@@ -42,8 +42,9 @@ jobs:
       CELERY_BACKEND: redis://127.0.0.1:6379/0
       RENGINE_HOME: ${{ github.workspace }}/web
       DOMAIN_NAME: localhost
-      XDG_CACHE_HOME: ${{ runner.temp }}/cvengine-cache
     steps:
+      - name: Set cache directory
+        run: printf 'XDG_CACHE_HOME=%s/cvengine-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@v4
       - name: Python 3.12
