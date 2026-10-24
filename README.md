@@ -42,8 +42,8 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 - Targets as domains, IPs, CIDR ranges, or URLs, with bulk add by organization and project and scope control for shared provider domains.
 
 **Understand**
-- One record per host: open ports, services, products, versions, OS, banners, TLS, and technologies, from nmap and nuclei fingerprinting.
-- A background sweep of all 65,535 ports, one host at a time, so coverage grows without slowing your scans.
+- Host tracking: open ports, services, products, versions, OS, banners, TLS, and technologies, from nmap and nuclei fingerprinting. (shodan style)
+- A slow background sweep of all 65,535 ports, one host at a time, so coverage grows without slowing your scans.
 - Paced deep nuclei coverage that walks the whole inventory with the full template set every week.
 - Web route checks that label each route open, login, session required, or SSO, and spot sensitive data in responses. Only the type, a count, and a masked sample are ever stored.
 - Exposure checks for Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB servers that answer without a login.
@@ -66,7 +66,7 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 - **Rescan**, archive, pin, or exclude any host. Archived hosts are rechecked daily and come back on their own when they reappear.
 - One switch to pause all scanning, which holds across restarts.
 - For administrators: scheduler and worker health, an activity and error log, and AI model usage with cost estimates.
-- Teams: organizations, projects, four roles, two-step sign-in, an audit log, and an IP allowlist.
+- Teams: organizations, projects, four roles, MFA, an audit log, and an IP allowlist.
 - A REST API and an MCP server, so agents can add scoped targets, start and inspect scans, read findings, request validation, and drive remediation under the same project permissions.
 - Notifications to Slack, Discord, Telegram, and Lark.
 - Memory-aware scheduling that keeps small servers healthy, and updates that drain running work before they restart anything.
