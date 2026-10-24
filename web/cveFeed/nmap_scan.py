@@ -1,0 +1,308 @@
+"""nmap OS/service fingerprinting over every IP discovery found: one ``-O -sV`` pass (OS guess,
+service/version on the thousand most common ports plus the high-risk ones in EXTRA_PORTS, at version intensity 5 so a probe stops at the likely answer). That single run per IP is the pipeline's whole port scan; the full ``-p-`` sweep is far too slow
+to run inline, so it is a slow background task of its own (see cveFeed.fullscan). Both feed
+the same Shodan-style inventory (Port / IpAddress) that bbot and nuclei write to, so correlate_cves and the hosts page see
+one consistent picture regardless of which tool found what.
+"""
+import logging
+import os
+import subprocess
+import tempfile
+
+from django.utils import timezone
+
+from cveFeed import distro as distro_lib
+from cveFeed import naabu_scan
+
+logger = logging.getLogger(__name__)
+
+NMAP_BIN = 'nmap'
+FAST_FLAGS = ['-sV', '--version-intensity', '5', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
+              '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit']
+FULL_PORT_FLAGS = ['-p-', '--open', '-T4', '-Pn']
+# nmap's --top-ports ranks ports by how often they are open across the internet, not by how dangerous an open one is, so
+# the thousand it picks leave out most of the services an exposure check cares about (Redis is 2742th, MongoDB 2169th,
+# the Docker API 3217th, kubelet is not ranked at all). The pass scans the top thousand plus these, about 3% more probes.
+EXTRA_PORTS = (
+    2181, 2375, 2376, 2379, 2380,     # Zookeeper, Docker API (plain and TLS), etcd
+    3100, 4369, 5601, 5672, 5984,     # Loki, Erlang epmd, Kibana, AMQP, CouchDB
+    6379, 6380, 6443, 7474, 8086,     # Redis, Kubernetes API, Neo4j, InfluxDB
+    8161, 8200, 8500, 8834, 8983,     # ActiveMQ console, Vault, Consul, Nessus, Solr
+    9042, 9092, 9100, 9200, 9300,     # Cassandra, Kafka, node exporter, Elasticsearch HTTP and transport
+    9443, 10250, 10255, 11211, 15672, # alternate HTTPS, kubelet, kubelet read-only, Memcached, RabbitMQ console
+    16686, 27017, 27018, 50070, 61616, 1883, 8883,  # Jaeger, MongoDB, Hadoop, ActiveMQ, MQTT (plain and TLS)
+)
+TOP_PORTS = 1000
+NMAP_SERVICES = ('/usr/local/share/nmap/nmap-services', '/usr/share/nmap/nmap-services')  # built from source / distro package
+_port_list = []
+
+
+def top_tcp_ports(count=TOP_PORTS, paths=NMAP_SERVICES):
+    """The ``count`` most frequently open TCP ports from nmap's own frequency table (what ``--top-ports`` uses), or None when
+    the table cannot be read."""
+    for path in paths:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as handle:
+                rows = []
+                for line in handle:
+                    parts = line.split()
+                    if len(parts) < 3 or line.startswith('#') or not parts[1].endswith('/tcp'):
+                        continue
+                    try:
+                        rows.append((float(parts[2]), int(parts[1].split('/')[0])))
+                    except ValueError:
+                        continue
+            rows.sort(key=lambda row: (-row[0], row[1]))
+            return [port for _, port in rows[:count]]
+        except OSError:
+            continue
+    return None
+
+
+def fast_flags(paths=NMAP_SERVICES):
+    """FAST_FLAGS with ``--top-ports 1000`` replaced by ``-p <the top thousand plus EXTRA_PORTS>``. If nmap's frequency table
+    cannot be read, FAST_FLAGS unchanged plus the extra ports cannot be expressed, so the plain top thousand is scanned."""
+    if paths == NMAP_SERVICES and _port_list:
+        ports = _port_list[0]
+    else:
+        top = top_tcp_ports(TOP_PORTS, paths)
+        ports = sorted(set(top) | set(EXTRA_PORTS)) if top else None
+        if paths == NMAP_SERVICES and ports:
+            _port_list.append(ports)
+    if not ports:
+        logger.warning('nmap-services not found; scanning --top-ports %s without the extra high-risk ports', TOP_PORTS)
+        return list(FAST_FLAGS)
+    i = FAST_FLAGS.index('--top-ports')
+    return [*FAST_FLAGS[:i], '-p', naabu_scan.port_argument(ports), *FAST_FLAGS[i + 2:]]
+
+
+HOST_TIMEOUT_FAST = '8m'  # a host that has not finished in 8 minutes is skipped, not waited for
+HOST_TIMEOUT_FULL = '10m'
+MAX_TARGETS = 200
+NMAP_CHUNK = 64  # hosts per nmap process: keeps each run's memory small, and a memory kill only repeats part of the work
+PROCESS_TIMEOUT_BUFFER = 300  # on top of three host timeouts, for nmap's own startup/teardown
+HOST_GROUPS_ALLOWED = 3  # hosts run in parallel groups, so a chunk takes a few host timeouts, not one per host
+
+
+def _minutes(host_timeout):
+    return int(host_timeout.rstrip('m'))
+
+
+def build_targets(ips, limit=MAX_TARGETS):
+    """Pure: the deduplicated, sorted IP list for nmap. Hostnames are never scanned: nmap resolves them to the very same
+    IPs, and several names on one address would be fingerprinted once each (nmap finds the ports itself)."""
+    return sorted({i for i in ips if i})[:limit]
+
+
+def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None):
+    """Write ``targets`` to a scratch file and run nmap against them, returning its XML report text. The run waits its
+    turn for memory (as heavy job ``kind``, for at most ``wait_timeout`` seconds) and raises reNgine.resources.MemoryKill if it
+    had to be stopped to protect the container."""
+    from reNgine import resources
+    timeout = HOST_GROUPS_ALLOWED * _minutes(host_timeout) * 60 + PROCESS_TIMEOUT_BUFFER
+    with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+        f.write('\n'.join(targets) + '\n')
+        path = f.name
+    cmd = [NMAP_BIN, *flags, '--host-timeout', host_timeout, '-oX', '-', '-iL', path]
+    try:
+        label = ', '.join(targets[:3]) if kind != 'nmap' else f'{len(targets)} host(s)'
+        with resources.heavy_job(kind, label=label, wait_timeout=wait_timeout) as job:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+            job.attach(proc)
+            try:
+                out, _err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                resources.terminate_group(proc, grace=5)
+                proc.communicate()
+                raise
+            job.raise_if_killed()
+            return out
+    finally:
+        os.unlink(path)
+
+
+def run_nmap_args(args, label, timeout):
+    """Run nmap with exactly ``args`` (after the binary) and return its stdout, waiting its turn for memory like run_nmap_xml. Used by
+    the validation check, which must be able to show the exact command it ran. Raises subprocess.TimeoutExpired, or
+    reNgine.resources.MemoryKill if it had to be stopped to protect the container."""
+    from reNgine import resources
+    with resources.heavy_job('nmap', label=label) as job:
+        proc = subprocess.Popen([NMAP_BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        job.attach(proc)
+        try:
+            out, _err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            resources.terminate_group(proc, grace=5)
+            proc.communicate()
+            raise
+        job.raise_if_killed()
+        return out
+
+
+def parse_xml(xml_text):
+    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable."""
+    import xmltodict
+
+    from reNgine.nmap_service import extract_nmap_inventory
+    if not (xml_text or '').strip():
+        return []
+    try:
+        data = xmltodict.parse(xml_text)
+    except Exception:  # noqa: BLE001 - a truncated/partial XML report must not crash the pipeline
+        logger.warning('could not parse nmap XML output', exc_info=True)
+        return []
+    return extract_nmap_inventory(data)
+
+
+def persist_inventory(inventory, source='nmap'):
+    """Write parsed nmap records onto Port/IpAddress, creating a Port row if nothing found it first
+    (unlike reNgine.tasks.persist_nmap_service_inventory, which only enriches rows naabu already made:
+    here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
+    Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
+    seen on one IP's 443 onto every IP's 443."""
+    from startScan.models import IpAddress, Port
+    ports_written = hosts_with_os = 0
+    now = timezone.now()
+    for host in inventory:
+        ip_addr = host.get('ip')
+        if not ip_addr:
+            continue
+        ip_obj, _ = IpAddress.objects.get_or_create(address=ip_addr)
+        if host.get('os_guess'):
+            ip_obj.os_guess = host['os_guess']
+            ip_obj.os_accuracy = host.get('os_accuracy')
+            ip_obj.last_seen = now
+            ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
+            hosts_with_os += 1
+        for rec in host.get('ports', []):
+            if not rec.get('number'):
+                continue
+            port = ip_obj.ports.filter(number=rec['number']).order_by('id').first()
+            if port is not None and port.ports.exclude(pk=ip_obj.pk).exists():
+                ip_obj.ports.remove(port)  # a row shared with other IPs by older code: give this IP its own
+                port = None
+            if port is None:
+                port = Port(number=rec['number'], service_name=rec.get('service_name') or None)
+            elif rec.get('service_name'):
+                port.service_name = rec['service_name']
+            for field in ('protocol', 'state', 'product', 'version', 'service_extra', 'cpe'):
+                if rec.get(field):
+                    setattr(port, field, rec[field])
+            info = distro_lib.parse_distro(rec.get('product', ''), rec.get('version', ''), rec.get('service_extra', ''),
+                                           rec.get('cpes') or [rec.get('cpe', '')])
+            # everything nmap said, not just the first CPE: the OS CPE carries the distro release, and "table" means the service
+            # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
+            port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
+                          'method': rec.get('method', '')}
+            port.distro, port.distro_release = info['distro'], info['release']
+            port.package_release, port.upstream_version = info['package_release'], info['upstream_version']
+            port.source = source
+            port.last_seen = now
+            port.save()
+            ip_obj.ports.add(port)
+            ports_written += 1
+        close_unreported_ports(ip_obj, host)
+    return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
+
+
+def close_unreported_ports(ip_obj, host):
+    """A port the run probed and did not find open is closed now: mark it, so nothing keeps scanning, correlating or listing a
+    service that is gone. Only when the host evidently answered (it reported an open port, or nmap counted closed ones: an RST
+    came back), and only for TCP ports inside the set the run probed, so a top-1000 run never closes 8443 it did not try and a
+    silent or unreachable host (everything "filtered") does not wipe what was open last time. Returns the ports closed."""
+    scanned = host.get('scanned')
+    if not scanned:
+        return 0
+    reported = {rec['number'] for rec in host.get('ports', []) if rec.get('number')}
+    answered = any(rec.get('state') == 'open' for rec in host.get('ports', [])) or 'closed' in (host.get('extraports') or ())
+    if host.get('status', 'up') != 'up' or not answered:
+        return 0
+    closed = 0
+    for port in ip_obj.ports.all():
+        if port.number in scanned and port.number not in reported and port.protocol in ('', 'tcp') and port.state in ('', 'open'):
+            port.state = 'closed'
+            port.save(update_fields=['state'])
+            closed += 1
+    return closed
+
+
+def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_for=None):
+    """Run nmap over ``targets`` in chunks and persist each chunk as it finishes. If a run is stopped for memory, that
+    chunk is halved and retried (down to a handful of hosts) before giving up. ``flags_for(chunk)`` may choose each chunk's flags
+    (naabu's open ports); None from it means the chunk has nothing to fingerprint. Returns the summed persist counts."""
+    from reNgine.resources import MemoryKill
+    totals = {'ports': 0, 'hosts_with_os': 0}
+    pending = [targets[i:i + size] for i in range(0, len(targets), size)]
+    while pending:
+        chunk = pending.pop(0)
+        chunk_flags = flags_for(chunk) if flags_for else flags
+        if chunk_flags is None:
+            continue
+        try:
+            xml = runner(chunk, chunk_flags, host_timeout)
+        except MemoryKill:
+            if len(chunk) <= 4:
+                raise
+            half = len(chunk) // 2
+            logger.warning('nmap was stopped for memory on %s hosts; retrying as %s + %s', len(chunk), half, len(chunk) - half)
+            pending[0:0] = [chunk[:half], chunk[half:]]
+            continue
+        result = persist_inventory(parse_xml(xml))
+        for key in totals:
+            totals[key] += result.get(key, 0)
+    return totals
+
+
+def _plural(n, word):
+    return f'{n} {word}{"s" if n != 1 else ""}'
+
+
+def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=False):
+    """Fingerprint the scan's discovered IPs that no scan has covered recently, in one ``-O -sV --top-ports 1000`` pass (the full-port
+    sweep is the background task in cveFeed.fullscan). Only IPs are scanned, each at most once per TTL across all scans (see
+    cveFeed.ledger); an IP another pipeline is scanning right now is left to it. ``runner(targets, flags, host_timeout) ->
+    xml text`` is injectable so tests need no nmap binary. When naabu is installed (see cveFeed.naabu_scan) it finds the open TCP
+    ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged."""
+    from cveFeed import activity, ledger
+    from cveFeed.nuclei_scan import scan_targets
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
+    domain, project = scan.domain, scan.domain.project_id
+    _hostnames, ips, _ports = scan_targets(scan)
+    all_ips = build_targets(ips, limit=None)
+    if not all_ips:
+        activity.log('run_check', f'nmap skipped for {domain.name}: discovery found no IPs to scan', project=project)
+        return {'targets': 0}
+
+    fast_todo = all_ips if force else [i for i in all_ips if i not in ledger.fresh('nmap-fast', all_ips)]
+    if not fast_todo:
+        activity.log('run_check', f'nmap skipped for {domain.name}: all {_plural(len(all_ips), "IP")} were fingerprinted '
+                     f'in the last {ledger.ttl_label("nmap-fast")}', project=project, scan_id=scan.id)
+        return {'targets': len(all_ips), 'reused': len(all_ips)}
+    result = {'targets': len(all_ips), 'reused': len(all_ips) - len(fast_todo)}
+
+    with ledger.claim_many('nmap-fast', fast_todo) as won:
+        targets = build_targets(won)
+        if targets:
+            reused = len(all_ips) - len(fast_todo)
+            note = f' ({reused} already fingerprinted in the last {ledger.ttl_label("nmap-fast")})' if reused else ''
+            busy = len(fast_todo) - len(won)
+            note += f' ({busy} being scanned by another scan)' if busy else ''
+            fast_running = activity.log('run_check', f'nmap is fingerprinting {len(targets)} new IP(s) for {domain.name}{note} '
+                                        f'(-O -sV, the top 1000 ports plus {len(EXTRA_PORTS)} high-risk ones), scan #{scan_id}', project=project, status='running', scan_id=scan.id)
+            try:
+                ports_by_ip = naabu_scan.discover(targets, scan, naabu_runner)
+                flags = fast_flags()
+                fast = scan_in_chunks(runner, targets, flags, HOST_TIMEOUT_FAST,
+                                      flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None)
+            except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
+                logger.exception('nmap fast scan failed for scan %s', scan_id)
+                ledger.record('nmap-fast', targets, None, scan, 'failed')
+                activity.settle(fast_running, 'failed', message=f'nmap failed for {domain.name}: {exc}')
+                return {**result, 'error': str(exc)}
+            ledger.record('nmap-fast', targets, None, scan)
+            activity.settle(fast_running, 'done', message=(
+                f'nmap fingerprinted {domain.name}: {_plural(fast["ports"], "service")}, '
+                f'{fast["hosts_with_os"]} OS guess{"es" if fast["hosts_with_os"] != 1 else ""}'), **fast)
+            result['fast'] = fast
+    return result

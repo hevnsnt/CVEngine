@@ -1,0 +1,156 @@
+services:
+  db:
+    restart: always
+    image: "postgres:18-alpine"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+    volumes:
+      # PostgreSQL 18 images keep PGDATA in a version directory under /var/lib/postgresql, so mount there.
+      # A new volume: the old PostgreSQL 12 data cannot be opened by 18 (see scripts/upgrade-postgres.sh).
+      - postgres18_data:/var/lib/postgresql
+    networks:
+      - rengine_network
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    image: "redis:alpine"
+    hostname: redis
+    networks:
+      - rengine_network
+
+  celery:
+    mem_limit: "${CELERY_MEM_LIMIT:-4g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
+    build:
+      context: ./web
+    restart: always
+    entrypoint: /usr/src/app/celery-entrypoint.sh
+    # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/reNgine/" -- celery -A reNgine.tasks worker --autoscale=10,0 -l INFO
+    volumes:
+      - ./web:/usr/src/app
+      - github_repos:/usr/src/github
+      - wordlist:/usr/src/wordlist
+      - scan_results:/usr/src/scan_results
+      - gf_patterns:/root/.gf
+      - nuclei_templates:/root/nuclei-templates
+      - tool_config:/root/.config
+    # every variable in .env reaches the container (the explicit entries below win, so the internal
+    # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DEBUG=1
+      - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
+      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-}
+      # 1 restarts workers on every .py edit, killing any scan in flight; restart manually instead
+      - CELERY_AUTORELOAD=0
+      - CELERY_BROKER=redis://redis:6379/0
+      - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-3}
+      - CELERY_BACKEND=redis://redis:6379/0
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+    depends_on:
+      - db
+      - redis
+    networks:
+      - rengine_network
+
+  celery-beat:
+    mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    restart: always
+    build: ./web
+    entrypoint: /usr/src/app/beat-entrypoint.sh
+    command: celery -A reNgine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
+    depends_on:
+      - celery
+      - db
+    # every variable in .env reaches the container (the explicit entries below win, so the internal
+    # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DEBUG=1
+      - CELERY_BROKER=redis://redis:6379/0
+      - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-3}
+      - CELERY_BACKEND=redis://redis:6379/0
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+    volumes:
+      - ./web:/usr/src/app
+      - github_repos:/usr/src/github
+      - wordlist:/usr/src/wordlist
+      - scan_results:/usr/src/scan_results
+      - gf_patterns:/root/.gf
+      - nuclei_templates:/root/nuclei-templates
+      - tool_config:/root/.config
+    networks:
+      - rengine_network
+
+  web:
+    mem_limit: "${WEB_MEM_LIMIT:-1g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
+    build:
+      context: ./web
+    entrypoint: /usr/src/app/entrypoint.sh
+    restart: always
+    image: cvengine/web:latest
+    # every variable in .env reaches the container (the explicit entries below win, so the internal
+    # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DEBUG=1
+      - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
+      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-}
+      - CELERY_BROKER=redis://redis:6379/0
+      - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-3}
+      - CELERY_BACKEND=redis://redis:6379/0
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+    volumes:
+      - ./web:/usr/src/app
+      - github_repos:/usr/src/github
+      - wordlist:/usr/src/wordlist
+      - scan_results:/usr/src/scan_results
+      - gf_patterns:/root/.gf
+      - nuclei_templates:/root/nuclei-templates
+      - tool_config:/root/.config
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - celery
+      - celery-beat
+    networks:
+      - rengine_network
+
+networks:
+  rengine_network:
+volumes:
+  tool_config:
+  postgres18_data:
+  gf_patterns:
+  nuclei_templates:
+  github_repos:
+  wordlist:
+  scan_results:

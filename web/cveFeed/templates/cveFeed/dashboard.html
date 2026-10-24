@@ -1,0 +1,96 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Live</h1>
+    <p class="sub">Discovery, the AI engine and your exposure, as it happens. <span class="live" id="live">live</span></p>
+  </div>
+  {% if not ai_ready %}<a class="btn sm" href="{% url 'cve_welcome' %}">Connect your AI model</a>{% endif %}
+</div>
+
+<section class="panel ticks" aria-label="Exposure">
+  <a class="cell" id="c-exposed" {% if slug %}href="{% url 'cve_section' slug 'hosts' %}"{% endif %}>
+    <div class="cell-head"><span class="eyebrow">Exposed hosts</span><span class="go">Hosts</span></div>
+    <div class="big"><b id="s-exposed_hosts">-</b><small>of <span id="s-hosts">-</span> hosts</small></div>
+    <div class="meter" role="img" aria-label="Share of hosts that are exposed"><i id="m-exposed"></i></div>
+    <p>A host is exposed when a CVE matches it, or an open finding is medium or worse.</p>
+  </a>
+
+  <div class="cell" id="c-map">
+    <div class="cell-head"><span class="eyebrow">Attack surface</span><span class="eyebrow" id="map-count"></span></div>
+    <div class="map" id="map" role="list" aria-label="One square per host, coloured by its worst threat"></div>
+    <div class="legend" id="map-legend" aria-hidden="true"></div>
+  </div>
+
+  <div class="cell" id="c-temps">
+    <div class="cell-head"><span class="eyebrow">CVE intelligence feed</span><span class="eyebrow" id="temp-hint">Filter</span></div>
+    <p class="note">These are catalog advisories, not findings on your assets. Asset candidates are listed under CVE matches.</p>
+    <div class="temps">
+      <button class="temp fire" type="button" data-tier="fire" aria-pressed="false"><span class="nm">Fire</span><span class="bar"><i id="b-fire"></i></span><b id="s-fire">-</b></button>
+      <button class="temp smoke" type="button" data-tier="smoke" aria-pressed="false"><span class="nm">Smoke</span><span class="bar"><i id="b-smoke"></i></span><b id="s-smoke">-</b></button>
+      <button class="temp ice" type="button" data-tier="ice" aria-pressed="false"><span class="nm">Ice</span><span class="bar"><i id="b-ice"></i></span><b id="s-ice">-</b></button>
+    </div>
+  </div>
+</section>
+
+<nav class="strip" aria-label="Engine counters">
+  <a id="n-targets" {% if slug %}href="{% url 'cve_section' slug 'targets' %}"{% endif %}><b id="s-targets">-</b><span>Targets</span></a>
+  <a id="n-matches" {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-matches">-</b><span>CVE matches</span></a>
+  <a id="n-findings" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
+  <a id="n-scans" {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_running">-</b><span id="s-scans_label">Scans running</span></a>
+  <a id="n-certs" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span></a>
+  <a id="n-auto" {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-autofire_runs">-</b><span>Auto-fire runs</span></a>
+  <a id="n-ai" {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %} title="AI-authored Nuclei templates that passed syntax checks; this is not a count of reviewed or validated findings"><b id="s-templates">-</b><span>AI templates syntax-valid</span></a>
+</nav>
+
+<section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}">
+  {% csrf_token %}
+  <div class="card discovery">
+    <div class="card-head">
+      <h2>Live discovery</h2>
+      <span class="badge" id="d-status" style="display:none"></span>
+    </div>
+    <p class="note" id="d-target" style="margin:2px 0 10px">Waiting for a scan.</p>
+    <div class="graph-box">
+      <div id="d-graph" role="img" aria-label="Live graph of what discovery is finding"></div>
+      <div class="graph-empty" id="d-empty">
+        <p>Add a target and watch discovery draw it live.</p>
+        <button class="btn" type="button" data-add-targets>Add targets</button>
+      </div>
+    </div>
+    <div class="counts" id="d-counts"></div>
+    <div class="node-card" id="d-detail" aria-live="polite"></div>
+    <ul class="ticker" id="d-ticker" aria-live="polite" tabindex="0" aria-label="Discovery findings, newest first. Scroll up for earlier lines."></ul>
+    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'vulns' %}">See scanner findings</a>{% endif %}
+  </div>
+
+  <div class="card ai">
+    <div class="card-head">
+      <h2>AI activity</h2>
+      <span class="live" id="ai-live">working</span>
+    </div>
+    <ul class="agent" id="agent" aria-live="polite" tabindex="0" aria-label="AI activity, newest first. Scroll for earlier lines."></ul>
+    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'activity' %}">See all activity</a>{% endif %}
+    <p class="empty" id="agent-empty">The engine is idle. Connect a model and add a target to put it to work.</p>
+  </div>
+</section>
+
+<section class="card feed-card" style="margin-top:14px">
+  <div class="feed-head">
+    <h2>CVE feed</h2>
+    <span class="note" id="feed-filter">All temperatures</span>
+  </div>
+  <ul class="feed" id="feed" aria-live="polite"></ul>
+  <p class="empty" id="feed-empty">Waiting for CVEs. They arrive as cve.now publishes them.</p>
+  <details class="how">
+    <summary>How the engine works</summary>
+    <p>New <b>fire</b> and <b>smoke</b> CVEs are matched against your inventory, confirmed by the AI, checked with a nuclei template (written on the spot if none exists), and validated.</p>
+  </details>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{% asset 'cve/vivagraph.min.js' %}"></script>
+<script type="module" src="{% asset 'cve/dashboard.js' %}"></script>
+{% endblock %}

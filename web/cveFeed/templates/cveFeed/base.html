@@ -1,0 +1,161 @@
+{% load static assets %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f4f4f5">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0b'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial Black,Helvetica,sans-serif' font-weight='900' font-style='italic' font-size='15' fill='white'%3Ecv%3C/text%3E%3Crect x='23' y='6' width='3' height='4' fill='%23ff5a00'/%3E%3C/svg%3E">
+<title>{% block title %}CVEngine{% endblock %}</title>
+<link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
+{% importmap %}
+</head>
+<body data-slug="{{ slug|default:'' }}">
+{% csrf_token %}
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-7 5 14L17 12h4"/></symbol>
+    <symbol id="i-graph" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.2 10.8l7.6-3.6M8.2 13.2l7.6 3.6"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-match" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-bug" viewBox="0 0 24 24"><rect x="8" y="8" width="8" height="11" rx="4"/><path d="M9.5 5.5L11 8M14.5 5.5L13 8M4 13h4M16 13h4M5 19l3-2M19 19l-3-2M5 8l3 2M19 8l-3 2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12h.01"/></symbol>
+    <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 12l5.5-5.5"/><path d="M12 7a5 5 0 105 5"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3M14 9l2 2"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01M9.5 16.5h5"/><circle cx="12" cy="4" r="1"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 5-5.5 8-5.5s6.5 1.5 8 5.5"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 4H6a2 2 0 00-2 2v12a2 2 0 002 2h3M16 8l4 4-4 4M20 12H9"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></symbol>
+    <symbol id="i-building" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M10 21v-4h4v4"/></symbol>
+  </defs>
+</svg>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="app">
+<aside class="rail" id="rail" aria-label="Primary">
+  <a class="brand" href="{% url 'cve_dashboard' %}" aria-label="CVEngine, by FieldCraft Cyber"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+  {% if projects %}
+  <div class="proj-wrap">
+    <label class="proj-label" for="project">Project</label>
+    <div class="select"><select id="project" class="proj" data-section="{{ active }}">
+      {% if show_all_option %}<option value="_all" {% if all_projects %}selected{% endif %}>All projects</option>{% endif %}
+      {% for p in projects %}<option value="{{ p.slug }}" {% if p.slug == slug %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+    </select><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></div>
+  </div>
+  {% endif %}
+  <nav class="rail-nav" aria-label="Sections">
+    <p class="rail-h">Monitor</p>
+    <a data-nav="Live" href="{% url 'cve_dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Live</a>
+    <a data-nav="Asset graph" href="{% url 'cve_graph' %}" {% if active == 'graph' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>
+    {% if slug %}
+    <p class="rail-h">Exposure</p>
+    <a data-nav="Hosts" href="{% url 'cve_section' slug 'hosts' %}" {% if active == 'hosts' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-server"/></svg>Hosts</a>
+    <a data-nav="Changes" href="{% url 'cve_section' slug 'changes' %}" {% if active == 'changes' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Changes</a>
+    <a data-nav="Activity" href="{% url 'cve_section' slug 'activity' %}" {% if active == 'activity' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>Activity</a>
+    <a data-nav="CVE matches" href="{% url 'cve_section' slug 'matches' %}" {% if active == 'matches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-match"/></svg>CVE matches</a>
+    <a data-nav="Scanner findings" href="{% url 'cve_section' slug 'vulns' %}" {% if active == 'vulns' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Scanner findings</a>
+    <a data-nav="Hygiene" href="{% url 'cve_section' slug 'hygiene' %}" {% if active == 'hygiene' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
+    <p class="rail-h">Work</p>
+    <a data-nav="Targets" href="{% url 'cve_section' slug 'targets' %}" {% if active == 'targets' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
+    <a data-nav="Scans" href="{% url 'cve_section' slug 'scans' %}" {% if active == 'scans' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Scans</a>
+    <a data-nav="API keys" href="{% url 'cve_section' slug 'keys' %}" {% if active == 'keys' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
+    {% endif %}
+    <p class="rail-h">Agents</p>
+    <a data-nav="API tokens and MCP" href="{% url 'cve_agents' %}" {% if active == 'agents' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens and MCP</a>
+  </nav>
+  <details class="acct">
+    <summary aria-label="Account menu"><span class="avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span><span class="acct-name">{{ request.user.first_name|default:request.user.username }}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+    <div class="menu">
+      <a data-nav="My account" href="{% url 'cve_account' %}"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg>My account</a>
+      {% if is_admin %}<a data-nav="Administration" href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
+      {% if request.user.is_superuser %}<a data-nav="{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}" href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
+      <a data-nav="Settings" href="{% url 'cve_settings' %}"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
+      <a data-nav="About" href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>About</a>
+      <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
+    </div>
+  </details>
+</aside>
+
+<div class="stage">
+<header class="topbar">
+  <a class="brand compact" href="{% url 'cve_dashboard' %}" aria-label="CVEngine home"><span class="logo sm" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span></a>
+  <button class="jump" type="button" id="jump" aria-haspopup="dialog">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
+    <span class="jump-text"><span class="long">Jump to a page, project or action</span><span class="short">Jump to…</span></span>
+    <kbd class="jump-key" aria-hidden="true">Ctrl K</kbd>
+  </button>
+  {% if slug %}<button class="btn sm add-btn" type="button" data-add-targets><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg><span>Add targets</span></button>{% endif %}
+</header>
+<main class="wrap" id="main">
+  {% block content %}{% endblock %}
+</main>
+</div>
+</div>
+
+<nav class="tabbar" aria-label="Main">
+  <a href="{% url 'cve_dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Live</a>
+  {% if slug %}
+  <a href="{% url 'cve_section' slug 'hosts' %}" {% if active == 'hosts' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-server"/></svg>Hosts</a>
+  <a href="{% url 'cve_section' slug 'matches' %}" {% if active == 'matches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-match"/></svg>Matches</a>
+  <a href="{% url 'cve_section' slug 'scans' %}" {% if active == 'scans' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Scans</a>
+  {% else %}
+  <a href="{% url 'cve_graph' %}" {% if active == 'graph' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Graph</a>
+  {% endif %}
+  <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg>More</button>
+</nav>
+
+<div class="sheet-scrim" id="sheet-scrim" hidden></div>
+<div class="sheet" id="sheet" role="dialog" aria-label="More" hidden>
+  <div class="sheet-grip" aria-hidden="true"></div>
+  {% if projects %}
+  <div class="proj-wrap">
+    <label class="proj-label" for="project-m">Project</label>
+    <div class="select"><select id="project-m" class="proj" data-section="{{ active }}">
+      {% if show_all_option %}<option value="_all" {% if all_projects %}selected{% endif %}>All projects</option>{% endif %}
+      {% for p in projects %}<option value="{{ p.slug }}" {% if p.slug == slug %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+    </select><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></div>
+  </div>
+  {% endif %}
+  <div class="sheet-grid">
+    {% if slug %}
+    <a href="{% url 'cve_section' slug 'targets' %}"><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
+    <a href="{% url 'cve_section' slug 'changes' %}"><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Changes</a>
+    <a href="{% url 'cve_section' slug 'activity' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>Activity</a>
+    <a href="{% url 'cve_section' slug 'vulns' %}"><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Scanner findings</a>
+    <a href="{% url 'cve_section' slug 'hygiene' %}"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
+    <a href="{% url 'cve_section' slug 'keys' %}"><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
+    {% endif %}
+    <a href="{% url 'cve_graph' %}"><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>
+    <a href="{% url 'cve_agents' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens</a>
+    <a href="{% url 'cve_account' %}"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg>My account</a>
+    {% if is_admin %}<a href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
+    {% if request.user.is_superuser %}<a href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
+    <a href="{% url 'cve_settings' %}"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
+    <a href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>About</a>
+    <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="out" type="submit"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
+  </div>
+</div>
+
+<dialog class="palette" id="palette" aria-label="Jump to">
+  <div class="palette-box">
+    <div class="palette-in"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
+      <input id="palette-q" type="text" placeholder="Jump to a page, project or action" autocomplete="off" aria-controls="palette-list" aria-label="Jump to"></div>
+    <ul id="palette-list" role="listbox"></ul>
+    <p class="palette-empty" id="palette-empty" hidden>Nothing matches that.</p>
+  </div>
+</dialog>
+
+<script type="module" src="{% asset 'cve/shell.js' %}"></script>
+{% if slug %}<script type="module" src="{% asset 'cve/addtargets.js' %}"></script>{% endif %}
+{% if request.user.is_superuser %}<script type="module" src="{% asset 'cve/updatebar.js' %}"></script>{% endif %}
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,43 @@
+{% load static assets %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0b'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial Black,Helvetica,sans-serif' font-weight='900' font-style='italic' font-size='15' fill='white'%3Ecv%3C/text%3E%3Crect x='23' y='6' width='3' height='4' fill='%23ff5a00'/%3E%3C/svg%3E">
+<title>Welcome to CVEngine</title>
+<link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
+{% importmap %}
+<style>
+  body{padding-bottom:0;min-height:100vh;display:flex;flex-direction:column}
+  .wiz{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 16px;position:relative}
+  .wiz-card{width:100%;max-width:520px}
+  .wiz .brand{margin-bottom:26px;font-size:20px}
+  .wiz .mark{width:32px;height:32px}
+  .dots{display:flex;gap:6px;margin-bottom:24px}
+  .dots i{flex:1;height:6px;border-radius:2px;background:var(--line-2);transition:background .3s}
+  .dots i.on{background:var(--ink)}
+  .wiz h1{font-size:34px;margin-bottom:8px}
+  .wiz .lead{color:var(--muted);margin:0 0 24px;font-size:15.5px}
+  .step{animation:in .35s ease}
+  .skip{position:static;background:none;border:0;color:var(--muted);font:inherit;font-weight:600;cursor:pointer;text-decoration:underline;padding:8px}
+  .points{list-style:none;padding:0;margin:0 0 8px;display:grid;gap:12px}
+  .points li{display:grid;grid-template-columns:30px 1fr;gap:12px;align-items:start;padding:14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l)}
+  .points b{display:grid;place-items:center;width:30px;height:30px;border-radius:6px;background:var(--ink);color:#fff;font:700 13px var(--mono)}
+  .points span{color:var(--muted);font-size:14.5px}
+  .points span strong{display:block;color:var(--ink);font-size:15px}
+  .live-hint{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--muted);margin-top:14px}
+</style>
+</head>
+<body>
+<main class="wiz">
+  <div class="wiz-card">
+    <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+    <div class="dots" id="dots" aria-hidden="true"></div>
+    <div id="wizard">{% csrf_token %}<div id="step"></div></div>
+  </div>
+</main>
+<script type="module" src="{% asset 'cve/welcome.js' %}"></script>
+</body>
+</html>

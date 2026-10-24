@@ -1,0 +1,67 @@
+"""CVEngine threat tiers: fire / smoke / ice.
+
+A fast, deterministic pre-classification of a CVE from its exploitation and
+severity signals, so the pipeline can prioritize what the AI looks at first:
+
+  fire  🔥  actively dangerous now  — CISA KEV, Exploit-DB, a critical score (CVSS 9+), or high EPSS + CVSS
+  smoke 💨  emerging / warning signs — high CVSS, or EPSS threshold reached
+  ice   🧊  cold, low-priority watch — everything else
+
+Thresholds are intentionally in one place and easy to retune.
+"""
+
+FIRE = "fire"
+SMOKE = "smoke"
+ICE = "ice"
+
+HIGH_CVSS = 7.0
+CRITICAL_CVSS = 9.0  # cve.now calls this critical too
+
+
+def classify_threat_tier(kev=None, epss_reached=None, exploit_db=None, cvss=None):
+    """Return 'fire', 'smoke' or 'ice' from a CVE's exploitation/severity signals."""
+    score = cvss or 0.0
+    if kev or exploit_db or score >= CRITICAL_CVSS or (epss_reached and score >= HIGH_CVSS):
+        return FIRE
+    if score >= HIGH_CVSS or epss_reached:
+        return SMOKE
+    return ICE
+
+
+def fire_tier_q():
+    """The database form of ``classify_threat_tier(...) == FIRE`` over CVEEntry rows."""
+    from django.db.models import Q
+    return Q(kev=True) | Q(exploit_db=True) | Q(cvss__gte=CRITICAL_CVSS) | (Q(epss_reached=True) & Q(cvss__gte=HIGH_CVSS))
+
+
+def hot_tier_q():
+    """CVEEntry rows that are fire or smoke: what auto-fire acts on, and what the dashboard counts as hot."""
+    from django.db.models import Q
+    return fire_tier_q() | Q(cvss__gte=HIGH_CVSS) | Q(epss_reached=True)
+
+
+def match_temperature(tier, cvss=None, ai_verdict=None, distro_status=None):
+    """How hot a CVE is *on one of your hosts*. The feed tier says how dangerous the CVE is in general; a match says it is on
+    your asset, so a high score (7.0 or more) that the AI confirmed affects the host reads as fire too. A match the host's
+    distribution has patched (a backported fix) is ice however dangerous the CVE is."""
+    if distro_status == "patched":
+        return ICE
+    if tier == FIRE:
+        return FIRE
+    score = cvss or 0.0
+    if ai_verdict == 'affected' and score >= HIGH_CVSS:
+        return FIRE
+    return tier
+
+
+SEVERITY_HEAT = {4: FIRE, 3: FIRE, 2: SMOKE, 1: ICE}
+HEAT_RANK = {FIRE: 3, SMOKE: 2, ICE: 1}
+
+
+def host_heat(status, tiers, severities):
+    """A host's worst threat temperature: the hottest of its CVE matches' tiers and its open findings' severities
+    (critical and high read as fire, medium as smoke, low as ice); otherwise clean, or unscanned if nothing has probed it."""
+    temps = [t for t in tiers if t in HEAT_RANK] + [SEVERITY_HEAT[v] for v in severities if v in SEVERITY_HEAT]
+    if temps:
+        return max(temps, key=HEAT_RANK.get)
+    return 'unscanned' if status == 'unscanned' else 'clean'

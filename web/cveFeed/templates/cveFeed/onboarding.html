@@ -1,0 +1,82 @@
+{% extends 'cveFeed/base.html' %}
+{% load assets %}
+{% block title %}CVEngine · {% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}{% endblock %}
+{% block content %}
+<div class="ai-usage-page">
+  <h1>{% if ai_usage_connected %}AI Model Usage{% else %}Connect your model{% endif %}</h1>
+  {% if ai_usage_connected %}
+  <p class="sub">Provider attempts, returned token counts and estimated costs update from recorded usage. Earlier attempts and provider billing are unavailable.</p>
+  <div id="ai-usage" aria-live="polite"></div>
+  <details class="card ai-connection-form"><summary>Change model connection</summary>
+  {% else %}
+  <p class="sub">Paste an API key. CVEngine recognises the provider, checks the key works, and turns on AI confirmation. The key is stored in the database and never shown again.</p>
+  {% endif %}
+  <form class="card" id="f" style="margin-top:24px" autocomplete="off">
+    {% csrf_token %}
+    <div class="field">
+      <label for="key">API key</label>
+      <input id="key" type="password" autocomplete="new-password" spellcheck="false" placeholder="sk-ant-... or sk-...">
+      <p class="note" style="margin:8px 0 0" id="detected">Anthropic and OpenAI keys are detected automatically. Leave the key blank to keep the existing connection when changing its model.</p>
+    </div>
+    <div class="field">
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="">Detect from key</option>
+        <option value="anthropic" {% if ai_usage_provider == 'anthropic' %}selected{% endif %}>Anthropic</option><option value="openai" {% if ai_usage_provider == 'openai' %}selected{% endif %}>OpenAI</option><option value="openrouter" {% if ai_usage_provider == 'openrouter' %}selected{% endif %}>OpenRouter</option><option value="ollama" {% if ai_usage_provider == 'ollama' %}selected{% endif %}>Ollama (local, no key)</option><option value="vllm" {% if ai_usage_provider == 'vllm' %}selected{% endif %}>vLLM</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="model">Model <span class="note">(optional)</span></label>
+      <input id="model" placeholder="provider default" value="{{ ai_usage_model }}">
+    </div>
+    <button class="btn" id="go" type="submit">Verify and enable</button>
+    <div id="out" role="status"></div>
+  </form>
+  {% if ai_usage_connected %}</details>{% endif %}
+  <section class="card ai-discovery-keys">
+    <h2>Discovery API keys</h2>
+    <p class="note">Shodan and other OSINT keys belong to a project or its organization. A configured Shodan key helps BBOT's passive Shodan DNS discovery; InternetDB lookup does not need a key. Results remain observations until confirmed for this asset.</p>
+    {% if projects %}
+    <div class="ai-discovery-links">
+      {% for item in projects %}<a class="btn ghost sm" href="{% url 'cve_section' item.slug 'keys' %}">Configure {{ item.name }} keys</a>{% endfor %}
+    </div>
+    {% else %}<p class="note">Add a project before configuring discovery keys.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var key = document.getElementById('key'), prov = document.getElementById('provider'), model = document.getElementById('model'),
+      out = document.getElementById('out'), go = document.getElementById('go'), det = document.getElementById('detected'),
+      csrf = document.querySelector('[name=csrfmiddlewaretoken]').value, t;
+  var NAMES = {anthropic: 'Anthropic', openai: 'OpenAI'};
+  function post(url, body) {
+    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: JSON.stringify(body)});
+  }
+  key.addEventListener('input', function () {
+    clearTimeout(t);
+    t = setTimeout(function () {
+      if (!key.value.trim()) return;
+      post('/cve/api/setup/detect', {key: key.value}).then(function (r) { return r.json(); }).then(function (d) {
+        det.textContent = d.provider ? 'Looks like an ' + NAMES[d.provider] + ' key.' : 'Not a recognised key format. Choose a provider below.';
+        if (d.provider && !prov.value) prov.dataset.auto = d.provider;
+      });
+    }, 250);
+  });
+  document.getElementById('f').addEventListener('submit', function (e) {
+    e.preventDefault();
+    go.disabled = true; out.className = 'msg'; out.textContent = 'Checking the key...';
+    post('/cve/api/setup/save', {key: key.value, provider: prov.value || null, model: model.value})
+      .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+      .then(function (x) {
+        if (x.ok) { out.className = 'msg ok'; out.textContent = 'Connection verified. Loading usage…'; key.value = ''; window.location.reload(); }
+        else { out.className = 'msg err'; out.textContent = x.d.error || 'Something went wrong.'; }
+      })
+      .catch(function () { out.className = 'msg err'; out.textContent = 'Could not reach the server.'; })
+      .then(function () { go.disabled = false; });
+  });
+})();
+</script>
+{% if ai_usage_connected %}<script type="module" src="{% asset 'cve/ai-usage.js' %}"></script>{% endif %}
+{% endblock %}

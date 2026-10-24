@@ -1,0 +1,18 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · My account{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>My account</h1>
+    <p class="sub">Who you are in CVEngine, how you sign in, and what you can reach.</p>
+  </div>
+</div>
+<div id="acct">
+  <div class="acct-grid" id="view"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{% static 'mfa/qrcode.js' %}"></script>
+<script type="module" src="{% asset 'cve/account.js' %}"></script>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · {{ title }}{% if all_projects %} · All projects{% endif %}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ title }}</h1>
+    <p class="sub">{% if scan_id %}<a href="{% url 'cve_section' project.slug 'scans' %}">Scans</a> / {% endif %}{% if all_projects %}All projects · {{ projects|length }} you can access · {% if section == 'activity' and is_app_admin %}global scanning control{% elif section == 'keys' %}choose an authorized project or organization{% else %}read-only{% endif %}{% else %}{{ project.name }}{% endif %}</p>
+  </div>
+</div>
+<div id="section" data-slug="{{ project.slug }}" data-kind="{{ section }}"{% if is_app_admin %} data-app-admin="1"{% endif %}{% if is_admin %} data-admin="1"{% endif %}{% if scan_id %} data-scan="{{ scan_id }}"{% endif %}>
+  {% csrf_token %}
+  <div id="view"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/app.js' %}"></script>
+{% endblock %}

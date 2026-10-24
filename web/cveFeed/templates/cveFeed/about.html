@@ -1,0 +1,61 @@
+{% extends 'cveFeed/base.html' %}
+{% load static %}
+{% block title %}CVEngine · About{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>About CVEngine</h1>
+    <p class="sub">Who builds CVEngine and the open-source work it stands on.</p>
+  </div>
+</div>
+<div class="about-grid">
+  <section class="card about-lead">
+    <span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span>
+    <p class="about-tag">Know what you expose. Know what is exploitable. Fix it first. CVEngine finds your internet-facing assets, fingerprints their services, and tells you which of today's CVEs actually hit you.</p>
+    <dl class="node-rows">
+      <dt>Made by</dt><dd><a href="https://fieldcraftcyber.com" rel="noopener" target="_blank">FieldCraft Cyber</a></dd>
+      <dt>Created by</dt><dd>Bill Swearingen (<a href="https://github.com/hevnsnt" rel="noopener" target="_blank">hevnsnt</a>)</dd>
+      <dt>Source code</dt><dd><a href="https://github.com/hevnsnt/CVEngine" rel="noopener" target="_blank">github.com/hevnsnt/CVEngine</a></dd>
+      <dt>License</dt><dd>GPL-3.0</dd>
+    </dl>
+    <p><a class="btn ghost sm about-link" href="https://github.com/hevnsnt/CVEngine" rel="noopener" target="_blank">View on GitHub</a></p>
+  </section>
+
+  <section class="card">
+    <h2>Built on reNgine</h2>
+    <p class="note">CVEngine is a fork of <a href="https://github.com/yogeshojha/rengine" rel="noopener" target="_blank">reNgine</a> 2.x by Yogesh Ojha, and still uses its code. Thanks to everyone who built it, including
+      <a href="https://github.com/Aju100" rel="noopener" target="_blank">Aju100</a>,
+      <a href="https://github.com/d1pakda5" rel="noopener" target="_blank">d1pakda5</a>,
+      <a href="https://github.com/subha7595" rel="noopener" target="_blank">subha7595</a>,
+      <a href="https://github.com/Suprita-25" rel="noopener" target="_blank">Suprita-25</a>,
+      <a href="https://github.com/TheBinitGhimire" rel="noopener" target="_blank">TheBinitGhimire</a>,
+      <a href="https://github.com/vinaynm" rel="noopener" target="_blank">Vinay Leo</a> and
+      <a href="https://github.com/ErdemOzgen" rel="noopener" target="_blank">Erdem Ozgen</a>.
+      The full list is on reNgine's <a href="https://github.com/yogeshojha/rengine/graphs/contributors" rel="noopener" target="_blank">contributors page</a>.</p>
+  </section>
+
+  <section class="card">
+    <h2>Scanners and data</h2>
+    <dl class="node-rows">
+      <dt><a href="https://github.com/blacklanternsecurity/bbot" rel="noopener" target="_blank">bbot</a></dt><dd>Discovery and screenshots</dd>
+      <dt><a href="https://github.com/projectdiscovery/nuclei" rel="noopener" target="_blank">nuclei</a></dt><dd>Vulnerability scanning and CVE tests, with its templates</dd>
+      <dt><a href="https://github.com/projectdiscovery/naabu" rel="noopener" target="_blank">naabu</a></dt><dd>Optional full-port discovery</dd>
+      <dt><a href="https://nmap.org" rel="noopener" target="_blank">nmap</a></dt><dd>Service and OS fingerprinting</dd>
+      <dt><a href="https://github.com/sensepost/gowitness" rel="noopener" target="_blank">gowitness</a></dt><dd>Screenshots</dd>
+      <dt><a href="https://cve.now" rel="noopener" target="_blank">cve.now</a></dt><dd>The CVE feed (CVE List, GHSA, OSV, NVD, EUVD, CISA KEV, EPSS, Exploit-DB)</dd>
+      <dt><a href="https://security-tracker.debian.org" rel="noopener" target="_blank">Debian tracker</a>, <a href="https://osv.dev" rel="noopener" target="_blank">OSV</a></dt><dd>Distribution fix data</dd>
+      <dt><a href="https://crt.sh" rel="noopener" target="_blank">crt.sh</a></dt><dd>Certificate transparency</dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2>Front end</h2>
+    <dl class="node-rows">
+      <dt><a href="https://github.com/vercel/geist-font" rel="noopener" target="_blank">Geist</a></dt><dd>Typeface (SIL Open Font License 1.1)</dd>
+      <dt><a href="https://github.com/anvaka/VivaGraphJS" rel="noopener" target="_blank">VivaGraphJS</a></dt><dd>Asset graph (BSD-3-Clause)</dd>
+      <dt><a href="https://github.com/kazuhikoarase/qrcode-generator" rel="noopener" target="_blank">qrcode-generator</a></dt><dd>Two-step sign-in QR codes (MIT)</dd>
+      <dt>Django, Celery and others</dt><dd>The Python libraries in requirements.txt, under their own licenses</dd>
+    </dl>
+  </section>
+</div>
+{% endblock %}

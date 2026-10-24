@@ -1,0 +1,15 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · Administration{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Administration</h1>
+    <p class="sub" id="admin-sub">People, organizations and projects.</p>
+  </div>
+</div>
+<div id="admin"><div id="view"></div></div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/admin.js' %}"></script>
+{% endblock %}

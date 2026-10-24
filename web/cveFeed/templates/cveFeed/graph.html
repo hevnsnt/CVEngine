@@ -1,0 +1,69 @@
+{% extends 'cveFeed/base.html' %} {% load static assets %} {% block title %}CVEngine · Graph{% endblock %} {% block content %}
+<div class="page-head">
+  <div>
+    <h1>Asset graph</h1>
+    <p class="sub">Domains, subdomains, IPs, ports and the CVEs that hit them. Click a bubble for details; pan or zoom to explore a project and its registered domains. <span class="live" id="live">live</span></p>
+  </div>
+  <span class="note" id="count"></span>
+</div>
+<div class="toolbar">
+  <div class="field">
+    <label for="domain">Domain</label>
+    <select id="domain">
+      <option value="">All domains</option>
+      {% for d in domains %}
+      <option value="{{ d.id }}">{{ d.name }}{% if all_projects %} · {{ d.project.name }}{% endif %}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button class="btn ghost sm" id="graph-fit" type="button">Fit graph</button>
+</div>
+<div class="card graph-card">
+  <div id="graph" role="img" aria-label="Interactive bubble graph of discovered assets"></div>
+  <div class="legend graph-legend">
+    <span><i style="background:#0a0a0b"></i>domain</span>
+    <span><i style="border:2px solid #b3261e;background:rgba(179,38,30,.14)"></i>vulnerable</span>
+    <span><i style="border:2px solid #4a8062;background:#fff"></i>scanned, clean</span>
+    <span><i style="border:1.5px solid #9a9aa2;background:transparent"></i>not scanned</span>
+    <span><i style="background:#9a9aa2"></i>ip</span>
+    <span><i style="background:#cfcfd4"></i>port</span>
+    <span><i style="border:2px solid #47678d;background:#f2f6fc"></i>project / registered domain (all domains)</span>
+  </div>
+</div>
+<div class="card node-card" id="detail" aria-live="polite"></div>
+{% endblock %} {% block scripts %}
+<script src="{% asset 'cve/vivagraph.min.js' %}"></script>
+<script type="module">
+  import { mountGraph, showNodeDetails } from '/staticfiles/cve/graph.js';
+  const box = document.getElementById('detail');
+  const graph = mountGraph(document.getElementById('graph'), { onSelect: d => showNodeDetails(box, d) });
+  showNodeDetails(box, null);
+  const live = document.getElementById('live'), count = document.getElementById('count'),
+    select = document.getElementById('domain');
+  let last = null;
+  async function poll() {
+    try {
+      const key = select.value;
+      const params = new URLSearchParams({project: document.body.dataset.slug || '_all'});
+      if (key) params.set('domain', key);
+      const response = await fetch('/cve/api/graph?' + params, {credentials: 'same-origin'});
+      if (!response.ok) throw new Error(response.status);
+      const data = await response.json();
+      const reset = key !== last;
+      if (reset) {
+        graph.clear();
+        last = key;
+      }
+      graph.setClustered(!key);
+      const rendered = graph.sync(data);
+      if (reset) graph.fit();
+      count.textContent = `${rendered.nodes} nodes · ${rendered.edges} links`;
+      live.className = 'live';
+    } catch (_) { live.className = 'live off'; }
+  }
+  select.addEventListener('change', poll);
+  document.getElementById('graph-fit').addEventListener('click', () => graph.fit());
+  poll();
+  setInterval(poll, 4000);
+</script>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · Settings{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="sub">Instance-wide. Secrets are write-only: once saved they are never shown again.</p>
+  </div>
+</div>
+<div id="settings">
+  {% csrf_token %}
+  <div id="view"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/settings.js' %}"></script>
+{% endblock %}

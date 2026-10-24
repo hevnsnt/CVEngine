@@ -1,0 +1,16 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}CVEngine · Verify{% endblock %}
+{% block content %}
+<h1>Two-step check</h1>
+<p class="sub">Enter the 6-digit code from your authenticator app, or a recovery code.</p>
+<form class="card ticks" method="post" autocomplete="off">
+  {% csrf_token %}
+  <div class="field">
+    <label for="code">Code</label>
+    <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus required>
+  </div>
+  <button class="btn" type="submit">Verify</button>
+  {% if error %}<div class="msg err" role="alert">{{ error }}</div>{% endif %}
+</form>
+<p class="note" style="margin-top:16px"><a href="{% url 'login' %}">Back to sign in</a></p>
+{% endblock %}

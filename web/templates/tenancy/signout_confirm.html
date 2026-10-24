@@ -1,0 +1,11 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}Sign out · CVEngine{% endblock %}
+{% block content %}
+<h1>Sign out?</h1>
+<p class="sub">You will need your password{% if request.user.tenancy_profile.mfa_enabled %} and a code{% endif %} to come back.</p>
+<form method="post" action="{% url 'logout' %}">
+  {% csrf_token %}
+  <button class="btn" type="submit">Sign out</button>
+</form>
+<p class="note" style="margin-top:14px"><a href="/cve/">Stay signed in</a></p>
+{% endblock %}

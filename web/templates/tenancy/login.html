@@ -1,0 +1,20 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}Sign in · CVEngine{% endblock %}
+{% block content %}
+<h1>Sign in</h1>
+<p class="sub">AI-first vulnerability management.</p>
+<form class="card ticks" method="post">
+  {% csrf_token %}
+  <input type="hidden" name="next" value="{{ next }}">
+  <div class="field">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus required>
+  </div>
+  <div class="field">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+  </div>
+  <button class="btn" type="submit" style="width:100%;margin-top:4px">Sign in</button>
+  {% if form.errors %}<div class="msg err" role="alert">That username and password did not match.</div>{% endif %}
+</form>
+{% endblock %}

@@ -1,0 +1,207 @@
+"""Update check against the project's GitHub repository, with an administrator in the loop.
+
+A beat task (``check_for_updates``, twice a day) asks GitHub for the head of the configured branch and compares it
+with the installed commit. When there is something newer, superusers see a banner and a Settings > Updates page
+where they approve or dismiss it. The web container never updates itself and has no Docker or git access: approving
+only writes the approved commit to ``.update-approved`` in the application directory (the host's ``web/``), and
+``scripts/apply-update.sh`` on the host (cron or systemd timer, see scripts/install-updater.sh) fast-forwards the
+checkout to exactly that commit and rebuilds. The installed commit is the first line of ``.commit``, written by
+``make up`` / ``make build`` and by the updater script.
+
+Pure helpers take their HTTP function as a parameter so they are testable without a network.
+"""
+import logging
+import os
+import re
+from datetime import datetime
+
+import requests
+from django.conf import settings
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
+
+API = 'https://api.github.com'
+REPO_RE = re.compile(r'^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$')
+BRANCH_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$')
+SHA_RE = re.compile(r'^[0-9a-f]{40}$')
+MAX_COMMITS = 20
+
+
+class UpdateError(Exception):
+    pass
+
+
+def valid_repo(repo):
+    return bool(REPO_RE.match(repo or '')) and '..' not in repo
+
+
+def valid_branch(branch):
+    return bool(BRANCH_RE.match(branch or '')) and '..' not in branch and not branch.endswith(('/', '.lock'))
+
+
+def _file(name):
+    return os.path.join(settings.BASE_DIR, name)
+
+
+def installed_sha():
+    """The commit this installation was built from ('' when unknown)."""
+    try:
+        with open(_file('.commit')) as f:
+            first = f.readline().strip().lower()
+    except OSError:
+        first = ''
+    if SHA_RE.match(first):
+        return first
+    env = os.environ.get('CVENGINE_COMMIT', '').strip().lower()
+    return env if SHA_RE.match(env) else ''
+
+
+def _headers(token):
+    headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'CVEngine-updater'}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    return headers
+
+
+def _first_line(text):
+    return (text or '').strip().splitlines()[0][:300] if (text or '').strip() else ''
+
+
+def fetch_latest(repo, branch, token='', installed='', get=requests.get):
+    """Ask GitHub for the branch head and how far ahead of ``installed`` it is.
+    Returns {sha, message, url, date, behind_by (None if unknown), commits}. Raises UpdateError with a readable reason."""
+    if not valid_repo(repo) or not valid_branch(branch):
+        raise UpdateError('the repository or branch name is not valid')
+    try:
+        resp = get(f'{API}/repos/{repo}/commits/{branch}', headers=_headers(token), timeout=20)
+    except requests.RequestException as exc:
+        raise UpdateError(f'could not reach GitHub: {exc}')
+    if resp.status_code == 404:
+        raise UpdateError('repository or branch not found (a private repository needs a token)')
+    if resp.status_code in (401, 403):
+        raise UpdateError('GitHub refused the request (check the token, or the rate limit was hit)')
+    if resp.status_code != 200:
+        raise UpdateError(f'GitHub answered {resp.status_code}')
+    data = resp.json()
+    sha = str(data.get('sha', '')).lower()
+    if not SHA_RE.match(sha):
+        raise UpdateError('unexpected answer from GitHub')
+    commit = data.get('commit') or {}
+    date = ((commit.get('committer') or {}).get('date')) or ''
+    out = {'sha': sha, 'message': _first_line(commit.get('message')), 'url': str(data.get('html_url', ''))[:300],
+           'date': date, 'behind_by': None, 'commits': []}
+    if not installed:
+        return out
+    if installed == sha:
+        out['behind_by'] = 0
+        return out
+    try:
+        cmp = get(f'{API}/repos/{repo}/compare/{installed}...{sha}', headers=_headers(token), timeout=20)
+    except requests.RequestException:
+        return out
+    if cmp.status_code == 200:
+        body = cmp.json()
+        if body.get('status') in ('behind', 'identical'):
+            out['behind_by'] = 0  # the installation is already at or past the remote head
+        else:
+            out['behind_by'] = int(body.get('ahead_by') or 0)
+            out['commits'] = [{'sha': str(c.get('sha', ''))[:7], 'message': _first_line((c.get('commit') or {}).get('message'))}
+                              for c in reversed(body.get('commits') or [])][:MAX_COMMITS]
+    return out
+
+
+def update_available(row, installed):
+    return bool(row.latest_sha and row.latest_sha != installed and row.behind_by != 0)
+
+
+def check(row=None, get=requests.get):
+    """Run one check and store the result on the settings row."""
+    from cveFeed.models import UpdateSettings
+    row = row or UpdateSettings.current()
+    row.last_checked_at = timezone.now()
+    try:
+        found = fetch_latest(row.repo, row.branch, row.token, installed_sha(), get=get)
+    except UpdateError as exc:
+        row.last_error = str(exc)[:300]
+        row.save(update_fields=['last_checked_at', 'last_error'])
+        return row
+    row.last_error = ''
+    row.latest_sha, row.latest_message, row.latest_url = found['sha'], found['message'], found['url']
+    try:
+        row.latest_date = datetime.fromisoformat(found['date'].replace('Z', '+00:00')) if found['date'] else None
+    except ValueError:
+        row.latest_date = None
+    row.behind_by, row.commits = found['behind_by'], found['commits']
+    row.save()
+    sync_applied(row)
+    return row
+
+
+def sync_applied(row):
+    """Forget an approval once the installed commit has caught up with it."""
+    if row.approved_sha and installed_sha() == row.approved_sha:
+        row.approved_sha, row.approved_by, row.approved_at = '', '', None
+        row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
+        _remove_flag()
+
+
+def _remove_flag():
+    try:
+        os.remove(_file('.update-approved'))
+    except OSError:
+        pass
+
+
+def approve(row, user):
+    """Record the administrator's approval of the commit currently shown, and hand it to the host updater."""
+    if not SHA_RE.match(row.latest_sha or ''):
+        raise UpdateError('there is no update to approve; run a check first')
+    if not update_available(row, installed_sha()):
+        raise UpdateError('this installation is already up to date')
+    tmp = _file('.update-approved.tmp')
+    with open(tmp, 'w') as f:
+        f.write(row.latest_sha + '\n')
+    os.replace(tmp, _file('.update-approved'))
+    row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, user.username, timezone.now()
+    row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
+    return row
+
+
+def cancel_approval(row):
+    _remove_flag()
+    row.approved_sha, row.approved_by, row.approved_at = '', '', None
+    row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
+
+
+def dismiss(row):
+    """Hide the banner for this commit; a newer one asks again."""
+    row.dismissed_sha = row.latest_sha
+    row.save(update_fields=['dismissed_sha'])
+
+
+def state(row):
+    """What the API and the banner show. ``status``: disabled | error | up_to_date | available | approved | dismissed."""
+    installed = installed_sha()
+    available = update_available(row, installed)
+    if not row.enabled:
+        status = 'disabled'
+    elif row.approved_sha and row.approved_sha == row.latest_sha and available:
+        status = 'approved'
+    elif available and row.dismissed_sha == row.latest_sha:
+        status = 'dismissed'
+    elif available:
+        status = 'available'
+    elif row.last_error and not row.latest_sha:
+        status = 'error'
+    else:
+        status = 'up_to_date'
+    return {
+        'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'has_token': bool(row.token),
+        'installed': installed[:7], 'installed_known': bool(installed),
+        'latest': row.latest_sha[:7], 'latest_message': row.latest_message, 'latest_url': row.latest_url,
+        'latest_date': row.latest_date.isoformat() if row.latest_date else None, 'behind_by': row.behind_by,
+        'commits': row.commits, 'last_checked_at': row.last_checked_at.isoformat() if row.last_checked_at else None,
+        'last_error': row.last_error, 'approved_by': row.approved_by,
+        'approved_at': row.approved_at.isoformat() if row.approved_at else None,
+    }

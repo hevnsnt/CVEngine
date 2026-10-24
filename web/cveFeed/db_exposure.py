@@ -1,0 +1,199 @@
+"""Unauthenticated-database exposure checks: for a database-like service nmap found open, make exactly
+ONE read-only connection attempt with NO credentials and see whether the server lets it through. This
+never tries a second username/password combination (credential guessing is out of scope here) and
+never reads, lists or modifies real data once connected - the single fact recorded is "no credential
+was required to reach this service", which is itself the vulnerability for a network-exposed datastore.
+"""
+import logging
+import socket
+
+logger = logging.getLogger(__name__)
+
+CONNECT_TIMEOUT = 3
+# What the server said when it let the attempt through, kept as the finding's evidence: (host, port) -> short text. A checker notes
+# it just before returning True and run_db_exposure_checks takes it; runs are sequential, so one table is enough.
+EVIDENCE = {}
+
+
+def _note(host, port, text):
+    EVIDENCE[(host, port)] = str(text)[:300]
+
+
+def check_redis(host, port):
+    """A single PING with no password: open iff the server answers instead of demanding auth."""
+    try:
+        import redis
+    except ImportError:
+        return None
+    client = None
+    try:
+        client = redis.Redis(host=host, port=port, socket_connect_timeout=CONNECT_TIMEOUT,
+                             socket_timeout=CONNECT_TIMEOUT)
+        if not client.ping():
+            return False
+        reply = 'PONG'
+        try:
+            reply += f' (redis {client.info("server").get("redis_version", "?")})'
+        except Exception:  # noqa: BLE001 - the version is a nicety; the PONG is the evidence
+            pass
+        _note(host, port, reply)
+        return True
+    except redis.AuthenticationError:
+        return False
+    except redis.ResponseError as exc:
+        return 'NOAUTH' not in str(exc) and 'WRONGPASS' not in str(exc)
+    except Exception:  # noqa: BLE001 - refused/timeout/reset: simply "not exposed", not a crash
+        return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def check_memcached(host, port):
+    """Memcached has no authentication mechanism at all, so any instance that answers a read-only
+    "version" command is, by definition, reachable with none."""
+    try:
+        with socket.create_connection((host, port), timeout=CONNECT_TIMEOUT) as sock:
+            sock.sendall(b'version\r\n')
+            reply = sock.recv(256)
+        if reply.startswith(b'VERSION'):
+            _note(host, port, reply.decode('ascii', 'replace').strip().splitlines()[0])
+            return True
+        return False
+    except OSError:
+        return False
+
+
+def check_postgres(host, port):
+    """A single attempt to connect to the default "postgres" database as the default "postgres" role
+    with no password: open iff the server's access policy trusts this connection outright."""
+    try:
+        import psycopg2
+    except ImportError:
+        return None
+    conn = None
+    try:
+        conn = psycopg2.connect(host=host, port=port, dbname='postgres', user='postgres', password='',
+                                connect_timeout=CONNECT_TIMEOUT)
+        version = getattr(conn, 'server_version', None)
+        _note(host, port, f'PostgreSQL {version // 10000}.{version % 10000}' if isinstance(version, int) else 'connected as postgres, no password')
+        return True
+    except Exception:  # noqa: BLE001 - OperationalError covers auth failure, refused, no such db, etc.
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def check_elasticsearch(host, port):
+    """A plain GET /: Elasticsearch with no security plugin configured answers with cluster info and no
+    auth challenge at all."""
+    import requests
+    try:
+        resp = requests.get(f'http://{host}:{port}/', timeout=CONNECT_TIMEOUT, allow_redirects=False)
+        info = resp.json() if resp.status_code == 200 and resp.content else {}
+        if 'cluster_name' not in info:
+            return False
+        _note(host, port, f'cluster {info.get("cluster_name")}, version {(info.get("version") or {}).get("number", "?")}')
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def check_couchdb(host, port):
+    """GET /_all_dbs: lists database NAMES only, never document content. CouchDB's "admin party" mode
+    (no admin user ever configured) answers this with no credential at all."""
+    import requests
+    try:
+        resp = requests.get(f'http://{host}:{port}/_all_dbs', timeout=CONNECT_TIMEOUT, allow_redirects=False)
+        names = resp.json() if resp.status_code == 200 else None
+        if not isinstance(names, list):
+            return False
+        _note(host, port, f'/_all_dbs answered with {len(names)} database name(s)')  # a count, never the names
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+CHECKS = {
+    'redis': ('Redis', check_redis),
+    'memcached': ('Memcached', check_memcached),
+    'postgres': ('PostgreSQL', check_postgres), 'postgresql': ('PostgreSQL', check_postgres),
+    'elastic': ('Elasticsearch', check_elasticsearch),
+    'couchdb': ('CouchDB', check_couchdb),
+}
+
+
+def checker_for(port, table=None):
+    """(label, check_fn) for a Port that looks like one of the databases above, else (None, None)."""
+    text = f'{port.service_name or ""} {port.product or ""}'.lower()
+    for key, (label, fn) in (table if table is not None else CHECKS).items():
+        if key in text:
+            return label, fn
+    return None, None
+
+
+def run_db_exposure_checks(scan_id, checks=None):
+    """One read-only, no-credential connection attempt per database-like port this scan found. Persists
+    a critical Vulnerability for every one that let the attempt through. Never fatal to the scan.
+    ``checks`` overrides the {name-fragment: (label, fn)} table (tests inject fakes here)."""
+    from cveFeed import activity
+    from startScan.models import open_ports
+    from targetApp.target_types import is_scannable_ip
+    from reNgine.definitions import NUCLEI_SEVERITY_MAP
+    from reNgine.tasks import save_vulnerability
+    from startScan.models import ScanHistory, Subdomain
+
+    table = checks if checks is not None else CHECKS
+    scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
+    domain, project = scan.domain, scan.domain.project_id
+    targets = []  # (subdomain, host, port_obj, label, check_fn)
+    EVIDENCE.clear()
+    for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
+        for ip in sub.ip_addresses.all():
+            if not is_scannable_ip(ip.address):
+                continue
+            for port in open_ports(ip):
+                label, fn = checker_for(port, table)
+                if fn:
+                    targets.append((sub, ip.address, port, label, fn))
+    if not targets:
+        return {'checked': 0, 'exposed': 0}
+    running = activity.log(
+        'run_check', f'Checking {len(targets)} database service(s) on {domain.name} for missing authentication',
+        project=project, status='running', scan_id=scan.id)
+    exposed = 0
+    # Names that share an address share the service: one probe per (address, port), and the finding goes to every host that
+    # answers on it, each with the same evidence (one critical per host stays visible on each host's page).
+    groups = {}
+    for sub, host, port, label, fn in targets:
+        groups.setdefault((host, port.number, label), (fn, []))[1].append(sub)
+    for (host, number, label), (fn, subs) in groups.items():
+        try:
+            is_open = fn(host, number)
+        except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
+            logger.exception('db exposure check %s failed for %s:%s', label, host, number)
+            continue
+        if not is_open:
+            continue
+        reply = EVIDENCE.pop((host, number), '')
+        exposed += 1
+        for sub in subs:
+            vuln, created = save_vulnerability(
+                target_domain=domain, scan_history=scan, subdomain=sub, source='db_exposure',
+                template_id=f'db-exposure-{label.lower()}', name=f'Unauthenticated {label} exposure',
+                severity=NUCLEI_SEVERITY_MAP['critical'],
+                description=f'{label} on {host}:{number} accepted a connection with no credentials at all.'
+                            + (f' The server replied: {reply}' if reply else ''),
+                impact=f'Anyone who can reach {host}:{number} has the same access as a fully authenticated client.',
+                remediation=f'Require authentication on this {label} instance and restrict network access to trusted hosts only.',
+                extracted_results=[reply] if reply else [], http_url=f'{label.lower()}://{host}:{number}')
+            if created:
+                activity.log('validate', f'{label} on {host}:{number} has no authentication required'
+                             + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+    activity.settle(running, 'done', message=(
+        f'Database exposure check for {domain.name}: {exposed} of {len(groups)} service(s) open with no authentication'))
+    return {'checked': len(groups), 'exposed': exposed}

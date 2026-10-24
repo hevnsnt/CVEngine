@@ -1,0 +1,89 @@
+{% extends 'cveFeed/base.html' %}
+{% block title %}CVEngine · Agents{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+<h1>Agent access</h1>
+<p class="sub">API tokens let scripts and AI agents act as you, with your projects and roles. Use them with the REST API at <code>/api/v1/</code> or the MCP server at <code>/mcp/</code>.</p>
+</div></div>
+
+<div class="grid main" style="margin-top:0">
+  <div>
+    <form class="card" id="f" autocomplete="off">
+      {% csrf_token %}
+      <h2 style="margin-bottom:12px">New token</h2>
+      <div class="field"><label for="name">Name</label><input id="name" placeholder="remediation-agent" required></div>
+      <div class="form-check field" style="display:flex;gap:8px;align-items:center">
+        <input type="checkbox" id="ro" style="width:auto;min-height:0"><label for="ro" style="margin:0">Read only</label>
+      </div>
+      <button class="btn" type="submit">Create token</button>
+      <div id="secret" class="msg ok" style="display:none" role="status"></div>
+    </form>
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin-bottom:8px">Your tokens</h2>
+      <ul class="feed" id="list" style="max-height:none"></ul>
+      <p class="empty" id="none">No tokens yet.</p>
+    </div>
+  </div>
+  <div class="card">
+    <h2 style="margin-bottom:8px">Connect an agent</h2>
+    <p class="note" style="margin-bottom:6px">Claude Code</p>
+    <pre class="code" data-copy>claude mcp add --transport http cvengine http://{{ host }}/mcp/ --header "Authorization: Bearer &lt;token&gt;"</pre>
+    <p class="note" style="margin-bottom:6px">REST</p>
+    <pre class="code" data-copy>curl -H "Authorization: Bearer &lt;token&gt;" http://{{ host }}/api/v1/me</pre>
+    <p class="note">Remediation agents: <code>register_assets</code>, then <code>get_remediation_work</code>, then <code>update_remediation_status</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var csrf = document.querySelector('[name=csrfmiddlewaretoken]').value, list = document.getElementById('list'),
+      none = document.getElementById('none'), secret = document.getElementById('secret');
+  function api(method, url, body) {
+    return fetch(url, {method: method, credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: body ? JSON.stringify(body) : undefined})
+      .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); });
+  }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function render(items) {
+    list.textContent = '';
+    var live = items.filter(function (t) { return !t.revoked; });
+    none.style.display = live.length ? 'none' : '';
+    live.forEach(function (t) {
+      var li = el('li'); li.style.display = 'flex'; li.style.justifyContent = 'space-between'; li.style.alignItems = 'center'; li.style.gap = '12px';
+      var left = el('div'); left.appendChild(el('span', 'cve-id', t.name));
+      left.appendChild(el('div', 'meta', t.prefix + '...  ' + (t.read_only ? 'read only  ' : '') + (t.last_used ? 'used ' + t.last_used.slice(0, 10) : 'never used')));
+      var b = el('button', 'btn ghost', 'Revoke'); b.type = 'button';
+      b.addEventListener('click', function () { api('DELETE', '/api/v1/tokens/' + t.id).then(load); });
+      li.appendChild(left); li.appendChild(b); list.appendChild(li);
+    });
+  }
+  function copyBtn(getText) {
+    var b = el('button', 'copy', 'Copy'); b.type = 'button';
+    b.addEventListener('click', function () {
+      var text = getText();
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { window.getSelection().selectAllChildren(b.parentNode); });
+      else window.getSelection().selectAllChildren(b.parentNode);
+    });
+    return b;
+  }
+  document.querySelectorAll('pre[data-copy]').forEach(function (pre) { var t = pre.textContent; pre.appendChild(copyBtn(function () { return t; })); });
+  function load() { api('GET', '/api/v1/tokens').then(function (x) { render(x.d.results || []); }); }
+  document.getElementById('f').addEventListener('submit', function (e) {
+    e.preventDefault();
+    api('POST', '/api/v1/tokens', {name: document.getElementById('name').value, read_only: document.getElementById('ro').checked}).then(function (x) {
+      secret.style.display = 'block';
+      if (x.ok) {
+        secret.className = 'msg ok secret-box'; secret.textContent = '';
+        secret.appendChild(el('span', '', 'Copy this token now. It is not shown again.'));
+        var code = el('pre', 'code', x.d.token); code.appendChild(copyBtn(function () { return x.d.token; })); secret.appendChild(code);
+        document.getElementById('name').value = ''; load();
+      }
+      else { secret.className = 'msg err'; secret.textContent = x.d.error || 'Could not create the token.'; }
+    });
+  });
+  load();
+})();
+</script>
+{% endblock %}

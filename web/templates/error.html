@@ -1,0 +1,23 @@
+{% load static assets %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f4f4f5">
+<title>{{ title }} · CVEngine</title>
+<link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
+</head>
+<body style="padding-bottom:0">
+<main class="auth">
+  <div class="auth-card" style="text-align:center">
+    <a class="brand" style="align-items:center" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+    <p class="eyebrow" style="margin-bottom:8px">Error {{ code }}</p>
+    <h1>{{ title }}</h1>
+    <p class="sub" style="margin:8px auto 22px">{{ message }}</p>
+    <a class="btn" style="width:auto" href="/cve/">Back to CVEngine</a>
+  </div>
+</main>
+</body>
+</html>

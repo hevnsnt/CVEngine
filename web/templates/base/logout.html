@@ -1,0 +1,7 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}Signed out · CVEngine{% endblock %}
+{% block content %}
+<h1>You are signed out</h1>
+<p class="sub">Your session has ended on this device.</p>
+<a class="btn" href="{% url 'login' %}">Sign in again</a>
+{% endblock %}
