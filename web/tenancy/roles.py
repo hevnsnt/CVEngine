@@ -30,7 +30,7 @@ SUPERUSER_ONLY = re.compile(
 # settings are global singletons in reNgine, so they are instance-wide above).
 ADMIN_ONLY = re.compile(r'^/(?!)')
 # Bug bounty workflow: opt-in per user and Pentester or Admin role.
-BUGBOUNTY = re.compile(r'(hackerone|bountyhub)', re.I)
+BUGBOUNTY = re.compile(r'(hackerone|bountyhub|vulnerability/report)', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
 ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$))')
 

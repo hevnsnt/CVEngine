@@ -541,17 +541,20 @@ class QueryInterestingSubdomains(APIView):
 
 
 class ListTargetsDatatableViewSet(viewsets.ReadOnlyModelViewSet):
-	queryset = Domain.objects.all()
+	# Model hint only. A class-level Domain.objects.all() is evaluated once at import time,
+	# outside the request's tenancy scope, and would then be reused for every request.
+	queryset = Domain.objects.none()
 	serializer_class = DomainSerializer
 
 	def get_queryset(self):
+		# Built per request: the default manager applies the caller's project scope.
+		qs = Domain.objects.all()
 		slug = self.request.GET.get('slug', None)
 		if slug:
-			self.queryset = self.queryset.filter(project__slug=slug)
-		return self.queryset
+			qs = qs.filter(project__slug=slug)
+		return qs
 
 	def filter_queryset(self, qs):
-		qs = self.queryset.filter()
 		search_value = self.request.GET.get(u'search[value]', None)
 		_order_col = self.request.GET.get(u'order[0][column]', None)
 		_order_direction = self.request.GET.get(u'order[0][dir]', None)
@@ -571,11 +574,12 @@ class ListTargetsDatatableViewSet(viewsets.ReadOnlyModelViewSet):
 			if _order_direction == 'desc':
 				order_col = f'-{order_col}'
 
-			qs = self.queryset.filter(
-				Q(name__icontains=search_value) |
-				Q(description__icontains=search_value) |
-				Q(domains__name__icontains=search_value)
-			)
+			if search_value:
+				qs = qs.filter(
+					Q(name__icontains=search_value) |
+					Q(description__icontains=search_value) |
+					Q(domains__name__icontains=search_value)
+				)
 			return qs.order_by(order_col)
 
 		return qs.order_by('-id')
@@ -1970,7 +1974,10 @@ class IpAddressViewSet(viewsets.ReadOnlyModelViewSet):
 				ip_addresses__isnull=True).distinct()
 		else:
 			self.serializer_class = IpSerializer
-			self.queryset = IpAddress.objects.all()
+			# IpAddress/Port are global per address and not in tenancy SCOPES: reach them only
+			# through Subdomain, whose default manager is project-scoped.
+			self.queryset = IpAddress.objects.filter(
+				ip_addresses__in=Subdomain.objects.all()).distinct()
 		return self.queryset
 
 	def paginate_queryset(self, queryset, view=None):

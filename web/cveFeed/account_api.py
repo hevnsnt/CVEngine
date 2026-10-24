@@ -77,6 +77,9 @@ def change_password(request):
     user.set_password(new)
     user.save()
     update_session_auth_hash(request, user)  # keep this session signed in
+    # Like an administrator reset, a password change cuts off bearer tokens: otherwise a token minted
+    # from a stolen session would outlive the very password change meant to end the compromise.
+    ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     profile.must_change_password = False
     profile.save(update_fields=['must_change_password'])
