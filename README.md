@@ -19,6 +19,10 @@
 
 ---
 
+<p align="center">
+  <img src="docs/images/cvengine-tour.gif" alt="A tour of CVEngine: the live dashboard, hosts ranked by score, a validated CVE match, the change timeline with screenshot diffs, and the asset graph" width="900">
+</p>
+
 ## Why CVEngine
 
 Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. CVEngine runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the only question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
