@@ -53,6 +53,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.git('checkout', '-b', 'master', cwd=self.work)
         (self.work / 'scripts').mkdir()
         shutil.copy(SCRIPTS / 'apply-update.sh', self.work / 'scripts' / 'apply-update.sh')
+        shutil.copy(SCRIPTS / 'update-state.py', self.work / 'scripts' / 'update-state.py')
         # the one-time PostgreSQL move is a separate script with its own docker calls; here it only records that it ran
         (self.work / 'scripts' / 'upgrade-postgres.sh').write_text('#!/usr/bin/env bash\necho "upgrade-postgres $*" >> "$STUB_DIR/calls.log"\n')
         (self.work / 'scripts' / 'upgrade-postgres.sh').chmod(0o755)
@@ -94,6 +95,96 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 0)
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.head(), self.prev)
+
+    def test_shared_lock_symlink_cannot_truncate_host_file(self):
+        victim = self.tmp / 'host-only'
+        victim.write_text('keep me')
+        (self.work / 'web' / '.update-lock').symlink_to(victim)
+        self.approve('not-a-sha')
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertEqual(victim.read_text(), 'keep me')
+        self.assertTrue((self.work / '.git' / 'cvengine-update' / 'update.lock').is_file())
+
+    def test_symlink_approval_is_rejected_before_fetch_or_deploy(self):
+        approval = self.tmp / 'host-approval'
+        approval.write_text(self.new + '\n')
+        (self.work / 'web' / '.update-approved').symlink_to(approval)
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.head(), self.prev)
+        self.assertEqual(approval.read_text(), self.new + '\n')
+
+    def test_hardlinked_approval_is_rejected(self):
+        approval = self.tmp / 'host-approval'
+        approval.write_text(self.new + '\n')
+        os.link(approval, self.work / 'web' / '.update-approved')
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.head(), self.prev)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'requires POSIX FIFOs')
+    def test_nonregular_approval_is_rejected_without_blocking(self):
+        os.mkfifo(self.work / 'web' / '.update-approved')
+        result = subprocess.run(['bash', 'scripts/apply-update.sh'], cwd=self.work,
+                                env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.calls(), [])
+
+    def test_shared_log_and_commit_symlinks_are_replaced_not_followed(self):
+        victim = self.tmp / 'host-only'
+        victim.write_text('keep me')
+        for name in ('.update-log', '.commit'):
+            (self.work / 'web' / name).symlink_to(victim)
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(victim.read_text(), 'keep me')
+        for name in ('.update-log', '.commit'):
+            self.assertFalse((self.work / 'web' / name).is_symlink())
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
+        self.assertEqual((self.work / 'web' / '.update-log').read_bytes(),
+                         (self.work / '.git' / 'cvengine-update' / 'update.log').read_bytes())
+
+    def test_legacy_log_import_keeps_only_bounded_tail(self):
+        limit = 8 * 1024 * 1024
+        with (self.work / 'web' / '.update-log').open('wb') as log:
+            log.write(b'old prefix')
+            log.seek(limit + 4096)
+            log.write(b'last history line\n')
+        self.approve('not-a-sha')
+        self.assertEqual(self.run_script().returncode, 1)
+        private = (self.work / '.git' / 'cvengine-update' / 'update.log').read_bytes()
+        self.assertNotIn(b'old prefix', private)
+        self.assertIn(b'last history line', private)
+        self.assertLess(len(private), limit + 1024)
+
+    def test_existing_regular_log_history_is_preserved(self):
+        (self.work / 'web' / '.update-log').write_text('previous update history\n')
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertTrue((self.work / 'web' / '.update-log').read_text().startswith(
+            'previous update history\n'))
+
+    def test_host_private_lock_serializes_updates(self):
+        import fcntl
+        state = self.work / '.git' / 'cvengine-update'
+        state.mkdir()
+        self.approve()
+        with (state / 'update.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.head(), self.prev)
+
+    def test_commit_publication_replaces_hardlink_without_changing_host_file(self):
+        victim = self.tmp / 'host-only'
+        victim.write_text('keep me')
+        os.link(victim, self.work / 'web' / '.commit')
+        result = subprocess.run(['python3', 'scripts/update-state.py', 'commit', self.new],
+                                cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_text(), 'keep me')
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
 
     def test_dev_compose_file_deploys_with_that_file_and_restarts_the_code_services(self):
         self.approve()

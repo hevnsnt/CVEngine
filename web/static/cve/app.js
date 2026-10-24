@@ -528,6 +528,9 @@ function renderFinding(d, cfg, row) {
   if (d.kind === "match" && d.cve) {
     const advisory = detailSection("About this CVE");
     advisory.append(el("p", d.cve.description ? "" : "note", d.cve.description || "No description is available in the CVE feed yet."));
+    if (d.cve.summary && d.cve.summary !== d.cve.description) {
+      advisory.append(el("h3", "sec", "Feed summary"), el("p", "", d.cve.summary));
+    }
     if (d.cve.affected && d.cve.affected.length) {
       advisory.append(el("h3", "sec", "Products and versions in the advisory"));
       d.cve.affected.forEach((item) => {

@@ -26,11 +26,11 @@ certs: check-env	## Generate the HTTPS certificate.
 
 up: check-env		## Build and start all services.
 	@./scripts/upgrade-postgres.sh
-	@git rev-parse HEAD > web/.commit 2>/dev/null || true
+	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 
 build: check-env		## Build all services.
-	@git rev-parse HEAD > web/.commit 2>/dev/null || true
+	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
 
 username: check-env	## Create an admin account (use after make up).

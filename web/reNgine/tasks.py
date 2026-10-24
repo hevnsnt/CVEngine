@@ -238,6 +238,8 @@ def initiate_subscan(
 		results_dir=RENGINE_RESULTS,
 		starting_point_path='',
 		excluded_paths=[],
+		actor_id=None,
+		project_id=None,
 	):
 	"""Initiate a new subscan.
 
@@ -251,10 +253,25 @@ def initiate_subscan(
 		excluded_paths (list): Excluded paths. Default: [], url paths to exclude from scan.
 	"""
 
-	# Get Subdomain, Domain and ScanHistory
-	subdomain = Subdomain.objects.get(pk=subdomain_id)
+	# Queued identifiers are not authority. Recheck current membership before any
+	# record, filesystem write or probe, including messages queued before revocation.
+	from django.contrib.auth.models import User
+	from api.permissions import require_project_write, validate_subscan_types
+	from targetApp.target_types import scannable_hosts
+	validate_subscan_types([scan_type])
+	if not actor_id or not project_id or engine_id is not None:
+		raise PermissionError('Missing authorization binding or unsupported engine override')
+	actor = User.objects.get(pk=actor_id, is_active=True)
+	subdomain = Subdomain.objects.get(pk=subdomain_id, target_domain__project_id=project_id)
+	require_project_write(actor, subdomain.target_domain.project)
+	if subdomain.scan_history_id != scan_history_id:
+		raise PermissionError('Scan does not match authorized subdomain')
 	scan = ScanHistory.objects.get(pk=subdomain.scan_history.id)
 	domain = Domain.objects.get(pk=subdomain.target_domain.id)
+	if scan.domain_id != domain.pk:
+		raise PermissionError('Scan and target do not match')
+	if not scannable_hosts([subdomain.name], project=project_id):
+		raise PermissionError('Host is excluded or not publicly scannable')
 
 	# Get EngineType
 	engine_id = engine_id or scan.scan_type.id
@@ -3006,7 +3023,8 @@ def http_crawl(
 	if custom_header:
 		custom_headers.append(custom_header)
 	threads = cfg.get(THREADS, DEFAULT_THREADS)
-	follow_redirect = cfg.get(FOLLOW_REDIRECT, True)
+	# Redirect destinations have not passed our target policy. Do not let httpx
+	# follow them implicitly; recording Location is still useful to the caller.
 	self.output_path = None
 	input_path = f'{self.results_dir}/httpx_input.txt'
 	history_file = f'{self.results_dir}/commands.txt'
@@ -3014,8 +3032,6 @@ def http_crawl(
 		if self.starting_point_path:
 			urls = [u for u in urls if self.starting_point_path in u]
 
-		with open(input_path, 'w') as f:
-			f.write('\n'.join(urls))
 	else:
 		urls = get_http_urls(
 			is_uncrawled=not recrawl,
@@ -3026,8 +3042,19 @@ def http_crawl(
 	if self.excluded_paths:
 		urls = exclude_urls_by_patterns(self.excluded_paths, urls)
 
+	from targetApp.target_types import scannable_hosts
+	project_id = None
+	if self.scan_id:
+		project_id = ScanHistory.objects.get(pk=self.scan_id).domain.project_id
+	elif ctx.get('domain_id'):
+		project_id = Domain.objects.get(pk=ctx['domain_id']).project_id
+	urls = scannable_hosts(urls, project=project_id)
 	if not urls:
 		return
+	# Always rewrite the list after filtering, including lists returned by
+	# get_http_urls, so the subprocess cannot consume pre-filtered entries.
+	with open(input_path, 'w') as f:
+		f.write('\n'.join(urls))
 
 	if len(urls) < threads:
 		threads = len(urls)
@@ -3044,8 +3071,6 @@ def http_crawl(
 	cmd += f' -u {urls[0]}' if len(urls) == 1 else f' -l {input_path}'
 	cmd += f' -x {method}' if method else ''
 	cmd += f' -silent'
-	if follow_redirect:
-		cmd += ' -fr'
 	results = []
 	endpoint_ids = []
 	for line in stream_command(

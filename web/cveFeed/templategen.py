@@ -49,7 +49,7 @@ SYSTEM_PROMPT = (
     "protocol; the check must be non-destructive and detect the vulnerability by "
     "version or a safe response marker with matchers (never exploit, never write or "
     "delete data, no code/javascript/headless/file protocols, no interactsh). Requests may "
-    "target only the scanned host: http paths must start with {{BaseURL}}, network hosts "
+    "target only the scanned host: http paths must be {{BaseURL}} or {{BaseURL}}/path; network checks may only read banners without sending inputs. Network hosts "
     "must be {{Hostname}} or {{Host}}; never include any other URL or hostname, and no "
     "redirects. " + UNTRUSTED_NOTICE)
 
@@ -97,10 +97,31 @@ def _only_safe_vars(text):
     return all(name.split("(")[0].strip() in SAFE_VARS or name.startswith("rand_") for name in _VAR_RE.findall(text))
 
 
-def destination_check(doc):
+def _bound_http_path(value, allow_root_url=False):
+    """A placeholder must end the authority before any model-controlled suffix."""
+    if not isinstance(value, str) or any(ord(c) < 32 for c in value) or "\\" in value:
+        return False
+    placeholders = ("{{BaseURL}}", "{{RootURL}}") if allow_root_url else ("{{BaseURL}}",)
+    return any(value == prefix or value.startswith(prefix + "/") for prefix in placeholders)
+
+
+def destination_check(doc, allow_root_url=False):
     """A generated template may talk only to the host nuclei is pointed at. Every request destination must be a
     {{BaseURL}}/{{Hostname}}/{{Host}} placeholder: no absolute URLs, no literal hosts, no redirects, no resolvers.
     Returns a reason string, or "" when the document is acceptable."""
+    if not isinstance(doc, dict):
+        return "template must be a mapping"
+    for proto in PROTOCOL_SECTIONS:
+        if proto not in doc:
+            continue
+        blocks = doc[proto]
+        if not isinstance(blocks, list) or not blocks or any(not isinstance(b, dict) for b in blocks):
+            return f"malformed {proto} section"
+        for block in blocks:
+            for key in ("path", "raw", "inputs", "matchers", "extractors"):
+                if key in block and not isinstance(block[key], list):
+                    return f"malformed {proto} {key} list"
+
     def walk(node, path=""):
         if isinstance(node, dict):
             for k, v in node.items():
@@ -118,6 +139,9 @@ def destination_check(doc):
     reason = walk({k: v for k, v in doc.items() if k != "info"})
     if reason:
         return reason
+    variables = doc.get("variables") or {}
+    if not isinstance(variables, dict) or any(str(k).strip() in SAFE_VARS for k in variables):
+        return "template variables must not override built-in target variables"
     requests_seen = 0
     for proto in ("http", "requests"):
         for block in doc.get(proto) or []:
@@ -125,16 +149,19 @@ def destination_check(doc):
                 return f"malformed {proto} section"
             for p in block.get("path") or []:
                 requests_seen += 1
-                if not str(p).startswith("{{BaseURL}}") or "://" in str(p) or not _only_safe_vars(str(p)):
-                    return f"http path must start with {{{{BaseURL}}}} and contain no other URL: {str(p)[:80]!r}"
+                if not _bound_http_path(p, allow_root_url) or "://" in str(p) or not _only_safe_vars(str(p)):
+                    return f"http path must be {{{{BaseURL}}}} or {{{{BaseURL}}}}/path and contain no other URL: {str(p)[:80]!r}"
             for raw in block.get("raw") or []:
                 requests_seen += 1
                 text = str(raw)
                 if "://" in text or not _only_safe_vars(text):
                     return "raw request contains an absolute URL or an unknown variable"
                 first = text.strip().splitlines()[0] if text.strip() else ""
-                if not re.match(r"^[A-Z]+\s+(?:/|\{\{BaseURL\}\})", first):
-                    return f"raw request line must be METHOD /path or METHOD {{{{BaseURL}}}}...: {first[:60]!r}"
+                fields = first.split()
+                target = fields[1] if len(fields) == 3 else ""
+                relative = target.startswith("/") and not target.startswith("//") and "\\" not in target
+                if not (relative or _bound_http_path(target, allow_root_url)):
+                    return f"raw request line must use /path or {{{{BaseURL}}}}/path: {first[:60]!r}"
                 for line in text.splitlines()[1:]:
                     if line.lower().startswith("host:") and not _HOST_OK.match(line.split(":", 1)[1].strip()):
                         return "raw Host header must be {{Hostname}} or {{Host}}"
@@ -142,6 +169,9 @@ def destination_check(doc):
         for block in doc.get(proto) or []:
             if not isinstance(block, dict):
                 return f"malformed {proto} section"
+            inputs = block.get("inputs") or []
+            if not isinstance(inputs, list) or any(not isinstance(i, dict) or i.get("data") for i in inputs):
+                return "network checks may only read banners; outgoing data is not allowed"
             for key in ("host", "address"):
                 values = block.get(key) or []
                 for h in values if isinstance(values, list) else [values]:
@@ -358,11 +388,22 @@ def run_template(path, hosts):
     container it raises reNgine.resources.MemoryKill."""
     from reNgine import resources
     hosts = [hosts] if isinstance(hosts, str) else list(hosts)
+    from cveFeed.validation import approved_template
+    text, problem = approved_template(path)
+    if problem:
+        return [{"host": host, "vulnerable": False, "output": "", "error": problem} for host in hosts]
+    if not hosts:
+        return []
     timeout = min(RUN_TIMEOUT + 10 * len(hosts), 1800)
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
-        handle.write("\n".join(hosts) + "\n")
-    try:
-        cmd = [NUCLEI_BIN, "-t", path, "-l", handle.name, "-jsonl", "-silent", "-duc", "-ni",
+    # Execute exactly the bytes the policy inspected, not a mutable shared file.
+    with tempfile.TemporaryDirectory(prefix="cvengine-template-run-") as scratch:
+        template_path = os.path.join(scratch, "approved.yaml")
+        host_path = os.path.join(scratch, "hosts.txt")
+        with open(template_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        with open(host_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(hosts) + "\n")
+        cmd = [NUCLEI_BIN, "-t", template_path, "-l", host_path, "-jsonl", "-silent", "-duc", "-ni",
                "-rl", RATE_LIMIT, "-timeout", "10", "-retries", "0"]
         with resources.heavy_job("template-test", label=hosts[0] if len(hosts) == 1 else f"{len(hosts)} hosts") as job:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
@@ -377,11 +418,6 @@ def run_template(path, hosts):
             if proc.returncode != 0:
                 reason = (err or f'nuclei exited with status {proc.returncode}').strip()[-300:]
                 return [{"host": host, "vulnerable": False, "output": "", "error": reason} for host in hosts]
-    finally:
-        try:
-            os.remove(handle.name)
-        except OSError:
-            pass
     hits, rows, malformed = {}, {}, False
     for line in out.splitlines():
         if not line.strip():

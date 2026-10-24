@@ -3,7 +3,7 @@ import datetime
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import hygiene as hy
@@ -15,6 +15,36 @@ from tests.test_agentapi import call, create_token
 
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+
+
+class PinnedHygieneTests(SimpleTestCase):
+	def test_all_tls_attempts_share_one_admitted_address_set(self):
+		addresses = ((2, ('203.0.113.10', 443)),)
+		with mock.patch.object(hy.pinned_transport, 'resolve', return_value=addresses) as resolve, \
+				mock.patch.object(hy, '_fetch_cert', return_value={'host': 'asset.example.test'}) as fetch, \
+				mock.patch.object(hy, '_chain_error', return_value='') as chain, \
+				mock.patch.object(hy, '_accepts_legacy_tls', return_value=False) as legacy:
+			self.assertIsNotNone(hy.probe_tls('asset.example.test', 443))
+		resolve.assert_called_once_with('asset.example.test', 443)
+		for probe in (fetch, chain, legacy):
+			probe.assert_called_once_with('asset.example.test', 443, addresses=addresses)
+
+	def test_failed_admission_never_opens_tls_socket(self):
+		with mock.patch.object(hy.pinned_transport, 'resolve', side_effect=ValueError('blocked')), \
+				mock.patch.object(hy, '_fetch_cert') as fetch:
+			self.assertIsNone(hy.probe_tls('asset.example.test', 443))
+		fetch.assert_not_called()
+
+	def test_chain_verification_keeps_original_sni(self):
+		addresses = ((2, ('203.0.113.10', 443)),)
+		raw = mock.MagicMock()
+		raw.__enter__.return_value = raw
+		context = mock.MagicMock()
+		with mock.patch.object(hy.pinned_transport, 'open_socket', return_value=raw) as connect, \
+				mock.patch.object(hy.ssl, 'create_default_context', return_value=context):
+			self.assertEqual(hy._chain_error('asset.example.test', 443, addresses=addresses), '')
+		connect.assert_called_once_with(addresses, hy.TLS_TIMEOUT)
+		context.wrap_socket.assert_called_once_with(raw, server_hostname='asset.example.test')
 
 
 def checks(findings):

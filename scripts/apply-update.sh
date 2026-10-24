@@ -13,7 +13,8 @@
 #      commit and restarts it. Once the migration has succeeded the previous code is never put back, because it would
 #      run on the new schema: the restart is retried and, if it still fails, the approval is kept so the next run
 #      retries it. Schema migrations are never rolled back.
-# Results are appended to web/.update-log. Needs git, make and Docker, and a clone that can `git fetch origin`.
+# Results are retained in Git-private state and safely published to web/.update-log.
+# Needs python3, git and Docker, and a clone that can `git fetch origin`.
 #
 # CVENGINE_COMPOSE_FILE may select a root-level dev compose file. Ordinary updates deliberately keep db/Redis
 # containers running. A PostgreSQL major-version migration requires a separate maintenance operation. An update
@@ -22,17 +23,31 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 FLAG=web/.update-approved
-LOG=web/.update-log
-[ -f "$FLAG" ] || exit 0
-
-exec 9>web/.update-lock
+[ -e "$FLAG" ] || [ -L "$FLAG" ] || exit 0
+STATE=$(python3 scripts/update-state.py directory)
+LOG="$STATE/update.log"
+exec 9>"$STATE/update.lock"
 flock -n 9 || exit 0  # another run is in progress
+# Retain this safe publisher when rollback restores code without the helper.
+STATE_HELPER="$STATE/update-state.py"
+cp scripts/update-state.py "$STATE_HELPER"
+python3 "$STATE_HELPER" migrate-log "$LOG"
 
 # .env is kept in a private (0600) temporary copy during the merge and removed when the script ends; its
 # contents are never printed or logged.
 ENV_BACKUP=
 ENV_MODE=
-cleanup() { [ -z "$ENV_BACKUP" ] || rm -f "$ENV_BACKUP"; }
+cleanup() {
+  local status=$?
+  [ -z "$ENV_BACKUP" ] || rm -f "$ENV_BACKUP"
+  if [ -f "$LOG" ]; then
+    python3 "$STATE_HELPER" log "$LOG" || {
+      echo "Could not publish UI update log; complete log retained at $LOG" >&2
+      status=1
+    }
+  fi
+  return "$status"
+}
 trap cleanup EXIT
 
 backup_env() {
@@ -65,7 +80,7 @@ fi
 # How far the last deploy got; "migrated" means the database already has the new schema.
 DEPLOY_STAGE=
 deploy() {
-  git rev-parse HEAD > web/.commit 2>/dev/null || true
+  python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=(docker compose -f "${COMPOSE_FILE_OVERRIDE:-docker-compose.yml}")
   local services=(web celery celery-beat) listed
   # the dev compose file has no proxy service; recreate it only where it exists (keep it if the list cannot be read)
@@ -97,8 +112,7 @@ running_scans() {
   printf '%s\n' "$out"
 }
 
-SHA=$(head -n1 "$FLAG" | tr -d '[:space:]')
-if ! [[ $SHA =~ ^[0-9a-f]{40}$ ]]; then
+if ! SHA=$(python3 "$STATE_HELPER" approval); then
   log "refusing: approval file does not hold a commit id"
   rm -f "$FLAG"
   exit 1
@@ -129,7 +143,7 @@ fi
 PREV=$(git rev-parse HEAD)
 if [ "$PREV" = "$SHA" ]; then
   log "already at $SHA"
-  echo "$SHA" > web/.commit
+  python3 "$STATE_HELPER" commit "$SHA"
   rm -f "$FLAG"
   exit 0
 fi
@@ -145,14 +159,14 @@ fi
 restore_env
 
 if deploy >>"$LOG" 2>&1; then
-  echo "$SHA" > web/.commit
+  python3 "$STATE_HELPER" commit "$SHA"
   rm -f "$FLAG"
   log "updated to $SHA"
 elif [ "$DEPLOY_STAGE" = migrated ]; then
   # The database already has $SHA's schema, so $PREV's code must not run on it: keep $SHA and retry the restart.
   log "restarting $SHA failed after its migrations ran; keeping $SHA and retrying the restart"
   if deploy >>"$LOG" 2>&1; then
-    echo "$SHA" > web/.commit
+    python3 "$STATE_HELPER" commit "$SHA"
     rm -f "$FLAG"
     log "updated to $SHA"
   else

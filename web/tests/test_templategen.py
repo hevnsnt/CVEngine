@@ -172,7 +172,8 @@ class _Job:
 class RunTimeHitTests(unittest.TestCase):
 	def _run(self, lines):
 		FakeProc.lines = lines
-		with mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
+		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
+				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
 			return templategen.run_template('/t.yaml', ['www.t.test'])[0]
 
 	def test_an_extractor_only_line_is_not_a_hit(self):

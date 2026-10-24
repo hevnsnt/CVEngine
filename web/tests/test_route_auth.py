@@ -154,6 +154,11 @@ class ProbeTests(SimpleTestCase):
 
 	def setUp(self):
 		Handler.seen.clear()
+		# This fixture deliberately connects to its own loopback server. Production
+		# policy rejection is exercised separately in test_pinned_transport.
+		policy = mock.patch('cveFeed.pinned_transport.is_scannable_ip', return_value=True)
+		policy.start()
+		self.addCleanup(policy.stop)
 
 	def test_reads_at_most_the_sample_cap_and_sends_no_cookies_or_credentials(self):
 		result = ra.probe_url(f'http://127.0.0.1:{self.port}/big')
@@ -167,6 +172,39 @@ class ProbeTests(SimpleTestCase):
 		result = ra.probe_url(f'http://127.0.0.1:{self.port}/redir')
 		self.assertEqual((result['status'], result['location'], result['cookies']), (302, '/final', ['sid']))
 		self.assertEqual([p for p, _, _ in Handler.seen], ['/redir'])
+
+	def test_rejects_non_http_urls_and_userinfo_before_resolution(self):
+		with mock.patch('cveFeed.pinned_transport.resolve') as resolve:
+			for url in ('file:///tmp/dummy', 'ftp://example.test/', 'http://u:p@example.test/', 'http://example.test/\n'):
+				with self.assertRaises(ValueError):
+					ra.probe_url(url)
+			resolve.assert_not_called()
+
+	def test_pinned_request_preserves_host_headers_schema_and_read_limit(self):
+		from email.message import Message
+		response = mock.Mock(status=200)
+		response.headers = Message()
+		response.headers['Content-Type'] = 'text/html; charset=utf-8'
+		response.headers['Set-Cookie'] = 'sid=one; Path=/'
+		response.getheader.side_effect = lambda name, default=None: response.headers.get(name, default)
+		response.read.return_value = b'<title>Pinned</title>'
+		connection = mock.Mock()
+		connection.getresponse.return_value = response
+		addresses = ((2, ('203.0.113.10', 8443)),)
+		with mock.patch('cveFeed.pinned_transport.resolve', return_value=addresses), \
+				mock.patch('cveFeed.pinned_transport.HTTPConnection', return_value=connection) as factory:
+			result = ra.probe_url('https://original.example.test:8443/a?x=1', max_bytes=100,
+							  headers={'Host': 'fallback.example.test'})
+		self.assertEqual(factory.call_args.args, ('original.example.test', 8443, addresses, ra.CONNECT_TIMEOUT))
+		self.assertFalse(factory.call_args.kwargs['context'].check_hostname)
+		request_headers = connection.request.call_args.kwargs['headers']
+		self.assertEqual(request_headers['Host'], 'fallback.example.test')
+		self.assertEqual(request_headers['Accept-Encoding'], 'identity')
+		self.assertNotIn('Authorization', request_headers)
+		self.assertNotIn('Cookie', request_headers)
+		response.read.assert_called_once_with(100)
+		self.assertEqual((result['title'], result['cookies'], result['status']), ('Pinned', ['sid'], 200))
+		connection.close.assert_called_once()
 
 
 class RouteFixture:

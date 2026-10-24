@@ -182,6 +182,13 @@ def user_org_ids(user):
             set(ProjectMembership.objects.filter(user=user).values_list('project__org_id', flat=True)))
 
 
+def requires_mfa(user):
+    """Organization MFA policy also covers members assigned directly to its projects."""
+    from dashboard.models import OrgMembership, ProjectMembership
+    return (OrgMembership.objects.filter(user=user, org__require_mfa=True).exists()
+            or ProjectMembership.objects.filter(user=user, project__org__require_mfa=True).exists())
+
+
 def can_manage_credentials(actor, target):
     """Password reset, MFA reset and enable/disable change who can sign in as ``target``, which exposes
     EVERY org the target belongs to. So an Org Admin needs to administer all of them, not just one; a user

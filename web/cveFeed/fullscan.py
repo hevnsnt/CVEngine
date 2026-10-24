@@ -85,7 +85,7 @@ def candidates():
             .order_by(F('full_scanned_at').asc(nulls_first=True), '-open_count', 'id'))
 
 
-def in_scope(ip):
+def in_scope(ip, *, strict=False):
     """Whether a scanner may be pointed at ``ip``: a scannable address (private ones only with CVENGINE_ALLOW_PRIVATE_TARGETS), and
     at least one of the in-scope names on it that does not resolve anywhere blocked."""
     from targetApp import target_types
@@ -97,8 +97,16 @@ def in_scope(ip):
     rows = list(active_attached(ip)
                 .values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
     banned = {}  # project id -> the names its organization excluded for good: such a name does not make the address in scope
-    names = [name for name, project in rows if name.lower().rstrip('.') not in
-             banned.setdefault(project, excluded_names(project) | archived_names(project))]
+    for _name, project in rows:
+        if project not in banned:
+            if strict:
+                # Admission is an authorization boundary: a failed lookup must prevent process creation.
+                from cveFeed.models import HostExclusion
+                banned[project] = set(HostExclusion.objects.filter(org__projects__id=project).values_list('host', flat=True))
+            else:
+                banned[project] = excluded_names(project)
+            banned[project] |= archived_names(project)
+    names = [name for name, project in rows if name.lower().rstrip('.') not in banned[project]]
     return any(not target_types.resolves_to_blocked(name) for name in names)
 
 
@@ -206,7 +214,23 @@ def _advance(ip, ports):
 
 def _sweep_runner(targets, flags, host_timeout):
     from cveFeed import nmap_scan
-    return nmap_scan.run_nmap_xml(targets, flags, host_timeout, kind='nmap-full-bg', wait_timeout=WAIT_SECONDS)
+    return nmap_scan.run_nmap_xml(targets, flags, host_timeout, kind='nmap-full-bg', wait_timeout=WAIT_SECONDS,
+                                 before_launch=lambda: _require_current_scope(targets))
+
+
+def _require_current_scope(targets):
+    """Re-read inventory and exclusions after a resource wait; never use the IP instance captured by pick()."""
+    from startScan.models import IpAddress
+    for address in targets:
+        ip = IpAddress.objects.filter(address=address).first()
+        if ip is None or not in_scope(ip, strict=True):
+            raise ValueError('background scan target is no longer in scope')
+
+
+def _fingerprint_runner(targets, flags, host_timeout):
+    from cveFeed import nmap_scan
+    return nmap_scan.run_nmap_xml(targets, flags, host_timeout,
+                                 before_launch=lambda: _require_current_scope(targets))
 
 
 # ----------------------------------------------------------------------------- new ports
@@ -231,7 +255,7 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
     out = {'ports': ports, 'capped': len(set(new_ports)) > len(ports)}
     try:
         flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(ports)]
-        fingerprinted = nmap_scan.scan_in_chunks(runner or nmap_scan.run_nmap_xml, [ip.address], flags,
+        fingerprinted = nmap_scan.scan_in_chunks(runner or _fingerprint_runner, [ip.address], flags,
                                                  nmap_scan.HOST_TIMEOUT_FAST, size=1)
         out['fingerprinted'] = fingerprinted.get('ports', 0)
     except Exception as exc:  # noqa: BLE001 - the ports are recorded; their versions arrive with the next fingerprint

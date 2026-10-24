@@ -130,3 +130,12 @@ Domain names are unique across the instance. A range or CIDR target is capped at
 The API does not expose instance settings, the AI key, bug bounty features, or user management. It can set a project's own OSINT service keys (write-only) and read which services are configured.
 
 See also: [TENANCY.md](TENANCY.md) for roles, [PIPELINE.md](PIPELINE.md) for what a scan does, [documentation index](README.md).
+
+
+### Validation request authority and accounting
+
+Manual validation persists its requesting user and, for bearer requests, the token ID. Workers recheck active user status, current project write access, required MFA/password setup, and token expiry/revocation before checks and fresh AI review. Deleting a requester or token does not turn the request into automatic work. Automatic background validation retains its separate scheduling authority.
+
+Migration `0060_validation_request_authority` expires old queued/running requests whose original bearer identity was not recorded. Submit a new manual request after the upgrade; background scheduling can create fresh automatic jobs. Migration `0059_validationbudget` adds durable daily check reservations. Refreshing a finding or deleting its freshness marker does not reset daily usage, and failed attempts still count. The initial upgrade-day count seeds from remaining historical freshness records, so earlier erased usage cannot be reconstructed.
+
+CVE detail keeps the original advisory description separately from the feed summary and retains unknown exploit signals as unknown. Links include CVE Program and NVD records, plus the CISA catalog for known-exploited entries.

@@ -1679,11 +1679,19 @@ def _cve_context(c):
     refs = []
     for ref in (c.references if isinstance(c.references, list) else [])[:40]:
         url = ref if isinstance(ref, str) else ref.get('url', '') if isinstance(ref, dict) else ''
-        parsed = urlparse(url)
-        if parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password:
-            refs.append(url[:2000])
+        if not isinstance(url, str) or len(url) > 2000:
+            continue
+        try:
+            parsed = urlparse(url)
+            allowed = parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password
+        except ValueError:
+            continue
+        if allowed:
+            refs.append(url)
     if re.fullmatch(r'CVE-\d{4}-\d{4,}', c.cve_id, re.I):
         refs = [f'https://www.cve.org/CVERecord?id={c.cve_id}', f'https://nvd.nist.gov/vuln/detail/{c.cve_id}', *refs]
+    if c.kev is True:
+        refs.insert(0, 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog')
     affected = []
     for item in (c.affected if isinstance(c.affected, list) else [])[:30]:
         if isinstance(item, dict):
@@ -1692,7 +1700,8 @@ def _cve_context(c):
                               for rng in (item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:20]
                               if isinstance(rng, dict)]
             affected.append(part)
-    return {'description': _cve_description(c, 3000), 'affected': affected, 'references': list(dict.fromkeys(refs))[:40],
+    return {'description': (c.original_description or c.summary or c.title or '').strip()[:12000],
+            'summary': (c.summary or '').strip()[:3000], 'affected': affected, 'references': list(dict.fromkeys(refs))[:40],
             'sources': [s for s in (c.sources if isinstance(c.sources, list) else [])[:20]
                         if isinstance(s, (str, dict))],
             'exploitation': {'cisa_kev': c.kev, 'exploit_db': c.exploit_db, 'epss_elevated': c.epss_reached,
@@ -2171,7 +2180,8 @@ def retriage_finding(ctx, slug, kind, finding_id):
                 created_at__gte=now - timedelta(hours=1)).count() >= 20:
             raise ApiError(429, 'hourly validation request limit reached')
         job = AutomaticValidation.objects.create(triage=row, project=project, signature=row.signature,
-                                                 priority=3, source='manual', requested_by=ctx.user, attempts=1)
+                                                 priority=3, source='manual', requested_by=ctx.user, attempts=1,
+                                                 requested_token_id=ctx.token.pk if ctx.token else None)
     try:
         automatic_validate_finding.apply_async(args=[job.pk], priority=3)
     except Exception as exc:
@@ -2224,7 +2234,8 @@ def validate_match_now(ctx, slug, match_id):
         if OnDemandValidation.objects.filter(project=project, requested_by=ctx.user,
                                              created_at__gte=timezone.now() - timedelta(hours=1)).count() >= 20:
             raise ApiError(429, 'hourly validation request limit reached')
-        job = OnDemandValidation.objects.create(match=match, project=project, requested_by=ctx.user)
+        job = OnDemandValidation.objects.create(match=match, project=project, requested_by=ctx.user, source='manual',
+                                               requested_token_id=ctx.token.pk if ctx.token else None)
     from cveFeed.tasks import validate_match_on_demand
     try:
         validate_match_on_demand.apply_async(args=[job.pk], priority=3)
