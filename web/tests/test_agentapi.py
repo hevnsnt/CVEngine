@@ -231,6 +231,19 @@ class AgentApiTests(TestCase):
 		self.assertIn('https://vendor.example/advisory', detail['cve']['references'])
 		self.assertNotIn('javascript:alert(1)', detail['cve']['references'])
 
+	def test_cve_detail_keeps_original_advisory_and_skips_malformed_references(self):
+		from agentapi import services
+		self.cve.original_description = 'Original advisory with the precise affected condition.'
+		self.cve.summary = 'A short AI feed summary.'
+		self.cve.kev = True
+		self.cve.references = [{'url': 42}, 'https://[bad', 'https://vendor.example/advisory']
+		context = services._cve_context(self.cve)
+		self.assertEqual(context['description'], self.cve.original_description)
+		self.assertEqual(context['summary'], self.cve.summary)
+		self.assertIn('https://www.cisa.gov/known-exploited-vulnerabilities-catalog', context['references'])
+		self.assertIn('https://vendor.example/advisory', context['references'])
+		self.assertNotIn('https://[bad', context['references'])
+
 	def test_validate_now_is_scoped_deduplicated_and_reports_queue_failure(self):
 		from cveFeed.models import OnDemandValidation
 		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
@@ -265,6 +278,64 @@ class AgentApiTests(TestCase):
 		status, body = rpc(self.t_ro, 'tools/call', {'name': 'validate_cve_match',
 			'arguments': {'project': 'proj-a', 'match_id': self.match.id}})
 		self.assertTrue(body['result']['isError'])
+
+	def _assert_queued_validation_refuses_revocation(self, revoke):
+		from agentapi.auth import hash_token
+		from dashboard.models import ApiToken
+		from cveFeed.models import OnDemandValidation
+		from cveFeed.tasks import validate_match_on_demand
+		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
+		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		job = OnDemandValidation.objects.get(pk=job_id)
+		token = ApiToken.objects.get(key_hash=hash_token(self.t_alice))
+		self.assertEqual((job.source, job.requested_token_id), ('manual', token.pk))
+		revoke(token)
+		with mock.patch('targetApp.target_types.scannable_hosts') as scope, \
+				mock.patch('cveFeed.validation.run_validation') as checks, \
+				mock.patch('cveFeed.triage.run_triage') as ai:
+			validate_match_on_demand(job_id)
+		job.refresh_from_db()
+		self.assertEqual(job.status, 'failed')
+		scope.assert_not_called()
+		checks.assert_not_called()
+		ai.assert_not_called()
+
+	def test_queued_validation_rechecks_revoked_token(self):
+		def revoke(token):
+			token.revoked = True
+			token.save(update_fields=['revoked'])
+		self._assert_queued_validation_refuses_revocation(revoke)
+
+	def test_queued_validation_rechecks_deleted_token(self):
+		self._assert_queued_validation_refuses_revocation(lambda token: token.delete())
+
+	def test_queued_validation_rechecks_current_role(self):
+		self._assert_queued_validation_refuses_revocation(lambda token:
+			ProjectMembership.objects.filter(user=self.alice, project=self.pa).update(role='audit'))
+
+	def test_queued_validation_rechecks_readonly_token(self):
+		def narrow(token):
+			token.read_only = True
+			token.save(update_fields=['read_only'])
+		self._assert_queued_validation_refuses_revocation(narrow)
+
+	def test_queued_validation_rechecks_expired_token(self):
+		def expire(token):
+			token.expires_at = timezone.now()
+			token.save(update_fields=['expires_at'])
+		self._assert_queued_validation_refuses_revocation(expire)
+
+	def test_queued_validation_rechecks_disabled_user(self):
+		self._assert_queued_validation_refuses_revocation(lambda token:
+			User.objects.filter(pk=self.alice.pk).update(is_active=False))
+
+	def test_queued_validation_rechecks_new_mfa_policy(self):
+		self._assert_queued_validation_refuses_revocation(lambda token:
+			Org.objects.filter(pk=self.pa.org_id).update(require_mfa=True))
+
+	def test_queued_validation_does_not_treat_deleted_user_as_automatic(self):
+		self._assert_queued_validation_refuses_revocation(lambda token: self.alice.delete())
 
 	def test_validate_now_worker_only_uses_persisted_match_and_records_result(self):
 		from cveFeed.models import AgentActivity, OnDemandValidation
@@ -1537,6 +1608,25 @@ class TriageApiTests(TestCase):
 		from cveFeed.models import AutomaticValidation
 		job = AutomaticValidation.objects.get(pk=queued['id'])
 		self.assertEqual((job.project_id, job.source, job.requested_by_id), (self.pa.pk, 'manual', self.alice.pk))
+
+	def test_nonmatch_validation_worker_rechecks_queued_token_authority(self):
+		from agentapi.auth import hash_token
+		from dashboard.models import ApiToken
+		from cveFeed.models import AutomaticValidation
+		from cveFeed.tasks import automatic_validate_finding
+		path = f'/api/v1/projects/proj-a/findings/vulnerability/{self.bbot.id}/retriage'
+		with mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async'):
+			status, queued = call(self.t_alice, 'POST', path)
+		self.assertEqual(status, 202)
+		ApiToken.objects.filter(key_hash=hash_token(self.t_alice)).update(revoked=True)
+		with mock.patch('cveFeed.hot_validation.manual_eligible') as eligible, \
+				mock.patch('cveFeed.validation.run_validation') as checks, \
+				mock.patch('cveFeed.triage.run_triage') as ai:
+			automatic_validate_finding(queued['id'])
+		self.assertEqual(AutomaticValidation.objects.get(pk=queued['id']).status, 'failed')
+		eligible.assert_not_called()
+		checks.assert_not_called()
+		ai.assert_not_called()
 
 	def test_nonmatch_retriage_rejects_closed_finding_and_broker_failure(self):
 		from cveFeed.models import AutomaticValidation

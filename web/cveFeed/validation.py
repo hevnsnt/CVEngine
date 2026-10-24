@@ -117,12 +117,17 @@ def readonly_problem(yaml_text):
     lowered = yaml_text.lower()
     if 'interactsh' in lowered or re.search(r'\boast\b', lowered):
         return 'template not validated: it uses out-of-band checks'
+    for proto in ('http', 'requests', 'network', 'tcp', 'dns', 'ssl'):
+        if proto in doc and not isinstance(doc[proto], list):
+            return 'template not validated: malformed protocol section'
     for proto in ('http', 'requests'):
         for block in doc.get(proto) or []:
             if not isinstance(block, dict):
                 return 'template not validated: malformed http section'
             if 'raw' not in block and str(block.get('method', 'GET')).upper() not in READONLY_METHODS:
                 return f'template not validated: http method {str(block.get("method")).upper()} is not read-only'
+            if 'raw' in block and not isinstance(block['raw'], list):
+                return 'template not validated: malformed raw requests'
             for raw in block.get('raw') or []:
                 first = str(raw).strip().splitlines()[0] if str(raw).strip() else ''
                 verb = first.split(' ', 1)[0].upper()
@@ -130,7 +135,9 @@ def readonly_problem(yaml_text):
                     return f'template not validated: raw request method {verb or "?"} is not read-only'
     for proto in ('network', 'tcp'):
         for block in doc.get(proto) or []:
-            if isinstance(block, dict) and any(isinstance(i, dict) and i.get('data') for i in block.get('inputs') or []):
+            if not isinstance(block, dict) or ('inputs' in block and not isinstance(block['inputs'], list)):
+                return 'template not validated: malformed network section'
+            if any(not isinstance(i, dict) or i.get('data') for i in block.get('inputs') or []):
                 return 'template not validated: it sends data over a raw connection'
     return ''
 
@@ -140,34 +147,49 @@ def _inside(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def resolve_template(cve_id):
-    """``(path, "")`` of the template validation may run for ``cve_id``, or ``("", reason)``. An installed template must be read-only by
-    its text. A file in the generated-templates directory must belong to a GeneratedTemplate that is status valid and must still pass
-    the full safety gate and a separately reviewed positive fixture. Pre-gate legacy rows, drafts, invalid rows and edited files
-    cannot run. Nothing outside the two directories is ever used."""
+def approved_template(path, cve_id=None):
+    """Return approved immutable text and an error, applying policy at every execution.
+
+    Generated files must still match an approved row. Installed files must be read-only
+    and destination-bound. Both are read with a size cap and fail closed outside roots.
+    """
     from cveFeed import templategen
     from cveFeed.models import GeneratedTemplate
+    generated = _inside(path, templategen.GENERATED_DIR)
+    if not generated and not _inside(path, templategen.TEMPLATES_ROOT):
+        return '', 'template not validated: outside the template directories'
+    limit = templategen.MAX_TEMPLATE_BYTES if generated else MAX_INSTALLED_TEMPLATE_BYTES
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read(limit + 1)
+        if len(data) > limit:
+            return '', 'template not validated: too large'
+        text = data.decode('utf-8')
+    except (OSError, UnicodeError):
+        return '', 'template not validated: cannot read UTF-8 template'
+    if generated:
+        rows = GeneratedTemplate.objects.filter(path=path, status=GeneratedTemplate.STATUS_VALID,
+                    positive_fixture_verified_at__isnull=False).exclude(positive_fixture_source='')
+        if cve_id:
+            rows = rows.filter(cve_entry__cve_id__iexact=cve_id)
+        row = rows.select_related('cve_entry').first()
+        if row is None or row.yaml != text:
+            return '', 'template not validated: not an unchanged valid generated template with a reviewed positive fixture'
+        ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
+        problem = '' if ok else f'template not validated: {why}'
+    else:
+        problem = readonly_problem(text)
+    return ('', problem) if problem else (text, '')
+
+
+def resolve_template(cve_id):
+    """Choose only a currently approved, read-only and destination-bound template."""
+    from cveFeed import templategen
     reason = 'no template covers this CVE'
     for path in templategen.find_existing_template(cve_id):
-        try:
-            text = open(path, encoding='utf-8', errors='replace').read()
-        except OSError:
-            continue
-        if _inside(path, templategen.GENERATED_DIR):
-            approved = GeneratedTemplate.objects.filter(path=path, status=GeneratedTemplate.STATUS_VALID,
-                    positive_fixture_verified_at__isnull=False).exclude(positive_fixture_source='').order_by('-id').first()
-            if not approved or approved.yaml != text:
-                reason = 'template not validated: no independently reviewed positive fixture'
-                continue
-            ok, why = templategen.static_check(text, expected_cve_id=cve_id)
-            problem = '' if ok else f'template not validated: {why}'
-        elif _inside(path, templategen.TEMPLATES_ROOT):
-            problem = readonly_problem(text)
-        else:
-            problem = 'template not validated: outside the template directories'
-        if not problem:
+        _text, reason = approved_template(path, cve_id)
+        if not reason:
             return path, ''
-        reason = problem
     return '', reason
 
 
@@ -557,11 +579,45 @@ def next_cap_reset():
     return _today() + timedelta(days=1, minutes=5)
 
 
-def ran_today(project_id=None):
-    """Validation checks that finished today (their ledger rows), for the per-day caps."""
+def _legacy_ran_today(project_id=None):
+    """One-time upgrade-day seed; freshness records are not a usage ledger."""
     from cveFeed.models import ServiceRun
     qs = ServiceRun.objects.filter(service__startswith='validate:', finished_at__gte=_today())
     return (qs.filter(project_id=project_id) if project_id is not None else qs).count()
+
+
+def ran_today(project_id=None):
+    """Reserved check attempts, unaffected by freshness-ledger resets/upserts."""
+    from cveFeed.models import ValidationBudget
+    scope = 'global' if project_id is None else f'project:{project_id}'
+    budget = ValidationBudget.objects.filter(day=_today().date(), scope=scope).first()
+    return budget.reserved if budget else _legacy_ran_today(project_id)
+
+
+def _reserve_validation_check(project_id):
+    """Reserve global/project capacity atomically before each actual check.
+
+    The global validation-day row serializes workers. Failures and worker loss
+    consume capacity; no network work runs inside the transaction. An accounting
+    database failure propagates before the runner, so reservations fail closed.
+    """
+    from django.db import transaction
+    from cveFeed.models import ValidationBudget
+    day = _today().date()
+    with transaction.atomic():
+        global_budget, _ = ValidationBudget.objects.get_or_create(
+            day=day, scope='global', defaults={'reserved': _legacy_ran_today})
+        global_budget = ValidationBudget.objects.select_for_update().get(pk=global_budget.pk)
+        project_budget, _ = ValidationBudget.objects.get_or_create(
+            day=day, scope=f'project:{project_id}', defaults={'reserved': lambda: _legacy_ran_today(project_id)})
+        if (global_budget.reserved >= cap('VALIDATE_MAX_PER_DAY')
+                or project_budget.reserved >= cap('VALIDATE_MAX_PER_PROJECT_DAY')):
+            return False
+        global_budget.reserved += 1
+        project_budget.reserved += 1
+        global_budget.save(update_fields=['reserved'])
+        project_budget.save(update_fields=['reserved'])
+    return True
 
 
 def _blocked_step(row, check, why, now):
@@ -606,7 +662,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
     rows = list(Triage.objects.filter(pk__in=list(triage_ids), project_id=project_id, kind__in=PLANNED_KINDS))
     rows.sort(key=lambda r: (-len(r.hard_evidence or []), r.pk))
     stats['rows'] = len(rows)
-    state = {'run': 0, 'project': None, 'day': None}
+    state = {'run': 0}
     hits = []
     with resources.scan_context(scan_id):
         for row in rows:
@@ -662,10 +718,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                                                 'classification', 'reason', 'updated_at'])
                         stats['reused'] += 1
                         continue
-                if state['project'] is None:
-                    state['project'], state['day'] = ran_today(project_id), ran_today()
-                if (state['run'] >= cap('VALIDATE_MAX_PER_RUN') or state['project'] >= cap('VALIDATE_MAX_PER_PROJECT_DAY')
-                        or state['day'] >= cap('VALIDATE_MAX_PER_DAY')):
+                if state['run'] >= cap('VALIDATE_MAX_PER_RUN') or not _reserve_validation_check(project_id):
                     stats['capped'] += 1
                     if row.validation_status in ('none', 'no_check'):
                         row.validation_status = 'pending'
@@ -682,8 +735,6 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                     logger.exception('validation check %s failed for %s', check['kind'], row.host)
                     result = {'status': 'failed', 'error': f'{type(exc).__name__}: {exc}'[:200], 'summary': 'the check failed to run'}
                 state['run'] += 1
-                state['project'] += 1
-                state['day'] += 1
                 ledger.record(check['service'], [check['asset']], project_id, scan_id, 'failed' if result['status'] == 'failed' else 'done')
                 apply_validation(row, check, result)
                 stats['ran'] += 1

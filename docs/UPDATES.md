@@ -30,7 +30,7 @@ It:
 4. applies migrations, publishes static files, and recreates web, the workers, the scheduler, and the proxy, keeping the database and Redis;
 5. waits up to ten minutes (`CVENGINE_UPDATE_READY_SECONDS`) until the site, every worker queue, and the scheduler answer, then queues any stopped scans again.
 
-New work stays queued in Redis throughout. If the drain times out or is interrupted, the previous workers and scheduler resume untouched, and stopped scans wait in `web/.update-requeue.json` for the next successful update. A failure after migration leaves the new code in place and reports what to check, and startup warnings go to a private file whose path the script prints.
+New work stays queued in Redis throughout. If the drain times out or is interrupted, the previous workers and scheduler resume untouched, and stopped scans wait in the host-private `$(git rev-parse --git-path cvengine-update)/requeue.json` for the next successful update. A failure after migration leaves the new code in place and reports what to check, and startup warnings go to a private file whose path the script prints.
 
 ### Custom Compose layouts
 
@@ -54,3 +54,9 @@ cp .env /tmp/cvengine.env && git checkout -- .env && git pull && cp /tmp/cvengin
 For the host updater, set `CVENGINE_COMPOSE_FILE` before running `scripts/install-updater.sh` to deploy with another Compose file.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [UPGRADE.md](UPGRADE.md) for moving an old install across a major version, [documentation index](README.md).
+
+### Host update state
+
+Both updater scripts share a lock under `git rev-parse --git-path cvengine-update`, outside the container's writable `web` mount. Approval updates keep the authoritative log there and publish a UI copy to `web/.update-log` by atomic replacement. Commit markers use the same safe publication. Approval files must be regular, single-link files containing one full commit ID; symlinks and special files are refused.
+
+The manual updater keeps stopped-scan plans in that private directory. A regular legacy `web/.update-requeue.json` is imported once with size and structure checks, then removed. An unsafe or malformed legacy plan stops the update for operator inspection. `--check` remains read-only. These changes preserve worker draining, datastore containers, migration-aware rollback, and readiness checks.

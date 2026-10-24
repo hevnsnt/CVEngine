@@ -41,7 +41,8 @@ class _FakeNuclei:
 class BatchedRunTests(unittest.TestCase):
 	def setUp(self):
 		_FakeNuclei.runs = []
-		patches = [mock.patch('reNgine.resources.heavy_job', _heavy_job),
+		patches = [mock.patch('cveFeed.validation.approved_template', return_value=('id: fixture', '')),
+			mock.patch('reNgine.resources.heavy_job', _heavy_job),
 			mock.patch.object(templategen.subprocess, 'Popen', _FakeNuclei)]
 		for p in patches:
 			p.start()

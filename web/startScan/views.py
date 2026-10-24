@@ -4,7 +4,6 @@ import markdown
 
 from html import escape
 
-from weasyprint import HTML, CSS
 from datetime import datetime
 from django.db.models import Count, Case, When, IntegerField
 from django.http import HttpResponse
@@ -18,6 +17,7 @@ from reNgine.definitions import *
 from scanEngine.models import *
 from startScan.models import *
 from targetApp.models import *
+from startScan.report_resources import render_report_pdf
 
 
 def _text_download(lines, kind, scan):
@@ -196,8 +196,7 @@ def create_report(request, id):
         template = get_template('report/default.html')
 
     html = template.render(data)
-    pdf = HTML(string=html).write_pdf()
-    # pdf = HTML(string=html).write_pdf(stylesheets=[CSS(string='@page { size: A4; margin: 0; }')])
+    pdf = render_report_pdf(html, (data['subdomain_http_status_chart'], data['vulns_severity_chart']))
 
     if 'download' in request.GET:
         response = HttpResponse(pdf, content_type='application/octet-stream')

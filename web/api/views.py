@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.status import HTTP_400_BAD_REQUEST, HTTP_204_NO_CONTENT, HTTP_202_ACCEPTED
 from rest_framework.decorators import action
+from rest_framework.exceptions import APIException
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.cache import cache
 
@@ -223,6 +224,7 @@ class HackerOneProgramViewSet(viewsets.ViewSet):
 			if not handles:
 				return Response({"error": "No program handles provided"}, status=status.HTTP_400_BAD_REQUEST)
 
+			require_project_write(request.user, get_object_or_404(Project, slug=project_slug))
 			import_hackerone_programs_task.delay(handles, project_slug)
 
 			create_inappnotification(
@@ -238,13 +240,14 @@ class HackerOneProgramViewSet(viewsets.ViewSet):
 		except Exception as e:
 			return self.handle_exception(e)
 	
-	@action(detail=False, methods=['get'])
+	@action(detail=False, methods=['post'])
 	def sync_bookmarked(self, request):
 		try:
 			project_slug = request.query_params.get('project_slug')
 			if not project_slug:
 				return Response({"error": "Project slug is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+			require_project_write(request.user, get_object_or_404(Project, slug=project_slug))
 			sync_bookmarked_programs_task.delay(project_slug)
 
 			create_inappnotification(
@@ -261,6 +264,8 @@ class HackerOneProgramViewSet(viewsets.ViewSet):
 			return self.handle_exception(e)
 
 	def handle_exception(self, exc):
+		if isinstance(exc, APIException):
+			return super().handle_exception(exc)
 		if isinstance(exc, ObjectDoesNotExist):
 			return Response({"error": "HackerOne API credentials not configured"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 		elif str(exc) == "Invalid API credentials":
@@ -268,7 +273,7 @@ class HackerOneProgramViewSet(viewsets.ViewSet):
 		else:
 			return Response({"error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-class InAppNotificationManagerViewSet(viewsets.ModelViewSet):
+class InAppNotificationManagerViewSet(viewsets.ReadOnlyModelViewSet):
 	"""
 		This class manages the notification model, provided CRUD operation on notif model
 		such as read notif, clear all, fetch all notifications etc
@@ -297,6 +302,8 @@ class InAppNotificationManagerViewSet(viewsets.ModelViewSet):
 			queryset = queryset.filter(
 				Q(project__slug=project_slug) | Q(notification_type='system')
 			)
+		for notification in queryset:
+			require_project_write(request.user, notification.project)
 		queryset.update(is_read=True)
 		return Response(status=HTTP_204_NO_CONTENT)
 
@@ -304,6 +311,7 @@ class InAppNotificationManagerViewSet(viewsets.ModelViewSet):
 	def mark_read(self, request, pk=None):
 		# mark individual notification read when cliked
 		notification = self.get_object()
+		require_project_write(request.user, notification.project)
 		notification.is_read = True
 		notification.save()
 		return Response(status=HTTP_204_NO_CONTENT)
@@ -329,6 +337,8 @@ class InAppNotificationManagerViewSet(viewsets.ModelViewSet):
 			queryset = queryset.filter(
 				Q(project__slug=project_slug) | Q(notification_type='system')
 			)
+		for notification in queryset:
+			require_project_write(request.user, notification.project)
 		queryset.delete()
 		return Response(status=HTTP_204_NO_CONTENT)
 
@@ -481,9 +491,11 @@ class CreateProjectApi(APIView):
 	permission_classes = [HasPermission]
 	permission_required = PERM_MODIFY_TARGETS
 
-	def get(self, request):
+	def post(self, request):
 		req = self.request
-		project_name = req.query_params.get('name')
+		if not request.user.is_superuser:
+			raise PermissionDenied('Use the organization project API')
+		project_name = req.data.get('name')
 		slug = slugify(project_name)
 		insert_date = timezone.now()
 		from tenancy.roles import ALL_PROJECTS, is_reserved_project
@@ -602,7 +614,7 @@ class SearchHistoryView(APIView):
 		response = {}
 		response['status'] = False
 
-		scan_history = SearchHistory.objects.all().order_by('-id')[:5]
+		scan_history = SearchHistory.objects.filter(user=req.user).order_by('-id')[:5]
 
 		if scan_history:
 			response['status'] = True
@@ -627,7 +639,7 @@ class UniversalSearch(APIView):
 
 		# search history to be saved
 		SearchHistory.objects.get_or_create(
-			query=query
+			user=req.user, query=query
 		)
 
 		# lookup query in subdomain
@@ -883,13 +895,14 @@ class AddReconNote(APIView):
 
 		try:
 			project = Project.objects.get(slug=project)
+			require_project_write(request.user, project)
 			note = TodoNote()
 			note.title = title
 			note.description = description
 
 			# get scan history for subdomain_id
 			if subdomain_id:
-				subdomain = Subdomain.objects.get(id=subdomain_id)
+				subdomain = Subdomain.objects.get(id=subdomain_id, target_domain__project=project)
 				note.subdomain = subdomain
 
 				# also get scan history
@@ -900,6 +913,8 @@ class AddReconNote(APIView):
 			note.project = project
 			note.save()
 			response = {'status': True}
+		except PermissionDenied:
+			raise
 		except Exception as e:
 			response = {'status': False, 'message': str(e)}
 
@@ -915,7 +930,7 @@ class ToggleSubdomainImportantStatus(APIView):
 
 		response = {'status': False, 'message': 'No subdomain_id provided'}
 
-		name = Subdomain.objects.get(id=subdomain_id)
+		name = writable_batch(request.user, Subdomain, [subdomain_id])[0]
 		name.is_important = not name.is_important
 		name.save()
 
@@ -941,6 +956,7 @@ class AddTarget(APIView):
 			domain_name = domain_name[1:]
 		organization_name = data.get('organization')
 		slug = data.get('slug')
+		require_project_write(request.user, get_object_or_404(Project, slug=slug))
 
 		# Validate domain name
 		if not validators.domain(domain_name):
@@ -1070,18 +1086,13 @@ class DeleteMultipleRows(APIView):
 		req = self.request
 		data = req.data
 
-		try:
-			if data['type'] == 'subscan':
-				for row in data['rows']:
-					SubScan.objects.get(id=row).delete()
-			elif data['type'] == 'organization':
-				for row in data['rows']:
-					Organization.objects.get(id=row).delete()
-			response = True
-		except Exception as e:
-			response = False
-
-		return Response({'status': response})
+		model = {'subscan': SubScan, 'organization': Organization}.get(data.get('type'))
+		if model is None:
+			return Response({'error': 'Unsupported resource'}, status=400)
+		objects = writable_batch(request.user, model, data.get('rows'))
+		for obj in objects:
+			obj.delete()
+		return Response({'status': True})
 
 
 class StopScan(APIView):
@@ -1094,8 +1105,11 @@ class StopScan(APIView):
 		scan_ids = data.get('scan_ids', [])
 		subscan_ids = data.get('subscan_ids', [])
 
-		scan_ids = [int(id) for id in scan_ids]
-		subscan_ids = [int(id) for id in subscan_ids]
+		# Validate both batches before any revoke or database write.
+		scans = writable_batch(request.user, ScanHistory, scan_ids) if scan_ids else []
+		subscans = writable_batch(request.user, SubScan, subscan_ids) if subscan_ids else []
+		scan_ids = [obj.pk for obj in scans]
+		subscan_ids = [obj.pk for obj in subscans]
 
 		response = {'status': False}
 
@@ -1191,18 +1205,25 @@ class InitiateSubTask(APIView):
 	def post(self, request):
 		req = self.request
 		data = req.data
-		engine_id = data.get('engine_id')
-		scan_types = data['tasks']
-		for subdomain_id in data['subdomain_ids']:
-			logger.info(f'Running subscans {scan_types} on subdomain "{subdomain_id}" ...')
+		scan_types = validate_subscan_types(data.get('tasks'))
+		subdomains = writable_batch(request.user, Subdomain, data.get('subdomain_ids'))
+		if len(subdomains) * len(scan_types) > MAX_LEGACY_BATCH:
+			return Response({'error': 'At most 100 subscan jobs per request'}, status=400)
+		# Reuse each scan's engine; never accept another engine's arbitrary configuration.
+		if data.get('engine_id') is not None:
+			return Response({'error': 'Engine override is not supported'}, status=400)
+		for subdomain in subdomains:
+			if not subdomain.scan_history_id or not subdomain.scan_history.scan_type_id:
+				return Response({'error': 'Subdomain has no scan engine'}, status=400)
+		for subdomain in subdomains:
 			for stype in scan_types:
-				ctx = {
-					'scan_history_id': None,
-					'subdomain_id': subdomain_id,
+				initiate_subscan.apply_async(kwargs={
+					'scan_history_id': subdomain.scan_history_id,
+					'subdomain_id': subdomain.pk,
 					'scan_type': stype,
-					'engine_id': engine_id
-				}
-				initiate_subscan.apply_async(kwargs=ctx)
+					'actor_id': request.user.pk,
+					'project_id': subdomain.target_domain.project_id,
+				})
 		return Response({'status': True})
 
 
@@ -1212,8 +1233,8 @@ class DeleteSubdomain(APIView):
 
 	def post(self, request):
 		req = self.request
-		for id in req.data['subdomain_ids']:
-			Subdomain.objects.get(id=id).delete()
+		for obj in writable_batch(request.user, Subdomain, req.data.get('subdomain_ids')):
+			obj.delete()
 		return Response({'status': True})
 
 
@@ -1223,8 +1244,8 @@ class DeleteVulnerability(APIView):
 
 	def post(self, request):
 		req = self.request
-		for id in req.data['vulnerability_ids']:
-			Vulnerability.objects.get(id=id).delete()
+		for obj in writable_batch(request.user, Vulnerability, req.data.get('vulnerability_ids')):
+			obj.delete()
 		return Response({'status': True})
 
 
@@ -1543,10 +1564,9 @@ class IPToDomain(APIView):
 
 
 class VulnerabilityReport(APIView):
-	def get(self, request):
-		req = self.request
-		vulnerability_id = req.query_params.get('vulnerability_id')
-		return Response({"status": send_hackerone_report(vulnerability_id)})
+	def post(self, request):
+		vulnerability = writable_batch(request.user, Vulnerability, [request.data.get('vulnerability_id')])[0]
+		return Response({"status": send_hackerone_report(vulnerability.pk)})
 
 
 class GetFileContents(APIView):
@@ -1936,7 +1956,7 @@ class ListIPs(APIView):
 		return Response({"ips": serializer.data})
 
 
-class IpAddressViewSet(viewsets.ModelViewSet):
+class IpAddressViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = Subdomain.objects.none()
 	serializer_class = IpSubdomainSerializer
 
@@ -1960,7 +1980,7 @@ class IpAddressViewSet(viewsets.ModelViewSet):
 			queryset, self.request, view=self)
 
 
-class SubdomainsViewSet(viewsets.ModelViewSet):
+class SubdomainsViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = Subdomain.objects.none()
 	serializer_class = SubdomainSerializer
 
@@ -1982,7 +2002,7 @@ class SubdomainsViewSet(viewsets.ModelViewSet):
 			queryset, self.request, view=self)
 
 
-class SubdomainChangesViewSet(viewsets.ModelViewSet):
+class SubdomainChangesViewSet(viewsets.ReadOnlyModelViewSet):
 	'''
 		This viewset will return the Subdomain changes
 		To get the new subdomains, we will look for ScanHistory with
@@ -2064,7 +2084,7 @@ class SubdomainChangesViewSet(viewsets.ModelViewSet):
 			queryset, self.request, view=self)
 
 
-class EndPointChangesViewSet(viewsets.ModelViewSet):
+class EndPointChangesViewSet(viewsets.ReadOnlyModelViewSet):
 	'''
 		This viewset will return the EndPoint changes
 	'''
@@ -2135,7 +2155,7 @@ class EndPointChangesViewSet(viewsets.ModelViewSet):
 			queryset, self.request, view=self)
 
 
-class InterestingSubdomainViewSet(viewsets.ModelViewSet):
+class InterestingSubdomainViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = Subdomain.objects.none()
 	serializer_class = SubdomainSerializer
 
@@ -2189,7 +2209,7 @@ class InterestingSubdomainViewSet(viewsets.ModelViewSet):
 			queryset, self.request, view=self)
 
 
-class InterestingEndpointViewSet(viewsets.ModelViewSet):
+class InterestingEndpointViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = EndPoint.objects.none()
 	serializer_class = EndpointSerializer
 
@@ -2213,7 +2233,7 @@ class InterestingEndpointViewSet(viewsets.ModelViewSet):
 			queryset, self.request, view=self)
 
 
-class SubdomainDatatableViewSet(viewsets.ModelViewSet):
+class SubdomainDatatableViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = Subdomain.objects.none()
 	serializer_class = SubdomainSerializer
 
@@ -2470,7 +2490,7 @@ class SubdomainDatatableViewSet(viewsets.ModelViewSet):
 		return qs
 
 
-class ListActivityLogsViewSet(viewsets.ModelViewSet):
+class ListActivityLogsViewSet(viewsets.ReadOnlyModelViewSet):
 	serializer_class = CommandSerializer
 	queryset = Command.objects.none()
 	def get_queryset(self):
@@ -2480,7 +2500,7 @@ class ListActivityLogsViewSet(viewsets.ModelViewSet):
 		return self.queryset
 
 
-class ListScanLogsViewSet(viewsets.ModelViewSet):
+class ListScanLogsViewSet(viewsets.ReadOnlyModelViewSet):
 	serializer_class = CommandSerializer
 	queryset = Command.objects.none()
 	def get_queryset(self):
@@ -2528,7 +2548,7 @@ class ListEndpoints(APIView):
 		return Response({'endpoints': endpoints_serializer.data})
 
 
-class EndPointViewSet(viewsets.ModelViewSet):
+class EndPointViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = EndPoint.objects.none()
 	serializer_class = EndpointSerializer
 
@@ -2771,7 +2791,7 @@ class EndPointViewSet(viewsets.ModelViewSet):
 		return qs
 
 
-class DirectoryViewSet(viewsets.ModelViewSet):
+class DirectoryViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = DirectoryFile.objects.none()
 	serializer_class = DirectoryFileSerializer
 
@@ -2799,7 +2819,7 @@ class DirectoryViewSet(viewsets.ModelViewSet):
 		return self.queryset
 
 
-class VulnerabilityViewSet(viewsets.ModelViewSet):
+class VulnerabilityViewSet(viewsets.ReadOnlyModelViewSet):
 	queryset = Vulnerability.objects.none()
 	serializer_class = VulnerabilitySerializer
 

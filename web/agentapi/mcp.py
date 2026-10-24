@@ -6,6 +6,7 @@ tenancy scoping, role checks and read-only-token rules as the REST API.
 import json
 
 from django.http import HttpResponse, JsonResponse
+from django.core.exceptions import RequestDataTooBig
 
 from agentapi import host_manage as hosts
 from agentapi import services as svc
@@ -13,6 +14,9 @@ from agentapi.services import ApiError, Ctx
 
 SUPPORTED_VERSIONS = ('2025-06-18', '2025-03-26', '2024-11-05')
 SERVER_INFO = {'name': 'cvengine', 'version': '1.0.0'}
+MAX_BODY_BYTES = 256 * 1024
+MAX_BATCH_ITEMS = 20
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 SLUG = {'type': 'string', 'description': 'Project slug (see list_projects)'}
 SLUG_OR_ALL = {'type': 'string', 'description': "Project slug (see list_projects), or '_all' for every project you can access: read-only, and each row names its own project"}
 
@@ -207,7 +211,11 @@ def handle_message(ctx, msg):
     """Handle one JSON-RPC message; returns a response dict, or None for notifications."""
     if not isinstance(msg, dict) or msg.get('jsonrpc') != '2.0' or 'method' not in msg:
         return _rpc_error(msg.get('id') if isinstance(msg, dict) else None, -32600, 'invalid request')
-    method, rpc_id, params = msg['method'], msg.get('id'), msg.get('params') or {}
+    method, rpc_id, params = msg['method'], msg.get('id'), msg.get('params', {})
+    if not isinstance(method, str) or not isinstance(rpc_id, (str, int, float, type(None))):
+        return _rpc_error(None, -32600, 'invalid request')
+    if not isinstance(params, dict):
+        return _rpc_error(rpc_id, -32602, 'params must be an object') if 'id' in msg else None
     if 'id' not in msg:
         return None  # notification (e.g. notifications/initialized)
     if method == 'initialize':
@@ -224,6 +232,8 @@ def handle_message(ctx, msg):
             {'name': n, 'description': d + (' (write)' if w else ''), 'inputSchema': s,
              'annotations': {'readOnlyHint': not w}} for n, d, s, _, w in TOOLS]})
     if method == 'tools/call':
+        if not isinstance(params.get('name'), str) or not isinstance(params.get('arguments', {}), dict):
+            return _rpc_error(rpc_id, -32602, 'tool name must be a string and arguments an object')
         try:
             data = call_tool(ctx, params.get('name'), params.get('arguments'))
             return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': json.dumps(data, default=str)}], 'isError': False})
@@ -232,18 +242,67 @@ def handle_message(ctx, msg):
     return _rpc_error(rpc_id, -32601, f'method not found: {method}')
 
 
+def _encode_bounded(value, limit):
+    """Stop encoding at the response budget instead of building a whole batch string."""
+    encoded = bytearray()
+    for chunk in json.JSONEncoder().iterencode(value):
+        # Default ensure_ascii means character count is also the encoded byte count.
+        if len(encoded) + len(chunk) > limit:
+            return None
+        encoded.extend(chunk.encode('ascii'))
+    return bytes(encoded)
+
+
+def _bounded_result(response, limit):
+    encoded = _encode_bounded(response, limit)
+    if encoded is not None:
+        return encoded
+    rpc_id = response.get('id')
+    # A user-controlled giant id must not defeat the small error response either.
+    if not isinstance(rpc_id, (str, int, float, type(None))) or len(str(rpc_id)) > 128:
+        rpc_id = None
+    return json.dumps(_rpc_error(rpc_id, -32001,
+        'Response exceeds the size limit; request a smaller page. '
+        'The operation may have completed; do not blindly retry writes.')).encode('utf-8')
+
+
 def endpoint(request):
     if request.method != 'POST':
         response = JsonResponse({'error': 'POST JSON-RPC messages to this endpoint'}, status=405)
         response['Allow'] = 'POST'
         return response
+    too_large = lambda: JsonResponse(_rpc_error(None, -32600, 'Request body exceeds 256 KiB'), status=413)
     try:
-        payload = json.loads(request.body)
-    except json.JSONDecodeError:
+        length = int(request.META.get('CONTENT_LENGTH') or 0)
+    except (TypeError, ValueError):
+        length = 0
+    if length > MAX_BODY_BYTES:
+        return too_large()
+    try:
+        body = request.body
+    except RequestDataTooBig:
+        return too_large()
+    if len(body) > MAX_BODY_BYTES:
+        return too_large()
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return JsonResponse(_rpc_error(None, -32700, 'parse error'))
     ctx = Ctx(user=request.user, token=getattr(request, 'api_token', None))
     if isinstance(payload, list):
-        responses = [r for r in (handle_message(ctx, m) for m in payload) if r is not None]
-        return JsonResponse(responses, safe=False) if responses else HttpResponse(status=202)
+        if not payload:
+            return JsonResponse(_rpc_error(None, -32600, 'empty batch'))
+        if len(payload) > MAX_BATCH_ITEMS:
+            return JsonResponse(_rpc_error(None, -32600, 'Batch exceeds 20 messages'), status=413)
+        # Reserve punctuation and divide the total budget across all entries. Encode
+        # each response before dispatching the next, rather than retaining catalogs
+        # or tool results for the entire batch. Notifications still have no response.
+        item_limit = (MAX_RESPONSE_BYTES - MAX_BATCH_ITEMS - 2) // max(1, len(payload))
+        responses = []
+        for message in payload:
+            response = handle_message(ctx, message)
+            if response is not None:
+                responses.append(_bounded_result(response, item_limit))
+        return HttpResponse(b'[' + b','.join(responses) + b']', content_type='application/json') if responses else HttpResponse(status=202)
     response = handle_message(ctx, payload)
-    return JsonResponse(response) if response is not None else HttpResponse(status=202)
+    return HttpResponse(_bounded_result(response, MAX_RESPONSE_BYTES), content_type='application/json') if response is not None else HttpResponse(status=202)

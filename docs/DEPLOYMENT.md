@@ -59,3 +59,5 @@ Run `scripts/update.sh` from a clean checkout (`--check` first shows what it wil
 **Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It removes every organization, project, target, host, scan, result file, other user, token, and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines, wordlists, and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
 
 See also: [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
+
+Updater coordination and pending stopped scans are stored outside the writable application mount, under `git rev-parse --git-path cvengine-update`. Keep that directory private to the host operator. `scripts/update.sh --check` inspects readiness without creating update state; the actual update shares its lock with `scripts/apply-update.sh`.

@@ -231,39 +231,74 @@ def analyse(result):
 
 # ----------------------------------------------------------------------------- network
 
-_warned = False
-
-
 def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET'):
-    """One safe GET (or HEAD, for the validation banner probe; no other method is accepted): no credentials, no cookies (a fresh session that ignores the environment, so no netrc or proxy
-    credentials either), redirects never followed, at most ``max_bytes`` of the body read. Returns the dict ``classify``
-    reads; raises on a network error. ``headers`` adds to the fixed ones (only ever a Host header, for a name
-    whose DNS is gone); it never carries credentials."""
-    import requests
-    import urllib3
-    global _warned
-    if not _warned:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        _warned = True
+    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
+    import ssl
+    from http.cookies import SimpleCookie, CookieError
+    from urllib.parse import quote, urlsplit
+    from cveFeed import pinned_transport
+
     if method not in ('GET', 'HEAD'):
         raise ValueError('route probes are read-only: GET or HEAD')
-    session = requests.Session()
-    session.trust_env = False
-    resp = session.request(method, url, allow_redirects=False, stream=True, timeout=timeout, verify=False,
-                           headers={'User-Agent': 'CVEngine route check', 'Accept': 'text/html,*/*;q=0.5', **(headers or {})})
+    max_bytes = min(int(max_bytes), ROUTE_SAMPLE_BYTES)
+    if max_bytes < 0:
+        raise ValueError('invalid probe byte limit')
+    if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) == 127 for c in url):
+        raise ValueError('invalid probe URL')
+    parsed = urlsplit(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ValueError('probe URL must be HTTP(S) without credentials')
+    if headers and any(key.lower() != 'host' for key in headers):
+        raise ValueError('only a Host override is allowed for anonymous probes')
+    host = parsed.hostname.encode('idna').decode('ascii')
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
+    addresses = pinned_transport.resolve(host, port)
+    context = None
+    if parsed.scheme == 'https':
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE  # scanner must inspect broken-certificate sites too
+    connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context)
+    authority = f'[{host}]' if ':' in host else host
+    if parsed.port is not None:
+        authority += f':{port}'
+    request_headers = {'User-Agent': 'CVEngine route check', 'Accept': 'text/html,*/*;q=0.5',
+                       'Accept-Encoding': 'identity', 'Host': authority}
+    request_headers.update({key.title(): value for key, value in (headers or {}).items()})
+    path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
+    if parsed.query:
+        path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
+    response = None
     try:
-        raw = resp.raw.read(max_bytes, decode_content=True) or b''
-        text = raw.decode(resp.encoding or 'utf-8', errors='replace')
+        connection.connect()
+        connection.sock.settimeout(timeout[1])
+        connection.request(method, path, headers=request_headers)
+        response = connection.getresponse()
+        if response.getheader('Content-Encoding', 'identity').lower() not in ('', 'identity'):
+            raise ValueError('probe server ignored identity encoding')
+        raw = response.read(max_bytes) or b''
+        encoding = response.headers.get_content_charset() or 'utf-8'
+        try:
+            text = raw.decode(encoding, errors='replace')
+        except LookupError:
+            text = raw.decode('utf-8', errors='replace')
         found = TITLE_RE.search(text)
         title = re.sub(r'\s+', ' ', found.group(1)).strip()[:300] if found else ''
-        return {'url': url, 'status': resp.status_code, 'location': resp.headers.get('Location', ''),
-                'www_authenticate': resp.headers.get('WWW-Authenticate', ''), 'cookies': list(resp.cookies.keys()),
-                'content_type': (resp.headers.get('Content-Type') or '').split(';')[0].strip().lower(),
-                'body': text, 'title': title, 'bytes': len(raw), 'server': resp.headers.get('Server', ''),
-                'powered_by': resp.headers.get('X-Powered-By', '')}
+        cookies = SimpleCookie()
+        for value in response.headers.get_all('Set-Cookie', []):
+            try:
+                cookies.load(value)
+            except CookieError:
+                pass
+        return {'url': url, 'status': response.status, 'location': response.getheader('Location', ''),
+                'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
+                'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
+                'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
+                'powered_by': response.getheader('X-Powered-By', '')}
     finally:
-        resp.close()
-        session.close()
+        if response is not None:
+            response.close()
+        connection.close()
 
 
 # ----------------------------------------------------------------------------- the stage
