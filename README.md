@@ -28,11 +28,11 @@
 Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. CVEngine runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the only question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
 
 - **Total visibility.** Domains, subdomains, IPs, ports, products, versions, TLS, and technologies in one inventory that keeps itself current, from the first scan to the weekly deep dive.
-- **Every CVE, matched to your reality.** The live [cve.now](https://cve.now) feed is rated [fire, smoke, or ice](docs/FIRE-SMOKE-ICE.md) and matched to what you actually run, by product and version, with distribution backports understood.
+- **Every CVE, matched to your internet facing environment.** The live [cve.now](https://cve.now) feed is rated [fire, smoke, or ice](docs/FIRE-SMOKE-ICE.md) and matched to what you actually run, by product and version, with distribution backports understood.
 - **Verdicts, not noise.** AI triages every finding, read-only checks reproduce it, and fixed rules mean the model can never wave away hard evidence. Every check records exactly what it ran.
-- **Nothing changes unseen.** New hosts, opened ports, version bumps, new certificates, login pages that appear, and front pages that change all land on a timeline.
-- **Live in minutes.** One Docker Compose stack with every scanner built in. No agents to install, no cloud account to open.
-- **Yours, completely.** Open source, self-hosted, GPL-3.0. Your inventory stays on your server, and you choose the AI model, including one that runs on your own hardware.
+- **Changes to your environment are tracked** New hosts, opened ports, version bumps, new certificates, login pages that appear, and front pages that change all land on a timeline.
+- **Start scanning in minutes.** One Docker Compose stack with every scanner built in. No agents to install, no cloud account to open.
+- **Yours, completely.** Open source, self-hosted, GPL-3.0. Your inventory stays on your server, and you choose the AI model, including one that runs on your own hardware. No data goes back to me or Fieldcraft cyber. Deployed with your AI keys, so you control interaction with LLMs.
 
 ## Everything in the box
 
