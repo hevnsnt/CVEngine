@@ -17,8 +17,29 @@
     </select>
   </div>
   <button class="btn ghost sm" id="graph-fit" type="button">Fit graph</button>
+  <button class="btn sm" id="graph-soc" type="button" aria-pressed="false" title="Full-screen wall display: the graph, live counts, and the scans running now">SOC mode</button>
 </div>
 <div class="card graph-card">
+  <div class="soc-hud">
+    <div class="soc-bar">
+      <strong class="soc-title">Asset graph</strong>
+      <span class="soc-scope" id="soc-scope"></span>
+      <span class="soc-stats">
+        <span><b id="soc-running">0</b>scanning</span>
+        <span><b id="soc-queued">0</b>queued</span>
+        <span class="soc-fire"><b id="soc-fire">0</b>fire</span>
+        <span class="soc-smoke"><b id="soc-smoke">0</b>smoke</span>
+        <span><b id="soc-nodes">0</b>nodes</span>
+      </span>
+      <time class="soc-clock" id="soc-clock"></time>
+      <button class="btn ghost sm" id="soc-full" type="button">Full screen</button>
+      <button class="btn sm" id="soc-exit" type="button">Exit SOC mode</button>
+    </div>
+    <aside class="soc-feed" aria-label="Scanning now">
+      <h2>Scanning now</h2>
+      <ul id="soc-scans"></ul>
+    </aside>
+  </div>
   <div id="graph" role="img" aria-label="Interactive bubble graph of discovered assets"></div>
   <div class="legend graph-legend">
     <span><i style="background:var(--ink)"></i>domain</span>
@@ -58,12 +79,91 @@
       const rendered = graph.sync(data);
       if (reset) graph.fit();
       count.textContent = `${rendered.nodes} nodes · ${rendered.edges} links`;
+      const hosts = data.nodes.filter((n) => n.kind === 'subdomain');
+      document.getElementById('soc-nodes').textContent = rendered.nodes;
+      document.getElementById('soc-fire').textContent = hosts.filter((n) => n.heat === 'fire').length;
+      document.getElementById('soc-smoke').textContent = hosts.filter((n) => n.heat === 'smoke').length;
       live.className = 'live';
     } catch (_) { live.className = 'live off'; }
   }
-  select.addEventListener('change', poll);
+  select.addEventListener('change', () => { poll(); pollLive(); });
   document.getElementById('graph-fit').addEventListener('click', () => graph.fit());
   poll();
   setInterval(poll, 4000);
+
+  // Live scan highlighting: the domains and hosts a scan is working on right now pulse on the graph, in or out of SOC mode.
+  const slug = document.body.dataset.slug || '_all';
+  const el = (id) => document.getElementById(id);
+  const duration = (seconds) => {
+    const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
+    return h ? `${h}h ${m}m` : m ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`;
+  };
+  function renderScans(scans) {
+    const list = el('soc-scans');
+    list.textContent = '';
+    if (!scans.length) {
+      list.append(Object.assign(document.createElement('li'), { className: 'soc-idle', textContent: 'No scans running' }));
+      return;
+    }
+    scans.forEach((scan) => {
+      const item = document.createElement('li');
+      const link = Object.assign(document.createElement('a'), { href: `/cve/${encodeURIComponent(scan.project || slug)}/scans/`, textContent: scan.domain });
+      item.append(link,
+        Object.assign(document.createElement('span'), { className: 'soc-stage', textContent: scan.stage || 'between steps' }),
+        Object.assign(document.createElement('span'), { className: 'soc-elapsed', textContent: duration(scan.elapsed) }));
+      list.append(item);
+    });
+  }
+  async function pollLive() {
+    if (document.hidden) return;
+    try {
+      const params = new URLSearchParams({ project: slug });
+      if (select.value) params.set('domain', select.value);
+      const response = await fetch('/cve/api/graph-live?' + params, { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) throw new Error(response.status);
+      const data = await response.json();
+      graph.setActive(data.domains, data.hosts);
+      renderScans(data.scans);
+      el('soc-running').textContent = data.counts.running;
+      el('soc-queued').textContent = data.counts.queued;
+    } catch (_) { /* the next poll tries again; the highlight just stays as it was */ }
+  }
+  pollLive();
+  setInterval(pollLive, 3000);
+
+  // SOC mode: the graph over the whole window, with a status bar and the running scans. ?soc=1 opens it that way (a wall display
+  // can load the URL); the browser only allows real full screen from a click, so that is its own button.
+  const socButton = el('graph-soc');
+  const tick = () => { el('soc-clock').textContent = new Date().toLocaleTimeString(); };
+  let clock = null;
+  function setSoc(on) {
+    document.body.classList.toggle('soc', on);
+    socButton.setAttribute('aria-pressed', String(on));
+    el('soc-scope').textContent = [document.querySelector('#project option:checked')?.textContent, select.value && select.selectedOptions[0].textContent]
+      .filter(Boolean).join(' · ');
+    clearInterval(clock);
+    if (on) { tick(); clock = setInterval(tick, 1000); }
+    else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    const url = new URL(location.href);
+    if (on) url.searchParams.set('soc', '1'); else url.searchParams.delete('soc');
+    history.replaceState(null, '', url);
+    window.dispatchEvent(new Event('resize')); // the graph's container changed size
+    graph.fit();
+  }
+  socButton.addEventListener('click', () => setSoc(!document.body.classList.contains('soc')));
+  el('soc-exit').addEventListener('click', () => setSoc(false));
+  el('soc-full').addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('soc') && !document.fullscreenElement) setSoc(false);
+  });
+  document.addEventListener('fullscreenchange', () => {
+    el('soc-full').textContent = document.fullscreenElement ? 'Exit full screen' : 'Full screen';
+    window.dispatchEvent(new Event('resize'));
+    graph.fit();
+  });
+  if (new URLSearchParams(location.search).get('soc') === '1') setSoc(true);
 </script>
 {% endblock %}

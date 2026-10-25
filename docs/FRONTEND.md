@@ -26,7 +26,7 @@ Static files are content-versioned and nginx sends `Cache-Control: no-cache` for
 | `/cve/<project>/changes/` | What changed: hosts, ports, versions, technologies, certificates, auth state, and screenshots |
 | `/cve/<project>/hygiene/`, `.../activity/`, `.../keys/` | Email and TLS checks, the full AI activity log, and project API keys for OSINT services |
 | `/cve/_all/<section>/` | **All projects**: the same sections across every project you can see |
-| `/cve/graph/` | Live asset graph |
+| `/cve/graph/` | Live asset graph. Domains and hosts a scan is working on right now carry a pulsing red ring (read every 3 seconds from `GET /cve/api/graph-live`, which lists the running scans, the step each is in, and the hosts they are working on). **SOC mode** (or `?soc=1`) puts the graph over the whole window with a status bar (scans running and queued, hosts on fire and smoke, nodes, a clock) and a **Scanning now** list; everything not being scanned dims while a scan runs. **Full screen** asks the browser for real full screen, **Escape** or **Exit SOC mode** leaves. |
 | `/cve/bounty/` | Bug bounty workbench, for authorized users ([BUG-BOUNTY.md](BUG-BOUNTY.md)) |
 | `/cve/agents/` | API tokens and MCP connection commands |
 | `/cve/admin/` | Administration: people, organizations, projects, audit log, activity and error log, plus timings and scheduler health for superusers |

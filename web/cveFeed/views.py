@@ -589,6 +589,17 @@ def api_graph(request):
 
 @require_GET
 @project_scoped
+def api_graph_live(request):
+    """Running scans, their current step and the hosts they are working on: what the graph pulses and SOC mode lists. Never cached."""
+    from cveFeed import graph_live
+    slug, domain = request.GET.get('project', ''), request.GET.get('domain', '')
+    response = JsonResponse(graph_live.live(slug if slug and slug != ALL_PROJECTS else None, int(domain) if domain.isdigit() else None))
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@require_GET
+@project_scoped
 def api_graph_overview(request):
     from cveFeed.graph_overview import groups
     slug = request.GET.get('project', '')
