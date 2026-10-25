@@ -1,12 +1,8 @@
 # Changelog
 
-CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, taken in November 2025. The history of reNgine up to that point is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
+cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
 ## Unreleased
-
-### Security
-
-- **Two-step sign-in could be skipped at `/admin/login/`.** Django's own admin login signed a staff user in with the password alone and made a normal session for the whole app. `/admin/login/` now only forwards to the app's `/login/`, which enforces the second step. Found by the API, tenancy and front-end review.
 
 ### Changed
 
@@ -16,57 +12,45 @@ CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, take
 
 ### Added
 
+- **Deeper service fingerprinting.** nmap runs at version intensity 7 with the banner, SSH host key and algorithms, TLS certificate, HTTP header and title, anonymous FTP, RDP NTLM, SMB OS discovery, and NetBIOS scripts, and keeps the output per port. Search reaches it with `banner:`. Windows build, computer name, and domain from RDP and SMB fill an empty OS guess, and an FTP server that allows anonymous sign-in is a finding with its listing as evidence.
 - **WPScan for WordPress sites.** A host fingerprinted as WordPress is scanned once a week for its version, plugins, themes, config backups, database exports, and author names, and for known vulnerabilities when a wpscan.com API token is set under Settings, API keys. Findings and versions flow into Findings and CVE matching.
 - **Archived URLs as passive evidence.** The Internet Archive's saved URLs show what a host ran in the past, such as PHP or WordPress. Search finds it and labels it as seen in the web archive.
 
 ### Fixed
 
-- **AI-written templates survived no update.** Their directory was not on a Docker volume, so each deploy deleted them and they had to be regenerated and reviewed again. It is now the `generated_templates` volume in all three services that share it, and a worker restores any validated template whose file is missing from the database copy, through the same safety check, when it starts.
-- **`scripts/uninstall.sh` removed anything with `rengine` in its name,** including another reNgine install on the host. It now removes only this install's Docker Compose project, selected by its exact label, and lists what it will remove before asking.
-- **Proxy documentation.** It told operators to set `CVENGINE_TRUSTED_PROXIES` to their proxy's network, which replaces the Docker default and makes the IP allowlist and abuse guard see the Docker gateway for every request. The docs now say to leave the default or add to it.
 - **Search.** A bare word and `tech:` find a host wherever its software was seen (web server and `X-Powered-By` headers, cookie names, banners, NSE output, route fingerprints, port product and version), not only in the technology list, and `banner:` searches service banners. `php` now finds every host running PHP.
-- **Test suite.** `tests.test_nmap` (a placeholder with fixtures that never existed) now tests the vulners and vulscan parsers, and `tests.test_hard_lockout` calls the current lockout helpers.
+- **Findings counted wrongly.** `save_vulnerability` returned the created flag of its last tag, CVE or reference lookup instead of the finding's own, so new-finding counts were off.
+- **Test suite.** `tests.test_hard_lockout` calls the current lockout helpers, and the placeholder `tests.test_nmap` is gone with the code it was meant to test.
+
+## v1.0.1 (2026-10-25)
+
+A security patch. Update with `make up` or the in-app updater.
+
+- **Security:** two-step sign-in could be skipped at `/admin/login/`. That URL now only forwards to `/login/`, which enforces the second step.
+- **AI-written templates are kept across updates.** They now live on a Docker volume, and a worker restores any validated template whose file is missing.
+- **`scripts/uninstall.sh` removes only this install,** not another reNgine on the same host.
+- **Proxy docs:** `CVENGINE_TRUSTED_PROXIES` should be left at its default or added to, never replaced.
 
 ## v1.0 (2026-10-25)
 
-CVEngine is an AI-first external attack surface scanner: it continuously
-discovers your internet-facing assets, fingerprints their services, and tells
-you which of today's CVEs are actually exploitable on them, with evidence.
+The most advanced external attack surface assessment you can get for free. cvENGINE continuously discovers your internet-facing assets, fingerprints their services, and tells you which of today's CVEs are actually exploitable on them, with evidence.
 
 ### Highlights
 
-- **Continuous attack surface discovery**: subdomains, certificates, IPs and
-  open ports, with scheduled re-discovery and change tracking.
-- **Service and OS fingerprinting**: one consistent host inventory built from
-  nmap, naabu and bbot.
-- **Exploitability-ranked CVEs (fire / smoke / ice)**: every CVE scored by
-  real-world exploitation, fed by CISA KEV, ENISA EUVD, EPSS, Exploit-DB and
-  Metasploit so hosts are matched against historically exploited CVEs, not just
-  the last two weeks.
-- **Evidence-based validation**: each finding is reproduced with a read-only
-  check (a vetted nuclei template, nmap, an HTTP probe, a database banner); the
-  AI triages it and drafts a template when none exists. No raw guessing.
-- **One findings view**: CVE matches, scanner findings and email/DNS hygiene
-  together, hottest first.
-- **Exposure checks**: unauthenticated Redis, PostgreSQL, Elasticsearch,
-  Memcached and CouchDB, plus a full email-security review (SPF, DKIM, DMARC,
-  MTA-STS and more).
-- **Built for teams and agents**: organizations and projects with data
-  isolation and roles, a REST API and an MCP server, and Shodan-style host
-  search.
-- **Operations**: pause-all control, scheduler and worker health, an activity
-  and AI-cost log, two-step sign-in, an IP allowlist and an audit log.
+- **Continuous discovery.** Subdomains, certificates, IPs, and open ports with [bbot](https://github.com/blacklanternsecurity/bbot), scheduled re-discovery, and a change log.
+- **Service and OS fingerprinting.** One host inventory built from [nmap](https://github.com/nmap/nmap), optional [naabu](https://github.com/projectdiscovery/naabu), and bbot.
+- **Fire, smoke, and ice.** Every CVE rated by real-world exploitation from CISA KEV, ENISA EUVD, VulnCheck KEV, EPSS, Exploit-DB, and Metasploit, so hosts are matched against historically exploited CVEs, not just the last two weeks.
+- **Evidence-based validation.** Each finding is reproduced with a read-only check (a vetted [nuclei](https://github.com/projectdiscovery/nuclei) template, nmap, an HTTP probe, or a database banner). The AI triages it and drafts a template when none exists; a person reviews drafts before they run.
+- **One findings view.** CVE matches, scanner findings, and email and DNS hygiene together, hottest first.
+- **Exposure checks.** Unauthenticated Redis, PostgreSQL, Elasticsearch, Memcached, and CouchDB, plus a full email-security review (SPF, DKIM, DMARC, MTA-STS, and more).
+- **Bug bounty workbench.** Public program scope, a vulnerability rating per finding, and report drafts ([BUG-BOUNTY.md](docs/BUG-BOUNTY.md)).
+- **Built for teams and agents.** Organizations and projects with data isolation and roles, a REST API and an MCP server, and Shodan-style host search.
+- **Operations.** A pause-all control, scheduler and worker health, an activity and AI-cost log, two-step sign-in, an IP allowlist, an audit log, and automatic deployment of new releases.
 
 ### Platform
 
-Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.9, Go 1.27 and Ubuntu 26.04
-LTS. GPL-3.0; a fork of reNgine 2.x. See [docs/](docs/), and
-[docs/UPGRADE.md](docs/UPGRADE.md) to move an older install.
+Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, Go 1.27, and Ubuntu 26.04 LTS. GPL-3.0. See [docs/](docs/), and [docs/UPGRADE.md](docs/UPGRADE.md) to move an older install.
 
 ### Security
 
-Hardened against prompt injection and server-side request forgery, with
-tenant-isolated media, encrypted secrets, bounded scan and probe time, and a
-static safety gate on AI-generated templates.
-
-Also includes an optional bug-bounty workbench.
+Hardened against prompt injection and server-side request forgery, with tenant-isolated media, encrypted secrets, bounded scan and probe time, and a static safety gate on AI-generated templates.
