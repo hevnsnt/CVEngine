@@ -10,10 +10,11 @@ checkout to exactly that commit and rebuilds. The installed commit is the first 
 
 Pure helpers take their HTTP function as a parameter so they are testable without a network.
 """
+import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 
 import requests
 from django.conf import settings
@@ -26,6 +27,7 @@ REPO_RE = re.compile(r'^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$')
 BRANCH_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$')
 SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 MAX_COMMITS = 20
+PHASE_VALUES = ('idle', 'draining', 'applying', 'done', 'failed')
 
 
 class UpdateError(Exception):
@@ -55,6 +57,29 @@ def installed_sha():
         return first
     env = os.environ.get('CVENGINE_COMMIT', '').strip().lower()
     return env if SHA_RE.match(env) else ''
+
+
+def read_phase():
+    """scripts/apply-update.sh's current progress ({phase, detail, scans_running, changed_at}), 'idle' when there is
+    no phase file (no update has ever run, or the previous one's result was already superseded) or it cannot be
+    read as the shape the script writes."""
+    try:
+        with open(_file('.update-phase.json')) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {'phase': 'idle', 'detail': '', 'scans_running': None, 'changed_at': None}
+    phase = data.get('phase')
+    if phase not in PHASE_VALUES:
+        return {'phase': 'idle', 'detail': '', 'scans_running': None, 'changed_at': None}
+    scans_running = data.get('scans_running')
+    changed_at = data.get('changed_at')
+    return {
+        'phase': phase,
+        'detail': str(data.get('detail') or '')[:200],
+        'scans_running': scans_running if isinstance(scans_running, int) and scans_running >= 0 else None,
+        'changed_at': datetime.fromtimestamp(changed_at, tz=dt_timezone.utc).isoformat()
+                      if isinstance(changed_at, (int, float)) else None,
+    }
 
 
 def _headers(token):
@@ -182,6 +207,8 @@ def dismiss(row):
 
 def state(row):
     """What the API and the banner show. ``status``: disabled | error | up_to_date | available | approved | dismissed."""
+    from cveFeed.models import ScanControl
+
     installed = installed_sha()
     available = update_available(row, installed)
     if not row.enabled:
@@ -196,6 +223,10 @@ def state(row):
         status = 'error'
     else:
         status = 'up_to_date'
+    phase = read_phase()
+    # Read live, not from the phase file: apply-update.sh's own pause/release calls can fail independently of the
+    # phase it last wrote, and an admin's manual resume can clear it between runs without rewriting the phase file.
+    control = ScanControl.current()
     return {
         'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'has_token': bool(row.token),
         'installed': installed[:7], 'installed_known': bool(installed),
@@ -204,4 +235,7 @@ def state(row):
         'commits': row.commits, 'last_checked_at': row.last_checked_at.isoformat() if row.last_checked_at else None,
         'last_error': row.last_error, 'approved_by': row.approved_by,
         'approved_at': row.approved_at.isoformat() if row.approved_at else None,
+        'phase': phase['phase'], 'phase_detail': phase['detail'], 'phase_scans_running': phase['scans_running'],
+        'phase_changed_at': phase['changed_at'],
+        'scans_paused_by_update': bool(control.paused and control.paused_by_update),
     }

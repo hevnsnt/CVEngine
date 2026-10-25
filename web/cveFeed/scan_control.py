@@ -72,6 +72,39 @@ def updater_idle():
         os.close(fd)
 
 
+def request_drain_pause(reason='An update is being applied'):
+    """Pause new scan dispatch for an approved update to drain into (cveFeed.updater), without touching work already
+    running: unlike the operator "Pause all scanning" action, this never calls abort_running_scans. A no-op, safely
+    skipped, if scanning is already paused for any reason (an operator's own pause already stops new dispatch, and
+    must never be silently reinterpreted as ours to release later). Serialized against a manual resume via the same
+    lock updater_idle uses, so the two can never race each other into an inconsistent state."""
+    from django.db import transaction
+
+    from cveFeed.models import ScanControl
+    with updater_idle(), transaction.atomic():
+        row = ScanControl.objects.select_for_update().get_or_create(pk=1)[0]
+        if not row.paused:
+            from django.utils import timezone as tz
+            row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
+                True, True, reason[:200], '', tz.now(), ''
+            row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
+
+
+def release_update_pause():
+    """Undo request_drain_pause once the update it was waiting for has finished, but only a pause this module set:
+    an operator's own pause (paused_by_update False) is never cleared here, exactly like request_drain_pause never
+    claims one that already exists."""
+    from django.db import transaction
+
+    from cveFeed.models import ScanControl
+    with updater_idle(), transaction.atomic():
+        row = ScanControl.objects.select_for_update().get_or_create(pk=1)[0]
+        if row.paused and row.paused_by_update:
+            from django.utils import timezone as tz
+            row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at = False, False, '', '', tz.now()
+            row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at'])
+
+
 def abort_running_scans(actor):
     """Stop running scan records cooperatively, without revoking a worker process."""
     from django.utils import timezone

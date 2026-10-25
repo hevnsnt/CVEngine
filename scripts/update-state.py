@@ -6,9 +6,11 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 MAX_LEGACY_LOG_BYTES = 8 * 1024 * 1024
+PHASE_VALUES = ('idle', 'draining', 'applying', 'done', 'failed')
 
 
 def regular_fd(path, *, dir_fd=None):
@@ -121,6 +123,22 @@ def main():
         elif action == 'log':
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
                 publish(web_fd, '.update-log', iter(lambda: source.read(65536), b''))
+        elif action == 'phase':
+            value = sys.argv[2]
+            if value not in PHASE_VALUES:
+                raise ValueError('invalid phase')
+            detail = sys.argv[3] if len(sys.argv) > 3 else ''
+            if len(detail) > 200:
+                raise ValueError('phase detail is too long')
+            scans_running = None
+            if len(sys.argv) > 4 and sys.argv[4] != '':
+                scans_running = int(sys.argv[4])
+                if scans_running < 0:
+                    raise ValueError('scans_running must not be negative')
+            payload = json.dumps({
+                'phase': value, 'detail': detail, 'scans_running': scans_running, 'changed_at': time.time(),
+            }).encode('utf-8')
+            publish(web_fd, '.update-phase.json', [payload])
         else:
             raise ValueError('unknown update state action')
     finally:

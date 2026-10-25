@@ -1022,6 +1022,11 @@ class ScanControl(models.Model):
     """Durable global operator hold. Queued work is retained for resume."""
 
     paused = models.BooleanField(default=False)
+    # Set when cveFeed.scan_control.request_drain_pause (an approved update waiting to drain, see cveFeed.updater)
+    # requested this pause, rather than an operator's own "Pause all scanning": only a pause with this set True may be
+    # released automatically, by scripts/apply-update.sh once its deploy finishes; an operator's own pause is theirs
+    # to lift. A drain pause never calls abort_running_scans: it stops new dispatch and lets active work finish.
+    paused_by_update = models.BooleanField(default=False)
     reason = models.CharField(max_length=200, blank=True, default='')
     actor = models.CharField(max_length=150, blank=True, default='')
     last_error = models.CharField(max_length=160, blank=True, default='')
