@@ -9,6 +9,7 @@ import re
 from urllib.parse import quote
 from collections import Counter
 
+from django.db.models import F
 from django.db.models import Count
 from django.http import JsonResponse
 from django.http import Http404
@@ -246,13 +247,21 @@ def ui_context(request, active, slug=None):
     (the read-only combined view): the switcher then marks "All projects" selected. That option is offered only to a caller who
     can see two or more projects; with one there is nothing to combine."""
     from dashboard.models import Project
-    projects = list(Project.objects.order_by('name').values('slug', 'name'))  # scoped to the caller
+    projects = list(Project.objects.order_by('name').values('slug', 'name', org_slug=F('org__slug'), org_name=F('org__name')))  # scoped to the caller
     current = slug or (projects[0]['slug'] if projects else None)
+    # the organizations the caller's projects belong to; the switcher shows an organization choice only when there are two or more
+    orgs = []
+    for p in projects:
+        p['org_slug'] = p['org_slug'] or ''
+        if p['org_slug'] not in [o['slug'] for o in orgs]:
+            orgs.append({'slug': p['org_slug'], 'name': p['org_name'] or 'No organization'})
+    orgs.sort(key=lambda o: o['name'].lower())
+    current_org = next((p['org_slug'] for p in projects if p['slug'] == current), '') if slug != ALL_PROJECTS else None
     from tenancy.roles import is_admin_anywhere
     from dashboard.models import AIProviderSettings
     ai_cfg = AIProviderSettings.objects.first()
     ai_connected = bool(ai_cfg and ai_cfg.enabled)
-    return {'active': active, 'slug': current, 'projects': projects, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
+    return {'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
             'is_app_admin': request.user.is_superuser,
             'bounty_enabled': _bounty_allowed(request.user),
             'ai_usage_connected': ai_connected,

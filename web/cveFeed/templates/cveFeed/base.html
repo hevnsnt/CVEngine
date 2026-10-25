@@ -41,18 +41,11 @@
 </svg>
 <a class="skip" href="#main">Skip to content</a>
 
+{% if projects %}{{ projects|json_script:"switch-projects" }}{{ orgs|json_script:"switch-orgs" }}{% endif %}
 <div class="app">
 <aside class="rail" id="rail" aria-label="Primary">
   <a class="brand" href="https://fieldcraftcyber.com/" target="_blank" rel="noopener noreferrer" aria-label="CVEngine, by FieldCraft Cyber (opens fieldcraftcyber.com in a new tab)"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
-  {% if projects %}
-  <div class="proj-wrap">
-    <label class="proj-label" for="project">Project</label>
-    <div class="select"><select id="project" class="proj" data-section="{{ active }}">
-      {% if show_all_option %}<option value="_all" {% if all_projects %}selected{% endif %}>All projects</option>{% endif %}
-      {% for p in projects %}<option value="{{ p.slug }}" {% if p.slug == slug %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
-    </select><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></div>
-  </div>
-  {% endif %}
+  {% include "cveFeed/_switcher.html" with sfx="" %}
   <nav class="rail-nav" aria-label="Sections">
     <p class="rail-h">Monitor</p>
     <a data-nav="Live" href="{% url 'cve_dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Live</a>
@@ -131,15 +124,7 @@
 <div class="sheet-scrim" id="sheet-scrim" hidden></div>
 <div class="sheet" id="sheet" role="dialog" aria-label="More" hidden>
   <div class="sheet-grip" aria-hidden="true"></div>
-  {% if projects %}
-  <div class="proj-wrap">
-    <label class="proj-label" for="project-m">Project</label>
-    <div class="select"><select id="project-m" class="proj" data-section="{{ active }}">
-      {% if show_all_option %}<option value="_all" {% if all_projects %}selected{% endif %}>All projects</option>{% endif %}
-      {% for p in projects %}<option value="{{ p.slug }}" {% if p.slug == slug %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
-    </select><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></div>
-  </div>
-  {% endif %}
+  {% include "cveFeed/_switcher.html" with sfx="-m" %}
   <div class="sheet-grid">
     {% if slug %}
     <a href="{% url 'cve_section' slug 'targets' %}"><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
