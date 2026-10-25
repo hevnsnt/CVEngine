@@ -13,6 +13,33 @@ import {
 
 const LANES = 4;
 
+// A notice with an Undo button that stays for UNDO_MS. Used after a bulk change and after a row-menu action.
+export const UNDO_MS = 10000;
+export function undoNotice(message, onUndo) {
+  const box = el("div", "toast notice undo", null, { role: "status" });
+  const text = el("span", "", message);
+  const undo = el("button", "notice-link notice-undo", "Undo", { type: "button" });
+  const close = el("button", "notice-close", "\u00d7", { type: "button", "aria-label": "Dismiss" });
+  let done = false;
+  const end = () => {
+    done = true;
+    box.remove();
+  };
+  undo.onclick = async () => {
+    if (done) return;
+    undo.disabled = true;
+    end();
+    await onUndo();
+  };
+  close.onclick = end;
+  box.append(text, undo, close);
+  document.body.append(box);
+  setTimeout(() => {
+    if (!done) end();
+  }, UNDO_MS);
+  return box;
+}
+
 export async function runBulk(items, worker, onProgress) {
   const ok = [];
   const failed = [];
@@ -142,6 +169,7 @@ export function createBulk({
       (c) => (c.disabled = true),
     );
     status.textContent = `${action.verb} ${items.length}`;
+    const priors = new Map(items.map((i) => [keyOf(i), action.prior ? action.prior(i) : undefined]));
     const result = action.runBatch
       ? await action.runBatch(items, value)
       : await runBulk(
@@ -158,10 +186,20 @@ export function createBulk({
     );
     selected.clear();
     result.failed.forEach((f) => selected.set(keyOf(f.item), f.item));
+    const undoable = result.ok.filter((i) => priors.get(keyOf(i)) !== undefined);
+    const doneText = `${action.done}: ${result.ok.length} ${noun}${result.ok.length === 1 ? "" : "s"}`;
     if (!result.failed.length) {
-      toast(
-        `${action.done}: ${result.ok.length} ${noun}${result.ok.length === 1 ? "" : "s"}`,
-      );
+      if (undoable.length && (action.restore || action.restoreBatch)) {
+        undoNotice(doneText, async () => {
+          const back = action.restoreBatch
+            ? await action.restoreBatch(undoable, (i) => priors.get(keyOf(i)))
+            : await runBulk(undoable, (i) => action.restore(i, priors.get(keyOf(i))));
+          toast(back.failed.length ? `Undone for ${back.ok.length}, ${back.failed.length} could not be undone` : `Undone: ${back.ok.length} ${noun}${back.ok.length === 1 ? "" : "s"}`, back.failed.length > 0);
+          afterRun();
+        });
+      } else {
+        toast(doneText);
+      }
     } else {
       reportFailures(action, value, result);
     }

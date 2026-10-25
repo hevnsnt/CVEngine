@@ -96,6 +96,7 @@ const SHEET = [
       ["x", "Select the row (starts selection mode)"],
       ["Esc", "Leave selection mode"],
       ["f", "Focus the filter or search box"],
+      [".", "Open the actions menu of the focused row"],
     ],
   ],
   [
@@ -103,7 +104,7 @@ const SHEET = [
     () => [
       [
         "1 to 6",
-        "Switch tab: Overview, Services, Web, Findings, Changes, Manage",
+        "Switch tab: Overview, Services, Web, Findings, History, Manage",
       ],
       ["y", "Copy the name (the link, on a finding)"],
       ["Y", "Copy the link"],
@@ -201,6 +202,14 @@ document.addEventListener("keydown", (e) => {
       if (pick) {
         e.preventDefault();
         pick.click();
+      }
+      break;
+    }
+    case ".": {
+      const menuButton = currentRow() && $(".row-menu-btn", currentRow());
+      if (menuButton) {
+        e.preventDefault();
+        menuButton.click();
       }
       break;
     }

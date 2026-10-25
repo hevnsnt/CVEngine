@@ -271,3 +271,34 @@ export function heatmap({ title, unit = "events", dates, weeks = 18 }) {
   root.append(head, grid, legend);
   return root;
 }
+
+/**
+ * A small trend line for a counter: the last days as a line with the latest point marked. Decorative (aria-hidden); the number
+ * beside it is the real information.
+ * @param {number[]} values one number per day, oldest first
+ */
+export function sparkline(values) {
+  const W = 120;
+  const H = 24;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "spark");
+  svg.setAttribute("aria-hidden", "true");
+  const max = Math.max(1, ...values);
+  const pts = values.map((v, i) => [values.length < 2 ? W / 2 : (i / (values.length - 1)) * W, H - 3 - (v / max) * (H - 8)]);
+  const line = document.createElementNS(NS, "polyline");
+  line.setAttribute("points", pts.map((p) => p.join(",")).join(" "));
+  line.setAttribute("class", "spark-line");
+  svg.append(line);
+  const last = pts[pts.length - 1];
+  if (last) {
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", last[0]);
+    dot.setAttribute("cy", last[1]);
+    dot.setAttribute("r", "2.4");
+    dot.setAttribute("class", "spark-dot");
+    svg.append(dot);
+  }
+  return svg;
+}

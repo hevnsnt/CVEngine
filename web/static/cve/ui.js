@@ -138,7 +138,7 @@ export function ask(message, { title = 'Are you sure?', ok = 'Confirm', danger =
 
 // Copy to the clipboard (text, or a function returning it when the value is only known at click time). Falls back to a
 // hidden textarea where the Clipboard API is unavailable (plain http). Says so with the toast, which is also announced.
-async function copyText(text) {
+export async function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
   const area = el('textarea', '', null, { 'aria-hidden': 'true', tabindex: '-1' });
   area.style.cssText = 'position:fixed;top:-1000px;opacity:0';

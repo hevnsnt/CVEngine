@@ -4,6 +4,7 @@ import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { fmtTime } from "/staticfiles/cve/prefs.js";
+import { areaChart, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -627,5 +628,48 @@ every(pollFeed, 6000);
     strip.hidden = false;
   } catch (_) {
     /* the strip is a convenience: stay hidden when the answer does not come */
+  }
+})();
+
+// --- trends ---------------------------------------------------------------------------------------
+// Two charts under the counters (new findings per day, inventory changes per day) and a small trend line in the CVE matches and
+// scanner findings counters. They are built in the browser from the dates the API already returns, so they show what arrived
+// and when; an "exposed over time" and a "time to fix" line need history the server does not keep yet (requested).
+(async () => {
+  if (!slug) return;
+  const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
+  const PAGES = 5;
+  const collect = async (path) => {
+    const rows = [];
+    for (let page = 1; page <= PAGES; page += 1) {
+      const sep = path.includes("?") ? "&" : "?";
+      const data = await get(`${base}/${path}${sep}page=${page}&page_size=200`);
+      const got = data.results || [];
+      rows.push(...got);
+      if (got.length < 200) break;
+    }
+    return rows;
+  };
+  try {
+    const [findings, changes] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
+    const section = $("trends");
+    if (!findings.length && !changes.length) return;
+    section.append(
+      areaChart({ title: "New findings per day", unit: "findings", ranges: [["7D", 7], ["30D", 30], ["90D", 90]], dates: findings.map((f) => f.detected) }),
+      areaChart({ title: "Inventory changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30], ["90D", 90]], dates: changes.map((c) => c.detected) }),
+    );
+    section.hidden = false;
+    const spark = (anchorId, dates, label) => {
+      const a = $(anchorId);
+      if (!a || !dates.length) return;
+      const values = dailyCounts(dates, 14).map((p) => p.v);
+      const svg = sparkline(values);
+      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days`);
+      a.append(svg, sr);
+    };
+    spark("n-matches", findings.filter((f) => f.type === "cve").map((f) => f.detected), "CVE matches");
+    spark("n-findings", findings.filter((f) => f.type === "scanner").map((f) => f.detected), "Scanner findings");
+  } catch (_) {
+    /* trends are extra: leave the section hidden when the data does not come */
   }
 })();

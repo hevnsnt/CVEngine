@@ -1,3 +1,5 @@
+import { hostRow, previewHosts, suggestions, syntaxHelp } from "/staticfiles/cve/palette-search.js";
+
 // App shell behaviour: project switcher, mobile "More" sheet, account menu, and the jump palette (Ctrl/Cmd+K or "/").
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -60,13 +62,27 @@ if (scrim) {
 }
 
 // --- palette ------------------------------------------------------------------------------
+// Jump to a page, project or action, or search hosts the Shodan way (filter:value, "phrases", -negation). Pages and actions
+// are filtered here; the search itself is the server's (the same query the Hosts page runs), previewed six hosts at a time.
 const palette = $("#palette");
 const list = $("#palette-list");
 const input = $("#palette-q");
 const none = $("#palette-empty");
 let items = [];
 let shown = [];
+let optionEls = [];
 let cursor = 0;
+let hits = []; // preview hosts for the query in the box
+let hitCount = null;
+let searching = false;
+let searchError = "";
+let searchSeq = 0;
+let searchTimer = null;
+
+const slugNow = () => {
+  const sel = $("#project");
+  return sel && sel.value ? sel.value : "";
+};
 
 function collect() {
   const seen = new Set();
@@ -75,40 +91,90 @@ function collect() {
     const label = a.dataset.nav;
     if (seen.has(a.getAttribute("href"))) return;
     seen.add(a.getAttribute("href"));
-    out.push({ label, hint: "Go to", href: a.getAttribute("href") });
+    out.push({ label, hint: "Go to", href: a.getAttribute("href"), section: "Go to" });
   });
-  if ($("[data-add-targets]")) out.push({ label: "Add targets", hint: "Action", run: () => $("[data-add-targets]").click() });
+  if ($("[data-add-targets]")) out.push({ label: "Add targets", hint: "Action", run: () => $("[data-add-targets]").click(), section: "Go to" });
   // commands registered by page scripts (keys.js, saved views): { label, hint, run, when? }
   (window.cveCommands || []).forEach((c) => {
-    if (!c.when || c.when()) out.push({ label: c.label, hint: c.hint || "Action", run: c.run });
+    if (!c.when || c.when()) out.push({ label: c.label, hint: c.hint || "Action", run: c.run, section: "Go to" });
   });
   const current = $("#project");
   if (current) {
     const here = current.dataset.section;
     [...current.options].forEach((o) => {
       if (o.value !== current.value) {
-        out.push({ label: `Switch to ${o.textContent}`, hint: "Project", href: projectHref(o.value, here) });
+        out.push({ label: `Switch to ${o.textContent}`, hint: "Project", href: projectHref(o.value, here), section: "Go to" });
       }
     });
   }
   return out;
 }
 
+const helpRow = { label: "Search syntax", sub: "port:443 product:nginx -host:test", hint: "Help", run: syntaxHelp, section: "Help" };
+
+// Everything the palette lists for what is typed, in order, each row tagged with the section it belongs to.
+function rowsFor(raw) {
+  const q = raw.trim();
+  const ql = q.toLowerCase();
+  const local = items.filter((i) => !ql || i.label.toLowerCase().includes(ql));
+  if (!q) return [...local, helpRow];
+  const slug = slugNow();
+  const searchRow =
+    q.length >= 2 && slug
+      ? {
+          label: `Search hosts for \u201c${q}\u201d`,
+          sub: searchError || (hitCount === 0 ? "No host matches. Try a bare word or one filter." : ""),
+          error: Boolean(searchError),
+          hint: searching ? "searching" : hitCount != null ? `${hitCount.toLocaleString()} host${hitCount === 1 ? "" : "s"}` : "hosts",
+          href: `/cve/${encodeURIComponent(slug)}/hosts/?q=${encodeURIComponent(q)}`,
+          section: "Search",
+        }
+      : null;
+  const pagesFirst = local.length > 0 && local[0].label.toLowerCase().startsWith(ql);
+  return [
+    ...suggestions(raw),
+    ...(pagesFirst ? local : []),
+    ...(searchRow ? [searchRow] : []),
+    ...(searchRow && !searchError ? hits : []),
+    ...(pagesFirst ? [] : local),
+    helpRow,
+  ];
+}
+
 function draw() {
-  const q = input.value.trim().toLowerCase();
-  shown = items.filter((i) => !q || i.label.toLowerCase().includes(q));
+  shown = rowsFor(input.value);
   cursor = Math.min(cursor, Math.max(shown.length - 1, 0));
   list.textContent = "";
+  optionEls = [];
+  let section = null;
   shown.forEach((item, idx) => {
+    if (item.section && item.section !== section) {
+      section = item.section;
+      const head = document.createElement("li");
+      head.className = "palette-sec";
+      head.setAttribute("role", "presentation");
+      head.textContent = section;
+      list.append(head);
+    }
     const li = document.createElement("li");
     li.setAttribute("role", "option");
     li.setAttribute("aria-selected", String(idx === cursor));
+    const main = document.createElement("span");
+    main.className = "palette-main";
     const name = document.createElement("span");
+    name.className = "palette-name";
     name.textContent = item.label;
+    main.append(name);
+    if (item.sub) {
+      const sub = document.createElement("span");
+      sub.className = `palette-sub${item.error ? " err" : ""}`;
+      sub.textContent = item.sub;
+      main.append(sub);
+    }
     const hint = document.createElement("span");
-    hint.className = "palette-hint";
-    hint.textContent = item.hint;
-    li.append(name, hint);
+    hint.className = `palette-hint${item.heat ? ` heat-${item.heat}` : ""}`;
+    hint.textContent = item.hint || "";
+    li.append(main, hint);
     li.addEventListener("click", () => choose(item));
     li.addEventListener("mousemove", () => {
       if (cursor !== idx) {
@@ -117,34 +183,80 @@ function draw() {
       }
     });
     list.append(li);
+    optionEls.push(li);
   });
   none.hidden = shown.length > 0;
 }
 function mark() {
-  [...list.children].forEach((li, i) => li.setAttribute("aria-selected", String(i === cursor)));
-  const cur = list.children[cursor];
+  optionEls.forEach((li, i) => li.setAttribute("aria-selected", String(i === cursor)));
+  const cur = optionEls[cursor];
   if (cur) cur.scrollIntoView({ block: "nearest" });
 }
 function choose(item) {
+  if (item.insert !== undefined) {
+    // a filter suggestion completes what is being typed; the palette stays open
+    input.value = input.value.slice(0, item.start) + item.insert;
+    input.focus();
+    onInput();
+    return;
+  }
   palette.close();
   if (item.run) item.run();
   else if (item.href) window.location.href = item.href;
 }
+
+function scheduleSearch() {
+  clearTimeout(searchTimer);
+  const q = input.value.trim();
+  const slug = slugNow();
+  if (q.length < 2 || !slug) {
+    hits = [];
+    hitCount = null;
+    searching = false;
+    searchError = "";
+    return;
+  }
+  searching = true;
+  searchTimer = setTimeout(async () => {
+    const seq = (searchSeq += 1);
+    try {
+      const data = await previewHosts(slug, q);
+      if (seq !== searchSeq) return; // a newer query is already on its way
+      hits = (data.results || []).map((h) => hostRow(slug, h));
+      hitCount = data.count;
+      searchError = "";
+    } catch (err) {
+      if (seq !== searchSeq) return;
+      hits = [];
+      hitCount = null;
+      searchError = err.message;
+    }
+    searching = false;
+    draw();
+  }, 220);
+}
+function onInput() {
+  cursor = 0;
+  scheduleSearch();
+  draw();
+}
+
 function openPalette() {
   if (!palette || palette.open) return;
   items = collect();
   input.value = "";
   cursor = 0;
+  hits = [];
+  hitCount = null;
+  searchError = "";
+  searching = false;
   draw();
   palette.showModal();
   input.focus();
 }
 if (palette) {
   $("#jump").addEventListener("click", openPalette);
-  input.addEventListener("input", () => {
-    cursor = 0;
-    draw();
-  });
+  input.addEventListener("input", onInput);
   input.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -154,6 +266,9 @@ if (palette) {
       e.preventDefault();
       cursor = Math.max(cursor - 1, 0);
       mark();
+    } else if (e.key === "Tab" && shown[cursor] && shown[cursor].insert !== undefined) {
+      e.preventDefault();
+      choose(shown[cursor]);
     } else if (e.key === "Enter" && shown[cursor]) {
       e.preventDefault();
       choose(shown[cursor]);

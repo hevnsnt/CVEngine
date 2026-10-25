@@ -2,13 +2,16 @@
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
 import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
-import { createBulk } from "/staticfiles/cve/bulk.js";
+import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
+import { collectAll, exportButton, stamp } from "/staticfiles/cve/csv.js";
+import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
 import { fmtDateTime, fmtDay, fmtTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { isNewSince, newTag, newToggle, sinceLastVisit } from "/staticfiles/cve/seen.js";
 import {
   ask,
   button as uiButton,
   copyButton,
+  copyText,
   dialog,
   field,
   text as uiText,
@@ -261,6 +264,12 @@ function createList({
   };
   return {
     reload: () => load(true),
+    // the next page of rows, for a view that shows the same rows another way (the host gallery)
+    more: () => {
+      page += 1;
+      return load(false);
+    },
+    left: () => (lastCount == null ? 0 : Math.max(0, lastCount - page * 30)),
     start: () => {
       liveLists.add(live);
       return load(true);
@@ -363,6 +372,16 @@ const meterCell = (n, of) => {
   return box;
 };
 // A KPI tile: big number, mono label; "hot" colours it when the number is above zero.
+// Copy a value from a menu (the copy buttons do the same inline).
+const copyValue = async (text, label) => {
+  try {
+    await copyText(text);
+    toast(`Copied ${label}`);
+  } catch (_) {
+    toast(`Could not copy the ${label}`, true);
+  }
+};
+
 const tile = (label, n, { hot = "", onClick = null, href = "" } = {}) => {
   const t = el(href ? "a" : onClick ? "button" : "div", `tile${n ? ` ${hot}` : " dim"}`.trimEnd());
   if (href) t.setAttribute("href", href);
@@ -794,6 +813,7 @@ function renderFinding(d, cfg, row) {
   const project = projectOf(row); // the finding's own project: its host, history and screenshots live there
   const head = el("div", "host-head");
   head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
+  const detailAge = agingOf(row || {});
   if (d.severity) head.append(badge(d.severity, d.severity));
   if (d.assessment_status === "closed_not_applicable") head.append(badge("Closed: invalid product match", "ice"));
   head.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
@@ -805,6 +825,13 @@ function renderFinding(d, cfg, row) {
   if (d.host) { idline.append(hostLink(d.host, project)); if (d.target && d.target !== d.host) idline.append(document.createTextNode(" · "), hostLink(d.target, project)); }
   else if (d.target) idline.append(hostLink(d.target, project));
   out.push(head, idline);
+  if (detailAge) {
+    const d0 = Math.floor(detailAge.days);
+    const line = el("p", `note sla-line${detailAge.overdueBy ? " overdue" : ""}`);
+    line.append(el("b", "", `Open ${d0} day${d0 === 1 ? "" : "s"}`));
+    if (detailAge.sla) line.append(document.createTextNode(detailAge.overdueBy ? `. ${detailAge.overdueBy} day${detailAge.overdueBy === 1 ? "" : "s"} past the ${detailAge.sla} day target for ${row.severity}.` : `. The target for ${row.severity} is ${detailAge.sla} days, ${Math.max(0, Math.ceil(detailAge.sla - detailAge.days))} left.`));
+    out.push(line);
+  }
 
   if (d.automatic_validation) {
     const job = d.automatic_validation;
@@ -1080,6 +1107,102 @@ function foldPane(pane) {
   });
 }
 
+// The host's history: every recorded change in the last year as a timeline, grouped by day, filtered by range and by what changed.
+const HISTORY_GROUPS = [
+  ["all", "All", null],
+  ["ports", "Ports", ["port_opened", "port_closed", "service_changed"]],
+  ["tech", "Technologies", ["tech_added", "tech_removed", "tech_version_changed"]],
+  ["certs", "Certificates", ["cert_changed"]],
+  ["web", "Web", ["auth_changed", "route_retired", "zombie_route", "screenshot_changed", "sensitive_found"]],
+  ["life", "Lifecycle", ["host_new", "host_returned", "host_retired", "zombie_host", "zombie_cleared"]],
+];
+function buildHistory(box, events, project, total) {
+  box.textContent = "";
+  if (!events.length) {
+    box.append(el("p", "note", "No changes have been recorded for this host in the last year."));
+    return;
+  }
+  const RANGES = [["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last year"]];
+  let rangeDays = "90";
+  let group = "all";
+  const tools = el("div", "history-tools");
+  const range = select("History range", RANGES, () => {
+    rangeDays = range.value;
+    paint();
+  });
+  range.value = rangeDays;
+  const chips = el("div", "picker", null, { role: "group", "aria-label": "What changed" });
+  const chipBtn = new Map();
+  HISTORY_GROUPS.forEach(([key, label]) => {
+    const b = el("button", "", null, { type: "button", "aria-pressed": String(key === group) });
+    b.append(document.createTextNode(label), el("b", "", "0"));
+    b.onclick = () => {
+      group = key;
+      paint();
+    };
+    chipBtn.set(key, b);
+    chips.append(b);
+  });
+  tools.append(range, chips);
+  const summary = el("p", "note history-summary");
+  const feed = el("div", "timeline");
+  box.append(tools, summary, feed);
+  const inGroup = (c, key) => {
+    const kinds = HISTORY_GROUPS.find((g) => g[0] === key)[2];
+    return !kinds || kinds.includes(c.kind);
+  };
+  function paint() {
+    const cutoff = Date.now() - Number(rangeDays) * 86400000;
+    const inRange = events.filter((c) => Date.parse(c.detected) >= cutoff);
+    chipBtn.forEach((b, key) => {
+      b.setAttribute("aria-pressed", String(key === group));
+      b.lastChild.textContent = String(inRange.filter((c) => inGroup(c, key)).length);
+    });
+    const shownEvents = inRange.filter((c) => inGroup(c, group)).sort((x, y) => Date.parse(y.detected) - Date.parse(x.detected));
+    summary.textContent = shownEvents.length
+      ? `${shownEvents.length} change${shownEvents.length === 1 ? "" : "s"}${total > events.length ? `. The latest ${events.length} of ${total} were loaded.` : ""}`
+      : "Nothing matches this range and filter.";
+    feed.textContent = "";
+    let day = null;
+    shownEvents.forEach((c) => {
+      const label = fmtDay(c.detected);
+      if (label !== day) {
+        day = label;
+        feed.append(el("h3", "tl-day", label));
+      }
+      const row = el("div", "tl-event");
+      row.append(el("time", "tl-time", fmtTime(c.detected, false), { datetime: c.detected, title: `${fmtDateTime(c.detected)} ${zoneLabel()}` }), badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)));
+      const what = el("span", "tl-what");
+      what.append(changeCell(c, project));
+      row.append(what);
+      if (c.scan_id) row.append(el("a", "tl-scan", `#${c.scan_id}`, { href: scanHref(project, c.scan_id), title: "The scan that saw it" }));
+      feed.append(row);
+    });
+  }
+  paint();
+}
+
+// How long a finding has been open, against how long its severity allows. The days are the defaults until the server can say
+// otherwise (requested as a project setting); a finding that is fixed, closed or accepted has no age to chase.
+const SLA_DAYS = { critical: 7, high: 30, medium: 90, low: 180 };
+const SETTLED = ["fixed", "accepted_risk", "closed", "ruled out", "resolved", "dismissed", "not_applicable", "false_positive", "invalid"];
+function agingOf(item) {
+  const status = String(item.status ?? item.remediation_status ?? "").toLowerCase();
+  const started = Date.parse(item.detected || "");
+  if (!Number.isFinite(started) || SETTLED.includes(status)) return null;
+  const days = Math.max(0, (Date.now() - started) / 86400000);
+  const sla = SLA_DAYS[item.severity];
+  return { days, sla, overdueBy: sla && days > sla ? Math.floor(days - sla) : 0 };
+}
+const ageWord = (days) => (days < 1 ? `${Math.max(1, Math.round(days * 24))}h` : days < 60 ? `${Math.floor(days)}d` : `${Math.floor(days / 30)}mo`);
+function ageTags(item) {
+  const age = agingOf(item);
+  if (!age) return [];
+  const out = [el("span", "age-tag", ageWord(age.days), { title: `Open for ${Math.floor(age.days)} day${Math.floor(age.days) === 1 ? "" : "s"}${age.sla ? `. A ${item.severity} finding should be handled within ${age.sla} days.` : ""}` })];
+  if (age.overdueBy) out.push(el("span", "age-tag overdue", `overdue ${age.overdueBy}d`, { title: `${age.overdueBy} day${age.overdueBy === 1 ? "" : "s"} past the ${age.sla} day target for ${item.severity}` }));
+  return out;
+}
+
 function findingPage(mount, cfg) {
   const split = el("div", "split");
   const side = el("aside", "split-list card");
@@ -1092,6 +1215,8 @@ function findingPage(mount, cfg) {
   // (POST findings/status, up to 200 items per request, per-item results). A server without that route still handles CVE
   // matches one at a time through PATCH matches/<id>; that older route replaces the note, so the fallback sends the old one back.
   const BULK_KINDS = ["match", "vulnerability", "hygiene"];
+  const STATUS_VALUES = ["open", "in_progress", "fixed", "accepted_risk"];
+  const STATUS_LABELS = [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]];
   const BULK_MAX = 200;
   const itemKind = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
   const isBulkable = (item) => BULK_KINDS.includes(itemKind(item));
@@ -1151,15 +1276,55 @@ function findingPage(mount, cfg) {
             verb: "Updating",
             done: "Updated",
             runBatch: setStatusBatch,
+            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk)
+            prior: (item) => {
+              const was = item.status ?? item.remediation_status; // the unified list says status, the matches list says remediation_status
+              return STATUS_VALUES.includes(was) ? was : undefined;
+            },
+            restoreBatch: async (items, priorOf) => {
+              const byStatus = new Map();
+              items.forEach((i) => byStatus.set(priorOf(i), [...(byStatus.get(priorOf(i)) || []), i]));
+              const out = { ok: [], failed: [] };
+              for (const [was, group] of byStatus) {
+                const r = await setStatusBatch(group, was);
+                out.ok.push(...r.ok);
+                out.failed.push(...r.failed);
+              }
+              return out;
+            },
           },
         ],
       })
     : null;
   const fresh = newToggle(rows);
   const lastLook = cfg.seenPage && !ALL ? sinceLastVisit(cfg.seenPage, slug) : null;
+  // "Overdue 3": narrows the list to findings past their severity's target
+  const overdueBtn = el("button", "new-toggle overdue-toggle", "", { type: "button", "aria-pressed": "false", title: "Show only findings past their time target" });
+  overdueBtn.hidden = true;
+  overdueBtn.onclick = () => {
+    const on = !rows.classList.contains("only-overdue");
+    rows.classList.toggle("only-overdue", on);
+    overdueBtn.setAttribute("aria-pressed", String(on));
+  };
+  const updateOverdue = () => {
+    const n = rows.querySelectorAll("[data-overdue]").length;
+    overdueBtn.textContent = `Overdue ${n}`;
+    overdueBtn.hidden = n === 0;
+    if (n === 0) rows.classList.remove("only-overdue");
+  };
   const metaRow = el("div", "list-meta");
   const metaTools = el("span", "meta-tools");
-  metaTools.append(fresh.node);
+  metaTools.append(fresh.node, overdueBtn);
+  if (cfg.csv) {
+    metaTools.append(
+      exportButton({
+        run: async (progress) => {
+          const { rows, truncated } = await collectAll((page, size) => api("GET", `${cfg.path}?${query({ ...cfg.params(), page, page_size: size })}`), progress);
+          return { filename: `cvengine-${cfg.csv.name}-${ALL ? "all" : slug}-${stamp()}.csv`, columns: cfg.csv.columns, rows, truncated };
+        },
+      }),
+    );
+  }
   if (bulk) metaTools.append(bulk.toggle);
   metaRow.append(el("span"), metaTools);
   side.append(...cfg.filters, metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
@@ -1260,7 +1425,41 @@ function findingPage(mount, cfg) {
           row.dataset.fresh = "1";
           meta.prepend(newTag());
         }
+        const aging = agingOf(item);
+        if (aging) meta.append(...ageTags(item));
+        if (aging && aging.overdueBy) row.dataset.overdue = "1";
         row.append(meta);
+        const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
+        attachRowMenu(row, rowName, () => {
+          const was = item.status ?? item.remediation_status;
+          const menu = [
+            { section: "copy", label: "Copy title", run: () => copyValue(rowName, "title") },
+            { section: "copy", label: "Copy link", run: () => copyValue(`${location.origin}${location.pathname}#${hashOf(item)}`, "link") },
+            { section: "open", label: "Open in a new tab", run: () => window.open(`${location.pathname}${location.search}#${hashOf(item)}`, "_blank", "noopener") },
+          ];
+          if (isBulkable(item)) {
+            STATUS_LABELS.forEach(([value, label]) =>
+              menu.push({
+                section: "status",
+                label: `Mark as ${label}`,
+                disabled: was === value,
+                run: async () => {
+                  const r = await setStatusBatch([item], value);
+                  if (r.failed.length) return toast(r.failed[0].error, true);
+                  list.reload();
+                  if (STATUS_VALUES.includes(was)) {
+                    undoNotice(`Marked ${label.toLowerCase()}`, async () => {
+                      const back = await setStatusBatch([item], was);
+                      toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
+                      list.reload();
+                    });
+                  } else toast(`Marked ${label.toLowerCase()}`);
+                },
+              }),
+            );
+          }
+          return menu;
+        });
         (r.notes || []).filter(Boolean).forEach((n) => row.append(n instanceof Node ? n : el("span", "note host-why", n)));
         row.onclick = (e) => {
           if (e.target.closest("a")) return; // a link inside the row goes where it points
@@ -1272,6 +1471,7 @@ function findingPage(mount, cfg) {
       });
       settleRows(rows);
       fresh.update();
+      updateOverdue();
       if (bulk) bulk.prune();
       const wanted = wantedFromHash();
       if (current == null && wanted) show(wanted.key, wanted.project, { validate: wanted.validate });
@@ -1695,9 +1895,9 @@ const pages = {
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
     // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
-    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all" };
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list" };
     const syncUrl = () => {
-      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter }, HOST_DEFAULTS, ["host"]);
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list" }, HOST_DEFAULTS, ["host"]);
       views.refresh();
     };
     const q = searchBox("Search hosts: php, port:3306, tech:nginx, auth:open -host:www", () => {
@@ -1738,6 +1938,7 @@ const pages = {
         paintHeat();
         bulk.prune();
         settleSelection();
+        if (galleryOn) paintGallery();
       };
       chipBtn.set(key, b);
       heatChips.append(b);
@@ -1798,31 +1999,86 @@ const pages = {
       labelOf: (h) => h.host,
       afterRun: () => list.reload(),
       actions: [
-        { label: "Pin", verb: "Pinning", done: "Pinned", run: (h) => api("POST", hostPath(h, "pin"), { pinned: true }) },
-        { label: "Unpin", verb: "Unpinning", done: "Unpinned", run: (h) => api("POST", hostPath(h, "pin"), { pinned: false }) },
+        { label: "Pin", verb: "Pinning", done: "Pinned", prior: (h) => Boolean(h.pinned), run: (h) => api("POST", hostPath(h, "pin"), { pinned: true }), restore: (h, was) => api("POST", hostPath(h, "pin"), { pinned: was }) },
+        { label: "Unpin", verb: "Unpinning", done: "Unpinned", prior: (h) => Boolean(h.pinned), run: (h) => api("POST", hostPath(h, "pin"), { pinned: false }), restore: (h, was) => api("POST", hostPath(h, "pin"), { pinned: was }) },
         {
           label: "Archive",
           verb: "Archiving",
           done: "Archived",
           confirm: (n) => `${n} host${n === 1 ? "" : "s"} will leave active scan scheduling. Their history is kept and you can restore them later.`,
+          prior: (h) => Boolean(h.archived),
           run: (h) => api("POST", hostPath(h, "archive"), { reason: "Archived in bulk from the Hosts page" }),
+          restore: (h, was) => (was ? api("POST", hostPath(h, "archive"), { reason: "Restored state after undo" }) : api("POST", hostPath(h, "restore"), {})),
         },
-        { label: "Restore", verb: "Restoring", done: "Restored", run: (h) => api("POST", hostPath(h, "restore"), {}) },
+        {
+          label: "Restore",
+          verb: "Restoring",
+          done: "Restored",
+          prior: (h) => Boolean(h.archived),
+          run: (h) => api("POST", hostPath(h, "restore"), {}),
+          restore: (h, was) => (was ? api("POST", hostPath(h, "archive"), { reason: "Restored state after undo" }) : api("POST", hostPath(h, "restore"), {})),
+        },
         {
           select: { label: "Criticality", options: [["unknown", "Unknown"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["critical", "Critical"]] },
           verb: "Updating",
           done: "Criticality set on",
+          prior: (h) => hostProfile(h).criticality,
           run: (h, v) => api("POST", hostPath(h, "profile"), { ...hostProfile(h), criticality: v }),
+          restore: (h, was) => api("POST", hostPath(h, "profile"), { ...hostProfile(h), criticality: was }),
         },
         {
           label: "Set owner",
           prompt: { title: "Set the owner", label: "Owner", placeholder: "Team or person responsible", help: "Applied to every selected host. Purpose and criticality are kept." },
           verb: "Updating",
           done: "Owner set on",
+          prior: (h) => hostProfile(h).owner,
           run: (h, v) => api("POST", hostPath(h, "profile"), { ...hostProfile(h), owner: v }),
+          restore: (h, was) => api("POST", hostPath(h, "profile"), { ...hostProfile(h), owner: was }),
         },
       ],
     });
+    // Row menu actions. Each can be undone for ten seconds.
+    async function rowPin(h) {
+      const was = Boolean(h.pinned);
+      try {
+        await api("POST", hostPath(h, "pin"), { pinned: !was });
+      } catch (err) {
+        toast(err.message, true);
+        return;
+      }
+      h.pinned = !was;
+      list.reload();
+      undoNotice(`${was ? "Unpinned" : "Pinned"} ${h.host}`, async () => {
+        try {
+          await api("POST", hostPath(h, "pin"), { pinned: was });
+          h.pinned = was;
+          toast("Undone");
+        } catch (err) {
+          toast(err.message, true);
+        }
+        list.reload();
+      });
+    }
+    async function rowArchive(h) {
+      const sure = await ask(`${h.host} will leave active scan scheduling. Its history is kept and you can restore it later.`, { title: "Archive this host?", ok: "Archive" });
+      if (!sure) return;
+      try {
+        await api("POST", hostPath(h, "archive"), { reason: "Archived from the row menu" });
+      } catch (err) {
+        toast(err.message, true);
+        return;
+      }
+      list.reload();
+      undoNotice(`Archived ${h.host}`, async () => {
+        try {
+          await api("POST", hostPath(h, "restore"), {});
+          toast("Undone");
+        } catch (err) {
+          toast(err.message, true);
+        }
+        list.reload();
+      });
+    }
     const fresh = newToggle(rows);
     const lastLook = sinceLastVisit("hosts", slug);
     let newHosts = new Set();
@@ -1846,9 +2102,101 @@ const pages = {
     }
     const metaRow = el("div", "list-meta");
     const metaTools = el("span", "meta-tools");
-    metaTools.append(fresh.node, bulk.toggle);
+    const csv = exportButton({
+      run: async (progress) => {
+        const { rows, truncated } = await collectAll((page, size) => api("GET", `${base}/search?${query({ q: q.value, sort: sortBy.value, page, page_size: size })}`), progress);
+        const kept = heatFilter === "all" ? rows : rows.filter((h) => (h.heat || "unscanned") === heatFilter);
+        const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => p.number)))];
+        const columns = [
+          { label: "Host", value: (h) => h.host },
+          ...(ALL ? [{ label: "Project", value: (h) => projectOf(h) || "" }] : []),
+          { label: "Temperature", value: (h) => h.heat || "unscanned" },
+          { label: "Score", value: (h) => h.score || 0 },
+          { label: "Target", value: (h) => h.target },
+          { label: "HTTP status", value: (h) => h.http_status },
+          { label: "Addresses", value: (h) => h.ips.map((ip) => ip.address) },
+          { label: "Open ports", value: ports },
+          { label: "Services", value: (h) => h.ips.flatMap((ip) => ip.ports.map((p) => `${p.number} ${[p.product || p.service, p.version].filter(Boolean).join(" ")}`.trim())) },
+          { label: "CVE matches", value: (h) => h.cve_matches || 0 },
+          { label: "Open findings", value: (h) => h.vuln_count || 0 },
+          { label: "Owner", value: (h) => (h.profile || {}).owner },
+          { label: "Criticality", value: (h) => (h.profile || {}).criticality },
+          { label: "Pinned", value: (h) => (h.pinned ? "yes" : "") },
+          { label: "Archived", value: (h) => (h.archived ? "yes" : "") },
+          { label: "Labels", value: (h) => (h.labels || []).map((l) => l.label) },
+        ];
+        return { filename: `cvengine-hosts-${ALL ? "all" : slug}-${stamp()}.csv`, columns, rows: kept, truncated };
+      },
+    });
+    // Gallery: the same hosts as screenshot cards. It shows what has been loaded (and a Load more), narrowed by the same filters.
+    let galleryOn = readParam("view", "list", ["list", "gallery"]) === "gallery";
+    let onlyShots = true;
+    const gallery = el("div", "host-gallery");
+    const galleryHead = el("div", "gallery-head");
+    const galleryGrid = el("div", "gallery-grid");
+    const galleryMore = el("div", "more-row");
+    gallery.append(galleryHead, galleryGrid, galleryMore);
+    const galleryBtn = el("button", "new-toggle gallery-toggle", "Gallery", { type: "button", "aria-pressed": String(galleryOn), title: "Show hosts as screenshots" });
+    galleryBtn.onclick = () => {
+      galleryOn = !galleryOn;
+      applyGallery();
+      syncUrl();
+    };
+    function paintGallery() {
+      galleryHead.textContent = "";
+      galleryGrid.textContent = "";
+      galleryMore.textContent = "";
+      const shown = [...byId.values()].filter((h) => heatFilter === "all" || (h.heat || "unscanned") === heatFilter);
+      const withShot = shown.filter((h) => h.screenshot);
+      const cards = onlyShots ? withShot : shown;
+      const label = el("label", "gallery-only");
+      const box = el("input", "", null, { type: "checkbox" });
+      box.checked = onlyShots;
+      box.onchange = () => {
+        onlyShots = box.checked;
+        paintGallery();
+      };
+      label.append(box, document.createTextNode(` Only hosts with a screenshot (${withShot.length} of ${shown.length})`));
+      galleryHead.append(label);
+      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken when a scan finds a web page." : "No hosts match."));
+      cards.forEach((h) => {
+        const card = el("button", "shot-card", null, { type: "button", "data-heat": h.heat || "unscanned", "aria-label": `Open ${h.host}` });
+        const frame = el("span", "shot-frame");
+        if (h.screenshot) {
+          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/`, alt: "", loading: "lazy", decoding: "async" });
+          img.onerror = () => {
+            img.remove();
+            frame.append(el("span", "shot-none", "No screenshot"));
+          };
+          frame.append(img);
+        } else frame.append(el("span", "shot-none", "No screenshot"));
+        const meta = el("span", "shot-meta");
+        meta.append(el("b", "mono", h.host), el("span", "note", [`score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
+        card.append(frame, meta);
+        card.onclick = () => {
+          galleryOn = false;
+          applyGallery();
+          syncUrl();
+          history.replaceState(null, "", `${location.pathname}${location.search}#${h.id}`);
+          showHost(h);
+        };
+        galleryGrid.append(card);
+      });
+      if (list.left() > 0) {
+        const more = el("button", "btn ghost", `Load more (${list.left()} left)`, { type: "button" });
+        more.onclick = () => list.more();
+        galleryMore.append(more);
+      }
+    }
+    function applyGallery() {
+      split.classList.toggle("gallery", galleryOn);
+      galleryBtn.setAttribute("aria-pressed", String(galleryOn));
+      if (galleryOn) paintGallery();
+    }
+    metaTools.append(fresh.node, galleryBtn, csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, controls, heatChips, metaRow, bulk.bar, rows);
+    side.append(views.node, controls, heatChips, metaRow, bulk.bar, rows, gallery);
+    split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
     let hostTab = "overview";
     let current = null;
@@ -2181,14 +2529,13 @@ const pages = {
       }
       const techBox = technologyTable(h);
       if (techBox) OV.side.append(techBox);
-      const recent = el("div", "recent-changes");
-      S.changes.append(el("h3", "sec", "Recent changes"), recent);
-      api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "30d", page_size: 10 })}`)
+      const history = el("div", "history");
+      S.changes.append(history);
+      api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "365d", page_size: 200 })}`)
         .then((data) => {
           if (current !== h.id) return;
           const items = (data.results || []).filter((c) => c.host === h.host);
           setTabCount("changes", items.length);
-          if (!items.length) recent.append(el("p", "note", "No changes in the last 30 days."));
           const shot = items.find((c) => c.kind === "screenshot_changed" && c.before && c.before.subdomain_id);
           if (shot) {
             // the front page changed: let the previous screenshot be looked at next to the current one
@@ -2206,14 +2553,10 @@ const pages = {
             };
             compareBox.append(toggle, before);
           }
-          items.forEach((c) => {
-            const line = el("div", "find");
-            line.append(badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)), changeCell(c, projectOf(h)), el("span", "note", shortDate(c.detected)));
-            recent.append(line);
-          });
+          buildHistory(history, items, projectOf(h), data.count || items.length);
           foldTabs();
         })
-        .catch(() => recent.append(el("p", "note", "Changes could not be loaded.")));
+        .catch(() => history.append(el("p", "note", "History could not be loaded.")));
       if (h.names && h.names.length) {
         S.services.append(el("h3", "sec", "Names this IP answers to"));
         h.names.forEach(([how, name]) =>
@@ -2288,7 +2631,7 @@ const pages = {
       if (ALL) S.manage.append(assetInfoReadOnly(h));
       else S.manage.append(assetInfo(h), hostActions(h));
       foldTabs();
-      const tabLabels = { overview: "Overview", services: "Services", web: "Web", findings: "Findings", changes: "Changes", manage: "Manage" };
+      const tabLabels = { overview: "Overview", services: "Services", web: "Web", findings: "Findings", changes: "History", manage: "Manage" };
       const findingCount = (h.vulns || []).length;
       const openTab = (name) => {
         hostTab = name;
@@ -2353,6 +2696,13 @@ const pages = {
           if (chip) meta.append(chip);
           row.append(top, meta);
           bulk.decorate(row, h, h.id);
+          attachRowMenu(row, h.host, () => [
+            { section: "copy", label: "Copy hostname", run: () => copyValue(h.host, "hostname") },
+            { section: "copy", label: "Copy link", run: () => copyValue(`${location.origin}${location.pathname}#${h.id}`, "link") },
+            { section: "open", label: "Open in a new tab", run: () => window.open(`${location.pathname}${location.search}#${h.id}`, "_blank", "noopener") },
+            { section: "act", label: h.pinned ? "Unpin" : "Pin", run: () => rowPin(h) },
+            { section: "act", label: "Archive", danger: true, run: () => rowArchive(h) },
+          ], top);
           if (h.matched && h.matched.length) row.append(rowLine(...h.matched.slice(0, 3).flatMap((t, i) => [i ? " · " : "", matchedWhy(t, projectOf(h), h.host)])));
           row.onclick = (e) => {
             const link = e.target.closest("a");
@@ -2368,6 +2718,7 @@ const pages = {
         markNewHosts();
         bulk.prune();
         settleSelection();
+        if (galleryOn) paintGallery();
         const wanted = Number(location.hash.slice(1));
         const named = wantedHost && items.find((h) => h.host === wantedHost);
         if (current == null && named) showHost(named);
@@ -2380,6 +2731,7 @@ const pages = {
       },
     });
     showHost(null);
+    applyGallery();
     list.start();
   },
 
@@ -2467,6 +2819,21 @@ const pages = {
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "findings",
+      csv: {
+        name: "findings",
+        columns: [
+          { label: "Type", value: (f) => f.type },
+          { label: "Severity", value: (f) => f.severity },
+          { label: "Status", value: (f) => f.status },
+          { label: "Title", value: (f) => f.title },
+          { label: "Host", value: (f) => f.host },
+          ...(ALL ? [{ label: "Project", value: (f) => projectOf(f) || "" }] : []),
+          { label: "Temperature", value: (f) => f.heat },
+          { label: "CVSS", value: (f) => f.cvss },
+          { label: "Detected", value: (f) => f.detected },
+          { label: "Note", value: (f) => f.note },
+        ],
+      },
       kind: "vulnerability",
       kindOf: (item) => item.kind,
       forKind: (kind) => (kind === "match" ? { kind, statusControl: matchStatusControl } : { kind }),

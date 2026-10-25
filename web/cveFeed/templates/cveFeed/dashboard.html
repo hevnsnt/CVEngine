@@ -47,6 +47,8 @@
   <a id="n-ai" {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %} title="AI-authored Nuclei templates that passed syntax checks; this is not a count of reviewed or validated findings"><b id="s-templates">-</b><span>AI templates syntax-valid</span></a>
 </nav>
 
+<section class="trends" id="trends" aria-label="Trends" hidden></section>
+
 <section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}">
   {% csrf_token %}
   <div class="card discovery">
