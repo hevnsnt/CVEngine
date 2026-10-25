@@ -50,14 +50,17 @@ def queued_scans(qs=None):
     return (ScanHistory.objects.all() if qs is None else qs).filter(scan_status=-1)
 
 
-def host_reps(domain_id=None):
-    """One row per host (project and name) of the current inventory: the row the Hosts page shows for it."""
+def host_reps(domain_id=None, domain_ids=None):
+    """One row per host (project and name) of the current inventory: the row the Hosts page shows for it. ``domain_id`` (one
+    target) or ``domain_ids`` (several) narrow it to those targets' hosts."""
     from agentapi.services import _one_per_host
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     base = Subdomain.objects.filter(latest_scan_q())
     if domain_id:
         base = base.filter(target_domain_id=domain_id)
+    if domain_ids is not None:
+        base = base.filter(target_domain_id__in=list(domain_ids))
     return _one_per_host(base, per_project=True)
 
 
