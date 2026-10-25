@@ -172,7 +172,8 @@ class _Job:
 class RunTimeHitTests(unittest.TestCase):
 	def _run(self, lines):
 		FakeProc.lines = lines
-		with mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
+		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
+				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
 			return templategen.run_template('/t.yaml', ['www.t.test'])[0]
 
 	def test_an_extractor_only_line_is_not_a_hit(self):
@@ -201,14 +202,16 @@ class RunTimeHitTests(unittest.TestCase):
 		self.assertEqual(out['error'], 'nuclei returned malformed JSON output')
 
 	def test_missing_nuclei_is_not_reported_as_no_match(self):
-		with mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), \
+		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
+				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), \
 				mock.patch.object(templategen.subprocess, 'Popen', side_effect=FileNotFoundError('nuclei')):
 			out = templategen._run_template_with_retry('/t.yaml', ['www.t.test'])
 		self.assertIn('FileNotFoundError', out[0]['error'])
 
 	def test_timeout_is_not_reported_as_no_match(self):
 		import subprocess
-		with mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), \
+		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
+				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), \
 				mock.patch('reNgine.resources.terminate_group'), \
 				mock.patch.object(templategen.subprocess, 'Popen', FakeProc), \
 				mock.patch.object(FakeProc, 'communicate', side_effect=[subprocess.TimeoutExpired('nuclei', 1), ('', '')]):

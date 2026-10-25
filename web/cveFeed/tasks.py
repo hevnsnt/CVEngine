@@ -297,6 +297,7 @@ def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
     from django.utils import timezone
     from cveFeed import activity, correlation, triage, validation, validation_plan
+    from cveFeed.validation_authority import require_authority
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch, OnDemandValidation, ServiceRun, Triage
     from targetApp.target_types import scannable_hosts
@@ -310,6 +311,7 @@ def validate_match_on_demand(request_id):
     progress = activity.log('validate', f'Validation request #{job.pk} running for {cve_id}',
                             project=job.project_id, cve_id=cve_id, status='running', **detail)
     try:
+        require_authority(job)
         match = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id).filter(
             latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
         if not match or not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
@@ -359,6 +361,7 @@ def validate_match_on_demand(request_id):
             ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()
         row.validation_status, row.attempts, row.next_attempt_at = 'pending', 0, None
         row.save(update_fields=['validation_status', 'attempts', 'next_attempt_at', 'updated_at'])
+        require_authority(job)
         check_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=selected)
         # One bounded second decision uses observations from the first checks. A banner cannot end
         # the request while another already-approved, scoped check remains available.
@@ -385,6 +388,7 @@ def validate_match_on_demand(request_id):
             for check in remaining:
                 if check['kind'] in next_kinds:
                     ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()
+            require_authority(job)
             next_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=next_kinds) if next_kinds else {}
             for key in ('ran', 'reused', 'failed', 'blocked', 'capped', 'hits', 'no_check'):
                 check_result[key] = check_result.get(key, 0) + next_result.get(key, 0)
@@ -404,6 +408,7 @@ def validate_match_on_demand(request_id):
         ai_progress = activity.log('confirm', f'Validation request #{job.pk}: AI review started for {cve_id}',
                                    project=job.project_id, cve_id=cve_id, status='running', **detail)
         try:
+            require_authority(job)
             ai_result = triage.run_triage([(row, described)])
         except Exception:
             activity.settle(ai_progress, 'failed', f'Validation request #{job.pk}: AI review failed')
@@ -503,6 +508,7 @@ def automatic_validate_finding(job_id):
     """Review a persisted non-CVE finding; its owning project and target are never task arguments."""
     from django.utils import timezone
     from cveFeed import activity, hot_validation, triage, validation
+    from cveFeed.validation_authority import require_authority
     from cveFeed.diagnostics import worker_failure
     from cveFeed.models import AutomaticValidation, Triage
     from targetApp.target_types import scannable_hosts
@@ -516,6 +522,7 @@ def automatic_validate_finding(job_id):
                             project=job.project_id, status='running', job_id=job.pk, finding_id=job.triage_id)
     stage = 'load_finding'
     try:
+        require_authority(job)
         row = Triage.objects.get(pk=job.triage_id, project_id=job.project_id)
         fresh_row = Triage.objects.select_related(
             'match__cve_entry', 'vulnerability__target_domain', 'route', 'hygiene__domain').get(pk=row.pk)
@@ -546,6 +553,7 @@ def automatic_validate_finding(job_id):
         if row.kind in validation.PLANNED_KINDS:
             activity.log('validate', f'Automatic validation #{job.pk}: running approved checks',
                          project=job.project_id, job_id=job.pk, finding_id=row.pk)
+            require_authority(job)
             checks = validation.run_validation(job.project_id, [row.pk])
             row.refresh_from_db()
             check_state = ('no_check' if checks.get('no_check') and not checks.get('ran') else
@@ -559,6 +567,7 @@ def automatic_validate_finding(job_id):
         stage = 'ai_review'
         activity.log('confirm', f'Automatic validation #{job.pk}: AI review started', project=job.project_id,
                      job_id=job.pk, finding_id=row.pk)
+        require_authority(job)
         ai = triage.run_triage([(row, described)])
         row.refresh_from_db()
         ai_state = ('failed' if ai.get('errors') or row.status == 'error' else

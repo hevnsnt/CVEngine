@@ -136,11 +136,21 @@ def checker_for(port, table=None):
     return None, None
 
 
+def _excluded_names(project):
+    """Authorization checks fail closed, unlike best-effort discovery filtering."""
+    from cveFeed.models import HostExclusion
+    if not project:
+        return frozenset()
+    return frozenset(HostExclusion.objects.filter(org__projects__id=project).values_list('host', flat=True))
+
+
 def run_db_exposure_checks(scan_id, checks=None):
     """One read-only, no-credential connection attempt per database-like port this scan found. Persists
-    a critical Vulnerability for every one that let the attempt through. Never fatal to the scan.
+    a critical Vulnerability for every one that let the attempt through. Checker errors are non-fatal;
+    authorization lookup failures stop this stage before another connection or finding write.
     ``checks`` overrides the {name-fragment: (label, fn)} table (tests inject fakes here)."""
     from cveFeed import activity
+    from cveFeed.exclusions import normalize
     from startScan.models import open_ports
     from targetApp.target_types import is_scannable_ip
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
@@ -152,7 +162,10 @@ def run_db_exposure_checks(scan_id, checks=None):
     domain, project = scan.domain, scan.domain.project_id
     targets = []  # (subdomain, host, port_obj, label, check_fn)
     EVIDENCE.clear()
+    banned = _excluded_names(project)
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
+        if normalize(sub.name) in banned:
+            continue
         for ip in sub.ip_addresses.all():
             if not is_scannable_ip(ip.address):
                 continue
@@ -165,13 +178,20 @@ def run_db_exposure_checks(scan_id, checks=None):
     running = activity.log(
         'run_check', f'Checking {len(targets)} database service(s) on {domain.name} for missing authentication',
         project=project, status='running', scan_id=scan.id)
-    exposed = 0
+    exposed = checked = 0
     # Names that share an address share the service: one probe per (address, port), and the finding goes to every host that
     # answers on it, each with the same evidence (one critical per host stays visible on each host's page).
     groups = {}
     for sub, host, port, label, fn in targets:
         groups.setdefault((host, port.number, label), (fn, []))[1].append(sub)
     for (host, number, label), (fn, subs) in groups.items():
+        # Exclusion is organization-wide even when its author could not purge
+        # this project's records. Recheck at dispatch, not only while planning.
+        banned = _excluded_names(project)
+        subs = [sub for sub in subs if normalize(sub.name) not in banned]
+        if not subs or not is_scannable_ip(host):
+            continue
+        checked += 1
         try:
             is_open = fn(host, number)
         except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
@@ -180,6 +200,10 @@ def run_db_exposure_checks(scan_id, checks=None):
         if not is_open:
             continue
         reply = EVIDENCE.pop((host, number), '')
+        banned = _excluded_names(project)
+        subs = [sub for sub in subs if normalize(sub.name) not in banned]
+        if not subs:
+            continue
         exposed += 1
         for sub in subs:
             vuln, created = save_vulnerability(
@@ -195,5 +219,5 @@ def run_db_exposure_checks(scan_id, checks=None):
                 activity.log('validate', f'{label} on {host}:{number} has no authentication required'
                              + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
     activity.settle(running, 'done', message=(
-        f'Database exposure check for {domain.name}: {exposed} of {len(groups)} service(s) open with no authentication'))
-    return {'checked': len(groups), 'exposed': exposed}
+        f'Database exposure check for {domain.name}: {exposed} of {checked} service(s) open with no authentication'))
+    return {'checked': checked, 'exposed': exposed}

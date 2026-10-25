@@ -6,6 +6,7 @@ from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.http import JsonResponse
+from django.db import transaction
 
 from dashboard.models import ApiToken, OrgMembership, ProjectMembership, UserProfile
 from tenancy import mfa, roles
@@ -38,7 +39,7 @@ def account_payload(user):
         'name': user.get_full_name() or user.username, 'email': user.email,
         'role': 'App Admin' if user.is_superuser else (access[0]['role'] if access else 'No access yet'),
         'access': access, 'is_admin': roles.is_admin_anywhere(user),
-        'mfa_enabled': bool(profile and profile.mfa_enabled), 'mfa_required': any(o['mfa_required'] for o in orgs),
+        'mfa_enabled': bool(profile and profile.mfa_enabled), 'mfa_required': roles.requires_mfa(user),
         'bugbounty_enabled': bool(profile and profile.bugbounty_enabled),
         'must_change_password': bool(profile and profile.must_change_password),
         'tokens': ApiToken.objects.filter(user=user, revoked=False).count(),
@@ -76,6 +77,9 @@ def change_password(request):
     user.set_password(new)
     user.save()
     update_session_auth_hash(request, user)  # keep this session signed in
+    # Like an administrator reset, a password change cuts off bearer tokens: otherwise a token minted
+    # from a stolen session would outlive the very password change meant to end the compromise.
+    ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     profile.must_change_password = False
     profile.save(update_fields=['must_change_password'])
@@ -90,9 +94,11 @@ def mfa_start(request):
     return {'secret': secret, 'uri': mfa.otpauth_uri(secret, request.user.username)}
 
 
+@transaction.atomic
 def mfa_enable(request):
     data, user = _body(request), request.user
-    profile = profile_of(user)
+    initial = profile_of(user)
+    profile = UserProfile.objects.select_for_update().get(pk=initial.pk)
     if profile.mfa_enabled:
         raise AccountError(400, 'two-step sign-in is already on')
     secret = request.session.get(SETUP_SECRET_KEY)
@@ -104,17 +110,19 @@ def mfa_enable(request):
     plain, hashes = mfa.new_recovery_codes()
     profile.mfa_secret, profile.mfa_enabled = secret, True
     profile.recovery_codes, profile.mfa_last_step = hashes, step
-    profile.save()
+    profile.save(update_fields=['mfa_secret', 'mfa_enabled', 'recovery_codes', 'mfa_last_step'])
     request.session.pop(SETUP_SECRET_KEY, None)
     return {**account_payload(user), 'recovery_codes': plain}
 
 
+@transaction.atomic
 def mfa_disable(request):
     data, user = _body(request), request.user
-    profile = profile_of(user)
+    initial = profile_of(user)
+    profile = UserProfile.objects.select_for_update().get(pk=initial.pk)
     if not profile.mfa_enabled:
         raise AccountError(400, 'two-step sign-in is already off')
-    if OrgMembership.objects.filter(user=user, org__require_mfa=True).exists():
+    if roles.requires_mfa(user):
         raise AccountError(400, 'your organization requires two-step sign-in')
     if locked(user):
         raise AccountError(429, 'too many attempts. Try again in a few minutes.')
@@ -123,7 +131,7 @@ def mfa_disable(request):
         raise AccountError(400, 'that code is not valid')
     clear_failures(user)
     profile.mfa_enabled, profile.mfa_secret, profile.recovery_codes = False, '', []
-    profile.save()
+    profile.save(update_fields=['mfa_enabled', 'mfa_secret', 'recovery_codes'])
     return account_payload(user)
 
 

@@ -139,7 +139,7 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 		self.assertIn('out-of-band', validation.readonly_problem(GET_TEMPLATE + '\n# {{interactsh-url}}\n'))
 		self.assertIn('not validated', validation.readonly_problem('id: x\nhttp: [1]\ncode: []\n'))
 		net = 'id: x\nnetwork:\n  - host: ["{{Hostname}}"]\n    inputs:\n      - data: "EVIL"\n'
-		self.assertIn('sends data', validation.readonly_problem(net))
+		self.assertIn('outgoing data', validation.readonly_problem(net))
 		self.assertEqual(validation.readonly_problem('id: x\nnetwork:\n  - host: ["{{Hostname}}"]\n    read-size: 64\n'), '')
 		for bad in ('', ':::', '- a list'):
 			self.assertIn('not validated', validation.readonly_problem(bad))
@@ -573,6 +573,8 @@ class RunValidationTests(ValidationBase):
 			self.run_validation(runners=(runners, calls))
 		self.assertEqual(len(calls), 3)  # today's three already count
 		ServiceRun.objects.update(finished_at=timezone.now() - datetime.timedelta(days=2))
+		from cveFeed.models import ValidationBudget
+		ValidationBudget.objects.update(day=(timezone.now() - datetime.timedelta(days=2)).date())
 		with mock.patch.dict('os.environ', {'CVENGINE_VALIDATE_MAX_PER_DAY': '2'}):
 			self.run_validation(runners=(runners, calls))
 		self.assertEqual(len(calls), 5)
@@ -673,3 +675,75 @@ class TemplateOutcomeFeedTests(ValidationBase):
 			validation.record_template_outcomes(self.cve, [outcome], self.project.id, '/t/cve-2099-1.yaml')
 			row.refresh_from_db()
 			self.assertEqual(row.validation_status, expected)
+
+
+class DurableValidationBudgetTests(ValidationBase):
+    def test_deleted_freshness_rows_do_not_reset_daily_usage(self):
+        self.match()
+        self.rows()
+        runners, calls = self.runners('no_match')
+        with mock.patch.dict('os.environ', {'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY': '4'}):
+            self.run_validation(runners=(runners, calls))
+            ServiceRun.objects.filter(service__startswith='validate:').delete()
+            self.run_validation(runners=(runners, calls))
+            self.assertEqual(len(calls), 4)
+            ServiceRun.objects.filter(service__startswith='validate:').delete()
+            third, _ = self.run_validation(runners=(runners, calls))
+        self.assertEqual((len(calls), third['capped']), (4, 2))
+        self.assertEqual(validation.ran_today(self.project.pk), 4)
+        self.assertEqual(validation.ran_today(), 4)
+
+    def test_reused_checks_do_not_reserve_again(self):
+        self.match()
+        self.rows()
+        self.run_validation()
+        reused, _ = self.run_validation()
+        self.assertEqual(reused['reused'], 2)
+        self.assertEqual(validation.ran_today(self.project.pk), 2)
+
+    def test_failed_checks_keep_their_reservations(self):
+        self.match()
+        self.rows()
+        runners, calls = self.runners('raise')
+        with mock.patch.dict('os.environ', {'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY': '2'}):
+            self.run_validation(runners=(runners, calls))
+            ServiceRun.objects.filter(service__startswith='validate:').delete()
+            Triage.objects.update(next_attempt_at=None)
+            capped, _ = self.run_validation(runners=(runners, calls))
+        self.assertEqual((len(calls), capped['capped']), (2, 2))
+
+    def test_accounting_failure_prevents_the_check(self):
+        self.match()
+        self.rows()
+        runners, calls = self.runners()
+        with mock.patch('cveFeed.validation._reserve_validation_check', side_effect=RuntimeError('database unavailable')):
+            with self.assertRaises(RuntimeError):
+                self.run_validation(runners=(runners, calls))
+        self.assertEqual(calls, [])
+
+
+from django.test import TransactionTestCase
+from django.db import connection, close_old_connections
+
+
+@unittest.skipUnless(connection.vendor == 'postgresql', 'requires PostgreSQL row locks')
+class ValidationBudgetConcurrencyTests(TransactionTestCase):
+    def test_two_projects_cannot_both_spend_the_last_global_slot(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        gate = Barrier(2)
+
+        def reserve(project_id):
+            close_old_connections()
+            try:
+                gate.wait(timeout=5)
+                return validation._reserve_validation_check(project_id)
+            finally:
+                close_old_connections()
+
+        with mock.patch.dict('os.environ', {'CVENGINE_VALIDATE_MAX_PER_DAY': '1'}):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(reserve, project_id) for project_id in (101, 102)]
+                admitted = [future.result(timeout=10) for future in futures]
+        self.assertEqual(sorted(admitted), [False, True])
+        self.assertEqual(validation.ran_today(), 1)

@@ -30,7 +30,7 @@ SUPERUSER_ONLY = re.compile(
 # settings are global singletons in reNgine, so they are instance-wide above).
 ADMIN_ONLY = re.compile(r'^/(?!)')
 # Bug bounty workflow: opt-in per user and Pentester or Admin role.
-BUGBOUNTY = re.compile(r'(hackerone|bountyhub)', re.I)
+BUGBOUNTY = re.compile(r'(hackerone|bountyhub|vulnerability/report)', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
 ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$))')
 
@@ -180,6 +180,13 @@ def user_org_ids(user):
     from dashboard.models import OrgMembership, ProjectMembership
     return (set(OrgMembership.objects.filter(user=user).values_list('org_id', flat=True)) |
             set(ProjectMembership.objects.filter(user=user).values_list('project__org_id', flat=True)))
+
+
+def requires_mfa(user):
+    """Organization MFA policy also covers members assigned directly to its projects."""
+    from dashboard.models import OrgMembership, ProjectMembership
+    return (OrgMembership.objects.filter(user=user, org__require_mfa=True).exists()
+            or ProjectMembership.objects.filter(user=user, project__org__require_mfa=True).exists())
 
 
 def can_manage_credentials(actor, target):

@@ -183,7 +183,9 @@ queued = sum(len(start_discoveries(domains, mode=mode, quiet=True)) for mode, do
 print("REQUEUED", queued)
 PY
 )
-requeue_file=web/.update-requeue.json
+# Pending scan work is host-private; a writable web mount must not control
+# files that the host updater reads and rewrites as its own user.
+requeue_file=$(git rev-parse --git-path cvengine-update/requeue.json)
 
 # Published host ports that something other than Docker already holds, from the Compose config
 # and the kernel's listening sockets. One line per conflict: service, address, port, owner.
@@ -317,11 +319,13 @@ if (( check_only )); then
     exit 0
 fi
 
+STATE=$(python3 scripts/update-state.py directory)
+requeue_file="$STATE/requeue.json"
 if (( after_fetch )); then
     # Re-exec of the just-fetched script, still holding descriptor 9 and the updater lock.
     flock -n 9 || die "Updater lock was not inherited."
 else
-    exec 9>web/.update-lock
+    exec 9>"$STATE/update.lock"
     flock -n 9 || die "Another update is running."
     step "Fetching the latest master"
     from_commit=$(git rev-parse --short HEAD)
@@ -347,6 +351,7 @@ revert_unmigrated() {
     fi
 }
 trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT
+python3 scripts/update-state.py migrate-requeue "$requeue_file"
 "${compose[@]}" config --quiet
 diagnostic_log=$(mktemp /tmp/cvengine-update.XXXXXX)
 chmod 600 "$diagnostic_log"
@@ -657,7 +662,7 @@ while (( SECONDS < deadline )); do
     status=$(curl -k -s --max-time 5 -o /dev/null -w '%{http_code}' \
         "$ready_url" || true)
     if [[ "$status" =~ ^[23][0-9][0-9]$ ]] && worker_queues_ready && beat_ready; then
-        git rev-parse HEAD > web/.commit
+        python3 scripts/update-state.py commit "$(git rev-parse HEAD)"
         dispatch_paused=0
         requeued=''
         if [[ -s $requeue_file ]]; then

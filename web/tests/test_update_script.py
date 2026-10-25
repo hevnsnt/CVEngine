@@ -95,6 +95,7 @@ class UpdateScriptCase(unittest.TestCase):
         self.git('checkout', '-b', 'master', cwd=self.work)
         (self.work / 'scripts').mkdir()
         shutil.copy(SCRIPT, self.work / 'scripts' / 'update.sh')
+        shutil.copy(SCRIPT.with_name('update-state.py'), self.work / 'scripts' / 'update-state.py')
         (self.work / 'web').mkdir()
         (self.work / 'web' / 'README').write_text('v1\n')
         (self.work / 'docker-compose.yml').write_text('services: {}\n')
@@ -122,6 +123,36 @@ class UpdateScriptCase(unittest.TestCase):
 
 @unittest.skipUnless(SCRIPT.is_file() and shutil.which('git') and shutil.which('flock'), 'needs git and flock')
 class ManualUpdateTests(UpdateScriptCase):
+    def test_shared_web_state_symlinks_never_write_host_targets(self):
+        victim = self.tmp / 'host-only'
+        victim.write_text('unchanged')
+        for name in ('.update-lock', '.commit'):
+            (self.work / 'web' / name).symlink_to(victim)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(victim.read_text(), 'unchanged')
+        self.assertFalse((self.work / 'web' / '.commit').is_symlink())
+        self.assertTrue((self.work / '.git' / 'cvengine-update' / 'update.lock').is_file())
+
+    def test_legacy_scan_plan_is_imported_and_requeued_once(self):
+        (self.stub / 'web_up').touch()
+        legacy = self.work / 'web' / '.update-requeue.json'
+        legacy.write_text('[{"scan": 5, "domain": 2, "mode": "passive"}]')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(legacy.exists())
+        self.assertIn('"mode": "passive"', (self.stub / 'requeue_env').read_text())
+        self.assertFalse((self.work / '.git' / 'cvengine-update' / 'requeue.json').exists())
+
+    def test_legacy_symlink_plan_is_rejected_without_reading_or_writing_it(self):
+        victim = self.tmp / 'host-only'
+        victim.write_text('[{"scan": 5, "domain": 2, "mode": "deep"}]')
+        (self.work / 'web' / '.update-requeue.json').symlink_to(victim)
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(victim.read_text(), '[{"scan": 5, "domain": 2, "mode": "deep"}]')
+        self.assertFalse(any(' build ' in c or 'cancel_consumer' in c for c in self.calls()))
+
     def test_migrates_then_recreates_apps_and_requires_all_worker_queues(self):
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -469,7 +500,7 @@ class UpdateLayoutAndScanTests(UpdateScriptCase):
         self.assertLess(calls.index('--force-recreate web'), calls.index('start_discoveries'))
         self.assertIn('"mode": "deep"', (self.stub / 'requeue_env').read_text())
         self.assertIn('Queued 1 stopped scan(s) again', result.stdout)
-        self.assertFalse((self.work / 'web' / '.update-requeue.json').exists())
+        self.assertFalse((self.work / '.git' / 'cvengine-update' / 'requeue.json').exists())
 
     def test_stopped_scans_survive_a_failed_update_for_the_next_run(self):
         (self.stub / 'web_up').touch()
@@ -479,7 +510,7 @@ class UpdateLayoutAndScanTests(UpdateScriptCase):
                                 capture_output=True, text=True, timeout=45)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Stopped scans are saved', result.stderr)
-        saved = self.work / 'web' / '.update-requeue.json'
+        saved = self.work / '.git' / 'cvengine-update' / 'requeue.json'
         self.assertTrue(saved.exists())
         self.assertEqual(oct(saved.stat().st_mode & 0o777), '0o600')
         (self.stub / 'migrate_fail').unlink()

@@ -94,10 +94,11 @@ def build_targets(ips, limit=MAX_TARGETS):
     return sorted({i for i in ips if i})[:limit]
 
 
-def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None):
+def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, before_launch=None):
     """Write ``targets`` to a scratch file and run nmap against them, returning its XML report text. The run waits its
     turn for memory (as heavy job ``kind``, for at most ``wait_timeout`` seconds) and raises reNgine.resources.MemoryKill if it
-    had to be stopped to protect the container."""
+    had to be stopped to protect the container. ``before_launch`` may raise to revoke a job after memory admission,
+    immediately before process creation; it must re-read any authorization state that could change during the wait."""
     from reNgine import resources
     timeout = HOST_GROUPS_ALLOWED * _minutes(host_timeout) * 60 + PROCESS_TIMEOUT_BUFFER
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
@@ -107,6 +108,8 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None):
     try:
         label = ', '.join(targets[:3]) if kind != 'nmap' else f'{len(targets)} host(s)'
         with resources.heavy_job(kind, label=label, wait_timeout=wait_timeout) as job:
+            if before_launch is not None:
+                before_launch()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
             try:

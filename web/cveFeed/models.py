@@ -187,6 +187,8 @@ class OnDemandValidation(models.Model):
     match = models.ForeignKey(CVEMatch, on_delete=models.CASCADE, related_name='validation_requests')
     project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')
     requested_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, related_name='+')
+    source = models.CharField(max_length=12, default='automatic')  # automatic | manual | legacy
+    requested_token_id = models.PositiveBigIntegerField(null=True, blank=True)  # retained after token deletion
     evidence_signature = models.CharField(max_length=40, blank=True, default='')
     priority = models.PositiveSmallIntegerField(default=3)  # Redis 0 Fire, 3 manual, 6 Smoke
     status = models.CharField(max_length=12, default='queued')  # queued | running | completed | failed
@@ -229,6 +231,7 @@ class AutomaticValidation(models.Model):
     priority = models.PositiveSmallIntegerField(default=6)  # Redis transport: 0 Fire, 3 manual, 6 Smoke
     source = models.CharField(max_length=12, default='automatic')  # automatic | manual
     requested_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    requested_token_id = models.PositiveBigIntegerField(null=True, blank=True)  # retained after token deletion
     status = models.CharField(max_length=12, default='queued')  # queued | running | completed | failed
     attempts = models.PositiveSmallIntegerField(default=0)
     next_attempt_at = models.DateTimeField(null=True, blank=True)
@@ -742,6 +745,17 @@ class TriageVerdict(models.Model):
 
     def __str__(self):
         return f"{self.kind} {self.signature[:8]} -> {self.classification}"
+
+
+class ValidationBudget(models.Model):
+    """Durable admitted check attempts, independent of mutable freshness rows."""
+
+    day = models.DateField()
+    scope = models.CharField(max_length=64)
+    reserved = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['day', 'scope'], name='uniq_validation_budget_day_scope')]
 
 
 class TriageCall(models.Model):

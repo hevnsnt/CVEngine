@@ -4,6 +4,8 @@ Pages are server-rendered shells; the live parts poll the small JSON endpoints
 below, so the UI updates on its own without a reload.
 """
 import json
+import logging
+import re
 from urllib.parse import quote
 from collections import Counter
 from datetime import timedelta
@@ -22,6 +24,8 @@ from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, Disc
 from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_temperature
 from startScan.models import open_ports
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
+
+logger = logging.getLogger(__name__)
 
 FEED_PAGE = 30
 FEED_MAX = 100
@@ -722,7 +726,8 @@ def api_onboarding_save(request):
             else:
                 provider.complete('Reply with the single word: ok', 'ping')
     except AIProviderError as exc:
-        return JsonResponse({'ok': False, 'provider': provider_name, 'error': str(exc)[:300]}, status=400)
+        logger.warning('AI provider connection test failed for %s: %s', provider_name, re.sub(r'//[^/@\s]+@', '//[redacted]@', str(exc)))  # never log URL credentials
+        return JsonResponse({'ok': False, 'provider': provider_name, 'error': 'The connection test failed. Check the address, key and model; the details are in the server log.'}, status=400)
     cfg = previous or AIProviderSettings()
     if cfg.provider != provider_name:
         cfg.base_url = ''

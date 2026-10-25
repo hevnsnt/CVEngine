@@ -218,6 +218,12 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
     try:
+        # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
+        # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
+        from targetApp.target_types import resolves_to_blocked
+        if resolves_to_blocked(scan.domain.name):
+            raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
+                             'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
         for attempt, run_mode in enumerate(modes):
             try:
                 for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,

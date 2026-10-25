@@ -78,11 +78,10 @@ class TenancyMiddleware:
     @staticmethod
     def must_enrol_mfa(user):
         """True when the user belongs to an organization that requires MFA and has not enrolled."""
-        from dashboard.models import OrgMembership
         profile = getattr(user, 'tenancy_profile', None)
         if profile and profile.mfa_enabled:
             return False
-        return OrgMembership.objects.filter(user=user, org__require_mfa=True).exists()
+        return roles.requires_mfa(user)
 
     @classmethod
     def _require_mfa(cls, request, user):

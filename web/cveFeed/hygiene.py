@@ -10,6 +10,7 @@ import datetime
 import logging
 import re
 import socket
+from cveFeed import pinned_transport
 import ssl
 from dataclasses import dataclass, field
 
@@ -266,7 +267,7 @@ def _legacy_context():
     return ctx
 
 
-def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False):
+def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
     """Connect without verification (so broken certs can still be read), return a plain info dict or None."""
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -277,12 +278,13 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False):
             return None
     else:
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: the legacy check below is the only place old protocols are spoken
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
-        with socket.create_connection((host, port), timeout=timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
             der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
-    except (OSError, ssl.SSLError, socket.timeout):
+    except (OSError, ssl.SSLError, socket.timeout, ValueError):
         return None
     cert = x509.load_der_x509_certificate(der)
     try:
@@ -303,35 +305,40 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False):
             'key_description': key, 'protocol': protocol, 'cipher': cipher}
 
 
-def _chain_error(host, port, timeout=TLS_TIMEOUT):
+def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
     """Empty string if the system trust store accepts the certificate for this host, else the reason."""
     ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
-        with socket.create_connection((host, port), timeout=timeout) as raw, ctx.wrap_socket(raw, server_hostname=host):
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host):
             return ''
     except ssl.SSLCertVerificationError as exc:
         return (exc.verify_message or str(exc))[:300]
-    except (OSError, ssl.SSLError):
+    except (OSError, ssl.SSLError, ValueError):
         return ''
 
 
-def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT):
+def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None):
     """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
     try:
         ctx = _legacy_context()
-        with socket.create_connection((host, port), timeout=timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
             return tls.version() in ('TLSv1', 'TLSv1.1')
     except (OSError, ssl.SSLError, ValueError):
         return False
 
 
 def probe_tls(host, port):
-    info = _fetch_cert(host, port)
+    try:
+        addresses = pinned_transport.resolve(host, port)
+    except (OSError, ValueError):
+        return None
+    info = _fetch_cert(host, port, addresses=addresses)
     if info:
-        info['chain_error'] = _chain_error(host, port)
-        info['legacy_tls'] = _accepts_legacy_tls(host, port)
+        info['chain_error'] = _chain_error(host, port, addresses=addresses)
+        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses)
         return info
-    info = _fetch_cert(host, port, legacy=True)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
+    info = _fetch_cert(host, port, legacy=True, addresses=addresses)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
     if info:
         info['chain_error'] = 'cannot be verified: the server only speaks TLS 1.0 / 1.1'
         info['legacy_tls'] = True

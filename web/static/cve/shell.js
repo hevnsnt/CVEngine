@@ -13,6 +13,8 @@ function projectHref(value, here) {
 // --- project switcher (sidebar and sheet) -------------------------------------------------
 $$("select.proj").forEach((sel) => {
   sel.addEventListener("change", () => {
+    // Only a project slug (or the reserved "_all") may become part of the address.
+    if (sel.value && !/^[-\w]+$/.test(sel.value)) return;
     window.location.href = projectHref(sel.value, sel.dataset.section);
   });
 });

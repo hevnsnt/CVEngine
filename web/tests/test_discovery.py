@@ -28,6 +28,19 @@ class DiscoveryTests(TestCase):
 		self.project = Project.objects.create(name='P', slug='pd', insert_date=timezone.now(), org=org)
 		self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests
+		self.resolves_to_blocked = patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_domain_resolving_to_a_blocked_address_is_never_handed_to_bbot(self):
+		scan = self._scan()
+		self.resolves_to_blocked.return_value = True
+		stream = mock.Mock(side_effect=AssertionError('bbot must not start'))
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=stream)
+		self.assertEqual(out['status'], discovery.FAILED)
+		self.assertIn('resolves to a loopback, link-local or internal address', out['error'])
+		stream.assert_not_called()
 
 	def _scan(self):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:

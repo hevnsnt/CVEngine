@@ -64,9 +64,12 @@ class AliveProbeTests(SimpleTestCase):
 		threading.Thread(target=server.serve_forever, daemon=True).start()
 		self.addCleanup(server.server_close)
 		self.addCleanup(server.shutdown)
-		self.assertTrue(zombie.http_alive('old.example.test', '127.0.0.1', server.server_address[1], 'http'))
-		self.assertEqual(HostHandler.hosts, ['old.example.test'])
-		self.assertFalse(zombie.http_alive('old.example.test', '127.0.0.1', 1, 'http'))
+		# The probe refuses loopback by design; this fixture is the only loopback server involved.
+		with mock.patch('cveFeed.pinned_transport.is_scannable_ip', return_value=True):
+			self.assertTrue(zombie.http_alive('old.example.test', '127.0.0.1', server.server_address[1], 'http'))
+			self.assertEqual(HostHandler.hosts, ['old.example.test'])
+			self.assertFalse(zombie.http_alive('old.example.test', '127.0.0.1', 1, 'http'))
+		self.assertFalse(zombie.http_alive('old.example.test', '127.0.0.1', server.server_address[1], 'http'))  # gate on: refused
 
 
 class ZombieHostTests(ChangeFixture, TestCase):

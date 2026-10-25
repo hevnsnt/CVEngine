@@ -31,6 +31,19 @@ class PatternTests(SimpleTestCase):
 	def types(self, text):
 		return set(sv.scan_text(text))
 
+	def test_scanning_a_hostile_64kb_body_takes_linear_time(self):
+		# Before the repeats were bounded these cost 1 to 35 seconds each on one worker thread.
+		import time
+		bodies = ('a' * 65536, 'a-' * 32768, 'a.' * 32768, 'a@' * 32768, 'eyJ' + 'a' * 65000, ('eyJ' + 'a' * 12 + '.') * 4000)
+		started = time.monotonic()
+		for body in bodies:
+			sv.scan_text(body)
+		self.assertLess(time.monotonic() - started, 2.0)
+
+	def test_bounded_patterns_still_find_ordinary_values(self):
+		found = sv.scan_text('write alice.smith@mail.acme-corp.io, host db1.prod.corp.local, ip 10.1.2.3')
+		self.assertEqual({'email', 'internal_host', 'internal_ip'}, set(found))
+
 	def test_each_credential_pattern_matches_and_near_misses_do_not(self):
 		for name, value in (('aws_key', AWS_KEY), ('github_token', GITHUB), ('slack_token', SLACK), ('stripe_key', STRIPE),
 				('google_key', GOOGLE), ('jwt', JWT), ('private_key', PEM)):
