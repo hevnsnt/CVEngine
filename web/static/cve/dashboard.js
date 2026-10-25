@@ -155,18 +155,22 @@ function hostsHref(name, project) {
   return where ? `/cve/${encodeURIComponent(where)}/hosts/?host=${encodeURIComponent(name)}` : "#";
 }
 
+const MAP_LIMIT = 100; // the map shows the highest-scoring hosts; the legend still counts every host
+
 function drawMap(nodes) {
   const hosts = nodes.filter((n) => n.kind === "subdomain");
   const map = $("map");
   const counts = {};
   const seen = new Set();
-  map.dataset.size = hosts.length <= 12 ? "xl" : hosts.length <= 60 ? "l" : "s";
+  const heatOf = (h) => (HEAT_ORDER.includes(h.heat) ? h.heat : "unscanned");
+  hosts.forEach((h) => (counts[heatOf(h)] = (counts[heatOf(h)] || 0) + 1));
   const ordered = hosts
     .slice()
-    .sort((a, b) => (b.score || 0) - (a.score || 0) || HEAT_ORDER.indexOf(a.heat) - HEAT_ORDER.indexOf(b.heat) || a.label.localeCompare(b.label));
+    .sort((a, b) => (b.score || 0) - (a.score || 0) || HEAT_ORDER.indexOf(a.heat) - HEAT_ORDER.indexOf(b.heat) || a.label.localeCompare(b.label))
+    .slice(0, MAP_LIMIT);
+  map.dataset.size = ordered.length <= 12 ? "xl" : ordered.length <= 60 ? "l" : "s";
   const cellsInOrder = ordered.map((h, i) => {
-    const heat = HEAT_ORDER.includes(h.heat) ? h.heat : "unscanned";
-    counts[heat] = (counts[heat] || 0) + 1;
+    const heat = heatOf(h);
     seen.add(h.id);
     let cell = cells.get(h.id);
     if (!cell) {
@@ -222,7 +226,8 @@ function drawMap(nodes) {
   const empty = map.querySelector(".map-empty");
   if (!hosts.length && !empty) map.append(el("span", "map-empty", "No hosts yet. Add a target and they appear here."));
   else if (hosts.length && empty) empty.remove();
-  $("map-count").textContent = hosts.length ? `${hosts.length} host${hosts.length === 1 ? "" : "s"}` : "";
+  $("map-count").textContent = !hosts.length ? "" : hosts.length > ordered.length
+    ? `Top ${ordered.length} of ${hosts.length} hosts` : `${hosts.length} host${hosts.length === 1 ? "" : "s"}`;
   const sig = HEAT_ORDER.map((k) => counts[k] || 0).join(",");
   const legend = $("map-legend");
   if (legend.dataset.sig !== sig) {

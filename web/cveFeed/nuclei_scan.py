@@ -45,6 +45,55 @@ _APPROVED = {'root': None, 'at': 0, 'value': None}
 _APPROVED_LOCK = threading.Lock()
 
 
+# Templates whose absence quietly removes a whole capability: their exclusion is an error, not a policy statistic.
+ESSENTIAL_TEMPLATES = ('http/technologies/tech-detect.yaml',)
+NO_TEMPLATES = re.compile(r'no (valid )?templates (were )?(provided|found|loaded)', re.I)
+ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+
+def _policy_reason(problem):
+    """A skip reason without the per-template detail, so equal reasons count together ("forbidden key 'payloads'")."""
+    reason = re.sub(r'^template not validated: ', '', str(problem)).strip()
+    return re.sub(r'\d+', 'N', reason)[:90]
+
+
+def _report_policy(revision, count, skipped, essential_skipped):
+    """Put the outcome of a template-policy snapshot in the activity and error log, once per snapshot revision for all processes.
+    An empty snapshot, or an essential template the policy excluded, is logged as failed; otherwise a done line with the counts."""
+    total = count + sum(skipped.values())
+    top = ', '.join(f'{reason} ({n})' for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1])[:4])
+    message = f'Nuclei template policy approved {count:,} of {total:,} installed templates'
+    if skipped:
+        message += f'; skipped: {top}'
+    failed = not count or bool(essential_skipped)
+    if essential_skipped:
+        message = (f'Nuclei template policy excludes {", ".join(sorted(essential_skipped))} '
+                   f'({"; ".join(sorted(set(essential_skipped.values())))}), so that detection does not run. ' + message)
+    (logger.error if failed else logger.info)('%s', message)
+    try:
+        from django.core.cache import cache
+        if not cache.add(f'cvengine:nuclei-policy-logged:{revision}', 1, timeout=7 * 86400):
+            return
+    except Exception:  # noqa: BLE001 - without the cache every process logs its own snapshot
+        pass
+    from cveFeed import activity
+    activity.log('run_check', message, status='failed' if failed else 'done', approved=count, installed=total,
+                 skipped=dict(sorted(skipped.items(), key=lambda kv: -kv[1])[:10]), essential_excluded=essential_skipped)
+
+
+def _stderr_reason(stream):
+    """The line of nuclei's stderr that says why it stopped (its last fatal or error line, else its last line), cleaned."""
+    try:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - 8192))
+        lines = [ANSI.sub('', line).strip() for line in stream.read().splitlines()]
+    except (OSError, ValueError):
+        return ''
+    lines = [line for line in lines if line]
+    pick = next((line for line in reversed(lines) if re.search(r'\[(FTL|ERR)\]|could not|error', line, re.I)), lines[-1] if lines else '')
+    return ''.join(c for c in pick if c.isprintable())[:200]
+
+
 def approved_templates():
     with _APPROVED_LOCK:
         return _approved_templates_locked()
@@ -61,7 +110,7 @@ def _approved_templates_locked():
         raise RuntimeError('Nuclei template library is unavailable')
     dest = tempfile.mkdtemp(prefix='cvengine-approved-nuclei-')
     digest = hashlib.sha256(TEMPLATE_POLICY_REV.encode())
-    count = 0
+    count, skipped, essential_skipped = 0, {}, {}
     try:
         for base, dirs, files in os.walk(root):
             dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(base, d)))
@@ -76,9 +125,15 @@ def _approved_templates_locked():
                         content = source.read(validation.MAX_INSTALLED_TEMPLATE_BYTES + 1)
                 except OSError:
                     continue
-                if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES or validation.readonly_problem(content.decode('utf-8', 'replace')):
-                    continue
                 relative = os.path.relpath(path, root)
+                problem = ('larger than the template size limit' if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES
+                           else validation.readonly_problem(content.decode('utf-8', 'replace')))
+                if problem:
+                    reason = _policy_reason(problem)
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                    if relative in ESSENTIAL_TEMPLATES:
+                        essential_skipped[relative] = reason
+                    continue
                 target = os.path.join(dest, relative)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with open(target, 'wb') as copy:
@@ -87,12 +142,14 @@ def _approved_templates_locked():
                 digest.update(content)
                 count += 1
         if not count:
+            _report_policy(TEMPLATE_POLICY_REV, 0, skipped, essential_skipped)
             raise RuntimeError('No installed Nuclei templates passed the read-only policy')
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
         raise
     old = _APPROVED['value']
     revision = digest.hexdigest()[:12]
+    _report_policy(revision, count, skipped, essential_skipped)
     if old and old[1] == revision and os.path.isdir(old[0]):
         shutil.rmtree(dest, ignore_errors=True)
         _APPROVED['at'] = time.monotonic()
@@ -180,9 +237,9 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
         label = 'targets'
     kind = 'nuclei-light' if profile == 'light' or tech else 'nuclei'
     approved_dir, _, _ = approved_templates()
-    with resources.heavy_job(kind, label=label) as job:
+    with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
         proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir)], stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True)
+                                stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)
         timed_out = threading.Event()
         def expire():
@@ -192,6 +249,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
         timer.start()
         completed = False
         malformed = False
+        yielded = 0
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -203,6 +261,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
                     malformed = True
                     continue
                 if isinstance(row, dict):
+                    yielded += 1
                     yield row
                 else:
                     malformed = True
@@ -213,8 +272,16 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
                 resources.terminate_group(proc, grace=5)
             proc.wait()
             job.raise_if_killed()
-        if completed and (timed_out.is_set() or proc.returncode):
-            raise RuntimeError('Nuclei timed out' if timed_out.is_set() else f'Nuclei exited with status {proc.returncode}')
+        if completed and timed_out.is_set():
+            raise RuntimeError('Nuclei timed out')
+        if completed and proc.returncode:
+            reason = _stderr_reason(stderr)
+            if not yielded and NO_TEMPLATES.search(reason):
+                # nuclei exits 1 when the approved library holds no template for these tags: nothing ran, nothing failed
+                logger.info('nuclei: no approved template matched %s; nothing to run', ','.join(sorted(tags or [])) or 'this selection')
+                return
+            logger.error('nuclei exited with status %s: %s', proc.returncode, reason or 'no error output')
+            raise RuntimeError(f'Nuclei exited with status {proc.returncode}' + (f': {reason}' if reason else ''))
         if completed and malformed:
             raise RuntimeError('Nuclei returned malformed JSON output')
 

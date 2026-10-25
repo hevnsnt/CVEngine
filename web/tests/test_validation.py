@@ -51,8 +51,9 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 			with open(os.path.join(directory, 'write.yaml'), 'w') as output:
 				output.write(GET_TEMPLATE.replace('method: GET', 'method: POST'))
 			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch.dict(nuclei_scan._APPROVED,
-				{'root': None, 'at': 0, 'value': None}):
+				{'root': None, 'at': 0, 'value': None}), mock.patch.object(nuclei_scan, '_report_policy') as report:
 				approved, revision, count = nuclei_scan.approved_templates()
+				self.assertEqual(report.call_args.args[1:3], (1, {'http method POST is not read-only': 1}))
 				try:
 					self.assertEqual(count, 1)
 					self.assertTrue(os.path.isfile(os.path.join(approved, 'safe.yaml')))
@@ -81,6 +82,54 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 					mock.patch.object(nuclei_scan.subprocess, 'Popen', return_value=Process()):
 				with self.assertRaisesRegex(RuntimeError, 'exited with status 2'):
 					list(nuclei_scan.stream_nuclei(targets.name, timeout=1))
+
+	def run_stream(self, returncode, stderr_text, stdout=''):
+		import io
+		class Job:
+			def __enter__(self): return self
+			def __exit__(self, *args): return False
+			def attach(self, proc): pass
+			def raise_if_killed(self): pass
+		class Process:
+			def __init__(self, stderr):
+				stderr.write(stderr_text)
+				self.stdout, self.returncode = io.StringIO(stdout), returncode
+			def poll(self): return self.returncode
+			def wait(self): return self.returncode
+		with tempfile.NamedTemporaryFile('w') as targets:
+			targets.write('www.example.test\n')
+			targets.flush()
+			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
+					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
+					mock.patch.object(nuclei_scan.subprocess, 'Popen', side_effect=lambda *a, **kw: Process(kw['stderr'])):
+				return list(nuclei_scan.stream_nuclei(targets.name, timeout=1, tags=['wordpress']))
+
+	def test_a_failed_nuclei_run_says_why(self):
+		with self.assertLogs('cveFeed.nuclei_scan', 'ERROR'), \
+				self.assertRaisesRegex(RuntimeError, r'status 1: \[FTL\] Could not create runner: bad flag'):
+			self.run_stream(1, '\x1b[31m[FTL]\x1b[0m Could not create runner: bad flag\n')
+
+	def test_no_approved_template_for_the_tags_is_an_empty_run_not_a_failure(self):
+		self.assertEqual(self.run_stream(1, '[FTL] Could not run nuclei: no templates provided for scan\n'), [])
+		with self.assertRaises(RuntimeError):  # results then a fatal exit is still a failure
+			self.run_stream(1, '[FTL] Could not run nuclei: no templates provided for scan\n', stdout='{"host": "x"}\n')
+
+	def test_policy_report_logs_an_excluded_essential_template_as_failed_once_per_revision(self):
+		from django.core.cache import cache
+		cache.delete('cvengine:nuclei-policy-logged:rev-a')
+		with mock.patch('cveFeed.activity.log') as log, self.assertLogs('cveFeed.nuclei_scan', 'ERROR'):
+			nuclei_scan._report_policy('rev-a', 10, {"forbidden key 'host-redirects'": 4},
+									   {'http/technologies/tech-detect.yaml': "forbidden key 'host-redirects'"})
+			nuclei_scan._report_policy('rev-a', 10, {"forbidden key 'host-redirects'": 4},
+									   {'http/technologies/tech-detect.yaml': "forbidden key 'host-redirects'"})
+		log.assert_called_once()
+		self.assertEqual(log.call_args.kwargs['status'], 'failed')
+		self.assertIn('tech-detect.yaml', log.call_args.args[1])
+		self.assertIn('approved 10 of 14', log.call_args.args[1])
+		cache.delete('cvengine:nuclei-policy-logged:rev-b')
+		with mock.patch('cveFeed.activity.log') as log:
+			nuclei_scan._report_policy('rev-b', 10, {'x': 1}, {})
+		self.assertEqual(log.call_args.kwargs['status'], 'done')
 
 	def test_broad_nuclei_malformed_output_is_not_clean(self):
 		import io
@@ -479,6 +528,30 @@ class RunValidationTests(ValidationBase):
 		self.assertEqual((row.classification, row.validation_status), ('confirmed', 'hit'))
 		self.assertEqual(len(row.validation_steps), 2)
 		self.assertEqual(ServiceRun.objects.filter(service__startswith='validate:').count(), 2)
+
+	def test_a_global_pause_stops_the_run_before_its_next_check(self):
+		from cveFeed.models import ScanControl
+		self.match()
+		self.rows()
+		runners, calls = self.runners('no_match')
+		first = runners['nuclei_template']
+
+		def pause_after_first(check):
+			ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+			return first(check)
+		runners['nuclei_template'] = pause_after_first
+		stats, _ = self.run_validation(runners=(runners, calls))
+		self.assertTrue(stats['stopped'])
+		self.assertEqual([c[0] for c in calls], ['nuclei_template'])  # nmap_sv never started
+
+	def test_a_check_that_crashes_stores_a_diagnostic_not_the_exception_text(self):
+		self.match()
+		self.rows()
+		with self.assertLogs('cveFeed.activity', 'WARNING'):
+			self.run_validation(runners=self.runners('raise'))
+		row = Triage.objects.get()
+		errors = [step.get('error', '') for step in row.validation_steps]
+		self.assertTrue(errors and all('diagnostic' in e and 'boom' not in e for e in errors), errors)
 
 	def test_no_check_is_recorded_and_nothing_is_invented(self):
 		self.match(source='tech', port=None)

@@ -156,6 +156,19 @@ def signature_for(kind, fields):
     return hashlib.sha1(blob.encode()).hexdigest()
 
 
+# Signature fields that are not evidence about the asset: advisory text and scores from the CVE feed. When only these, or the
+# decision scheme above, change, the finding is reviewed again but keeps what was proven about it until the new verdict lands.
+NON_ASSET_FIELDS = ('intelligence',)
+
+
+def evidence_key_for(kind, fields, review_nonce=''):
+    """The sha1 of the asset evidence alone: the signature fields without NON_ASSET_FIELDS and without the scheme version. An explicit
+    fresh review (a nonce) is part of it, so asking for one still starts over."""
+    asset = {k: v for k, v in fields.items() if k not in NON_ASSET_FIELDS} if isinstance(fields, dict) else fields
+    blob = [kind, asset, review_nonce] if review_nonce else [kind, asset]
+    return hashlib.sha1(json.dumps(blob, sort_keys=True, default=str, separators=(',', ':')).encode()).hexdigest()
+
+
 def effective_signature(description, review_nonce=''):
     """Evidence signature, with a persisted nonce only for an explicit fresh review."""
     return (signature_for(description['kind'], [description['signature_fields'], review_nonce])
@@ -391,12 +404,20 @@ def describe(finding):
                 'host': sub.name if sub else '', 'first_seen': finding.discovered_date}
     d.update(base)
     d['signature'] = signature_for(d['kind'], d['signature_fields'])
+    d['evidence_key'] = evidence_key_for(d['kind'], d['signature_fields'])
     d['first_seen'] = d['first_seen'] or timezone.now()
     return d
 
 
+def _rereview_fields(d, now):
+    """The asset evidence is unchanged but the signature is not (new feed intelligence, or a new decision scheme): queue a fresh
+    AI review and keep the verdict, classification, validation record and legacy CVE verdict until that review replaces them."""
+    return {'signature': d['signature'], 'evidence_key': d['evidence_key'], 'status': 'pending', 'attempts': 0, 'next_attempt_at': None,
+            'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'updated_at': now}
+
+
 def _reset_fields(d, now):
-    return {'signature': d['signature'], 'verdict': None, 'status': 'pending', 'classification': '', 'reason': '',
+    return {'signature': d['signature'], 'evidence_key': d['evidence_key'], 'verdict': None, 'status': 'pending', 'classification': '', 'reason': '',
             'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'validation_status': 'none', 'validation_steps': [],
             'validation_evidence': {}, 'validated_at': None, 'attempts': 0, 'next_attempt_at': None, 'confidence_adjust': 0.0,
             'updated_at': now}
@@ -423,7 +444,8 @@ def _fetch(fk, ids):
 def track(findings):
     """Make sure each finding has a Triage row carrying the signature of its current evidence, and mark it seen now. A row whose
     evidence changed is reset (verdict detached, classification cleared, validation plan dropped), the stale legacy verdict of a CVE
-    match is cleared with it, and the hosts are rescored so a stale AI bonus goes. Returns ``[(Triage row, description)]`` in the
+    match is cleared with it, and the hosts are rescored so a stale AI bonus goes. A row whose asset evidence is unchanged and whose
+    signature moved only because of the CVE feed or the decision scheme is queued for review without losing its record. Returns ``[(Triage row, description)]`` in the
     order given; a finding with no owning project is skipped (nothing is stored without a tenancy scope)."""
     from cveFeed.models import CVEMatch, Triage
     now = timezone.now()
@@ -442,6 +464,7 @@ def track(findings):
             row = existing[fk].get(f.pk)
             if row is not None and row.review_nonce:
                 d['signature'] = effective_signature(d, row.review_nonce)
+                d['evidence_key'] = evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce)
             if row is None:
                 fields = {k: v for k, v in _reset_fields(d, now).items() if k != 'updated_at'}
                 new_rows.append(Triage(project_id=d['project_id'], domain_id=d['domain_id'], host=d['host'][:500], kind=d['kind'],
@@ -449,17 +472,23 @@ def track(findings):
                 continue
             row.last_seen, row.host, row.kind = now, d['host'][:500], d['kind']
             if row.signature != d['signature']:
-                for key, value in _reset_fields(d, now).items():
-                    setattr(row, key, value)
-                if isinstance(f, CVEMatch):
-                    reset_matches.append(f)
+                if row.evidence_key and row.evidence_key == d['evidence_key']:
+                    for key, value in _rereview_fields(d, now).items():
+                        setattr(row, key, value)
+                else:  # the evidence the decision rested on changed (or is unknown, on a row older than evidence_key): start over
+                    for key, value in _reset_fields(d, now).items():
+                        setattr(row, key, value)
+                    if isinstance(f, CVEMatch):
+                        reset_matches.append(f)
+            elif row.evidence_key != d['evidence_key']:
+                row.evidence_key = d['evidence_key']  # rows written before evidence_key existed learn it while their signature still holds
             changed.append(row)
         if new_rows:
             Triage.objects.bulk_create(new_rows, ignore_conflicts=True)  # ids are not set on a conflict-tolerant insert: read back
             for fk in set(KIND_FK[d['kind']] for _, d in described):
                 existing[fk].update(_fetch(fk, [f.pk for f, d in described if KIND_FK[d['kind']] == fk and f.pk not in existing[fk]]))
         if changed:
-            Triage.objects.bulk_update(changed, ['last_seen', 'host', 'kind', 'signature', 'verdict', 'status', 'classification', 'reason',
+            Triage.objects.bulk_update(changed, ['last_seen', 'host', 'kind', 'signature', 'evidence_key', 'verdict', 'status', 'classification', 'reason',
                                                  'hard_evidence', 'validation_status', 'validation_steps', 'validation_evidence',
                                                  'validated_at', 'attempts', 'next_attempt_at', 'confidence_adjust', 'updated_at'],
                                        batch_size=CHUNK)

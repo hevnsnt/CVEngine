@@ -8,6 +8,9 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 
 ### Added
 
+- **One Findings list.** The Findings page (formerly Scanner findings) lists CVE matches, scanner findings and hygiene findings together, hottest first, filtered by type, severity and status (actionable by default). Its heat follows the host card. The API and MCP offer the same list (`GET projects/{slug}/findings`, `list_findings`). The CVE matches and Hygiene pages stay for focused work. See [docs/FRONTEND.md](docs/FRONTEND.md).
+- **Weekly log maintenance.** AI activity, AI call and AI usage rows past their retention (30, 90 and 400 days) are archived to a tar.gz on the scan results volume, then deleted. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+- **Stuck-job expiry.** Host assessments and validation jobs that a restarted worker left queued or running are expired every 15 minutes, freeing their slots.
 - **Bug bounty page.** Programs and scope from HackerOne, Bugcrowd, Intigriti and YesWeHack (public data from [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), loaded on request and refreshed hourly), exact scope matching with an "unclear" verdict instead of a guess, a radar of scope changes, your own targets matched against program scope, engagements with a recorded policy acknowledgement, scope import as targets (discovery only if you confirm scanning is allowed), reports drafted from scanner findings with credential masking and pre-submission checks, HackerOne submission under the caller's own account, and a Playbook tab sourced from the platforms' guidance. Only an App Admin can authorize a user (Administration, Users, Manage; audit logged). App Admins always have access. See [docs/BUG-BOUNTY.md](docs/BUG-BOUNTY.md).
 - The input guard no longer strikes the free-text fields of bug bounty reports (only on the report and engagement endpoints).
 - **MailFail email checks.** The hygiene scan now runs the email-security checks of [MailFail](https://github.com/ACK-J/MailFail) by Black Hills Information Security (domain takeover of SPF includes and DMARC report addresses, DMARC report authorization, MTA-STS, TLS reporting, DANE, DNSSEC strength, Microsoft 365 Direct Send, BIMI, ARC, ADSP, MailChannels and record-format checks), credited in the AI activity feed while they run. See [docs/PIPELINE.md](docs/PIPELINE.md).
@@ -36,6 +39,14 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 - **User interface.** A new mobile-first interface with a live dashboard, an attack-surface map, a live asset graph, a hosts page, and a command palette.
 
 ### Changed
+
+- **Accepted host names.** Only `DOMAIN_NAME`, loopback and `CVENGINE_ALLOWED_HOSTS` are accepted; a server reached by another name or by IP answers 400 until that name is listed. `manage.py check` warns (`cvengine.W001`) when `DOMAIN_NAME` is unset or a placeholder. See [docs/UPGRADE.md](docs/UPGRADE.md#accepted-host-names).
+- **Pause scope.** Pausing scanning holds work that touches targets or spends AI budget, and lets the CVE feed, notifications, pruning and the update check run. A validation run stops before its next check.
+- **AI budget and triage.** AI-written nuclei checks are limited to one attempt per CVE per week and 10 a day. A CVE feed refresh or a new decision scheme re-reviews a finding without discarding its verdict or validation proof.
+- **Fairness and resilience.** Re-tests serve projects in turn and hottest hosts first. The global host-assessment caps count every project. The background full-port sweep backs off from IPs that keep failing. The three-hour AI review no longer skips a cycle under queue latency.
+- **Archives.** A host a person archived stays archived until restored; rediscovery and scans no longer lift it. A failed rediscovery enqueue puts the archive back.
+- **Errors.** Stored and displayed job errors carry a diagnostic id instead of exception text. Nuclei failures say why, and the template policy reports what it excludes, including the technology detection template. Impossible dates in filters return 400.
+- **Dashboard.** The Attack surface map shows the 100 highest-scoring hosts.
 
 - Python 3.14, Django 5.2 LTS, PostgreSQL 18, Go 1.27, nmap 7.992, and Ubuntu 26.04 LTS. See [docs/UPGRADE.md](docs/UPGRADE.md) for moving an older install.
 - Database indexes on the tables that grow with every scan, and batched writes in the feed sync and scanner passes.

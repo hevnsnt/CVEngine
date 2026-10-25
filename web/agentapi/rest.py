@@ -159,6 +159,8 @@ ROUTES = [
      lambda r, c, slug, service, **k: svc.set_api_credential(c, slug, service, _body(r))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/api-keys/(?P<service>[-\w]+)', "Remove this project's own key (its org's still applies)",
      lambda r, c, slug, service, **k: svc.delete_api_credential(c, slug, service)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/findings', 'Every finding in one list, hottest first: CVE matches, scanner and hygiene findings (type=all|cve|scanner|hygiene, heat=fire|smoke|ice, severity=, status=actionable|all, host=)',
+     lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/vulnerabilities', 'Scanner findings (severity, open filters)',
      lambda r, c, slug, **k: svc.list_vulnerabilities(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/matches', 'CVE-on-host matches (status, verdict, host filters)',

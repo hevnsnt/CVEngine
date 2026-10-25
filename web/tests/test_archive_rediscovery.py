@@ -69,6 +69,37 @@ class ArchivedRediscoveryTests(TestCase):
         self.assertEqual(row.archive_assessment.host, row.host)
         self.assertEqual(row.archive_assessment.status, 'queued')
 
+    def test_a_manual_archive_is_never_lifted_by_rediscovery_or_a_new_scan(self):
+        from cveFeed.changes import record_scan_changes
+        row = self.state('kept.archive.example', archived_by_user=True, state={'ips': {'8.8.8.8': {'ports': {}}}})
+        resolver = lambda name: ('resolved', {'8.8.8.8'})  # noqa: E731
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.tasks.assess_host.apply_async') as sender, \
+             mock.patch('cveFeed.tasks.rediscover_archived_hosts.apply_async'):
+            self.assertEqual(check_one(row, resolver=resolver), 'checked')
+            self.assertEqual(run_page(resolver=resolver)['checked'], 0)  # not even visited by the daily run
+        sender.assert_not_called()
+        scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2)
+        sub = Subdomain.objects.create(target_domain=self.domain, scan_history=scan, name=row.host)
+        sub.ip_addresses.add(IpAddress.objects.create(address='8.8.8.8'))
+        with mock.patch('cveFeed.retest.queue_retests'):
+            record_scan_changes(scan.pk, resolver=lambda names: set())
+        row.refresh_from_db()
+        self.assertIsNotNone(row.archived_at)
+        self.assertTrue(row.archived_by_user)
+
+    def test_any_enqueue_failure_puts_the_archive_back(self):
+        row = self.state('flaky.archive.example')
+        archived = row.archived_at
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.host_assessment.enqueue', side_effect=OSError('database went away')), \
+             self.assertLogs('cveFeed.archive_rediscovery', 'ERROR'):
+            self.assertEqual(check_one(row, resolver=lambda name: ('absent', set()) if name.startswith('cvengine-nonexistent-')
+                                       else ('resolved', {'8.8.8.8'})), 'error')
+        row.refresh_from_db()
+        self.assertEqual(row.archived_at, archived)
+        self.assertEqual((row.archive_check_status, row.archive_check_error), ('error', 'OSError'))
+
     def test_dns_failures_wildcard_and_blocked_addresses_do_not_reactivate(self):
         row = self.state('uncertain.archive.example')
         for resolver, status in (
@@ -119,6 +150,7 @@ class ArchivedRediscoveryTests(TestCase):
         status, archived = call(self.token, 'POST', base + '/archive', {'reason': 'Owner review'})
         self.assertEqual(status, 200)
         self.assertIsNotNone(archived['archived_at'])
+        self.assertTrue(HostState.objects.get(project=self.project, host=sub.name).archived_by_user)
         from cveFeed.fullscan import candidates
         ip = IpAddress.objects.create(address='8.8.8.8')
         sub.ip_addresses.add(ip)
@@ -127,6 +159,7 @@ class ArchivedRediscoveryTests(TestCase):
         status, restored = call(self.token, 'POST', base + '/restore', {})
         self.assertEqual(status, 200)
         self.assertIsNone(restored['archived_at'])
+        self.assertFalse(HostState.objects.get(project=self.project, host=sub.name).archived_by_user)
         self.assertTrue(candidates().filter(pk=ip.pk).exists())
         self.assertEqual(call(self.token, 'POST', f'/api/v1/projects/archive-other/hosts/{name}/restore', {})[0], 404)
 

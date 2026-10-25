@@ -91,6 +91,17 @@ class ScheduledReviewTests(TestCase):
         self.assertEqual(AssessmentReviewDecision.objects.filter(review=review).count(), 12)
         self.assertEqual(ar.run_page()['skipped'], 'not due')
 
+    def test_a_run_a_little_early_is_due_and_windows_are_contiguous(self):
+        end = timezone.now() - timedelta(hours=2, minutes=50)  # the last run started late; this one starts on time
+        AssessmentReview.objects.create(period_start=end - timedelta(hours=3), period_end=end, status='completed', total_projects=0)
+        with mock.patch('cveFeed.performance_review.review', return_value={'status': 'no_change'}), \
+             mock.patch('cveFeed.tasks.assessment_review_task.apply_async'):
+            result = ar.run_page()
+        self.assertNotIn('skipped', result)
+        self.assertEqual(AssessmentReview.objects.get(pk=result['review_id']).period_start, end)
+        AssessmentReview.objects.update(status='completed', period_end=timezone.now() - timedelta(hours=2))
+        self.assertEqual(ar.run_page()['skipped'], 'not due')  # but not an hour early
+
     def test_ai_choice_is_bounded_and_durable(self):
         project = self.projects[0]
         facts = {'project_id': project.id, 'targets': 1, 'hosts': 2, 'matched_cves': 1,

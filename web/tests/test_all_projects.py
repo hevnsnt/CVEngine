@@ -405,7 +405,7 @@ class AllProjectsPageTests(AllProjectsBase):
 		html = client_for(self.ann).get('/cve/_all/vulns/').content.decode()
 		self.assertEqual(len(re.findall(r'<option value="_all" selected>All projects</option>', html)), 2)  # sidebar and mobile sheet
 		self.assertNotIn('<option value="acme" selected', html)
-		self.assertIn('<title>CVEngine · Scanner findings · All projects</title>', html)
+		self.assertIn('<title>CVEngine · Findings · All projects</title>', html)
 		self.assertIn('/cve/_all/hosts/', html)
 
 	def test_a_real_project_page_keeps_its_project_selected_and_offers_all(self):

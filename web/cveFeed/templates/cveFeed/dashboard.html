@@ -38,7 +38,7 @@
 <nav class="strip" aria-label="Engine counters">
   <a id="n-targets" {% if slug %}href="{% url 'cve_section' slug 'targets' %}"{% endif %}><b id="s-targets">-</b><span>Targets</span></a>
   <a id="n-matches" {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-matches">-</b><span>CVE matches</span></a>
-  <a id="n-findings" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
+  <a id="n-findings" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
   <a id="n-scans" {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_running">-</b><span id="s-scans_label">Scans running</span></a>
   <a id="n-certs" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span></a>
   <a id="n-auto" {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-autofire_runs">-</b><span>Auto-fire runs</span></a>
@@ -63,7 +63,7 @@
     <div class="counts" id="d-counts"></div>
     <div class="node-card" id="d-detail" aria-live="polite"></div>
     <ul class="ticker" id="d-ticker" aria-live="polite" tabindex="0" aria-label="Discovery findings, newest first. Scroll up for earlier lines."></ul>
-    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'vulns' %}">See scanner findings</a>{% endif %}
+    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'vulns' %}?type=scanner">See scanner findings</a>{% endif %}
   </div>
 
   <div class="card ai">

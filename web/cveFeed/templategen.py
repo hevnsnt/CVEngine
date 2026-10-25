@@ -11,6 +11,7 @@ protocols (http/network/dns/ssl/tcp), rejects ``code``/``javascript``/``headless
 nuclei runs with code templates disabled, a timeout, and a rate limit, only
 against hosts already in the inventory.
 """
+import datetime
 import json
 import logging
 import os
@@ -572,12 +573,58 @@ def cve_info_for(cve):
             "cvss": cve.cvss, "affected": cve.affected, "references": cve.references}
 
 
-def generate_template(cve, provider, project=None, candidate_only=True):
-    """Ask the AI for a template and gate it. On-demand candidates stay drafts after a benign fixture test."""
-    from cveFeed.models import GeneratedTemplate
+class TemplateBudgetExceeded(Exception):
+    """No AI template is written now: the CVE had an attempt recently, or the daily budget is spent."""
 
+
+GENERATION_DEFAULTS = {'TEMPLATE_GEN_MAX_PER_DAY': 10, 'TEMPLATE_GEN_CVE_DAYS': 7}
+
+
+def generation_limit(name):
+    """A template-generation limit, overridable by CVENGINE_<NAME> in the environment."""
+    try:
+        return max(1, int(os.environ.get(f'CVENGINE_{name}', '')))
+    except ValueError:
+        return GENERATION_DEFAULTS[name]
+
+
+def _generation_lease(cve):
+    """Claim this CVE for one generation attempt, or raise TemplateBudgetExceeded. Every attempt, whatever its outcome, is a
+    GeneratedTemplate row, so the rows are the ledger: one attempt per CVE per TEMPLATE_GEN_CVE_DAYS, and at most
+    TEMPLATE_GEN_MAX_PER_DAY across all projects in any 24 hours. The cache lease stops two workers writing the same CVE at once."""
+    from django.core.cache import cache
+    from django.utils import timezone
+
+    from cveFeed.models import GeneratedTemplate
+    now = timezone.now()
+    recent = GeneratedTemplate.objects.filter(cve_entry=cve,
+                                              created_at__gte=now - datetime.timedelta(days=generation_limit('TEMPLATE_GEN_CVE_DAYS')))
+    last = recent.order_by('-created_at').first()
+    if last is not None:
+        raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} was already attempted on {last.created_at:%Y-%m-%d} ({last.status})')
+    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
+        raise TemplateBudgetExceeded('the daily AI template budget is spent')
+    key = f'cvengine:templategen:{cve.pk}'
+    if not cache.add(key, 1, timeout=15 * 60):
+        raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
+    return key
+
+
+def generate_template(cve, provider, project=None, candidate_only=True):
+    """Ask the AI for a template and gate it. On-demand candidates stay drafts after a benign fixture test. Raises
+    TemplateBudgetExceeded instead of calling the AI when the generation budget does not allow an attempt."""
     if not candidate_only:
         raise ValueError('an AI template requires independently reviewed positive fixture evidence before installation')
+    from django.core.cache import cache
+    key = _generation_lease(cve)
+    try:
+        return _generate_template(cve, provider, project)
+    finally:
+        cache.delete(key)
+
+
+def _generate_template(cve, provider, project):
+    from cveFeed.models import GeneratedTemplate
 
     from cveFeed import activity
     with activity.step('write_check', f'Writing a nuclei check for {cve.cve_id} with {provider.name}',
@@ -686,7 +733,11 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
     else:
         if provider is None:
             return {"source": "none", "template": "", "results": [], "reason": reason or "no AI provider configured"}
-        tmpl = generate_template(cve, provider, project=project, candidate_only=True)
+        try:
+            tmpl = generate_template(cve, provider, project=project, candidate_only=True)
+        except TemplateBudgetExceeded as exc:
+            activity.log('write_check', f'Not writing a nuclei check for {cve.cve_id}: {exc}', project=project, cve_id=cve.cve_id)
+            return {"source": "none", "template": "", "results": [], "reason": str(exc)}
         return {"source": "candidate" if tmpl.status == tmpl.STATUS_DRAFT else "none",
                 "template": tmpl.template_id, "results": [], "reason": tmpl.validation_output}
     results = []

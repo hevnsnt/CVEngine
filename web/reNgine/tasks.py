@@ -4316,7 +4316,7 @@ def run_command(
 		scan_history_id=scan_id,
 		activity_id=activity_id)
 	from reNgine.resources import ScanAborted, global_pause_requested
-	if global_pause_requested():
+	if global_pause_requested(fail_closed=True):
 		raise ScanAborted('global scanning pause is active')
 
 	# Run the command using subprocess

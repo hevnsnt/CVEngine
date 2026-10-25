@@ -44,6 +44,20 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(client_for(self.root).get('/cve/admin/').status_code, 200)
 		self.assertEqual(Client().get('/cve/api/admin/users').status_code, 302)
 
+	def test_an_impossible_date_filter_is_a_400_not_a_server_error(self):
+		root = client_for(self.root)
+		for value in ('2026-13-45T00:00:00%2B00:00', '2026-02-30T10:00:00Z', 'yesterday'):
+			status, body = api(root, 'GET', f'activity?from={value}')
+			self.assertEqual(status, 400, value)
+			self.assertIn('ISO timestamp', body['error'])
+		self.assertEqual(root.get('/cve/api/activity?after=1&since=2026-13-45T00:00:00Z').status_code, 200)  # the feed ignores it
+
+	def test_a_malformed_feed_date_does_not_stop_the_sync(self):
+		from cveFeed.models import _feed_time
+		self.assertIsNone(_feed_time('2026-13-45T00:00:00Z'))
+		self.assertIsNone(_feed_time(''))
+		self.assertEqual(_feed_time('2026-10-24T12:00:00Z').year, 2026)
+
 	def test_activity_log_is_paged_scoped_filterable_and_redacted(self):
 		from cveFeed.models import AgentActivity
 		AgentActivity.objects.bulk_create([

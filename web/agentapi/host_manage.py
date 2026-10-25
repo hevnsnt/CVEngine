@@ -92,13 +92,13 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
             raise ApiError(409, 'a host assessment is active; stop it before archiving')
         if not state.archived_at:
             state.archived_at, state.archive_reason = timezone.now(), reason.strip() or 'Manually archived by an authorized project user'
-            state.archive_check_status = ''
-            state.save(update_fields=['archived_at', 'archive_reason', 'archive_check_status'])
+            state.archive_check_status, state.archived_by_user = '', True
+            state.save(update_fields=['archived_at', 'archive_reason', 'archive_check_status', 'archived_by_user'])
     elif action == 'restore':
         if state.archived_at:
-            state.archived_at, state.archive_reason = None, ''
+            state.archived_at, state.archive_reason, state.archived_by_user = None, '', False
             state.inactive_first_absent_at, state.inactive_last_absent_at, state.inactive_absent_checks = None, None, 0
-            state.save(update_fields=['archived_at', 'archive_reason', 'inactive_first_absent_at',
+            state.save(update_fields=['archived_at', 'archive_reason', 'archived_by_user', 'inactive_first_absent_at',
                                       'inactive_last_absent_at', 'inactive_absent_checks'])
     elif action == 'pin':
         if not isinstance(pinned, bool):

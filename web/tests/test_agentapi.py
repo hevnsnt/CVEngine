@@ -361,6 +361,21 @@ class AgentApiTests(TestCase):
 		self.assertEqual(checks.call_args[0][0], self.pa.id)
 		self.assertEqual(validate_match_on_demand(job_id)['skipped'], 'request is no longer queued')
 
+	def test_a_crashed_validation_stores_a_diagnostic_not_the_exception_text(self):
+		from cveFeed.models import OnDemandValidation
+		from cveFeed.tasks import validate_match_on_demand
+		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
+		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		with mock.patch('cveFeed.validation.resolve_template', side_effect=OSError('/srv/private/templates unreadable')), \
+				self.assertLogs('cveFeed.activity', 'WARNING') as logs, self.assertLogs('cveFeed.tasks', 'ERROR'):
+			validate_match_on_demand(job_id)
+		job = OnDemandValidation.objects.get(pk=job_id)
+		self.assertEqual(job.status, 'failed')
+		self.assertNotIn('/srv/private', job.error)
+		self.assertTrue(job.error.startswith(f'Validation request #{job_id} failed (OSError); diagnostic '), job.error)
+		self.assertIn('/srv/private/templates unreadable', '\n'.join(logs.output))
+
 	def test_validate_now_without_template_or_usable_evidence_is_partial_and_visible(self):
 		from cveFeed.models import AgentActivity, OnDemandValidation
 		from cveFeed.tasks import validate_match_on_demand

@@ -11,6 +11,7 @@ class CveFeedConfig(AppConfig):
         AI-written, unproven templates in the blanket nuclei pass. A clear error beats a quiet loss of the isolation."""
         from django.core.exceptions import ImproperlyConfigured
 
+        from cveFeed import checks  # noqa: F401 - registers the system checks
         from cveFeed import templategen
         problem = templategen.templates_dir_problem()
         if problem:

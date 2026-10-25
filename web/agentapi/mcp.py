@@ -123,6 +123,11 @@ TOOLS = [
     ('remove_exclusion', 'Lift an exclusion so the organization can scan the host again (organization admin only).', _schema(
         {'project': SLUG, 'host': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.remove_exclusion(c, a.get('project'), a['host']), True),
+    ('list_findings', 'Every finding in one list, hottest first: CVE matches on hosts, scanner findings and hygiene findings. type: all|cve|scanner|hygiene; heat: fire|smoke|ice; severity: critical|high|medium|low|info; status: actionable (default: what heats a host) or all; host: substring. counts gives each type\'s total.',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'type': {'type': 'string', 'enum': ['all', 'cve', 'scanner', 'hygiene']},
+                          'heat': {'type': 'string', 'enum': ['all', 'fire', 'smoke', 'ice']}, 'severity': {'type': 'string'},
+                          'status': {'type': 'string', 'enum': ['actionable', 'all']}, 'host': {'type': 'string'}}), ['project']),
+     lambda c, a: svc.list_findings(c, a.get('project'), a), False),
     ('list_vulnerabilities', 'Scanner findings. severity: info|low|medium|high|critical, or actionable (everything but info); open: true|false.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'open': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_vulnerabilities(c, a.get('project'), a), False),

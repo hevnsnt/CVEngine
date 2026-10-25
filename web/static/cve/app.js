@@ -717,6 +717,34 @@ function renderFinding(d, cfg, row) {
 // One page of findings: the list down the left, the selected finding's full picture on the right (like Hosts). cfg:
 // kind (the API's finding kind), path, noun and plural, filters (nodes), params(), empty, onLoaded, row(item) -> {heat, title, meta[],
 // notes[]}, statusControl(detail) -> node (optional).
+// A CVE match's remediation status, set in its detail pane with the fix (the CVE matches and Findings pages)
+function matchStatusControl(d) {
+  const s = select(
+    "Remediation status",
+    [
+      ["open", "Open"],
+      ["in_progress", "In progress"],
+      ["fixed", "Fixed"],
+      ["accepted_risk", "Accepted risk"],
+    ],
+    async () => {
+      try {
+        await api("PATCH", `${base}/matches/${d.id}`, { status: s.value });
+        d.remediation.status = s.value;
+        toast("Status updated");
+      } catch (err) {
+        s.value = d.remediation.status;
+        toast(err.message, true);
+      }
+    },
+  );
+  s.value = d.remediation.status;
+  const box = el("div", "tools");
+  box.append(el("span", "note", "Remediation status"), s);
+  if (d.remediation.note) box.append(el("p", "note", d.remediation.note));
+  return box;
+}
+
 function findingPage(mount, cfg) {
   const split = el("div", "split");
   const side = el("aside", "split-list card");
@@ -729,24 +757,37 @@ function findingPage(mount, cfg) {
   const byId = new Map();
   let current = null;
   let token = 0;
+  // A page of one kind keys its rows by id. A mixed page (cfg.kindOf: the unified Findings list) keys them "kind-id", since a
+  // CVE match and a scanner finding can share an id, and each row opens the detail of its own kind.
+  const kindOf = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
+  const keyOf = (item) => (cfg.kindOf ? `${kindOf(item)}-${item.id}` : String(item.id));
+  const parseKey = (key) => {
+    if (!cfg.kindOf) return Number(key) ? { id: Number(key), kind: cfg.kind } : null;
+    if (Number(key)) return { id: Number(key), kind: cfg.kind }; // an older link (#id) names the page's own kind
+    const m = /^(match|vulnerability|hygiene|route)-(\d+)$/.exec(key || "");
+    return m ? { id: Number(m[2]), kind: m[1] } : null;
+  };
   // The address of a selected finding. Fetching the detail needs its project, so in the all-projects view the hash carries it
-  // (#project:id) and a reload reopens the finding even when it is not on the first page. One project: #id, as ever.
-  const hashOf = (item) => (ALL ? `${item.project}:${item.id}` : String(item.id));
+  // (#project:key) and a reload reopens the finding even when it is not on the first page. One project: #key.
+  const hashOf = (item) => (ALL ? `${item.project}:${keyOf(item)}` : keyOf(item));
   const wantedFromHash = () => {
     const [a, b] = location.hash.slice(1).split(":");
-    if (ALL) return b && Number(b) && /^[-\w]+$/.test(a) ? { id: Number(b), project: a } : null;
-    return Number(a) ? { id: Number(a), project: slug } : null;
+    if (ALL) return b && parseKey(b) && /^[-\w]+$/.test(a) ? { key: b, project: a } : null;
+    return parseKey(a) ? { key: a, project: slug } : null;
   };
 
-  async function show(id, project = slug) {
-    current = id;
-    rows.querySelectorAll(".host-row").forEach((r) => r.classList.toggle("sel", Number(r.dataset.id) === current));
-    split.classList.toggle("has-sel", !!id);
+  async function show(key, project = slug) {
+    key = key == null ? null : String(key);
+    current = key;
+    rows.querySelectorAll(".host-row").forEach((r) => r.classList.toggle("sel", r.dataset.key === current));
+    split.classList.toggle("has-sel", !!key);
     pane.textContent = "";
-    if (!id) {
+    const wanted = parseKey(key);
+    if (!wanted) {
       pane.append(el("p", "empty", `Select a ${cfg.noun} to see how it was found and what to do about it.`));
       return;
     }
+    const { id, kind } = wanted;
     const mine = (token += 1);
     const back = el("button", "btn ghost sm back", `← All ${cfg.plural}`, { type: "button" });
     back.onclick = () => {
@@ -756,11 +797,11 @@ function findingPage(mount, cfg) {
     pane.append(back, el("div", "skeleton"), el("div", "skeleton"));
     try {
       // the detail comes from the finding's own project; in the all-projects view the row (when loaded) supplies its name too
-      const row = byId.get(id) || { id, project };
-      const d = await api("GET", `${baseOf(project)}/findings/${cfg.kind}/${id}`);
+      const row = byId.get(key) || { id, project };
+      const d = await api("GET", `${baseOf(project)}/findings/${kind}/${id}`);
       if (mine !== token) return;
       pane.textContent = "";
-      pane.append(back, ...renderFinding(d, cfg, row));
+      pane.append(back, ...renderFinding(d, cfg.forKind ? cfg.forKind(kind) : cfg, row));
     } catch (err) {
       if (mine !== token) return;
       pane.textContent = "";
@@ -780,11 +821,11 @@ function findingPage(mount, cfg) {
         byId.clear();
       }
       items.forEach((item) => {
-        byId.set(item.id, item);
+        byId.set(keyOf(item), item);
         const r = cfg.row(item);
         const row = el("button", "host-row");
         row.type = "button";
-        row.dataset.id = item.id;
+        row.dataset.key = keyOf(item);
         row.dataset.heat = r.heat || "";
         row.append(el("span", "cve-id", r.title));
         const meta = el("span", "host-meta");
@@ -792,14 +833,14 @@ function findingPage(mount, cfg) {
         row.append(meta);
         (r.notes || []).filter(Boolean).forEach((n) => row.append(el("span", "note host-why", n)));
         row.onclick = () => {
-          history.replaceState(null, "", `#${hashOf(item)}`);
-          show(item.id, projectOf(item));
+          history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
+          show(keyOf(item), projectOf(item));
         };
         rows.append(row);
       });
       const wanted = wantedFromHash();
-      if (current == null && wanted) show(wanted.id, wanted.project);
-      else if (current == null && window.matchMedia("(min-width:900px)").matches && items.length) show(items[0].id, projectOf(items[0]));
+      if (current == null && wanted) show(wanted.key, wanted.project);
+      else if (current == null && window.matchMedia("(min-width:900px)").matches && items.length) show(keyOf(items[0]), projectOf(items[0]));
     },
   });
   show(null);
@@ -1645,48 +1686,85 @@ const pages = {
   },
 
   vulns(mount) {
-    // Findings down the left, the selected finding's evidence, classification and checks on the right.
-    // informational detections are not findings: the default view hides them, "All" and the Info chip bring them back
-    const context = el("p", "note");
-    context.append("This page lists scanner findings. The default Findings filter hides informational detections; choose All or Info to include them. Candidate CVE correlations and hygiene observations have their own lists: ",
-      el("a", "", "CVE matches", { href: `/cve/${encodeURIComponent(slug)}/matches/` }),
-      " · ", el("a", "", "Hygiene", { href: `/cve/${encodeURIComponent(slug)}/hygiene/` }));
-    mount.append(context);
-    const sevParam = (key) => (key === "all" ? "" : key);
+    // The unified Findings list: CVE matches on hosts, scanner findings and hygiene findings as one population, hottest first.
+    // Two labelled axes (what kind of finding, how severe) and one switch (actionable or everything) instead of one row of chips.
+    const TYPE_LABEL = { cve: "CVE match", scanner: "Scanner", hygiene: "Hygiene" };
+    const wanted = new URLSearchParams(location.search);
+    const initial = (key, allowed) => (allowed.includes(wanted.get(key)) ? wanted.get(key) : null);
+    const header = el("p", "note");
+    mount.append(header);
+    const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value });
+    const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 1 })}`)).total;
+    const q = searchBox("Filter by host", () => reload());
+    const type = picker(
+      "Type",
+      [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
+      countOf((key) => ({ type: key })),
+      () => reload(),
+    );
     const sev = picker(
       "Severity",
       [
-        ["actionable", "Findings"],
-        ["all", "All"],
+        ["all", "Any severity"],
         ["critical", "Critical", "fire"],
         ["high", "High", "fire"],
         ["medium", "Medium", "smoke"],
         ["low", "Low", "ice"],
         ["info", "Info"],
       ],
-      async (key) => (await api("GET", `${base}/vulnerabilities?${query({ severity: sevParam(key), classification: cls.value, page_size: 1 })}`)).count,
-      () => list.reload(),
+      countOf((key) => ({ severity: key })),
+      () => reload(),
     );
-    const cls = select("AI classification", CLASS_OPTIONS, () => {
-      sev.refresh();
-      list.reload();
+    const status = picker(
+      "Status",
+      [["actionable", "Actionable"], ["all", "Everything"]],
+      countOf((key) => ({ status: key })),
+      () => reload(),
+    );
+    [[type, "type", ["all", "cve", "scanner", "hygiene"]], [sev, "severity", ["all", "critical", "high", "medium", "low", "info"]],
+     [status, "status", ["actionable", "all"]]].forEach(([p, key, allowed]) => {
+      const start = initial(key, allowed);
+      if (start) {
+        p.value = start;
+        p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(allowed[i] === start)));
+      }
     });
+    const hint = el("p", "note", "Actionable is what makes a host hot on its card: CVE matches the AI has not ruled out, and open scanner and hygiene findings above info. Everything adds informational, closed and ruled-out findings.");
+    mount.append(hint);
+    function reload() {
+      [type, sev, status].forEach((p) => p.refresh());
+      list.reload();
+    }
+    function describe({ counts = {}, total = 0, count = 0, truncated = false }) {
+      header.textContent = "";
+      const link = (key, n) => el("a", "", `${n} ${{ cve: n === 1 ? "CVE match" : "CVE matches", scanner: n === 1 ? "scanner finding" : "scanner findings", hygiene: n === 1 ? "hygiene finding" : "hygiene findings" }[key]}`,
+        { href: `/cve/${encodeURIComponent(slug)}/${{ cve: "matches", scanner: "vulns", hygiene: "hygiene" }[key]}/${key === "scanner" ? "?type=scanner" : ""}` });
+      header.append(`${total} finding${total === 1 ? "" : "s"}: `);
+      ["cve", "scanner", "hygiene"].forEach((key, i) => header.append(...(i ? [" · "] : []), link(key, counts[key] || 0)));
+      if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
+    }
     const list = findingPage(mount, {
       kind: "vulnerability",
+      kindOf: (item) => item.kind,
+      forKind: (kind) => (kind === "match" ? { kind, statusControl: matchStatusControl } : { kind }),
       noun: "finding",
       plural: "findings",
-      path: `${base}/vulnerabilities`,
-      filters: [sev.node, cls],
-      params: () => ({ severity: sevParam(sev.value), classification: cls.value }),
-      empty: "No findings.",
-      onLoaded: (_, reset) => reset && sev.refresh(),
-      row: (v) => ({
-        heat: SEV_HEAT[v.severity],
-        title: v.name,
-        meta: [badge(v.severity, v.severity), aiBadge(v.triage), validationBadge(v.triage), projChip(v)],
-        notes: [v.host || "-", v.cves.join(" · ")],
+      path: `${base}/findings`,
+      filters: [q, type.node, sev.node, status.node],
+      params,
+      empty: "No findings match these filters.",
+      onLoaded: (data, reset) => {
+        if (reset) describe(data);
+      },
+      row: (f) => ({
+        heat: f.heat,
+        title: f.title,
+        meta: [badge(TYPE_LABEL[f.type] || f.type), badge(f.severity, f.severity), aiBadge(f.triage), validationBadge(f.triage),
+               f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, projChip(f)],
+        notes: [[f.host || "-", f.note].filter(Boolean).join(" · "), f.description || ""],
       }),
     });
+    [type, sev, status].forEach((p) => p.refresh());
   },
 
   matches(mount) {
@@ -1707,33 +1785,7 @@ const pages = {
       status.refresh();
       list.reload();
     });
-    // the remediation status is set in the detail pane, with the fix
-    const statusControl = (d) => {
-      const s = select(
-        "Remediation status",
-        [
-          ["open", "Open"],
-          ["in_progress", "In progress"],
-          ["fixed", "Fixed"],
-          ["accepted_risk", "Accepted risk"],
-        ],
-        async () => {
-          try {
-            await api("PATCH", `${base}/matches/${d.id}`, { status: s.value });
-            d.remediation.status = s.value;
-            toast("Status updated");
-          } catch (err) {
-            s.value = d.remediation.status;
-            toast(err.message, true);
-          }
-        },
-      );
-      s.value = d.remediation.status;
-      const box = el("div", "tools");
-      box.append(el("span", "note", "Remediation status"), s);
-      if (d.remediation.note) box.append(el("p", "note", d.remediation.note));
-      return box;
-    };
+    const statusControl = matchStatusControl;
     const list = findingPage(mount, {
       kind: "match",
       noun: "match",

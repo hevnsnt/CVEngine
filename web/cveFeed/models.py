@@ -11,6 +11,14 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 
+def _feed_time(value):
+    """A feed timestamp, or None when it is missing or not a real date: one malformed entry must not stop the sync."""
+    try:
+        return parse_datetime(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
 class CVEEntry(models.Model):
     cve_id = models.CharField(max_length=64, unique=True, db_index=True)
     title = models.TextField(blank=True, default="")
@@ -99,8 +107,8 @@ class CVEEntry(models.Model):
             "references": entry.get("references") or [],
             "sources": entry.get("sources") or [],
             "status": entry.get("status") or "",
-            "published_at": parse_datetime(entry["publishedAt"]) if entry.get("publishedAt") else None,
-            "first_seen_at": parse_datetime(entry["firstSeenAt"]) if entry.get("firstSeenAt") else None,
+            "published_at": _feed_time(entry.get("publishedAt")),
+            "first_seen_at": _feed_time(entry.get("firstSeenAt")),
             "raw": entry,
         }
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds
@@ -422,7 +430,11 @@ class AgentActivity(models.Model):
 
     class Meta:
         ordering = ["-id"]
-        indexes = [models.Index(fields=["id"])]
+        indexes = [models.Index(fields=["id"]),
+                   # the dashboard and admin feeds read a project's (or the failed) entries newest first; retention reads by age
+                   models.Index(fields=["project", "id"], name="agentact_project_id_idx"),
+                   models.Index(fields=["status", "id"], name="agentact_status_id_idx"),
+                   models.Index(fields=["created_at"], name="agentact_created_idx")]
 
     def __str__(self):
         return f"[{self.kind}] {self.message}"
@@ -571,6 +583,7 @@ class HostState(models.Model):
     last_alive_check = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True)
     archive_reason = models.CharField(max_length=300, blank=True, default='')
+    archived_by_user = models.BooleanField(default=False)  # a person archived it: only Restore brings it back, never rediscovery
     pinned = models.BooleanField(default=False)
     archive_checked_at = models.DateTimeField(null=True, blank=True)
     archive_check_status = models.CharField(max_length=24, blank=True, default='')
@@ -858,6 +871,7 @@ class Triage(models.Model):
     hygiene = models.OneToOneField(HygieneFinding, on_delete=models.CASCADE, null=True, blank=True, related_name="triage")
     signature = models.CharField(max_length=40, blank=True, default="")
     review_nonce = models.CharField(max_length=40, blank=True, default="")  # explicit user-requested fresh AI review
+    evidence_key = models.CharField(max_length=40, blank=True, default="")  # the asset evidence alone (triage.evidence_key_for)
     verdict = models.ForeignKey(TriageVerdict, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     status = models.CharField(max_length=12, default="pending")
     classification = models.CharField(max_length=24, blank=True, default="")

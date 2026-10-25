@@ -491,7 +491,7 @@ def apply_validation(row, check, result, now=None, save=True):
     row.validated_at = now
     if save:
         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at', 'attempts',
-                                'next_attempt_at', 'confidence_adjust', 'classification', 'reason', 'status', 'verdict', 'signature',
+                                'next_attempt_at', 'confidence_adjust', 'classification', 'reason', 'status', 'verdict', 'signature', 'evidence_key',
                                 'hard_evidence', 'updated_at'])
     return row
 
@@ -525,6 +525,7 @@ def resync(row):
     signature = triage.effective_signature(d, row.review_nonce)
     if signature != row.signature:
         row.signature = signature
+        row.evidence_key = triage.evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce)
         row.hard_evidence = triage.hard_evidence(d['kind'], d['facts'])[1]
         if row.status == 'triaged':
             row.status, row.verdict = 'pending', None  # the classification stays; the impact text is asked for the new evidence
@@ -699,7 +700,9 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                 stats['no_check'] += 1
                 continue
             for check in checks:
-                if scan_id is not None and resources.abort_requested(scan_id):
+                # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
+                # stopped by its watchdog)
+                if (scan_id is not None and resources.abort_requested(scan_id)) or resources.global_pause_requested(fail_closed=True):
                     stats['stopped'] = True
                     break
                 wanted = list(dict.fromkeys([row.host, check['target']]))
@@ -733,7 +736,9 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                     result = {'status': 'failed', 'error': 'the check timed out', 'summary': 'timed out'}
                 except Exception as exc:  # noqa: BLE001 - one check failing must not stop the others; it is "failed", never "clean"
                     logger.exception('validation check %s failed for %s', check['kind'], row.host)
-                    result = {'status': 'failed', 'error': f'{type(exc).__name__}: {exc}'[:200], 'summary': 'the check failed to run'}
+                    from cveFeed import activity
+                    result = {'status': 'failed', 'summary': 'the check failed to run',
+                              'error': activity.diagnostic(f'The {check["label"]}', f'{type(exc).__name__}: {exc}', type(exc).__name__)[:200]}
                 state['run'] += 1
                 ledger.record(check['service'], [check['asset']], project_id, scan_id, 'failed' if result['status'] == 'failed' else 'done')
                 apply_validation(row, check, result)

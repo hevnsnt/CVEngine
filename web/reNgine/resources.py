@@ -112,9 +112,11 @@ def abort_requested(scan_id):
         return False
 
 
-def global_pause_requested():
+def global_pause_requested(fail_closed=False):
+    """For the watchdogs that stop running work: an unreadable control database is not a pause. A gate about to start work
+    passes ``fail_closed=True``."""
     from cveFeed.scan_control import pause_requested
-    return pause_requested()
+    return pause_requested(fail_closed=fail_closed)
 
 
 def clear_abort(scan_id):
@@ -680,7 +682,7 @@ def heavy_job(kind, label='', cost=None, wait_timeout=None, store=None, state_fn
         roomy = alone or state['available_mb'] >= cost + headroom_mb(state)
         if roomy and store.reserve(job.token, cost, f'{kind}: {label}'[:120], budget_mb(state), now, kind, max_concurrent(kind)):
             break
-        if global_pause_requested() or (job.scan_id is not None and abort_requested(job.scan_id)):
+        if global_pause_requested(fail_closed=True) or (job.scan_id is not None and abort_requested(job.scan_id)):
             store.release(job.token)
             raise ScanAborted(f'{kind} on {label} was stopped before it started')
         store.wait(job.token, cost, f'{kind}: {label}'[:120], now)

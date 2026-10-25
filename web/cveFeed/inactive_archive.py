@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 PAGE = 25
 MIN_ABSENCE = timedelta(days=30)
 LEASE = timedelta(minutes=10)
+# A queued or running scan of the domain defers the review (it may be about to see the host), unless it is older than this: a
+# scan that has not finished in three days is stuck, and must not keep every host of its domain from being reviewed.
+STUCK_SCAN_AGE = timedelta(days=3)
 
 
 def candidates(now=None):
@@ -40,7 +43,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
             host == domain.name.lower() or (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
         return 'deferred'
     if HostAssessment.objects.filter(project_id=row.project_id, host=host, status__in=('queued', 'running')).exists() or \
-            ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1)).exists():
+            ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1), start_scan_date__gte=now - STUCK_SCAN_AGE).exists():
         return 'deferred'
     observed = observe(row, resolver=resolver or resolve_one, tcp_probe=tcp_probe)
     status = observed['status']
@@ -86,7 +89,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
               'inactive_absent_checks': count, 'archive_checked_at': now,
               'archive_check_status': status, 'archive_check_error': ''}
     if count >= 2 and first <= now - MIN_ABSENCE and row.last_seen <= first:
-        values.update(archived_at=now, archive_reason='Automatically archived after two negative observations '
+        values.update(archived_at=now, archived_by_user=False, archive_reason='Automatically archived after two negative observations '
                       'at least 30 days apart; history is preserved')
         if selector.update(**values):
             activity.log('inventory', f'{host} archived after repeated absence over 30 days',

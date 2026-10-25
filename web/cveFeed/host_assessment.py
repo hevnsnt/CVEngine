@@ -46,10 +46,12 @@ def enqueue(project, sub, *, source='manual', user=None):
     existing = HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).order_by('id').first()
     if existing:
         return existing, False
-    active_scans = ScanHistory.objects.filter(Q(scan_status=-1) | Q(scan_status=1,
-                                                                    start_scan_date__gte=timezone.now() - timedelta(hours=11)))
-    if HostAssessment.objects.filter(status__in=ACTIVE).count() >= 20 or \
-            HostAssessment.objects.filter(project=project, status__in=ACTIVE).count() >= 5 or \
+    # The global caps count every project: _base_manager is not narrowed to the caller's projects by the tenancy scope, which
+    # inside a request would make "20 at once across the installation" mean 20 per user.
+    active_scans = ScanHistory._base_manager.filter(Q(scan_status=-1) | Q(scan_status=1,
+                                                                          start_scan_date__gte=timezone.now() - timedelta(hours=11)))
+    if HostAssessment._base_manager.filter(status__in=ACTIVE).count() >= 20 or \
+            HostAssessment._base_manager.filter(project=project, status__in=ACTIVE).count() >= 5 or \
             active_scans.count() >= 20:
         raise RuntimeError('host assessment queue is at capacity; retry later')
     try:
@@ -74,7 +76,7 @@ def enqueue(project, sub, *, source='manual', user=None):
 
 
 def execute(job_id, celery_id=None):
-    from cveFeed.discovery import run_host_pipeline
+    from cveFeed.discovery import FAILED, run_host_pipeline
     from cveFeed.exclusions import is_excluded
     from cveFeed.models import HostState
     from cveFeed.scan_control import pause_requested
@@ -95,9 +97,14 @@ def execute(job_id, celery_id=None):
         else:
             result = run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True,
                                        force=True, hygiene=True, assessment_id=job_id)
+            # a failed run reports the exception text of whatever stopped it; every other state carries the pipeline's own
+            # explanation ("Failed stages: nmap_scan", "stopped", why it was inconclusive), which stays
+            if result.get('error') and result.get('status') == FAILED:
+                result = {**result, 'error': activity.diagnostic(f'Host assessment #{job.pk}', result['error'])}
     except Exception as exc:
         logger.exception('host assessment %s failed', job_id)
-        result = {'status': 'failed', 'error': f'{type(exc).__name__}: {str(exc)[:220]}'}
+        result = {'status': 'failed', 'error': activity.diagnostic(f'Host assessment #{job.pk}', f'{type(exc).__name__}: {exc}',
+                                                                    type(exc).__name__)}
     state = result.get('status')
     # a stage that failed leaves the assessment incomplete even though the scan (and the inventory it found) stands
     status = (('failed' if result.get('failed_stages') else 'completed') if state == 2 else 'stopped' if state == 'aborted' else

@@ -71,6 +71,18 @@ class InactiveArchiveTests(TestCase):
         row.refresh_from_db()
         self.assertIsNone(row.archived_at)
 
+    def test_a_running_scan_defers_the_review_but_one_stuck_for_three_days_does_not(self):
+        from scanEngine.models import EngineType
+        from startScan.models import ScanHistory
+        engine = EngineType.objects.create(engine_name='inactive-engine', yaml_configuration='x')
+        row = self.state(inactive_first_absent_at=self.now - timedelta(days=40), inactive_absent_checks=2)
+        scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, scan_status=1,
+                                          start_scan_date=self.now - timedelta(hours=5))
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
+            self.assertEqual(check_one(row, resolver=lambda host: ('absent', set()), now=self.now), 'deferred')
+            ScanHistory.objects.filter(pk=scan.pk).update(start_scan_date=self.now - timedelta(days=3, hours=1))
+            self.assertEqual(check_one(row, resolver=lambda host: ('absent', set()), now=self.now), 'archived')
+
     def test_quiet_known_ip_ports_do_not_prove_host_absence(self):
         row = self.state('8.8.8.8', inactive_first_absent_at=self.now - timedelta(days=40),
                          inactive_absent_checks=2)

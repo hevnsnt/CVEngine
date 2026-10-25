@@ -100,6 +100,34 @@ class QueueTests(RetestFixture, TestCase):
 			self.assertEqual(retest.dispatch_deferred_retests()['queued'], 2)
 		self.assertEqual(DeferredRetest.objects.filter(status='queued').count(), 4)
 
+	def deferred(self, project, domain, scan, host, sig='s'):
+		return DeferredRetest.objects.create(project=project, domain=domain, scan=scan, host=host, signature=sig)
+
+	def test_a_big_project_cannot_hold_another_projects_retests_behind_its_batches(self):
+		from dashboard.models import Project
+		from targetApp.models import Domain
+		other = Project.objects.create(name='Other', slug='retest-other', insert_date=timezone.now(), org=self.project.org)
+		other_domain = Domain.objects.create(name='other.test', project=other, insert_date=timezone.now())
+		big = self.scan({'a.ct.test': HOST})
+		small = ScanHistory.objects.create(domain=other_domain, scan_type=big.scan_type, start_scan_date=timezone.now(), scan_status=2)
+		for i in range(6):
+			self.deferred(self.project, self.domain, big, f'h{i}.ct.test')
+		self.deferred(other, other_domain, small, 'www.other.test')  # queued last
+		with mock.patch.dict(os.environ, {'CVENGINE_RETEST_MAX_HOSTS': '2'}):
+			first = retest.dispatch_deferred_retests()
+			second = retest.dispatch_deferred_retests()
+		self.assertEqual(len(first['hosts']), 2)  # the big project, never served, oldest
+		self.assertEqual(second['hosts'], ['www.other.test'])  # next: the project served least recently, not batch two
+
+	def test_the_hottest_changed_hosts_are_retested_first(self):
+		scan = self.scan({'a.ct.test': HOST})
+		for name, score in (('cold.ct.test', 5), ('hot.ct.test', 90), ('warm.ct.test', 40), ('new.ct.test', None)):
+			self.deferred(self.project, self.domain, scan, name)
+			if score is not None:
+				HostState.objects.update_or_create(project=self.project, host=name, defaults={'domain': self.domain, 'score': score})
+		with mock.patch.dict(os.environ, {'CVENGINE_RETEST_MAX_HOSTS': '2'}):
+			self.assertEqual(retest.dispatch_deferred_retests()['hosts'], ['hot.ct.test', 'warm.ct.test'])
+
 	def test_new_evidence_on_same_host_queues_again_inside_legacy_ttl(self):
 		first = self.scan({'a.ct.test': HOST})
 		self.change(first, 'a.ct.test', 'service_changed', {'version': '1'}, {'version': '2'})

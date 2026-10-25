@@ -28,10 +28,13 @@ def classify_threat_tier(kev=None, epss_reached=None, exploit_db=None, cvss=None
     return ICE
 
 
-def fire_tier_q():
-    """The database form of ``classify_threat_tier(...) == FIRE`` over CVEEntry rows."""
+def fire_tier_q(prefix=""):
+    """The database form of ``classify_threat_tier(...) == FIRE`` over CVEEntry rows. ``prefix`` reaches the CVE from another
+    model ("cve_entry__" for a CVEMatch)."""
     from django.db.models import Q
-    return Q(kev=True) | Q(exploit_db=True) | Q(cvss__gte=CRITICAL_CVSS) | (Q(epss_reached=True) & Q(cvss__gte=HIGH_CVSS))
+    p = prefix
+    return (Q(**{p + "kev": True}) | Q(**{p + "exploit_db": True}) | Q(**{p + "cvss__gte": CRITICAL_CVSS})
+            | (Q(**{p + "epss_reached": True}) & Q(**{p + "cvss__gte": HIGH_CVSS})))
 
 
 def hot_tier_q():
@@ -56,6 +59,25 @@ def match_temperature(tier, cvss=None, ai_verdict=None, distro_status=None):
 
 SEVERITY_HEAT = {4: FIRE, 3: FIRE, 2: SMOKE, 1: ICE}
 HEAT_RANK = {FIRE: 3, SMOKE: 2, ICE: 1}
+
+
+def match_heat_rank_expr():
+    """The database form of ``HEAT_RANK[match_temperature(classify_threat_tier(...), ...)]`` over CVEMatch rows (3 fire, 2 smoke,
+    1 ice), so a list can filter, count and order matches by how hot they are on the host without loading them."""
+    from django.db.models import Case, IntegerField, Q, Value, When
+    return Case(
+        When(distro_status="patched", then=Value(HEAT_RANK[ICE])),
+        When(fire_tier_q("cve_entry__"), then=Value(HEAT_RANK[FIRE])),
+        When(Q(ai_verdict="affected", cve_entry__cvss__gte=HIGH_CVSS), then=Value(HEAT_RANK[FIRE])),
+        When(Q(cve_entry__cvss__gte=HIGH_CVSS) | Q(cve_entry__epss_reached=True), then=Value(HEAT_RANK[SMOKE])),
+        default=Value(HEAT_RANK[ICE]), output_field=IntegerField())
+
+
+def severity_heat_rank_expr(field="severity"):
+    """The database form of ``HEAT_RANK.get(SEVERITY_HEAT.get(severity), 0)``: critical and high 3, medium 2, low 1, info 0."""
+    from django.db.models import Case, IntegerField, Value, When
+    return Case(*[When(**{field: sev}, then=Value(HEAT_RANK[heat])) for sev, heat in SEVERITY_HEAT.items()],
+                default=Value(0), output_field=IntegerField())
 
 
 def host_heat(status, tiers, severities):

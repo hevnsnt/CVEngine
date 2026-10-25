@@ -8,7 +8,10 @@ new surface: it is fingerprinted, and the hosts on that IP go through the re-tes
 nmap pass stays the top 1000 plus EXTRA_PORTS; this task is the only ``-p-`` sweep.
 
 A failed or timed-out sweep records its attempt in ``full_scan_started_at`` but does not advance
-``full_scanned_at``: only successful coverage is fresh. The in-flight lease delays retries of a stuck host.
+``full_scanned_at``: only successful coverage is fresh. The in-flight lease delays retries of a stuck host, and an IP whose
+sweeps keep failing backs off (``full_scan_retry_at``: 6 hours after the first failure, doubling, at most 7 days) and goes
+behind the clean never-swept IPs, so a few dead addresses cannot hold the one sweep slot. Waiting too long for memory or a
+pause is not the address's failure and does not count.
 """
 import logging
 import os
@@ -25,6 +28,8 @@ IN_FLIGHT_SECONDS = WAIT_SECONDS + 3600  # a sweep whose start is more recent th
 MAX_CANDIDATES = 500  # IPs looked at per pick: the scope checks resolve names, so they are bounded
 MAX_NAMES_CHECKED = 5  # hostnames of one IP resolved to see that none points somewhere a scanner must not touch
 DEFAULT_INTERVAL_MIN = 10
+FAILURE_BACKOFF_HOURS = 6  # after the first failed sweep; doubles per further failure
+MAX_BACKOFF_HOURS = 7 * 24
 DEFAULT_INVESTIGATE_MAX = 50
 FINGERPRINT_FLAGS = ['-sV', '--version-intensity', '5', '-Pn', '-T4']
 OPEN = ('', 'open')
@@ -70,8 +75,9 @@ def active_attached(ip):
     return Subdomain.objects.filter(ip_addresses=ip, target_domain__project__isnull=False).filter(~Exists(archived))
 
 def candidates():
-    """In-scope IpAddress rows, in sweep order: ``full_scanned_at`` oldest first with never-swept first, then the most open
-    ports, then id. In scope means attached to a Subdomain of a target that belongs to a project, and not a CDN address."""
+    """In-scope IpAddress rows, in sweep order: ``full_scanned_at`` oldest first with never-swept first, then the fewest failed
+    sweeps, then the most open ports, then id; an IP backing off after failures is left out until its retry time. In scope
+    means attached to a Subdomain of a target that belongs to a project, and not a CDN address."""
     from datetime import timedelta
 
     from django.db.models import Count, Exists, F, OuterRef, Q
@@ -81,8 +87,9 @@ def candidates():
     in_flight = (Q(full_scan_started_at__isnull=False) & Q(full_scan_started_at__gte=timezone.now() - timedelta(seconds=IN_FLIGHT_SECONDS))
                  & (Q(full_scanned_at__isnull=True) | Q(full_scanned_at__lt=F('full_scan_started_at'))))
     return (IpAddress.objects.filter(Exists(attached), is_cdn=False, address__isnull=False).exclude(in_flight)
+            .exclude(full_scan_retry_at__gt=timezone.now())
             .annotate(open_count=Count('ports', filter=Q(ports__state__in=OPEN), distinct=True))
-            .order_by(F('full_scanned_at').asc(nulls_first=True), '-open_count', 'id'))
+            .order_by(F('full_scanned_at').asc(nulls_first=True), 'full_scan_failures', '-open_count', 'id'))
 
 
 def in_scope(ip, *, strict=False):
@@ -183,10 +190,14 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
                            project=project, status='running')
     try:
         nmap_scan.scan_in_chunks(capture, [address], nmap_scan.FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL, size=1)
-    except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease
+    except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease or the backoff
+        from reNgine.resources import MemoryBusy, ScanAborted
         logger.warning('background full scan of %s failed', address, exc_info=True)
-        activity.settle(running, 'failed', message=f'Background full port scan of {address} failed: {str(exc)[:200]}')
-        return {'ip': address, 'ok': False, 'error': str(exc)[:290]}
+        retry = None if isinstance(exc, (MemoryBusy, ScanAborted)) else _back_off(ip)
+        activity.settle(running, 'failed', message=activity.diagnostic(f'Background full port scan of {address}',
+                                                                       f'{type(exc).__name__}: {exc}', type(exc).__name__)
+                        + (f'; next try after {retry:%Y-%m-%d %H:%M} UTC' if retry else ''))
+        return {'ip': address, 'ok': False, 'error': type(exc).__name__}
     found = set()
     for xml in seen:
         for host in nmap_scan.parse_xml(xml):
@@ -209,9 +220,21 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
     return result
 
 
+def _back_off(ip):
+    """Count a failed sweep of ``ip`` and set when it may be picked again. Returns that time."""
+    from datetime import timedelta
+
+    from django.db.models import F
+    from startScan.models import IpAddress
+    failures = (IpAddress.objects.filter(pk=ip.pk).values_list('full_scan_failures', flat=True).first() or 0) + 1
+    retry = timezone.now() + timedelta(hours=min(MAX_BACKOFF_HOURS, FAILURE_BACKOFF_HOURS * 2 ** min(failures - 1, 10)))
+    IpAddress.objects.filter(pk=ip.pk).update(full_scan_failures=F('full_scan_failures') + 1, full_scan_retry_at=retry)
+    return retry
+
+
 def _advance(ip, ports):
     from startScan.models import IpAddress
-    fields = {'full_scanned_at': timezone.now()}
+    fields = {'full_scanned_at': timezone.now(), 'full_scan_failures': 0, 'full_scan_retry_at': None}
     if ports is not None:
         fields['full_scan_ports'] = ports
     IpAddress.objects.filter(pk=ip.pk).update(**fields)

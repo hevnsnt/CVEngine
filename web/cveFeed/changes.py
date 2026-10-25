@@ -157,7 +157,7 @@ def _record_baseline(scan, project, current, now):
                     existing[row.host].inactive_first_absent_at = None
                     existing[row.host].inactive_last_absent_at = None
                     existing[row.host].inactive_absent_checks = 0
-                    if row.state.get('ips'):
+                    if row.state.get('ips') and not existing[row.host].archived_by_user:  # a person's archive stays
                         existing[row.host].archived_at, existing[row.host].archive_reason = None, ''
                         existing[row.host].archive_check_status = 'rediscovered_scan'
             HostState.objects.bulk_update(list(existing.values()), ['state', 'fingerprint', 'scan', 'last_seen', 'retired_at',
@@ -248,7 +248,7 @@ def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
                                       scan=scan, last_seen=now))
             continue
         was_zombie = row.zombie_since is not None
-        was_archived = row.archived_at is not None and bool(state.get('ips'))
+        was_archived = row.archived_at is not None and bool(state.get('ips')) and not row.archived_by_user  # a person's archive stays
         if was_archived:
             row.archived_at, row.archive_reason, row.archive_check_status = None, '', 'rediscovered_scan'
             if row.retired_at is None:

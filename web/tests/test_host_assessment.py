@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import discovery
-from cveFeed.host_assessment import enqueue, execute
+from cveFeed.host_assessment import enqueue, execute, serialize
 from cveFeed.models import HostAssessment
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -88,6 +88,40 @@ class HostAssessmentTests(TestCase):
                 execute(job.pk)
             job.refresh_from_db()
             self.assertEqual(job.status, expected)
+
+    def test_exception_text_is_kept_out_of_the_stored_and_served_error(self):
+        secret = 'connection to 10.0.0.7:5432 refused at /opt/app/secret_path.py'
+        cases = ((mock.patch('cveFeed.discovery.run_host_pipeline', side_effect=RuntimeError(secret)), ' (RuntimeError)'),
+                 (mock.patch('cveFeed.discovery.run_host_pipeline', return_value={'status': discovery.FAILED, 'error': secret}), ''))
+        for patch, kind in cases:
+            job = HostAssessment.objects.create(project=self.project, domain=self.domain, host=self.host.name)
+            with patch, self.assertLogs('cveFeed.activity', 'WARNING') as logs:
+                execute(job.pk)
+            job.refresh_from_db()
+            for text in (job.error, str(job.result), str(serialize(job))):
+                self.assertNotIn('10.0.0.7', text)
+                self.assertNotIn('secret_path', text)
+            self.assertTrue(job.error.startswith(f'Host assessment #{job.pk} failed{kind}; diagnostic '), job.error)
+            self.assertIn(secret, '\n'.join(logs.output))  # the operator still has it, in the worker log
+        outcome = {'status': discovery.SUCCESS, 'failed_stages': ['nmap_scan'], 'scan_id': None, 'error': 'Failed stages: nmap_scan'}
+        job = HostAssessment.objects.create(project=self.project, domain=self.domain, host=self.host.name)
+        with mock.patch('cveFeed.discovery.run_host_pipeline', return_value=outcome):
+            execute(job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.error, 'Failed stages: nmap_scan')  # the pipeline's own explanation is not hidden
+
+    def test_the_global_cap_counts_projects_the_caller_cannot_see(self):
+        from tenancy import scope
+        hidden = Domain.objects.create(name='hidden.example', project=self.other, insert_date=timezone.now())
+        for i in range(20):
+            HostAssessment.objects.create(project=self.other, domain=hidden, host=f'h{i}.hidden.example', status='running')
+        tokens = scope.set_scope({self.project.pk}, self.user)  # a request by a user of this project only
+        try:
+            self.assertEqual(HostAssessment.objects.filter(status='running').count(), 0)  # the caller sees none of them
+            with self.assertRaisesRegex(RuntimeError, 'capacity'):
+                enqueue(self.project, self.host)
+        finally:
+            scope.reset_scope(tokens)
 
     def test_no_resolution_is_inconclusive_and_does_not_mark_coverage(self):
         job = HostAssessment.objects.create(project=self.project, domain=self.domain, host=self.host.name)

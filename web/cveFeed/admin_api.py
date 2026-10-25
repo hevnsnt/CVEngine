@@ -500,7 +500,10 @@ def activity_list(request, actor):
     for key, op in (('from', 'gte'), ('to', 'lte')):
         value = params.get(key, '').strip()
         if value:
-            when = parse_datetime(value)
+            try:
+                when = parse_datetime(value)
+            except ValueError:  # well formed but impossible, e.g. month 13
+                when = None
             if when is None or timezone.is_naive(when):
                 raise AdminError(400, f'{key} must be an ISO timestamp with timezone')
             qs = qs.filter(**{f'created_at__{op}': when})
