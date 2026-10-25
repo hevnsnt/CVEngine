@@ -623,6 +623,25 @@ class HostState(models.Model):
         return self.host
 
 
+class HostArchive(models.Model):
+    """What the web archive says a host has run (see cveFeed.archive_urls): technologies read from archived URLs. Historical
+    evidence for search only, never a current technology. One row per (project, host)."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    technologies = models.JSONField(default=dict, blank=True)  # {name: {"count": n, "sample": [paths]}}
+    tech_text = models.TextField(blank=True, default="")       # the names as flat lowercase text, which search reads
+    url_count = models.PositiveIntegerField(default=0)
+    checked_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hostarchive_project_host")]
+
+    def __str__(self):
+        return self.host
+
+
 class HostAssessment(models.Model):
     """One requested assessment of an inventoried host. Active requests are unique per project and name."""
 

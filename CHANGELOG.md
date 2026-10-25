@@ -10,8 +10,14 @@ CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, take
 
 ### Changed
 
+- **The old reNgine scan engine is retired.** Its scan and subscan tasks, the `/api/action/initiate/subtask/` endpoint, its extra queues, and about 4,000 lines of code that nothing in the current pipeline called are removed, along with the Go tools only it used (httpx, subfinder, chaos, gospider, hakrawler, katana, gau, waybackurls, ffuf, tlsx, gf, unfurl, dalfox, crlfuzz, s3scanner) and the Python tools it cloned at every start (Sublist3r, OneForAll, EyeWitness, CMSeeK, ctfr, GooFuzz, h8mail). The worker image now builds only nuclei and naabu, next to nmap and bbot, so it builds and starts faster.
 - **Every CVE match is validated automatically.** Before, only fire and smoke matches were queued for AI validation and the rest waited for someone to press Validate now. Now a match of any confidence or score is queued by itself, hottest first (fire, smoke, then ice at the lowest priority, using the capacity the hot ones leave), except one the AI ruled out or the distribution patched. Ice stops at five active jobs per project so it cannot crowd out hot findings, and the daily validation caps still apply. `CVENGINE_AUTO_VALIDATE_ALL_MATCHES=0` restores fire and smoke only.
 - **More nuclei templates run.** Installed templates that follow redirects on the same host (`host-redirects`, at most three hops) now pass the read-only policy, about 1,250 more (6,531 of 13,903 in the current community set, up from 5,280), among them the technology detection template, so hosts get fingerprinted again. A template that merely recognizes an interactsh server by its header is no longer taken for an out-of-band check. Redirects to other hosts stay refused, and AI-written templates still follow none.
+
+### Added
+
+- **WPScan for WordPress sites.** A host fingerprinted as WordPress is scanned once a week for its version, plugins, themes, config backups, database exports, and author names, and for known vulnerabilities when a wpscan.com API token is set under Settings, API keys. Findings and versions flow into Findings and CVE matching.
+- **Archived URLs as passive evidence.** The Internet Archive's saved URLs show what a host ran in the past, such as PHP or WordPress. Search finds it and labels it as seen in the web archive.
 
 ### Fixed
 

@@ -205,10 +205,6 @@ urlpatterns = [
         ToggleSubdomainImportantStatus.as_view(),
         name='toggle_subdomain'),
     path(
-        'action/initiate/subtask/',
-        InitiateSubTask.as_view(),
-        name='initiate_subscan'),
-    path(
         'action/stop/scan/',
         StopScan.as_view(),
         name='stop_scan'),

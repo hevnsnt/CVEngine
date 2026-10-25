@@ -13,7 +13,7 @@ CVEngine is one Docker Compose deployment. The scanners run inside the worker im
 | `redis` | Job broker, locks, and the memory queue |
 | `proxy` | nginx, terminates TLS |
 
-The worker image contains the scanners: bbot, nmap, nuclei, and httpx, plus other Go tools inherited from reNgine. bbot fetches gowitness for screenshots on first use.
+The worker image contains the scanners: bbot (with gowitness, fetched on first use for screenshots), nmap, naabu, and nuclei. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone; bbot covers discovery, crawling, and screenshots.
 
 ## Stack
 

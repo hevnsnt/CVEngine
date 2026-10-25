@@ -164,17 +164,14 @@ class AgentApiTests(TestCase):
 			self.assertEqual(result['created_names'], ['good.example.com'])
 			self.assertEqual(len(result['invalid']), 2)
 
-	def test_start_scan_runs_discovery_not_the_classic_engine(self):
+	def test_start_scan_runs_discovery(self):
 		from startScan.models import ScanHistory
-		with mock.patch('reNgine.tasks.initiate_scan') as classic, \
-				mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
 			status, data = call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': self.engine.id})
 			self.assertEqual((status, data['status']), (202, 'queued'))
 			scan = ScanHistory.objects.get(pk=data['scan_id'])
 			self.assertEqual(scan.domain_id, self.da.id)
 			queued.assert_called_once_with(scan.id, 'standard')
-			classic.apply_async.assert_not_called()
-			classic.delay.assert_not_called()
 			# engine_id is optional, but a bogus one is still rejected
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': 99999})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.db.id})[0], 404)

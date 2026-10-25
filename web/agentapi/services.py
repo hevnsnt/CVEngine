@@ -1376,7 +1376,8 @@ def _running_q(value, project):
     route_hit = Q()
     for key in _ROUTE_EVIDENCE_KEYS:
         route_hit |= Q(**{f'evidence__{key}__icontains': value})
-    return q | _hosts_named_in(routes.filter(route_hit), project)
+    from cveFeed.models import HostArchive
+    return q | _hosts_named_in(routes.filter(route_hit), project) | _hosts_named_in(HostArchive.objects.filter(tech_text__icontains=value), project)
 
 
 def _banner_q(value):
@@ -1483,6 +1484,14 @@ def _route_reasons(sub, v):
     return out
 
 
+def _archive_reasons(sub, v):
+    """Technologies the web archive says the host ran at some point that hold ``v``. Historical, so labelled as such."""
+    from cveFeed.models import HostArchive
+    row = HostArchive.objects.filter(project_id=sub.target_domain.project_id, host=sub.name).first()
+    return [f'seen in web archive: {name} ({info.get("count", 0)} URLs)' for name, info in (row.technologies if row else {}).items()
+            if v in name.lower()]
+
+
 def _why_matched(sub, terms):
     """What each positive term matched on this host, for the results list (read from the page's prefetched rows)."""
     from startScan.models import open_ports
@@ -1510,6 +1519,7 @@ def _why_matched(sub, terms):
             if has(sub.webserver):
                 reasons.append(f'web server {sub.webserver}')
             reasons += _route_reasons(sub, v)
+            reasons += _archive_reasons(sub, v)
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')

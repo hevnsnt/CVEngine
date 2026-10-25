@@ -13,9 +13,12 @@ A target is a domain, an IP address, a CIDR range (`10.0.0.0/24`), a dashed rang
 3. **Exposure checks.** One connection attempt, with no credentials, to Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB ports. A server that answers is reported as a critical finding.
 4. **nuclei, technology pass.** HTTP and technology templates fingerprint each host.
 5. **Web route checks.** For each web host, CVEngine asks a handful of common routes (`/`, `/login`, `/admin`, `/api`, and paths bbot found) one plain anonymous GET and labels each route `open`, `login`, `session_required`, `sso`, or `redirect`. The same response is scanned in memory for sensitive data such as cloud keys, personal data, and internal identifiers. Only the type, a count, and a masked sample are stored. Credentials show only their type and public prefix.
-6. **CVE correlation.** The inventory is matched against the CVE feed.
-7. **nuclei, AI-targeted pass.** Your AI model sees the technology names found on each host and picks nuclei tags from those the installed templates use. A built-in technology map always adds its tags. Hosts with the same choice are scanned together, and each host's fire and smoke CVE matches get a template test.
-8. **Triage, validation, and changes.** See below.
+6. **WPScan.** Hosts fingerprinted as WordPress by the earlier stages are scanned with WPScan (see [Configuration](CONFIGURATION.md#settings-in-the-app)).
+7. **CVE correlation.** The inventory is matched against the CVE feed.
+8. **nuclei, AI-targeted pass.** Your AI model sees the technology names found on each host and picks nuclei tags from those the installed templates use. A built-in technology map always adds its tags. Hosts with the same choice are scanned together, and each host's fire and smoke CVE matches get a template test.
+9. **Triage, validation, and changes.** See below.
+
+The daily hygiene task also asks the Internet Archive, once a week per target, for the URLs it saved. A `.php` page or a `/wp-content/` path says a host ran PHP or WordPress at some point. That is kept as historical evidence only: search finds the host and labels it *seen in web archive*, and it is never treated as a current technology.
 
 Hygiene runs as its own task when the scan finishes. It checks TLS certificates (expiry, trust chain, hostname, self-signed, legacy protocols) and SPF, DKIM, DMARC, and CAA records.
 
