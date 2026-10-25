@@ -1,4 +1,6 @@
 import io
+import shutil
+import tempfile
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -91,6 +93,11 @@ class CandidatesTests(RouteFixture, TestCase):
 class RunForScanTests(RouteFixture, TestCase):
 	def setUp(self):
 		super().setUp()
+		self.media_root = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, self.media_root, ignore_errors=True)
+		override = self.settings(MEDIA_ROOT=self.media_root)
+		override.enable()
+		self.addCleanup(override.disable)
 		self.scan_obj = self.scan(names=('win.rt.test',), ports=())
 		self.sub = Subdomain.objects.get(scan_history=self.scan_obj)
 		self.ip = self.sub.ip_addresses.get()
@@ -223,6 +230,14 @@ class RunForScanTests(RouteFixture, TestCase):
 
 
 class PipelineWiringTests(RouteFixture, TestCase):
+	def setUp(self):
+		super().setUp()
+		self.media_root = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, self.media_root, ignore_errors=True)
+		override = self.settings(MEDIA_ROOT=self.media_root)
+		override.enable()
+		self.addCleanup(override.disable)
+
 	def test_the_pipeline_runs_the_stage_only_when_a_candidate_exists(self):
 		from cveFeed import discovery
 		scan = self.scan(names=('win.rt.test',), ports=())
