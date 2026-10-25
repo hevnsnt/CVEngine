@@ -690,6 +690,97 @@ class FindingStatusTests(TestCase):
 		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'vendor says no'})
 		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'accepted_risk', 'vendor says no'))
 
+	def test_assignee_can_be_set_alone_changed_and_cleared_with_null(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': self.alice.id})
+		self.assertEqual(status, 200)
+		self.assertEqual(data['assignee'], {'id': self.alice.id, 'username': 'fsalice', 'name': 'fsalice'})
+		self.assertEqual(data['remediation_status'], 'open')  # untouched: assignee was sent alone
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': None})
+		self.assertEqual((status, data['assignee']), (200, None))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'in_progress', 'assignee': self.carol.id})
+		self.assertEqual((status, data['remediation_status'], data['assignee']['username']), (200, 'in_progress', 'fscarol'))
+
+	def test_a_patch_needs_status_or_assignee_and_the_assignee_must_be_a_member(self):
+		base = self._base()
+		self.assertEqual(call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'note': 'x'})[0], 400)
+		outsider = User.objects.create_user('fsoutsider', password='x')
+		for bad in (outsider.id, 'abc', 99999999):
+			status, _ = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': bad})
+			self.assertEqual(status, 400, bad)
+
+	def test_comments_are_listed_oldest_first_counted_and_audited(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		status, c1 = call(self.t_alice, 'POST', f'{base}/comments', {'text': 'looking into it'})
+		self.assertEqual((status, c1['text'], c1['author']['username']), (201, 'looking into it', 'fsalice'))
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'second'})
+		status, listed = call(self.t_alice, 'GET', f'{base}/comments')
+		self.assertEqual((status, [c['text'] for c in listed['results']]), (200, ['looking into it', 'second']))
+		self.assertEqual(call(self.t_alice, 'GET', base)[1]['comment_count'], 2)
+		rows = call(self.t_alice, 'GET', f'{self._base()}/vulnerabilities')[1]['results']
+		self.assertEqual(next(r for r in rows if r['id'] == self.vuln.id)['comment_count'], 2)
+		self.assertEqual(call(self.t_alice, 'POST', f'{base}/comments', {'text': '   '})[0], 400)
+		self.assertEqual(call(self.t_alice, 'POST', f'{base}/comments', {})[0], 400)
+
+	def test_comment_writes_are_gated_like_every_other_write(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}/comments'
+		self.assertEqual(call(self.t_ro, 'POST', base, {'text': 'x'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'POST', base, {'text': 'x'})[0], 403)
+		self.assertEqual(call(self.t_alice, 'GET', base.replace('fs-proj', 'fs-other'))[0], 404)
+		other = f'/api/v1/projects/fs-proj/findings/vulnerability/{self.vuln_other.id}/comments'
+		self.assertEqual(call(self.t_alice, 'POST', other, {'text': 'x'})[0], 404)  # another project's finding
+
+	def test_the_audit_trail_records_status_assignee_and_comment_with_before_and_after(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		call(self.t_alice, 'PATCH', base, {'status': 'in_progress'})
+		call(self.t_alice, 'PATCH', base, {'assignee': self.alice.id})
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'on it'})
+		status, trail = call(self.t_alice, 'GET', f'{base}/audit')
+		self.assertEqual(status, 200)
+		events = list(reversed(trail['results']))  # newest first on the wire
+		self.assertEqual([e['event'] for e in events], ['status', 'assignee', 'comment'])
+		self.assertEqual((events[0]['before'], events[0]['after']), ({'status': 'open'}, {'status': 'in_progress'}))
+		self.assertEqual((events[1]['before'], events[1]['after']['assignee']['username']), ({'assignee': None}, 'fsalice'))
+		self.assertEqual(events[2]['after']['text'], 'on it')
+		self.assertTrue(all(e['actor']['username'] == 'fsalice' for e in events))
+
+	def test_bulk_status_changes_are_audited_too(self):
+		status, _ = call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': [{'kind': 'hygiene', 'id': self.hyg.id}], 'status': 'fixed'})
+		self.assertEqual(status, 200)
+		trail = call(self.t_alice, 'GET', f'{self._base()}/findings/hygiene/{self.hyg.id}/audit')[1]['results']
+		self.assertEqual([(e['event'], e['after']) for e in trail], [('status', {'status': 'fixed'})])
+
+	def test_members_lists_direct_and_org_members_for_the_picker(self):
+		from dashboard.models import OrgMembership
+		orgish = User.objects.create_user('fsorg', password='x')
+		OrgMembership.objects.create(user=orgish, org=self.proj.org, role='user')
+		status, data = call(self.t_alice, 'GET', f'{self._base()}/members')
+		self.assertEqual(status, 200)
+		self.assertEqual([m['username'] for m in data['results']], ['fsalice', 'fscarol', 'fsorg'])
+		self.assertEqual(call(self.t_alice, 'GET', '/api/v1/projects/fs-other/members')[0], 404)
+
+	def test_detail_carries_status_assignee_and_comment_count_for_every_kind(self):
+		base = self._base()
+		call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'ok', 'assignee': self.alice.id})
+		status, data = call(self.t_alice, 'GET', f'{base}/findings/hygiene/{self.hyg.id}')
+		self.assertEqual(status, 200)
+		self.assertEqual((data['remediation']['status'], data['remediation']['note']), ('accepted_risk', 'ok'))
+		self.assertEqual((data['assignee']['username'], data['status_changed_by']['username'], data['comment_count']), ('fsalice', 'fsalice', 0))
+		self.assertIsNotNone(data['status_changed_at'])
+		route = call(self.t_alice, 'GET', f'{base}/findings/route/{self.route.id}')[1]
+		self.assertEqual((route['assignee'], route['comment_count'], route['status_changed_at']), (None, 0, None))
+
+	def test_mcp_assign_comment_audit_and_members_tools(self):
+		from tests.test_agentapi import tool_call
+		args = {'project': 'fs-proj', 'kind': 'vulnerability', 'id': self.vuln.id}
+		self.assertFalse(tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': self.alice.id})[0])
+		self.assertFalse(tool_call(self.t_alice, 'add_finding_comment', {**args, 'text': 'via mcp'})[0])
+		self.assertEqual([c['text'] for c in tool_call(self.t_alice, 'list_finding_comments', args)[1]['results']], ['via mcp'])
+		self.assertEqual({e['event'] for e in tool_call(self.t_alice, 'finding_audit', args)[1]['results']}, {'assignee', 'comment'})
+		self.assertIn('fsalice', [m['username'] for m in tool_call(self.t_alice, 'list_members', {'project': 'fs-proj'})[1]['results']])
+		unassigned = tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': None})
+		self.assertEqual((unassigned[0], unassigned[1]['assignee']), (False, None))
+
 	def test_status_changed_at_and_by_are_set_by_a_patch(self):
 		base = self._base()
 		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress'})

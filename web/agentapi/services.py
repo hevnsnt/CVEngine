@@ -165,6 +165,19 @@ def _user_brief(user):
     return {'id': user.id, 'username': user.username, 'name': user.get_full_name() or user.username} if user else None
 
 
+def _comment_count_annotation(kind):
+    """An annotation expression counting cveFeed.models.FindingComment rows of ``kind`` for each row of the annotated
+    queryset, by a correlated subquery rather than a join (a comment is addressed by (kind, id), not a real FK, so a
+    join would fan out the outer rows). Not project-scoped: (kind, id) alone already names one finding anywhere."""
+    from django.db.models import Count, IntegerField, OuterRef, Subquery
+    from django.db.models.functions import Coalesce
+
+    from cveFeed.models import FindingComment
+    sub = FindingComment.objects.filter(finding_kind=kind, finding_id=OuterRef('pk')) \
+        .order_by().values('finding_id').annotate(n=Count('id')).values('n')
+    return Coalesce(Subquery(sub, output_field=IntegerField()), 0)
+
+
 # --- identity ----------------------------------------------------------------
 
 def me(ctx):
@@ -459,8 +472,8 @@ def list_scan_endpoints(ctx, slug, scan_id, params):
 def list_scan_vulnerabilities(ctx, slug, scan_id, params):
     from startScan.models import Vulnerability
     scan = _scan_in_project(ctx, slug, scan_id)
-    qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict') \
-        .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
+    qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .prefetch_related('cve_ids', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
@@ -1718,6 +1731,7 @@ def _vuln(v):
             'remediation_status': v.remediation_status, 'remediation_note': v.remediation_note,
             'remediation_updated': _iso(v.remediation_updated_at),
             'status_changed_at': _iso(v.remediation_updated_at), 'status_changed_by': _user_brief(v.remediation_by),
+            'assignee': _user_brief(v.assignee), 'comment_count': v.comment_count,
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
 
@@ -1726,8 +1740,8 @@ def list_vulnerabilities(ctx, slug, params):
     from startScan.models import Vulnerability
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict', 'remediation_by') \
-        .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
+    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .prefetch_related('cve_ids', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
@@ -1772,6 +1786,7 @@ def _hygiene(f):
             'remediation_status': f.remediation_status, 'remediation_note': f.remediation_note,
             'remediation_updated': _iso(f.remediation_updated_at),
             'status_changed_at': _iso(f.remediation_updated_at), 'status_changed_by': _user_brief(f.remediation_by),
+            'assignee': _user_brief(f.assignee), 'comment_count': f.comment_count,
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
             'triage': _triage_brief(_triage_of(f))}
 
@@ -1782,8 +1797,8 @@ def list_hygiene(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
     qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project').select_related(
-        'domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by') \
-        .order_by('-severity', 'host', 'id')
+        'domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .annotate(comment_count=_comment_count_annotation('hygiene')).order_by('-severity', 'host', 'id')
     qs = qs.filter(status=params.get('status') or 'open')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
@@ -2150,6 +2165,7 @@ def _match(m):
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
             'remediation_updated': _iso(m.remediation_updated_at),
             'status_changed_at': _iso(m.remediation_updated_at), 'status_changed_by': _user_brief(m.remediation_by),
+            'assignee': _user_brief(m.assignee), 'comment_count': m.comment_count,
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m))}
 
@@ -2158,7 +2174,8 @@ def _matches_qs(project):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
-        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'remediation_by').order_by('-confidence', '-id')
+        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .annotate(comment_count=_comment_count_annotation('match')).order_by('-confidence', '-id')
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs
 
 
@@ -2225,8 +2242,9 @@ def _finding_sources(project, params):
         sources['cve'] = qs
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
-            .select_related('subdomain', 'triage__verdict', 'remediation_by', *(['target_domain__project'] if everywhere else [])) \
-            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'))
+            .select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee', *(['target_domain__project'] if everywhere else [])) \
+            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
+                      comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
             qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
@@ -2234,8 +2252,9 @@ def _finding_sources(project, params):
         sources['scanner'] = qs
     if wanted in ('all', 'hygiene'):
         qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project') \
-            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by') \
-            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'))
+            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by', 'assignee') \
+            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'),
+                      comment_count=_comment_count_annotation('hygiene'))
         if status == 'actionable':
             qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
@@ -2271,6 +2290,7 @@ def _finding_row(kind, obj):
             'remediation_note': getattr(obj, 'remediation_note', ''),
             'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
             'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)),
+            'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
             'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
 
 
@@ -2328,15 +2348,57 @@ def _apply_remediation(obj, status, note, user):
     obj.save(update_fields=fields)
 
 
-def update_match(ctx, slug, match_id, status, note=None):
+UNSET = object()  # a PATCH field the caller's body left out entirely, as opposed to an explicit null/empty value
+
+
+def _record_status_change(project, kind, finding_id, before, after, actor):
+    from cveFeed.models import FindingAuditEvent
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=finding_id, event='status',
+                                      actor=actor, before={'status': before}, after={'status': after})
+
+
+def _apply_assignee(project, kind, obj, assignee, actor):
+    """Set or clear ``obj.assignee`` (a user id, or None/''/0 to unassign) and write the audit event. The new assignee
+    must be someone who can already see this project (the same check PATCH .../profile and everywhere else that names
+    a user by id uses); an id naming nobody, or nobody with access, is a 400."""
+    from django.contrib.auth.models import User
+
+    from cveFeed.models import FindingAuditEvent
+    before = _user_brief(obj.assignee)
+    if assignee in (None, '', 0, '0'):
+        new_user = None
+    else:
+        try:
+            new_user = User.objects.get(pk=int(assignee))
+        except (TypeError, ValueError, User.DoesNotExist):
+            raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
+        if not roles.effective_role(new_user, project):
+            raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
+    obj.assignee = new_user
+    obj.save(update_fields=['assignee'])
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='assignee', actor=actor,
+                                      before={'assignee': before}, after={'assignee': _user_brief(new_user)})
+
+
+def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
+    """At least one of ``status``/``assignee`` is required; either can be sent alone, the same true-partial-update
+    semantics ``note`` already has. A status change and an assignee change are logged as separate audit events even
+    when sent in the same call, since they are independent facts a reader may want separately."""
     from cveFeed import activity
-    project, _ = get_project(ctx, slug, write=True)
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before body validation
+    if status is None and assignee is UNSET:
+        raise ApiError(400, 'missing field(s): status or assignee')
     m = _matches_qs(project).filter(id=match_id).first()
     if not m:
         raise ApiError(404, 'match not found')
-    _apply_remediation(m, status, note, ctx.user)
-    activity.log('remediation', f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
-                 project=project, finding_kind='match', finding_id=m.id)
+    if status is not None:
+        before = m.remediation_status
+        _apply_remediation(m, status, note, ctx.user)
+        _record_status_change(project, 'match', m.id, before, status, ctx.user)
+        activity.log('remediation', f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
+                     project=project, finding_kind='match', finding_id=m.id)
+    if assignee is not UNSET:
+        _apply_assignee(project, 'match', m, assignee, ctx.user)
     return _match(m)
 
 
@@ -2344,21 +2406,29 @@ STATUS_KINDS = ('match', 'vulnerability', 'hygiene')  # finding kinds with a rem
 MAX_BULK_STATUS = 200
 
 
-def update_finding_status(ctx, slug, kind, finding_id, status, note=None):
-    """Set the remediation status (open/in_progress/fixed/accepted_risk) and note of one finding: a CVE match, scanner
-    finding or hygiene finding. Same permissions and project-scoped 404 as update_match, which this delegates to for
-    kind='match' so the two routes agree exactly. A web route has no remediation workflow (its auth_state already says
-    what it needs), so 'route' 400s here the same as any other unrecognized kind."""
+def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, assignee=UNSET):
+    """Set the remediation status (open/in_progress/fixed/accepted_risk), note and/or assignee of one finding: a CVE
+    match, scanner finding or hygiene finding; at least one of status/assignee is required. Same permissions and
+    project-scoped 404 as update_match, which this delegates to for kind='match' so the two routes agree exactly. A
+    web route has no remediation workflow (its auth_state already says what it needs), so 'route' 400s here the same
+    as any other unrecognized kind."""
     from cveFeed import activity
     if kind == 'match':
-        return update_match(ctx, slug, finding_id, status, note=note)
+        return update_match(ctx, slug, finding_id, status, note=note, assignee=assignee)
     project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before kind/status validation
     if kind not in STATUS_KINDS:
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    if status is None and assignee is UNSET:
+        raise ApiError(400, 'missing field(s): status or assignee')
     obj = _finding_obj(project, kind, finding_id)
-    _apply_remediation(obj, status, note, ctx.user)
-    activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
-                 finding_kind=kind, finding_id=finding_id)
+    if status is not None:
+        before = obj.remediation_status
+        _apply_remediation(obj, status, note, ctx.user)
+        _record_status_change(project, kind, finding_id, before, status, ctx.user)
+        activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
+                     finding_kind=kind, finding_id=finding_id)
+    if assignee is not UNSET:
+        _apply_assignee(project, kind, obj, assignee, ctx.user)
     return _vuln(obj) if kind == 'vulnerability' else _hygiene(obj)
 
 
@@ -2385,7 +2455,9 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             if kind not in STATUS_KINDS:
                 raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
             obj = _finding_obj(project, kind, finding_id)
+            before = obj.remediation_status
             _apply_remediation(obj, status, note, ctx.user)
+            _record_status_change(project, kind, finding_id, before, status, ctx.user)
             updated += 1
         except ApiError as e:
             failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
@@ -2527,11 +2599,13 @@ def _finding_obj(project, kind, finding_id):
         obj = _matches_qs(project).filter(pk=finding_id).first()
     elif kind == 'vulnerability':
         obj = Vulnerability.objects.filter(target_domain__project=project, pk=finding_id).select_related(
-            'subdomain', 'target_domain', 'triage__verdict').prefetch_related('cve_ids', 'cwe_ids', 'tags').first()
+            'subdomain', 'target_domain', 'triage__verdict', 'remediation_by', 'assignee') \
+            .prefetch_related('cve_ids', 'cwe_ids', 'tags').annotate(comment_count=_comment_count_annotation('vulnerability')).first()
     elif kind == 'route':
         obj = RouteAuth.objects.filter(project=project, pk=finding_id).select_related('domain', 'triage__verdict').first()
     else:
-        obj = HygieneFinding.objects.filter(domain__project=project, pk=finding_id).select_related('domain', 'triage__verdict').first()
+        obj = HygieneFinding.objects.filter(domain__project=project, pk=finding_id).select_related(
+            'domain', 'triage__verdict', 'remediation_by', 'assignee').annotate(comment_count=_comment_count_annotation('hygiene')).first()
     if obj is None:
         raise ApiError(404, 'finding not found')
     return obj
@@ -2636,8 +2710,9 @@ def finding_detail(ctx, slug, kind, finding_id):
                    if base is not None and adjust else None)
     remediation = {'text': v.remediation if v else '', 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
     if kind == 'match':
-        remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), status=obj.remediation_status,
-                           note=obj.remediation_note, local_checks=(t.local_checks if t else None) or None)
+        remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), local_checks=(t.local_checks if t else None) or None)
+    if kind in STATUS_KINDS:  # match, vulnerability, hygiene: a web route has no remediation workflow
+        remediation.update(status=obj.remediation_status, note=obj.remediation_note)
     assessment_status = ('closed_not_applicable' if kind == 'match' and obj.ai_verdict == 'not_affected' and
                          (obj.ai_reason or '').startswith('Closed automatically:')
                          else 'candidate' if kind == 'match' else None)
@@ -2693,11 +2768,81 @@ def finding_detail(ctx, slug, kind, finding_id):
                'triaged': _iso(v.created_at) if v else None, 'severity_adjust': adjust, 'severity_reason': v.severity_reason if v else '',
                'hard_evidence': (t.hard_evidence if t else []) or [], 'advice': (v.validation_notes if v else []) or []},
         'how_found': how, 'remediation': remediation,
+        'status_changed_at': _iso(obj.remediation_updated_at) if kind in STATUS_KINDS else None,
+        'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
+        'assignee': _user_brief(obj.assignee) if kind in STATUS_KINDS else None,
+        'comment_count': obj.comment_count if kind in STATUS_KINDS else 0,
         'cve': _cve_context(obj.cve_entry) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},
     }
+
+
+MAX_COMMENT_LENGTH = 4000
+
+
+def _comment(c):
+    return {'id': c.id, 'text': c.text, 'author': _user_brief(c.author), 'created': _iso(c.created_at)}
+
+
+def list_finding_comments(ctx, slug, kind, finding_id):
+    """Every comment on one finding, oldest first."""
+    from cveFeed.models import FindingComment
+    project, _ = get_one_project(ctx, slug)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    _finding_obj(project, kind, finding_id)  # 404 for an unknown finding, or one in another project
+    rows = FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('author')
+    return {'results': [_comment(c) for c in rows]}
+
+
+def add_finding_comment(ctx, slug, kind, finding_id, text):
+    """Add one comment, logged to the finding's audit trail. A write like any other (read-only tokens and the audit
+    role cannot comment; ``_all`` is never writable), even though it does not touch the finding's own remediation
+    fields, since it creates a row."""
+    from cveFeed.models import FindingAuditEvent, FindingComment
+    project, _ = get_one_project(ctx, slug, write=True)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError(400, 'text must not be empty')
+    obj = _finding_obj(project, kind, finding_id)
+    comment = FindingComment.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, author=ctx.user, text=text[:MAX_COMMENT_LENGTH])
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='comment', actor=ctx.user,
+                                      before={}, after={'comment_id': comment.id, 'text': comment.text[:200]})
+    return _comment(comment)
+
+
+def _audit_event(e):
+    return {'id': e.id, 'event': e.event, 'actor': _user_brief(e.actor), 'before': e.before, 'after': e.after, 'created': _iso(e.created_at)}
+
+
+def finding_audit(ctx, slug, kind, finding_id):
+    """One finding's audit trail, newest first: status changes, assignee changes, and comments, each with who, when,
+    and (status/assignee) what changed from and to. A comment's own text is also in GET .../comments; it is repeated
+    here as a short before/after so the trail reads as one timeline without a second request."""
+    from cveFeed.models import FindingAuditEvent
+    project, _ = get_one_project(ctx, slug)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    _finding_obj(project, kind, finding_id)
+    rows = FindingAuditEvent.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('actor')
+    return {'results': [_audit_event(e) for e in rows]}
+
+
+def list_members(ctx, slug):
+    """Users who can act on this project, for an assignee picker: its direct members, plus an organization's members
+    when the project belongs to one (an org role already grants project access, see tenancy.roles.effective_role). A
+    superuser with no membership row of their own is not listed; assign to an actual team member instead."""
+    from django.contrib.auth.models import User
+    from django.db.models import Q
+    project, _ = get_one_project(ctx, slug)
+    members = Q(project_memberships__project=project)
+    if project.org_id:
+        members |= Q(org_memberships__org_id=project.org_id)
+    users = User.objects.filter(members).distinct().order_by('username')
+    return {'results': [_user_brief(u) for u in users]}
 
 
 def _triage_item(t):

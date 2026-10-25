@@ -519,6 +519,9 @@ class Vulnerability(models.Model):
 	remediation_updated_at = models.DateTimeField(null=True, blank=True)
 	remediation_by = models.ForeignKey(
 		'auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+	# Who owns triaging this finding. Independent of remediation_by (who last changed the status); set through the same
+	# API/MCP surface. Same field on cveFeed.models.CVEMatch and HygieneFinding.
+	assignee = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 
 	class Meta:
 		indexes = [

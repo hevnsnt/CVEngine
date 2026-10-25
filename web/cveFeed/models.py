@@ -189,6 +189,9 @@ class CVEMatch(models.Model):
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
     remediation_by = models.ForeignKey(
         "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Who owns triaging this finding. Independent of remediation_by; set through the same API/MCP surface. Same field
+    # on startScan.models.Vulnerability and HygieneFinding below.
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -518,6 +521,7 @@ class HygieneFinding(models.Model):
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
     remediation_by = models.ForeignKey(
         "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     class Meta:
         unique_together = ("domain", "host", "check_name")
@@ -1292,3 +1296,43 @@ class StatsSnapshot(models.Model):
         constraints = [models.UniqueConstraint(fields=["project", "date"], name="uniq_statssnapshot_project_date")]
         indexes = [models.Index(fields=["project", "-date"], name="statssnap_proj_date_idx")]
         ordering = ["-date"]
+
+
+FINDING_KINDS = ("match", "vulnerability", "hygiene")  # a finding kind with a remediation workflow; same set as agentapi.services.STATUS_KINDS
+
+
+class FindingComment(models.Model):
+    """A free-text note on one finding (a CVEMatch, Vulnerability or HygieneFinding), named generically by
+    ``(finding_kind, finding_id)`` rather than three parallel FKs, the same way cveFeed.models.Triage and the activity
+    log already address a finding of any kind."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
+    finding_id = models.PositiveIntegerField()
+    author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    text = models.TextField(max_length=4000)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx")]
+        ordering = ["created_at", "id"]
+
+
+class FindingAuditEvent(models.Model):
+    """One entry of a finding's audit trail: a status change, an assignee change, or a comment, each with who did it,
+    when, and (status/assignee) what changed from and to. Written alongside the action itself (agentapi.services),
+    never derived after the fact."""
+
+    EVENTS = ("status", "assignee", "comment")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
+    finding_id = models.PositiveIntegerField()
+    event = models.CharField(max_length=16, choices=[(e, e) for e in EVENTS])
+    actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "-created_at"], name="findingaudit_target_idx")]
+        ordering = ["-created_at", "-id"]
