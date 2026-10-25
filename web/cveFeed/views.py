@@ -11,7 +11,7 @@ from collections import Counter
 
 from django.db.models import Count
 from django.http import JsonResponse
-from django.http import Http404
+from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -364,7 +364,34 @@ def host_screenshot(request, slug, subdomain_id):
     path = os.path.realpath(os.path.join(media_root, sub.screenshot_path))
     if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
         raise Http404
-    return FileResponse(open(path, 'rb'))
+    size = request.GET.get('size', 'full')
+    if size not in ('full', 'thumb'):
+        return HttpResponseBadRequest('size must be full or thumb')
+    if size == 'thumb':
+        from cveFeed import shots
+        thumb = shots.thumbnail_path(path)
+        if thumb:
+            return _cacheable_file(request, thumb, 'image/jpeg')
+    return _cacheable_file(request, path)
+
+
+def _cacheable_file(request, path, content_type=None):
+    """A file with an ETag (mtime and size) and a day of private caching, so a gallery grid revisits for a 304, not the bytes."""
+    import mimetypes
+    import os
+
+    from django.http import FileResponse, HttpResponseNotModified
+    from django.utils.http import http_date
+    info = os.stat(path)
+    etag = f'"{int(info.st_mtime)}-{info.st_size}"'
+    if request.META.get('HTTP_IF_NONE_MATCH') == etag:
+        response = HttpResponseNotModified()
+    else:
+        response = FileResponse(open(path, 'rb'), content_type=content_type or mimetypes.guess_type(path)[0] or 'application/octet-stream')
+        response['Last-Modified'] = http_date(info.st_mtime)
+    response['ETag'] = etag
+    response['Cache-Control'] = 'private, max-age=86400'
+    return response
 
 
 def host_rdp_screenshot(request, slug, subdomain_id, port):
