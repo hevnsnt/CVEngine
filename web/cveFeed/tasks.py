@@ -1242,6 +1242,29 @@ def reap_stuck_jobs():
     return counts
 
 
+BOOTSTRAP_LOCK = "cvengine:first-run-bootstrap"
+
+
+@app.task(name="bootstrap_first_run", bind=False, queue="cve_feed_queue")
+def bootstrap_first_run():
+    """Once, when a brand-new install's workers come up: load the CVE feed and the threat intelligence now, instead of waiting for
+    the first scheduled run (up to 30 minutes for the feed, an hour for threat intelligence), so the first dashboard already has
+    CVEs, tiers and matches to show. The sync tasks go on to correlate and auto-fire by themselves. "First run" means the CVE
+    table is empty, so an existing install (an update, a restart) never repeats it, and a first attempt that found no network
+    simply tries again the next time a worker starts. A lock keeps several workers starting together from queuing it more than once."""
+    from celery import chain
+    from django.core.cache import cache
+
+    from cveFeed import activity
+    if CVEEntry.objects.exists():
+        return {"skipped": "the CVE feed is already loaded"}
+    if not cache.add(BOOTSTRAP_LOCK, 1, timeout=1800):
+        return {"skipped": "a first-run load is already under way"}
+    activity.log("feed", "First start: loading the CVE feed and threat intelligence now, instead of waiting for the schedule")
+    chain(sync_cve_now_feed.si(), sync_threat_intel.si(), backfill_cve_now_feed.si()).apply_async()
+    return {"started": True}
+
+
 @app.task(name="snapshot_daily_stats", bind=False, queue="cve_feed_queue")
 def snapshot_daily_stats():
     """Daily: store one point-in-time snapshot per project (cveFeed.stats_history), so Settings and the dashboard can
