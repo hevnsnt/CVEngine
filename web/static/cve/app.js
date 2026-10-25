@@ -2366,6 +2366,7 @@ const ACTIVITY_KIND = {
   scan: "Scan",
   hygiene: "Hygiene",
   changes: "Changes",
+  remediation: "Remediation",
 };
 const ACTIVITY_BADGE = { target: "fire", validate: "success", hygiene: "success" };
 

@@ -6,10 +6,10 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed.models import CVEEntry, CVEMatch
+from cveFeed.models import CVEEntry, CVEMatch, HygieneFinding, RouteAuth
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
 from scanEngine.models import EngineType
-from startScan.models import IpAddress, Port, Subdomain
+from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
 
@@ -26,6 +26,12 @@ def call(token, method, path, body=None):
 
 def rpc(token, method, params=None, rpc_id=1):
 	return call(token, 'POST', '/mcp/', {'jsonrpc': '2.0', 'id': rpc_id, 'method': method, 'params': params or {}})
+
+
+def tool_call(token, name, args=None):
+	status, data = rpc(token, 'tools/call', {'name': name, 'arguments': args or {}})
+	content = data['result']['content'][0]['text']
+	return data['result']['isError'], (json.loads(content) if not data['result']['isError'] else content)
 
 
 class AgentApiTests(TestCase):
@@ -201,6 +207,14 @@ class AgentApiTests(TestCase):
 		status, data = call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'fixed', 'note': 'upgraded to 1.24'})
 		self.assertEqual((status, data['remediation_status']), (200, 'fixed'))
 		self.assertEqual(call(self.t_alice, 'GET', f'{base}/work')[1]['count'], 0)
+
+	def test_patching_a_match_without_a_note_leaves_the_existing_one_alone(self):
+		base = '/api/v1/projects/proj-a'
+		call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'in_progress', 'note': 'opened PR #4'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'fixed'})  # no 'note' in the body
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'fixed', 'opened PR #4'))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'open', 'note': ''})  # an explicit '' still clears it
+		self.assertEqual((status, data['remediation_note']), (200, ''))
 
 	def test_not_affected_verdict_is_excluded_from_work(self):
 		CVEMatch.objects.filter(pk=self.match.pk).update(ai_verdict='not_affected')
@@ -632,6 +646,125 @@ class AgentApiTests(TestCase):
 		self.assertEqual(data['remediation_status'], 'in_progress')
 		err, data = self._tool(self.t_alice, 'update_remediation_status', {'project': 'proj-a', 'match_id': mid})
 		self.assertTrue(err)  # missing status is a clean tool error
+
+
+class FindingStatusTests(TestCase):
+	"""The unified remediation-status workflow (open/in_progress/fixed/accepted_risk) on scanner and hygiene findings,
+	alongside the existing CVE-match one: PATCH findings/{kind}/{id}, the bulk POST findings/status, and how both feed
+	back into the actionable Findings view and the note's PATCH semantics."""
+
+	@classmethod
+	def setUpTestData(cls):
+		now = timezone.now()
+		org = Org.objects.create(name='FS', slug='fs-org')
+		other_org = Org.objects.create(name='FS2', slug='fs-org-2')
+		cls.proj = Project.objects.create(name='FS Project', slug='fs-proj', insert_date=now, org=org)
+		cls.other_proj = Project.objects.create(name='FS Other', slug='fs-other', insert_date=now, org=other_org)
+		cls.domain = Domain.objects.create(name='fs.example', project=cls.proj, insert_date=now)
+		other_domain = Domain.objects.create(name='fs-other.example', project=cls.other_proj, insert_date=now)
+		mk = lambda n: User.objects.create_user(n, password='x')
+		cls.alice, cls.carol = mk('fsalice'), mk('fscarol')
+		ProjectMembership.objects.create(user=cls.alice, project=cls.proj, role='user')
+		ProjectMembership.objects.create(user=cls.carol, project=cls.proj, role='audit')
+		_, cls.t_alice = create_token(cls.alice, 'agent')
+		_, cls.t_ro = create_token(cls.alice, 'readonly', read_only=True)
+		_, cls.t_carol = create_token(cls.carol, 'auditor')
+		sub = Subdomain.objects.create(name='www.fs.example', target_domain=cls.domain)
+		cls.vuln = Vulnerability.objects.create(name='Reflected XSS', severity=3, subdomain=sub, target_domain=cls.domain,
+		                                        open_status=True, http_url='https://www.fs.example/', source='nuclei')
+		cls.hyg = HygieneFinding.objects.create(domain=cls.domain, host='www.fs.example', check_name='spf_missing',
+		                                        severity=2, title='No SPF')
+		cls.route = RouteAuth.objects.create(project=cls.proj, domain=cls.domain, host='www.fs.example',
+		                                     url='https://www.fs.example/admin', path='/admin', auth_state='login')
+		other_sub = Subdomain.objects.create(name='www.fs-other.example', target_domain=other_domain)
+		cls.vuln_other = Vulnerability.objects.create(name='Other XSS', severity=3, subdomain=other_sub, target_domain=other_domain,
+		                                              open_status=True, http_url='https://www.fs-other.example/')
+
+	def _base(self):
+		return '/api/v1/projects/fs-proj'
+
+	def test_patch_sets_status_and_note_for_each_kind(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress', 'note': 'ticket #9'})
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'in_progress', 'ticket #9'))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'vendor says no'})
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'accepted_risk', 'vendor says no'))
+
+	def test_patch_match_kind_delegates_to_the_same_route_as_matches(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-50', cvss=7.0, title='x', published_at=timezone.now())
+		match = CVEMatch.objects.create(cve_entry=cve, subdomain=Subdomain.objects.create(name='m.fs.example', target_domain=self.domain), confidence=0.5)
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/match/{match.id}', {'status': 'fixed'})
+		self.assertEqual((status, data['remediation_status']), (200, 'fixed'))
+		match.refresh_from_db()
+		self.assertEqual(match.remediation_status, 'fixed')
+
+	def test_bad_status_is_rejected(self):
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/vulnerability/{self.vuln.id}', {'status': 'bogus'})
+		self.assertEqual(status, 400)
+
+	def test_route_kind_has_no_remediation_workflow(self):
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/route/{self.route.id}', {'status': 'fixed'})
+		self.assertEqual(status, 400)
+
+	def test_cross_project_id_is_404_not_another_projects_finding(self):
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/vulnerability/{self.vuln_other.id}', {'status': 'fixed'})
+		self.assertEqual(status, 404)
+
+	def test_read_only_and_audit_role_cannot_write(self):
+		self.assertEqual(call(self.t_ro, 'PATCH', f'{self._base()}/findings/vulnerability/{self.vuln.id}', {'status': 'fixed'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'PATCH', f'{self._base()}/findings/hygiene/{self.hyg.id}', {'status': 'fixed'})[0], 403)
+
+	def test_omitting_note_preserves_it_but_an_explicit_empty_note_clears_it(self):
+		base = self._base()
+		call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress', 'note': 'keep me'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'fixed'})  # no 'note' key at all
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'fixed', 'keep me'))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'open', 'note': ''})
+		self.assertEqual((status, data['remediation_note']), (200, ''))
+
+	def test_marking_fixed_or_accepted_risk_drops_out_of_actionable_findings(self):
+		base = self._base()
+		before = call(self.t_alice, 'GET', f'{base}/findings')[1]
+		self.assertEqual((before['counts']['scanner'], before['counts']['hygiene']), (1, 1))
+		call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'fixed'})
+		call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk'})
+		after = call(self.t_alice, 'GET', f'{base}/findings')[1]
+		self.assertEqual((after['counts']['scanner'], after['counts']['hygiene']), (0, 0))
+		everything = call(self.t_alice, 'GET', f'{base}/findings?status=all')[1]
+		self.assertEqual((everything['counts']['scanner'], everything['counts']['hygiene']), (1, 1))  # status=all still shows them
+
+	def test_bulk_update_sets_many_and_reports_partial_failure(self):
+		base = self._base()
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}, {'kind': 'hygiene', 'id': self.hyg.id},
+		         {'kind': 'vulnerability', 'id': 999999}, {'kind': 'route', 'id': self.route.id}]
+		status, data = call(self.t_alice, 'POST', f'{base}/findings/status', {'items': items, 'status': 'accepted_risk', 'note': 'batch'})
+		self.assertEqual((status, data['updated'], len(data['failed'])), (200, 2, 2))
+		self.vuln.refresh_from_db()
+		self.hyg.refresh_from_db()
+		self.assertEqual((self.vuln.remediation_status, self.hyg.remediation_status), ('accepted_risk', 'accepted_risk'))
+
+	def test_bulk_update_caps_at_200_items(self):
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}] * 201
+		status, data = call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': items, 'status': 'fixed'})
+		self.assertEqual(status, 400)
+
+	def test_bulk_update_rejects_an_empty_or_malformed_items_list(self):
+		self.assertEqual(call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': [], 'status': 'fixed'})[0], 400)
+		self.assertEqual(call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'status': 'fixed'})[0], 400)
+
+	def test_bulk_update_needs_write_access(self):
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}]
+		self.assertEqual(call(self.t_ro, 'POST', f'{self._base()}/findings/status', {'items': items, 'status': 'fixed'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'POST', f'{self._base()}/findings/status', {'items': items, 'status': 'fixed'})[0], 403)
+
+	def test_mcp_update_finding_status_and_bulk(self):
+		err, data = tool_call(self.t_alice, 'update_finding_status', {'project': 'fs-proj', 'kind': 'hygiene', 'id': self.hyg.id, 'status': 'in_progress'})
+		self.assertFalse(err)
+		self.assertEqual(data['remediation_status'], 'in_progress')
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}, {'kind': 'hygiene', 'id': self.hyg.id}]
+		err, data = tool_call(self.t_alice, 'bulk_update_finding_status', {'project': 'fs-proj', 'items': items, 'status': 'fixed'})
+		self.assertFalse(err)
+		self.assertEqual(data['updated'], 2)
 
 
 class AgentsPageTests(TestCase):

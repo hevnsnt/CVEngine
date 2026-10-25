@@ -508,6 +508,16 @@ class HygieneFinding(models.Model):
     last_seen = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
 
+    # Remediation workflow, driven by people or agents through the API / MCP. Independent of ``status`` above, which the
+    # hygiene sweep alone manages (see cveFeed.hygiene): a finding a human marks accepted_risk stays "open" here if the
+    # check still finds it, but drops out of the actionable view regardless. Same fields and choices as CVEMatch's.
+    REMEDIATION_STATUSES = CVEMatch.REMEDIATION_STATUSES
+    remediation_status = models.CharField(max_length=16, default="open")
+    remediation_note = models.TextField(blank=True, default="")
+    remediation_updated_at = models.DateTimeField(null=True, blank=True)
+    remediation_by = models.ForeignKey(
+        "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
     class Meta:
         unique_together = ("domain", "host", "check_name")
         ordering = ["-severity", "host"]

@@ -46,6 +46,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | hygiene | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |
 | CVEs | `GET cves?tier=fire`, `GET cves/{id}` | `list_cves`, `get_cve` |
 | matches | `GET projects/{slug}/matches`, `PATCH .../matches/{id}` | `list_cve_matches`, `update_remediation_status` |
+| remediation status | `PATCH projects/{slug}/findings/{match,vulnerability,hygiene}/{id}`, `POST .../findings/status` (bulk) | `update_finding_status`, `bulk_update_finding_status` |
 | assess a host | `POST projects/{slug}/host-assessments` (`host_id`), `GET .../host-assessments?host_id=`, `GET .../host-assessments/{id}`, `POST .../host-assessments/{id}/stop` | `assess_host`, `get_host_assessment`, `stop_host_assessment` |
 | archive a host | `POST projects/{slug}/hosts/{host}/archive` (`reason`), `.../restore`, `.../pin` (`pinned`) | `archive_host`, `restore_host`, `pin_host` |
 | validate a match | `POST projects/{slug}/matches/{id}/validate`, `GET .../matches/{id}/validate/{request_id}` | `validate_cve_match`, `get_validation_request` |
@@ -103,7 +104,7 @@ Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs i
 
 - **`routes`** lists web routes with `auth_state` (`open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `error`), `redirect_to`, and `evidence` (markers, never page content). `sensitive` holds `{type: {count, sample}}` with the sample already masked, and `sensitive_score` runs 0 to 25. Raw values are never stored or returned. `retired_at` and `zombie_since` mark route lifecycle, and `sensitive=1` or `zombie=1` filter.
 - **`changes`** lists inventory changes newest first. `since` is an ISO 8601 datetime or `24h`, `7d`, `4w`. `kind` is one of the kinds in [Changes](PIPELINE.md#changes), and `host` matches part of a hostname. Each row has `before` and `after`.
-- **`activity`** is the AI activity log for the project plus system-wide entries. `kind` is `feed`, `inventory`, `target`, `confirm`, `write_check`, `run_check`, `validate`, `discovery`, `scan`, `hygiene`, or `changes`.
+- **`activity`** is the AI activity log for the project plus system-wide entries. `kind` is `feed`, `inventory`, `target`, `confirm`, `write_check`, `run_check`, `validate`, `discovery`, `scan`, `hygiene`, `changes`, or `remediation`.
 
 ## Triage and remediation
 
@@ -124,6 +125,12 @@ List endpoints (`vulnerabilities`, `matches`, `routes`, `hygiene`, `work`) carry
 3. `update_remediation_status` sets `open`, `in_progress`, `fixed`, or `accepted_risk` with a note.
 
 Matches also carry `distro_status` (`patched`, `vulnerable`, `unknown`, `no_data`), `distro_label`, `evidence`, and the template test result (`vulnerable`, `no_match`, `error`).
+
+**Remediation status on scanner and hygiene findings.** CVE matches, scanner findings, and hygiene findings each carry the same `remediation_status` (`open`, `in_progress`, `fixed`, `accepted_risk`), `remediation_note`, and `remediation_updated` fields, driven entirely by people or agents, never by a scan. They are independent of the finding's own auto-managed liveness signal (a CVE match's `ai_verdict`, a scanner finding's `open`, a hygiene finding's `status`): a scan re-detecting a finding never undoes a `fixed` or `accepted_risk` mark, and marking one of those statuses drops the finding out of `findings?status=actionable` (and the host's heat) immediately, whether or not the underlying check still finds it.
+
+`PATCH projects/{slug}/findings/{kind}/{id}` (`update_finding_status`, `kind` one of `match`, `vulnerability`, `hygiene`) sets one finding's status and note; `kind=match` is identical to `PATCH .../matches/{id}`, kept as its own endpoint for the simpler single-kind case. `POST projects/{slug}/findings/status` (`bulk_update_finding_status`) sets the same status and note on up to 200 findings in one call, `{items: [{kind, id}, ...], status, note}`, and answers `{updated, failed: [{kind, id, error}]}` so one bad id never blocks the rest. A web route has no remediation workflow (its `auth_state` already says what it needs), so `kind=route` is a `400`. Every write here is logged to `activity` as `kind=remediation`.
+
+`note` on every one of these routes, `update_remediation_status` included, is a true partial-update field: leave it out of the body and the stored note is untouched; send `""` (or any string) and it replaces it. Earlier, an omitted `note` was treated the same as an explicit `""` and silently cleared it.
 
 ## Limits
 

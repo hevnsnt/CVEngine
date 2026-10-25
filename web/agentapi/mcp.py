@@ -145,7 +145,7 @@ TOOLS = [
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'since': {'type': 'string'}, 'kind': {'type': 'string'}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_changes(c, a.get('project'), a), False),
-    ('list_activity', 'The AI activity log, newest first: what the engine read, checked, wrote, ran and validated, for this project plus system-wide entries. kind: feed|inventory|target|confirm|write_check|run_check|validate|discovery|scan|hygiene|changes.', _schema(
+    ('list_activity', 'The AI activity log, newest first: what the engine read, checked, wrote, ran and validated, for this project plus system-wide entries. kind: feed|inventory|target|confirm|write_check|run_check|validate|discovery|scan|hygiene|changes|remediation.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'kind': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_activity(c, a.get('project'), a), False),
     ('run_hygiene_checks', 'Run the certificate, TLS and email-authentication checks now (optionally for one target).', _schema(
@@ -186,7 +186,18 @@ TOOLS = [
     ('update_remediation_status', 'Set a match to open, in_progress, fixed or accepted_risk, with a note.',
      _schema({'project': SLUG, 'match_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']},
               'note': {'type': 'string'}}, ['project', 'match_id', 'status']),
-     lambda c, a: svc.update_match(c, a.get('project'), int(a['match_id']), a.get('status'), a.get('note', '')), True),
+     lambda c, a: svc.update_match(c, a.get('project'), int(a['match_id']), a.get('status'), a.get('note')), True),
+    ('update_finding_status', 'Set the remediation status of any finding (match, vulnerability or hygiene; a route has no remediation workflow) to open, in_progress, fixed or accepted_risk, with a note.',
+     _schema({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'},
+              'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']}, 'note': {'type': 'string'}},
+             ['project', 'kind', 'id', 'status']),
+     lambda c, a: svc.update_finding_status(c, a.get('project'), a['kind'], int(a['id']), a.get('status'), a.get('note')), True),
+    ('bulk_update_finding_status', 'Set the same remediation status and note on up to 200 findings (match, vulnerability or hygiene) at once. Returns {updated, failed: [{kind, id, error}]} so a bad id never blocks the rest.',
+     _schema({'project': SLUG, 'items': {'type': 'array', 'items': _schema(
+                 {'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'}}, ['kind', 'id'])},
+              'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']}, 'note': {'type': 'string'}},
+             ['project', 'items', 'status']),
+     lambda c, a: svc.bulk_update_finding_status(c, a.get('project'), a.get('items'), a.get('status'), a.get('note')), True),
 ]
 BY_NAME = {t[0]: t for t in TOOLS}
 
