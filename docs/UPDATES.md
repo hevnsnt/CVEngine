@@ -58,6 +58,22 @@ For the host updater, set `CVENGINE_COMPOSE_FILE` before running `scripts/instal
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [UPGRADE.md](UPGRADE.md) for moving an old install across a major version, [documentation index](README.md).
 
+### Automatic deployment
+
+To deploy every new `master` commit without anyone running a command, install the timer once, as root, on the server:
+
+```bash
+scripts/install-auto-deploy.sh            # checks master every 3 minutes
+scripts/install-auto-deploy.sh --remove   # turn it off
+```
+
+When `master` on GitHub moves ahead of the checkout, `scripts/auto-deploy.sh`:
+
+1. backs up the database and the secret key (the last 7 backups are kept in `.git/cvengine-auto-deploy/backups`);
+2. runs `scripts/update.sh --stop-scans`, which stops running scans cleanly, pauses the scheduler and workers, applies and verifies the update, and queues the stopped scans again.
+
+It never deploys without a backup, waits while another update holds the updater lock, and retries a commit that failed at most once an hour. The installer runs `scripts/update.sh --check` first and refuses an install that is not ready. Logs are in `journalctl -u cvengine-auto-deploy`. It uses the same Compose layout settings as the updater, so an install with an overlay keeps it. Use either automatic deployment or the approval-based host updater above, not both.
+
 ### Host update state
 
 Both updater scripts share a lock under `git rev-parse --git-path cvengine-update`, outside the container's writable `web` mount. Approval updates keep the authoritative log there and publish a UI copy to `web/.update-log` by atomic replacement. Commit markers use the same safe publication. Approval files must be regular, single-link files containing one full commit ID; symlinks and special files are refused.

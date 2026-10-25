@@ -125,7 +125,7 @@ Open `https://<your DOMAIN_NAME>/`. The setup wizard creates your organization, 
 
 Next: open **Settings, AI model** to add a key (optional), click **Add targets**, and watch discovery on the dashboard.
 
-Updates are one command (`scripts/update.sh`), or approve them in the app. Details, reverse proxy setup, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
+Updates are one command (`scripts/update.sh`), an approval in the app, or fully automatic on every new commit ([automatic deployment](docs/UPDATES.md#automatic-deployment)). Details, reverse proxy setup, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
 
 ## Built for teams and agents
 

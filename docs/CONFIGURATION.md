@@ -80,6 +80,10 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | `CVENGINE_UPDATE_DRAIN_SECONDS` | `10800` | Longest wait for active tasks before an update gives up without stopping them. |
 | `CVENGINE_UPDATE_READY_SECONDS` | `600` | Longest wait for the site, workers, and scheduler after an update. |
 | `CVENGINE_UPDATE_STOP_SCANS` | `0` | Set to `1` to make every update stop scans and queue them again, as `--stop-scans` does. |
+| `CVENGINE_AUTO_DEPLOY_BACKUPS` | `7` | Database backups automatic deployment keeps. `0` skips the backup. |
+| `CVENGINE_AUTO_DEPLOY_RETRY_SECONDS` | `3600` | Wait before automatic deployment retries a commit that failed. |
+| `CVENGINE_AUTO_DEPLOY_DRAIN_SECONDS` | `1800` | Longest wait for active tasks during an automatic deployment. |
+| `CVENGINE_AUTO_DEPLOY_INTERVAL` | `3min` | How often the timer checks `master`, set when running `scripts/install-auto-deploy.sh`. |
 
 ## Web server
 
