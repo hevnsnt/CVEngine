@@ -422,7 +422,11 @@ class AgentActivity(models.Model):
 
     class Meta:
         ordering = ["-id"]
-        indexes = [models.Index(fields=["id"])]
+        indexes = [models.Index(fields=["id"]),
+                   # the dashboard and admin feeds read a project's (or the failed) entries newest first; retention reads by age
+                   models.Index(fields=["project", "id"], name="agentact_project_id_idx"),
+                   models.Index(fields=["status", "id"], name="agentact_status_id_idx"),
+                   models.Index(fields=["created_at"], name="agentact_created_idx")]
 
     def __str__(self):
         return f"[{self.kind}] {self.message}"

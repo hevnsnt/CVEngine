@@ -60,6 +60,8 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | `CVENGINE_TEMPLATE_GEN_MAX_PER_DAY`, `CVENGINE_TEMPLATE_GEN_CVE_DAYS` | `10`, `7` | AI-written nuclei checks: at most this many attempts in any 24 hours across all projects, and one attempt per CVE in this many days, whatever its outcome. |
 | `CVENGINE_RETEST_MAX_HOSTS` | `25` | Hosts re-tested right away after a change in one scan. The rest wait for the five-minute sweep. |
 | `CVENGINE_CHANGES_RETENTION_DAYS` | `90` | Days the Changes log is kept. |
+| `CVENGINE_ACTIVITY_RETENTION_DAYS`, `CVENGINE_TRIAGE_CALL_RETENTION_DAYS`, `CVENGINE_AI_USAGE_RETENTION_DAYS` | `30`, `90`, `400` | Days the AI activity feed, the AI call leases and the AI usage ledger are kept. Every Sunday at 03:23 UTC the older rows are written to `cvengine-logs-<time>.tar.gz` (one JSON object per line per table) and only then deleted. The run is logged in the activity feed, and nothing is deleted if the archive cannot be written. |
+| `CVENGINE_LOG_ARCHIVE_DIR`, `CVENGINE_LOG_ARCHIVE_DAYS` | `/usr/src/scan_results/.log-archives`, `365` | Where those archives go (on the scan results volume; only a superuser can download them), and how long they are kept. |
 | `CVENGINE_SHOT_THRESHOLD` | `12` | Bits (of 64) by which screenshot hashes must differ to count as a changed front page. |
 
 ## Updates

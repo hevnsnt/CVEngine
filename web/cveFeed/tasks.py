@@ -1161,6 +1161,35 @@ def prune_asset_changes():
     return {"deleted": deleted}
 
 
+@app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")
+def weekly_maintenance():
+    """Weekly: archive the AI activity feed, AI call leases and AI usage rows past their retention to a tar.gz and delete them
+    (cveFeed.maintenance). One run at a time; the outcome is a line in the activity log, failed if the archive could not be
+    written, in which case nothing was deleted."""
+    from django.core.cache import cache
+
+    from cveFeed import activity, maintenance
+    if not cache.add('cvengine:weekly-maintenance', 1, timeout=6 * 3600):
+        return {'skipped': 'another maintenance run is in progress'}
+    try:
+        result = maintenance.run()
+    except Exception as exc:  # noqa: BLE001 - reported, and retried next week; no row was deleted
+        logger.exception('weekly maintenance failed')
+        activity.log('feed', activity.diagnostic('Weekly log maintenance', f'{type(exc).__name__}: {exc}', type(exc).__name__),
+                     status='failed')
+        return {'error': type(exc).__name__}
+    finally:
+        cache.delete('cvengine:weekly-maintenance')
+    archived = sum(result['archived'].values())
+    activity.log('feed', (f'Weekly log maintenance archived and removed {archived:,} log rows older than their retention '
+                          f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '
+                          f'{os.path.basename(result["archive"])}' if archived else
+                          'Weekly log maintenance: no log rows were past their retention')
+                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else ''),
+                 archived=result['archived'], deleted=result['deleted'])
+    return result
+
+
 @app.task(name="rescore_all_hosts", bind=False, queue="cve_feed_queue")
 def rescore_all_hosts():
     """Daily: recompute every host's score (the latest finished scan's hosts and the certificate watch's), per project, 500 at a
