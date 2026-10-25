@@ -837,3 +837,7 @@ a.bb-tile:hover,a.bb-tile:focus-visible{border-color:var(--ink)}
 .bb-list{margin:8px 0 12px 18px;display:grid;gap:6px;font-size:14px;line-height:1.5}
 #bounty .card{margin-bottom:14px}
 #bounty .mono{font:500 13px var(--mono);overflow-wrap:anywhere}
+
+.host-overview .kv{grid-template-columns:minmax(120px,max-content) 1fr}
+.tech-line{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.nse{margin-top:6px}.nse summary{cursor:pointer;font-size:12px;color:var(--muted)}

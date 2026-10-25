@@ -22,6 +22,19 @@ FTP = """Anonymous FTP login allowed (FTP code 230)
 drwxr-xr-x   2 ftp      ftp          4096 Jan 01 00:00 pub"""
 
 
+RDP_ENC = """  Security layer
+    CredSSP (NLA): SUCCESS
+    CredSSP with Early User Auth: SUCCESS
+    RDSTLS: SUCCESS
+    SSL: SUCCESS
+    RDP: SUCCESS
+  RDP Encryption level: Client Compatible"""
+RDP_NLA_ONLY = """  Security layer
+    CredSSP (NLA): SUCCESS
+    CredSSP with Early User Auth: SUCCESS
+    RDP: FAILED"""
+
+
 class ParseTests(SimpleTestCase):
     def test_rdp_ntlm_names_the_windows_build_and_computer(self):
         facts = service_intel.parse_rdp_ntlm(RDP)
@@ -65,6 +78,15 @@ class FindingTests(RouteFixture, TestCase):
         self.port(21, {'ftp-anon': 'Can\'t get directory listing: TIMEOUT'}, service_name='ftp')
         self.assertEqual(service_intel.record_service_findings(self.scan_obj), 0)
 
+    def test_rdp_that_skips_nla_is_a_finding_and_one_that_insists_is_not(self):
+        self.port(3389, {'rdp-enum-encryption': RDP_ENC}, service_name='ms-wbt-server')
+        self.assertEqual(service_intel.record_service_findings(self.scan_obj), 1)
+        vuln = Vulnerability.objects.get(name='RDP does not require Network Level Authentication')
+        self.assertEqual(vuln.extracted_results, ['SSL: SUCCESS', 'RDP: SUCCESS'])
+        Vulnerability.objects.all().delete()
+        Port.objects.filter(number=3389).update(extra={'scripts': {'rdp-enum-encryption': RDP_NLA_ONLY}})
+        self.assertEqual(service_intel.record_service_findings(self.scan_obj), 0)
+
     def test_a_closed_port_is_not_reported(self):
         port = self.port(21, {'ftp-anon': FTP}, service_name='ftp')
         port.state = 'closed'
@@ -85,3 +107,24 @@ class FindingTests(RouteFixture, TestCase):
         ip.refresh_from_db()
         self.assertEqual(ip.os_guess, 'Microsoft Windows Server 2019')
         self.assertEqual(ip.fingerprint['facts']['source'], 'smb-os-discovery')
+
+
+class HostRecordTests(RouteFixture, TestCase):
+    def test_the_host_record_carries_facts_and_script_output(self):
+        from agentapi.auth import create_token
+        from django.contrib.auth.models import User
+        from dashboard.models import ProjectMembership
+        from tests.test_agentapi import call
+        scan = self.scan(names=('win.rt.test',), ports=())
+        sub = Subdomain.objects.get(scan_history=scan)
+        ip = sub.ip_addresses.get()
+        ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server', extra={'scripts': {'rdp-ntlm-info': RDP}}))
+        service_intel.record_service_findings(scan)
+        user = User.objects.create_user('intel-user', password='x')
+        ProjectMembership.objects.create(user=user, project=self.project, role='user')
+        _, token = create_token(user, 'intel')
+        status, data = call(token, 'GET', '/api/v1/projects/pr/hosts')
+        self.assertEqual(status, 200, data)
+        ip_row = data['results'][0]['ips'][0]
+        self.assertEqual(ip_row['facts']['computer_name'], 'SRV01')
+        self.assertIn('Product_Version', ip_row['ports'][0]['scripts']['rdp-ntlm-info'])

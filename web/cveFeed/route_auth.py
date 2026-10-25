@@ -174,7 +174,11 @@ def classify(probe):
     for key, field in (('server', 'server'), ('powered_by', 'powered_by')):
         if probe.get(field):
             evidence[key] = str(probe[field])[:100]
-    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''))
+    page_url = probe.get('url', '')
+    scripts, local = fingerprint.script_sources(body, page_url) if (urlparse(page_url).path or '/') == '/' else ([], [])
+    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts)
+    if local:
+        evidence['local_scripts'] = local  # read by run_route_auth, which removes it before anything is stored
     if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
@@ -244,6 +248,30 @@ def analyse(result):
 
 
 # ----------------------------------------------------------------------------- network
+
+def _read_scripts(result, probe, scan_id):
+    """Read the first bytes of up to four scripts the front page loads from its own host and add the libraries their comment banners
+    name (jQuery, Bootstrap, AngularJS ...) to the page's fingerprints. The same bounded, pinned, anonymous GET as every route
+    check, with the same gap between requests; a script that cannot be read is skipped."""
+    from reNgine import resources
+    evidence = result.get('evidence') or {}
+    local = evidence.pop('local_scripts', None) or []
+    pairs = []
+    for src in local:
+        if resources.abort_requested(scan_id):
+            break
+        time.sleep(PER_REQUEST_GAP)
+        try:
+            got = probe(src)
+        except Exception:  # noqa: BLE001
+            continue
+        if 200 <= (got.get('status') or 0) < 300:
+            pairs += fingerprint.from_script_body(got.get('body') or '')
+    if pairs:
+        found = fingerprint.extend(evidence.get('fingerprints'), pairs)
+        evidence['fingerprints'] = found
+        evidence['fingerprint_names'] = [f['name'] for f in found]
+
 
 def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET'):
     """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
@@ -443,7 +471,9 @@ def run_route_auth(scan_id, probe=probe_url, force=False):
                 if i:
                     time.sleep(PER_REQUEST_GAP)
                 try:
-                    out.append((url, analyse(probe(url))))
+                    result = analyse(probe(url))
+                    _read_scripts(result, probe, scan_id)
+                    out.append((url, result))
                 except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
                     out.append((url, exc))
             return host, out

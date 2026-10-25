@@ -104,6 +104,20 @@ def anonymous_ftp(port):
     return lines[:MAX_LISTING]
 
 
+WEAK_RDP_LAYERS = ('Native RDP', 'RDP', 'SSL')  # accepted without CredSSP: the login screen is reachable before anyone authenticates
+
+
+def rdp_without_nla(port):
+    """The security layers a server accepts that do not require Network Level Authentication, from rdp-enum-encryption. ``None``
+    when the script did not run or the server insists on CredSSP."""
+    text = ((port.extra or {}).get('scripts') or {}).get('rdp-enum-encryption', '')
+    accepted = []
+    for key, value in _field_lines(text):
+        if value.upper().startswith('SUCCESS') and key in WEAK_RDP_LAYERS:
+            accepted.append(key)
+    return accepted or None
+
+
 def record_service_findings(scan):
     """Findings the scan's stored script output proves. Returns how many were new. Idempotent: a finding is one row per host and
     port, and a port that stopped allowing anonymous sign-in is simply no longer reported."""
@@ -114,6 +128,18 @@ def record_service_findings(scan):
         for ip in sub.ip_addresses.all():
             apply_host_facts(ip)
             for port in open_ports(ip):
+                layers = rdp_without_nla(port) if port.number == 3389 or 'wbt' in (port.service_name or '') else None
+                if layers:
+                    _vuln, created = save_vulnerability(
+                        target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=f'rdp://{ip.address}:{port.number}',
+                        name='RDP does not require Network Level Authentication', severity=2, source='nmap',
+                        template_id='rdp-enum-encryption', type='rdp',
+                        description=('The Remote Desktop service accepts connections that skip Network Level Authentication, so the login '
+                                     'screen and the pre-authentication protocol are exposed to anyone who can reach the port. Security '
+                                     'layers accepted without CredSSP: ' + ', '.join(layers) + '.'),
+                        remediation='Require Network Level Authentication, and keep RDP off the internet behind a VPN or gateway.',
+                        extracted_results=[f'{name}: SUCCESS' for name in layers], tags=['rdp', 'misconfiguration'])
+                    new += int(created)
                 listing = anonymous_ftp(port) if port.number == 21 or (port.service_name or '') == 'ftp' else None
                 if listing is None:
                     continue

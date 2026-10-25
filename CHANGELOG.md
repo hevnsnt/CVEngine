@@ -12,12 +12,14 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Added
 
+- **JavaScript libraries and technology columns.** The web route check reads jQuery, Bootstrap, AngularJS, React, Vue.js, Lodash, Moment.js, and Underscore.js versions from script names and script banners, and Angular from the page, so old libraries reach CVE matching. Technologies now have `version` and `category` columns. The host page shows an overview, a technology table, per-service script output, and what the web archive remembers.
 - **Deeper service fingerprinting.** nmap runs at version intensity 7 with the banner, SSH host key and algorithms, TLS certificate, HTTP header and title, anonymous FTP, RDP NTLM, SMB OS discovery, and NetBIOS scripts, and keeps the output per port. Search reaches it with `banner:`. Windows build, computer name, and domain from RDP and SMB fill an empty OS guess, and an FTP server that allows anonymous sign-in is a finding with its listing as evidence.
 - **WPScan for WordPress sites.** A host fingerprinted as WordPress is scanned once a week for its version, plugins, themes, config backups, database exports, and author names, and for known vulnerabilities when a wpscan.com API token is set under Settings, API keys. Findings and versions flow into Findings and CVE matching.
 - **Archived URLs as passive evidence.** The Internet Archive's saved URLs show what a host ran in the past, such as PHP or WordPress. Search finds it and labels it as seen in the web archive.
 
 ### Fixed
 
+- **CI runs the whole test suite,** not a short list of modules, and the image build no longer waits for it.
 - **Search.** A bare word and `tech:` find a host wherever its software was seen (web server and `X-Powered-By` headers, cookie names, banners, NSE output, route fingerprints, port product and version), not only in the technology list, and `banner:` searches service banners. `php` now finds every host running PHP.
 - **Findings counted wrongly.** `save_vulnerability` returned the created flag of its last tag, CVE or reference lookup instead of the finding's own, so new-finding counts were off.
 - **Test suite.** `tests.test_hard_lockout` calls the current lockout helpers, and the placeholder `tests.test_nmap` is gone with the code it was meant to test.

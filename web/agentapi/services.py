@@ -1052,22 +1052,28 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     http, hosting_info, details = _host_record(sub, ips, techs, root)
     on_ip = (shared or {}).get('names_on_ip', {})
     countries = (shared or {}).get('countries', {})
+    archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
     return {'id': sub.id, 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
             'screenshot': bool(sub.screenshot_path),
             'technologies': sorted(techs),
             'technology_details': details,
+            # what the web archive says the host ran at some point: historical evidence, never a current technology
+            'archived_technologies': [{'name': n, 'urls': i.get('count', 0), 'examples': (i.get('sample') or [])[:3]}
+                                      for n, i in sorted(archived.items())],
             'http': http,
             'hosting': hosting_info,
             'names': _host_names(sub),
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
+                     'facts': (e['ip'].fingerprint or {}).get('facts') or {},
                      'full_scanned_at': e['ip'].full_scanned_at.isoformat() if e['ip'].full_scanned_at else None,
                      'full_scan_ports': e['ip'].full_scan_ports, 'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
+                 'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'http': p.http or None, 'tls': p.tls or None} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
@@ -1132,7 +1138,10 @@ def _shared_for(project, subs):
             names[row['ip_addresses__address']] = row['n']
     geo_ids = {ip.geo_iso_id for sub in subs for ip in sub.ip_addresses.all() if ip.geo_iso_id}
     countries = {c.id: c.name or c.iso for c in CountryISO.objects.filter(id__in=geo_ids)} if geo_ids else {}
-    return {'names_on_ip': names, 'countries': countries}
+    from cveFeed.models import HostArchive
+    archive = {(row.project_id, row.host): row.technologies for row in HostArchive.objects.filter(
+        project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs})}
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}

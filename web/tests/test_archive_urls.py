@@ -99,3 +99,13 @@ class ArchiveLookupTests(TestCase):
 		self.assertTrue(any(m.startswith('seen in web archive: PHP') for m in data['results'][0]['matched']), data)
 		status, data = call(self.token, 'GET', '/api/v1/projects/arc-a/search?' + urlencode({'q': 'wordpress'}))
 		self.assertEqual([h['host'] for h in data['results']], ['www.acme.example'])
+
+	def test_the_host_record_lists_archived_technologies_apart_from_current_ones(self):
+		self.run_lookup()
+		status, data = call(self.token, 'GET', '/api/v1/projects/arc-a/hosts')
+		self.assertEqual(status, 200, data)
+		host = next(h for h in data['results'] if h['host'] == 'www.acme.example')
+		self.assertEqual([(a['name'], a['urls']) for a in host['archived_technologies']], [('PHP', 2), ('WordPress', 1)])
+		self.assertEqual(host['technologies'], [])  # history is never a current technology
+		plain = next(h for h in data['results'] if h['host'] == 'plain.acme.example')
+		self.assertEqual(plain['archived_technologies'], [])
