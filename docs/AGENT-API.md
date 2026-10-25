@@ -99,9 +99,14 @@ Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first 
 | `auth:<state>` | hosts with a web route in that state (any state listed under Routes) |
 | `sensitive:any`, `sensitive:credentials`, `sensitive:pii`, `sensitive:internal` | hosts with a route serving that kind of sensitive data |
 | `zombie:yes`, `zombie:no` | hosts whose name is gone but whose last address answers |
+| `country:US`, `country:Germany` | the ISO code or name of a host IP's geolocated country |
 | `-term`, `"apache tomcat"` | negate a term, or match a phrase |
 
 `?heat=fire|smoke|ice|clean|unscanned` narrows the page to that heat, the same value each host's own `heat` field carries. The response's `facets.heat` always counts every one of those five values over the whole match of `q`, ignoring `heat` itself, so a UI's heat chips keep their real totals while one is selected. Both the filter and the facet count stop after 5,000 matched hosts (`facets.truncated: true`); a search that wide needs narrowing with `q` regardless.
+
+Any field filter's value takes a comma-separated list for OR within that one filter, Shodan-style: `port:80,443` is port 80 or 443, still ANDed with every other term. Quote the value to keep a literal comma (`tech:"foo,bar"`): it is then never split.
+
+`?facets=port,product,tech,os,country` (comma-separated) adds the same whole-match, heat-chip-style counting for those fields: the response's `facets.port`, `facets.product`, and so on are each `[{value, count}]`, highest count first, up to `?facet_size=` values (default 10, max 50) — `count` is the number of distinct hosts with that value, over the same (and equally 5,000-capped) match `facets.heat` counts. `org:`, `asn:`, and `hosting:` filters and facets were asked for too, but nothing in CVEngine looks up an IP's ASN or hosting provider today (only its country, via `geoiplookup`) — adding that is its own feature, not implemented here.
 
 Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs it.
 

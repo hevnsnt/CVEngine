@@ -1336,20 +1336,24 @@ def list_hosts(ctx, slug, params):
     return _mark_zombies(project, _hosts_page(project, qs, params))
 
 
-SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth', 'sensitive', 'zombie')
+SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
+                  'sensitive', 'zombie', 'country')
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
 def parse_search(query):
-    """Split a search into terms: ``[(negated, field or None, value)]``. A bare word has no field; ``field:value`` filters one
-    field; ``-term`` negates; a quoted value (``"apache tomcat"``, ``tech:"apache tomcat"``) is a phrase."""
+    """Split a search into terms: ``[(negated, field or None, value, quoted)]``. A bare word has no field; ``field:value``
+    filters one field; ``-term`` negates; a quoted value (``"apache tomcat"``, ``tech:"apache tomcat"``) is a phrase, and
+    never split on comma even if it contains one (``quoted`` says so, for the comma-OR a field value otherwise gets)."""
     terms = []
-    for neg, field, quoted, bare in _SEARCH_TERM.findall(query or ''):
-        value = (quoted if quoted else bare).strip()
+    for m in _SEARCH_TERM.finditer(query or ''):
+        neg, field, quoted, bare = m.group(1), m.group(2) or '', m.group(3), m.group(4) or ''
+        is_quoted = quoted is not None
+        value = (quoted if is_quoted else bare).strip()
         if field and field.lower() not in SEARCH_FIELDS:
-            value, field = f'{field}:{value}', ''  # "http://x" or "foo:bar": not a field, just text
+            value, field, is_quoted = f'{field}:{value}', '', False  # "http://x" or "foo:bar": not a field, just text
         if value:
-            terms.append((bool(neg), field.lower() or None, value))
+            terms.append((bool(neg), field.lower() or None, value, is_quoted))
     return terms
 
 
@@ -1447,6 +1451,8 @@ def _term_filter(field, value, project=None):
         return Q(**{ports + 'service_name__icontains': value}) & open_port
     if field == 'os':
         return Q(ip_addresses__os_guess__icontains=value)
+    if field == 'country':
+        return Q(ip_addresses__geo_iso__iso__iexact=value) | Q(ip_addresses__geo_iso__name__icontains=value)
     if field == 'cve':
         return Q(cve_matches__cve_entry__cve_id__icontains=value)
     if field == 'ip':
@@ -1526,7 +1532,7 @@ def _why_matched(sub, terms):
     """What each positive term matched on this host, for the results list (read from the page's prefetched rows)."""
     from startScan.models import open_ports
     reasons = []
-    for neg, field, value in terms:
+    for neg, field, value, _quoted in terms:
         if neg:
             continue
         v = value.lower()
@@ -1553,6 +1559,8 @@ def _why_matched(sub, terms):
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')
+            if field == 'country' and ip.geo_iso and (has(ip.geo_iso.iso) or has(ip.geo_iso.name)):
+                reasons.append(f'country {ip.geo_iso.name or ip.geo_iso.iso}')
             for p in open_ports(ip):
                 label = f'port {p.number} {" ".join(x for x in (p.product, p.version) if x) or p.service_name or ""}'.strip()
                 if field == 'port' and str(p.number) == value:
@@ -1607,34 +1615,82 @@ def _heat_facets(project, qs):
     return counts, heat_by_id, total > HEAT_FACET_CAP
 
 
+SEARCH_FACET_FIELDS = ('port', 'product', 'tech', 'os', 'country')
+SEARCH_FACET_SIZE_DEFAULT = 10
+SEARCH_FACET_SIZE_MAX = 50
+
+
+def _search_facets(host_ids, names, size):
+    """``{facet name: [{value, count}]}``, highest count first, over the given host ids: each count is the number of
+    distinct hosts with that value, the same ids (and so the same cap and truncation) ``_heat_facets`` already counted
+    for ``facets.heat``. ``host_ids`` can be any iterable (a dict's keys included); it is only ever used as a filter."""
+    from django.db.models import Count
+    from startScan.models import Subdomain
+    base = Subdomain.objects.filter(id__in=list(host_ids))
+    sources = {
+        'port': (base.filter(ip_addresses__ports__state__in=('', 'open')).exclude(ip_addresses__ports__number=0),
+                 'ip_addresses__ports__number'),
+        'product': (base.filter(ip_addresses__ports__state__in=('', 'open')).exclude(ip_addresses__ports__product=''),
+                    'ip_addresses__ports__product'),
+        'tech': (base.exclude(technologies__name=''), 'technologies__name'),
+        'os': (base.exclude(ip_addresses__os_guess=''), 'ip_addresses__os_guess'),
+        'country': (base.exclude(ip_addresses__geo_iso__isnull=True), 'ip_addresses__geo_iso__name'),
+    }
+    out = {}
+    for name in names:
+        qs, column = sources[name]
+        rows = qs.values(column).annotate(n=Count('id', distinct=True)).order_by('-n', column)[:size]
+        out[name] = [{'value': row[column], 'count': row['n']} for row in rows]
+    return out
+
+
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
     page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
-    session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal) and ``zombie:`` (yes, no) filter one field; ``-term``
+    session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``zombie:`` (yes, no) and ``country:`` (ISO code
+    or name) filter one field; a filter value takes a comma-separated list for OR (``port:80,443``), unless quoted; ``-term``
     negates; quote a phrase. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
     always counts every value over the whole match of q, ignoring ``heat`` itself, so the chips keep their real totals while one is
-    selected. Each result says what matched. No ``q`` lists every host. Highest score first; ``sort=name`` for names."""
+    selected. ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
+    each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
+    host. Highest score first; ``sort=name`` for names."""
+    from django.db.models import Q
+
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     heat = params.get('heat') or ''
     if heat and heat not in HEAT_FACET_VALUES:
         raise ApiError(400, f'heat must be one of {", ".join(HEAT_FACET_VALUES)}')
+    facet_names = [f.strip() for f in (params.get('facets') or '').split(',') if f.strip()]
+    bad_facets = [f for f in facet_names if f not in SEARCH_FACET_FIELDS]
+    if bad_facets:
+        raise ApiError(400, f'facets must be among {", ".join(SEARCH_FACET_FIELDS)}: unknown {", ".join(bad_facets)}')
+    try:
+        facet_size = min(SEARCH_FACET_SIZE_MAX, max(1, int(params.get('facet_size', SEARCH_FACET_SIZE_DEFAULT))))
+    except (TypeError, ValueError):
+        raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
-    for neg, field, value in terms:
-        q = _term_filter(field, value, project)
+    for neg, field, value, quoted in terms:
+        if field and not quoted and ',' in value:
+            q = Q()
+            for part in (p.strip() for p in value.split(',') if p.strip()):
+                q |= _term_filter(field, part, project)
+        else:
+            q = _term_filter(field, value, project)
         qs = qs.exclude(q) if neg else qs.filter(q)
     qs = _one_per_host(qs, per_project=_is_all(project))
     heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
+    search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
     if heat:
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
-    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated}
+    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated, **search_facets}
     return page
 
 

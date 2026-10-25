@@ -1541,6 +1541,40 @@ class HostSearchTests(TestCase):
 		self.assertEqual(status, 200)
 		self.assertIn('db.srch.example', json.dumps(data))
 
+	def test_comma_is_or_within_one_filter_but_not_when_quoted(self):
+		self.assertEqual(self.names('port:3306,8080'), ['db.srch.example', 'port.srch.example'])
+		self.assertEqual(self.names('product:php,mysql'), ['db.srch.example', 'port.srch.example'])
+		# quoting a value with a comma keeps it literal, so port: (which takes a bare number) 400s instead of splitting it
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=' + 'port:"3306,8080"'.replace(',', '%2C').replace('"', '%22'))
+		self.assertEqual(status, 400)
+
+	def test_country_filters_and_shows_in_matched(self):
+		from startScan.models import CountryISO
+		us, _ = CountryISO.objects.get_or_create(iso='US', name='United States')
+		de, _ = CountryISO.objects.get_or_create(iso='DE', name='Germany')
+		IpAddress.objects.filter(address='10.0.0.5').update(geo_iso=us)
+		IpAddress.objects.filter(address='10.0.0.3').update(geo_iso=de)
+		self.assertEqual(self.names('country:US'), ['db.srch.example'])
+		self.assertEqual(self.names('country:Germany'), ['port.srch.example'])
+		why = {h['host']: h['matched'] for h in self.search('country:us')['results']}
+		self.assertEqual(why['db.srch.example'], ['country United States'])
+
+	def test_facets_count_the_whole_match_like_heat_does(self):
+		data = self.search('', facets='port,product,os')
+		self.assertEqual(sorted(data['facets']['port'], key=lambda r: r['value']),
+		                  sorted([{'value': 8080, 'count': 1}, {'value': 3306, 'count': 1}], key=lambda r: r['value']))
+		self.assertIn({'value': 'MySQL', 'count': 1}, data['facets']['product'])
+		self.assertIn({'value': 'Linux 5.X', 'count': 1}, data['facets']['os'])
+		# the same counts hold while the page is narrowed, exactly like facets.heat
+		narrowed = self.search('', heat='clean', facets='port')
+		self.assertEqual(sorted(narrowed['facets']['port'], key=lambda r: r['value']), sorted(data['facets']['port'], key=lambda r: r['value']))
+
+	def test_facet_size_bounds_and_bad_facet_name_is_400(self):
+		data = self.search('', facets='port', facet_size=1)
+		self.assertEqual(len(data['facets']['port']), 1)
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&facets=bogus')
+		self.assertEqual(status, 400)
+
 
 
 class AgentApiMfaTests(TestCase):
