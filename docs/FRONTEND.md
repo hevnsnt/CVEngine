@@ -68,9 +68,9 @@ Per-browser preferences (localStorage, nothing sent to the server): theme (`cve.
 saved views on Hosts and Findings (`cve.views.v1.<project>.<page>`, 12 per page), Live graph pin positions (`cve.pins.<project|all>`), the "new since you last looked" baseline (`cve.seen.v1.<project>.<page>`) and
 desktop notifications (`cve.notify.desktop`).
 
-Modules: `views.js` (filters in the URL and saved views), `bulk.js` (select mode, the action bar, and undo; host actions send one request
-per row, four at a time, and finding status changes send up to 200 per request), `keys.js` (vim-style keys and the `?` sheet), `seen.js` (new markers), `notify.js` (scan notices),
-`prefs.js` (time zone formatting, theme chooser), `charts.js` (area chart, heatmap, sparkline), `csv.js` (CSV export of the current filter, formula-safe), `rowmenu.js` (row actions menu), `palette-search.js` (Shodan-style filters, suggestions and host preview in Ctrl+K). Script URLs are content-hashed, so restart the
+Modules: `views.js` (filters in the URL and saved views), `bulk.js` (select mode and the action bar; actions run the single-item
+request four at a time), `keys.js` (vim-style keys and the `?` sheet), `seen.js` (new markers), `notify.js` (scan notices),
+`prefs.js` (time zone formatting, theme chooser), `charts.js` (area chart, heatmap). Script URLs are content-hashed, so restart the
 web container after editing a static file.
 
 Checks used while building these: axe-core (WCAG 2.0 and 2.1 A and AA) on 18 pages in light, dark and auto, with zero
