@@ -22,6 +22,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **The attack-surface map's hover card names the host's project.** With "All projects" selected, the dashboard spans every project the viewer can see, and the card had no way to say which one a host belonged to.
 - **CI runs the whole test suite,** not a short list of modules, and the image build no longer waits for it.
 - **Search.** A bare word and `tech:` find a host wherever its software was seen (web server and `X-Powered-By` headers, cookie names, banners, NSE output, route fingerprints, port product and version), not only in the technology list, and `banner:` searches service banners. `php` now finds every host running PHP.
 - **Findings counted wrongly.** `save_vulnerability` returned the created flag of its last tag, CVE or reference lookup instead of the finding's own, so new-finding counts were off.

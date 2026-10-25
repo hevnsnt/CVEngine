@@ -411,6 +411,7 @@ a.cell:hover .go{color:var(--ink);transform:translateX(3px)}
 .map-tip .tip-dot.fire{background:var(--fire)}.map-tip .tip-dot.smoke{background:var(--smoke)}.map-tip .tip-dot.ice{background:var(--ice)}
 .map-tip .tip-heat{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.03em}
 .map-tip .tip-name{font:600 12px var(--mono);word-break:break-all;margin-top:3px}
+.map-tip .tip-project{color:var(--muted);margin-top:1px;font-size:11px}
 .map-tip .tip-facts{color:var(--muted);margin-top:4px;font-size:11.5px}
 .map-tip .tip-vuln{margin-top:6px;display:flex;align-items:center;gap:5px;font:600 12px var(--mono)}
 .map-tip .tip-tag{font:700 10px var(--mono);letter-spacing:.04em;padding:1px 5px;border-radius:4px;background:var(--ice);color:#fff}
