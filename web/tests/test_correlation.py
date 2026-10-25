@@ -306,3 +306,132 @@ class TestParseVersion(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+CRAFT = FakeCVE(70, [{"vendor": "craftcms", "product": "cms", "package": "craftcms/cms",
+                      "ranges": [{"introduced": "4.0.0", "fixed": "4.18.9"}, {"introduced": "5.0.0", "fixed": "5.11.2"}]}], kev=False)
+PHP_RANGES = [{"introduced": "8.2.*", "fixed": "8.2.35"}, {"introduced": "8.3.*", "fixed": "8.3.36"},
+              {"introduced": "8.4.*", "fixed": "8.4.27"}, {"introduced": "8.5.*", "fixed": "8.5.12"}]
+PHP2SHELL = FakeCVE(71, [{"vendor": "PHP Group", "product": "PHP", "package": "php-src", "ranges": PHP_RANGES}], kev=True)
+
+
+class TestWordBoundaryMatching(unittest.TestCase):
+    """A shorter name matches a longer one only as whole words. Found on a Netlify site tagged "datocms" that matched Craft CMS
+    advisories because the advisory's product is "cms"."""
+
+    def test_datocms_is_not_craft_cms(self):
+        self.assertEqual(_hits([CRAFT], "datocms"), [])
+        self.assertEqual(_hits([CRAFT], "datocms", "1.0"), [])
+
+    def test_a_craft_host_still_matches_craft_advisories(self):
+        for label in ("Craft CMS", "craftcms", "CraftCMS"):
+            self.assertEqual([row[0] for row in _hits([CRAFT], label, "4.10.0")], [70], label)
+
+    def test_a_generic_product_word_names_nothing_on_its_own(self):
+        self.assertEqual(affected_product_tokens({"vendor": "craftcms", "product": "cms"}), {"craftcms"})
+        self.assertEqual(_hits([CRAFT], "Drupal CMS", "4.10.0"), [])
+        self.assertEqual(_hits([CRAFT], "cms", "4.10.0"), [])
+
+    def test_php_is_not_every_php_prefixed_product(self):
+        for label in ("phpMyAdmin", "PHPUnit", "PHPMailer", "phpBB", "PhpSpreadsheet"):
+            self.assertEqual(_hits([PHP2SHELL], label, "8.2.30"), [], label)
+
+    def test_php_and_its_own_variants_match_php(self):
+        for label in ("PHP", "php", "PHP-FPM"):
+            self.assertEqual([row[0] for row in _hits([PHP2SHELL], label, "8.2.30")], [71], label)
+
+    def test_substrings_inside_one_word_never_match(self):
+        js = FakeCVE(72, [{"product": "javascript", "ranges": [{"introduced": "1.0", "fixed": "9.0"}]}])
+        self.assertEqual(_hits([js], "java", "1.5"), [])
+        sp = FakeCVE(73, [{"product": "spring", "ranges": [{"introduced": "1.0", "fixed": "9.0"}]}])
+        self.assertEqual(_hits([sp], "ring", "1.5"), [])
+
+    def test_whole_words_of_a_longer_name_still_match(self):
+        tomcat = FakeCVE(74, [{"vendor": "apache", "product": "tomcat", "ranges": [{"introduced": "9.0.0", "fixed": "9.0.50"}]}])
+        self.assertEqual([row[0] for row in _hits([tomcat], "Apache Tomcat", "9.0.10")], [74])
+        server = FakeCVE(75, [{"product": "http_server", "vendor": "oracle", "ranges": [{"introduced": "1.0", "fixed": "9.0"}]}])
+        self.assertEqual([row[0] for row in _hits([server], "Oracle HTTP Server", "2.0")], [75])
+
+    def test_one_generic_word_left_over_is_not_a_product(self):
+        server = FakeCVE(76, [{"product": "server", "ranges": [{"introduced": "1.0", "fixed": "9.0"}]}])
+        self.assertEqual(_hits([server], "Apache Server", "2.0"), [])
+
+    def test_nextjs_reaches_the_next_package(self):
+        nxt = FakeCVE(77, [{"vendor": "vercel", "product": "next.js", "package": "next",
+                            "ranges": [{"introduced": "13.0.0", "fixed": "13.5.9"}]}])
+        self.assertEqual([row[0] for row in _hits([nxt], "Next.js", "13.1.0")], [77])
+        only_pkg = FakeCVE(78, [{"package": "next", "ranges": [{"introduced": "13.0.0", "fixed": "13.5.9"}]}])
+        self.assertEqual([row[0] for row in _hits([only_pkg], "Next.js", "13.1.0")], [78])
+
+    def test_the_word_table_is_bounded_and_failing_closed(self):
+        from cveFeed import correlation
+        saved = dict(correlation._WORDS)
+        try:
+            correlation._WORDS_MAX_TOKENS, original = len(correlation._WORDS), correlation._WORDS_MAX_TOKENS
+            before = len(correlation._WORDS)
+            for i in range(200):
+                correlation._norm(f"Hostile Banner Product {i}")
+            self.assertEqual(len(correlation._WORDS), before)
+            token = correlation._norm("Hostile Banner Product 1")
+            self.assertTrue(correlation.name_matches_token(token, token))  # an unregistered token still matches itself
+            self.assertFalse(correlation.name_matches_token(token, correlation._norm("Product 1")))
+        finally:
+            correlation._WORDS_MAX_TOKENS = original
+            correlation._WORDS.clear()
+            correlation._WORDS.update(saved)
+
+    def test_overlong_and_many_word_names_are_not_recorded(self):
+        from cveFeed import correlation
+        n = len(correlation._WORDS)
+        correlation._norm("a " * 120)
+        correlation._norm(" ".join(f"w{i}x" for i in range(20)))
+        self.assertEqual(len(correlation._WORDS), n)
+
+
+class TestUnlistedBranch(unittest.TestCase):
+    """PHP2Shell lists only the branches that got a fix (8.2 to 8.5). PHP 7.4 to 8.1 are older than all of them: not cleared."""
+
+    def _verdict(self, version, cve=PHP2SHELL, label="PHP"):
+        rows = _hits([cve], label, version)
+        return rows[0][1] if rows else "no match"
+
+    def test_older_branches_are_unknown_not_cleared(self):
+        for version in ("7.4.33", "8.0.30", "8.1.30", "7.3.0", "5.6.40"):
+            self.assertIsNone(self._verdict(version), version)
+
+    def test_listed_branches_are_decided_by_their_own_range(self):
+        self.assertIs(self._verdict("8.2.30"), True)
+        self.assertIs(self._verdict("8.3.20"), True)
+        self.assertIs(self._verdict("8.4.26"), True)
+        self.assertIs(self._verdict("8.5.11"), True)
+        for fixed in ("8.2.35", "8.3.36", "8.4.27", "8.5.12", "8.5.13", "8.6.0", "9.0.0"):
+            self.assertIs(self._verdict(fixed), False, fixed)
+
+    def test_an_unlisted_branch_keeps_a_usable_confidence(self):
+        self.assertEqual(_hits([PHP2SHELL], "PHP", "8.1.30"), [(71, None, 0.5)])
+
+    def test_the_evidence_says_why_it_is_unknown(self):
+        index = build_product_index([PHP2SHELL])
+        details = {}
+        list(_match_candidates("PHP", parse_version("8.1.30"), "php", index, {71: PHP2SHELL}, details=details))
+        self.assertEqual(details[71]["branch_unlisted"], True)
+        self.assertEqual(details[71]["lowest_listed_branch"], "8.2")
+
+    def test_a_cold_advisory_does_not_add_noise_for_old_versions(self):
+        cold = FakeCVE(79, [{"product": "PHP", "ranges": PHP_RANGES}], kev=False)  # no cvss, no kev, no epss: ice
+        self.assertIs(self._verdict("8.1.30", cold), False)
+
+    def test_other_shapes_of_range_are_unchanged(self):
+        self.assertIs(self._verdict("1.18.0", _nginx_cve(80, "1.20.0", "1.25.0", kev=True), "nginx"), False)  # one range
+        two = FakeCVE(81, [{"product": "widget", "ranges": [{"introduced": "1.0", "fixed": "1.9"}, {"introduced": "2.0", "fixed": "2.5"}]}], kev=True)
+        self.assertIs(self._verdict("0.5", two, "widget"), False)  # not branch-style: the fix is not a patch of the branch
+        mixed = FakeCVE(82, [{"product": "PHP", "ranges": PHP_RANGES + [{"introduced": "9.0", "lastAffected": "9.1"}]}], kev=True)
+        self.assertIs(self._verdict("8.1.30", mixed), False)  # one odd range: do not guess
+
+    def test_helpers(self):
+        from cveFeed.correlation import branch_unlisted, lowest_listed_branch
+        self.assertEqual(lowest_listed_branch(PHP_RANGES), (8, 2))
+        self.assertIsNone(lowest_listed_branch(PHP_RANGES[:1]))
+        self.assertTrue(branch_unlisted((8, 1, 30), PHP_RANGES))
+        self.assertFalse(branch_unlisted((8, 2, 0), PHP_RANGES))
+        self.assertFalse(branch_unlisted(None, PHP_RANGES))

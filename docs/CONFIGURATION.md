@@ -41,6 +41,8 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CVENGINE_TTL_NMAP_FAST` | `168` | nmap fingerprint of an IP. |
+| `CVENGINE_CVE_COVERAGE_DAYS` | `14` | How many days of the cve.now feed the hourly coverage task keeps stored. `0` turns it off. |
+| `CVENGINE_CVE_WATCH_TECHS` | `php` | Technology slugs whose cve.now feed the coverage task reads, comma separated. |
 | `CVENGINE_TTL_BBOT`, `CVENGINE_TTL_BBOT_DEEP` | `168` | Discovery of a target, and deep discovery of an apex domain. |
 | `CVENGINE_TTL_NUCLEI`, `_NUCLEI_LIGHT`, `_NUCLEI_CVE` | `24` | Full, light, and CVE template runs per host. |
 | `CVENGINE_TTL_NUCLEI_DEEP_HOST`, `_NUCLEI_DEEP_TARGET` | `168` | Successful paced deep Nuclei host and individual target coverage, in hours. |

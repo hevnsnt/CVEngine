@@ -1032,7 +1032,7 @@ def _merge_group(sub, others):
     return ips, reasons, sorted(vulns.values(), key=lambda v: -v.severity), len(cves)
 
 
-def _host(sub, others=(), labels=(), profile=None, excluded=False):
+def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, shared=None):
     """One host row. ``others`` are the same name's other current-inventory Subdomain rows (see ``_name_siblings``): the counts, IPs,
     ports, matches and open findings cover all of them, while score, technologies and screenshot come from ``sub``."""
     ips, reasons, vulns, cve_count = _merge_group(sub, others)
@@ -1041,13 +1041,21 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False):
     if not ips:
         score_detail = [line for line in score_detail if not str(line.get('label', '')).startswith(('Reachable on a public IP', 'Public IP observed'))]
     display_score = min(100, sum(int(line.get('points') or 0) for line in score_detail)) if score_detail else 0
+    http, hosting_info, details = _host_record(sub, ips, techs, root)
+    on_ip = (shared or {}).get('names_on_ip', {})
+    countries = (shared or {}).get('countries', {})
     return {'id': sub.id, 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
-            'http_status': sub.http_status, 'title': sub.page_title, 'score': display_score, 'score_detail': score_detail, 'zombie': False,
+            'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
             'screenshot': bool(sub.screenshot_path),
             'technologies': sorted(techs),
+            'technology_details': details,
+            'http': http,
+            'hosting': hosting_info,
             'names': _host_names(sub),
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
+                     'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
+                     'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
                      'full_scanned_at': e['ip'].full_scanned_at.isoformat() if e['ip'].full_scanned_at else None,
                      'full_scan_ports': e['ip'].full_scan_ports, 'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
@@ -1058,6 +1066,62 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False):
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded)}
+
+
+def _host_record(sub, ips, techs, root):
+    """``(http, hosting, technology_details)`` for one host: the Shodan-style part of the record. What the host row stores wins; what
+    the web route check saw on the root page (its status, title, Server and X-Powered-By headers) fills what the row lacks, so a host
+    the route check reached is never shown as unprobed."""
+    from cveFeed import fingerprint, hosting
+    from cveFeed.correlation import split_name_version
+    evidence = dict((root.evidence or {}) if root else {})
+    http = {'url': sub.http_url or (root.url if root else None),
+            'status': sub.http_status or (root.http_status if root and root.http_status else 0),
+            'title': sub.page_title or (root.title if root and root.title else None),
+            'webserver': sub.webserver or evidence.get('server', ''), 'powered_by': evidence.get('powered_by', ''),
+            'content_type': sub.content_type or (root.content_type if root else '') or '',
+            'redirect_to': root.redirect_to if root else '', 'cname': sub.cname or '',
+            'checked': root.checked_at.isoformat() if root and root.checked_at else None,
+            'source': 'host scan' if sub.http_status else ('web route check' if root else '')}
+    pointers = [e['ip'].reverse_pointer for e in ips.values() if e['ip'].reverse_pointer]
+    info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=http['webserver'], reverse_pointers=pointers,
+                            cdn_name=sub.cdn_name or '', is_cdn=bool(sub.is_cdn or any(e['ip'].is_cdn for e in ips.values())))
+    from_page = {f['name']: f['source'] for f in evidence.get('fingerprints') or []}
+    details = []
+    for name in sorted(techs | set(from_page)):
+        base, version = split_name_version(name)
+        details.append({'name': base or name, 'version': version, 'category': fingerprint.categorize(name),
+                        'source': from_page.get(name, 'scan')})
+    return http, info, details
+
+
+def _roots_for(project, subs):
+    """``{(project id, lowercase host): the newest root-page RouteAuth row}`` for a page of hosts: one query."""
+    from cveFeed.models import RouteAuth
+    out = {}
+    wanted = {s.name.lower() for s in subs}
+    for row in RouteAuth.objects.filter(project_id__in=_pids_of(project, subs), host__in=wanted, path='/', retired_at__isnull=True) \
+            .order_by('checked_at', 'id'):
+        key = (row.project_id, row.host)
+        # the https answer speaks for the host; an http redirect only when nothing else was seen
+        if key not in out or row.url.startswith('https') or not out[key].url.startswith('https'):
+            out[key] = row
+    return out
+
+
+def _shared_for(project, subs):
+    """Per-page lookups for the IP rows: how many names of the project's own inventory sit on each address, and country names."""
+    from django.db.models import Count
+    from startScan.models import CountryISO, Subdomain
+    addresses = {ip.address for sub in subs for ip in sub.ip_addresses.all() if ip.address}
+    names = {}
+    if addresses:
+        for row in Subdomain.objects.filter(target_domain__project_id__in=_pids_of(project, subs), ip_addresses__address__in=addresses) \
+                .values('ip_addresses__address').annotate(n=Count('name', distinct=True)):
+            names[row['ip_addresses__address']] = row['n']
+    geo_ids = {ip.geo_iso_id for sub in subs for ip in sub.ip_addresses.all() if ip.geo_iso_id}
+    countries = {c.id: c.name or c.iso for c in CountryISO.objects.filter(id__in=geo_ids)} if geo_ids else {}
+    return {'names_on_ip': names, 'countries': countries}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -1152,10 +1216,12 @@ def _hosts_page(project, qs, params, extra=None):
     others = _name_siblings(project, subs)
     labels = _labels_for(project, subs)
     profiles, excluded = _profiles_for(project, subs)
+    roots, shared = _roots_for(project, subs), _shared_for(project, subs)
     rows = []
     for sub in subs:
         key = (_pid_of(project, sub), sub.name.lower())
-        row = {**_host(sub, others[sub.id], labels.get(key, ()), profiles.get(key), key in excluded), **(extra(sub) if extra else {})}
+        row = {**_host(sub, others[sub.id], labels.get(key, ()), profiles.get(key), key in excluded, roots.get(key), shared),
+               **(extra(sub) if extra else {})}
         if everywhere:
             row['project'], row['project_name'] = sub.target_domain.project.slug, sub.target_domain.project.name
         rows.append(row)
@@ -1168,7 +1234,7 @@ def host_group(project, sub):
     profiles, excluded = _profiles_for(project, [sub])
     key = (project.id, sub.name.lower())
     return _host(sub, _name_siblings(project, [sub])[sub.id], _labels_for(project, [sub]).get(key, ()),
-                 profiles.get(key), key in excluded)
+                 profiles.get(key), key in excluded, _roots_for(project, [sub]).get(key), _shared_for(project, [sub]))
 
 
 def _mark_zombies(project, page):

@@ -273,9 +273,19 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
     domain, project = scan.domain, scan.domain.project_id
     _hostnames, ips, _ports = scan_targets(scan)
     all_ips = build_targets(ips, limit=None)
+    from cveFeed import hosting
+    shared = hosting.shared_by_address(all_ips)
+    if shared:
+        # Netlify, Vercel, a CDN edge: the address belongs to the platform and other customers answer on it, so it is not ours to scan
+        hosting.mark_shared(shared)
+        all_ips = [i for i in all_ips if i not in shared]
+        providers = ', '.join(sorted({v['provider'] for v in shared.values() if v['provider']})) or 'a shared platform'
+        activity.log('run_check', f'nmap left {len(shared)} shared platform address(es) alone for {domain.name} ({providers}): '
+                     'other customers answer on them', project=project, scan_id=scan.id)
     if not all_ips:
-        activity.log('run_check', f'nmap skipped for {domain.name}: discovery found no IPs to scan', project=project)
-        return {'targets': 0}
+        if not shared:
+            activity.log('run_check', f'nmap skipped for {domain.name}: discovery found no IPs to scan', project=project)
+        return {'targets': 0, 'shared': len(shared)} if shared else {'targets': 0}
 
     fast_todo = all_ips if force else [i for i in all_ips if i not in ledger.fresh('nmap-fast', all_ips)]
     if not fast_todo:

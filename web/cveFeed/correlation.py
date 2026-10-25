@@ -20,6 +20,12 @@ _VER_RE = re.compile(r"(\d+(?:\.\d+)*)")
 _MIN_TOKEN = 3  # ignore 1-2 char product tokens to avoid noise
 # Cloud-provider and generic service labels identify infrastructure, not a vulnerable product.
 # A concrete product (for example Multi Model Server) must be observed separately.
+# Single words too common to identify a product when they are all that is left of a longer name.
+GENERIC_WORDS = frozenset({
+    'cms', 'server', 'core', 'api', 'web', 'app', 'http', 'https', 'framework', 'project', 'client', 'service', 'services',
+    'sdk', 'cli', 'lib', 'library', 'tool', 'tools', 'manager', 'platform', 'engine', 'plugin', 'module', 'data', 'cloud',
+    'ssl', 'tls', 'js', 'html', 'proxy', 'gateway', 'portal', 'admin', 'system',
+})
 GENERIC_PRODUCT_TOKENS = frozenset({
     'aws', 'awsservice', 'amazonaws', 'amazonwebservices', 'amazonwebservice',
     'azure', 'azureservice', 'microsoftazure', 'googlecloud', 'googlecloudservice',
@@ -104,8 +110,26 @@ def version_in_range(ver, rng):
     return True
 
 
+# Normalizing a name throws its word boundaries away ("craftcms/cms" and "craftcmscms" both become one token), and a plain
+# substring test on the result matches "cms" inside "datocms" and "php" inside "phpmyadmin". The boundaries are kept here,
+# keyed by the normalized token, so name matching can require that a shorter name is a whole run of words of the longer one.
+# Bounded: product strings come from banners a target controls, and past the cap a token simply has no recorded boundaries,
+# which makes it match only itself.
+_WORDS = {}
+_WORDS_MAX_TOKENS = 50000
+_WORDS_MAX_RAW = 200
+_WORDS_MAX_WORDS = 8
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
 def _norm(value):
-    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+    text = (value or "").lower()
+    token = re.sub(r"[^a-z0-9]", "", text)
+    if token and len(text) <= _WORDS_MAX_RAW:
+        words = tuple(_WORD_RE.findall(text))
+        if 1 < len(words) <= _WORDS_MAX_WORDS and (token in _WORDS or len(_WORDS) < _WORDS_MAX_TOKENS):
+            _WORDS.setdefault(token, set()).add(words)
+    return token
 
 
 def affected_product_tokens(affected_item):
@@ -116,10 +140,18 @@ def affected_product_tokens(affected_item):
     vendor+product token would match a bare "Apache" banner to Log4j and Tomcat. The vendor is only used to
     disambiguate (see _vendor_ok)."""
     tokens = set()
+    vendor = _norm(affected_item.get("vendor"))
     for key in ("product", "package"):
         token = _norm(affected_item.get(key))
-        if len(token) >= _MIN_TOKEN and token not in GENERIC_PRODUCT_TOKENS:
-            tokens.add(token)
+        if len(token) < _MIN_TOKEN or token in GENERIC_PRODUCT_TOKENS:
+            continue
+        if key == "product" and vendor and token in GENERIC_WORDS:
+            # "cms", "server", "core": the product alone names nothing ("datocms" is not Craft's "cms"). With a vendor, the
+            # vendor's own name for the software ("craftcms") is the identity; it matches the exact name only.
+            if len(vendor) >= _MIN_TOKEN and vendor not in GENERIC_PRODUCT_TOKENS:
+                tokens.add(vendor)
+            continue
+        tokens.add(token)
     return tokens
 
 
@@ -136,6 +168,7 @@ PRODUCT_ALIASES = {
     "eximsmtpd": {"exim"},
     "iscbind": {"bind"},
     "bind9": {"bind"},
+    "nextjs": {"next"},  # the npm package of Next.js is named "next"
 }
 
 
@@ -168,7 +201,27 @@ def name_matches_token(tech_token, product_token):
     if (len(tech_token) < _MIN_TOKEN or len(product_token) < _MIN_TOKEN
             or tech_token in GENERIC_PRODUCT_TOKENS or product_token in GENERIC_PRODUCT_TOKENS):
         return False
-    return tech_token in product_token or product_token in tech_token
+    if tech_token == product_token:
+        return True
+    # a shorter name matches a longer one only as whole words: "apache" in "apache http server", "tomcat" in "apache tomcat",
+    # never "cms" in "datocms", "php" in "phpmyadmin" or "java" in "javascript"
+    for tech_words in _WORDS.get(tech_token) or ((tech_token,),):
+        for product_words in _WORDS.get(product_token) or ((product_token,),):
+            inner, outer = (tech_words, product_words) if len(tech_words) <= len(product_words) else (product_words, tech_words)
+            if inner == outer or not _word_run_ok(inner):
+                continue
+            if any(outer[i:i + len(inner)] == inner for i in range(len(outer) - len(inner) + 1)):
+                return True
+    return False
+
+
+def _word_run_ok(words):
+    """A run of whole words that may stand for a product when it is all that is compared: long enough, not a generic label
+    ('aws service'), and not one generic word ('server')."""
+    joined = "".join(words)
+    if len(joined) < _MIN_TOKEN or joined in GENERIC_PRODUCT_TOKENS:
+        return False
+    return not (len(words) == 1 and words[0] in GENERIC_WORDS)
 
 
 def confidence_for(ver, in_range, kev):
@@ -252,6 +305,30 @@ def _bounded(rng):
     return version_in_range((0,), rng) is not None  # a range with at least one usable bound
 
 
+def _is_branch_range(rng):
+    """One maintained branch of a branch-by-branch fix list: introduced "8.2" or "8.2.*", fixed "8.2.35"."""
+    intro = parse_version(rng.get("introduced"), strict=True)
+    fixed = parse_version(rng.get("fixed"), strict=True)
+    return bool(intro and fixed and len(intro) <= 2 and len(fixed) > len(intro) and fixed[:len(intro)] == intro)
+
+
+def lowest_listed_branch(ranges):
+    """The oldest branch an advisory lists, when every one of its ranges is a branch fix (two or more of them, as PHP, Django
+    and Rails publish); None for any other shape of advisory."""
+    bounded = [r for r in ranges if _bounded(r)]
+    if len(bounded) < 2 or not all(_is_branch_range(r) for r in bounded):
+        return None
+    return min(parse_version(r["introduced"], strict=True) for r in bounded)
+
+
+def branch_unlisted(ver, ranges):
+    """True when ``ver`` is older than every branch a branch-by-branch advisory lists. Such an advisory names only the branches
+    that received a fix; an older branch is not cleared by it (end-of-life releases never get a fix, so are usually still
+    exposed), so the answer for it is "unknown", not "not in range"."""
+    lowest = lowest_listed_branch(ranges)
+    return bool(lowest and ver and _vcmp(ver[:len(lowest)], lowest) < 0)
+
+
 def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None):
     """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
     discovered product `token` (normalized) at version `ver` (tuple or None).
@@ -307,6 +384,14 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
                     break
             if in_range is not True and unknown:
                 in_range = None
+            if in_range is False and not _is_ice(cve) and any(
+                    branch_unlisted(ver, [r for r in (item.get("ranges") or []) if _bounded(r)]) for _i, item in hit):
+                in_range = None  # older than every branch the advisory fixes: unlisted, not cleared
+                if details is not None:
+                    low = next(lowest_listed_branch(item.get("ranges") or []) for _i, item in hit
+                               if branch_unlisted(ver, [r for r in (item.get("ranges") or []) if _bounded(r)]))
+                    details[cve.id] = {"affected_index": hit[0][0], "range": {}, "branch_unlisted": True,
+                                       "lowest_listed_branch": ".".join(map(str, low))}
         if details is not None and cve.id not in details and hit:
             details[cve.id] = {"affected_index": hit[0][0], "range": {}}
         yield cve, matched_product, in_range
