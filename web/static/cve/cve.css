@@ -1298,3 +1298,4 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}.update-live .ul-dot{animation:none}}
 html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointer-events:none;transition:opacity .3s}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
+.proj-wrap:has(.org-switch){gap:4px}.proj-wrap:has(.org-switch) .select+.select,.proj-wrap:has(.org-switch) .select+.proj-label+.select{margin-top:2px}
