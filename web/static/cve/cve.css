@@ -99,6 +99,15 @@ svg{flex:none}
 .sheet-grid a:active{background:var(--sunk)}
 .sheet-grid a.out{color:var(--fire-ink)}
 .sheet .proj-wrap{margin:0}
+.tab-avatar{width:22px;height:22px;border-radius:5px;display:grid;place-items:center;background:var(--ink);color:var(--surface);font:700 11.5px var(--font);letter-spacing:0}
+.tabbar [aria-current="page"] .tab-avatar,.tabbar [aria-expanded="true"] .tab-avatar{background:var(--brand)}
+.acct-head{display:flex;align-items:center;gap:12px;padding:4px 2px 14px;border-bottom:1px solid var(--line)}
+.acct-head>span:last-child{display:flex;flex-direction:column;min-width:0}
+.acct-head b{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sheet-list{display:flex;flex-direction:column;margin-top:6px}
+.sheet-list form{display:contents}
+.sheet-list a,.sheet-list button{display:flex;align-items:center;gap:12px;min-height:48px;padding:10px 4px;border:0;border-bottom:1px solid var(--line);background:none;font:600 15px var(--font);color:var(--ink);text-decoration:none;text-align:left;width:100%;cursor:pointer}
+.sheet-list button.out{color:var(--fire-ink);border-bottom:0}
 @keyframes rise{from{transform:translateY(24px);opacity:0}to{transform:none;opacity:1}}
 
 /* project switcher */

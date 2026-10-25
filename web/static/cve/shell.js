@@ -34,24 +34,28 @@ if (acct) {
   });
 }
 
-// --- mobile "More" sheet ------------------------------------------------------------------
-const sheet = $("#sheet");
+// --- mobile sheets: "More" (pages) and "Account" (the desktop account menu) -----------------------
 const scrim = $("#sheet-scrim");
-const moreBtn = $("#more-btn");
-function setSheet(open) {
-  if (!sheet) return;
-  sheet.hidden = !open;
+const sheets = [[$("#sheet"), $("#more-btn")], [$("#acct-sheet"), $("#acct-btn")]].filter(([s, b]) => s && b);
+let openSheet = null;
+function setSheet(pair, open) {
+  sheets.forEach(([s, b]) => {
+    const on = open && pair && s === pair[0];
+    s.hidden = !on;
+    b.setAttribute("aria-expanded", String(on));
+  });
   scrim.hidden = !open;
-  moreBtn.setAttribute("aria-expanded", String(open));
   document.body.classList.toggle("noscroll", open);
-  if (open) $("a, select", sheet).focus();
-  else moreBtn.focus();
+  const was = openSheet;
+  openSheet = open ? pair : null;
+  if (open) $("a, select, button", pair[0]).focus();
+  else if (was) was[1].focus();
 }
-if (moreBtn) {
-  moreBtn.addEventListener("click", () => setSheet(sheet.hidden));
-  scrim.addEventListener("click", () => setSheet(false));
+sheets.forEach((pair) => pair[1].addEventListener("click", () => setSheet(pair, openSheet !== pair)));
+if (scrim) {
+  scrim.addEventListener("click", () => setSheet(null, false));
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !sheet.hidden) setSheet(false);
+    if (e.key === "Escape" && openSheet) setSheet(null, false);
   });
 }
 
