@@ -19,6 +19,8 @@ A target is a domain, an IP address, a CIDR range (`10.0.0.0/24`), a dashed rang
 
 Hygiene runs as its own task when the scan finishes. It checks TLS certificates (expiry, trust chain, hostname, self-signed, legacy protocols) and SPF, DKIM, DMARC, and CAA records.
 
+The email review also runs the checks of [MailFail](https://github.com/ACK-J/MailFail) by Black Hills Information Security, re-implemented server side and credited in the AI activity feed while they run: SPF and DMARC records that receivers ignore, SPF includes and DMARC report addresses on domains anyone can register (asked of the domain's registry over RDAP), DMARC report addresses that are not authorised (RFC 7489 §7.1), malformed report addresses, DKIM keys in testing mode, SHA-1 only or unparseable, weak ARC keys, Microsoft 365 Direct Send exposure (read from MX; nothing is sent), MTA-STS (the record and the domain's own policy file, fetched only when it does not resolve to a blocked address), SMTP TLS reporting, DANE TLSA records for SMTP, DNSSEC algorithms and key sizes, BIMI records, obsolete ADSP, and MailChannels Domain Lockdown. Like MailFail, none of these sends mail or opens SMTP. `CVENGINE_HYGIENE_RDAP=0` turns the registry lookups off.
+
 Every nuclei run uses a snapshot of the installed templates that passed source-level read-only and destination checks.
 
 ## Triage and validation
