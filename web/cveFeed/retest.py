@@ -83,9 +83,27 @@ def _changed_evidence(scan):
             for host, items in by_host.items()}
 
 
-def dispatch_deferred_retests(limit=None):
-    """Send one bounded oldest-first batch. Broker rejection leaves rows pending."""
+def _next_project(due):
+    """The project to serve next: of those with due re-tests, the one whose re-tests were dispatched longest ago (never first),
+    so one tenant's large discovery cannot hold every other project's re-tests behind its batches."""
+    from django.db.models import Max
+
     from cveFeed.models import DeferredRetest
+    projects = sorted(set(due.values_list('project_id', flat=True)))
+    if not projects:
+        return None
+    served = dict(DeferredRetest.objects.filter(project_id__in=projects).exclude(status='pending')
+                  .values('project_id').annotate(at=Max('updated_at')).values_list('project_id', 'at'))
+    return min(projects, key=lambda p: (p in served, served.get(p) or timezone.now(), p))
+
+
+def dispatch_deferred_retests(limit=None):
+    """Send one bounded batch: the least recently served project's due re-tests of one scan, hottest hosts first. Broker
+    rejection leaves rows pending."""
+    from django.db.models import OuterRef, Subquery, Value
+    from django.db.models.functions import Coalesce
+
+    from cveFeed.models import DeferredRetest, HostState
     from cveFeed.tasks import retest_hosts
     from cveFeed import ledger
     now = timezone.now()
@@ -95,14 +113,20 @@ def dispatch_deferred_retests(limit=None):
             status='pending', next_attempt_at=now, updated_at=now)
         DeferredRetest.objects.filter(status__in=['queued', 'running'], updated_at__lt=now - timedelta(hours=3)).update(
             status='pending', next_attempt_at=now + timedelta(minutes=5), updated_at=now)
-        chosen = list(DeferredRetest.objects.select_for_update(skip_locked=True).filter(
-            status='pending', next_attempt_at__lte=now).order_by('created_at', 'id')[:1])
+        due = DeferredRetest.objects.filter(status='pending', next_attempt_at__lte=now)
+        project = _next_project(due)
+        if project is None:
+            return {'queued': 0}
+        # within the project, the hottest changed hosts go first (HostState.score), oldest first at equal heat
+        heat = Coalesce(Subquery(HostState.objects.filter(project_id=OuterRef('project_id'), host=OuterRef('host'))
+                                 .values('score')[:1]), Value(0))
+        chosen = list(due.select_for_update(skip_locked=True).filter(project_id=project).annotate(heat=heat)
+                      .order_by('-heat', 'created_at', 'id')[:1])
         if not chosen:
             return {'queued': 0}
         first = chosen[0]
-        batch = list(DeferredRetest.objects.select_for_update(skip_locked=True).filter(
-            status='pending', next_attempt_at__lte=now, domain_id=first.domain_id, scan_id=first.scan_id)
-                     .order_by('created_at', 'id')[:min(limit or max_hosts(), max_hosts())])
+        batch = list(due.select_for_update(skip_locked=True).filter(domain_id=first.domain_id, scan_id=first.scan_id)
+                     .annotate(heat=heat).order_by('-heat', 'created_at', 'id')[:min(limit or max_hosts(), max_hosts())])
         ids, names = [r.id for r in batch], [r.host for r in batch]
         # Commit this claim before publishing: a fast worker must be able to see it.
         DeferredRetest.objects.filter(pk__in=ids).update(status='dispatching', attempts=models.F('attempts') + 1,
