@@ -14,6 +14,7 @@ from django_celery_beat.schedulers import DatabaseScheduler
 PAUSE_EXEMPT_TASKS = frozenset({
     'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'check_for_updates', 'update_nuclei_templates',
     'prune_asset_changes', 'report_resources', 'rescore_all_hosts', 'reconcile_invalid_correlations', 'weekly_maintenance',
+    'reap_stuck_jobs',
     'send_notif', 'send_scan_notif', 'send_task_notif', 'send_file_to_discord',
 })
 

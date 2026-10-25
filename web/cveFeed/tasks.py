@@ -1161,6 +1161,17 @@ def prune_asset_changes():
     return {"deleted": deleted}
 
 
+@app.task(name="reap_stuck_jobs", bind=False, queue="cve_feed_queue")
+def reap_stuck_jobs():
+    """Every 15 minutes: fail host assessments and validation jobs a lost worker left queued or running (cveFeed.reaper)."""
+    from cveFeed import activity, reaper
+    counts = reaper.reap()
+    if counts:
+        activity.log('validate', 'Expired stuck jobs a restarted worker left behind: '
+                     + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='failed', **counts)
+    return counts
+
+
 @app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")
 def weekly_maintenance():
     """Weekly: archive the AI activity feed, AI call leases and AI usage rows past their retention to a tar.gz and delete them

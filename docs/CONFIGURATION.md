@@ -62,6 +62,7 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | `CVENGINE_CHANGES_RETENTION_DAYS` | `90` | Days the Changes log is kept. |
 | `CVENGINE_ACTIVITY_RETENTION_DAYS`, `CVENGINE_TRIAGE_CALL_RETENTION_DAYS`, `CVENGINE_AI_USAGE_RETENTION_DAYS` | `30`, `90`, `400` | Days the AI activity feed, the AI call leases and the AI usage ledger are kept. Every Sunday at 03:23 UTC the older rows are written to `cvengine-logs-<time>.tar.gz` (one JSON object per line per table) and only then deleted. The run is logged in the activity feed, and nothing is deleted if the archive cannot be written. |
 | `CVENGINE_LOG_ARCHIVE_DIR`, `CVENGINE_LOG_ARCHIVE_DAYS` | `/usr/src/scan_results/.log-archives`, `365` | Where those archives go (on the scan results volume; only a superuser can download them), and how long they are kept. |
+| `CVENGINE_ASSESSMENT_QUEUED_HOURS`, `CVENGINE_ASSESSMENT_RUNNING_HOURS`, `CVENGINE_VALIDATION_QUEUED_HOURS`, `CVENGINE_VALIDATION_RUNNING_HOURS` | `12`, `6`, `6`, `2` | After this long a host assessment or validation job still queued or running is marked failed ("expired"), freeing its slot and its share of the caps. The check runs every 15 minutes. A validation job with attempts left becomes due again at once. Queued jobs are left alone while scanning is paused. |
 | `CVENGINE_SHOT_THRESHOLD` | `12` | Bits (of 64) by which screenshot hashes must differ to count as a changed front page. |
 
 ## Updates
