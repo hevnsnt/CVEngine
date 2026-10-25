@@ -2,7 +2,7 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.1 (2026-10-25)
 
 ### Changed
 
