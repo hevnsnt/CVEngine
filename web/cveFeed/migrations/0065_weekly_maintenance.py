@@ -16,7 +16,7 @@ def unschedule(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0062_triage_evidence_key'), ('django_celery_beat', '0001_initial')]
+    dependencies = [('cveFeed', '0064_triage_evidence_key'), ('django_celery_beat', '0001_initial')]
     operations = [
         migrations.AddIndex(model_name='agentactivity', index=models.Index(fields=['project', 'id'], name='agentact_project_id_idx')),
         migrations.AddIndex(model_name='agentactivity', index=models.Index(fields=['status', 'id'], name='agentact_status_id_idx')),

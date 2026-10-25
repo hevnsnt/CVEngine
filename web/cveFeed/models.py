@@ -986,3 +986,205 @@ class AssessmentReviewDecision(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=('review', 'project'), name='one_assessment_decision_per_project')]
+
+
+# --- Bug bounty ----------------------------------------------------------------------------------
+# The program catalogue is public data (see cveFeed.bounty_data) and belongs to no project. Engagements and reports belong to one
+# project each and are listed in tenancy.scope.SCOPES.
+
+class BountyProgram(models.Model):
+    """One bug bounty or disclosure program of a platform, from the public bounty-targets-data dump."""
+
+    PLATFORMS = (("hackerone", "HackerOne"), ("bugcrowd", "Bugcrowd"), ("intigriti", "Intigriti"), ("yeswehack", "YesWeHack"))
+
+    platform = models.CharField(max_length=16, choices=PLATFORMS)
+    handle = models.CharField(max_length=200)  # the platform's own identifier of the program
+    name = models.CharField(max_length=300)
+    url = models.CharField(max_length=500, blank=True, default="")
+    offers_bounties = models.BooleanField(null=True, blank=True)  # False: a disclosure program that pays nothing
+    min_bounty = models.IntegerField(null=True, blank=True)
+    max_bounty = models.IntegerField(null=True, blank=True)
+    currency = models.CharField(max_length=8, blank=True, default="")
+    safe_harbor = models.CharField(max_length=16, blank=True, default="")  # full, partial or empty (unknown)
+    managed = models.BooleanField(default=False)
+    state = models.CharField(max_length=32, blank=True, default="")
+    response_efficiency = models.IntegerField(null=True, blank=True)  # percent of reports answered (HackerOne)
+    first_response_hours = models.FloatField(null=True, blank=True)
+    resolved_hours = models.FloatField(null=True, blank=True)
+    in_scope_count = models.IntegerField(default=0)
+    bounty_scope_count = models.IntegerField(default=0)
+    first_seen_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_scope_change_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    removed_at = models.DateTimeField(null=True, blank=True)  # the platform no longer lists it
+    content_hash = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["platform", "handle"], name="uniq_bountyprogram_platform_handle")]
+        indexes = [models.Index(fields=["platform", "removed_at"], name="bntyprogram_platform_idx")]
+
+    def __str__(self):
+        return f"{self.platform}:{self.handle}"
+
+
+class BountyAsset(models.Model):
+    """One in-scope or out-of-scope entry of a program, normalized (see cveFeed.bounty_data.normalize_asset)."""
+
+    KINDS = ("domain", "wildcard", "url", "ip", "cidr", "mobile", "code", "other")
+
+    program = models.ForeignKey(BountyProgram, on_delete=models.CASCADE, related_name="assets")
+    kind = models.CharField(max_length=12)
+    identifier = models.CharField(max_length=500)  # lowercase host, wildcard, URL, IP or CIDR for the network kinds
+    raw_type = models.CharField(max_length=64, blank=True, default="")
+    in_scope = models.BooleanField(default=True)
+    eligible_for_bounty = models.BooleanField(null=True, blank=True)
+    max_severity = models.CharField(max_length=16, blank=True, default="")
+    instruction = models.CharField(max_length=1000, blank=True, default="")
+    first_seen_at = models.DateTimeField(default=timezone.now)
+    removed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["program", "identifier", "raw_type", "in_scope"], name="uniq_bountyasset")]
+        indexes = [models.Index(fields=["program", "in_scope", "removed_at"], name="bntyasset_program_idx"),
+                   models.Index(fields=["identifier"], name="bntyasset_ident_idx")]
+
+
+class BountyScopeChange(models.Model):
+    """A program or asset appearing, leaving or changing in the public data: the radar that shows new scope first."""
+
+    KINDS = ("program_added", "program_removed", "asset_added", "asset_removed", "asset_flipped")
+
+    program = models.ForeignKey(BountyProgram, on_delete=models.CASCADE, related_name="changes")
+    kind = models.CharField(max_length=16)
+    asset_kind = models.CharField(max_length=12, blank=True, default="")
+    identifier = models.CharField(max_length=500, blank=True, default="")
+    in_scope = models.BooleanField(default=True)
+    detected_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-detected_at", "-id"]
+
+
+class BountySource(models.Model):
+    """The state of one platform's data file: the ETag that makes polling cheap, and when it last changed or failed."""
+
+    platform = models.CharField(max_length=16, unique=True)
+    etag = models.CharField(max_length=200, blank=True, default="")
+    last_checked = models.DateTimeField(null=True, blank=True)
+    last_changed = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    programs = models.IntegerField(default=0)
+    assets = models.IntegerField(default=0)
+
+
+class BountyEngagement(models.Model):
+    """A project's decision to work one program: the policy acknowledgement, the imported targets and the notes."""
+
+    STATUSES = ("watching", "active", "paused", "done")
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    program = models.ForeignKey(BountyProgram, on_delete=models.CASCADE, related_name="engagements")
+    status = models.CharField(max_length=12, default="watching")
+    policy_url = models.CharField(max_length=500, blank=True, default="")
+    policy_ack_at = models.DateTimeField(null=True, blank=True)
+    policy_ack_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    ack_content_hash = models.CharField(max_length=64, blank=True, default="")  # the program's scope when it was acknowledged
+    automated_ok = models.BooleanField(default=False)  # the user confirmed the policy allows automated scanning
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "program"], name="uniq_bountyengagement_project_program")]
+
+
+class BountyEngagementTarget(models.Model):
+    """A target an engagement imported from the program's scope."""
+
+    engagement = models.ForeignKey(BountyEngagement, on_delete=models.CASCADE, related_name="targets")
+    domain = models.ForeignKey("targetApp.Domain", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    value = models.CharField(max_length=500)
+    asset_identifier = models.CharField(max_length=500, blank=True, default="")
+    imported_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["engagement", "value"], name="uniq_bountytarget_engagement_value")]
+
+
+class BountyReport(models.Model):
+    """A vulnerability report in the making or on its way: drafted from a finding, edited, submitted, tracked."""
+
+    STATUSES = ("draft", "ready", "submitted", "triaged", "needs_info", "resolved", "duplicate", "informative",
+                "not_applicable", "spam", "closed")
+    OPEN_STATUSES = ("submitted", "triaged", "needs_info")
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    engagement = models.ForeignKey(BountyEngagement, null=True, blank=True, on_delete=models.SET_NULL, related_name="reports")
+    program = models.ForeignKey(BountyProgram, null=True, blank=True, on_delete=models.SET_NULL, related_name="reports")
+    platform = models.CharField(max_length=16)
+    program_handle = models.CharField(max_length=200, blank=True, default="")
+    program_name = models.CharField(max_length=300, blank=True, default="")
+    title = models.CharField(max_length=300)
+    status = models.CharField(max_length=16, default="draft")
+    severity = models.CharField(max_length=16, blank=True, default="")
+    cvss_score = models.FloatField(null=True, blank=True)
+    cvss_vector = models.CharField(max_length=120, blank=True, default="")
+    cwe = models.CharField(max_length=200, blank=True, default="")
+    vrt = models.CharField(max_length=200, blank=True, default="")
+    asset = models.CharField(max_length=500, blank=True, default="")
+    location_url = models.CharField(max_length=2000, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    steps = models.TextField(blank=True, default="")
+    impact = models.TextField(blank=True, default="")
+    remediation = models.TextField(blank=True, default="")
+    references = models.TextField(blank=True, default="")
+    evidence = models.JSONField(default=dict, blank=True)
+    checklist = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    finding_kind = models.CharField(max_length=16, blank=True, default="")
+    finding_id = models.IntegerField(null=True, blank=True)
+    platform_report_id = models.CharField(max_length=64, blank=True, default="")
+    platform_url = models.CharField(max_length=500, blank=True, default="")
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    submitted_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    bounty_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    bounty_currency = models.CharField(max_length=8, blank=True, default="")
+    created_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "program", "finding_kind", "finding_id"],
+                                               condition=models.Q(finding_id__isnull=False), name="uniq_bountyreport_finding")]
+        indexes = [models.Index(fields=["project", "status"], name="bntyreport_proj_status_idx")]
+        ordering = ["-updated_at", "-id"]
+
+
+class BountyReportEvent(models.Model):
+    """The timeline of one report: created, edited, status changes, submission, bounty, platform sync."""
+
+    report = models.ForeignKey(BountyReport, on_delete=models.CASCADE, related_name="events")
+    kind = models.CharField(max_length=16)
+    note = models.CharField(max_length=2000, blank=True, default="")
+    actor = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["at", "id"]
+
+
+class BountyCredential(models.Model):
+    """One user's own account on a bug bounty platform, used only when that user submits a report. It is per user on purpose: a
+    report is attributed to the account that sends it, so a shared key would put every report, and every reputation penalty, on one
+    person. The token is encrypted at rest and is never returned by the API."""
+
+    user = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
+    platform = models.CharField(max_length=16)
+    username = models.CharField(max_length=200)
+    token = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "platform"], name="uniq_bountycredential_user_platform")]

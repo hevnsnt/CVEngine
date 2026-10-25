@@ -10,6 +10,7 @@ Start with the [project README](../README.md) for what CVEngine is and how to in
 | [CONFIGURATION.md](CONFIGURATION.md) | Environment variables for memory, workers, network, and re-scan windows |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | HTTPS, proxies, AI models, backups, dev stack, and factory reset |
 | [TENANCY.md](TENANCY.md) | Organizations, projects, roles, and two-step sign-in |
+| [BUG-BOUNTY.md](BUG-BOUNTY.md) | The bug bounty page: who may use it, program scope, reports, and submission |
 | [AI-USAGE.md](AI-USAGE.md) | AI model usage, tokens, and cost estimates |
 | [AGENT-API.md](AGENT-API.md) | REST and MCP interface for agents |
 | [UPDATES.md](UPDATES.md) | Approving and applying updates |

@@ -271,6 +271,21 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     return result
 
 
+@app.task(name='sync_bounty_catalogue', bind=False, queue='cve_feed_queue')
+def sync_bounty_catalogue(platforms=None, force=False):
+    """Refresh the bug bounty program catalogue (public scope data, see cveFeed.bounty_data). The hourly schedule does nothing until
+    someone with bug bounty access has loaded the catalogue once from the page (``force``), so an instance that never uses the
+    feature never makes the request. ``CVENGINE_BOUNTY_CATALOGUE=0`` turns it off entirely. An unchanged file costs one conditional
+    request (ETag)."""
+    from cveFeed import bounty_data
+    from cveFeed.models import BountySource
+    if os.environ.get('CVENGINE_BOUNTY_CATALOGUE', '1') == '0':
+        return {'status': 'disabled'}
+    if not force and not BountySource.objects.filter(last_changed__isnull=False).exists():
+        return {'status': 'not loaded yet'}
+    return bounty_data.sync_all(platforms)
+
+
 @app.task(name='correlate_refreshed_cves', bind=False, queue='cve_feed_queue')
 def correlate_refreshed_cves():
     """Recheck only materially updated CVEs and reset their dependent AI rows."""

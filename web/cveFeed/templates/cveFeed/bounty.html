@@ -1,0 +1,15 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · Bug bounty{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Bug bounty</h1>
+    <p class="sub" id="bounty-sub">Find programs, check scope, work them, and report findings.</p>
+  </div>
+</div>
+<div id="bounty" data-project="{{ slug|default:'' }}" data-app-admin="{{ is_app_admin|yesno:'1,0' }}"><div id="view"></div></div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/bounty.js' %}"></script>
+{% endblock %}

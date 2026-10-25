@@ -91,7 +91,7 @@ def user_dict(actor, u):
     return {'id': u.id, 'username': u.username, 'first_name': u.first_name, 'last_name': u.last_name,
             'name': u.get_full_name() or u.username, 'email': u.email, 'is_active': u.is_active, 'is_superuser': u.is_superuser,
             'last_login': u.last_login.isoformat() if u.last_login else None, 'date_joined': u.date_joined.isoformat(),
-            'mfa_enabled': bool(p and p.mfa_enabled), 'bugbounty_enabled': bool(p and p.bugbounty_enabled),
+            'mfa_enabled': bool(p and p.mfa_enabled), 'bugbounty_enabled': u.is_superuser or bool(p and p.bugbounty_enabled),
             'must_change_password': bool(p and p.must_change_password), 'memberships': memberships,
             'role_label': 'App Admin' if u.is_superuser else (memberships[0]['label'] if memberships else 'No access')}
 
@@ -170,6 +170,27 @@ def users_update(request, actor, user_id):
             setattr(user, field, str(data[field]).strip()[:limit])
     user.save()
     audit(actor, 'user.update', user.username, fields=sorted(data))
+    return user_dict(actor, user)
+
+
+def users_bug_bounty(request, actor, user_id):
+    """Authorize or withdraw one user's bug bounty access. Only an App Admin may: an Org Admin can manage the user's other settings
+    but cannot grant a feature that sends data to outside platforms. App Admins have the access without a flag."""
+    if not actor.is_superuser:
+        raise AdminError(403, 'only an App Admin can authorize bug bounty access')
+    data = _body(request)
+    if not isinstance(data.get('enabled'), bool):
+        raise AdminError(400, 'enabled must be true or false')
+    user = User.objects.filter(pk=user_id).first() if str(user_id).isdigit() else None
+    if not user:
+        raise AdminError(404, 'user not found')
+    if user.is_superuser:
+        raise AdminError(409, 'App Admins always have bug bounty access')
+    profile = _profile(user)
+    before = bool(profile.bugbounty_enabled)
+    profile.bugbounty_enabled = data['enabled']
+    profile.save(update_fields=['bugbounty_enabled'])
+    audit(actor, 'user.bugbounty_grant' if data['enabled'] else 'user.bugbounty_revoke', user.username, before=before, after=data['enabled'])
     return user_dict(actor, user)
 
 
@@ -697,6 +718,7 @@ def scan_control_set(request, actor):
 ROUTES = [
     ('GET', r'users', users_list), ('POST', r'users', users_create),
     ('PATCH', r'users/(?P<user_id>\d+)', users_update), ('DELETE', r'users/(?P<user_id>\d+)', users_delete),
+    ('PUT', r'users/(?P<user_id>\d+)/bug-bounty', users_bug_bounty),
     ('POST', r'users/(?P<user_id>\d+)/reset-password', users_reset_password),
     ('POST', r'users/(?P<user_id>\d+)/reset-mfa', users_reset_mfa),
     ('POST', r'memberships', memberships_set),

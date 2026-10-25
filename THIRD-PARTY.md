@@ -14,6 +14,8 @@ CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [cve.now](https://cve.now) | The CVE feed, which aggregates the CVE List, GHSA, OSV, NVD, EUVD, CISA KEV, EPSS, and Exploit-DB |
 | [Debian security tracker](https://security-tracker.debian.org) and [OSV](https://osv.dev) | Distribution fix data for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
+| [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope data of bug bounty programs, read at run time by the Bug bounty page |
+| [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for the report category and its priority |
 
 ## Front end
 

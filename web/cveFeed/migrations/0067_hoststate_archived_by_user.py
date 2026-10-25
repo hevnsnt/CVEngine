@@ -9,7 +9,7 @@ def mark_manual_archives(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0064_reap_stuck_jobs_schedule')]
+    dependencies = [('cveFeed', '0066_reap_stuck_jobs_schedule')]
     operations = [
         migrations.AddField(model_name='hoststate', name='archived_by_user', field=models.BooleanField(default=False)),
         migrations.RunPython(mark_manual_archives, migrations.RunPython.noop),

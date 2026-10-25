@@ -44,7 +44,14 @@ class RuleTests(TestCase):
 		self.assertIsNone(ok('admin', 'GET', '/scanEngine/x/proxy_settings', is_superuser=True))
 		self.assertIsNotNone(ok('admin', 'POST', '/scanEngine/x/delete/3'))  # engines are shared
 		self.assertIsNotNone(ok('admin', 'GET', '/cve/settings/'))
-		self.assertIsNotNone(ok('user', 'GET', '/x/bountyhub/list/programs', bugbounty_enabled=True))
+		self.assertIsNone(ok('user', 'GET', '/x/bountyhub/list/programs', bugbounty_enabled=True))  # an App Admin's authorization is what counts, not the role
+		self.assertIsNotNone(ok('user', 'GET', '/x/bountyhub/list/programs', bugbounty_enabled=False))
+		self.assertIsNotNone(ok('admin', 'GET', '/cve/bounty/', bugbounty_enabled=False))  # an org admin is not authorized by being an admin
+		self.assertIsNone(ok('admin', 'GET', '/cve/bounty/', bugbounty_enabled=False, is_superuser=True))  # an App Admin always is
+		self.assertIsNotNone(ok('user', 'GET', '/cve/api/bounty/programs'))
+		self.assertIsNone(ok('user', 'GET', '/cve/api/bounty/programs', bugbounty_enabled=True))
+		self.assertIsNotNone(ok('audit', 'POST', '/cve/api/bounty/reports', bugbounty_enabled=True))  # audit stays read only
+		self.assertIsNone(ok('admin', 'PUT', '/cve/api/admin/users/3/bug-bounty'))  # the grant route is not itself behind the grant
 		self.assertIsNotNone(ok('pentester', 'GET', '/x/bountyhub/list/programs', bugbounty_enabled=False))
 		self.assertIsNone(ok('pentester', 'GET', '/x/bountyhub/list/programs', bugbounty_enabled=True))
 		self.assertIsNone(ok(None, 'GET', '/login/'))

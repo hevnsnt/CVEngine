@@ -250,10 +250,30 @@ def ui_context(request, active, slug=None):
     ai_connected = bool(ai_cfg and ai_cfg.enabled)
     return {'active': active, 'slug': current, 'projects': projects, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
             'is_app_admin': request.user.is_superuser,
+            'bounty_enabled': _bounty_allowed(request.user),
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
             'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2}
+
+
+def _bounty_allowed(user):
+    from cveFeed.bounty_api import allowed
+    return allowed(user)
+
+
+def bounty_page(request):
+    """The bug bounty page. The middleware has already refused users an App Admin has not authorized; the check here is the second layer.
+    The project comes from ?project=, like the dashboard; the combined view has no meaning for engagements, so it falls back to the first project."""
+    from django.core.exceptions import PermissionDenied
+
+    from dashboard.models import Project
+    if not _bounty_allowed(request.user):
+        raise PermissionDenied
+    projects = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
+    want = request.GET.get('project') or ''
+    slug = want if want in projects and want != ALL_PROJECTS else (projects[0] if projects else None)
+    return render(request, 'cveFeed/bounty.html', ui_context(request, 'bounty', slug))
 
 
 def dashboard(request):

@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0061_cve_coverage_schedule'),
+        ('cveFeed', '0063_bounty_catalogue_schedule'),
     ]
 
     operations = [

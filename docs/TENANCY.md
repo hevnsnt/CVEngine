@@ -6,16 +6,16 @@ The hierarchy is **Organization, then Project**. In code the organization model 
 
 | Role | Can do |
 | --- | --- |
-| admin | Everything a user can do, plus the bug bounty workflow. An organization admin also manages that organization's members and projects on the Administration page. |
+| admin | Everything a user can do. An organization admin also manages that organization's members and projects on the Administration page. |
 | user | Add targets, scan, and build reports |
 | audit | Read only. Anything other than GET, HEAD, or OPTIONS is refused, except changes to your own account and two-step sign-in. |
-| pentester | Everything a user can do, plus the bug bounty workflow |
+| pentester | Everything a user can do |
 
 A role can be granted on an organization, which covers every project in it, or on a single project. A project role overrides the organization role for that project. Superusers are admin everywhere, and only they can open instance-wide settings (AI key, API vault, scan engines, `/admin/`). Organization admins manage the accounts and memberships of their own organizations on the Administration page.
 
 Manage memberships on the **Administration** page (organization roles admin, user, and audit; project roles user and audit). The pentester role and a project admin are set in the Django admin at `/admin/`. A new user has no access until you assign one. A project goes into the organization chosen when it is created, otherwise the creator's admin organization, else the oldest one. A creator who is not a superuser becomes its project admin.
 
-Bug bounty features are refused unless the user has `UserProfile.bugbounty_enabled` set and the role is pentester or admin.
+Bug bounty features are refused unless the user is an App Admin or an App Admin authorized that user (`UserProfile.bugbounty_enabled`, set on **Administration, Users, Manage** and written to the audit log). The role does not matter, and an organization admin cannot authorize anyone. See [BUG-BOUNTY.md](BUG-BOUNTY.md).
 
 ## How projects are isolated
 
