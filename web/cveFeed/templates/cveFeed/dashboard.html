@@ -10,6 +10,8 @@
   {% if not ai_ready %}<a class="btn sm" href="{% url 'cve_welcome' %}">Connect your AI model</a>{% endif %}
 </div>
 
+<a class="since-strip" id="since-strip" href="#" hidden></a>
+
 <section class="panel ticks" aria-label="Exposure">
   <a class="cell" id="c-exposed" title="Exposed hosts, out of every host the Hosts page lists. The same name in two targets of one project is one host." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}"{% endif %}>
     <div class="cell-head"><span class="eyebrow">Exposed hosts</span><span class="go">Hosts</span></div>
@@ -54,7 +56,7 @@
     </div>
     <p class="note" id="d-target" style="margin:2px 0 10px">Waiting for a scan.</p>
     <div class="graph-box">
-      <div id="d-graph" role="img" aria-label="Live graph of what discovery is finding"></div>
+      <div id="d-graph" role="group" aria-label="Live graph of what discovery is finding"></div>
       <div class="graph-empty" id="d-empty">
         <p>Add a target and watch discovery draw it live.</p>
         <button class="btn" type="button" data-add-targets>Add targets</button>
@@ -82,7 +84,7 @@
     <h2>CVE feed</h2>
     <span class="note" id="feed-filter">All temperatures</span>
   </div>
-  <ul class="feed" id="feed" aria-live="polite"></ul>
+  <ul class="feed" id="feed" aria-live="polite" tabindex="0" aria-label="CVE feed"></ul>
   <p class="empty" id="feed-empty">Waiting for CVEs. They arrive as cve.now publishes them.</p>
   <details class="how">
     <summary>How the engine works</summary>

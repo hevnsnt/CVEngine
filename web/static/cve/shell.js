@@ -78,6 +78,10 @@ function collect() {
     out.push({ label, hint: "Go to", href: a.getAttribute("href") });
   });
   if ($("[data-add-targets]")) out.push({ label: "Add targets", hint: "Action", run: () => $("[data-add-targets]").click() });
+  // commands registered by page scripts (keys.js, saved views): { label, hint, run, when? }
+  (window.cveCommands || []).forEach((c) => {
+    if (!c.when || c.when()) out.push({ label: c.label, hint: c.hint || "Action", run: c.run });
+  });
   const current = $("#project");
   if (current) {
     const here = current.dataset.section;

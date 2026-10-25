@@ -118,7 +118,25 @@ async function overviewTab(panel) {
   panel.append(cat);
   if (status.loading && (status.loading.requested || status.loading.running)) watchLoad(panel, progress, Date.parse(status.loading.requested) || Date.now(), status.loading);
 
-  if (!loaded) panel.append(card("Start here", para("1. Load the catalogue above. 2. Programs: find one that pays and lists scope you can test. 3. Work it: read the policy, record that you did, import the scope as targets. 4. Reports: draft from a finding, fix what the checks flag, send. The Playbook tab says why each step is there, with sources.")));
+  if (!loaded) {
+    const steps = document.createElement("ol");
+    steps.className = "steps";
+    [
+      ["Load the catalogue", "Above. It is public scope data; nothing about you is sent."],
+      ["Programs", "Find one that pays and lists scope you can test."],
+      ["Work it", "Read the policy, record that you did, import the scope as targets."],
+      ["Reports", "Draft from a finding, fix what the checks flag, send."],
+    ].forEach(([title, text]) => {
+      const li = document.createElement("li");
+      const b = document.createElement("b");
+      b.textContent = title;
+      li.append(b, document.createTextNode(` ${text}`));
+      steps.append(li);
+    });
+    const start = card("Start here", steps);
+    start.append(para("The Playbook tab says why each step is there, with sources."));
+    panel.append(start);
+  }
 }
 
 
