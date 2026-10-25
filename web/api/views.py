@@ -42,6 +42,12 @@ from api.serializers import *
 logger = logging.getLogger(__name__)
 
 
+def _failed(exc, what):
+	"""Log the exception with its traceback; the caller gets a message that exposes no internals."""
+	logger.exception('%s failed', what, exc_info=exc)
+	return f'{what} failed. The details are in the server log.'
+
+
 class ToggleBugBountyModeView(APIView):
 	"""
 		This class manages the user bug bounty mode
@@ -271,7 +277,7 @@ class HackerOneProgramViewSet(viewsets.ViewSet):
 		elif str(exc) == "Invalid API credentials":
 			return Response({"error": "Invalid HackerOne API credentials"}, status=status.HTTP_401_UNAUTHORIZED)
 		else:
-			return Response({"error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+			return Response({"error": _failed(exc, 'HackerOne sync')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class InAppNotificationManagerViewSet(viewsets.ReadOnlyModelViewSet):
 	"""
@@ -372,7 +378,7 @@ class OllamaManager(APIView):
 			else:
 				response['status'] = True
 		except Exception as e:
-			response['error'] = str(e)		
+			response['error'] = _failed(e, 'The model request')
 		return Response(response)
 	
 	def delete(self, request):
@@ -395,7 +401,7 @@ class OllamaManager(APIView):
 			else:
 				response['status'] = True
 		except Exception as e:
-			response['error'] = str(e)
+			response['error'] = _failed(e, 'The model request')
 		return Response(response)
 	
 	def put(self, request):
@@ -418,7 +424,7 @@ class OllamaManager(APIView):
 			)
 			response['status'] = True
 		except Exception as e:
-			response['error'] = str(e)
+			response['error'] = _failed(e, 'The model request')
 		return Response(response)
 
 
@@ -516,7 +522,7 @@ class CreateProjectApi(APIView):
 		except Exception as e:
 			response = {
 				'status': False,
-				'error': str(e)
+				'error': _failed(e, 'Creating the project')
 			}
 			return Response(response, status=HTTP_400_BAD_REQUEST)
 
@@ -920,7 +926,7 @@ class AddReconNote(APIView):
 		except PermissionDenied:
 			raise
 		except Exception as e:
-			response = {'status': False, 'message': str(e)}
+			response = {'status': False, 'message': _failed(e, 'Saving the note')}
 
 		return Response(response)
 
@@ -1148,8 +1154,7 @@ class StopScan(APIView):
 				)
 				response['status'] = True
 			except Exception as e:
-				logger.error(e)
-				response = {'status': False, 'message': str(e)}
+				response = {'status': False, 'message': _failed(e, 'Stopping the scan')}
 
 			return response
 
@@ -1173,8 +1178,7 @@ class StopScan(APIView):
 				)
 				response['status'] = True
 			except Exception as e:
-				logger.error(e)
-				response = {'status': False, 'message': str(e)}
+				response = {'status': False, 'message': _failed(e, 'Stopping the scan')}
 
 			return response
 
@@ -1186,8 +1190,7 @@ class StopScan(APIView):
 					continue
 				response = abort_scan(scan)
 			except Exception as e:
-				logger.error(e)
-				response = {'status': False, 'message': str(e)}
+				response = {'status': False, 'message': _failed(e, 'Stopping the scan')}
 			
 		for subscan_id in subscan_ids:
 			try:
@@ -1196,8 +1199,7 @@ class StopScan(APIView):
 					continue
 				response = abort_subscan(subscan)
 			except Exception as e:
-				logger.error(e)
-				response = {'status': False, 'message': str(e)}
+				response = {'status': False, 'message': _failed(e, 'Stopping the scan')}
 
 		return Response(response)
 
@@ -1343,8 +1345,7 @@ class UpdateTool(APIView):
 			run_command.apply_async(args=[update_command], kwargs={'shell': True})
 			return Response({'status': True, 'message': tool.name + ' updated successfully.'})
 		except Exception as e:
-			logger.error(str(e))
-			return Response({'status': False, 'message': str(e)})
+			return Response({'status': False, 'message': _failed(e, 'Updating the tool')})
 
 class GetExternalToolCurrentVersion(APIView):
 	permission_classes = [HasPermission]
@@ -1562,7 +1563,7 @@ class IPToDomain(APIView):
 			response = {
 				'status': False,
 				'ip_address': ip_address,
-				'message': f'Exception {e}'
+				'message': _failed(e, 'Resolving the address')
 			}
 		return Response(response)
 
