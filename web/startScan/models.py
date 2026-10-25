@@ -617,6 +617,8 @@ class IpAddress(models.Model):
 	os_guess = models.CharField(max_length=255, blank=True, default='')
 	os_accuracy = models.IntegerField(null=True, blank=True)
 	last_seen = models.DateTimeField(null=True, blank=True)
+	# what the host-level NSE scripts (smb-os-discovery, nbstat) reported: {'scripts': {script id: output text}}
+	fingerprint = models.JSONField(default=dict, blank=True)
 	# the background full-port sweep (cveFeed.fullscan): when this IP was last swept (never, while null) and how many ports it had open
 	full_scanned_at = models.DateTimeField(null=True, blank=True, db_index=True)
 	full_scan_ports = models.IntegerField(default=0)
