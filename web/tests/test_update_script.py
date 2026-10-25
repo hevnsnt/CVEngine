@@ -41,12 +41,14 @@ case " $* " in
     echo '{}'; exit 0;;
   *" add_consumer "*) echo '{}'; exit 0;;
   *" active_queues "*) if [ -f "$STUB_DIR/inspect_fail" ]; then exit 1; fi
+    if [ -f "$STUB_DIR/paused" ] && [ -f "$STUB_DIR/resume_once" ]; then rm "$STUB_DIR/resume_once"; cat "$STUB_DIR/queues"; exit 0; fi
     if [ -f "$STUB_DIR/paused" ]; then cat "$STUB_DIR/empty_queues";
     else cat "$STUB_DIR/queues"; fi; exit 0;;
   *" reserved "*) cat "$STUB_DIR/empty_queues"; exit 0;;
   *" scheduled "*) if [ -e "$STUB_DIR/persistent_scheduled" ]; then cat "$STUB_DIR/active";
     else cat "$STUB_DIR/empty_queues"; fi; exit 0;;
   *" active "*) if [ -f "$STUB_DIR/worker_lost" ]; then echo '{}'; exit 0; fi
+    if [ -f "$STUB_DIR/worker_slow_once" ]; then rm "$STUB_DIR/worker_slow_once"; echo '{}'; exit 0; fi
     if [ -f "$STUB_DIR/active" ]; then
       if [ -f "$STUB_DIR/finish_after_one" ]; then rm "$STUB_DIR/finish_after_one";
         cat "$STUB_DIR/active"; exit 0; fi
@@ -112,8 +114,8 @@ class UpdateScriptCase(unittest.TestCase):
     def git(self, *args, cwd):
         return subprocess.run(['git', *args], cwd=cwd, env=self.env, check=True, capture_output=True, text=True).stdout.strip()
 
-    def run_update(self, **env):
-        return subprocess.run(['bash', 'scripts/update.sh'], cwd=self.work, env={**self.env, **env},
+    def run_update(self, *args, **env):
+        return subprocess.run(['bash', 'scripts/update.sh', *args], cwd=self.work, env={**self.env, **env},
                               capture_output=True, text=True, timeout=45)
 
     def calls(self):
@@ -192,10 +194,45 @@ class ManualUpdateTests(UpdateScriptCase):
 
     def test_lost_worker_aborts_and_resumes_dispatch(self):
         (self.stub / 'worker_lost').touch()
-        result = self.run_update()
+        result = self.run_update(CVENGINE_UPDATE_MISSING_POLLS='1')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('worker disappeared', result.stderr)
+        self.assertIn('A worker disappeared: classic_worker@local', result.stderr)
         self.assertTrue(any(' add_consumer ' in c for c in self.calls()))
+
+    def test_a_worker_that_misses_one_reply_is_waited_for(self):
+        (self.stub / 'worker_slow_once').touch()
+        result = self.run_update(CVENGINE_UPDATE_DRAIN_SECONDS='60')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('waiting for', result.stdout)
+        self.assertTrue(any(' stop -t 60 celery' in c for c in self.calls()))
+
+    def test_a_queue_that_resumes_after_the_pause_is_paused_again(self):
+        (self.stub / 'resume_once').touch()
+        result = self.run_update(CVENGINE_UPDATE_DRAIN_SECONDS='60')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        cancels = [c for c in self.calls() if ' cancel_consumer ' in c]
+        self.assertEqual(len(cancels), 8)  # four queues, then the same four once more
+
+    def test_force_stops_the_workers_without_a_drain_and_requeues_scans(self):
+        (self.stub / 'web_up').touch()
+        (self.stub / 'active').write_text((self.stub / 'queues').read_text().replace('"name":"', '"id":"t","name":"x'))
+        (self.stub / 'persistent_active').touch()
+        (self.stub / 'stop_json').write_text('REQUEUE_JSON [{"scan": 5, "domain": 2, "mode": "deep"}]\n')
+        result = self.run_update('--force')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn('Letting active work finish', result.stdout)
+        self.assertIn('Force: stopping the workers now', result.stdout)
+        calls = self.calls()
+        self.assertTrue(any(' stop -t 10 celery' in c for c in calls))
+        self.assertTrue(any(' migrate --noinput' in c for c in calls))
+        self.assertIn('"mode": "deep"', (self.stub / 'requeue_env').read_text())
+
+    def test_force_proceeds_when_the_workers_cannot_be_inspected(self):
+        (self.stub / 'inspect_fail').touch()
+        result = self.run_update('--force')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('worker state is unknown', result.stderr)
+        self.assertTrue(any(' migrate --noinput' in c for c in self.calls()))
 
     def test_interrupt_restores_dispatch_without_stopping_active_work(self):
         (self.stub / 'active').write_text('{' + ','.join(f'"{name}@local":[{{"id":"work"}}]' for name in

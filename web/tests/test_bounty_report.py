@@ -270,6 +270,10 @@ class SubmitTests(SimpleTestCase):
         self.assertIs(bounty_submit.check_hackerone('u', 't', get=get(200)), True)
         self.assertIs(bounty_submit.check_hackerone('u', 't', get=get(401)), False)
         self.assertIsNone(bounty_submit.check_hackerone('u', 't', get=get(500)))
+        self.assertIn('not your email', bounty_submit.verify_hackerone('u', 't', get=get(401))['reason'])
+        self.assertIn('inactive', bounty_submit.verify_hackerone('u', 't', get=get(403))['reason'])
+        self.assertEqual(bounty_submit.hackerone_username('@granted'), 'granted')
+        self.assertEqual(bounty_submit.hackerone_username('https://www.hackerone.com/granted/'), 'granted')
 
 
 class PlaybookTests(SimpleTestCase):

@@ -59,12 +59,37 @@ def submit_hackerone(payload, username, token, post=None):
     raise SubmitError(f"{hint}" + (f" ({detail})" if detail else "") + f" [HTTP {resp.status_code}]", status=resp.status_code)
 
 
-def check_hackerone(username, token, get=None):
-    """True when the credentials are accepted (a one-item read of the user's own reports), False when refused, None when unreachable."""
+def hackerone_username(value):
+    """The HackerOne username as the Hacker API wants it: what a person pastes may carry an @ or be their profile URL."""
+    value = re.sub(r"^(https?://)?(www\.)?hackerone\.com/", "", str(value or "").strip(), flags=re.I)
+    return value.strip("/").lstrip("@").strip()
+
+
+REFUSED = {
+    401: "HackerOne refused this username and API token. The Hacker API signs in with your HackerOne username (the name in "
+         "hackerone.com/<username>, not your email address) and an API token from Settings, API Token; HackerOne shows no "
+         "separate identifier for it.",
+    403: "HackerOne accepted the sign-in but refused access to your reports (HTTP 403): the API token may be inactive or revoked. "
+         "Create a new one under Settings, API Token.",
+}
+
+
+def verify_hackerone(username, token, get=None):
+    """``{"verified": True | False | None, "reason": ""}``: a one-item read of the user's own reports. False is a refusal (the
+    reason says which kind), None means HackerOne could not be asked."""
     import requests
     try:
         resp = (get or requests.get)(HACKERONE_ME, auth=(username, token), params={"page[size]": 1}, timeout=TIMEOUT, allow_redirects=False,
                                      headers={"Accept": "application/json"})
     except requests.RequestException:
-        return None
-    return True if resp.status_code == 200 else False if resp.status_code in (401, 403) else None
+        return {"verified": None, "reason": "Could not reach HackerOne; nothing was checked."}
+    if resp.status_code == 200:
+        return {"verified": True, "reason": ""}
+    if resp.status_code in REFUSED:
+        return {"verified": False, "reason": REFUSED[resp.status_code]}
+    return {"verified": None, "reason": f"HackerOne answered HTTP {resp.status_code}; try again later."}
+
+
+def check_hackerone(username, token, get=None):
+    """True when the credentials are accepted, False when refused, None when unreachable."""
+    return verify_hackerone(username, token, get=get)["verified"]

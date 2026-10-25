@@ -205,6 +205,26 @@ class CatalogueTests(BountyBase):
         self.assertEqual(q.call_count, 1)
         cache.delete('bounty-catalogue-refresh')
 
+    def test_the_status_follows_a_queued_load_until_the_task_finishes_it(self):
+        from django.core.cache import cache
+        from cveFeed.tasks import sync_bounty_catalogue
+        cache.delete('bounty-catalogue-refresh')
+        with mock.patch('cveFeed.tasks.sync_bounty_catalogue.delay'):
+            call(self.c, 'POST', B + 'catalogue/refresh', {})
+        loading = call(self.c, 'GET', B + 'status')[1]['loading']
+        self.assertTrue(loading['requested'])
+        self.assertIsNone(loading['running'])
+        with mock.patch('cveFeed.bounty_data.sync_all', return_value=[{'platform': 'hackerone', 'status': 'updated', 'programs': 3},
+                                                                    {'platform': 'bugcrowd', 'status': 'error', 'error': 'the data host answered 503'}]):
+            sync_bounty_catalogue.run(force=True)
+        self.assertEqual(call(self.c, 'GET', B + 'status')[1]['loading'], {'requested': None, 'running': None})
+        from cveFeed.models import AgentActivity
+        line = AgentActivity.objects.filter(message__startswith='Bug bounty catalogue').latest('id')
+        self.assertEqual(line.status, 'failed')
+        self.assertIn('hackerone 3', line.message)
+        self.assertIn('bugcrowd: the data host answered 503', line.message)
+        cache.delete('bounty-catalogue-refresh')
+
     def test_refresh_can_be_turned_off(self):
         with mock.patch.dict('os.environ', {'CVENGINE_BOUNTY_CATALOGUE': '0'}):
             self.assertEqual(call(self.c, 'POST', B + 'catalogue/refresh', {})[0], 409)
@@ -446,7 +466,7 @@ class SubmitTests(ReportBase):
         return call(self.c, 'POST', f'{B}reports/{rid}/submit', {'project': 'a1', 'confirm': 'acme', **body})
 
     def test_credentials_are_per_user_encrypted_and_never_returned(self):
-        with mock.patch('cveFeed.bounty_submit.check_hackerone', return_value=True):
+        with mock.patch('cveFeed.bounty_submit.verify_hackerone', return_value={'verified': True, 'reason': ''}):
             status, out = self.creds()
         self.assertEqual((status, out['verified']), (200, True))
         self.assertNotIn(self.TOKEN, json.dumps(out))
@@ -460,9 +480,21 @@ class SubmitTests(ReportBase):
         self.assertEqual(call(self.c, 'DELETE', B + 'credentials/hackerone')[0], 200)
         self.assertFalse(BountyCredential.objects.exists())
 
+    def test_the_username_is_cleaned_an_email_is_refused_and_a_refusal_says_why(self):
+        with mock.patch('cveFeed.bounty_submit.verify_hackerone', return_value={'verified': True, 'reason': ''}) as verify:
+            status, out = call(self.c, 'PUT', B + 'credentials/hackerone', {'username': ' https://hackerone.com/@granted-h1/ ', 'token': self.TOKEN})
+        self.assertEqual((status, out['username']), (200, 'granted-h1'))
+        self.assertEqual(verify.call_args.args, ('granted-h1', self.TOKEN))
+        status, out = call(self.c, 'PUT', B + 'credentials/hackerone', {'username': 'me@acme.example', 'token': self.TOKEN})
+        self.assertEqual(status, 400)
+        self.assertIn('email address', out['error'])
+        with mock.patch('cveFeed.bounty_submit.verify_hackerone', return_value={'verified': False, 'reason': 'HackerOne refused this username'}):
+            status, out = call(self.c, 'POST', B + 'credentials/hackerone/test', {})
+        self.assertEqual((status, out['verified'], out['reason']), (200, False, 'HackerOne refused this username'))
+
     def test_submit_sends_under_the_callers_account_and_records_it(self):
         rid = self.ready()
-        with mock.patch('cveFeed.bounty_submit.check_hackerone', return_value=True):
+        with mock.patch('cveFeed.bounty_submit.verify_hackerone', return_value={'verified': True, 'reason': ''}):
             self.creds()
         with mock.patch('cveFeed.bounty_api.bounty_submit.submit_hackerone', return_value={'id': '777', 'url': 'https://hackerone.com/reports/777'}) as send:
             status, d = self.submit(rid)

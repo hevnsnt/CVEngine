@@ -6,11 +6,16 @@
 # application containers, and waits until the site, every worker queue and the scheduler answer.
 # It never stops host services, never replaces the database or Redis, and never deletes a volume.
 #
-# Usage: scripts/update.sh [--check] [--stop-scans] [--help]
+# Usage: scripts/update.sh [--check] [--stop-scans] [--force] [--help]
 #   --check       Preflight only. Shows the Compose layout, port owners, database volumes, workers
 #                 and scans, and says whether an update can run now. Changes nothing.
 #   --stop-scans  Stop running and queued discovery scans cleanly instead of waiting for them,
 #                 and queue them again once the update is done.
+#   --force       Do not wait for anything: stop discovery scans (and queue them again afterwards, as
+#                 --stop-scans), stop the workers without draining them, then migrate and restart. A
+#                 worker that cannot be inspected or paused does not stop the update. Any other task
+#                 running at that moment is lost and runs again only when its schedule next fires. The
+#                 database, Redis and volumes are still never replaced, and a failed migration still stops.
 #
 # Settings, from the environment or the same keys in .env:
 #   CVENGINE_COMPOSE_FILES         Compose files, comma separated (default docker-compose.yml).
@@ -20,6 +25,7 @@
 #   CVENGINE_UPDATE_DRAIN_SECONDS  Longest wait for active tasks, 1 to 10800 (default 10800)
 #   CVENGINE_UPDATE_READY_SECONDS  Longest wait for readiness, 1 to 900 (default 600)
 #   CVENGINE_UPDATE_STOP_SCANS=1   Same as --stop-scans
+#   CVENGINE_UPDATE_MISSING_POLLS  Drain polls in a row a worker may miss before it counts as gone (default 12)
 # CVENGINE_COMPOSE_FILE (a single file) is still accepted.
 set -Eeuo pipefail
 
@@ -35,10 +41,12 @@ usage() { sed -n '2,/^set -Eeuo/p' "$self" | sed '$d' | sed -E 's/^# ?//'; }
 check_only=0
 after_fetch=0
 stop_scans=0
+force=0
 for arg in "$@"; do
     case $arg in
         --check) check_only=1 ;;
         --stop-scans) stop_scans=1 ;;
+        --force) force=1; stop_scans=1 ;;
         --after-fetch) after_fetch=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
@@ -46,6 +54,7 @@ for arg in "$@"; do
 done
 forward_args=()
 (( stop_scans )) && forward_args+=(--stop-scans)
+(( force )) && forward_args+=(--force)
 
 die() {
     echo "ERROR: $*" >&2
@@ -397,9 +406,15 @@ if ! queue_snapshot=$("${compose[@]}" exec -T celery celery -A reNgine.tasks ins
     # An absent managed worker can be repaired by recreating it. A running container
     # whose workers cannot be inspected is different: its active jobs are unknown.
     running_celery=$("${compose[@]}" ps -q --status running celery) || die 'Could not inspect the Celery container.'
-    [[ -z $running_celery ]] || die 'Celery is running but worker state is unknown; cannot drain active jobs safely.'
+    if [[ -n $running_celery ]] && (( ! force )); then
+        die 'Celery is running but worker state is unknown; cannot drain active jobs safely (--force stops the workers anyway).'
+    fi
     queue_snapshot='{}'
-    echo 'Celery container is stopped; queued broker work will be preserved while workers are repaired.'
+    if [[ -n $running_celery ]]; then
+        echo 'Force: worker state is unknown; the workers will be stopped without a drain.' >&2
+    else
+        echo 'Celery container is stopped; queued broker work will be preserved while workers are repaired.'
+    fi
 fi
 snapshot_records=$(printf '%s' "$queue_snapshot" | python3 -c '
 import json, sys
@@ -456,7 +471,10 @@ for pid in os.listdir("/proc"):
         for worker in "${worker_names[@]}"; do
             [[ ${worker%%@*} == "$process_worker" ]] && found=1
         done
-        (( found )) || die "Worker process $process_worker is running but does not answer inspection; active work is unknown."
+        if (( ! found )); then
+            (( force )) || die "Worker process $process_worker is running but does not answer inspection; active work is unknown (--force stops it anyway)."
+            echo "Force: worker process $process_worker does not answer inspection; it will be stopped without a drain." >&2
+        fi
     done <<< "$process_workers"
 fi
 dispatch_paused=0
@@ -550,60 +568,109 @@ for pair in "${consumer_pairs[@]}"; do
         echo "Pausing queue consumers on $worker..."
         last_consumer_worker=$worker
     fi
-    "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 5 -d "$worker" cancel_consumer "$queue" \
-        >/dev/null 2>>"$diagnostic_log" || die "Could not pause $worker/$queue."
-done
-step "Letting active work finish (up to ${drain_seconds}s)"
-drain_deadline=$((SECONDS + drain_seconds))
-drain_started=$SECONDS
-last_drain_report=-30
-while :; do
-    if (( ${#worker_names[@]} == 0 )); then
-        echo 'No managed Celery workers are reachable; there are no managed active tasks to drain.'
-        break
+    if ! "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 5 -d "$worker" cancel_consumer "$queue" \
+            >/dev/null 2>>"$diagnostic_log"; then
+        (( force )) || die "Could not pause $worker/$queue."
+        echo "Force: could not pause $worker/$queue; continuing." >&2
     fi
-    activity=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 5 active 2>>"$diagnostic_log") ||
-        die 'Could not inspect active tasks during drain.'
-    reserved=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 5 reserved 2>>"$diagnostic_log") ||
-        die 'Could not inspect reserved tasks during drain.'
-    scheduled=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 5 scheduled 2>>"$diagnostic_log") ||
-        die 'Could not inspect scheduled tasks during drain.'
-    queue_state=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 5 active_queues 2>>"$diagnostic_log") ||
-        die 'Could not inspect queue consumers during drain.'
-    worker_list=$(IFS=,; echo "${worker_names[*]}")
-    drain_state=$(printf '%s\0' "$activity" "$reserved" "$scheduled" "$queue_state" "$worker_list" | python3 -c '
+done
+if (( force )); then
+    step 'Force: stopping the workers now, without a drain'
+    echo 'Tasks still running are lost and run again when their schedule next fires; stopped discovery scans are queued again after the update.'
+else
+    step "Letting active work finish (up to ${drain_seconds}s)"
+    drain_deadline=$((SECONDS + drain_seconds))
+    drain_started=$SECONDS
+    last_drain_report=-30
+    missing_polls=0
+    consuming_polls=0
+    drain_missing_limit=${CVENGINE_UPDATE_MISSING_POLLS:-12}  # consecutive polls without a worker's reply before it counts as gone
+    [[ $drain_missing_limit =~ ^[0-9]+$ ]] && (( drain_missing_limit >= 1 )) || die 'CVENGINE_UPDATE_MISSING_POLLS must be a positive integer.'
+
+    while :; do
+        if (( ${#worker_names[@]} == 0 )); then
+            echo 'No managed Celery workers are reachable; there are no managed active tasks to drain.'
+            break
+        fi
+        # Busy workers (a gevent worker parsing templates, a long CPU step) can miss a broadcast reply, and a worker that restarted
+        # resumes its queues: one poll proves neither "gone" nor "still consuming", so both must persist before the update stops.
+        activity=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 active 2>>"$diagnostic_log") ||
+            die 'Could not inspect active tasks during drain.'
+        reserved=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 reserved 2>>"$diagnostic_log") ||
+            die 'Could not inspect reserved tasks during drain.'
+        scheduled=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 scheduled 2>>"$diagnostic_log") ||
+            die 'Could not inspect scheduled tasks during drain.'
+        queue_state=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 active_queues 2>>"$diagnostic_log") ||
+            die 'Could not inspect queue consumers during drain.'
+        worker_list=$(IFS=,; echo "${worker_names[*]}")
+        drain_state=$(printf '%s\0' "$activity" "$reserved" "$scheduled" "$queue_state" "$worker_list" | python3 -c '
 import json, sys
 try:
     parts = sys.stdin.buffer.read().split(b"\0")
-    active, reserved, scheduled, queues = (json.loads(x) for x in parts[:4])
-    expected = set(filter(None, parts[4].decode().split(",")))
-    if any(not isinstance(x, dict) or not expected <= set(x) for x in (active, reserved, scheduled, queues)):
-        raise ValueError("worker disappeared")
-    if any(queues[name] for name in expected): raise ValueError("consumer still active")
+    replies = [json.loads(x) for x in parts[:4]]
+    expected = sorted(filter(None, parts[4].decode().split(",")))
+    if any(not isinstance(x, dict) for x in replies): raise ValueError("invalid reply")
+    active, reserved, scheduled, queues = replies
+    clean = lambda s: "".join(c for c in str(s) if c.isalnum() or c in "_.-@")[:120]
+    missing = [name for name in expected if any(name not in part for part in replies)]
+    if missing:
+        print("MISSING|" + ",".join(clean(name) for name in missing)); sys.exit(0)
+    consuming = [(name, q.get("name")) for name in expected for q in queues[name] if isinstance(q, dict) and q.get("name")]
+    if consuming:
+        print("CONSUMING|" + " ".join(clean(name) + "|" + clean(queue) for name, queue in consuming)); sys.exit(0)
     counts = [sum(len(part[name]) for name in expected) for part in (active, reserved, scheduled)]
     names = sorted({str(task.get("name", "unknown")) for part in (active, reserved, scheduled)
                     for name in expected for task in part[name] if isinstance(task, dict)})
     names = ["".join(c for c in name if c.isalnum() or c in "_.-")[:80] for name in names[:6]]
-    print("|".join([*(str(count) for count in counts), ",".join(names)]))
+    print("|".join(["COUNTS", *(str(count) for count in counts), ",".join(names)]))
 except (ValueError, TypeError, KeyError):
     sys.exit(1)
-') ||
-        die 'A worker disappeared or still consumes new tasks; update paused.'
-    IFS='|' read -r active_count reserved_count scheduled_count task_names <<< "$drain_state"
-    remaining=$((active_count + reserved_count + scheduled_count))
-    [[ $remaining =~ ^[0-9]+$ ]] || die 'Could not count active tasks.'
-    if (( SECONDS - last_drain_report >= 30 )); then
-        echo "Drain: $active_count active, $reserved_count reserved, $scheduled_count scheduled; $((SECONDS - drain_started))s elapsed, ${drain_seconds}s maximum${task_names:+; tasks: $task_names}."
-        last_drain_report=$SECONDS
-    fi
-    (( remaining == 0 )) && break
-    if (( SECONDS >= drain_deadline )); then
-        die "$remaining task(s) still active after the bounded drain; update aborted without killing them."
-    fi
-    sleep 5
-done
-echo 'All active and reserved worker tasks finished; stopping workers without replacing Redis...'
-"${compose[@]}" stop -t 60 celery
+') || die 'Worker inspection replies could not be read during drain.'
+        case $drain_state in
+            MISSING\|*)
+                missing_polls=$((missing_polls + 1)); consuming_polls=0
+                echo "Drain poll: no reply from ${drain_state#MISSING|} (${missing_polls}/${drain_missing_limit})" >>"$diagnostic_log"
+                if (( missing_polls >= drain_missing_limit )); then
+                    die "A worker disappeared: ${drain_state#MISSING|} did not answer ${missing_polls} inspections in a row; update paused."
+                fi
+                if (( SECONDS - last_drain_report >= 30 )); then
+                    echo "Drain: waiting for ${drain_state#MISSING|} to answer (a busy worker can miss a reply)."
+                    last_drain_report=$SECONDS
+                fi
+                (( SECONDS < drain_deadline )) || die 'The bounded drain ended while a worker was not answering; update aborted without killing work.'
+                sleep 5; continue;;
+            CONSUMING\|*)
+                consuming_polls=$((consuming_polls + 1)); missing_polls=0
+                echo "Drain poll: still consuming ${drain_state#CONSUMING|} (${consuming_polls}/3)" >>"$diagnostic_log"
+                if (( consuming_polls >= 3 )); then
+                    die "A worker still consumes new tasks after being paused three times (${drain_state#CONSUMING|}); update paused."
+                fi
+                # a restarted worker resumes its queues: pause them again
+                for pair in ${drain_state#CONSUMING|}; do
+                    "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 10 -d "${pair%%|*}" cancel_consumer "${pair#*|}" \
+                        >/dev/null 2>>"$diagnostic_log" || die "Could not pause ${pair%%|*}/${pair#*|} again."
+                done
+                sleep 5; continue;;
+        esac
+        missing_polls=0; consuming_polls=0
+        drain_state=${drain_state#COUNTS|}
+        IFS='|' read -r active_count reserved_count scheduled_count task_names <<< "$drain_state"
+        remaining=$((active_count + reserved_count + scheduled_count))
+        [[ $remaining =~ ^[0-9]+$ ]] || die 'Could not count active tasks.'
+        if (( SECONDS - last_drain_report >= 30 )); then
+            echo "Drain: $active_count active, $reserved_count reserved, $scheduled_count scheduled; $((SECONDS - drain_started))s elapsed, ${drain_seconds}s maximum${task_names:+; tasks: $task_names}."
+            last_drain_report=$SECONDS
+        fi
+        (( remaining == 0 )) && break
+        if (( SECONDS >= drain_deadline )); then
+            die "$remaining task(s) still active after the bounded drain; update aborted without killing them."
+        fi
+        sleep 5
+    done
+    echo 'All active and reserved worker tasks finished; stopping workers without replacing Redis...'
+fi
+stop_grace=$(( force ? 10 : 60 ))
+"${compose[@]}" stop -t "$stop_grace" celery
 workers_stopped=1
 
 step 'Applying migrations; the database and broker containers stay in place'
