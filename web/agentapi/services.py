@@ -1076,6 +1076,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
+                 'db': (p.extra or {}).get('db') or None,
                  'http': p.http or None, 'tls': p.tls or None,
                  'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,

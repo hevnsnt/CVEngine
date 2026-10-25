@@ -661,6 +661,33 @@ const rdpShotCard = (shot) => {
   if (shot.captured_at) box.append(el("p", "note", `Captured ${shortDate(shot.captured_at)}`));
   return box;
 };
+const DB_FIELD_LABELS = {
+  version: "Version", protocol: "Protocol", role: "Role", architecture: "Architecture",
+  uptime: "Uptime", authentication: "Authentication", auth: "Authentication",
+  windows_server: "Windows server", version_number: "Version number",
+  computer_name: "Computer name", domain: "Domain", fqdn: "FQDN", dns_domain: "DNS domain", os: "Operating system",
+};
+// A database port's richer metadata (cveFeed.db_intel), read from its own pre-authentication greeting. This is
+// version and identity only, never a sign of whether the server needs a password: that question is answered
+// separately, by the critical finding cveFeed.db_exposure raises when a real connection goes through unchallenged.
+const dbFactsCard = (db) => {
+  const rows = [];
+  const seen = new Set();
+  Object.values(db || {}).forEach((facts) => {
+    Object.entries(facts || {}).forEach(([key, value]) => {
+      if (key === "admin_party" || seen.has(key) || value === "" || value == null) return;
+      seen.add(key);
+      rows.push({ label: DB_FIELD_LABELS[key] || key, value: String(value) });
+    });
+  });
+  if (!rows.length) return null;
+  const box = el("div", "db-facts");
+  box.append(kvBox(rows));
+  if (Object.values(db || {}).some((facts) => facts && facts.admin_party)) {
+    box.append(badge("Admin party: no authentication configured", "critical"));
+  }
+  return box;
+};
 const excerpt = (label, text) => {
   const box = el("div");
   box.append(el("div", "note", label), el("pre", "banner", text));
@@ -1843,6 +1870,7 @@ const pages = {
             det.append(el("summary", "mono", id), el("pre", "banner", text));
             card.append(det);
           });
+          if (p.db) { const facts = dbFactsCard(p.db); if (facts) card.append(facts); }
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
           if (p.rdp_screenshot) card.append(rdpShotCard(p.rdp_screenshot));

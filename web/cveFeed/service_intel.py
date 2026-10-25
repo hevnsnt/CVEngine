@@ -126,13 +126,16 @@ def rdp_without_nla(port):
 def record_service_findings(scan):
     """Findings the scan's stored script output proves. Returns how many were new. Idempotent: a finding is one row per host and
     port, and a port that stopped allowing anonymous sign-in is simply no longer reported."""
+    from cveFeed import db_intel
     from reNgine.tasks import save_vulnerability
     from startScan.models import Subdomain, open_ports
     new = 0
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
         for ip in sub.ip_addresses.all():
             apply_host_facts(ip)
+            db_intel.apply_mssql_host_facts(ip)
             for port in open_ports(ip):
+                db_intel.apply_db_facts(port)
                 layers = rdp_without_nla(port) if is_rdp_port(port) else None
                 if layers:
                     _vuln, created = save_vulnerability(
