@@ -15,9 +15,10 @@ A target is a domain, an IP address, a CIDR range (`10.0.0.0/24`), a dashed rang
 5. **nuclei, technology pass.** [nuclei](https://github.com/projectdiscovery/nuclei) HTTP and technology templates fingerprint each host.
 6. **Web route checks.** For each web host, cvENGINE sends one plain anonymous GET to a handful of common routes (`/`, `/login`, `/admin`, `/api`, and paths bbot found) and labels each `open`, `login`, `session_required`, `sso`, or `redirect`. The response is scanned in memory for sensitive data such as cloud keys, personal data, and internal identifiers. Only the type, a count, and a masked sample are stored. The page's headers, generator tag, and script names, plus the comment banners of up to four scripts the host serves itself, name the technologies and libraries it runs (jQuery, Bootstrap, AngularJS, and others) with versions, so an old library is correlated like any other technology.
 7. **WPScan.** Hosts the earlier stages fingerprinted as WordPress are scanned with [WPScan](https://wpscan.com/) (see [Configuration](CONFIGURATION.md#settings-in-the-app)).
-8. **CVE correlation.** The inventory is matched against the CVE store.
-9. **nuclei, AI-targeted pass.** Your AI model sees the technology names found on each host and picks nuclei tags from those the installed templates use. A built-in technology map always adds its tags. Hosts with the same choice are scanned together, and each host's fire and smoke CVE matches get a template test.
-10. **Triage, validation, and changes.** See below.
+8. **node2shell.** Off by default (`CVENGINE_NODE2SHELL=1` turns it on). Hosts fingerprinted as Node.js or Express are checked for CVE-2026-111497 with [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) (see [Configuration](CONFIGURATION.md#settings-in-the-app)).
+9. **CVE correlation.** The inventory is matched against the CVE store.
+10. **nuclei, AI-targeted pass.** Your AI model sees the technology names found on each host and picks nuclei tags from those the installed templates use. A built-in technology map always adds its tags. Hosts with the same choice are scanned together, and each host's fire and smoke CVE matches get a template test.
+11. **Triage, validation, and changes.** See below.
 
 The daily hygiene task also asks the Internet Archive, once a week per target, for the URLs it saved. A `.php` page or a `/wp-content/` path says a host ran PHP or WordPress at some point. That is kept as historical evidence only: search finds the host and labels it *seen in web archive*, and it is never treated as a current technology.
 

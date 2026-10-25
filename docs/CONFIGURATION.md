@@ -56,6 +56,8 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_RDP_SHOT` | `1` | Set to `0` to turn off RDP login-screen screenshots entirely. |
 | `CVENGINE_TTL_RDP_SHOT` | `24` | Hours before a host's RDP screenshot is captured again. |
 | `CVENGINE_RDP_SHOT_MAX_HOSTS` | `10` | RDP servers screenshotted per scan; a live RDP session plus an AI call costs more than most checks. |
+| `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts fingerprinted as Node.js or Express for CVE-2026-111497. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
+| `CVENGINE_NODE2SHELL_TIMEOUT`, `CVENGINE_NODE2SHELL_MAX_HOSTS`, `CVENGINE_TTL_NODE2SHELL` | `90`, `5`, `168` | Seconds allowed per host, hosts checked per scan, and hours before a host is checked again. |
 
 ## AI limits
 
@@ -138,6 +140,10 @@ The AI key, API vault, update token, webhook URLs, and Telegram bot token are en
 
 **WPScan.** When a scan fingerprints a host as WordPress, cvENGINE runs [WPScan](https://wpscan.com/) on it once a week: the version, plugins, themes, config backups, database exports, and the first author names, with no password guessing. Its vulnerability data comes from the wpscan.com API. Add the token under **Settings, API keys, WPScan** (per organization or project; a project's own token wins). The free plan allows 25 requests a day, and each site costs one request for the core plus one per plugin and theme, so a busy install needs a paid plan; when the token runs out the remaining sites wait for the next scan. Without a token WPScan still reports versions and exposures. Findings appear in Findings with the source `wpscan`, CVE ids included. The token is given to WPScan in its environment, never on a command line or in a log. WPScan's licence is free for testing your own systems and for penetration testing, and a commercial licence is needed to use it in a managed or hosted service, so check it before offering cvENGINE to others as a service.
 
-Superusers set the rest under **Settings**: AI model, API vault, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset. Notification channels (Slack, Discord, Telegram, Lark) get at most one message per feed sync, scan, or automatic template-test run, naming up to five matches. A match is announced only with evidence it exists: a version in the affected range, a template hit, or the distribution tracker calling it vulnerable.
+Superusers set the rest under **Settings**: AI model, API vault, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset.
+
+**node2shell (CVE-2026-111497).** Off by default (`CVENGINE_NODE2SHELL=0`): see above for why. When on, it runs [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) against hosts already fingerprinted as Node.js or Express. It never executes a command and never sends a credential; a host is reported vulnerable only when the detector's own controls establish a real, stable signal first.
+
+Notification channels (Slack, Discord, Telegram, Lark) get at most one message per feed sync, scan, or automatic template-test run, naming up to five matches. A match is announced only with evidence it exists: a version in the affected range, a template hit, or the distribution tracker calling it vulnerable.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [PIPELINE.md](PIPELINE.md), [documentation index](README.md).

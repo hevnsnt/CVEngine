@@ -20,6 +20,7 @@ dotted-dict==2.0.0
 drf-yasg==1.21.18
 gunicorn==26.2.0
 gevent==26.9.0
+h11==0.16.0
 humanize==4.16.0
 Markdown==3.11.2
 metafinder==1.2

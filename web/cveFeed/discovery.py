@@ -500,7 +500,8 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
-                force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None):
+                force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
+                node2shell_checker=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -563,6 +564,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                                fallback={'sites': 0})
         if stopped(scan_id):
             return gone
+    from cveFeed import node2shell_scan
+    n2s_kwargs = {'checker': node2shell_checker} if node2shell_checker else {}
+    if retest or force:
+        n2s_kwargs['force'] = True
+    node2shell_result = None
+    if node2shell_scan.enabled() and node2shell_scan.node_sites(scan):  # only for hosts already fingerprinted as Node.js or Express
+        node2shell_result = _stage(scan, 'node2shell check', 'node2shell', lambda: node2shell_scan.run_for_scan(scan_id, **n2s_kwargs),
+                                   fallback={'checked': 0})
+        if stopped(scan_id):
+            return gone
     from cveFeed.tasks import correlate_cves, run_hygiene_task
     correlation = _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id),
                          fallback={'subdomains': 0, 'matches': 0})  # run inline: the AI-targeted pass needs the matches
@@ -614,6 +625,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['hygiene'] = hygiene_result
     if wpscan_result is not None:
         result['wpscan'] = wpscan_result
+    if node2shell_result is not None:
+        result['node2shell'] = node2shell_result
     if rdp_result is not None:
         result['rdp_screenshot'] = rdp_result
     _announce(scan, result, summary=hygiene)
