@@ -389,3 +389,39 @@ class ApiTests(TestCase):
 		status, data = rpc(self.t_alice, 'tools/call', {'name': 'list_routes', 'arguments': {'project': 'proj-a', 'auth_state': 'login'}})
 		self.assertFalse(data['result']['isError'])
 		self.assertEqual(json.loads(data['result']['content'][0]['text'])['count'], 1)
+
+
+class ProbeTimeBudgetTests(SimpleTestCase):
+	def test_a_host_that_trickles_bytes_is_cut_off_at_the_total_budget(self):
+		import socket
+		import time
+		from cveFeed import pinned_transport
+		listener = socket.socket()
+		listener.bind(('127.0.0.1', 0))
+		listener.listen(1)
+		stop = threading.Event()
+
+		def drip():
+			conn, _ = listener.accept()
+			try:
+				conn.recv(4096)
+				conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 70000\r\n\r\n')
+				while not stop.is_set():
+					conn.sendall(b'a')  # one byte every 0.2 s keeps every per-read timeout satisfied
+					time.sleep(0.2)
+			except OSError:
+				pass
+			finally:
+				conn.close()
+
+		thread = threading.Thread(target=drip, daemon=True)
+		thread.start()
+		started = time.monotonic()
+		try:
+			with mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True), mock.patch.object(ra, 'PROBE_TOTAL_SECONDS', 1):
+				with self.assertRaises(TimeoutError):
+					ra.probe_url(f'http://127.0.0.1:{listener.getsockname()[1]}/')
+		finally:
+			stop.set()
+			listener.close()
+		self.assertLess(time.monotonic() - started, 5)

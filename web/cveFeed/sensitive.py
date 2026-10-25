@@ -13,7 +13,9 @@ PII_TYPES = ('email', 'phone', 'card')
 INTERNAL_TYPES = ('internal_ip', 'internal_host')
 TYPE_GROUPS = {'credentials': CREDENTIAL_TYPES, 'pii': PII_TYPES, 'internal': INTERNAL_TYPES}
 PATTERNS = {
-    'email': r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',
+    # Repeats are bounded and matches may only start at a token boundary, so the work per body is linear: an unbounded
+    # repeat tried from every offset of a 64 KB body that has no '@' (or no suffix) costs seconds of CPU.
+    'email': r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}',
     'phone': r'(?<!\d)(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?|\d{2,4}[ .-])\d{3,4}[ .-]?\d{3,4}(?!\d)',
     'card': r'(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)',  # then Luhn + IIN check
     'aws_key': r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b',
@@ -21,10 +23,10 @@ PATTERNS = {
     'slack_token': r'\bxox[abposr]-[0-9A-Za-z-]{10,}\b',
     'github_token': r'\bgh[pousr]_[A-Za-z0-9]{36}\b',
     'stripe_key': r'\b[sr]k_live_[0-9a-zA-Z]{24,}\b',
-    'jwt': r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b',
+    'jwt': r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{10,4096}(?![A-Za-z0-9_-])',
     'private_key': r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----',
     'internal_ip': r'\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b',
-    'internal_host': r'\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|internal|corp|lan|intranet)\b',
+    'internal_host': r'(?<![a-z0-9.-])[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,6}\.(?:local|internal|corp|lan|intranet)\b',
 }
 COMPILED = {name: re.compile(pattern, re.I if name == 'internal_host' else 0) for name, pattern in PATTERNS.items()}
 EMAIL_NOISE = ('example.com', 'example.org', 'sentry.io', 'w3.org', 'schema.org', 'yoursite', 'email.com', 'domain.com')

@@ -8,9 +8,10 @@ from django.utils import timezone
 from cveFeed import hot_validation, triage
 from cveFeed.models import (AutomaticValidation, CVEEntry, CVEMatch, HygieneFinding,
                             HotValidationCursor, OnDemandValidation, RouteAuth, Triage)
-from dashboard.models import Org, Project
+from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
+from tenancy import roles
 
 
 class HotValidationTests(TestCase):
@@ -104,11 +105,13 @@ class HotValidationTests(TestCase):
 
     def test_manual_low_tier_finding_is_reviewed_but_closed_one_is_rejected(self):
         from cveFeed.tasks import automatic_validate_finding
+        requester = get_user_model().objects.create_user('requester', password='x' * 24)
+        ProjectMembership.objects.create(user=requester, project=self.project, role=roles.ADMIN)  # manual jobs re-check this at run time
         low = Vulnerability.objects.create(name='Low observation', severity=1, source='bbot',
                                             subdomain=self.sub, target_domain=self.domain)
         row = triage.track([low])[0][0]
         job = AutomaticValidation.objects.create(triage=row, project=self.project, signature=row.signature,
-                                                 source='manual', priority=3, attempts=1)
+                                                 source='manual', priority=3, attempts=1, requested_by=requester)
         with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
                 mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}) as review:
             result = automatic_validate_finding(job.pk)
@@ -118,7 +121,7 @@ class HotValidationTests(TestCase):
         low.open_status = False
         low.save(update_fields=['open_status'])
         again = AutomaticValidation.objects.create(triage=row, project=self.project, signature=row.signature,
-                                                   source='manual', priority=3, attempts=1)
+                                                   source='manual', priority=3, attempts=1, requested_by=requester)
         with mock.patch('cveFeed.triage.run_triage') as review:
             result = automatic_validate_finding(again.pk)
         review.assert_not_called()

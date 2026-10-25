@@ -7,8 +7,11 @@ each body are read. ``classify`` and the planning helpers are pure functions so 
 helper (``probe_url``) is injectable.
 """
 import concurrent.futures
+import http.client
 import logging
 import re
+import socket
+import threading
 import time
 from urllib.parse import urljoin, urlparse
 
@@ -27,6 +30,7 @@ MAX_URLS_PER_SCAN = 1500
 ROUTE_WORKERS = 8  # hosts probed in parallel; one host's paths go one after another
 PER_REQUEST_GAP = 0.2  # seconds between two requests to the same host
 CONNECT_TIMEOUT, READ_TIMEOUT = 3, 6
+PROBE_TOTAL_SECONDS = 20  # wall-clock budget for one probe: the per-read timeouts alone let a host that trickles bytes hold a worker thread for good
 ROUTE_SAMPLE_BYTES = 64 * 1024
 MAX_PATH_LENGTH = 200
 CHUNK = 500
@@ -269,6 +273,20 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
     if parsed.query:
         path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
     response = None
+    expired = threading.Event()
+
+    def abort():  # closes the connection under a blocked read; the read then ends and the budget breach is raised below
+        expired.set()
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    watchdog = threading.Timer(PROBE_TOTAL_SECONDS, abort)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         connection.connect()
         connection.sock.settimeout(timeout[1])
@@ -277,6 +295,8 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         if response.getheader('Content-Encoding', 'identity').lower() not in ('', 'identity'):
             raise ValueError('probe server ignored identity encoding')
         raw = response.read(max_bytes) or b''
+        if expired.is_set():
+            raise TimeoutError('probe exceeded its total time budget')
         encoding = response.headers.get_content_charset() or 'utf-8'
         try:
             text = raw.decode(encoding, errors='replace')
@@ -295,7 +315,12 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
                 'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
                 'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
                 'powered_by': response.getheader('X-Powered-By', '')}
+    except (OSError, http.client.HTTPException):
+        if expired.is_set():
+            raise TimeoutError('probe exceeded its total time budget') from None
+        raise
     finally:
+        watchdog.cancel()
         if response is not None:
             response.close()
         connection.close()

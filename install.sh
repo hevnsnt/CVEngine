@@ -46,6 +46,15 @@ else
   echo "Non-interactive installation parameter set. Installation begins."
 fi
 
+# Never bring up a public HTTPS instance with the example passwords from .env.example.
+placeholders=$(grep -iE '^(POSTGRES_PASSWORD|DJANGO_SUPERUSER_PASSWORD|AUTHORITY_PASSWORD)=.*change-me' .env | cut -d= -f1 | tr '\n' ' ')
+if [ -n "$placeholders" ]; then
+  tput setaf 1
+  echo "Refusing to continue: .env still has the example placeholder for: $placeholders"
+  echo "Set a real value for each (for example: openssl rand -base64 24) and run this script again."
+  exit 1
+fi
+
 echo " "
 tput setaf 3;
 echo "#########################################################################"

@@ -266,6 +266,22 @@ def _bounded_result(response, limit):
         'The operation may have completed; do not blindly retry writes.')).encode('utf-8')
 
 
+MAX_JSON_DEPTH = 32
+
+
+def _nesting_exceeds(value, limit):
+    """True if lists/objects nest deeper than ``limit`` (iterative, so the check itself cannot recurse)."""
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (list, dict)):
+            if depth > limit:
+                return True
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children if isinstance(child, (list, dict)))
+    return False
+
+
 def endpoint(request):
     if request.method != 'POST':
         response = JsonResponse({'error': 'POST JSON-RPC messages to this endpoint'}, status=405)
@@ -287,6 +303,8 @@ def endpoint(request):
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError, RecursionError):
+        return JsonResponse(_rpc_error(None, -32700, 'parse error'))
+    if _nesting_exceeds(payload, MAX_JSON_DEPTH):  # not left to RecursionError: newer Pythons parse far deeper than older ones
         return JsonResponse(_rpc_error(None, -32700, 'parse error'))
     ctx = Ctx(user=request.user, token=getattr(request, 'api_token', None))
     if isinstance(payload, list):

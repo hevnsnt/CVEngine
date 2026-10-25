@@ -15,13 +15,19 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env certs up build username changepassword migrate down stop restart rm test logs images help
+.PHONY: check-env check-secrets certs up build username changepassword migrate down stop restart rm test logs images help
 
 # .env is not tracked. Create it from the example on first use, then stop so it can be edited.
 check-env:
 	@test -f .env || { cp .env.example .env; echo "Created .env from .env.example. Edit it (DOMAIN_NAME and every change-me value), then run make again."; exit 1; }
 
-certs: check-env	## Generate the HTTPS certificate.
+# First-run guard: refuse to continue while a password still holds the public example value from .env.example.
+# (Not part of up/build/down, so an existing deployment's updates and restarts are never blocked by it.)
+check-secrets: check-env
+	@bad=$$(grep -iE '^(POSTGRES_PASSWORD|DJANGO_SUPERUSER_PASSWORD|AUTHORITY_PASSWORD)=.*change-me' .env | cut -d= -f1 | tr '\n' ' '); \
+	if [ -n "$$bad" ]; then echo "Refusing to continue: .env still has the example placeholder for: $$bad"; echo "Set a real value for each (for example: openssl rand -base64 24), then run make again."; exit 1; fi
+
+certs: check-secrets	## Generate the HTTPS certificate.
 	@${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} -f docker-compose.setup.yml run --rm certs
 
 up: check-env		## Build and start all services.
@@ -33,7 +39,7 @@ build: check-env		## Build all services.
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
 
-username: check-env	## Create an admin account (use after make up).
+username: check-secrets	## Create an admin account (use after make up).
 ifeq ($(isNonInteractive), true)
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py createsuperuser --username ${DJANGO_SUPERUSER_USERNAME} --email ${DJANGO_SUPERUSER_EMAIL} --noinput
 else
