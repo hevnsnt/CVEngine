@@ -94,7 +94,7 @@ jobs:
         run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs
 
   build:
-    name: 🐳 Build Docker image
+    name: 🐳 Build Docker image (${{ matrix.platform }})
     needs: security-tests
     runs-on: ${{ matrix.runner }}
     strategy:
