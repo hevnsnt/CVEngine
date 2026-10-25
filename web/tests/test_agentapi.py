@@ -1335,12 +1335,12 @@ class HostSearchTests(TestCase):
 	def test_field_filters(self):
 		self.assertEqual(self.names('port:3306'), ['db.srch.example'])  # only that host, not the other project's
 		self.assertEqual(self.names('product:mysql'), ['db.srch.example'])
-		self.assertEqual(self.names('tech:php'), ['tech.srch.example', 'www.srch.example'])
+		self.assertEqual(self.names('tech:php'), ['port.srch.example', 'tech.srch.example', 'www.srch.example'])  # tech: is everything a host runs
 		self.assertEqual(self.names('os:"linux 5"'), ['port.srch.example'])
 		self.assertEqual(self.names('service:svc port:8080'), ['port.srch.example'])  # terms are ANDed
 
 	def test_negation_and_phrases(self):
-		self.assertEqual(self.names('tech:php -host:www'), ['tech.srch.example'])
+		self.assertEqual(self.names('tech:php -host:www'), ['port.srch.example', 'tech.srch.example'])
 		self.assertEqual(self.names('-php'), ['db.srch.example'])
 		self.assertEqual(self.names('"welcome to acme"'), ['www.srch.example'])
 		self.assertEqual(self.names('welcome acme'), ['www.srch.example'])

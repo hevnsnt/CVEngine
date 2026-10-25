@@ -177,6 +177,7 @@ def classify(probe):
     found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''))
     if found:
         evidence['fingerprints'] = found
+        evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
 
     def done(state, provider='', redirect_to=''):
         evidence['provider'] = provider

@@ -211,6 +211,7 @@ def persist_inventory(inventory, source='nmap'):
                           'method': rec.get('method', '')}
             if rec.get('scripts'):
                 port.extra['scripts'] = rec['scripts']  # this run's NSE output; a run that had none leaves the last in place
+                port.extra['script_text'] = '\n'.join(rec['scripts'].values())  # flat text for search, without the script ids
             if rec.get('banner'):
                 port.banner = rec['banner']
             port.distro, port.distro_release = info['distro'], info['release']
