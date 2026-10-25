@@ -140,13 +140,16 @@ You need Linux with [Docker Engine](https://docs.docker.com/engine/install/) and
 ```bash
 git clone https://github.com/hevnsnt/CVEngine.git
 cd CVEngine
-cp .env.example .env     # set DOMAIN_NAME and replace every change-me
+./scripts/init-env.sh    # creates .env and generates its database and certificate passwords
+nano .env                # set DOMAIN_NAME to the name people will type
 make certs               # HTTPS certificate for the built-in proxy
 make up                  # build and start (the first build takes about 30 minutes)
-make username            # create your admin account
+make admin               # create your admin account: its password is generated and printed once
 ```
 
-Open `https://<your DOMAIN_NAME>/`. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt`. The setup wizard creates your organization and project, offers an optional AI model, and adds your first target. On a fresh Debian or Ubuntu machine, `sudo ./install.sh` installs Docker and runs these steps for you.
+`make admin` prints your username and a generated password once, so copy it from the terminal. You choose your own at your first sign-in. If you lose it before then, `make admin-password` prints a new one. (To pick the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` first, or run `make username`.)
+
+Open `https://<your DOMAIN_NAME>/`. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt`. The setup wizard creates your organization and project, offers an optional AI model, adds your first target (discovery starts the moment you add it), and offers optional search-engine keys. On a fresh Debian or Ubuntu machine, `sudo ./install.sh` installs Docker and runs these steps for you, ending with the admin password.
 
 Update with `scripts/update.sh`, or deploy every new commit automatically ([updates](docs/UPDATES.md)). Reverse proxies, backups, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
 

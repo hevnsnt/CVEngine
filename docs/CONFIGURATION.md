@@ -11,11 +11,11 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | `CVENGINE_HSTS_SECONDS` | HTTPS policy lifetime in seconds (3600 in production, 0 in development). Raise it only once every public route reliably uses HTTPS. |
 | `POSTGRES_PASSWORD` | Database password. Set it before the first start, because changing it later does not update the existing database. |
 | `AUTHORITY_PASSWORD` | Passed to the certificate authority step of `make certs`. The key is stored in `secrets/certs/`, so protect that directory. |
-| `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make username isNonInteractive=true` and `sudo ./install.sh -n`. A plain `make username` asks instead. |
+| `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make admin` and `sudo ./install.sh`. Leave the password empty and `make admin` generates one and prints it once (you choose your own at first sign-in); set it to choose the first one yourself. `make admin-password` generates a new one for a lost password. A plain `make username` asks instead. |
 | `COMPOSE_PROJECT_NAME`, `POSTGRES_DB`, `POSTGRES_USER` | Name the Docker volumes and the database. Change them only before the first start. Leave `POSTGRES_HOST=db` and `POSTGRES_PORT=5432` as they are. |
 | `AUTHORITY_NAME`, `COMPANY`, `COUNTRY_CODE`, `STATE`, `CITY` | Subject of the certificates `make certs` creates. |
 
-`make certs`, `make username`, and `install.sh` refuse to run while a password still says `change-me`.
+`make certs` and `install.sh` refuse to run while the database or certificate password still says `change-me`; `./scripts/init-env.sh` (which both run for you) fills them with random values and never touches one that is already set.
 
 ## Memory and workers
 

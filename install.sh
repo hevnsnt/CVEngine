@@ -13,13 +13,11 @@ usageFunction()
 tput setaf 2;
 echo "CVEngine"
 
-if [ ! -f .env ]; then
-  cp .env.example .env
-  tput setaf 2; echo "Created .env from .env.example."
-fi
+# .env is created with the database and certificate passwords already generated (it never touches a value that is set)
+./scripts/init-env.sh
 
-tput setaf 1; echo "Before running this script, please make sure Docker is running and you have made changes to .env file."
-tput setaf 2; echo "Changing the postgres username & password from .env is highly recommended."
+tput setaf 1; echo "Before running this script, please make sure Docker is running."
+tput setaf 2; echo "The passwords in .env are generated for you. Set DOMAIN_NAME in it to the name people will type."
 
 tput setaf 4;
 
@@ -33,13 +31,13 @@ while getopts nh opt; do
 done
 
 if [ $isNonInteractive = false ]; then
-    read -p "Are you sure, you made changes to .env file (y/n)? " answer
+    read -p "Edit .env now (DOMAIN_NAME and other options)? (y/N) " answer
     case ${answer:0:1} in
-        y|Y|yes|YES|Yes )
-          echo "Continuing Installation!"
+        y|Y )
+          nano .env
         ;;
         * )
-          nano .env
+          echo "Keeping .env as it is."
         ;;
     esac
 else
@@ -47,11 +45,11 @@ else
 fi
 
 # Never bring up a public HTTPS instance with the example passwords from .env.example.
-placeholders=$(grep -iE '^(POSTGRES_PASSWORD|DJANGO_SUPERUSER_PASSWORD|AUTHORITY_PASSWORD)=.*change-me' .env | cut -d= -f1 | tr '\n' ' ')
+placeholders=$(grep -iE '^(POSTGRES_PASSWORD|AUTHORITY_PASSWORD)=.*change-me' .env | cut -d= -f1 | tr '\n' ' ')
 if [ -n "$placeholders" ]; then
   tput setaf 1
   echo "Refusing to continue: .env still has the example placeholder for: $placeholders"
-  echo "Set a real value for each (for example: openssl rand -base64 24) and run this script again."
+  echo "Run ./scripts/init-env.sh to generate them (or set your own) and run this script again."
   exit 1
 fi
 
@@ -155,13 +153,22 @@ if [ "${failed}" -eq 0 ]; then
   echo " "
   tput setaf 4;
   echo "#########################################################################"
-  echo "Creating an account"
+  echo "Creating your admin account"
   echo "#########################################################################"
-  make username isNonInteractive=$isNonInteractive
-  make migrate
+  # the web service can still be starting: try for up to five minutes
+  created=1
+  for attempt in $(seq 1 30); do
+    if make migrate && make admin; then created=0; break; fi
+    echo "Waiting for the web service to finish starting (attempt $attempt of 30)..."
+    sleep 10
+  done
+  if [ "$created" -ne 0 ]; then
+    tput setaf 1 && echo "Could not create the admin account yet. Once the web service is up, run: make admin"
+  fi
 
-  tput setaf 2 && printf "\n%s\n" "Thank you for installing CVEngine, happy recon!!"
-  echo "In case you have unapplied migrations (see above in red), run 'make migrate'"
+  tput setaf 2 && printf "\n%s\n" "CVEngine is installed. Open the address above, sign in with that username and password, and the setup wizard takes it from there."
+  echo "Wrote your password down? It is not saved anywhere readable. Lost it: run 'make admin-password'."
+  echo "If you saw unapplied migrations above in red, run 'make migrate'."
 else
   tput setaf 1 && printf "\n%s\n" "CVEngine installation failed!!"
 fi
