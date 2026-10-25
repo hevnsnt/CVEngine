@@ -1,6 +1,6 @@
 # AI model usage
 
-Once an AI model is connected, the Setup menu shows **AI Model Usage**, refreshed every 15 seconds. It records every completion cvENGINE requests from Anthropic, OpenAI, OpenRouter, Ollama, or vLLM:
+Once an AI model is connected, the account menu shows **AI Model Usage** (superusers), refreshed every 15 seconds. It records every completion cvENGINE requests from Anthropic, OpenAI, OpenRouter, Ollama, or vLLM:
 
 - calls per day and per pipeline stage, including failed ones with a safe error category (choose 24 hours, 7 days, or 30 days);
 - the model that answered, input, output, and cache tokens as the provider reports them, and latency;
