@@ -39,6 +39,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | routes | `GET projects/{slug}/routes` | `list_routes` |
 | changes | `GET projects/{slug}/changes?since=7d` | `list_changes` |
 | activity | `GET projects/{slug}/activity` | `list_activity` |
+| stats history | `GET projects/{slug}/stats/history?days=90` | `stats_history` |
 | all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=` | `list_findings` |
 | scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
@@ -137,6 +138,8 @@ Matches also carry `distro_status` (`patched`, `vulnerable`, `unknown`, `no_data
 `note` on every one of these routes, `update_remediation_status` included, is a true partial-update field: leave it out of the body and the stored note is untouched; send `""` (or any string) and it replaces it. Earlier, an omitted `note` was treated the same as an explicit `""` and silently cleared it.
 
 Every match, scanner, and hygiene response (detail and `findings` rows alike) also carries `status_changed_at` and `status_changed_by` (`{id, username, name}` or `null`) — the same moment and actor as `remediation_updated`/the write that made it, under names that read naturally for aging and SLA display. `findings` rows carry `first_seen` alongside the existing `detected` (the same moment); the type-specific list and detail endpoints already had `first_seen`.
+
+**Stats history.** `GET projects/{slug}/stats/history` (`stats_history`) answers a bare JSON array, oldest first, of one point-in-time snapshot per day: `{date, hosts, exposed_hosts, open_findings: {critical, high, medium, low, info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}`. `?days=` bounds the window (default 90, capped at 365) to a number of calendar days ending today. Snapshots are written once a day by a beat task (`cveFeed.tasks.snapshot_daily_stats`, `cveFeed.stats_history`); a day before the feature existed, or one the task missed, is simply absent rather than backfilled. `_all` sums every visible project's rows per date; its `mean_days_to_fix` is the unweighted mean of the projects that have one that day, since the per-finding durations themselves are not stored.
 
 ## Limits
 

@@ -149,6 +149,9 @@ TOOLS = [
     ('list_activity', 'The AI activity log, newest first: what the engine read, checked, wrote, ran and validated, for this project plus system-wide entries. kind: feed|inventory|target|confirm|write_check|run_check|validate|discovery|scan|hygiene|changes|remediation.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'kind': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_activity(c, a.get('project'), a), False),
+    ('stats_history', "Daily snapshots of a project's inventory and findings counts, oldest first, for trend charts: {date, hosts, exposed_hosts, open_findings: {critical..info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}. days (default 90, capped at 365).", _schema(
+        {'project': SLUG_OR_ALL, 'days': {'type': 'integer'}}, ['project']),
+     lambda c, a: svc.stats_history(c, a.get('project'), a), False),
     ('run_hygiene_checks', 'Run the certificate, TLS and email-authentication checks now (optionally for one target).', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}}, ['project']),
      lambda c, a: svc.run_hygiene_checks(c, a.get('project'), a.get('target_id')), True),

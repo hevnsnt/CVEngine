@@ -1242,6 +1242,14 @@ def reap_stuck_jobs():
     return counts
 
 
+@app.task(name="snapshot_daily_stats", bind=False, queue="cve_feed_queue")
+def snapshot_daily_stats():
+    """Daily: store one point-in-time snapshot per project (cveFeed.stats_history), so Settings and the dashboard can
+    show trends (exposure over time, mean time-to-fix) that nothing else in the schema keeps a record of."""
+    from cveFeed import stats_history
+    return {'projects': stats_history.snapshot_all_projects()}
+
+
 @app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")
 def weekly_maintenance():
     """Weekly: archive the AI activity feed, AI call leases and AI usage rows past their retention to a tar.gz and delete them

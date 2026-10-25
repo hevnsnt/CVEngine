@@ -149,6 +149,8 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
+     lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=)',
      lambda r, c, slug, **k: svc.list_activity(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hygiene/run', 'Run the hygiene checks now (all targets, or {target_id})',
@@ -232,7 +234,7 @@ def dispatch(request, path):
         except ApiError as e:
             return JsonResponse({'error': e.message}, status=e.status)
         data, status = result if isinstance(result, tuple) else (result, 200)
-        return JsonResponse(data, status=status)
+        return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
         response = JsonResponse({'error': 'method not allowed'}, status=405)
         response['Allow'] = ', '.join(sorted(set(allowed)))

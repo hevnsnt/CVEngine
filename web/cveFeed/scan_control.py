@@ -15,7 +15,7 @@ PAUSE_EXEMPT_TASKS = frozenset({
     'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'sync_bounty_catalogue', 'sync_threat_intel',
     'check_for_updates', 'update_nuclei_templates', 'prune_asset_changes', 'report_resources', 'rescore_all_hosts',
     'reconcile_invalid_correlations', 'weekly_maintenance', 'reap_stuck_jobs', 'send_notif',
-    'send_task_notif',
+    'send_task_notif', 'snapshot_daily_stats',
 })
 
 

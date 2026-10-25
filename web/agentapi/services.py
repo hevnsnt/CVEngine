@@ -1789,6 +1789,60 @@ def list_changes(ctx, slug, params):
     return paginate(qs.order_by('-detected_at', '-id'), params, _tagged(_change, lambda c: c.project) if everywhere else _change)
 
 
+MAX_STATS_HISTORY_DAYS = 365
+
+
+def _snapshot_row(s):
+    return {'date': s.date.isoformat(), 'hosts': s.hosts, 'exposed_hosts': s.exposed_hosts,
+            'open_findings': s.open_findings, 'cve_matches': s.cve_matches, 'fixed': s.fixed,
+            'mean_days_to_fix': s.mean_days_to_fix}
+
+
+def stats_history(ctx, slug, params):
+    """Daily snapshots of this project's inventory and findings counts, oldest first, for the trend charts nothing else
+    in the schema keeps a past for: ?days= (default 90, capped at 365). Each row is {date, hosts, exposed_hosts,
+    open_findings: {critical..info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}, written once a day by
+    cveFeed.tasks.snapshot_daily_stats; a day with no row (the feature just turned on, or a day the beat task missed)
+    is simply absent rather than backfilled. ``_all`` sums every visible project's rows for each date; its
+    mean_days_to_fix is the unweighted mean of the projects that have one that day, since the raw per-finding
+    durations are not stored."""
+    from datetime import timedelta
+
+    from cveFeed.models import StatsSnapshot
+    from cveFeed.stats_history import CVE_MATCH_HEATS, OPEN_FINDING_BANDS
+    project, _ = get_project(ctx, slug)
+    try:
+        days = min(MAX_STATS_HISTORY_DAYS, max(1, int(params.get('days', 90))))
+    except (TypeError, ValueError):
+        raise ApiError(400, 'days must be an integer')
+    since = timezone.localdate() - timedelta(days=days - 1)
+    qs = _scoped(StatsSnapshot.objects.filter(date__gte=since), project, 'project').order_by('date')
+    if not _is_all(project):
+        return [_snapshot_row(s) for s in qs]
+    by_date = {}
+    for s in qs:
+        row = by_date.setdefault(s.date, {'date': s.date.isoformat(), 'hosts': 0, 'exposed_hosts': 0,
+                                           'open_findings': {b: 0 for b in OPEN_FINDING_BANDS},
+                                           'cve_matches': {h: 0 for h in CVE_MATCH_HEATS}, 'fixed': 0, '_days': []})
+        row['hosts'] += s.hosts
+        row['exposed_hosts'] += s.exposed_hosts
+        row['fixed'] += s.fixed
+        for band, n in (s.open_findings or {}).items():
+            if band in row['open_findings']:
+                row['open_findings'][band] += n
+        for heat, n in (s.cve_matches or {}).items():
+            if heat in row['cve_matches']:
+                row['cve_matches'][heat] += n
+        if s.mean_days_to_fix is not None:
+            row['_days'].append(s.mean_days_to_fix)
+    results = []
+    for row in by_date.values():
+        days_list = row.pop('_days')
+        row['mean_days_to_fix'] = round(sum(days_list) / len(days_list), 2) if days_list else None
+        results.append(row)
+    return sorted(results, key=lambda r: r['date'])
+
+
 def _activity(a):
     scan_id = (a.detail or {}).get('scan_id')
     return {'id': a.id, 'kind': a.kind, 'message': a.message, 'status': a.status, 'repeat': a.repeat,

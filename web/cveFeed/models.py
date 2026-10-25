@@ -1271,3 +1271,24 @@ class BountyCredential(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "platform"], name="uniq_bountycredential_user_platform")]
+
+
+class StatsSnapshot(models.Model):
+    """One project's point-in-time inventory and findings counts for one day, written once daily by
+    cveFeed.stats_history.snapshot_all_projects. Trend charts (exposure over time, time-to-fix) need a past this
+    schema otherwise has no record of; everything else here is derived live from current rows."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="stats_snapshots")
+    date = models.DateField()
+    hosts = models.IntegerField(default=0)
+    exposed_hosts = models.IntegerField(default=0)
+    open_findings = models.JSONField(default=dict, blank=True)  # {critical, high, medium, low, info: n}, actionable set
+    cve_matches = models.JSONField(default=dict, blank=True)  # {fire, smoke, ice: n}, actionable (not ruled-out) matches
+    fixed = models.IntegerField(default=0)  # findings of any kind currently marked remediation_status=fixed
+    mean_days_to_fix = models.FloatField(null=True, blank=True)  # over currently-fixed findings; null when there are none
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "date"], name="uniq_statssnapshot_project_date")]
+        indexes = [models.Index(fields=["project", "-date"], name="statssnap_proj_date_idx")]
+        ordering = ["-date"]
