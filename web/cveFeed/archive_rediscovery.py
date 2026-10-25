@@ -88,6 +88,8 @@ def check_one(row, *, resolver=resolve_one, tcp_probe=None):
 
     if pause_requested():
         return 'paused'
+    if row.archived_by_user:
+        return 'checked'  # a person archived it; only Restore brings it back
     host, domain = row.host.lower().rstrip('.'), row.domain
     if domain.project_id != row.project_id or is_excluded(row.project_id, host) or not (
             host == domain.name.lower() or (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
@@ -109,11 +111,15 @@ def check_one(row, *, resolver=resolve_one, tcp_probe=None):
     HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(archived_at=None)
     try:
         job, _ = enqueue(row.project, sub, source='archive')
-    except (RuntimeError, ValueError) as exc:
+    except Exception as exc:  # whatever stopped the enqueue, the host goes back to archived: nothing will assess it
+        expected = isinstance(exc, (RuntimeError, ValueError))  # at capacity, or no longer in scope
+        if not expected:
+            logger.exception('archived host rediscovery could not queue an assessment for state %s', row.pk)
         HostState.objects.filter(pk=row.pk, archived_at__isnull=True).update(
             archived_at=row.archived_at,
-            archive_checked_at=now, archive_check_status='enqueue_deferred', archive_check_error=type(exc).__name__)
-        return 'deferred'
+            archive_checked_at=now, archive_check_status='enqueue_deferred' if expected else 'error',
+            archive_check_error=type(exc).__name__)
+        return 'deferred' if expected else 'error'
     if job.status == 'failed':
         HostState.objects.filter(pk=row.pk, archived_at__isnull=True).update(
             archived_at=row.archived_at,
@@ -141,7 +147,7 @@ def _claim(run_id=None):
             run = ArchiveRediscovery.objects.select_for_update().filter(finished_at__isnull=True).order_by('id').first()
             if run is None:
                 run, _ = ArchiveRediscovery.objects.get_or_create(day=now.date(), defaults={
-                    'total': HostState.objects.filter(archived_at__isnull=False).count()})
+                    'total': HostState.objects.filter(archived_at__isnull=False, archived_by_user=False).count()})
                 if run.finished_at:
                     return None, 'already completed today'
         if not run:
@@ -162,7 +168,7 @@ def run_page(run_id=None, *, resolver=resolve_one, tcp_probe=None):
     run, reason = _claim(run_id)
     if not run:
         return {'skipped': reason}
-    rows = list(HostState.objects.filter(pk__gt=run.cursor_hoststate_id, archived_at__isnull=False)
+    rows = list(HostState.objects.filter(pk__gt=run.cursor_hoststate_id, archived_at__isnull=False, archived_by_user=False)
                 .select_related('domain', 'project').order_by('pk')[:PAGE])
     for row in rows:
         if pause_requested():
@@ -182,7 +188,7 @@ def run_page(run_id=None, *, resolver=resolve_one, tcp_probe=None):
         run.errors += outcome == 'error'
         run.cursor_hoststate_id = row.pk
         run.save(update_fields=['checked', 'reactivated', 'deferred', 'errors', 'cursor_hoststate_id'])
-    more = HostState.objects.filter(pk__gt=run.cursor_hoststate_id, archived_at__isnull=False).exists()
+    more = HostState.objects.filter(pk__gt=run.cursor_hoststate_id, archived_at__isnull=False, archived_by_user=False).exists()
     run.lease_until = None
     if more:
         run.status = 'queued'

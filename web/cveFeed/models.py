@@ -575,6 +575,7 @@ class HostState(models.Model):
     last_alive_check = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True)
     archive_reason = models.CharField(max_length=300, blank=True, default='')
+    archived_by_user = models.BooleanField(default=False)  # a person archived it: only Restore brings it back, never rediscovery
     pinned = models.BooleanField(default=False)
     archive_checked_at = models.DateTimeField(null=True, blank=True)
     archive_check_status = models.CharField(max_length=24, blank=True, default='')

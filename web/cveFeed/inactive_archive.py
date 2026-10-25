@@ -86,7 +86,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
               'inactive_absent_checks': count, 'archive_checked_at': now,
               'archive_check_status': status, 'archive_check_error': ''}
     if count >= 2 and first <= now - MIN_ABSENCE and row.last_seen <= first:
-        values.update(archived_at=now, archive_reason='Automatically archived after two negative observations '
+        values.update(archived_at=now, archived_by_user=False, archive_reason='Automatically archived after two negative observations '
                       'at least 30 days apart; history is preserved')
         if selector.update(**values):
             activity.log('inventory', f'{host} archived after repeated absence over 30 days',
