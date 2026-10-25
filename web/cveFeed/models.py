@@ -437,7 +437,8 @@ class AgentActivity(models.Model):
     """What the AI engine is doing, as a feed: reading the CVE feed, checking the inventory, identifying a
     target, writing / running / validating a check. Global entries (project null) are visible to every member."""
 
-    KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes")
+    KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes",
+             "remediation")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
     status = models.CharField(max_length=10, default="done")  # running | done | failed
