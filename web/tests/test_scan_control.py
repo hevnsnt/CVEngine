@@ -91,6 +91,32 @@ class ScanControlTests(TestCase):
         for compose in ('docker-compose.yml', 'docker-compose.dev.yml'):
             self.assertIn('--scheduler cveFeed.scan_control:PauseAwareScheduler', (root / compose).read_text())
 
+    def test_maintenance_that_never_touches_a_target_keeps_running_during_a_pause(self):
+        from cveFeed import scan_control
+        from cveFeed.tasks import prune_asset_changes, sync_cve_now_feed
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+        for task in (sync_cve_now_feed, prune_asset_changes):
+            with mock.patch.object(task._get_current_object(), 'retry', side_effect=AssertionError('deferred')):
+                scan_control.defer_if_paused(task._get_current_object())  # no retry: it runs
+        scheduler = object.__new__(PauseAwareScheduler)
+        entry = mock.Mock(task='sync_cve_now_feed')
+        with mock.patch('django_celery_beat.schedulers.DatabaseScheduler.is_due', return_value=(True, 60)):
+            self.assertEqual(scheduler.is_due(entry), (True, 60))
+            self.assertEqual(scheduler.is_due(mock.Mock(task='validate_sweep')), (False, 5))
+        known = {name for name in app_task_names()}
+        self.assertFalse(scan_control.PAUSE_EXEMPT_TASKS - known - {'weekly_maintenance'}, 'an exempt name matches no task')
+        for scanner in ('assess_host', 'host_pipeline', 'validate_match_on_demand', 'automatic_validate_finding', 'triage_sweep',
+                        'template_test_for_cve', 'weekly_deep_nuclei', 'background_full_scan', 'nuclei_scan'):
+            self.assertNotIn(scanner, scan_control.PAUSE_EXEMPT_TASKS)
+
+    def test_an_unreadable_control_database_gates_new_work_but_kills_nothing_running(self):
+        from cveFeed import scan_control
+        from reNgine import resources
+        with mock.patch('cveFeed.models.ScanControl.objects.filter', side_effect=RuntimeError('db down')):
+            self.assertTrue(scan_control.pause_requested())
+            self.assertFalse(resources.global_pause_requested())
+            self.assertTrue(resources.global_pause_requested(fail_closed=True))
+
     def test_resume_respects_updater_lock(self):
         from django.conf import settings
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(settings, 'RENGINE_HOME', directory):
@@ -134,3 +160,9 @@ class ScanControlTests(TestCase):
             self.assertTrue(job.check_once())
         self.assertTrue(job.aborted)
         terminate.assert_called_once_with(proc, grace=5)
+
+
+def app_task_names():
+    from reNgine.celery import app
+    import cveFeed.tasks, reNgine.tasks  # noqa: F401,E401 - registers every task
+    return set(app.tasks)

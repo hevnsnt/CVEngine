@@ -8,17 +8,31 @@ from django.conf import settings
 from django_celery_beat.schedulers import DatabaseScheduler
 
 
-def pause_requested():
-    """Fail closed when the control database is unavailable to a scanner."""
+# Work that never touches a customer target and costs no AI budget keeps running during a pause: the CVE feed and distribution
+# fixes, the update check and template download, notifications, pruning and other bookkeeping. Everything else (discovery,
+# scanners, validation, AI triage and reviews, certificate watching) waits for the resume.
+PAUSE_EXEMPT_TASKS = frozenset({
+    'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'check_for_updates', 'update_nuclei_templates',
+    'prune_asset_changes', 'report_resources', 'rescore_all_hosts', 'reconcile_invalid_correlations', 'weekly_maintenance',
+    'send_notif', 'send_scan_notif', 'send_task_notif', 'send_file_to_discord',
+})
+
+
+def pause_requested(fail_closed=True):
+    """Whether scanning is paused. When the control database cannot be read, a gate that is about to start work treats that as
+    paused (``fail_closed``); a watchdog deciding whether to kill work already running passes False, so a database blip never
+    kills a healthy scanner."""
     from cveFeed.models import ScanControl
 
     try:
         return ScanControl.objects.filter(pk=1, paused=True).exists()
     except Exception:
-        return True
+        return fail_closed
 
 
 def defer_if_paused(task):
+    if task.name in PAUSE_EXEMPT_TASKS:
+        return
     if pause_requested():
         # Celery retains the original queue and arguments when retrying. In particular,
         # an early-ack worker cannot silently consume a queued scan during a pause.
@@ -33,7 +47,7 @@ class PauseAwareTask(Task):
 
 class PauseAwareScheduler(DatabaseScheduler):
     def is_due(self, entry):
-        if pause_requested():
+        if getattr(entry, 'task', '') not in PAUSE_EXEMPT_TASKS and pause_requested():
             return False, 5
         return super().is_due(entry)
 

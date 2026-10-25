@@ -529,6 +529,30 @@ class RunValidationTests(ValidationBase):
 		self.assertEqual(len(row.validation_steps), 2)
 		self.assertEqual(ServiceRun.objects.filter(service__startswith='validate:').count(), 2)
 
+	def test_a_global_pause_stops_the_run_before_its_next_check(self):
+		from cveFeed.models import ScanControl
+		self.match()
+		self.rows()
+		runners, calls = self.runners('no_match')
+		first = runners['nuclei_template']
+
+		def pause_after_first(check):
+			ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+			return first(check)
+		runners['nuclei_template'] = pause_after_first
+		stats, _ = self.run_validation(runners=(runners, calls))
+		self.assertTrue(stats['stopped'])
+		self.assertEqual([c[0] for c in calls], ['nuclei_template'])  # nmap_sv never started
+
+	def test_a_check_that_crashes_stores_a_diagnostic_not_the_exception_text(self):
+		self.match()
+		self.rows()
+		with self.assertLogs('cveFeed.activity', 'WARNING'):
+			self.run_validation(runners=self.runners('raise'))
+		row = Triage.objects.get()
+		errors = [step.get('error', '') for step in row.validation_steps]
+		self.assertTrue(errors and all('diagnostic' in e and 'boom' not in e for e in errors), errors)
+
 	def test_no_check_is_recorded_and_nothing_is_invented(self):
 		self.match(source='tech', port=None)
 		(row,) = self.rows()

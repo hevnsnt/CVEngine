@@ -93,7 +93,7 @@ An organization can remove a host and exclude it (**Remove & exclude** on the Ho
 - **Background full port scan.** A slow task sweeps all 65,535 TCP ports of one in-scope IP at a time (10 minutes per host at most), oldest first. Ports it finds are fingerprinted and the host is re-tested. `CVENGINE_FULLSCAN=0` turns it off.
 - **Paced deep nuclei.** Every 10 minutes one due host gets the full broad template set on its web ports and up to 20 nonstandard ports, so the whole inventory gets a deep pass each week as capacity allows.
 - **Weekly deep discovery.** Once a day, each apex domain without a deep discovery in the last 7 days gets one, up to 50 per run. If only its subdomains were targets, the apex is added.
-- **Pause everything.** An App Admin can **Pause all scanning** from **All projects, Activity**. The pause survives restarts: scheduled and queued work waits, running scanners stop cooperatively, and running scans are marked aborted. **Resume** releases the queue.
+- **Pause everything.** An App Admin can **Pause all scanning** from **All projects, Activity**. The pause survives restarts: scheduled and queued work that touches targets or spends AI budget (discovery, scanners, validation, triage, reviews) waits, a validation run stops before its next check, running scanners stop cooperatively, and running scans are marked aborted. Bookkeeping that touches no target keeps running: the CVE feed and distribution fixes, the update check and template download, notifications, pruning and rescoring. If the pause switch cannot be read, new work waits but running scanners are not stopped. **Resume** releases the queue.
 
 ### Shared platform addresses
 
