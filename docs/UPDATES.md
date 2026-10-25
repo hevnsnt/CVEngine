@@ -20,15 +20,18 @@ Without the host script an approval waits. To update by hand, run the updater fr
 scripts/update.sh --check        # preflight: layout, ports, database, workers, scans; changes nothing
 scripts/update.sh                # update, waiting for running scans to finish
 scripts/update.sh --stop-scans   # update now: stop scans cleanly and queue them again afterward
+scripts/update.sh --force        # do not wait: stop scans (queued again afterward) and the workers, then update
 ```
 
 It:
 
 1. fetches the new code and builds the images while everything keeps running;
 2. checks that no host service already holds a port the stack publishes, and that no old PostgreSQL 12 volume needs [UPGRADE.md](UPGRADE.md) first;
-3. pauses the scheduler and the workers' queue consumers and lets active tasks finish, reporting progress every 30 seconds (up to three hours, `CVENGINE_UPDATE_DRAIN_SECONDS`). With `--stop-scans`, running and queued discovery scans are stopped through the app first, so the drain takes seconds;
+3. pauses the scheduler and the workers' queue consumers and lets active tasks finish, reporting progress every 30 seconds (up to three hours, `CVENGINE_UPDATE_DRAIN_SECONDS`). With `--stop-scans`, running and queued discovery scans are stopped through the app first, so the drain takes seconds. A busy worker can miss a status reply, and a restarted worker resumes its queues, so the update stops only when a worker misses 12 replies in a row (`CVENGINE_UPDATE_MISSING_POLLS`) or still consumes after being paused three times. The error names the worker or queue;
 4. applies migrations, publishes static files, and recreates web, the workers, the scheduler, and the proxy, keeping the database and Redis;
 5. waits up to ten minutes (`CVENGINE_UPDATE_READY_SECONDS`) until the site, every worker queue, and the scheduler answer, then queues any stopped scans again.
+
+`--force` skips the drain. It stops discovery scans (and queues them again afterwards, as `--stop-scans`), pauses what it can, and stops the workers with a 10-second grace. A worker that cannot be inspected or paused does not stop it. Any other task running at that moment is lost and runs again when its schedule next fires. It still keeps the database, Redis and volumes, and a failed migration still stops the update.
 
 New work stays queued in Redis throughout. If the drain times out or is interrupted, the previous workers and scheduler resume untouched, and stopped scans wait in the host-private `$(git rev-parse --git-path cvengine-update)/requeue.json` for the next successful update. A failure after migration leaves the new code in place and reports what to check, and startup warnings go to a private file whose path the script prints.
 
