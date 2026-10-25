@@ -211,6 +211,12 @@ class RescoreTests(ChangeFixture, TestCase):
 		nodes = [n for n in graph_payload(scan_id=self.new.id)['nodes'] if n['kind'] == 'subdomain']
 		self.assertEqual([n['score'] for n in nodes], [90])
 
+	def test_the_hover_card_names_the_hosts_project(self):
+		# the dashboard's attack-surface map spans every project the viewer can see, so its hover card
+		# must say which project a host belongs to, not just its score and findings
+		nodes = [n for n in graph_payload(scan_id=self.new.id)['nodes'] if n['kind'] == 'subdomain']
+		self.assertEqual([n['info']['project'] for n in nodes], ['P'])
+
 
 class OrderingApiTests(TestCase):
 	@classmethod

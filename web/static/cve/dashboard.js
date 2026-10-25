@@ -130,6 +130,7 @@ function fillTip(cell) {
   head.append(el("span", "tip-heat", HEAT_LABEL[cell.dataset.heat] || ""));
   tip.append(head);
   tip.append(el("div", "tip-name", cell.dataset.name));
+  if (info.project) tip.append(el("div", "tip-project", info.project));
   const facts = [];
   if (info.ips) facts.push(`${info.ips} IP${info.ips === 1 ? "" : "s"}`);
   if (info.cves) facts.push(`${info.cves} CVE${info.cves === 1 ? "" : "s"}`);

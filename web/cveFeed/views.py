@@ -85,6 +85,7 @@ def _host_tip(sub, live_matches, severities):
     score_parts = [{'label': str(r.get('label', ''))[:140], 'points': int(r.get('points') or 0)}
                    for r in (sub.score_detail or [])[:8]] if hasattr(sub, 'score_detail') else []
     return {
+        'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
         'ips': len({ip.address for ip in sub.ip_addresses.all()}),
         'cves': len(live_matches),
         'top_cve': worst[0] if worst else '',
