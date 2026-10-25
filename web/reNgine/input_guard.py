@@ -61,6 +61,14 @@ STRICT_OK = re.compile(r'^[A-Za-z0-9._:/\[\] \-]*$')
 TOKEN_BAD = re.compile(r'[|&$`<>(){}\\]')
 _MD_LINK = re.compile(r'\[[^\]]*\]\(([^)\s]*)\)')
 EXEMPT_PATH = re.compile(r'^/(staticfiles|login|logout|mfa|admin)(/|$)')
+# A bug bounty report is about attack strings: its steps, evidence and impact carry `<script>`, `' OR 1=1--`, `../../etc/passwd` and
+# `curl ... | sh` by nature, and a hunter who saved such a report would be struck and, at the threshold, locked out. On the report and
+# engagement endpoints only, these free-text fields are not scanned. They are stored as text, shown with textContent, exported as
+# Markdown and sent as JSON; they never reach a shell, a query string or a template. Every other field there (host, project, value,
+# ids) and every other endpoint keeps the full rules.
+BOUNTY_TEXT_PATH = re.compile(r'^/cve/api/bounty/(reports|engagements)(/|$)')
+BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediation', 'references', 'evidence', 'response', 'request', 'curl',
+                                'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 
 
 def _authority(token):
@@ -138,6 +146,8 @@ def _request_pairs(request):
                 pass
         elif ctype == 'application/x-www-form-urlencoded':
             pairs.extend((k, v) for k in request.POST for v in request.POST.getlist(k))
+    if BOUNTY_TEXT_PATH.match(request.path):
+        pairs = [(k, v) for k, v in pairs if k.rsplit('.', 1)[-1].lower() not in BOUNTY_TEXT_FIELDS]
     return pairs
 
 

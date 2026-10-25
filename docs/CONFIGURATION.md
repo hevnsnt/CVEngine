@@ -41,6 +41,7 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CVENGINE_TTL_NMAP_FAST` | `168` | nmap fingerprint of an IP. |
+| `CVENGINE_BOUNTY_CATALOGUE` | `1` | Set to `0` to stop CVEngine from fetching the public bug bounty program data (and to disable the page's load button). Nothing is fetched until someone loads the catalogue once. |
 | `CVENGINE_CVE_COVERAGE_DAYS` | `14` | How many days of the cve.now feed the hourly coverage task keeps stored. `0` turns it off. |
 | `CVENGINE_CVE_WATCH_TECHS` | `php` | Technology slugs whose cve.now feed the coverage task reads, comma separated. |
 | `CVENGINE_TTL_BBOT`, `CVENGINE_TTL_BBOT_DEEP` | `168` | Discovery of a target, and deep discovery of an apex domain. |

@@ -1,6 +1,6 @@
 from django.urls import path, re_path
 
-from cveFeed import account_api, admin_api, settings_api, welcome
+from cveFeed import account_api, admin_api, bounty_api, settings_api, welcome
 
 from cveFeed import views
 
@@ -14,6 +14,8 @@ urlpatterns = [
     path('admin/', views.admin_page, name='cve_admin'),
     re_path(r'^api/account/(?P<path>.*)$', account_api.dispatch, name='cve_api_account'),
     re_path(r'^api/admin/(?P<path>.*)$', admin_api.dispatch, name='cve_api_admin'),
+    path('bounty/', views.bounty_page, name='cve_bounty'),
+    re_path(r'^api/bounty/(?P<path>.*)$', bounty_api.dispatch, name='cve_api_bounty'),
     path('settings/', views.settings_page, name='cve_settings'),
     re_path(r'^api/settings/(?P<path>.*)$', settings_api.dispatch, name='cve_api_settings'),
     path('agents/', views.agents_page, name='cve_agents'),

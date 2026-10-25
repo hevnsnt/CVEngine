@@ -29,8 +29,10 @@ SUPERUSER_ONLY = re.compile(
 # Per-project settings that need the admin role (none yet: notification, proxy and report
 # settings are global singletons in reNgine, so they are instance-wide above).
 ADMIN_ONLY = re.compile(r'^/(?!)')
-# Bug bounty workflow: opt-in per user and Pentester or Admin role.
-BUGBOUNTY = re.compile(r'(hackerone|bountyhub|vulnerability/report)', re.I)
+# Bug bounty workflow: the program catalogue and report pages (/cve/bounty, /cve/api/bounty), the HackerOne routes and the legacy
+# toggle. App Admins always have it; any other user only after an App Admin authorized that user (UserProfile.bugbounty_enabled,
+# set through /cve/api/admin/users/<id>/bug-bounty, which only an App Admin may call and which is written to the audit log).
+BUGBOUNTY = re.compile(r'^/cve/(api/)?bounty(/|$)|hackerone|bountyhub|vulnerability/report|toggle-bug-bounty', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
 ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$))')
 
@@ -59,8 +61,8 @@ def check_access(role, method, path, bugbounty_enabled=False, is_superuser=False
         return 'audit role is read only'
     if ADMIN_ONLY.match(path) and role != ADMIN:
         return 'settings require the admin role'
-    if BUGBOUNTY.search(path) and not (bugbounty_enabled and role in (ADMIN, PENTESTER)):
-        return 'bug bounty features are not enabled for this user'
+    if BUGBOUNTY.search(path) and not (is_superuser or bugbounty_enabled):
+        return 'bug bounty features are not enabled for this user; an App Admin can authorize you'
     return None
 
 

@@ -40,7 +40,7 @@ def account_payload(user):
         'role': 'App Admin' if user.is_superuser else (access[0]['role'] if access else 'No access yet'),
         'access': access, 'is_admin': roles.is_admin_anywhere(user),
         'mfa_enabled': bool(profile and profile.mfa_enabled), 'mfa_required': roles.requires_mfa(user),
-        'bugbounty_enabled': bool(profile and profile.bugbounty_enabled),
+        'bugbounty_enabled': user.is_superuser or bool(profile and profile.bugbounty_enabled),
         'must_change_password': bool(profile and profile.must_change_password),
         'tokens': ApiToken.objects.filter(user=user, revoked=False).count(),
         'last_login': user.last_login.isoformat() if user.last_login else None, 'date_joined': user.date_joined.isoformat(),

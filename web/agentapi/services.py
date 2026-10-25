@@ -167,7 +167,7 @@ def me(ctx):
                 for p in Project.objects.order_by('name')]
     profile = getattr(ctx.user, 'tenancy_profile', None)
     return {'username': ctx.user.username, 'projects': projects,
-            'bugbounty_enabled': bool(profile and profile.bugbounty_enabled),
+            'bugbounty_enabled': ctx.user.is_superuser or bool(profile and profile.bugbounty_enabled),
             'token': {'name': ctx.token.name, 'read_only': ctx.token.read_only,
                       'assets': ctx.token.assets} if ctx.token else None}
 
