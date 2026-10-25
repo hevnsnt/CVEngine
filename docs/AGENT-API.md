@@ -100,6 +100,8 @@ Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first 
 | `zombie:yes`, `zombie:no` | hosts whose name is gone but whose last address answers |
 | `-term`, `"apache tomcat"` | negate a term, or match a phrase |
 
+`?heat=fire|smoke|ice|clean|unscanned` narrows the page to that heat, the same value each host's own `heat` field carries. The response's `facets.heat` always counts every one of those five values over the whole match of `q`, ignoring `heat` itself, so a UI's heat chips keep their real totals while one is selected. Both the filter and the facet count stop after 5,000 matched hosts (`facets.truncated: true`); a search that wide needs narrowing with `q` regardless.
+
 Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs it.
 
 ## Routes, changes, and activity

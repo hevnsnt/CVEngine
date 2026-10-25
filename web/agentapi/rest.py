@@ -139,7 +139,7 @@ ROUTES = [
      lambda r, c, slug, **k: hosts.list_exclusions(c, slug)),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin)',
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, -negation; sorted by score (sort=name)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/routes', 'Web routes and how they answer an anonymous GET: open, login, session_required, sso (auth_state=, host=, sensitive=1, zombie=1)',
      lambda r, c, slug, **k: svc.list_routes(c, slug, r.GET)),

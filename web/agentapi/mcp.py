@@ -88,8 +88,9 @@ TOOLS = [
     ('start_scan', 'Start a scan of a target: bbot discovery, then nmap and nuclei (work already done recently is reused). engine_id is optional and ignored.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'engine_id': {'type': 'integer'}}, ['project', 'target_id']),
      lambda c, a: svc.start_scan(c, a.get('project'), int(a['target_id']), int(a['engine_id']) if a.get('engine_id') else None), True),
-    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no); -term negates; "quoted phrase". Each result says what matched. Sorted by score, highest first (sort=name for names).',
-     _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']}}), ['project']),
+    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no); -term negates; "quoted phrase". heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself. Each result says what matched. Sorted by score, highest first (sort=name for names).',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
+                          'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']}}), ['project']),
      lambda c, a: svc.search_hosts(c, a.get('project'), a), False),
     ('stop_scan', 'Stop one running or queued scan: its scanner processes are killed and the next queued scan proceeds.', _schema(
         {'project': SLUG, 'scan_id': {'type': 'integer'}}, ['project', 'scan_id']),

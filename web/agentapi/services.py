@@ -1577,24 +1577,60 @@ def _why_matched(sub, terms):
     return list(dict.fromkeys(reasons))[:8]
 
 
+HEAT_FACET_VALUES = ('fire', 'smoke', 'ice', 'clean', 'unscanned')
+HEAT_FACET_CAP = 5000  # hosts a facet count (and a ?heat= filter) will walk before reporting the rest truncated; a search
+# this wide needs narrowing with q anyway, and a plain heat chip's own count stays an honest lower bound, never wrong upward
+
+
+def _heat_facets(project, qs):
+    """``({fire,smoke,ice,clean,unscanned: count}, {sub.id: heat}, truncated)`` for every host ``qs`` matches, up to
+    HEAT_FACET_CAP, computed with the same group-merge logic _host() itself uses (so a chip's count and a host's own
+    badge never disagree). ``truncated`` means more than the cap matched q; the count is then a lower bound."""
+    total = qs.count()
+    subs = list(qs.select_related('target_domain').prefetch_related(
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage',
+    ).order_by('id')[:HEAT_FACET_CAP])
+    others = _name_siblings(project, subs)
+    counts = {v: 0 for v in HEAT_FACET_VALUES}
+    heat_by_id = {}
+    for sub in subs:
+        sibs = others.get(sub.id, [])
+        _, reasons, _, _ = _merge_group(sub, sibs)
+        heat = _host_heat_merged(sub, sibs, reasons)
+        counts[heat] = counts.get(heat, 0) + 1
+        heat_by_id[sub.id] = heat
+    return counts, heat_by_id, total > HEAT_FACET_CAP
+
+
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
     page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
     session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal) and ``zombie:`` (yes, no) filter one field; ``-term``
-    negates; quote a phrase. Each result says what matched. No ``q`` lists every host. Highest score first; ``sort=name`` for names."""
+    negates; quote a phrase. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
+    always counts every value over the whole match of q, ignoring ``heat`` itself, so the chips keep their real totals while one is
+    selected. Each result says what matched. No ``q`` lists every host. Highest score first; ``sort=name`` for names."""
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
+    heat = params.get('heat') or ''
+    if heat and heat not in HEAT_FACET_VALUES:
+        raise ApiError(400, f'heat must be one of {", ".join(HEAT_FACET_VALUES)}')
     terms = parse_search(params.get('q'))
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
     for neg, field, value in terms:
         q = _term_filter(field, value, project)
         qs = qs.exclude(q) if neg else qs.filter(q)
-    qs = _one_per_host(qs, per_project=_is_all(project)).select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
+    qs = _one_per_host(qs, per_project=_is_all(project))
+    heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
+    if heat:
+        qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
+    qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
-    return _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated}
+    return page
 
 
 def _matches_of_host():
