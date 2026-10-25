@@ -781,6 +781,17 @@ class FindingStatusTests(TestCase):
 		unassigned = tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': None})
 		self.assertEqual((unassigned[0], unassigned[1]['assignee']), (False, None))
 
+	def test_serializers_count_comments_for_a_row_the_queryset_did_not_annotate(self):
+		from agentapi.services import _hygiene
+		from cveFeed.models import FindingComment
+		base = f'{self._base()}/findings/hygiene/{self.hyg.id}'
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'one'})
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'two'})
+		plain = HygieneFinding.objects.select_related('domain').get(pk=self.hyg.id)  # no comment_count annotation
+		self.assertFalse(hasattr(plain, 'comment_count'))
+		self.assertEqual(_hygiene(plain)['comment_count'], 2)
+		self.assertEqual(FindingComment.objects.filter(finding_kind='hygiene', finding_id=self.hyg.id).count(), 2)
+
 	def test_status_changed_at_and_by_are_set_by_a_patch(self):
 		base = self._base()
 		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress'})

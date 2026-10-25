@@ -165,6 +165,16 @@ def _user_brief(user):
     return {'id': user.id, 'username': user.username, 'name': user.get_full_name() or user.username} if user else None
 
 
+def _comment_count(obj, kind):
+    """``obj.comment_count`` when the queryset annotated it (every list and detail path does, in one query for the page), else a
+    count for this one row, so a serializer handed a plain, unannotated row still answers instead of raising."""
+    count = getattr(obj, 'comment_count', None)
+    if count is not None:
+        return count
+    from cveFeed.models import FindingComment
+    return FindingComment.objects.filter(finding_kind=kind, finding_id=obj.pk).count()
+
+
 def _comment_count_annotation(kind):
     """An annotation expression counting cveFeed.models.FindingComment rows of ``kind`` for each row of the annotated
     queryset, by a correlated subquery rather than a join (a comment is addressed by (kind, id), not a real FK, so a
@@ -1731,7 +1741,7 @@ def _vuln(v):
             'remediation_status': v.remediation_status, 'remediation_note': v.remediation_note,
             'remediation_updated': _iso(v.remediation_updated_at),
             'status_changed_at': _iso(v.remediation_updated_at), 'status_changed_by': _user_brief(v.remediation_by),
-            'assignee': _user_brief(v.assignee), 'comment_count': v.comment_count,
+            'assignee': _user_brief(v.assignee), 'comment_count': _comment_count(v, 'vulnerability'),
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
 
@@ -1786,7 +1796,7 @@ def _hygiene(f):
             'remediation_status': f.remediation_status, 'remediation_note': f.remediation_note,
             'remediation_updated': _iso(f.remediation_updated_at),
             'status_changed_at': _iso(f.remediation_updated_at), 'status_changed_by': _user_brief(f.remediation_by),
-            'assignee': _user_brief(f.assignee), 'comment_count': f.comment_count,
+            'assignee': _user_brief(f.assignee), 'comment_count': _comment_count(f, 'hygiene'),
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
             'triage': _triage_brief(_triage_of(f))}
 
@@ -2165,7 +2175,7 @@ def _match(m):
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
             'remediation_updated': _iso(m.remediation_updated_at),
             'status_changed_at': _iso(m.remediation_updated_at), 'status_changed_by': _user_brief(m.remediation_by),
-            'assignee': _user_brief(m.assignee), 'comment_count': m.comment_count,
+            'assignee': _user_brief(m.assignee), 'comment_count': _comment_count(m, 'match'),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m))}
 
