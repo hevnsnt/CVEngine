@@ -491,7 +491,7 @@ def apply_validation(row, check, result, now=None, save=True):
     row.validated_at = now
     if save:
         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at', 'attempts',
-                                'next_attempt_at', 'confidence_adjust', 'classification', 'reason', 'status', 'verdict', 'signature',
+                                'next_attempt_at', 'confidence_adjust', 'classification', 'reason', 'status', 'verdict', 'signature', 'evidence_key',
                                 'hard_evidence', 'updated_at'])
     return row
 
@@ -525,6 +525,7 @@ def resync(row):
     signature = triage.effective_signature(d, row.review_nonce)
     if signature != row.signature:
         row.signature = signature
+        row.evidence_key = triage.evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce)
         row.hard_evidence = triage.hard_evidence(d['kind'], d['facts'])[1]
         if row.status == 'triaged':
             row.status, row.verdict = 'pending', None  # the classification stays; the impact text is asked for the new evidence

@@ -491,6 +491,59 @@ class SignatureChangeTests(TriageDbBase):
 		self.assertEqual(row.classification, 'confirmed')
 		self.assertEqual(CVEMatch.objects.get(pk=m.pk).ai_verdict, 'affected')
 
+	def track_all(self):
+		return triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))
+
+	def test_new_feed_intelligence_rereviews_without_losing_the_record(self, _log):
+		m = self.match('a.tr.test')
+		self.run_all(provider=self.provider())
+		Triage.objects.update(validation_status='hit', validation_steps=[{'kind': 'nuclei_template', 'result': 'hit'}],
+							  validation_evidence={'request': 'GET /'}, validated_at=timezone.now())
+		row = Triage.objects.get()
+		before = (row.verdict_id, row.classification, CVEMatch.objects.get(pk=m.pk).ai_verdict)
+		CVEEntry.objects.filter(pk=self.cve.pk).update(epss_reached=True, summary='Updated advisory text')
+		with mock.patch('cveFeed.scoring.rescore_for_matches') as rescore:
+			self.track_all()
+		row.refresh_from_db()
+		self.assertEqual(row.status, 'pending')  # asked again about the new advisory
+		self.assertEqual((row.verdict_id, row.classification, CVEMatch.objects.get(pk=m.pk).ai_verdict), before)
+		self.assertEqual((row.validation_status, row.validation_evidence), ('hit', {'request': 'GET /'}))
+		rescore.assert_not_called()
+		self.run_all(provider=self.provider(reply('likely_false_positive')))
+		self.assertEqual(Triage.objects.get().classification, 'confirmed')  # the proof still outranks the new verdict
+
+	def test_a_new_decision_scheme_rereviews_without_losing_the_record(self, _log):
+		self.match('a.tr.test')
+		self.run_all(provider=self.provider())
+		row = Triage.objects.get()
+		kept = (row.verdict_id, row.classification)
+		with mock.patch.object(triage, 'signature_for', lambda kind, fields: triage.hashlib.sha1(
+				triage.json.dumps(['decision-v3', kind, fields], sort_keys=True, default=str).encode()).hexdigest()):
+			self.track_all()
+		row.refresh_from_db()
+		self.assertEqual((row.status, row.verdict_id, row.classification), ('pending', *kept))
+
+	def test_a_row_without_an_evidence_key_learns_it_and_unknown_history_starts_over(self, _log):
+		self.match('a.tr.test')
+		self.run_all(provider=self.provider())
+		Triage.objects.update(evidence_key='')
+		self.track_all()
+		row = Triage.objects.get()
+		self.assertTrue(row.evidence_key)
+		self.assertEqual(row.status, 'triaged')  # same signature: nothing to review
+		Triage.objects.update(evidence_key='', signature='0' * 40)
+		self.track_all()
+		row.refresh_from_db()
+		self.assertEqual((row.status, row.verdict_id, row.classification), ('pending', None, ''))
+
+	def test_an_explicit_fresh_review_still_starts_over(self, _log):
+		self.match('a.tr.test')
+		self.run_all(provider=self.provider())
+		Triage.objects.update(review_nonce='42')
+		self.track_all()
+		row = Triage.objects.get()
+		self.assertEqual((row.status, row.verdict_id, row.classification), ('pending', None, ''))
+
 	def test_first_and_last_seen(self, _log):
 		m = self.match('a.tr.test')
 		triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))

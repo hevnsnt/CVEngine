@@ -858,6 +858,7 @@ class Triage(models.Model):
     hygiene = models.OneToOneField(HygieneFinding, on_delete=models.CASCADE, null=True, blank=True, related_name="triage")
     signature = models.CharField(max_length=40, blank=True, default="")
     review_nonce = models.CharField(max_length=40, blank=True, default="")  # explicit user-requested fresh AI review
+    evidence_key = models.CharField(max_length=40, blank=True, default="")  # the asset evidence alone (triage.evidence_key_for)
     verdict = models.ForeignKey(TriageVerdict, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     status = models.CharField(max_length=12, default="pending")
     classification = models.CharField(max_length=24, blank=True, default="")
