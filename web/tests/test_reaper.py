@@ -34,6 +34,11 @@ class ReaperTests(TestCase):
 		OnDemandValidation.objects.filter(pk=job.pk).update(created_at=when, started_at=when if status == 'running' else None)
 		return job
 
+	def activity_row(self, message, status, hours):
+		row = AgentActivity.objects.create(project=self.project, kind='run_check', message=message, status=status)
+		AgentActivity.objects.filter(pk=row.pk).update(created_at=NOW - timedelta(hours=hours))
+		return row
+
 	def test_stuck_jobs_fail_with_a_reason_and_live_ones_are_untouched(self):
 		lost = self.assessment('h0.reap.example', 'queued', 13, started=False)
 		dead = self.assessment('h1.reap.example', 'running', 7)
@@ -71,6 +76,19 @@ class ReaperTests(TestCase):
 			reaper.reap(now=NOW)
 			job, created = enqueue(self.project, self.subs[0])
 		self.assertTrue(created)
+
+	def test_a_stuck_activity_row_is_closed_without_losing_its_message(self):
+		stuck = self.activity_row('Nuclei is scanning 12 targets for CVE-2099-4242, scan #3', 'running', 12)
+		fresh = self.activity_row('Weekly deep Nuclei checking reap.example', 'running', 1)
+		counts = reaper.reap(now=NOW)
+		self.assertEqual(counts, {'AgentActivity:running': 1})
+		stuck.refresh_from_db()
+		fresh.refresh_from_db()
+		self.assertEqual(stuck.status, 'failed')
+		self.assertTrue(stuck.message.startswith('Nuclei is scanning 12 targets for CVE-2099-4242, scan #3'))
+		self.assertIn('no result after 11 hours', stuck.message)
+		self.assertEqual(stuck.finished_at, NOW)
+		self.assertEqual(fresh.status, 'running')  # well within the window: left alone
 
 	def test_the_task_logs_what_it_expired_and_is_scheduled(self):
 		from django_celery_beat.models import PeriodicTask

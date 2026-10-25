@@ -1233,7 +1233,7 @@ def prune_asset_changes():
 
 @app.task(name="reap_stuck_jobs", bind=False, queue="cve_feed_queue")
 def reap_stuck_jobs():
-    """Every 15 minutes: fail host assessments and validation jobs a lost worker left queued or running (cveFeed.reaper)."""
+    """Every 15 minutes: fail host assessments, validation jobs and AI activity rows a lost worker left queued or running (cveFeed.reaper)."""
     from cveFeed import activity, reaper
     counts = reaper.reap()
     if counts:
