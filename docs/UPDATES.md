@@ -79,3 +79,9 @@ It never deploys without a backup, waits while another update holds the updater 
 Both updater scripts share a lock under `git rev-parse --git-path cvengine-update`, outside the container's writable `web` mount. Approval updates keep the authoritative log there and publish a UI copy to `web/.update-log` by atomic replacement. Commit markers use the same safe publication. Approval files must be regular, single-link files containing one full commit ID; symlinks and special files are refused.
 
 The manual updater keeps stopped-scan plans in that private directory. A regular legacy `web/.update-requeue.json` is imported once with size and structure checks, then removed. An unsafe or malformed legacy plan stops the update for operator inspection. `--check` remains read-only. These changes preserve worker draining, datastore containers, migration-aware rollback, and readiness checks.
+
+## Branches and releases
+
+- `master` holds released versions only. Each release is tagged (`v1.0`, `v1.1`, ...); pushing the tag publishes the GitHub release with that version's section of the [changelog](../CHANGELOG.md) as its notes (`.github/workflows/release.yml`). The tag must match `web/.version`.
+- `develop` is the next version in progress (`web/.version` reads `v1.1-dev`). Changes go to `develop` by pull request, and `develop` is merged into `master` for a release.
+- Keep an installation on `master` (the default update source). Point it at `develop` under Settings, Updates, Update source only on a test server.

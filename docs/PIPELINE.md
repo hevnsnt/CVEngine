@@ -21,7 +21,7 @@ Hygiene runs as its own task when the scan finishes. It checks TLS certificates 
 
 The email review also runs the checks of [MailFail](https://github.com/ACK-J/MailFail) by Black Hills Information Security, re-implemented server side and credited in the AI activity feed while they run: SPF and DMARC records that receivers ignore, SPF includes and DMARC report addresses on domains anyone can register (asked of the domain's registry over RDAP), DMARC report addresses that are not authorised (RFC 7489 §7.1), malformed report addresses, DKIM keys in testing mode, SHA-1 only or unparseable, weak ARC keys, Microsoft 365 Direct Send exposure (read from MX; nothing is sent), MTA-STS (the record and the domain's own policy file, fetched only when it does not resolve to a blocked address), SMTP TLS reporting, DANE TLSA records for SMTP, DNSSEC algorithms and key sizes, BIMI records, obsolete ADSP, and MailChannels Domain Lockdown. Like MailFail, none of these sends mail or opens SMTP. `CVENGINE_HYGIENE_RDAP=0` turns the registry lookups off.
 
-Every nuclei run uses a snapshot of the installed templates that passed source-level read-only and destination checks.
+Every nuclei run uses a snapshot of the installed templates that passed source-level read-only and destination checks: plain GET, HEAD or OPTIONS requests to the scanned host only, no payloads, bodies, code or out-of-band (interactsh) checks. A template may follow redirects on the same host, up to three (nuclei's `host-redirects`, which the technology detection template uses); one that follows redirects to other hosts is left out. The AI-written templates may not follow redirects at all.
 
 ## Triage and validation
 

@@ -4,7 +4,13 @@ CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, take
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- **More nuclei templates run.** Installed templates that follow redirects on the same host (`host-redirects`, at most three hops) now pass the read-only policy, about 1,250 more (6,531 of 13,903 in the current community set, up from 5,280), among them the technology detection template, so hosts get fingerprinted again. A template that merely recognizes an interactsh server by its header is no longer taken for an out-of-band check. Redirects to other hosts stay refused, and AI-written templates still follow none.
+
+### Fixed
+
+- **Test suite.** `tests.test_nmap` (a placeholder with fixtures that never existed) now tests the vulners and vulscan parsers, and `tests.test_hard_lockout` calls the current lockout helpers.
 
 ## v1.0 (2026-10-25)
 
