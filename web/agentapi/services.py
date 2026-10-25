@@ -1052,22 +1052,28 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     http, hosting_info, details = _host_record(sub, ips, techs, root)
     on_ip = (shared or {}).get('names_on_ip', {})
     countries = (shared or {}).get('countries', {})
+    archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
     return {'id': sub.id, 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
             'screenshot': bool(sub.screenshot_path),
             'technologies': sorted(techs),
             'technology_details': details,
+            # what the web archive says the host ran at some point: historical evidence, never a current technology
+            'archived_technologies': [{'name': n, 'urls': i.get('count', 0), 'examples': (i.get('sample') or [])[:3]}
+                                      for n, i in sorted(archived.items())],
             'http': http,
             'hosting': hosting_info,
             'names': _host_names(sub),
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
+                     'facts': (e['ip'].fingerprint or {}).get('facts') or {},
                      'full_scanned_at': e['ip'].full_scanned_at.isoformat() if e['ip'].full_scanned_at else None,
                      'full_scan_ports': e['ip'].full_scan_ports, 'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
+                 'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'http': p.http or None, 'tls': p.tls or None} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
@@ -1132,7 +1138,10 @@ def _shared_for(project, subs):
             names[row['ip_addresses__address']] = row['n']
     geo_ids = {ip.geo_iso_id for sub in subs for ip in sub.ip_addresses.all() if ip.geo_iso_id}
     countries = {c.id: c.name or c.iso for c in CountryISO.objects.filter(id__in=geo_ids)} if geo_ids else {}
-    return {'names_on_ip': names, 'countries': countries}
+    from cveFeed.models import HostArchive
+    archive = {(row.project_id, row.host): row.technologies for row in HostArchive.objects.filter(
+        project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs})}
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -1306,7 +1315,7 @@ def list_hosts(ctx, slug, params):
     return _mark_zombies(project, _hosts_page(project, qs, params))
 
 
-SEARCH_FIELDS = ('tech', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth', 'sensitive', 'zombie')
+SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth', 'sensitive', 'zombie')
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
@@ -1353,21 +1362,60 @@ def _hosts_named_in(rows, project):
     return Q(name__in=rows.values('host'))
 
 
+# The JSON keys inside the evidence stores that say what a host runs. Searched by key, never as raw JSON text, so a word like
+# "source" or "markers" does not match every row that happens to have that key.
+_ROUTE_EVIDENCE_KEYS = ('server', 'powered_by', 'fingerprint_names', 'cookies')  # RouteAuth.evidence: headers, fingerprint names, cookie names
+_PORT_TEXT = ('banner', 'service_extra', 'extra__script_text', 'http__webserver', 'http__title')  # Port: raw service text, NSE output, HTTP
+
+
+def _running_q(value, project):
+    """A Q matching hosts that run ``value`` anywhere CVEngine saw it: the technology list, the Server header and X-Powered-By,
+    the product, version and CPE nmap found, the service banner and NSE script output, the HTTP title, the cookie names and
+    fingerprints of the host's live routes. ``php`` finds a host whether the evidence is a header, a PHPSESSID cookie, an
+    OpenSSH-style banner or a technology row. Port evidence counts only on open ports, route evidence only on routes that answer."""
+    from django.db.models import Q
+
+    from cveFeed.models import RouteAuth
+    ports = 'ip_addresses__ports__'
+    open_port = Q(**{ports + 'state__in': ('', 'open')})
+    q = Q(webserver__icontains=value) | Q(technologies__name__icontains=value)
+    for lookup in ('product', 'version', 'cpe', *_PORT_TEXT):
+        q |= Q(**{f'{ports}{lookup}__icontains': value}) & open_port
+    routes = RouteAuth.objects.filter(retired_at__isnull=True)
+    route_hit = Q()
+    for key in _ROUTE_EVIDENCE_KEYS:
+        route_hit |= Q(**{f'evidence__{key}__icontains': value})
+    from cveFeed.models import HostArchive
+    return q | _hosts_named_in(routes.filter(route_hit), project) | _hosts_named_in(HostArchive.objects.filter(tech_text__icontains=value), project)
+
+
+def _banner_q(value):
+    """A Q matching hosts with ``value`` in a service banner, an NSE script's output (ssh-hostkey, ssl-cert, ftp-anon,
+    rdp-ntlm-info, smb-os-discovery ...) or the extra info nmap printed, on an open port."""
+    from django.db.models import Q
+    ports = 'ip_addresses__ports__'
+    q = Q()
+    for lookup in ('banner', 'extra__script_text', 'service_extra'):
+        q |= Q(**{f'{ports}{lookup}__icontains': value})
+    return q & Q(**{ports + 'state__in': ('', 'open')})
+
+
 def _term_filter(field, value, project=None):
     """The Q for one search term. Every lookup is a join the database does, so nothing is looped over in Python."""
     from django.db.models import Q
     ports = 'ip_addresses__ports__'
     open_port = Q(**{ports + 'state__in': ('', 'open')})  # a closed or filtered port is not on the host any more
     if field is None:
-        q = Q()
-        for lookup in ('name', 'page_title', 'technologies__name', 'ip_addresses__address', 'ip_addresses__os_guess',
+        q = _running_q(value, project)
+        for lookup in ('name', 'page_title', 'ip_addresses__address', 'ip_addresses__os_guess',
                        'vulnerability__name', 'cve_matches__cve_entry__cve_id'):
             q |= Q(**{f'{lookup}__icontains': value})
-        for lookup in (ports + 'product', ports + 'service_name', ports + 'version', ports + 'cpe'):
-            q |= Q(**{f'{lookup}__icontains': value}) & open_port
+        q |= Q(**{ports + 'service_name__icontains': value}) & open_port
         return q
     if field == 'tech':
-        return Q(technologies__name__icontains=value)
+        return _running_q(value, project)
+    if field == 'banner':
+        return _banner_q(value)
     if field == 'port':
         if not value.isdigit():
             raise ApiError(400, 'port: takes a port number, e.g. port:3306 (use product: or service: for names)')
@@ -1413,6 +1461,46 @@ def _term_filter(field, value, project=None):
     raise ApiError(400, f'unknown field {field}:')
 
 
+def _port_evidence(p, v, field):
+    """Which stored text of an open port holds ``v`` (lowercase), as a short label, or '' when none does. ``banner:`` looks only at
+    raw service text; ``tech:`` and bare words also look at product, version, CPE and the port's HTTP server and title."""
+    texts = [('banner', p.banner), ('info', p.service_extra)]
+    texts += [(sid, out) for sid, out in ((p.extra or {}).get('scripts') or {}).items()]
+    if field != 'banner':
+        http = p.http or {}
+        texts += [('product', p.product), ('version', p.version), ('cpe', p.cpe), ('web server', http.get('webserver')),
+                  ('title', http.get('title'))]
+    for label, text in texts:
+        if v in str(text or '').lower():
+            return label
+    return ''
+
+
+def _route_reasons(sub, v):
+    """What the host's live routes say it runs that holds ``v``: Server and X-Powered-By headers, fingerprints, cookie names."""
+    from cveFeed.models import RouteAuth
+    out = []
+    rows = RouteAuth.objects.filter(project_id=sub.target_domain.project_id, host=sub.name, retired_at__isnull=True)[:20]
+    for route in rows:
+        evidence = route.evidence or {}
+        for key, label in (('server', 'Server header'), ('powered_by', 'X-Powered-By')):
+            if v in str(evidence.get(key, '')).lower():
+                out.append(f'{label} {evidence[key]}')
+        for found in evidence.get('fingerprints') or []:
+            if v in str(found.get('name', '')).lower():
+                out.append(f'{found["name"]} ({found.get("source", "route")})')
+        out += [f'cookie {c}' for c in evidence.get('cookies') or [] if v in str(c).lower()]
+    return out
+
+
+def _archive_reasons(sub, v):
+    """Technologies the web archive says the host ran at some point that hold ``v``. Historical, so labelled as such."""
+    from cveFeed.models import HostArchive
+    row = HostArchive.objects.filter(project_id=sub.target_domain.project_id, host=sub.name).first()
+    return [f'seen in web archive: {name} ({info.get("count", 0)} URLs)' for name, info in (row.technologies if row else {}).items()
+            if v in name.lower()]
+
+
 def _why_matched(sub, terms):
     """What each positive term matched on this host, for the results list (read from the page's prefetched rows)."""
     from startScan.models import open_ports
@@ -1437,6 +1525,10 @@ def _why_matched(sub, terms):
                         reasons.append(f'IP {ip.address}')
         if field in (None, 'tech'):
             reasons += [f'technology {t.name}' for t in sub.technologies.all() if has(t.name)]
+            if has(sub.webserver):
+                reasons.append(f'web server {sub.webserver}')
+            reasons += _route_reasons(sub, v)
+            reasons += _archive_reasons(sub, v)
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')
@@ -1450,6 +1542,8 @@ def _why_matched(sub, terms):
                     reasons.append(label)
                 elif field is None and (has(p.version) or has(p.cpe) or str(p.number) == value):
                     reasons.append(label)
+                elif field in (None, 'tech', 'banner') and (hit := _port_evidence(p, v, field)):
+                    reasons.append(f'{label} ({hit})')
         if field in (None, 'vuln', 'sev'):
             for x in sub.vulnerability_set.all():
                 if (field == 'sev' and SEVERITY_NAMES.get(x.severity) == v) or (field != 'sev' and has(x.name)):
@@ -1469,7 +1563,8 @@ def _why_matched(sub, terms):
 
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
-    port product / service / version / CPE, OS, finding name, CVE id and page title; ``tech:``, ``port:``, ``product:``,
+    port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
+    page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
     session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal) and ``zombie:`` (yes, no) filter one field; ``-term``
     negates; quote a phrase. Each result says what matched. No ``q`` lists every host. Highest score first; ``sort=name`` for names."""

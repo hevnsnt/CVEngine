@@ -862,7 +862,10 @@ def validate_sweep():
 def run_hygiene_task(domain_id):
     """Certificate, TLS and SPF/DKIM/DMARC review of one target (see cveFeed.hygiene)."""
     from cveFeed.hygiene import run_hygiene
-    return run_hygiene(domain_id)
+    result = run_hygiene(domain_id)
+    from cveFeed import archive_urls
+    archive_urls.run_for_domain(domain_id)  # passive and weekly (ledger); never raises
+    return result
 
 
 HYGIENE_SWEEP_MAX = 500

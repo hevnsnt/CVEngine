@@ -17,7 +17,7 @@ class _Job:
 class NmapSpeedTests(unittest.TestCase):
 	def test_fast_profile_and_timeouts(self):
 		flags = nmap_scan.FAST_FLAGS
-		self.assertEqual(flags[flags.index('--version-intensity') + 1], '5')
+		self.assertEqual(flags[flags.index('--version-intensity') + 1], '7')
 		for wanted in ('-sV', '-O', '--osscan-limit', '-Pn', '-T4', '--defeat-rst-ratelimit'):
 			self.assertIn(wanted, flags)
 		self.assertEqual(flags[flags.index('--min-hostgroup') + 1], '32')

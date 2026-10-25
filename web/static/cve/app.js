@@ -583,6 +583,67 @@ const kvBox = (rows) => {
   });
   return box;
 };
+// "ACME  ·  SRV01  ·  srv01.acme.example": what the RDP and SMB scripts say a Windows address is called
+const factLine = (facts) => {
+  const f = facts || {};
+  return [f.os, f.computer_name, f.fqdn || f.dns_domain || f.domain].filter(Boolean).join("  ·  ");
+};
+// The top of the host page, Shodan-style: who hosts it, what answers on the web, what the operating system is
+const hostOverview = (h) => {
+  const http = h.http || {};
+  const hosting = h.hosting || {};
+  const rows = [];
+  if (hosting.provider) {
+    const note = [hosting.kind, hosting.shared_ip ? "shared address" : "", hosting.infrastructure].filter(Boolean).join(", ");
+    rows.push({ label: "Hosting", value: note ? `${hosting.provider} (${note})` : hosting.provider });
+  } else if (hosting.infrastructure) rows.push({ label: "Hosting", value: hosting.infrastructure });
+  const systems = [...new Set(h.ips.map((ip) => ip.os || (ip.facts || {}).os).filter(Boolean))];
+  if (systems.length) rows.push({ label: "Operating system", value: systems.join(", ") });
+  const identities = [...new Set(h.ips.map((ip) => factLine(ip.facts)).filter(Boolean))];
+  if (identities.length) rows.push({ label: "Windows identity", value: identities.join("; ") });
+  if (http.webserver) rows.push({ label: "Web server", value: http.webserver });
+  if (http.powered_by) rows.push({ label: "Powered by", value: http.powered_by });
+  if (http.title) rows.push({ label: "Page title", value: http.title });
+  if (http.url) rows.push({ label: "Front page", value: `${http.url}${http.status ? ` (HTTP ${http.status})` : ""}` });
+  if (http.redirect_to) rows.push({ label: "Redirects to", value: http.redirect_to });
+  if (http.cname) rows.push({ label: "CNAME", value: http.cname });
+  const countries = [...new Set(h.ips.map((ip) => ip.country).filter(Boolean))];
+  if (countries.length) rows.push({ label: "Country", value: countries.join(", ") });
+  const reverse = [...new Set(h.ips.map((ip) => ip.reverse).filter(Boolean))];
+  if (reverse.length) rows.push({ label: "Reverse DNS", value: reverse.join(", ") });
+  const shared = h.ips.filter((ip) => ip.names_on_ip > 1).map((ip) => `${ip.address} (${ip.names_on_ip} names)`);
+  if (shared.length) rows.push({ label: "Shared with", value: shared.join(", ") });
+  if (!rows.length) return el("div");
+  const box = el("div", "why host-overview");
+  box.append(el("h3", "sec", "Overview"), kvBox(rows));
+  return box;
+};
+// Technologies with version, kind and where they were seen; what only the web archive remembers is listed apart and labelled
+const technologyTable = (h) => {
+  const details = h.technology_details || [];
+  const archived = h.archived_technologies || [];
+  if (!details.length && !archived.length) return null;
+  const box = el("div", "tech-table");
+  if (details.length) {
+    box.append(el("h3", "sec", `Technologies (${details.length})`));
+    details.forEach((t) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", t.name));
+      if (t.version) line.append(el("span", "chip", t.version));
+      if (t.category) line.append(badge(t.category, "queued"));
+      line.append(el("span", "note", t.source ? `seen via ${t.source}` : ""));
+      box.append(line);
+    });
+  }
+  if (archived.length) {
+    box.append(el("h3", "sec", "Seen in the web archive"));
+    box.append(el("p", "note", "Historical only: archived pages show this host ran these at some point, not that it runs them now."));
+    const chips = el("div", "host-labels");
+    archived.forEach((a) => chips.append(el("span", "chip", `${a.name} (${a.urls} URLs)`, { title: (a.examples || []).join("\n") })));
+    box.append(chips);
+  }
+  return box;
+};
 const excerpt = (label, text) => {
   const box = el("div");
   box.append(el("div", "note", label), el("pre", "banner", text));
@@ -1562,7 +1623,7 @@ const pages = {
         if (job.error) assessBody.append(el("p", "note", job.error));
         (job.stages || []).forEach((stage) => {
           const state = { "-1": "queued", "0": "failed", "1": "running", "2": "completed", "3": "stopped" }[String(stage.status)] || "unknown";
-          assessBody.append(el("p", "note", `${stage.title || stage.name}: ${state}${stage.error_message ? ` — ${stage.error_message}` : ""}`));
+          assessBody.append(el("p", "note", `${stage.title || stage.name}: ${state}${stage.error_message ? `: ${stage.error_message}` : ""}`));
         });
         if (job.status === "queued" || job.status === "running") {
           assessButton.disabled = true;
@@ -1646,6 +1707,7 @@ const pages = {
         tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
+      pane.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");
       const reasons = h.heat_reasons || [];
@@ -1700,10 +1762,8 @@ const pages = {
         pane.append(img);
         pane.append(compareBox);
       }
-      if (h.technologies && h.technologies.length) {
-        pane.append(el("h3", "sec", `Technologies (${h.technologies.length})`));
-        pane.append(el("p", "note", h.technologies.join(", ")));
-      }
+      const techBox = technologyTable(h);
+      if (techBox) pane.append(techBox);
       const recent = el("div", "recent-changes");
       pane.append(el("h3", "sec", "Recent changes"), recent);
       api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "30d", page_size: 10 })}`)
@@ -1747,6 +1807,8 @@ const pages = {
       if (!h.ips.length) pane.append(el("p", "note", "No IP addresses resolved yet."));
       h.ips.forEach((ip) => {
         pane.append(el("div", "ip-line", ip.address + (ip.os ? `  ·  ${ip.os}` : "")));
+        const identity = factLine(ip.facts);
+        if (identity) pane.append(el("div", "note", identity));
         pane.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
         ip.ports.forEach((p) => {
           const card = el("div", "svc");
@@ -1756,8 +1818,14 @@ const pages = {
             el("span", "svc-name", [p.product || p.service, p.version].filter(Boolean).join(" ")),
           );
           card.append(top);
+          if (p.info) card.append(el("div", "note", p.info));
           if (p.cpe) card.append(el("div", "note mono", p.cpe));
           if (p.banner) card.append(el("pre", "banner", p.banner));
+          Object.entries(p.scripts || {}).forEach(([id, text]) => {
+            const det = el("details", "nse");
+            det.append(el("summary", "mono", id), el("pre", "banner", text));
+            card.append(det);
+          });
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
           pane.append(card);

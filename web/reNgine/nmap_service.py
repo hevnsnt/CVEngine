@@ -42,11 +42,36 @@ def _host_os(host):
     return name, accuracy
 
 
+SCRIPT_OUTPUT_CAP = 4000  # one NSE script's text, stored on the port; keeps a chatty script from bloating the row
+BANNER_CAP = 1024
+
+
+def _scripts(element):
+    """{script id: output text} from an nmap element's <script id= output=> children (a <port> or a <hostscript>)."""
+    out = {}
+    for script in _as_list((element or {}).get("script")):
+        if not isinstance(script, dict):
+            continue
+        sid = script.get("@id")
+        if not sid:
+            continue
+        out[str(sid)] = str(script.get("@output", "") or "")[:SCRIPT_OUTPUT_CAP]
+    return out
+
+
+def _banner_from(scripts, service):
+    """The service banner for a port: the `banner` NSE script's text if it ran, else nmap's service fingerprint probe
+    (``servicefp``), which is the raw bytes the service replied with. Cleaned of the NSE label and capped. '' when neither."""
+    raw = scripts.get("banner") or service.get("@servicefp") or ""
+    return raw.strip()[:BANNER_CAP]
+
+
 def _service_record(port):
-    """One port's service record from an nmap <port> element."""
+    """One port's service record from an nmap <port> element, including any NSE <script> output and a banner."""
     service = port.get("service") or {}
     cpes = [c for c in _as_list(service.get("cpe")) if isinstance(c, str)]
     portid = str(port.get("@portid", ""))
+    scripts = _scripts(port)
     return {
         "number": int(portid) if portid.isdigit() else None,
         "protocol": port.get("@protocol", "") or "",
@@ -59,6 +84,8 @@ def _service_record(port):
         "method": service.get("@method", "") or "",  # "probed" (it answered) or "table" (guessed from the port number)
         "cpe": cpes[0] if cpes else "",
         "cpes": cpes,
+        "scripts": scripts,
+        "banner": _banner_from(scripts, service),
     }
 
 
@@ -113,6 +140,7 @@ def extract_nmap_inventory(nmap_results):
             "os_guess": os_guess,
             "os_accuracy": os_accuracy,
             "ports": records,
+            "hostscripts": _scripts(host.get("hostscript")),  # smb-os-discovery, nbstat: attach to the host, not a port
             "status": (host.get("status") or {}).get("@state", "up") if isinstance(host.get("status"), dict) else "up",
             "extraports": _extraports_states(host),
             "scanned": scanned,

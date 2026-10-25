@@ -47,6 +47,10 @@ READONLY_METHODS = {'GET', 'HEAD', 'OPTIONS'}
 READONLY_FORBIDDEN_KEYS = {'payloads', 'attack', 'fuzzing', 'iterate-all', 'body', 'unsafe', 'race', 'pipeline', 'cookie-reuse',
                            'code', 'javascript', 'headless', 'file', 'flow', 'workflows', 'self-contained'}
 MAX_INSTALLED_TEMPLATE_BYTES = 200_000
+# Out of band: the {{interactsh-url}} placeholder, the interactsh_* match parts, or an interactsh page as the evidence (an
+# SSRF check that makes the target fetch one). A matcher that only recognizes an interactsh server by its
+# X-Interactsh-Version header, as tech-detect does, stays in band.
+OAST_RE = re.compile(r'interactsh-url|interactsh_(?:protocol|request|response|ip)|interactsh server|\boast\b')
 EVIDENCE_CAP = 4096
 OUTPUT_CAP = 600
 CLEAN_CONFIDENCE_ADJUST = -0.2
@@ -91,7 +95,7 @@ def readonly_problem(yaml_text):
     unknown = set(doc) - templategen.ALLOWED_TOP_KEYS
     if forbidden or unknown:
         return 'template not validated: unsupported protocol or top-level feature'
-    destination = templategen.destination_check(doc)
+    destination = templategen.destination_check(doc, allow_host_redirects=True)
     if destination:
         return f'template not validated: {destination}'
 
@@ -115,7 +119,7 @@ def readonly_problem(yaml_text):
     if not set(doc) & {'http', 'requests', 'network', 'tcp', 'dns', 'ssl'}:
         return 'template not validated: no protocol section'
     lowered = yaml_text.lower()
-    if 'interactsh' in lowered or re.search(r'\boast\b', lowered):
+    if OAST_RE.search(lowered):
         return 'template not validated: it uses out-of-band checks'
     for proto in ('http', 'requests', 'network', 'tcp', 'dns', 'ssl'):
         if proto in doc and not isinstance(doc[proto], list):

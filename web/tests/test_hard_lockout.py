@@ -34,7 +34,7 @@ class SharedCacheTests(TestCase):
 	def test_concurrent_failures_are_all_counted(self):
 		def hammer():
 			for _ in range(10):
-				tenancy_views._fail(self.user)
+				tenancy_views.fail(self.user)
 		threads = [threading.Thread(target=hammer) for _ in range(8)]
 		for t in threads:
 			t.start()
@@ -44,30 +44,30 @@ class SharedCacheTests(TestCase):
 
 	def test_a_second_process_sees_the_same_count_and_the_counter_survives_a_restart(self):
 		for _ in range(tenancy_views.MAX_FAILURES - 1):
-			tenancy_views._fail(self.user)
+			tenancy_views.fail(self.user)
 		other_process = RedisCache(settings.CACHES['default']['LOCATION'], {})  # a different worker, or this one after a restart
 		self.assertEqual(other_process.get(f'mfa_fail:{self.user.pk}'), tenancy_views.MAX_FAILURES - 1)
-		self.assertFalse(tenancy_views._locked(self.user))
-		tenancy_views._fail(self.user)
-		self.assertTrue(tenancy_views._locked(self.user))
+		self.assertFalse(tenancy_views.locked(self.user))
+		tenancy_views.fail(self.user)
+		self.assertTrue(tenancy_views.locked(self.user))
 		self.assertTrue(other_process.get(f'mfa_fail:{self.user.pk}') >= tenancy_views.MAX_FAILURES)
 
 	def test_the_window_starts_at_the_first_failure_and_expires(self):
-		tenancy_views._fail(self.user)
+		tenancy_views.fail(self.user)
 		self.assertTrue(0 < cache._cache.get_client().ttl(cache.make_key(f'mfa_fail:{self.user.pk}')) <= tenancy_views.LOCKOUT_SECONDS)
 		first = cache._cache.get_client().ttl(cache.make_key(f'mfa_fail:{self.user.pk}'))
-		tenancy_views._fail(self.user)
+		tenancy_views.fail(self.user)
 		self.assertLessEqual(cache._cache.get_client().ttl(cache.make_key(f'mfa_fail:{self.user.pk}')), first)  # not extended by later failures
 
 	def test_a_key_that_expires_between_add_and_incr_still_counts(self):
 		with mock.patch.object(RedisCache, 'incr', side_effect=ValueError('Key not found')):
-			tenancy_views._fail(self.user)
+			tenancy_views.fail(self.user)
 		self.assertEqual(cache.get(f'mfa_fail:{self.user.pk}'), 1)
 
 	def test_success_clears_the_counter(self):
-		tenancy_views._fail(self.user)
+		tenancy_views.fail(self.user)
 		cache.delete(f'mfa_fail:{self.user.pk}')
-		self.assertFalse(tenancy_views._locked(self.user))
+		self.assertFalse(tenancy_views.locked(self.user))
 
 
 class CacheUrlTests(unittest.TestCase):

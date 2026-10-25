@@ -55,11 +55,6 @@ class WebhookErrorTests(TestCase):
 				common_func.send_discord_message('hi')
 		self.assert_clean(ctx.exception)
 
-	def test_the_discord_file_task(self):
-		with mock.patch.object(tasks.DiscordWebhook, 'execute', side_effect=leaky(DISCORD)), mock.patch('builtins.open', mock.mock_open(read_data=b'x')):
-			with self.assertRaises(common_func.NotificationError) as ctx:
-				tasks.send_file_to_discord('/tmp/x.txt', 'title')
-		self.assert_clean(ctx.exception)
 
 	def test_an_http_status_is_kept_because_it_is_not_a_secret(self):
 		response = mock.Mock(status_code=401)

@@ -500,11 +500,11 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
-                force=False, hygiene_host=None):
+                force=False, hygiene_host=None, wpscan_runner=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
-    from cveFeed import db_exposure, nmap_scan, nuclei_scan
+    from cveFeed import db_exposure, nuclei_scan, service_intel
     from startScan.models import ScanActivity, ScanHistory
     gone = {'scan_id': scan_id, 'status': 'aborted'}
     if stopped(scan_id):
@@ -514,7 +514,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     nmap_kwargs = {'runner': nmap_runner} if nmap_runner else {}
     if force:
         nmap_kwargs['force'] = True
-    nmap_result = _stage(scan, 'nmap scan', 'nmap_scan', lambda: nmap_scan.run_nmap_for_scan(scan_id, **nmap_kwargs),
+    nmap_result = _stage(scan, 'nmap scan', 'nmap_scan', lambda: service_intel.run_nmap_stage(scan_id, **nmap_kwargs),
                          fallback={'targets': 0})
     if stopped(scan_id):
         return gone
@@ -539,6 +539,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                           fallback={'routes': 0})
     if stopped(scan_id):
         return gone
+    from cveFeed import wpscan_scan
+    wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
+    if retest or force:
+        wp_kwargs['force'] = True
+    wpscan_result = None
+    if (wpscan_runner or wpscan_scan.installed()) and wpscan_scan.wordpress_sites(scan):  # only for sites already fingerprinted as WordPress
+        wpscan_result = _stage(scan, 'WPScan (WordPress sites)', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
+                               fallback={'sites': 0})
+        if stopped(scan_id):
+            return gone
     from cveFeed.tasks import correlate_cves, run_hygiene_task
     correlation = _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id),
                          fallback={'subdomains': 0, 'matches': 0})  # run inline: the AI-targeted pass needs the matches
@@ -588,6 +598,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
               'asset_changes': changes_result}
     if hygiene_result is not None:
         result['hygiene'] = hygiene_result
+    if wpscan_result is not None:
+        result['wpscan'] = wpscan_result
     _announce(scan, result, summary=hygiene)
     return result
 

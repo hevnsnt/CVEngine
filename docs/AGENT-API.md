@@ -9,7 +9,7 @@ Two interfaces share one service layer, so both get the same project isolation, 
 
 Create a token on the **API tokens and MCP** page (`/cve/agents/`) and send `Authorization: Bearer <token>`. The secret (`cve_...`) is shown once and only its SHA-256 is stored. A token acts as its user, with the same memberships and roles. **Read only** tokens can call GET endpoints and read-only tools. Revoke a token on the same page. Bearer requests skip CSRF.
 
-When an organization requires two-step sign-in and a member has not enrolled, that member's session and tokens get `403` until they enroll at `/mfa/setup/`. Tokens are not revoked and work again afterward.
+When an organization requires two-step sign-in and a member has not enrolled, that member's session and tokens get `403` until they turn it on under **My account**. Tokens are not revoked and work again afterward. MCP requests are limited to 256 KiB, 20 batched messages, and 4 MiB of response.
 
 Connect Claude Code:
 
@@ -32,6 +32,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | discover | `POST projects/{slug}/targets/{id}/discover` (`mode`) | `discover_target` |
 | rescan | `POST projects/{slug}/targets/{id}/rescan-hosts` (`hosts`) | `rescan_hosts` |
 | stop | `POST projects/{slug}/scans/{id}/stop`, `POST projects/{slug}/scans/stop` | `stop_scan`, `stop_all_scans` |
+| tokens | `GET/POST tokens`, `DELETE tokens/{id}` (session only; a token cannot create tokens), `GET assets` | none |
 | scan detail | `GET .../scans/{id}/subdomains`, `endpoints`, `vulnerabilities`, `activity` | `list_scan_subdomains`, `list_scan_endpoints`, `list_scan_vulnerabilities`, `get_scan_activity` |
 | inventory | `GET projects/{slug}/hosts` | `list_hosts` |
 | search | `GET projects/{slug}/search?q=...` | `search_hosts` |
@@ -54,7 +55,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | exclude host | `POST projects/{slug}/hosts/{host}/exclude`, `GET projects/{slug}/exclusions`, `DELETE projects/{slug}/exclusions/{host}` | `exclude_host`, `list_exclusions`, `remove_exclusion` |
 | API keys | `GET/PUT/DELETE projects/{slug}/api-keys[/{service}]` | none |
 
-Lists take `page` and `page_size` (up to 200). Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
+Lists take `page` and `page_size` (up to 200), except `work`, `cves?tier=`, and `findings`, which stop at the first 200, 2,000, and 2,000 rows. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
 ## Targets and scans
 
@@ -66,7 +67,7 @@ Each target carries `scope_mode` and `host_scoped`. See [Shared provider domains
 
 ## All projects
 
-The reserved slug `_all` means every project you can see. The list endpoints and tools accept it in place of a project slug and return one combined, read-only list: `targets`, `scans`, `hosts`, `search`, `vulnerabilities`, `matches`, `changes`, `activity`, `hygiene`, `certificates`, and `routes`. Every row carries `project` (use this slug for anything you do next) and `project_name`. Only your own projects contribute rows, and `count` is the total. A write or a per-item call with `_all` is a `400` that asks you to pick a project.
+The reserved slug `_all` means every project you can see. The list endpoints and tools accept it in place of a project slug and return one combined, read-only list: `targets`, `scans`, `hosts`, `search`, `findings`, `vulnerabilities`, `matches`, `changes`, `activity`, `hygiene`, `certificates`, and `routes`. Every row carries `project` (use this slug for anything you do next) and `project_name`. Only your own projects contribute rows, and `count` is the total. Everything else needs a real project: a write or a per-item call with `_all` is a `400`.
 
 ## Host management
 
@@ -74,7 +75,7 @@ The reserved slug `_all` means every project you can see. The list endpoints and
 
 `delete` removes one host's data from this project only: its findings, CVE matches, routes, changes, triage, certificates, and asset information. A later scan can find the host again.
 
-`exclude` is organization wide. It records the host as excluded, deletes its data from every project of the organization you can write to, and from then on no scan stage touches it in any project of the organization. It needs an organization-level role, and `DELETE exclusions/{host}` lifts it (organization admins only). Both match the whole host name, case-insensitively, never a suffix: excluding `provider.example` leaves `www.provider.example` alone, and wildcards are a `400`. Each removal needs write access and is written to the audit log.
+`exclude` is organization wide: it deletes the host's data from every project of the organization you can write to, and no stage touches it again in any of them. It needs an organization-level role, and organization admins lift it with `DELETE exclusions/{host}`. Names match whole and case-insensitively: excluding `provider.example` leaves `www.provider.example` alone, and wildcards are a `400`. Removals are audit logged.
 
 ## Hosts and search
 
@@ -91,7 +92,7 @@ Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first 
 | `ip:10.0.0.5`, `ip:10.0.0.0/24` | an IP, or any IP in a CIDR range |
 | `host:www` | hostname |
 | `vuln:rce`, `sev:high` | finding name, severity |
-| `auth:open`, `auth:login`, `auth:session_required`, `auth:sso` | hosts with a web route in that state |
+| `auth:<state>` | hosts with a web route in that state (any state listed under Routes) |
 | `sensitive:any`, `sensitive:credentials`, `sensitive:pii`, `sensitive:internal` | hosts with a route serving that kind of sensitive data |
 | `zombie:yes`, `zombie:no` | hosts whose name is gone but whose last address answers |
 | `-term`, `"apache tomcat"` | negate a term, or match a phrase |
@@ -110,33 +111,24 @@ List endpoints (`vulnerabilities`, `matches`, `routes`, `hygiene`, `work`) carry
 
 `findings/{kind}/{id}` returns one finding in full: why it matters, how it was found (with request and response excerpts capped at 4 KB, returned only here), its history, the AI's classification and whether a rule overrode it, remediation, and every validation check with the command a person can repeat. A CVE match also includes the feed description, affected products and ranges, HTTPS advisory links, feed sources, and nullable exploitation signals. Those signals describe the CVE; they do not prove a particular host is vulnerable.
 
-**Validate a match.** `POST projects/{slug}/matches/{id}/validate` queues the same workflow as **Validate now**: an AI plan, the checks it chose from those the scope and template policy allow, and an AI review of the evidence. Without a provider, the policy-approved checks run on their own. An AI-drafted template runs on the host only after a reviewed positive fixture proves it. `GET .../validate/{request_id}` returns `queued`, `running`, `completed`, or `failed`, with the plan, its reason, the checks that ran, and the resulting classification. Requests are deduplicated and bounded per user, project, and day. `retriage` routes a CVE match through the same queue, and queues other findings for one check on the validation worker.
+**Validate a match.** `POST projects/{slug}/matches/{id}/validate` queues the same workflow as **Validate now**: an AI plan, the checks it chose from those the scope and template policy allow, and an AI review of the evidence. Without a provider, the policy-approved checks run on their own. `GET .../validate/{request_id}` returns `queued`, `running`, `completed`, or `failed`, with the plan, the checks that ran, and the resulting classification. A match with an active request, or one finished in the last 5 minutes, returns that request. Each project allows 10 in progress and each user 20 requests an hour (429). The worker rechecks the requester's current access before it runs anything, and `retriage` uses the same queue.
 
 **Diagnostics.** When an AI call fails, the finding keeps a retriable `error` status and an `ai.diagnostic` object (also shown as **Copy diagnostic**). It names the stage and a category such as `provider_auth` (check the key), `output_truncated` (check the model's output limit), or `schema_invalid` (the reply did not fit the triage format). It never contains credentials, prompts, model output, or target content, so it is safe to share.
 
-`validation_status=observed` means a check read a banner or version without running a CVE-specific detector. It records what was seen, not a verdict.
+`validation_status=observed` means a check read a banner or version without running a CVE-specific detector: it records what was seen, not a verdict.
 
 **Remediation loop**
 
 1. `register_assets` with the hosts, IPs, or CIDRs the agent is responsible for.
 2. `get_remediation_work` returns open CVE-on-host items for those assets, fire first, with the host's IPs and the CVE's fixed versions. Fixed, accepted-risk, and closed matches are left out, and `?include_fp=0` also drops likely false positives.
-3. `update_remediation_status` sets `in_progress`, `fixed`, or `accepted_risk` with a note.
+3. `update_remediation_status` sets `open`, `in_progress`, `fixed`, or `accepted_risk` with a note.
 
 Matches also carry `distro_status` (`patched`, `vulnerable`, `unknown`, `no_data`), `distro_label`, `evidence`, and the template test result (`vulnerable`, `no_match`, `error`).
 
 ## Limits
 
-Domain names are unique across the instance. A range or CIDR target is capped at 10,000 addresses per call (`CVENGINE_MAX_TARGETS_PER_ADD`). Loopback and link-local addresses cannot be added, and private ranges need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
+Domain names are unique across the instance. A range or CIDR target is capped at 10,000 addresses per call, and a bulk request at 10,000 lines or expanded rows (`CVENGINE_MAX_TARGETS_PER_ADD`). Loopback and link-local addresses cannot be added, and private ranges need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
 
-The API does not expose instance settings, the AI key, bug bounty features, or user management. It can set a project's own OSINT service keys (write-only) and read which services are configured.
+The API does not expose instance settings, the AI key, bug bounty actions, or user management. It can set a project's own OSINT service keys (write-only) and read which services are configured.
 
 See also: [TENANCY.md](TENANCY.md) for roles, [PIPELINE.md](PIPELINE.md) for what a scan does, [documentation index](README.md).
-
-
-### Validation request authority and accounting
-
-Manual validation persists its requesting user and, for bearer requests, the token ID. Workers recheck active user status, current project write access, required MFA/password setup, and token expiry/revocation before checks and fresh AI review. Deleting a requester or token does not turn the request into automatic work. Automatic background validation retains its separate scheduling authority.
-
-Migration `0060_validation_request_authority` expires old queued/running requests whose original bearer identity was not recorded. Submit a new manual request after the upgrade; background scheduling can create fresh automatic jobs. Migration `0059_validationbudget` adds durable daily check reservations. Refreshing a finding or deleting its freshness marker does not reset daily usage, and failed attempts still count. The initial upgrade-day count seeds from remaining historical freshness records, so earlier erased usage cannot be reconstructed.
-
-CVE detail keeps the original advisory description separately from the feed summary and retains unknown exploit signals as unknown. Links include CVE Program and NVD records, plus the CISA catalog for known-exploited entries.

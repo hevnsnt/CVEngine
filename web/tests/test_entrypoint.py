@@ -32,7 +32,7 @@ class EntrypointTests(SimpleTestCase):
         for cmd in worker_commands():
             queues += re.search(r'-Q (\S+)', cmd).group(1).split(',')
         self.assertEqual(len(queues), len(set(queues)))
-        for required in ('discovery_queue', 'cve_feed_queue', 'main_scan_queue', 'api_queue'):
+        for required in ('discovery_queue', 'cve_feed_queue', 'send_notif_queue', 'api_queue'):
             self.assertIn(required, queues)
 
     def test_theharvester_is_gone(self):

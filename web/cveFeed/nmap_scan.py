@@ -1,5 +1,5 @@
 """nmap OS/service fingerprinting over every IP discovery found: one ``-O -sV`` pass (OS guess,
-service/version on the thousand most common ports plus the high-risk ones in EXTRA_PORTS, at version intensity 5 so a probe stops at the likely answer). That single run per IP is the pipeline's whole port scan; the full ``-p-`` sweep is far too slow
+service/version on the thousand most common ports plus the high-risk ones in EXTRA_PORTS, at version intensity 7 with the NSE scripts in NSE_SCRIPTS, so each service gives up its banner and what it reveals about its host). That single run per IP is the pipeline's whole port scan; the full ``-p-`` sweep is far too slow
 to run inline, so it is a slow background task of its own (see cveFeed.fullscan). Both feed
 the same Shodan-style inventory (Port / IpAddress) that bbot and nuclei write to, so correlate_cves and the hosts page see
 one consistent picture regardless of which tool found what.
@@ -17,8 +17,17 @@ from cveFeed import naabu_scan
 logger = logging.getLogger(__name__)
 
 NMAP_BIN = 'nmap'
-FAST_FLAGS = ['-sV', '--version-intensity', '5', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
-              '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit']
+# NSE scripts that read what a service says about itself and its host. All are in nmap's safe or discovery categories and none
+# exploits anything: banner (the raw greeting), ssh-hostkey and ssh2-enum-algos (SSH server identity), ssl-cert (certificate
+# subject, issuer, validity), http-headers and http-title, ftp-anon (whether anonymous login is accepted, and the top level
+# listing it shows), rdp-ntlm-info (the OS build, host and domain names RDP's NTLM challenge reveals, without logging in),
+# rdp-enum-encryption (which RDP security layers the server accepts, so a server that does not insist on NLA is visible),
+# smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). Scripts only run on ports whose service matches.
+NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'ftp-anon',
+               'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat')
+NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
+FAST_FLAGS = ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
+              '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', *NSE_FLAGS]
 FULL_PORT_FLAGS = ['-p-', '--open', '-T4', '-Pn']
 # nmap's --top-ports ranks ports by how often they are open across the internet, not by how dangerous an open one is, so
 # the thousand it picks leave out most of the services an exposure check cares about (Redis is 2742th, MongoDB 2169th,
@@ -177,6 +186,10 @@ def persist_inventory(inventory, source='nmap'):
             ip_obj.last_seen = now
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
             hosts_with_os += 1
+        if host.get('hostscripts'):
+            # smb-os-discovery and nbstat describe the host, not one port
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'scripts': host['hostscripts']}
+            ip_obj.save(update_fields=['fingerprint'])
         for rec in host.get('ports', []):
             if not rec.get('number'):
                 continue
@@ -197,6 +210,11 @@ def persist_inventory(inventory, source='nmap'):
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
                           'method': rec.get('method', '')}
+            if rec.get('scripts'):
+                port.extra['scripts'] = rec['scripts']  # this run's NSE output; a run that had none leaves the last in place
+                port.extra['script_text'] = '\n'.join(rec['scripts'].values())  # flat text for search, without the script ids
+            if rec.get('banner'):
+                port.banner = rec['banner']
             port.distro, port.distro_release = info['distro'], info['release']
             port.package_release, port.upstream_version = info['package_release'], info['upstream_version']
             port.source = source

@@ -164,17 +164,14 @@ class AgentApiTests(TestCase):
 			self.assertEqual(result['created_names'], ['good.example.com'])
 			self.assertEqual(len(result['invalid']), 2)
 
-	def test_start_scan_runs_discovery_not_the_classic_engine(self):
+	def test_start_scan_runs_discovery(self):
 		from startScan.models import ScanHistory
-		with mock.patch('reNgine.tasks.initiate_scan') as classic, \
-				mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
 			status, data = call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': self.engine.id})
 			self.assertEqual((status, data['status']), (202, 'queued'))
 			scan = ScanHistory.objects.get(pk=data['scan_id'])
 			self.assertEqual(scan.domain_id, self.da.id)
 			queued.assert_called_once_with(scan.id, 'standard')
-			classic.apply_async.assert_not_called()
-			classic.delay.assert_not_called()
 			# engine_id is optional, but a bogus one is still rejected
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': 99999})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.db.id})[0], 404)
@@ -1335,12 +1332,12 @@ class HostSearchTests(TestCase):
 	def test_field_filters(self):
 		self.assertEqual(self.names('port:3306'), ['db.srch.example'])  # only that host, not the other project's
 		self.assertEqual(self.names('product:mysql'), ['db.srch.example'])
-		self.assertEqual(self.names('tech:php'), ['tech.srch.example', 'www.srch.example'])
+		self.assertEqual(self.names('tech:php'), ['port.srch.example', 'tech.srch.example', 'www.srch.example'])  # tech: is everything a host runs
 		self.assertEqual(self.names('os:"linux 5"'), ['port.srch.example'])
 		self.assertEqual(self.names('service:svc port:8080'), ['port.srch.example'])  # terms are ANDed
 
 	def test_negation_and_phrases(self):
-		self.assertEqual(self.names('tech:php -host:www'), ['tech.srch.example'])
+		self.assertEqual(self.names('tech:php -host:www'), ['port.srch.example', 'tech.srch.example'])
 		self.assertEqual(self.names('-php'), ['db.srch.example'])
 		self.assertEqual(self.names('"welcome to acme"'), ['www.srch.example'])
 		self.assertEqual(self.names('welcome acme'), ['www.srch.example'])

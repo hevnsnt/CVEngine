@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import yaml
+
 from django.test import TestCase
 from django.utils import timezone
 
@@ -192,6 +194,27 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 		self.assertEqual(validation.readonly_problem('id: x\nnetwork:\n  - host: ["{{Hostname}}"]\n    read-size: 64\n'), '')
 		for bad in ('', ':::', '- a list'):
 			self.assertIn('not validated', validation.readonly_problem(bad))
+
+	def with_redirects(self, *lines):
+		return GET_TEMPLATE.replace('    method: GET\n', '    method: GET\n' + ''.join(f'    {line}\n' for line in lines))
+
+	def test_same_host_redirects_pass_and_other_hosts_do_not(self):
+		for lines in (('host-redirects: true', 'max-redirects: 2'), ('host-redirects: false',), ('redirects: false', 'max-redirects: 0'),
+					  ('host-redirects: true', 'max-redirects: 3')):
+			self.assertEqual(validation.readonly_problem(self.with_redirects(*lines)), '', lines)
+		for lines, reason in ((('redirects: true',), 'other hosts'), (('host-redirects: true', 'max-redirects: 4'), 'max-redirects'),
+							  (('max-redirects: true',), 'max-redirects'), (('host-redirects: yes please',), 'true or false'),
+							  (('redirects: true', 'host-redirects: true'), 'other hosts')):
+			self.assertIn(reason, validation.readonly_problem(self.with_redirects(*lines)), lines)
+		# the AI-written template gate still allows no redirect at all
+		doc = yaml.safe_load(self.with_redirects('host-redirects: true'))
+		self.assertIn('host-redirects', templategen.destination_check(doc))
+
+	def test_detecting_an_interactsh_server_is_in_band_but_fetching_one_is_not(self):
+		tech = GET_TEMPLATE.replace('words: ["nginx/1.18.0"]', 'part: header\n        words: ["X-Interactsh-Version"]')
+		self.assertEqual(validation.readonly_problem(tech), '')
+		for evidence in ('{{interactsh-url}}', 'interactsh_protocol', 'Interactsh Server', 'oast'):
+			self.assertIn('out-of-band', validation.readonly_problem(GET_TEMPLATE.replace('nginx/1.18.0', evidence)), evidence)
 
 
 class PlanTests(unittest.TestCase):

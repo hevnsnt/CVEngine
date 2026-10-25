@@ -21,10 +21,6 @@ class HasPermission(BasePermission):
 		return True
 
 MAX_LEGACY_BATCH = 100
-LEGACY_SUBSCAN_TYPES = frozenset({
-    'port_scan', 'http_crawl', 'fetch_url', 'screenshot',
-    'dir_file_fuzz', 'vulnerability_scan',
-})
 
 
 def require_project_write(user, project):
@@ -81,12 +77,3 @@ def writable_batch(user, model, ids):
     for obj in objects:
         require_project_write(user, object_project(obj))
     return objects
-
-
-def validate_subscan_types(scan_types):
-    from rest_framework.exceptions import ValidationError
-    if (not isinstance(scan_types, list) or not scan_types
-            or len(scan_types) > len(LEGACY_SUBSCAN_TYPES)
-            or any(not isinstance(s, str) or s not in LEGACY_SUBSCAN_TYPES for s in scan_types)):
-        raise ValidationError('Unsupported subscan type')
-    return list(dict.fromkeys(scan_types))

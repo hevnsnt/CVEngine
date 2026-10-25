@@ -147,14 +147,3 @@ class CeleryDurabilityTests(TestCase):
 		self.assertEqual(settings.CELERY_BROKER_TRANSPORT_OPTIONS['visibility_timeout'], 12 * 3600)
 		self.assertTrue(run_bbot_discovery.acks_late)
 		self.assertTrue(run_bbot_discovery.reject_on_worker_lost)
-
-	def test_osint_never_enqueues_theharvester(self):
-		from unittest import mock
-		from reNgine import tasks
-		with mock.patch.object(tasks.theHarvester, 'si') as harvester, mock.patch.object(tasks.h8mail, 'si') as h8, \
-				mock.patch('reNgine.tasks.group') as group, \
-				mock.patch('reNgine.tasks.ScanHistory.objects.get'):
-			group.return_value.apply_async.return_value.ready.return_value = True
-			tasks.osint_discovery({'discover': ['emails', 'employees']}, 'example.test', 1, 1, '/tmp', {})
-		harvester.assert_not_called()
-		h8.assert_called_once()

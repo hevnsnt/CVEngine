@@ -90,6 +90,10 @@ GENERIC_WORDS = {"nginx", "apache", "server", "openresty", "iis", "microsoft-iis
 CONTENT_MATCHERS = {"word", "regex", "binary", "xpath", "json"}
 SAFE_VARS = {"BaseURL", "RootURL", "Hostname", "Host", "Port", "FQDN", "Scheme", "Path", "randstr"}
 MAX_REQUESTS = 6
+# Installed templates may follow redirects on the same host (nuclei's host-redirects), a few hops at most; following them
+# to another host (redirects: true) stays refused. AI-written templates get no redirects at all.
+HOST_REDIRECT_KEYS = {"host-redirects", "max-redirects", "redirects"}
+MAX_HOST_REDIRECTS = 3
 _VAR_RE = re.compile(r"\{\{\s*([^}]*?)\s*\}\}")
 _HOST_OK = re.compile(r"^\{\{(?:Hostname|Host)\}\}(?::\{\{Port\}\}|:\d{1,5})?$")
 
@@ -106,10 +110,21 @@ def _bound_http_path(value, allow_root_url=False):
     return any(value == prefix or value.startswith(prefix + "/") for prefix in placeholders)
 
 
-def destination_check(doc, allow_root_url=False):
+def _host_redirect_problem(key, value):
+    if key == "host-redirects":
+        return "" if isinstance(value, bool) else "host-redirects must be true or false"
+    if key == "redirects":
+        return "" if value is False else "redirects to other hosts are not allowed"
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_HOST_REDIRECTS:
+        return f"max-redirects must be 0 to {MAX_HOST_REDIRECTS}"
+    return ""
+
+
+def destination_check(doc, allow_root_url=False, allow_host_redirects=False):
     """A generated template may talk only to the host nuclei is pointed at. Every request destination must be a
     {{BaseURL}}/{{Hostname}}/{{Host}} placeholder: no absolute URLs, no literal hosts, no redirects, no resolvers.
-    Returns a reason string, or "" when the document is acceptable."""
+    allow_host_redirects admits same-host redirects (host-redirects, max-redirects up to MAX_HOST_REDIRECTS), for the
+    installed templates. Returns a reason string, or "" when the document is acceptable."""
     if not isinstance(doc, dict):
         return "template must be a mapping"
     for proto in PROTOCOL_SECTIONS:
@@ -126,7 +141,13 @@ def destination_check(doc, allow_root_url=False):
     def walk(node, path=""):
         if isinstance(node, dict):
             for k, v in node.items():
-                if str(k).lower() in FORBIDDEN_KEYS:
+                key = str(k).lower()
+                if allow_host_redirects and key in HOST_REDIRECT_KEYS:
+                    r = _host_redirect_problem(key, v)
+                    if r:
+                        return r
+                    continue
+                if key in FORBIDDEN_KEYS:
                     return f"forbidden key {k!r}"
                 r = walk(v, f"{path}.{k}")
                 if r:
@@ -514,6 +535,38 @@ def save_template_file(template_id, yaml_text):
         f.write(yaml_text)
     invalidate_template_index()
     return path
+
+
+def restore_missing_files():
+    """Write back the file of every validated AI template that is missing from GENERATED_DIR, from the copy kept in the database.
+    A container that is recreated (every update does) starts with an empty directory unless it is a volume; without this the
+    templates would have to be regenerated and re-reviewed after each deploy. A template is written back only if its row is still
+    ``valid``, its recorded path is inside GENERATED_DIR, and it passes the static safety gate again. Returns the counts."""
+    from cveFeed.models import GeneratedTemplate
+    generated = os.path.realpath(GENERATED_DIR)
+    restored = skipped = 0
+    for tmpl in GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).exclude(path='').select_related('cve_entry'):
+        if os.path.lexists(tmpl.path):
+            continue
+        stem, ext = os.path.splitext(os.path.basename(tmpl.path))
+        if os.path.dirname(os.path.realpath(tmpl.path)) != generated or ext != '.yaml' or not ID_RE.fullmatch(stem):
+            skipped += 1
+            continue
+        ok, reason = static_check(tmpl.yaml, expected_cve_id=tmpl.cve_entry.cve_id)
+        if not ok:
+            logger.warning('not restoring generated template %s: %s', tmpl.template_id, reason)
+            skipped += 1
+            continue
+        try:
+            save_template_file(stem, tmpl.yaml)
+        except FileExistsError:
+            continue
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning('could not restore generated template %s: %s', tmpl.template_id, exc)
+            skipped += 1
+            continue
+        restored += 1
+    return {'restored': restored, 'skipped': skipped}
 
 
 def approve_reviewed_template(template_pk):

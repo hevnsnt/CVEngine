@@ -1,86 +1,58 @@
 # Changelog
 
-CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, taken in November 2025. The history of reNgine up to that point is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
+cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
 ## Unreleased
 
-Nothing yet.
+### Changed
 
-## v1.0 (2026-10-25)
-
-The first numbered release of CVEngine.
+- **The old reNgine scan engine is retired.** Its scan and subscan tasks, the `/api/action/initiate/subtask/` endpoint, its extra queues, and about 4,000 lines of code that nothing in the current pipeline called are removed, along with the Go tools only it used (httpx, subfinder, chaos, gospider, hakrawler, katana, gau, waybackurls, ffuf, tlsx, gf, unfurl, dalfox, crlfuzz, s3scanner) and the Python tools it cloned at every start (Sublist3r, OneForAll, EyeWitness, CMSeeK, ctfr, GooFuzz, h8mail). The worker image now builds only nuclei and naabu, next to nmap and bbot, so it builds and starts faster.
+- **Every CVE match is validated automatically.** Before, only fire and smoke matches were queued for AI validation and the rest waited for someone to press Validate now. Now a match of any confidence or score is queued by itself, hottest first (fire, smoke, then ice at the lowest priority, using the capacity the hot ones leave), except one the AI ruled out or the distribution patched. Ice stops at five active jobs per project so it cannot crowd out hot findings, and the daily validation caps still apply. `CVENGINE_AUTO_VALIDATE_ALL_MATCHES=0` restores fire and smoke only.
+- **More nuclei templates run.** Installed templates that follow redirects on the same host (`host-redirects`, at most three hops) now pass the read-only policy, about 1,250 more (6,531 of 13,903 in the current community set, up from 5,280), among them the technology detection template, so hosts get fingerprinted again. A template that merely recognizes an interactsh server by its header is no longer taken for an out-of-band check. Redirects to other hosts stay refused, and AI-written templates still follow none.
 
 ### Added
 
-- **Bug bounty status dashboard.** The Overview now opens on what is happening on the targets your engagements imported: identified hosts and how many are live, how many are in scope, out of scope or unclear for each program (out-of-scope hosts are listed), scans running, queued and stalled, potential findings with a Draft report button, CVE matches that need validation with a link that runs Validate now, and a row per program. It reads `/cve/api/bounty/workbench`, uses the counting definitions in `web/cveFeed/counts.py`, and refreshes every 8 seconds while the page is visible.
-- **Threat intelligence for historical CVEs.** An hourly task reads CISA KEV, ENISA EUVD (exploited), FIRST EPSS, Exploit-DB and Metasploit, plus VulnCheck KEV with a key. It reconciles every stored CVE's exploited, exploit and EPSS signals with them, and imports the exploited and exploitable CVEs the cve.now feed never delivered (about 37,000, known exploited first) from their CVE List V5 records with affected version ranges. The CVE detail names which source reported each signal. See [docs/PIPELINE.md](docs/PIPELINE.md).
-- **One Findings list.** The Findings page (formerly Scanner findings) lists CVE matches, scanner findings and hygiene findings together, hottest first, filtered by type, severity and status (actionable by default). Its heat follows the host card. The API and MCP offer the same list (`GET projects/{slug}/findings`, `list_findings`). The CVE matches and Hygiene pages stay for focused work. See [docs/FRONTEND.md](docs/FRONTEND.md).
-- **Weekly log maintenance.** AI activity, AI call and AI usage rows past their retention (30, 90 and 400 days) are archived to a tar.gz on the scan results volume, then deleted. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-- **Stuck-job expiry.** Host assessments and validation jobs that a restarted worker left queued or running are expired every 15 minutes, freeing their slots.
-- **Bug bounty page.** Programs and scope from HackerOne, Bugcrowd, Intigriti and YesWeHack (public data from [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), loaded on request and refreshed hourly), exact scope matching with an "unclear" verdict instead of a guess, a radar of scope changes, your own targets matched against program scope, engagements with a recorded policy acknowledgement, scope import as targets (discovery only if you confirm scanning is allowed), reports drafted from scanner findings with credential masking and pre-submission checks, HackerOne submission under the caller's own account, and a Playbook tab sourced from the platforms' guidance. Only an App Admin can authorize a user (Administration, Users, Manage; audit logged). App Admins always have access. See [docs/BUG-BOUNTY.md](docs/BUG-BOUNTY.md).
-- The input guard no longer strikes the free-text fields of bug bounty reports (only on the report and engagement endpoints).
-- **MailFail email checks.** The hygiene scan now runs the email-security checks of [MailFail](https://github.com/ACK-J/MailFail) by Black Hills Information Security (domain takeover of SPF includes and DMARC report addresses, DMARC report authorization, MTA-STS, TLS reporting, DANE, DNSSEC strength, Microsoft 365 Direct Send, BIMI, ARC, ADSP, MailChannels and record-format checks), credited in the AI activity feed while they run. See [docs/PIPELINE.md](docs/PIPELINE.md).
-- **Accuracy and security hardening.** CVE matching by product rather than vendor (aliases, CPE first, no-bound ranges are unknown, epochs and pre-releases), stale matches closed, one scan's copy of each host, distro backports labelled "patched by distro" from a daily Debian and OSV sync, findings that show template-test hits and dedupe on what and where, per-IP ports with closed ports recorded, an optional naabu full-port stage, a stricter AI template gate validated before it is saved, scannable-host filtering on every stored host list, encrypted secret columns, bbot keys in a private temporary file, lockout counters in shared Redis, one notification per auto-fire run. Details in [docs/PIPELINE.md](docs/PIPELINE.md) and [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-- **CVE intelligence.** A [cve.now](https://cve.now) feed sync, fire, smoke, and ice threat tiers, and matching of CVEs to the host inventory by product and version.
-- **AI.** A model-agnostic layer for Anthropic, OpenAI, OpenRouter, Ollama, and vLLM. It gives a verdict on each CVE match, picks nuclei templates by each host's technologies, and writes and validates a nuclei template when none exists for a CVE.
-- **Auto-fire.** An optional step that tests confirmed fire and smoke matches on their hosts.
-- **Discovery.** bbot for subdomain discovery in standard (default), deep, and passive modes, a daily sweep that queues a deep discovery for each apex domain that has had none in 7 days, a certificate transparency watch, and gowitness screenshots.
-- **Inventory.** One nmap pass per IP (`-O -sV --top-ports 1000`) that fills the host, port, service, product, and version records. A slow background task sweeps all TCP ports of one in-scope IP at a time, oldest sweep first, and investigates new ports; it replaces `CVENGINE_NMAP_FULL`.
-- **Exposure checks.** Read-only checks for Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB servers that accept connections without a login.
-- **Hygiene.** TLS certificate, SPF, DKIM, DMARC, and CAA checks.
-- **Scheduling.** One pipeline per target, one scanner run per host with a re-scan window, three worker types, and a memory-aware queue with a watchdog for heavy jobs.
-- **Scan control.** A first in, first out queue with queue positions, stop for one scan or all running and queued scans, and a re-scan of chosen hosts without a new bbot run.
-- **Search.** Shodan-style host search (`tech:`, `port:`, `ip:`, `cve:`, `sev:`, and more) in the UI, the API, and MCP.
-- **Targets.** Domains, IPs, CIDR blocks, ranges, and URLs, bulk add with `##Organization` and `#Project` headers, and bulk delete.
-- **Multi-tenancy.** Organizations and projects, the roles admin, user, audit, and pentester, and project isolation at the data layer. An **All projects** option in the project switcher (the reserved slug `_all`, also accepted by the list endpoints of the API and MCP) shows one combined, read-only list across every project the user can see, each row tagged with its project.
-- **Access control.** Two-step sign-in with TOTP and recovery codes, a perimeter IP allowlist, an input guard that bans repeat offenders, and an audit log.
-- **Agent interface.** A REST API at `/api/v1/` and an MCP server at `/mcp/`, with API tokens that follow user roles and a remediation workflow.
-- **Updates.** A GitHub update check with administrator approval and a host script that applies the update.
-- **Administration.** First-run wizard, an Administration page where organization admins manage their members and projects, API keys for OSINT services (instance-wide, and per organization or project), and a factory reset.
-- **AI review every three hours.** The AI picks the due triage, validation, discovery, or host assessment for each project, and tunes scanner concurrency within bounds you set.
-- **Faster validation.** A dedicated validation worker checks fire and smoke findings first, **Validate now** runs an AI-planned check on any CVE match, and AI-drafted templates run only after a reviewed positive test.
-- **Host control.** Rescan a single host with a full assessment, archive or pin hosts, and let daily rediscovery bring archived hosts back when they reappear.
-- **Coverage.** Paced deep nuclei runs over the whole inventory each week, and CVE details refresh when the feed updates them.
-- **Operations.** Pause all scanning with one switch, scheduler and worker health, an activity and error log for administrators, AI model usage with cost estimates, and an update script that drains running work before restarting.
-- **User interface.** A new mobile-first interface with a live dashboard, an attack-surface map, a live asset graph, a hosts page, and a command palette.
-- **Mobile account menu.** The bottom bar on phones has an Account tab that opens My account, Administration, AI model usage, Settings, About and Sign out.
-- **Updater `--force`.** `scripts/update.sh --force` skips the drain, stops discovery scans (queued again afterwards) and stops the workers with a short grace. The normal drain now tolerates a busy worker that answers slowly. See [docs/UPDATES.md](docs/UPDATES.md).
-
-### Changed
-
-- **Accepted host names.** Only `DOMAIN_NAME`, loopback and `CVENGINE_ALLOWED_HOSTS` are accepted; a server reached by another name or by IP answers 400 until that name is listed. `manage.py check` warns (`cvengine.W001`) when `DOMAIN_NAME` is unset or a placeholder. See [docs/UPGRADE.md](docs/UPGRADE.md#accepted-host-names).
-- **Pause scope.** Pausing scanning holds work that touches targets or spends AI budget, and lets the CVE feed, notifications, pruning and the update check run. A validation run stops before its next check.
-- **AI budget and triage.** AI-written nuclei checks are limited to one attempt per CVE per week and 10 a day. A CVE feed refresh or a new decision scheme re-reviews a finding without discarding its verdict or validation proof.
-- **Fairness and resilience.** Re-tests serve projects in turn and hottest hosts first. The global host-assessment caps count every project. The background full-port sweep backs off from IPs that keep failing. The three-hour AI review no longer skips a cycle under queue latency.
-- **Archives.** A host a person archived stays archived until restored; rediscovery and scans no longer lift it. A failed rediscovery enqueue puts the archive back.
-- **Errors.** Stored and displayed job errors carry a diagnostic id instead of exception text. Nuclei failures say why, and the template policy reports what it excludes, including the technology detection template. Impossible dates in filters return 400.
-- **Dashboard.** The Attack surface map shows the 100 highest-scoring hosts.
-- Python 3.14, Django 5.2 LTS, PostgreSQL 18, Go 1.27, nmap 7.992, and Ubuntu 26.04 LTS. See [docs/UPGRADE.md](docs/UPGRADE.md) for moving an older install.
-- Database indexes on the tables that grow with every scan, and batched writes in the feed sync and scanner passes.
-- Branding and installer are CVEngine's.
-- `.env` is no longer tracked. Copy `.env.example` to `.env`.
-- **My account.** Two-step sign-in is set up and turned off on My account (QR code, confirmation code and recovery codes in place), so the separate two-step page and its menu item are gone; `/mfa/setup/` and `/mfa/disable/` forward to My account. The page lays out in two independent columns.
-- **About page.** A new About page in the account menu credits FieldCraft Cyber, Bill Swearingen, reNgine and the scanners and libraries CVEngine uses, and links to the GitHub repository.
-- **Scope of tenant domains.** The weekly apex sweep no longer promotes a tenant on a shared provider domain (`acme.jfrog.com`, `acme.atlassian.net`) to the provider's apex (`jfrog.com`, `atlassian.net`) and deep-scans all of it. A curated shared-domain list marks such targets host scoped: bbot runs with `--strict-scope` for them, the sweep skips them, and certificate transparency never queries a bare provider domain. Each target has a scope mode (`auto`, `host`, `parent`) in the Targets page, the API and MCP. On migrate, provider apexes that the sweep created earlier are deleted (with their scans and findings), and a shared domain you added yourself is kept and switched to `host`. See [docs/PIPELINE.md](docs/PIPELINE.md).
+- **JavaScript libraries and technology columns.** The web route check reads jQuery, Bootstrap, AngularJS, React, Vue.js, Lodash, Moment.js, and Underscore.js versions from script names and script banners, and Angular from the page, so old libraries reach CVE matching. Technologies now have `version` and `category` columns. The host page shows an overview, a technology table, per-service script output, and what the web archive remembers.
+- **Deeper service fingerprinting.** nmap runs at version intensity 7 with the banner, SSH host key and algorithms, TLS certificate, HTTP header and title, anonymous FTP, RDP NTLM, SMB OS discovery, and NetBIOS scripts, and keeps the output per port. Search reaches it with `banner:`. Windows build, computer name, and domain from RDP and SMB fill an empty OS guess, and an FTP server that allows anonymous sign-in is a finding with its listing as evidence.
+- **WPScan for WordPress sites.** A host fingerprinted as WordPress is scanned once a week for its version, plugins, themes, config backups, database exports, and author names, and for known vulnerabilities when a wpscan.com API token is set under Settings, API keys. Findings and versions flow into Findings and CVE matching.
+- **Archived URLs as passive evidence.** The Internet Archive's saved URLs show what a host ran in the past, such as PHP or WordPress. Search finds it and labels it as seen in the web archive.
 
 ### Fixed
 
-- **Numbers agree everywhere.** One definition per number (`web/cveFeed/counts.py`) now feeds the dashboard status line, the section pages' chips, the Targets table, the attack-surface map, the graph overview and the agent API. Before, the status line counted host rows (874), the Hosts page distinct hosts (659) and the map only live hosts, capped (163). Now Hosts is distinct hosts per project everywhere, the map header reads "N live of M hosts", a host held by two targets counts once, the Targets table's Exposed column leaves out what the AI ruled out (as the dashboard does), the dashboard's Scanner findings tile counts exactly what the Findings page shows under Scanner, Actionable (open, low or worse), the CVE matches page opens on matches not ruled out (a filter shows the rest), the Scans page counts a scan marked running for over 11 hours as Stalled (as the dashboard does), and a host's Open findings tile counts open findings of low severity or worse with informational detections listed apart. Every dashboard tile says what it counts. `tests/test_counts.py` pins each surface against the others.
-- **Section pages update on their own.** Every page that shows a number or a list re-reads it every 8 seconds while the tab is visible (filter chips, tiles, lists), from the same endpoints. A list reloads quietly when a count moves, unless the reader pressed Load more. Scan counts on the dashboard are read fresh on every poll.
-- **Every host, address and CVE id links to its record.** Hostnames to the host record, IPs to the host that holds them, CVE ids to the match on that host (`/cve/<project>/matches/#<id>`), in lists, the activity feeds, the live ticker, graph node details, the scan pages and the bug bounty page. "Needs validation" is a link: it opens the match and runs Validate now (any other finding opens its own page). `web/static/cve/links.js` holds these rules; `web/tests/test_links.mjs` tests them.
-- **HackerOne sign-in.** The bug bounty credential form asks for the HackerOne username (HackerOne's Hacker API signs in with the username and an API token) and says why HackerOne refused a credential. **Load the catalogue** reports a queued and a running load and redraws the page when it finishes.
+- **CI runs the whole test suite,** not a short list of modules, and the image build no longer waits for it.
+- **Search.** A bare word and `tech:` find a host wherever its software was seen (web server and `X-Powered-By` headers, cookie names, banners, NSE output, route fingerprints, port product and version), not only in the technology list, and `banner:` searches service banners. `php` now finds every host running PHP.
+- **Findings counted wrongly.** `save_vulnerability` returned the created flag of its last tag, CVE or reference lookup instead of the finding's own, so new-finding counts were off.
+- **Test suite.** `tests.test_hard_lockout` calls the current lockout helpers, and the placeholder `tests.test_nmap` is gone with the code it was meant to test.
 
-### Removed
+## v1.0.1 (2026-10-25)
 
-- The reNgine web interface. Old addresses forward to the matching CVEngine page.
-- amass, geckodriver, Selenium, and Firefox. bbot covers subdomain discovery.
-- The OpenAI and LangChain libraries, plotly, and `pycvesearch`.
+A security patch. Update with `make up` or the in-app updater.
+
+- **Security:** two-step sign-in could be skipped at `/admin/login/`. That URL now only forwards to `/login/`, which enforces the second step.
+- **AI-written templates are kept across updates.** They now live on a Docker volume, and a worker restores any validated template whose file is missing.
+- **`scripts/uninstall.sh` removes only this install,** not another reNgine on the same host.
+- **Proxy docs:** `CVENGINE_TRUSTED_PROXIES` should be left at its default or added to, never replaced.
+
+## v1.0 (2026-10-25)
+
+The most advanced external attack surface assessment you can get for free. cvENGINE continuously discovers your internet-facing assets, fingerprints their services, and tells you which of today's CVEs are actually exploitable on them, with evidence.
+
+### Highlights
+
+- **Continuous discovery.** Subdomains, certificates, IPs, and open ports with [bbot](https://github.com/blacklanternsecurity/bbot), scheduled re-discovery, and a change log.
+- **Service and OS fingerprinting.** One host inventory built from [nmap](https://github.com/nmap/nmap), optional [naabu](https://github.com/projectdiscovery/naabu), and bbot.
+- **Fire, smoke, and ice.** Every CVE rated by real-world exploitation from CISA KEV, ENISA EUVD, VulnCheck KEV, EPSS, Exploit-DB, and Metasploit, so hosts are matched against historically exploited CVEs, not just the last two weeks.
+- **Evidence-based validation.** Each finding is reproduced with a read-only check (a vetted [nuclei](https://github.com/projectdiscovery/nuclei) template, nmap, an HTTP probe, or a database banner). The AI triages it and drafts a template when none exists; a person reviews drafts before they run.
+- **One findings view.** CVE matches, scanner findings, and email and DNS hygiene together, hottest first.
+- **Exposure checks.** Unauthenticated Redis, PostgreSQL, Elasticsearch, Memcached, and CouchDB, plus a full email-security review (SPF, DKIM, DMARC, MTA-STS, and more).
+- **Bug bounty workbench.** Public program scope, a vulnerability rating per finding, and report drafts ([BUG-BOUNTY.md](docs/BUG-BOUNTY.md)).
+- **Built for teams and agents.** Organizations and projects with data isolation and roles, a REST API and an MCP server, and Shodan-style host search.
+- **Operations.** A pause-all control, scheduler and worker health, an activity and AI-cost log, two-step sign-in, an IP allowlist, an audit log, and automatic deployment of new releases.
+
+### Platform
+
+Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, Go 1.27, and Ubuntu 26.04 LTS. GPL-3.0. See [docs/](docs/), and [docs/UPGRADE.md](docs/UPGRADE.md) to move an older install.
 
 ### Security
 
-- **Detection gaps found on a live host.** A Netlify site tagged `datocms` matched Craft CMS advisories, and neither PHP2Shell CVE (CVE-2026-109618, CVE-2026-109619) was in the scanner. Name matching now requires whole words (`cms` is not in `datocms`, `php` is not `phpMyAdmin`); an advisory that lists only fixed branches leaves older branches *unknown*, not cleared; the feed gets an hourly coverage task, `sync_cve_now --backfill-days/--tech/--ids`, and retry with backoff; and the host record shows the web server, technologies with versions and categories, hosting, and shared-IP flags. nmap and the full-port sweep no longer scan addresses that belong to a shared platform.
-- Closed a command injection hole and a cross-organization account takeover.
-- Tenant-scoped media, a filter for internal addresses in outbound requests, and shell commands replaced with contained file operations.
-- Hardened the AI features against prompt injection, and added a static safety check for generated templates.
-- Source audit repairs: project write authority and the requester's current authorization are rechecked at legacy API and queued validation boundaries; MFA state is bound to current credentials; probes and TLS checks connect only to the addresses they vetted; PDF reports fetch no external resources; update state moved out of paths the containers can write; MCP requests, batches and responses are bounded, including JSON nesting depth.
-- `/api/listIps/` and `/api/listTargets/` are scoped to the caller's projects on every request; changing your password revokes your API tokens; the HackerOne report route needs the bug bounty permission; discovery refuses a name that resolves to a loopback, link-local or internal address; a probe of a slow host stops after 20 seconds; the sensitive-data scan no longer spends tens of seconds on a hostile response body; `install.sh` and `make certs` / `make username` refuse to run while `.env` still holds the example `change-me` passwords.
+Hardened against prompt injection and server-side request forgery, with tenant-isolated media, encrypted secrets, bounded scan and probe time, and a static safety gate on AI-generated templates.

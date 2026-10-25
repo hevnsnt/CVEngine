@@ -1,6 +1,7 @@
 """MFA views: the two-step login. Enrolling and turning it off live on My account (cveFeed/account_api.py)."""
 import math
 import time
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import login
@@ -109,6 +110,23 @@ class MFALoginView(LoginView):
             'user': user.pk, 'backend': user.backend, 'next': self.get_success_url(), 'ts': time.time(),
             'auth_hash': user.get_session_auth_hash(), 'factor_state': _factor_state(profile)}
         return redirect('mfa_verify')
+
+
+def admin_login_redirect(request):
+    """Django's own /admin/login/ signs a staff user in with the password alone, which would skip the second step MFALoginView
+    enforces at /login/. It is never served: a signed-out visitor is sent to /login/ (keeping a safe ``next``), a signed-in staff
+    user on to the admin, and anyone else to the app, so the redirect cannot loop with the admin's own permission check."""
+    target = request.GET.get('next', '')
+    user = request.user
+    if user.is_authenticated and not (user.is_active and user.is_staff):
+        return redirect(settings.LOGIN_REDIRECT_URL)
+    if url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
+        if user.is_authenticated:
+            return redirect(target)
+        return redirect(reverse('login') + '?' + urlencode({'next': target}))
+    if user.is_authenticated:
+        return redirect(reverse('admin:index'))
+    return redirect(reverse('login'))
 
 
 def verify_view(request):
