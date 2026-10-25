@@ -158,7 +158,7 @@ make admin               # create your admin account: its password is generated 
 
 To choose the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` first, or run `make username`.
 
-Update with `scripts/update.sh`, or deploy every new commit automatically ([updates](docs/UPDATES.md)). Reverse proxies, backups, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
+Update with `scripts/update.sh`, or deploy every new commit automatically ([updates](docs/UPDATES.md)). To serve it on the Internet under a real name with a trusted certificate, see [Hosting online](docs/HOSTING-ONLINE.md). Reverse proxies, backups, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
 
 ## Built for teams and agents
 
