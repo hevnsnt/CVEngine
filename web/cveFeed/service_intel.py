@@ -107,6 +107,11 @@ def anonymous_ftp(port):
 WEAK_RDP_LAYERS = ('Native RDP', 'RDP', 'SSL')  # accepted without CredSSP: the login screen is reachable before anyone authenticates
 
 
+def is_rdp_port(port):
+    """Whether a Port looks like RDP, by number or by service name (nmap's own guess when the port is not 3389)."""
+    return port.number == 3389 or 'wbt' in (port.service_name or '')
+
+
 def rdp_without_nla(port):
     """The security layers a server accepts that do not require Network Level Authentication, from rdp-enum-encryption. ``None``
     when the script did not run or the server insists on CredSSP."""
@@ -128,7 +133,7 @@ def record_service_findings(scan):
         for ip in sub.ip_addresses.all():
             apply_host_facts(ip)
             for port in open_ports(ip):
-                layers = rdp_without_nla(port) if port.number == 3389 or 'wbt' in (port.service_name or '') else None
+                layers = rdp_without_nla(port) if is_rdp_port(port) else None
                 if layers:
                     _vuln, created = save_vulnerability(
                         target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=f'rdp://{ip.address}:{port.number}',

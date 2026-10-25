@@ -1053,6 +1053,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     on_ip = (shared or {}).get('names_on_ip', {})
     countries = (shared or {}).get('countries', {})
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
+    host_key = (sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())
+    rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
     return {'id': sub.id, 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
@@ -1074,7 +1076,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
-                 'http': p.http or None, 'tls': p.tls or None} for p in e['ports']]} for addr, e in ips.items()],
+                 'http': p.http or None, 'tls': p.tls or None,
+                 'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
             # the list above is capped and includes informational detections; these are the real counts, split the way the Scanner
@@ -1083,6 +1086,15 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded)}
+
+
+def _rdp_screenshot_field(sub, shot):
+    """What the host record sends about one port's RDP capture (cveFeed.rdp_shot), or None when there is none."""
+    if not shot:
+        return None
+    return {'url': f'/cve/{sub.target_domain.project.slug}/hosts/{sub.id}/rdp-screenshot/{shot.port}/' if sub.target_domain else None,
+            'logged_in_user': shot.logged_in_user, 'summary': shot.ai_summary, 'error': shot.ai_error,
+            'captured_at': shot.captured_at.isoformat() if shot.captured_at else None}
 
 
 def _host_record(sub, ips, techs, root):
@@ -1138,10 +1150,13 @@ def _shared_for(project, subs):
             names[row['ip_addresses__address']] = row['n']
     geo_ids = {ip.geo_iso_id for sub in subs for ip in sub.ip_addresses.all() if ip.geo_iso_id}
     countries = {c.id: c.name or c.iso for c in CountryISO.objects.filter(id__in=geo_ids)} if geo_ids else {}
-    from cveFeed.models import HostArchive
+    from cveFeed.models import HostArchive, RdpScreenshot
     archive = {(row.project_id, row.host): row.technologies for row in HostArchive.objects.filter(
         project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs})}
-    return {'names_on_ip': names, 'countries': countries, 'archive': archive}
+    rdp_shots = {}
+    for row in RdpScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}):
+        rdp_shots.setdefault((row.project_id, row.host), {})[row.port] = row
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}

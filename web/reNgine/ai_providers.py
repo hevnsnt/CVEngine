@@ -66,15 +66,16 @@ def _record_completion(provider, status, category, started, duration_ms):
 
 
 def tracked_completion(fn):
+	"""Wraps complete() and complete_vision(): same usage accounting either way."""
 	@wraps(fn)
-	def wrapped(self, system, user):
+	def wrapped(self, *args, **kwargs):
 		from datetime import datetime, timezone
 		started = datetime.now(timezone.utc)
 		tick = time.monotonic()
 		self._last_usage, self._last_actual_model = None, ''
 		status, category = 'failed', ''
 		try:
-			answer = fn(self, system, user)
+			answer = fn(self, *args, **kwargs)
 			status = 'succeeded'
 			return answer
 		except Exception as exc:
@@ -235,6 +236,11 @@ class AIProvider:
 	def complete(self, system, user):
 		raise NotImplementedError
 
+	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
+		"""Like complete(), with one image attached to the user turn. Raises AIProviderError when this provider or its
+		configured model cannot take an image (most servers simply reject the request; this is not checked in advance)."""
+		raise AIProviderError(f'{self.name} does not support image input', category='unsupported')
+
 	def _post(self, url, headers, payload):
 		try:
 			resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
@@ -266,6 +272,21 @@ class AIProvider:
 			raise AIProviderError(f'{self.name} model list failed: {e}') from e
 
 
+def _anthropic_text(data):
+	"""The text of an Anthropic response, shared by complete() and complete_vision(). Raises AIProviderError."""
+	if data.get('stop_reason') == 'max_tokens':
+		raise AIProviderError('anthropic response exceeded the output token limit', category='output_truncated',
+			stop_reason='max_tokens')
+	try:
+		answer = ''.join(b.get('text', '') for b in data['content'] if b.get('type') == 'text')
+	except (KeyError, TypeError, AttributeError) as e:
+		raise AIProviderError('unexpected anthropic response shape', category='provider_shape') from e
+	if not answer.strip():
+		raise AIProviderError('anthropic response contained no text', category='empty_response',
+			stop_reason=data.get('stop_reason'))
+	return answer
+
+
 class AnthropicProvider(AIProvider):
 	name = 'anthropic'
 
@@ -284,17 +305,27 @@ class AnthropicProvider(AIProvider):
 			self.base_url or ANTHROPIC_URL, self._headers(),
 			{'model': self.model, 'max_tokens': MAX_TOKENS, 'system': system,
 			 'messages': [{'role': 'user', 'content': user}]})
-		try:
-			if data.get('stop_reason') == 'max_tokens':
-				raise AIProviderError('anthropic response exceeded the output token limit', category='output_truncated',
-					stop_reason='max_tokens')
-			answer = ''.join(b.get('text', '') for b in data['content'] if b.get('type') == 'text')
-			if not answer.strip():
-				raise AIProviderError('anthropic response contained no text', category='empty_response',
-					stop_reason=data.get('stop_reason'))
-			return answer
-		except (KeyError, TypeError, AttributeError) as e:
-			raise AIProviderError('unexpected anthropic response shape', category='provider_shape') from e
+		return _anthropic_text(data)
+
+	@tracked_completion
+	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
+		import base64
+		data = self._post(
+			self.base_url or ANTHROPIC_URL, self._headers(),
+			{'model': self.model, 'max_tokens': MAX_TOKENS, 'system': system,
+			 'messages': [{'role': 'user', 'content': [
+				 {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type,
+											   'data': base64.b64encode(image_bytes).decode()}},
+				 {'type': 'text', 'text': user}]}]})
+		return _anthropic_text(data)
+
+
+def _openai_text(data, name):
+	"""The text of an OpenAI-compatible chat completion, shared by complete() and complete_vision()."""
+	try:
+		return data['choices'][0]['message']['content']
+	except (KeyError, IndexError, TypeError) as e:
+		raise AIProviderError(f'unexpected {name} response shape', category='provider_shape') from e
 
 
 class OpenAIProvider(AIProvider):
@@ -328,10 +359,18 @@ class OpenAIProvider(AIProvider):
 			f'{self._base()}/chat/completions', self._headers(),
 			{'model': self.model, 'messages': [
 				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]})
-		try:
-			return data['choices'][0]['message']['content']
-		except (KeyError, IndexError, TypeError) as e:
-			raise AIProviderError(f'unexpected {self.name} response shape', category='provider_shape') from e
+		return _openai_text(data, self.name)
+
+	@tracked_completion
+	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
+		import base64
+		url = f'data:{media_type};base64,{base64.b64encode(image_bytes).decode()}'
+		data = self._post(
+			f'{self._base()}/chat/completions', self._headers(),
+			{'model': self.model, 'messages': [
+				{'role': 'system', 'content': system},
+				{'role': 'user', 'content': [{'type': 'text', 'text': user}, {'type': 'image_url', 'image_url': {'url': url}}]}]})
+		return _openai_text(data, self.name)
 
 
 class OpenRouterProvider(OpenAIProvider):
@@ -345,6 +384,14 @@ class OpenRouterProvider(OpenAIProvider):
 class VLLMProvider(OpenAIProvider):
 	"""A vLLM server's OpenAI-compatible API, e.g. http://vllm:8000/v1. The key is optional (--api-key)."""
 	name = 'vllm'
+
+
+def _ollama_text(data):
+	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
+	try:
+		return data['message']['content']
+	except (KeyError, TypeError) as e:
+		raise AIProviderError('unexpected ollama response shape', category='provider_shape') from e
 
 
 class OllamaProvider(AIProvider):
@@ -364,10 +411,17 @@ class OllamaProvider(AIProvider):
 			f'{self._base()}/api/chat', {},
 			{'model': self.model, 'stream': False, 'messages': [
 				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]})
-		try:
-			return data['message']['content']
-		except (KeyError, TypeError) as e:
-			raise AIProviderError('unexpected ollama response shape', category='provider_shape') from e
+		return _ollama_text(data)
+
+	@tracked_completion
+	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
+		import base64
+		data = self._post(
+			f'{self._base()}/api/chat', {},
+			{'model': self.model, 'stream': False, 'messages': [
+				{'role': 'system', 'content': system},
+				{'role': 'user', 'content': user, 'images': [base64.b64encode(image_bytes).decode()]}]})
+		return _ollama_text(data)
 
 
 PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider)}

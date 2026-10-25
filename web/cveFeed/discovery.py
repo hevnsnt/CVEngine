@@ -500,7 +500,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
-                force=False, hygiene_host=None, wpscan_runner=None):
+                force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -518,6 +518,20 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                          fallback={'targets': 0})
     if stopped(scan_id):
         return gone
+    from cveFeed import rdp_shot
+    rdp_kwargs = {}
+    if rdp_capturer:
+        rdp_kwargs['capturer'] = rdp_capturer
+    if rdp_reader:
+        rdp_kwargs['reader'] = rdp_reader
+    if retest or force:
+        rdp_kwargs['force'] = True
+    rdp_result = None
+    if (rdp_capturer or rdp_shot.available()) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
+        rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
+                            fallback={'attempted': 0})
+        if stopped(scan_id):
+            return gone
     db_result = _stage(scan, 'Database exposure check', 'db_exposure_scan',
                        lambda: db_exposure.run_db_exposure_checks(scan_id, checks=db_exposure_checks),
                        fallback={'checked': 0, 'exposed': 0})
@@ -600,6 +614,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['hygiene'] = hygiene_result
     if wpscan_result is not None:
         result['wpscan'] = wpscan_result
+    if rdp_result is not None:
+        result['rdp_screenshot'] = rdp_result
     _announce(scan, result, summary=hygiene)
     return result
 

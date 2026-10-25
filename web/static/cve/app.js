@@ -644,6 +644,23 @@ const technologyTable = (h) => {
   }
   return box;
 };
+// A port's RDP login-screen capture (cveFeed.rdp_shot): the image, exactly as read by the AI (never guessed), and its summary.
+// Only ever present when nmap already confirmed the server accepts a connection without Network Level Authentication.
+const rdpShotCard = (shot) => {
+  const box = el("div", "rdp-shot");
+  box.append(el("div", "note", "RDP login screen (captured with no credentials sent)"));
+  if (shot.url) {
+    const img = el("img", "shot rdp-shot-img", null, { src: shot.url, alt: "RDP login screen capture", loading: "lazy" });
+    img.onerror = () => img.remove();
+    box.append(img);
+  }
+  if (shot.logged_in_user) box.append(badge(`Signed in: ${shot.logged_in_user}`, "smoke"));
+  else if (!shot.error) box.append(badge("No one signed in", "success"));
+  if (shot.summary) box.append(el("p", "note", shot.summary));
+  if (shot.error) box.append(el("p", "note", `Could not be read: ${shot.error}`));
+  if (shot.captured_at) box.append(el("p", "note", `Captured ${shortDate(shot.captured_at)}`));
+  return box;
+};
 const excerpt = (label, text) => {
   const box = el("div");
   box.append(el("div", "note", label), el("pre", "banner", text));
@@ -1828,6 +1845,7 @@ const pages = {
           });
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
+          if (p.rdp_screenshot) card.append(rdpShotCard(p.rdp_screenshot));
           pane.append(card);
         });
       });

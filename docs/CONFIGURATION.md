@@ -53,6 +53,9 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_WPSCAN_MAX_SITES`, `CVENGINE_WPSCAN_TIMEOUT`, `CVENGINE_TTL_WPSCAN` | `10`, `900`, `168` | WordPress sites WPScan checks per scan, seconds allowed per site, and hours a site's result stays fresh. The token is an API key, not a variable: see below. |
 | `CVENGINE_ARCHIVE_LOOKUP` | `1` | Set to `0` to stop asking the Internet Archive which URLs it saved for a target (passive, nothing is sent to the target). |
 | `CVENGINE_TTL_ARCHIVE_URLS` | `168` | Hours before a target's archived URLs are read again. |
+| `CVENGINE_RDP_SHOT` | `1` | Set to `0` to turn off RDP login-screen screenshots entirely. |
+| `CVENGINE_TTL_RDP_SHOT` | `24` | Hours before a host's RDP screenshot is captured again. |
+| `CVENGINE_RDP_SHOT_MAX_HOSTS` | `10` | RDP servers screenshotted per scan; a live RDP session plus an AI call costs more than most checks. |
 
 ## AI limits
 
@@ -130,6 +133,8 @@ The AI key, API vault, update token, webhook URLs, and Telegram bot token are en
 | `CVENGINE_GUARD_STRIKES` | `3` | Points within 15 minutes before the input guard disables the account, revokes its tokens, and blocks a public client address for 24 hours. A command injection attempt is worth 3. Superusers are only logged. |
 
 ## Settings in the app
+
+**RDP screenshots.** When nmap shows an RDP server accepts a connection without Network Level Authentication (the same finding as "RDP does not require Network Level Authentication"), cvENGINE captures its pre-authentication login screen with no credentials sent, stores the image, and asks the configured AI model whether it shows an account already signed in and what it is called. A server that requires NLA is never attempted: there is nothing to see before authentication, and nothing is guessed. The username, when the screen shows one, is not a secret; anyone who can reach the port already sees it. Needs the configured AI model to support image input; without one, the screenshot is still taken and stored, just not read.
 
 **WPScan.** When a scan fingerprints a host as WordPress, cvENGINE runs [WPScan](https://wpscan.com/) on it once a week: the version, plugins, themes, config backups, database exports, and the first author names, with no password guessing. Its vulnerability data comes from the wpscan.com API. Add the token under **Settings, API keys, WPScan** (per organization or project; a project's own token wins). The free plan allows 25 requests a day, and each site costs one request for the core plus one per plugin and theme, so a busy install needs a paid plan; when the token runs out the remaining sites wait for the next scan. Without a token WPScan still reports versions and exposures. Findings appear in Findings with the source `wpscan`, CVE ids included. The token is given to WPScan in its environment, never on a command line or in a log. WPScan's licence is free for testing your own systems and for penetration testing, and a commercial licence is needed to use it in a managed or hosted service, so check it before offering cvENGINE to others as a service.
 
