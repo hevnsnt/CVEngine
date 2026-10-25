@@ -52,7 +52,8 @@ if (SWITCH_ORGS.length && currentProject && currentProject.value && currentProje
 $$("select.org-switch").forEach((sel) => {
   sel.addEventListener("change", () => {
     const slug = projectForOrg(sel.value);
-    if (slug) window.location.href = projectHref(slug, sel.dataset.section);
+    // Only a project slug may become part of the address (the same rule as the project switcher below): the list comes from page data.
+    if (slug && /^[-\w]+$/.test(slug)) window.location.href = projectHref(slug, sel.dataset.section);
   });
 });
 
