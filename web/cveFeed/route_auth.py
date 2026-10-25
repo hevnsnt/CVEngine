@@ -260,6 +260,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
     context = None
     if parsed.scheme == 'https':
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE  # scanner must inspect broken-certificate sites too
     connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context)

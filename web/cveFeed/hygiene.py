@@ -278,6 +278,7 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
             return None
     else:
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: the legacy check below is the only place old protocols are spoken
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
@@ -307,6 +308,7 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
 def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
     """Empty string if the system trust store accepts the certificate for this host, else the reason."""
     ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host):
             return ''
