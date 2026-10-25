@@ -1,5 +1,7 @@
 """Bounded drilldown for the asset graph: project, registrable domain, then hosts."""
-from django.db.models import Count, Q
+from django.db.models import Count, Q  # noqa: F401
+
+from cveFeed.counts import LIVE_HOST_Q
 
 from targetApp.target_types import apex_domain
 
@@ -20,8 +22,13 @@ def _domains(project_slug=None):
 
 
 def groups(project_slug=None):
-    """Aggregate all visible targets and current inventory rows in SQL; never truncate the overview."""
+    """Aggregate all visible targets and current inventory rows; never truncate the overview.
+
+    A host is counted once however many targets of its group (or project) hold it, exactly as the Hosts page and the dashboard
+    count it: the same name in two targets of one project is one host (see ``cveFeed.counts``). Per-target numbers are summed
+    nowhere; every group and project total is a count of distinct names."""
     from cveFeed.correlation import latest_scan_q
+    from cveFeed.counts import RULED_OUT
     from startScan.models import Subdomain
 
     domains = _domains(project_slug)
@@ -29,41 +36,48 @@ def groups(project_slug=None):
         return {'projects': [], 'targets': 0, 'hosts': 0}
     ids = [d.pk for d in domains]
     current = Subdomain.objects.filter(target_domain_id__in=ids).filter(latest_scan_q())
-    counts = {row['target_domain_id']: row for row in current.values('target_domain_id').annotate(
-        hosts=Count('name', distinct=True),
-        resolved=Count('name', filter=Q(ip_addresses__isnull=False), distinct=True))}
-    assessed = {row['target_domain_id']: row['count'] for row in current.filter(
+
+    def names_by_domain(qs, field='name'):
+        found = {}
+        for domain_id, name in qs.values_list('target_domain_id', field).distinct():
+            found.setdefault(domain_id, set()).add(name)
+        return found
+
+    hosts_of = names_by_domain(current)
+    live_of = names_by_domain(current.filter(LIVE_HOST_Q))
+    assessed_of = names_by_domain(current.filter(
         scan_history__scan_status=2,
         scan_history__scanactivity__name__in=('nuclei_scan', 'nuclei_targeted_scan'),
-        scan_history__scanactivity__status=2).values('target_domain_id').annotate(count=Count('name', distinct=True))}
+        scan_history__scanactivity__status=2))
     from startScan.models import Vulnerability
     from cveFeed.models import CVEMatch
-    findings = {row['subdomain__target_domain_id']: row['count'] for row in Vulnerability.objects.filter(
-        subdomain_id__in=current.values('pk'), open_status=True, severity__gte=1
-    ).values('subdomain__target_domain_id').annotate(count=Count('subdomain__name', distinct=True))}
-    candidates = {row['subdomain__target_domain_id']: row['count'] for row in CVEMatch.objects.filter(
-        subdomain_id__in=current.values('pk')).exclude(ai_verdict='not_affected').values(
-        'subdomain__target_domain_id').annotate(count=Count('subdomain__name', distinct=True))}
+    finding_pks = Vulnerability.objects.filter(subdomain_id__in=current.values('pk'), open_status=True, severity__gte=1).values('subdomain')
+    findings_of = names_by_domain(current.filter(pk__in=finding_pks))
+    match_pks = CVEMatch.objects.filter(subdomain_id__in=current.values('pk')).exclude(ai_verdict=RULED_OUT).values('subdomain')
+    candidates_of = names_by_domain(current.filter(pk__in=match_pks))
+
     projects = {}
     for domain in domains:
         project = domain.project
         item = projects.setdefault(project.pk, {'id': project.pk, 'slug': project.slug, 'name': project.name,
-                                                'targets': 0, 'hosts': 0, 'roots': {}})
+                                                'targets': 0, 'hosts': 0, 'roots': {}, '_names': set()})
         root = root_for(domain)
         group = item['roots'].setdefault(root, {'root': root, 'target_ids': [], 'targets': 0,
-                                                'hosts': 0, 'resolved': 0, 'assessed': 0,
-                                                'findings': 0, 'cve_candidates': 0})
-        summary = dict(counts.get(domain.pk, {}))
-        summary.update(assessed=assessed.get(domain.pk, 0), findings=findings.get(domain.pk, 0),
-                       cve_candidates=candidates.get(domain.pk, 0))
+                                                'hosts': 0, 'live': 0, 'assessed': 0, 'findings': 0, 'cve_candidates': 0,
+                                                '_sets': {k: set() for k in ('hosts', 'live', 'assessed', 'findings', 'cve_candidates')}})
         item['targets'] += 1
         group['targets'] += 1
         group['target_ids'].append(domain.pk)
-        for name in ('hosts', 'resolved', 'assessed', 'findings', 'cve_candidates'):
-            group[name] += summary.get(name, 0)
-        item['hosts'] += summary.get('hosts', 0)
+        for key, source in (('hosts', hosts_of), ('live', live_of), ('assessed', assessed_of),
+                            ('findings', findings_of), ('cve_candidates', candidates_of)):
+            group['_sets'][key] |= source.get(domain.pk, set())
+        item['_names'] |= hosts_of.get(domain.pk, set())
     result = []
     for project in projects.values():
+        for group in project['roots'].values():
+            for key, names in group.pop('_sets').items():
+                group[key] = len(names)
+        project['hosts'] = len(project.pop('_names'))
         project['roots'] = sorted(project['roots'].values(), key=lambda row: row['root'])
         result.append(project)
     result.sort(key=lambda row: row['name'].lower())

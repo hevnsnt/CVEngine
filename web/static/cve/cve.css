@@ -212,6 +212,11 @@ form.inline .field{margin:0;flex:1 1 220px}
 .badge.medium,.badge.smoke,.tier.smoke{background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 0 0 0 1px #e8d6b0}
 .badge.running{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
 .badge.running::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--brand);animation:blink 1s infinite}
+/* "Needs validation" is a link: it opens the match and runs Validate now */
+a.badge.needs-validation{text-decoration:none;cursor:pointer}
+a.badge.needs-validation:hover,a.badge.needs-validation:focus-visible{text-decoration:underline;outline:none;box-shadow:inset 0 0 0 1px currentColor}
+.host-row.sel a.badge.needs-validation{color:inherit}
+a.cve-link{font-family:var(--mono)}
 .badge.success,.badge.fixed{background:var(--ok-bg);color:var(--ok-ink)}
 .badge.low,.badge.ice,.tier.ice{background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 0 0 0 1px #d3d9e1}
 .badge.queued,.badge.info,.badge.aborted{background:var(--sunk);color:var(--muted)}

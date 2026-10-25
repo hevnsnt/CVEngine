@@ -715,10 +715,17 @@ export async function showNodeDetails(box, data) {
   const list = document.createElement("dl");
   list.className = "node-rows";
   detail.rows.forEach((r) => {
-    list.append(
-      Object.assign(document.createElement("dt"), { textContent: r.k }),
-      Object.assign(document.createElement("dd"), { textContent: String(r.v) }),
-    );
+    const dd = document.createElement("dd");
+    if (Array.isArray(r.links) && r.links.length) {
+      // each item names a record (a host, an address, a match): it links there when it has an address
+      r.links.forEach((item, i) => {
+        if (i) dd.append(document.createTextNode(", "));
+        if (item.href && item.href.startsWith("/cve/")) {
+          dd.append(Object.assign(document.createElement("a"), { className: "host-link", href: item.href, textContent: item.text }));
+        } else dd.append(document.createTextNode(item.text));
+      });
+    } else dd.textContent = String(r.v);
+    list.append(Object.assign(document.createElement("dt"), { textContent: r.k }), dd);
   });
   if (detail.heat) {
     head.append(
@@ -734,7 +741,7 @@ export async function showNodeDetails(box, data) {
       Object.assign(document.createElement("a"), {
         className: "btn ghost sm",
         href: detail.link,
-        textContent: "Open the host page",
+        textContent: detail.link_label || "Open the host page",
         style: "display:inline-flex;margin-top:10px;text-decoration:none",
       }),
     );

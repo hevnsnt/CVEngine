@@ -2,6 +2,14 @@
 // policy acknowledgement, and reports drafted from scanner findings, checked, and tracked. Every value from the server is shown with
 // textContent; every link has to be https. The server decides who may use this page and what each action may do.
 import { ask, api, badge, button, dialog, el, field, selectOf, shortDate, table, tabs, text, toast } from "/staticfiles/cve/ui.js";
+import { hostAnchor } from "/staticfiles/cve/links.js";
+
+// a host of this project, named in a line of text, links to its record
+const hostLine = (name, rest) => {
+  const p = el("p", "note");
+  p.append(project ? hostAnchor(project, name) : name, rest);
+  return p;
+};
 
 const API = "/cve/api/bounty";
 const root = document.getElementById("view");
@@ -230,7 +238,7 @@ async function matchesTab(panel) {
   if (!r.results.length) { panel.append(para("No program names your targets. Importing a program's scope is the other way round: see Engagements.", "msg busy")); return; }
   panel.append(table([
     { label: "Program", cls: "full", render: (m) => { const d = el("div", "row-card"); d.append(el("span", "cve-id", m.program.name), el("span", "note", `${PLATFORMS[m.program.platform]} · ${money(m.program)}`)); return d; } },
-    { label: "Your targets", cls: "full", render: (m) => { const d = el("div", "row-card"); m.targets.slice(0, 6).forEach((t) => d.append(row(scopeBadge(t.state), para(`${t.target}: ${t.reason}`)))); if (m.count > 6) d.append(para(`and ${m.count - 6} more`)); return d; } },
+    { label: "Your targets", cls: "full", render: (m) => { const d = el("div", "row-card"); m.targets.slice(0, 6).forEach((t) => d.append(row(scopeBadge(t.state), hostLine(t.target, `: ${t.reason}`)))); if (m.count > 6) d.append(para(`and ${m.count - 6} more`)); return d; } },
     { label: "", render: (m) => button("Open", async () => openProgram(m.program.id), "btn ghost sm") }], r.results));
 }
 
@@ -342,7 +350,7 @@ async function newReportDialog(engagement, mode) {
       list.textContent = "";
       if (!r.count) { list.append(para("No findings match. Scanner findings of severity low and up appear here.", "msg busy")); return; }
       list.append(table([
-        { label: "Finding", cls: "full", render: (f) => { const d = el("div", "row-card"); d.append(el("span", "cve-id", f.name), el("span", "note", `${f.host || ""} ${f.url || ""}`.trim().slice(0, 160))); return d; } },
+        { label: "Finding", cls: "full", render: (f) => { const d = el("div", "row-card"); const where = el("span", "note"); if (f.host) where.append(project ? hostAnchor(project, f.host) : f.host); where.append(` ${f.url || ""}`.slice(0, 160)); d.append(el("span", "cve-id", f.name), where); return d; } },
         { label: "Severity", render: (f) => badge(f.severity, f.severity) }, { label: "Drafts", render: (f) => (f.reports.length ? `#${f.reports.join(", #")}` : "") },
         { label: "", render: (f) => button("Draft", async () => create(f.id), "btn ghost sm") }], r.results));
     }

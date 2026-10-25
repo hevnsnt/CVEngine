@@ -43,7 +43,7 @@ export function mountOverview(container, search) {
         const stats = make("span", "graph-root-stats");
         summary.append(make("span", "graph-node-kind", "ROOT DOMAIN"));
         stats.append(make("strong", "", tally(group.hosts, "host")));
-        stats.append(make("span", "", `${group.resolved} resolved`));
+        stats.append(make("span", "", `${group.live} live`));
         stats.append(make("span", "", `${group.assessed} assessed`));
         if (group.findings || group.cve_candidates)
           stats.append(make("span", "graph-attention", `${group.findings} finding hosts · ${group.cve_candidates} CVE candidate hosts`));

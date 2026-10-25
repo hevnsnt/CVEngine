@@ -81,7 +81,8 @@ class StatsAndQueueTests(TestCase):
 			with CaptureQueriesContext(connection) as ctx:
 				stats = views.stats_payload()
 		self.assertEqual(stats['exposed_hosts'], 2)
-		self.assertEqual(len([q for q in ctx if 'DISTINCT' not in q['sql'] and 'COUNT' in q['sql'] and 'cvematch' in q['sql'].lower()
+		# one query reads matches and findings together (never one per host or a join that multiplies rows); it counts hosts by name
+		self.assertEqual(len([q for q in ctx if 'COUNT' in q['sql'] and 'cvematch' in q['sql'].lower()
 			and 'vulnerability' in q['sql'].lower()]), 1)
 
 	def test_queue_position_is_one_count_not_a_list_of_every_queued_scan(self):
