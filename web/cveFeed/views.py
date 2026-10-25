@@ -230,7 +230,7 @@ SECTIONS = {
     'hosts': 'Hosts',
     'changes': 'Changes',
     'activity': 'Activity',
-    'vulns': 'Scanner findings',
+    'vulns': 'Findings',
     'matches': 'CVE matches',
     'hygiene': 'Hygiene',
     'keys': 'API keys',

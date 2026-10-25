@@ -38,7 +38,8 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | routes | `GET projects/{slug}/routes` | `list_routes` |
 | changes | `GET projects/{slug}/changes?since=7d` | `list_changes` |
 | activity | `GET projects/{slug}/activity` | `list_activity` |
-| findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
+| all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=` | `list_findings` |
+| scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
 | triage | `GET projects/{slug}/triage`, `POST .../findings/{kind}/{id}/retriage` | `list_triage`, `retriage_finding` |
 | hygiene | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |

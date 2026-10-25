@@ -1859,6 +1859,132 @@ def list_matches(ctx, slug, params):
     return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
+# --- the unified Findings list: CVE matches, scanner findings and hygiene findings as one population ------------------
+
+FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # facet -> the finding-detail kind
+HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
+MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
+
+
+def _finding_sources(project, params):
+    """The querysets the facets allow, keyed by type, each annotated with ``heat_rank`` (3 fire, 2 smoke, 1 ice, 0 none: the
+    host card's rules, threat.match_temperature and SEVERITY_HEAT) and ``sev`` (0 info .. 4 critical; a CVE by its CVSS band,
+    an unscored one as low), and filtered by heat, severity, status and host.
+
+    "Actionable" (the default) is what heats a host on its card: a CVE match the AI did not rule out, an open scanner finding
+    above info, an open hygiene finding above info. ``status=all`` adds the rest (informational, closed, ruled out)."""
+    from django.db.models import Case, F, IntegerField, Value, When
+
+    from cveFeed.models import HygieneFinding
+    from cveFeed.threat import CRITICAL_CVSS, HIGH_CVSS, match_heat_rank_expr, severity_heat_rank_expr
+    from startScan.models import Vulnerability
+    wanted = params.get('type') or 'all'
+    if wanted != 'all' and wanted not in FINDING_TYPES:
+        raise ApiError(400, f'type must be all or one of {", ".join(FINDING_TYPES)}')
+    status = params.get('status') or 'actionable'
+    if status not in ('actionable', 'all'):
+        raise ApiError(400, 'status must be actionable or all')
+    heat, severity = params.get('heat') or 'all', params.get('severity') or 'all'
+    inverse = {v: k for k, v in SEVERITY_NAMES.items() if k >= 0}
+    if heat != 'all' and heat not in HEAT_FACETS:
+        raise ApiError(400, 'heat must be all, fire, smoke or ice')
+    if severity != 'all' and severity not in inverse:
+        raise ApiError(400, 'severity must be all, critical, high, medium, low or info')
+    everywhere = _is_all(project)
+    cve_band = Case(When(cve_entry__cvss__gte=CRITICAL_CVSS, then=Value(4)), When(cve_entry__cvss__gte=HIGH_CVSS, then=Value(3)),
+                    When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
+    sources = {}
+    if wanted in ('all', 'cve'):
+        qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
+        if status == 'actionable':
+            qs = qs.exclude(ai_verdict='not_affected')
+        if params.get('host'):
+            qs = qs.filter(subdomain__name__icontains=params['host'])
+        sources['cve'] = qs
+    if wanted in ('all', 'scanner'):
+        qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
+            .select_related('subdomain', 'triage__verdict', *(['target_domain__project'] if everywhere else [])) \
+            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'))
+        if status == 'actionable':
+            qs = qs.filter(open_status=True, severity__gte=1)
+        if params.get('host'):
+            qs = qs.filter(subdomain__name__icontains=params['host'])
+        sources['scanner'] = qs
+    if wanted in ('all', 'hygiene'):
+        qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project') \
+            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict') \
+            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'))
+        if status == 'actionable':
+            qs = qs.filter(status='open', severity__gte=1)
+        if params.get('host'):
+            qs = qs.filter(host__icontains=params['host'])
+        sources['hygiene'] = qs
+    for key, qs in sources.items():
+        if heat != 'all':
+            qs = qs.filter(heat_rank=HEAT_FACETS[heat])
+        if severity != 'all':
+            qs = qs.filter(sev=inverse[severity])
+        sources[key] = qs.order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
+    return sources
+
+
+def _finding_row(kind, obj):
+    """One row of the unified list: enough for the list card and the badges; the detail comes from finding_detail."""
+    from cveFeed.threat import HEAT_RANK
+    heat = {rank: name for name, rank in HEAT_RANK.items()}.get(obj.heat_rank, '')
+    if kind == 'cve':
+        cve, sub = obj.cve_entry, obj.subdomain
+        title, host = cve.cve_id, sub.name if sub else None
+        note = ' '.join(filter(None, [obj.matched_product, obj.matched_version])) or ''
+        status = 'ruled out' if obj.ai_verdict == 'not_affected' else obj.remediation_status
+        extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160)}
+    elif kind == 'scanner':
+        title, host, note = obj.name, obj.subdomain.name if obj.subdomain else None, obj.source or ''
+        status, extra = 'open' if obj.open_status else 'closed', {}
+    else:
+        title, host, note, status, extra = obj.title, obj.host, obj.check_name, obj.status, {}
+    return {'type': kind, 'kind': FINDING_TYPES[kind], 'id': obj.id, 'title': title, 'host': host, 'note': note,
+            'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
+            'detected': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
+
+
+def _finding_project(kind, obj):
+    return {'cve': lambda o: o.subdomain.target_domain.project, 'scanner': lambda o: o.target_domain.project,
+            'hygiene': lambda o: o.domain.project}[kind](obj)
+
+
+def list_findings(ctx, slug, params):
+    """Every finding of the project in one list, hottest first: CVE matches, scanner findings and hygiene findings. Facets:
+    type (all|cve|scanner|hygiene), heat (all|fire|smoke|ice), severity (all|critical|high|medium|low|info), status
+    (actionable, the default, or all) and host. ``counts`` holds the total of each type under the same facets; the list itself
+    pages through at most MAX_FINDINGS rows (``truncated`` says when there are more)."""
+    project, _ = get_project(ctx, slug)
+    try:
+        page = max(1, int(params.get('page', 1)))
+        size = min(PAGE_SIZE_MAX, max(1, int(params.get('page_size', PAGE_SIZE_DEFAULT))))
+    except (TypeError, ValueError):
+        raise ApiError(400, 'page and page_size must be integers')
+    sources = _finding_sources(project, params)
+    counts = {key: qs.count() for key, qs in sources.items()}
+    total = sum(counts.values())
+    start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
+    merged = []
+    for key, qs in sources.items():  # the top ``stop`` of each source holds the top ``stop`` of the merged order
+        merged += [(key, obj) for obj in (qs[:stop] if stop > start else [])]
+    epoch = timezone.now().replace(year=1970)
+    merged.sort(key=lambda pair: (pair[1].heat_rank, pair[1].sev, pair[1].when or epoch, pair[1].id), reverse=True)
+    everywhere = _is_all(project)
+    results = []
+    for key, obj in merged[start:stop]:
+        row = _finding_row(key, obj)
+        if everywhere:
+            owner = _finding_project(key, obj)
+            row['project'], row['project_name'] = (owner.slug, owner.name) if owner else (None, None)
+        results.append(row)
+    return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page,
+            'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
+
+
 def update_match(ctx, slug, match_id, status, note=''):
     from cveFeed.models import CVEMatch
     project, _ = get_project(ctx, slug, write=True)

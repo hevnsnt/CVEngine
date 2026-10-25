@@ -24,7 +24,7 @@ Static files are content-versioned (`{% asset %}` and an import map) and nginx s
 | `/cve/<project>/hosts/` | Inventory sorted by score, one row per hostname, with the reasons for the score, notable web routes and their auth state, sensitive-data and zombie badges, recent changes, and a screenshot comparison after a visible change |
 | `/cve/_all/<section>/` | **All projects**: targets, scans, hosts, changes, activity, vulns, matches, and hygiene across every project you can see, read-only |
 | `/cve/<project>/changes/` | What changed: hosts, ports, versions, technologies, certificates, auth state, and screenshots |
-| `/cve/<project>/vulns/` | Findings as a list with a detail pane, filtered by severity and AI classification. The default view hides info-level detections. |
+| `/cve/<project>/vulns/` | **Findings**: CVE matches, scanner findings and hygiene findings in one list, hottest first, with a detail pane. Filter by type, severity and status. Actionable, the default, is what heats a host on its card: CVE matches the AI has not ruled out, and open scanner and hygiene findings above info. Everything adds informational, closed and ruled-out ones. The header counts each type and links to its own page. `?type=`, `?severity=` and `?status=` preselect the filters. |
 | `/cve/<project>/matches/` | CVE-on-host matches as a list with a detail pane, with remediation status set in the pane |
 | `/cve/<project>/hygiene/` | TLS, SPF, DKIM, DMARC, and CAA checks |
 | `/cve/<project>/activity/` | The full AI activity log, with a kind filter |
