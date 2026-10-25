@@ -45,7 +45,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_DEEP_SWEEP_MAX` | `50` | Apex domains the daily sweep queues for deep discovery. |
 | `CVENGINE_FULLSCAN` | `1` | `0` turns off the background full port scan. |
 | `CVENGINE_FULLSCAN_INTERVAL_MIN`, `_BATCH`, `_INVESTIGATE_MAX` | `10`, `1`, `50` | Minutes between sweeps (1 to 1440, read when the schedule is created), IPs per sweep (1 to 20), and new ports fingerprinted per sweep (1 to 1000). |
-| `CVENGINE_NAABU` | `0` | `1` runs a naabu full-port discovery before nmap. |
+| `CVENGINE_NAABU` | `1` | `0` turns off the naabu full-port discovery that runs ahead of nmap by default (see [Pipeline](PIPELINE.md)). |
 | `CVENGINE_NAABU_BIN`, `CVENGINE_NAABU_RATE` | `naabu`, `1000` | The binary and packets per second (100 to 5000). |
 | `CVENGINE_HYGIENE_RDAP` | `1` | `0` skips the registry lookups that check whether SPF includes and DMARC report domains are registered. |
 | `CVENGINE_SHOT_THRESHOLD` | `12` | Bits (of 64) by which screenshot hashes must differ to count as a changed front page. |

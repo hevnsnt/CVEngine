@@ -40,6 +40,16 @@ class PureTests(unittest.TestCase):
 		build = naabu_scan.flags_for({'a': list(range(1, 60000, 2))}, nmap_scan.FAST_FLAGS)
 		self.assertEqual(build(['a']), nmap_scan.FAST_FLAGS)
 
+	def test_enabled_by_default_and_explicit_zero_turns_it_off(self):
+		with mock.patch.dict('os.environ', {}, clear=False):
+			import os
+			os.environ.pop('CVENGINE_NAABU', None)
+			self.assertTrue(naabu_scan.enabled())
+		with mock.patch.dict('os.environ', {'CVENGINE_NAABU': '0'}):
+			self.assertFalse(naabu_scan.enabled())
+		with mock.patch.dict('os.environ', {'CVENGINE_NAABU': 'false'}):
+			self.assertFalse(naabu_scan.enabled())
+
 	def test_the_binary_is_found_or_absent(self):
 		with mock.patch.dict('os.environ', {'CVENGINE_NAABU': '1', 'CVENGINE_NAABU_BIN': 'definitely-not-installed-naabu'}):
 			self.assertIsNone(naabu_scan.naabu_path())

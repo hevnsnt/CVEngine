@@ -33,6 +33,18 @@ NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-hea
                'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat', 'mysql-info', 'ms-sql-info',
                'ms-sql-ntlm-info', 'mongodb-info', 'redis-info', 'memcached-info', 'couchdb-stats')
 NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
+# nmap's own documentation says a version scan "automatically executes the scripts in the version category" (rpcinfo,
+# hnap-info, vmware-version, skypev2-version, and more) whenever -sV runs, regardless of --script; these "cannot be
+# selected explicitly", so there is no flag that turns them off while keeping -sV. Their output is hidden from the
+# console but still written to -oX, which is exactly what this module parses. None of them have been reviewed the way
+# NSE_SCRIPTS has, so persist_inventory drops anything -sV smuggled in before it is ever stored, searched or shown.
+NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS)
+
+
+def _reviewed_scripts(scripts):
+    """``scripts`` with every id outside NSE_SCRIPT_SET dropped. See the note above NSE_SCRIPT_SET for why -sV can hand
+    us scripts nobody asked for and nobody has reviewed."""
+    return {sid: text for sid, text in (scripts or {}).items() if sid in NSE_SCRIPT_SET}
 FAST_FLAGS = ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
               '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', *NSE_FLAGS]
 FULL_PORT_FLAGS = ['-p-', '--open', '-T4', '-Pn']
@@ -193,9 +205,10 @@ def persist_inventory(inventory, source='nmap'):
             ip_obj.last_seen = now
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
             hosts_with_os += 1
-        if host.get('hostscripts'):
+        host_scripts = _reviewed_scripts(host.get('hostscripts'))
+        if host_scripts:
             # smb-os-discovery and nbstat describe the host, not one port
-            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'scripts': host['hostscripts']}
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'scripts': host_scripts}
             ip_obj.save(update_fields=['fingerprint'])
         for rec in host.get('ports', []):
             if not rec.get('number'):
@@ -217,9 +230,10 @@ def persist_inventory(inventory, source='nmap'):
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
                           'method': rec.get('method', '')}
-            if rec.get('scripts'):
-                port.extra['scripts'] = rec['scripts']  # this run's NSE output; a run that had none leaves the last in place
-                port.extra['script_text'] = '\n'.join(rec['scripts'].values())  # flat text for search, without the script ids
+            kept_scripts = _reviewed_scripts(rec.get('scripts'))
+            if kept_scripts:
+                port.extra['scripts'] = kept_scripts  # this run's reviewed NSE output; a run with none kept leaves the last in place
+                port.extra['script_text'] = '\n'.join(kept_scripts.values())  # flat text for search, without the script ids
             if rec.get('banner'):
                 port.banner = rec['banner']
             port.distro, port.distro_release = info['distro'], info['release']

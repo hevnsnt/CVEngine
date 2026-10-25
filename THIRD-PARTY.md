@@ -10,7 +10,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [nuclei](https://github.com/projectdiscovery/nuclei) | MIT | Vulnerability scanning and CVE tests |
 | [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) | MIT | The community template library |
 | [nmap](https://github.com/nmap/nmap) | [Nmap Public Source License](https://nmap.org/npsl/) | Service and OS fingerprinting |
-| [naabu](https://github.com/projectdiscovery/naabu) | MIT | Optional full-port discovery |
+| [naabu](https://github.com/projectdiscovery/naabu) | MIT | Full-port discovery ahead of nmap |
 | [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Screenshots in deep discovery |
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
 | [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial licence is needed for managed or hosted use) | WordPress vulnerability scanning |

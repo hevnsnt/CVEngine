@@ -584,6 +584,20 @@ class RunValidationTests(ValidationBase):
 		self.assertEqual(calls, [])
 		self.assertEqual((row.validation_status, row.validation_steps, stats['no_check']), ('no_check', [], 1))
 
+	def test_no_check_asks_for_local_checks(self):
+		self.match(source='tech', port=None)
+		(row,) = self.rows()
+		with mock.patch('cveFeed.triage.suggest_local_checks') as suggest:
+			self.run_validation(template_for=lambda cve_id: ('', 'no template covers this CVE'))
+		self.assertEqual(suggest.call_args[0][0].pk, row.pk)
+
+	def test_a_local_check_suggestion_failure_does_not_break_the_sweep(self):
+		self.match(source='tech', port=None)
+		self.rows()
+		with mock.patch('cveFeed.triage.suggest_local_checks', side_effect=RuntimeError('boom')):
+			stats, _ = self.run_validation(template_for=lambda cve_id: ('', 'no template covers this CVE'))
+		self.assertEqual(stats['no_check'], 1)  # the sweep's own bookkeeping still completed
+
 	def test_a_blocked_host_is_skipped_and_the_runner_never_called(self):
 		self.match()
 		(row,) = self.rows()

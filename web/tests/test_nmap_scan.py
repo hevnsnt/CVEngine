@@ -410,3 +410,39 @@ class NseCaptureTests(TestCase):
 		ftp = IpAddress.objects.get(address='192.0.2.30').ports.get(number=21)
 		self.assertEqual(ftp.banner, '220 (vsFTPd 3.0.5)')
 		self.assertIn('ftp-anon', ftp.extra['scripts'])
+
+
+class ReviewedScriptsTests(TestCase):
+	# nmap's -sV runs its whole "version" NSE category on top of whatever --script asked for (rpcinfo, hnap-info, and
+	# more), unasked and unreviewed; persist_inventory must never let that reach storage, search, or the host page.
+	def test_a_script_outside_nse_scripts_is_dropped_but_a_reviewed_one_is_kept(self):
+		xml = NSE_XML.replace(
+			'<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>',
+			'<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>'
+			'<script id="rpcinfo" output="ERROR: Script execution failed (use -d to debug)"/>')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml))
+		ftp = IpAddress.objects.get(address='192.0.2.30').ports.get(number=21)
+		self.assertIn('ftp-anon', ftp.extra['scripts'])
+		self.assertNotIn('rpcinfo', ftp.extra['scripts'])
+		self.assertNotIn('rpcinfo', ftp.extra['script_text'])
+
+	def test_a_port_with_only_unreviewed_scripts_keeps_the_last_reviewed_output(self):
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(NSE_XML))
+		only_unreviewed = NSE_XML.replace(
+			'<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>',
+			'<script id="vmware-version" output="ERROR: Script execution failed (use -d to debug)"/>')
+		only_unreviewed = only_unreviewed.replace('<script id="banner" output="220 (vsFTPd 3.0.5)"/>', '')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(only_unreviewed))
+		ftp = IpAddress.objects.get(address='192.0.2.30').ports.get(number=21)
+		self.assertIn('ftp-anon', ftp.extra['scripts'])  # the earlier, reviewed run's output survives
+		self.assertNotIn('vmware-version', ftp.extra['scripts'])
+
+	def test_an_unreviewed_host_script_is_dropped(self):
+		xml = NSE_XML.replace(
+			'<hostscript><script id="smb-os-discovery" output="OS: Windows Server 2022&#xa;Computer name: WIN-ACME"/></hostscript>',
+			'<hostscript><script id="smb-os-discovery" output="OS: Windows Server 2022&#xa;Computer name: WIN-ACME"/>'
+			'<script id="hnap-info" output="ERROR: Script execution failed (use -d to debug)"/></hostscript>')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml))
+		ip = IpAddress.objects.get(address='192.0.2.30')
+		self.assertIn('smb-os-discovery', ip.fingerprint['scripts'])
+		self.assertNotIn('hnap-info', ip.fingerprint['scripts'])

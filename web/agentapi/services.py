@@ -2404,7 +2404,7 @@ def finding_detail(ctx, slug, kind, finding_id):
     remediation = {'text': v.remediation if v else '', 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
     if kind == 'match':
         remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), status=obj.remediation_status,
-                           note=obj.remediation_note)
+                           note=obj.remediation_note, local_checks=(t.local_checks if t else None) or None)
     assessment_status = ('closed_not_applicable' if kind == 'match' and obj.ai_verdict == 'not_affected' and
                          (obj.ai_reason or '').startswith('Closed automatically:')
                          else 'candidate' if kind == 'match' else None)

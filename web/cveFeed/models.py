@@ -943,6 +943,10 @@ class Triage(models.Model):
     validation_status = models.CharField(max_length=16, default="none")
     validation_steps = models.JSONField(default=list, blank=True)  # [{kind, label, display, target, ran_at, result, output_excerpt, error}]
     validation_evidence = models.JSONField(default=dict, blank=True)  # request / response excerpts of a hit, capped; never in a prompt
+    # {commands: [{os, command, look_for}], caveat, model, generated_at}: AI-suggested, read-only commands a host owner
+    # can run themselves, only generated when validation_status is "no_check" (cveFeed.triage.suggest_local_checks).
+    # Unverified by this tool; shown as a suggestion, never as evidence a classification can rest on.
+    local_checks = models.JSONField(default=dict, blank=True)
     validated_at = models.DateTimeField(null=True, blank=True)
     attempts = models.IntegerField(default=0)
     next_attempt_at = models.DateTimeField(null=True, blank=True)
