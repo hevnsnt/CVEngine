@@ -8,7 +8,6 @@ import logging
 import re
 from urllib.parse import quote
 from collections import Counter
-from datetime import timedelta
 
 from django.db.models import Count
 from django.http import JsonResponse
@@ -32,7 +31,7 @@ FEED_MAX = 100
 ALL_PROJECTS = '_all'  # reserved slug of the read-only combined view (tenancy.roles.ALL_PROJECTS)
 GRAPH_NODE_CAP = 1500
 # A scan marked running for longer than this is a casualty of a restart, not live work: never show it as running.
-RUNNING_WINDOW = timedelta(hours=11)  # discovery (6h cap) + nuclei (4h cap) + slack; see discovery.py
+from cveFeed.counts import RUNNING_WINDOW  # noqa: E402,F401  (defined with every other count, in cveFeed.counts)
 
 
 def _tier(entry):
@@ -114,8 +113,8 @@ def graph_payload(domain_id=None, scan_id=None):
     if scan_id:
         subs = subs.filter(scan_history_id=scan_id)  # one scan asked for by id: exactly its rows
     else:
-        from cveFeed.correlation import latest_scan_q
-        subs = subs.filter(latest_scan_q())  # otherwise each host once, from its domain's current scan
+        from cveFeed.counts import host_reps
+        subs = subs.filter(pk__in=host_reps(domain_id).values('pk'))  # otherwise each host once: the row the Hosts page shows
     nodes, edges = {}, set()
     by_name = {}
 
@@ -125,8 +124,8 @@ def graph_payload(domain_id=None, scan_id=None):
             return True
         return False
 
-    from django.db.models import Q
-    subs = subs.filter(Q(ip_addresses__isnull=False) | Q(http_status__gt=0)).distinct()
+    from cveFeed.counts import LIVE_HOST_Q
+    subs = subs.filter(LIVE_HOST_Q).distinct()
     sub_list = list(subs[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
     # "scanned" = at least one finding exists at all, even an info-only one (something looked); a
@@ -183,7 +182,8 @@ def graph_payload(domain_id=None, scan_id=None):
 
 
 def _running_scans(ScanHistory):
-    return ScanHistory.objects.filter(scan_status=1, start_scan_date__gte=timezone.now() - RUNNING_WINDOW)
+    from cveFeed.counts import running_scans
+    return running_scans(ScanHistory.objects.all())
 
 
 def tier_counts():
@@ -194,29 +194,32 @@ def tier_counts():
     return {FIRE: n_fire, SMOKE: n_hot - n_fire, ICE: total - n_hot}
 
 
+def live_scan_counts():
+    """Running and queued scans, read fresh on every poll (they are cheap and the first thing a person watches)."""
+    from cveFeed import counts
+    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count()}
+
+
 def stats_payload():
-    tiers = tier_counts()
-    from cveFeed.correlation import latest_scan_q
-    exposed = CVEMatch.objects.exclude(ai_verdict='not_affected').filter(latest_scan_q('subdomain__'))
-    from startScan.models import ScanHistory, Subdomain, Vulnerability
+    """Every headline number, defined once in ``cveFeed.counts`` (what each one counts is in that module's docstring)."""
+    from cveFeed import counts
+    from startScan.models import Vulnerability
     from targetApp.models import Domain
-    # exposed: a CVE match the AI has not ruled out, or an open finding that is medium or worse
-    from django.db.models import Q
-    exposed_hosts = Subdomain.objects.filter(
-        Q(pk__in=exposed.exclude(subdomain=None).values('subdomain')) |
-        Q(pk__in=Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(subdomain=None).values('subdomain'))).count()
+    tiers = tier_counts()
+    reps = counts.host_reps()
     return {
         'targets': Domain.objects.count(),
-        'certs_expiring': TlsCertificate.objects.filter(not_after__lte=timezone.now() + timedelta(days=30)).count(),
+        'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
+        'certs_total': TlsCertificate.objects.count(),
         'hygiene_open': HygieneFinding.objects.filter(status='open', severity__gte=1).count(),
-        'hosts': Subdomain.objects.filter(latest_scan_q()).count(),
-        'scans_running': _running_scans(ScanHistory).count(),
-        'scans_queued': ScanHistory.objects.filter(scan_status=-1).count(),
+        'hosts': reps.count(),
+        'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
+        **live_scan_counts(),
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
         'cves': CVEEntry.objects.count(),
-        'matches': exposed.count(),
-        'scanner_findings': Vulnerability.objects.exclude(severity=0).count(),
-        'exposed_hosts': exposed_hosts,
+        'matches': counts.exposed_matches().count(),
+        'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
+        'exposed_hosts': counts.exposed_host_count(),
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
     }
@@ -477,7 +480,7 @@ def cached_stats(key='', now=None):
 @require_GET
 @project_scoped
 def api_stats(request):
-    return JsonResponse(cached_stats((request.user.pk, request.GET.get('project', ''))))
+    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''))), **live_scan_counts()})
 
 
 GRAPH_CACHE_SECONDS = 30
@@ -550,7 +553,29 @@ def api_graph_hosts(request):
 
 
 def _kv(*pairs):
-    return [{'k': k, 'v': v} for k, v in pairs if v not in (None, '', [])]
+    """Rows of a node's detail card. A value is text, or a list of ``(text, href)`` pairs: each item then links to its record."""
+    rows = []
+    for k, v in pairs:
+        if v in (None, '', []):
+            continue
+        if isinstance(v, list):
+            rows.append({'k': k, 'v': ', '.join(text for text, _ in v), 'links': [{'text': text, 'href': href} for text, href in v]})
+        else:
+            rows.append({'k': k, 'v': v})
+    return rows
+
+
+def _host_href(project_slug, name):
+    return f'/cve/{quote(project_slug)}/hosts/?host={quote(name)}'
+
+
+def _ip_href(project_slug, address):
+    return f'/cve/{quote(project_slug)}/hosts/?q={quote("ip:" + address)}'
+
+
+def _match_href(project_slug, match_id):
+    return f'/cve/{quote(project_slug)}/matches/#{match_id}'
+
 
 
 def _classification_suffix(match):
@@ -584,29 +609,35 @@ def node_detail(node_id):
             return None
         first = DiscoveryEvent.objects.filter(scan_id=s.scan_history_id, host__iexact=s.name).order_by('id').first()
         ports = [f'{p.number} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_ports(ip)]
-        matches = CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage')
+        matches = list(CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage'))
         vulns = Vulnerability.objects.filter(subdomain=s).order_by('-severity')[:8]
         from agentapi.services import _host_heat
         project = s.target_domain.project if s.target_domain else None
         return {'kind': 'host', 'title': s.name, 'heat': _host_heat(s),
                 'link': f'/cve/{project.slug}/hosts/?host={quote(s.name)}' if project else '', 'rows': _kv(
-            ('Target', s.target_domain.name if s.target_domain else ''),
-            ('IP addresses', ', '.join(ip.address for ip in s.ip_addresses.all())),
+            ('Target', [(s.target_domain.name, _host_href(project.slug, s.target_domain.name))] if project else (s.target_domain.name if s.target_domain else '')),
+            ('IP addresses', [(ip.address, _ip_href(project.slug, ip.address)) for ip in s.ip_addresses.all()] if project
+             else ', '.join(ip.address for ip in s.ip_addresses.all())),
             ('Heat', _host_heat(s)), ('Score', s.score),
             ('Open ports', ', '.join(ports)),
             ('HTTP', f'{s.http_status} {s.page_title or ""}'.strip() if s.http_status else ''),
             ('Web server', s.webserver), ('CDN', s.cdn_name if s.is_cdn else ''),
             ('Technologies', ', '.join(t.name for t in s.technologies.all() if t.name)),
             ('Found by', f'{first.module} ({first.type.replace("_", " ").lower()})' if first else ''),
-            ('CVE matches', ', '.join(f'{m.cve_entry.cve_id} ({_tier(m.cve_entry)}{_classification_suffix(m)})' for m in matches)),
+            ('CVE matches', [(f'{m.cve_entry.cve_id} ({_tier(m.cve_entry)}{_classification_suffix(m)})', _match_href(project.slug, m.id))
+                             for m in matches] if project else
+             ', '.join(f'{m.cve_entry.cve_id} ({_tier(m.cve_entry)}{_classification_suffix(m)})' for m in matches)),
             ('Findings', ', '.join(f'{v.name} [{SEVERITY_LABEL.get(v.severity, v.severity)}]' for v in vulns)))}
     if kind == 'ip' and rest.isdigit():
         ip = IpAddress.objects.filter(pk=int(rest)).first()
-        hosts = Subdomain.objects.filter(ip_addresses=ip) if ip else Subdomain.objects.none()
+        hosts = Subdomain.objects.filter(ip_addresses=ip).select_related('target_domain__project') if ip else Subdomain.objects.none()
         if not ip or not hosts.exists():
             return None
-        return {'kind': 'ip', 'title': ip.address, 'rows': _kv(
-            ('Hosts', ', '.join(h.name for h in hosts[:10])),
+        shown = list(hosts[:10])
+        first = next((h.target_domain.project.slug for h in shown if h.target_domain_id and h.target_domain.project_id), '')
+        return {'kind': 'ip', 'title': ip.address, 'link': _ip_href(first, ip.address) if first else '', 'rows': _kv(
+            ('Hosts', [(h.name, _host_href(h.target_domain.project.slug, h.name)) if h.target_domain_id and h.target_domain.project_id
+                       else (h.name, '') for h in shown]),
             ('Open ports', ', '.join(f'{p.number} {p.product}'.strip() for p in open_ports(ip))),
             ('OS guess', ip.os_guess), ('Reverse pointer', ip.reverse_pointer),
             ('Full port scan', f'{timezone.localtime(ip.full_scanned_at):%Y-%m-%d %H:%M} ({ip.full_scan_ports} open)'
@@ -627,11 +658,18 @@ def node_detail(node_id):
         c = CVEEntry.objects.filter(pk=int(rest)).first()
         if not c:
             return None
-        hosts = CVEMatch.objects.filter(cve_entry=c).exclude(ai_verdict='not_affected').select_related('subdomain')
-        return {'kind': 'cve', 'title': c.cve_id, 'rows': _kv(
+        hosts = list(CVEMatch.objects.filter(cve_entry=c).exclude(ai_verdict='not_affected')
+                     .select_related('subdomain__target_domain__project'))
+        slugs = sorted({m.subdomain.target_domain.project.slug for m in hosts if m.subdomain and m.subdomain.target_domain_id
+                        and m.subdomain.target_domain.project_id})
+        where = slugs[0] if len(slugs) == 1 else ALL_PROJECTS if slugs else ''
+        return {'kind': 'cve', 'title': c.cve_id, 'link': f'/cve/{quote(where)}/matches/?cve={quote(c.cve_id)}' if where else '',
+                'link_label': 'Open the matches', 'rows': _kv(
             ('Tier', _tier(c)), ('CVSS', c.cvss), ('Summary', (c.title or c.original_description or '')[:300]),
             ('KEV', 'yes' if c.kev else ''), ('Exploit-DB', 'yes' if c.exploit_db else ''),
-            ('Matched hosts', ', '.join(m.subdomain.name for m in hosts if m.subdomain)))}
+            ('Matched hosts', [(m.subdomain.name, _host_href(m.subdomain.target_domain.project.slug, m.subdomain.name)
+                                if m.subdomain.target_domain_id and m.subdomain.target_domain.project_id else '')
+                               for m in hosts if m.subdomain]))}
     return None
 
 
@@ -648,6 +686,7 @@ def api_node(request):
 
 def _serialize_activity(a):
     return {'id': a.id, 'kind': a.kind, 'message': a.message, 'status': a.status, 'cve_id': a.cve_id,
+            'project': a.project.slug if a.project_id else None,  # the project a line's hosts and CVEs link into
             'repeat': a.repeat, 'created': a.created_at.isoformat(),
             'finished': a.finished_at.isoformat() if a.finished_at else None}
 
@@ -658,14 +697,15 @@ def api_activity(request):
     """The AI activity feed starts with the latest 100 rows. With ?after=<id>: newer rows, oldest first. Also returns
     entries that were running and have since settled (?since_running=<ids>) so spinners resolve."""
     after = request.GET.get('after', '')
-    qs = AgentActivity.objects.order_by('-id')
+    activity = AgentActivity.objects.select_related('project')
+    qs = activity.order_by('-id')
     if after.isdigit() and int(after) > 0:
-        items = list(AgentActivity.objects.filter(id__gt=int(after)).order_by('id')[:100])  # the oldest above the cursor, so a client far behind catches up without gaps
+        items = list(activity.filter(id__gt=int(after)).order_by('id')[:100])  # the oldest above the cursor, so a client far behind catches up without gaps
     else:
         items = list(qs[:100])
         items.reverse()
     running_ids = [int(i) for i in request.GET.get('running', '').split(',') if i.isdigit()][:50]
-    settled = list(AgentActivity.objects.filter(id__in=running_ids).exclude(status='running')) if running_ids else []
+    settled = list(activity.filter(id__in=running_ids).exclude(status='running')) if running_ids else []
     # a line reported again is the same row with a new time and a higher repeat count: send those the client already has
     bumped = []
     try:
@@ -673,7 +713,7 @@ def api_activity(request):
     except ValueError:  # an impossible date is no cursor, not a server error
         since = None
     if since and after.isdigit() and int(after) > 0:
-        bumped = list(AgentActivity.objects.filter(id__lte=int(after), repeat__gt=1, created_at__gt=since).order_by('id')[:50])
+        bumped = list(activity.filter(id__lte=int(after), repeat__gt=1, created_at__gt=since).order_by('id')[:50])
     return JsonResponse({'items': [_serialize_activity(a) for a in items],
                          'settled': [_serialize_activity(a) for a in settled],
                          'bumped': [_serialize_activity(a) for a in bumped], 'now': timezone.now().isoformat()})

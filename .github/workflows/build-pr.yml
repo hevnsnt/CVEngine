@@ -80,9 +80,9 @@ jobs:
           tests.test_host_headers tests.test_tenancy tests.test_scope_api
           tests.test_agentapi tests.test_validation tests.test_hard_security
           tests.test_legacy_cms_security tests.test_graph_overview
-          tests.test_template_fixtures --noinput
+          tests.test_template_fixtures tests.test_counts --noinput
       - name: Graph cluster regression gate
-        run: node --test web/tests/test_graph_cluster.mjs
+        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs
 
   build:
     name: 🐳 Build Docker image

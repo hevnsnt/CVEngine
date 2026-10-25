@@ -6,6 +6,12 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 
 ## Unreleased
 
+### Fixed
+
+- **Numbers agree everywhere.** One definition per number (`web/cveFeed/counts.py`) now feeds the dashboard status line, the section pages' chips, the Targets table, the attack-surface map, the graph overview and the agent API. Before, the status line counted host rows (874), the Hosts page distinct hosts (659) and the map only live hosts, capped (163). Now Hosts is distinct hosts per project everywhere, the map header reads "N live of M hosts", a host held by two targets counts once, the Targets table's Exposed column leaves out what the AI ruled out (as the dashboard does), the dashboard's Scanner findings tile counts exactly what the Findings page shows under Scanner, Actionable (open, low or worse), the CVE matches page opens on matches not ruled out (a filter shows the rest), the Scans page counts a scan marked running for over 11 hours as Stalled (as the dashboard does), and a host's Open findings tile counts open findings of low severity or worse with informational detections listed apart. Every dashboard tile says what it counts. `tests/test_counts.py` pins each surface against the others.
+- **Section pages update on their own.** Every page that shows a number or a list re-reads it every 8 seconds while the tab is visible (filter chips, tiles, lists), from the same endpoints. A list reloads quietly when a count moves, unless the reader pressed Load more. Scan counts on the dashboard are read fresh on every poll.
+- **Every host, address and CVE id links to its record.** Hostnames to the host record, IPs to the host that holds them, CVE ids to the match on that host (`/cve/<project>/matches/#<id>`), in lists, the activity feeds, the live ticker, graph node details, the scan pages and the bug bounty page. "Needs validation" is a link: it opens the match and runs Validate now (any other finding opens its own page). `web/static/cve/links.js` holds these rules; `web/tests/test_links.mjs` tests them.
+
 ### Added
 
 - **One Findings list.** The Findings page (formerly Scanner findings) lists CVE matches, scanner findings and hygiene findings together, hottest first, filtered by type, severity and status (actionable by default). Its heat follows the host card. The API and MCP offer the same list (`GET projects/{slug}/findings`, `list_findings`). The CVE matches and Hygiene pages stay for focused work. See [docs/FRONTEND.md](docs/FRONTEND.md).

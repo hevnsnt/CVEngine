@@ -1,6 +1,7 @@
 // Live dashboard: discovery graph + event ticker, the AI activity feed, KPIs and the CVE feed.
 // Every panel reads one endpoint each, so the numbers can never disagree with the lists beside them.
 import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
+import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -95,6 +96,8 @@ async function pollStats() {
       scans_running: s.scans_running,
     };
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
+    statsNow = s;
+    paintMapCount();
     const scansLabel = $("s-scans_label");
     if (scansLabel)
       scansLabel.textContent = s.scans_queued
@@ -156,6 +159,22 @@ function hostsHref(name, project) {
 }
 
 const MAP_LIMIT = 100; // the map shows the highest-scoring hosts; the legend still counts every host
+// The header of the attack-surface map reads the same numbers as the Exposed hosts tile, so the two cannot disagree: the map
+// draws live hosts (they resolved, or answered over HTTP), the tile counts every host the Hosts page lists.
+let statsNow = null;
+let mapDrawn = null; // squares on the map right now
+function paintMapCount() {
+  const n = $("map-count");
+  if (!statsNow || !statsNow.hosts) {
+    n.textContent = "";
+    n.removeAttribute("title");
+    return;
+  }
+  const live = statsNow.hosts_live;
+  const shown = mapDrawn != null && mapDrawn < live ? `Top ${mapDrawn} of ${live} live hosts` : `${live} live host${live === 1 ? "" : "s"}`;
+  n.textContent = `${shown} · ${statsNow.hosts} in all`;
+  n.title = "One square per live host: a host that resolved to an address or answered over HTTP, highest score first. The total is every host the Hosts page lists, live or not.";
+}
 
 function drawMap(nodes) {
   const hosts = nodes.filter((n) => n.kind === "subdomain");
@@ -226,8 +245,8 @@ function drawMap(nodes) {
   const empty = map.querySelector(".map-empty");
   if (!hosts.length && !empty) map.append(el("span", "map-empty", "No hosts yet. Add a target and they appear here."));
   else if (hosts.length && empty) empty.remove();
-  $("map-count").textContent = !hosts.length ? "" : hosts.length > ordered.length
-    ? `Top ${ordered.length} of ${hosts.length} hosts` : `${hosts.length} host${hosts.length === 1 ? "" : "s"}`;
+  mapDrawn = ordered.length;
+  paintMapCount();
   const sig = HEAT_ORDER.map((k) => counts[k] || 0).join(",");
   const legend = $("map-legend");
   if (legend.dataset.sig !== sig) {
@@ -277,6 +296,17 @@ function drawCounts(c) {
   });
 }
 
+// what discovery just saw: a host name or an address links to its record; anything else (an open port, a URL) is text
+let followedProject = slug || "";
+function eventLabel(e) {
+  const label = el("span", "ev-label");
+  const text = e.label || e.host || "";
+  if (followedProject && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(text)) label.append(ipAnchor(followedProject, text));
+  else if (followedProject && (e.type === "DNS_NAME" || e.type === "DNS_NAME_UNRESOLVED") && text === e.host) label.append(hostAnchor(followedProject, text));
+  else label.textContent = text;
+  return label;
+}
+
 function tickerLine(e) {
   const li = el("li", "", null, { "data-id": e.id });
   li.append(
@@ -285,7 +315,7 @@ function tickerLine(e) {
       `ev ev-${e.type.toLowerCase()}`,
       e.type.replace("_", " ").toLowerCase(),
     ),
-    el("span", "ev-label", e.label || e.host),
+    eventLabel(e),
   );
   if (e.module) li.append(el("span", "ev-mod", e.module));
   return li;
@@ -337,12 +367,19 @@ async function pollDiscovery() {
         ? `queued, ${d.scan.queue_position} ahead`
         : STATUS[d.scan.status] || d.scan.status;
     badge.className = `badge ${d.scan.status === 1 ? "running" : d.scan.status === 2 ? "success" : d.scan.status === 0 ? "failed" : ""}`;
-    $("d-target").textContent =
+    followedProject = d.scan.project || slug || "";
+    const target = $("d-target");
+    target.textContent = "";
+    linkify(
+      target,
       d.scan.status === 1
         ? `Discovering ${d.scan.target} now`
         : d.scan.status === -1
           ? `Waiting to discover ${d.scan.target}`
-          : `Last discovery: ${d.scan.target} (${STATUS[d.scan.status] || ""})`;
+          : `Last discovery: ${d.scan.target} (${STATUS[d.scan.status] || ""})`,
+      followedProject,
+      { kinds: ["host"] },
+    );
     drawCounts(d.counts);
     const list = $("d-ticker");
     keepPlace(list, () =>
@@ -389,7 +426,7 @@ function agentLine(a) {
   const li = el("li", `a-${a.status}`, null, { "data-id": a.id, "data-msg": `${a.kind}|${a.message}` });
   li.append(
     el("span", `kind k-${a.kind}`, KIND[a.kind] || a.kind),
-    el("span", "a-msg", a.message),
+    linkify(el("span", "a-msg"), a.message, a.project || slug),
     el("time", "a-time", clock(a.created)),
   );
   if (a.repeat > 1) li.querySelector(".a-msg").append(el("span", "a-repeat", ` ×${a.repeat}`));
@@ -477,7 +514,9 @@ function cveRow(c) {
   const li = el("li", "", null, { "data-tier": c.tier, "data-id": c.id });
   li.append(
     el("span", `tier ${c.tier}`, c.tier),
-    el("span", "cve-id", c.cve_id),
+    c.matches
+      ? Object.assign(el("a", "cve-id", c.cve_id, { href: cveHref(slug || "_all", c.cve_id) }), { title: "The hosts this CVE matches" })
+      : el("span", "cve-id", c.cve_id),
     el("span", "cve-title", c.title || "No description yet"),
   );
   const meta = el("div", "meta");
@@ -486,7 +525,7 @@ function cveRow(c) {
   if (c.exploit_db) meta.append(el("span", "", "Exploit-DB"));
   if (c.matches)
     meta.append(
-      el("span", "hit", `${c.matches} host match${c.matches > 1 ? "es" : ""}`),
+      Object.assign(el("a", "hit", `${c.matches} host match${c.matches > 1 ? "es" : ""}`, { href: cveHref(slug || "_all", c.cve_id) }), { title: "The hosts this CVE matches" }),
     );
   li.append(meta);
   return li;

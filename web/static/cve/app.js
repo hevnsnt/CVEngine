@@ -7,6 +7,7 @@ import {
   field,
   text as uiText,
 } from "/staticfiles/cve/ui.js";
+import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -26,6 +27,7 @@ const SCAN_STATUS = {
   3: "aborted",
 };
 const REFRESH_MS = 5000;
+const LIVE_MS = 8000;
 
 const fullScanAgo = (iso) => {
   if (!iso) return "never";
@@ -43,9 +45,40 @@ const el = (tag, cls, text, attrs = {}) => {
 };
 const badge = (text, cls = "") => el("span", `badge ${cls}`.trim(), text);
 // a hostname printed anywhere (except the host page itself) links to that host's page
-const hostUrl = (name, project = slug) => `/cve/${encodeURIComponent(project)}/hosts/?host=${encodeURIComponent(name)}`;
-const hostLink = (name, project = slug) =>
-  name && project ? el("a", "host-link", name, { href: hostUrl(name, project) }) : name ? el("span", "", name) : el("span", "", "-");
+const hostUrl = hostHref;
+const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
+// a CVE id printed anywhere links to its match on that host; without a match id, to the matches that name it
+const cveLink = (project, cveId, matchId, host) => (project ? cveAnchor(project, cveId, matchId, host) : el("span", "", cveId));
+// "CVE CVE-2026-1" in a host's search reasons links to that CVE's match on the host; the host and IP are this row itself
+const matchedWhy = (text, project, host) => {
+  const m = /^CVE (CVE-\d{4}-\d{4,})$/i.exec(text);
+  if (!m || !project) return document.createTextNode(text);
+  const n = el("span");
+  n.append("CVE ", cveAnchor(project, m[1].toUpperCase(), null, host));
+  return n;
+};
+// a link to the record its own row selects: it keeps its address, but a plain click only selects the row
+const selfLink = (a) => {
+  a.classList.add("self-link");
+  return a;
+};
+const rowIp = (project, address) => {
+  const n = el("span", "note");
+  n.append(selfLink(ipAnchor(project, address)));
+  return n;
+};
+// nodes separated by commas
+const joinNodes = (nodes) => {
+  const box = el("span");
+  nodes.forEach((n, i) => box.append(...(i ? [", ", n] : [n])));
+  return box;
+};
+// one line of a list row made of nodes and text
+const rowLine = (...parts) => {
+  const n = el("span", "note host-why");
+  n.append(...parts);
+  return n;
+};
 // the project a row belongs to, as a small chip (all-projects view only; null elsewhere, which append() skips via filter)
 const projChip = (row) => {
   if (!ALL || !row) return null;
@@ -114,13 +147,15 @@ function createList({
 }) {
   let page = 1;
   let timer = null;
+  let lastCount = null;
   const body = el("div");
   const more = el("div", "more-row");
   mount.append(body, more);
 
-  async function load(reset) {
+  // quiet: a refresh the reader did not ask for. The rows are swapped when the answer arrives, with no skeleton in between.
+  async function load(reset, quiet = false) {
     if (reset) page = 1;
-    if (reset) {
+    if (reset && !quiet) {
       body.textContent = "";
       body.append(
         el("div", "skeleton"),
@@ -134,6 +169,7 @@ function createList({
         `${path}?${query({ ...params(), page, page_size: 30 })}`,
       );
       const items = data.results || [];
+      lastCount = data.count;
       if (reset) body.textContent = "";
       if (reset && !items.length) body.append(el("p", "empty", empty));
       else render(body, items, reset);
@@ -156,12 +192,68 @@ function createList({
       if (autoRefresh && autoRefresh(items))
         timer = setTimeout(() => load(true), REFRESH_MS);
     } catch (err) {
+      if (quiet) return; // a failed background refresh keeps what is on screen
       body.textContent = "";
       body.append(el("p", "msg err", err.message));
     }
   }
-  return { reload: () => load(true), start: () => load(true) };
+  const live = {
+    alive: () => body.isConnected,
+    atTop: () => page === 1, // someone who pressed "Load more" keeps their place
+    count: () => lastCount,
+    peek: async () => (await api("GET", `${path}?${query({ ...params(), page: 1, page_size: 1 })}`)).count,
+    reload: () => load(true, true),
+  };
+  return {
+    reload: () => load(true),
+    start: () => {
+      liveLists.add(live);
+      return load(true);
+    },
+  };
 }
+
+// --- live numbers -------------------------------------------------------------------------------
+// Every number on a page is read again every few seconds, from the same definitions the dashboard uses (/cve/api/stats and
+// the list endpoints). When a headline number moves, or a filter chip's count does, or a list's own count does, the list
+// reloads quietly. Nothing here polls while the tab is hidden.
+const liveLists = new Set();
+const livePickers = new Set();
+const liveCustom = new Set();
+const LIVE_KEYS = ["targets", "hosts", "hosts_live", "exposed_hosts", "matches", "scanner_findings", "scans_running", "scans_queued",
+  "certs_expiring", "certs_total", "hygiene_open"];
+let liveSig = null;
+let liveBusy = false;
+async function liveTick() {
+  if (document.hidden || liveBusy) return;
+  liveBusy = true;
+  try {
+    const s = await api("GET", `/cve/api/stats?project=${encodeURIComponent(slug)}`);
+    const sig = LIVE_KEYS.map((k) => s[k]).join(",");
+    let moved = liveSig !== null && sig !== liveSig;
+    liveSig = sig;
+    for (const p of [...livePickers]) {
+      if (!p.node.isConnected) livePickers.delete(p);
+      else if (await p.refresh()) moved = true;
+    }
+    for (const c of [...liveCustom]) {
+      if (!c.alive()) liveCustom.delete(c);
+      else await c.run();
+    }
+    for (const l of [...liveLists]) {
+      if (!l.alive()) liveLists.delete(l);
+      else if (l.atTop() && (moved || (await l.peek()) !== l.count())) await l.reload();
+    }
+  } catch (_) {
+    /* the next tick tries again */
+  } finally {
+    liveBusy = false;
+  }
+}
+setInterval(liveTick, LIVE_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) liveTick();
+});
 
 function table(columns, heatOf) {
   let tbody = null;
@@ -216,8 +308,9 @@ const meterCell = (n, of) => {
   return box;
 };
 // A KPI tile: big number, mono label; "hot" colours it when the number is above zero.
-const tile = (label, n, { hot = "", onClick = null } = {}) => {
-  const t = el(onClick ? "button" : "div", `tile${n ? ` ${hot}` : " dim"}`.trimEnd());
+const tile = (label, n, { hot = "", onClick = null, href = "" } = {}) => {
+  const t = el(href ? "a" : onClick ? "button" : "div", `tile${n ? ` ${hot}` : " dim"}`.trimEnd());
+  if (href) t.setAttribute("href", href);
   if (onClick) {
     t.type = "button";
     t.onclick = onClick;
@@ -262,12 +355,22 @@ function picker(label, options, count, onChange) {
     buttons.set(key, b);
     node.append(b);
   });
+  // resolves true when any chip's number moved since it was last drawn (the first draw is not a move)
   out.refresh = () =>
-    options.forEach(([key]) =>
-      count(key)
-        .then((n) => (buttons.get(key).lastChild.textContent = n))
-        .catch(() => {}),
-    );
+    Promise.all(
+      options.map(([key]) =>
+        count(key)
+          .then((n) => {
+            const label = buttons.get(key).lastChild;
+            const moved = /^\d+$/.test(label.textContent) && label.textContent !== String(n);
+            label.textContent = n;
+            return moved;
+          })
+          .catch(() => false),
+      ),
+    ).then((moves) => moves.some(Boolean));
+  out.node = node;
+  livePickers.add(out);
   return out;
 }
 
@@ -414,7 +517,7 @@ function shotPair(c, project = slug) {
 }
 function changeCell(c, project = slug) {
   const box = el("div");
-  box.append(el("span", "", changeDetail(c)));
+  box.append(linkify(el("span"), changeDetail(c), project, { kinds: ["ip"] }));
   if (c.kind === "screenshot_changed" && project) box.append(shotPair(c, project));
   return box;
 }
@@ -454,7 +557,9 @@ const CLASS_OPTIONS = [
   ["needs_validation", "Needs validation"],
   ["likely_false_positive", "Likely false positive"],
 ];
-const aiBadge = (t = {}) => {
+// ``of`` = {project, kind, id} names the finding the label sits on: "Needs validation" then opens it (a match: with Validate now pressed)
+const aiBadge = (t = {}, of = null) => {
+  if (t.classification === "needs_validation" && of && of.project && of.id) return needsValidation(of.project, of.kind, of.id);
   if (t.classification && CLASS_BADGE[t.classification]) return badge(...CLASS_BADGE[t.classification]);
   if (t.status === "not_triaged") return badge("Not triaged", "fp");
   if (t.status === "error") return badge("Triage failed", "queued");
@@ -491,14 +596,14 @@ function renderFinding(d, cfg, row) {
   head.append(el("h2", "host-title", d.title));
   if (d.severity) head.append(badge(d.severity, d.severity));
   if (d.assessment_status === "closed_not_applicable") head.append(badge("Closed: invalid product match", "ice"));
-  head.append(aiBadge(d.ai));
+  head.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
   const vb = validationBadge({ validation_status: d.validation.status });
   if (vb) head.append(vb);
   const chip = projChip(row);
   if (chip) head.append(chip);
   const idline = el("p", "note");
-  if (d.host) { idline.append(hostLink(d.host, project)); if (d.target && d.target !== d.host) idline.append(document.createTextNode(` · ${d.target}`)); }
-  else if (d.target) idline.textContent = d.target;
+  if (d.host) { idline.append(hostLink(d.host, project)); if (d.target && d.target !== d.host) idline.append(document.createTextNode(" · "), hostLink(d.target, project)); }
+  else if (d.target) idline.append(hostLink(d.target, project));
   out.push(head, idline);
 
   if (d.automatic_validation) {
@@ -596,7 +701,7 @@ function renderFinding(d, cfg, row) {
 
   const ai = detailSection("AI classification");
   const top = el("div", "find");
-  top.append(aiBadge(d.ai));
+  top.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
   if (d.ai.reason) top.append(el("span", "", d.ai.reason));
   ai.append(top);
   if (d.ai.overridden) {
@@ -648,6 +753,7 @@ function renderFinding(d, cfg, row) {
   if (d.kind === "match" && d.assessment_status !== "closed_not_applicable") {
     const controls = el("div", "tools");
     const run = el("button", "btn sm", "Validate now", { type: "button" });
+    run.dataset.validate = "now";
     const state = el("span", "note", "Runs this match's safe template checks and requests AI review in the queue.");
     run.onclick = async () => {
       run.disabled = true;
@@ -771,12 +877,15 @@ function findingPage(mount, cfg) {
   // (#project:key) and a reload reopens the finding even when it is not on the first page. One project: #key.
   const hashOf = (item) => (ALL ? `${item.project}:${keyOf(item)}` : keyOf(item));
   const wantedFromHash = () => {
-    const [a, b] = location.hash.slice(1).split(":");
-    if (ALL) return b && parseKey(b) && /^[-\w]+$/.test(a) ? { key: b, project: a } : null;
-    return parseKey(a) ? { key: a, project: slug } : null;
+    const [target, flag] = location.hash.slice(1).split("&");
+    const [a, b] = target.split(":");
+    const validate = flag === "validate";
+    if (ALL) return b && parseKey(b) && /^[-\w]+$/.test(a) ? { key: b, project: a, validate } : null;
+    return parseKey(a) ? { key: a, project: slug, validate } : null;
   };
 
-  async function show(key, project = slug) {
+  // ``validate``: arrived through a "Needs validation" label, which means "open this and run Validate now"
+  async function show(key, project = slug, { validate = false } = {}) {
     key = key == null ? null : String(key);
     current = key;
     rows.querySelectorAll(".host-row").forEach((r) => r.classList.toggle("sel", r.dataset.key === current));
@@ -802,6 +911,15 @@ function findingPage(mount, cfg) {
       if (mine !== token) return;
       pane.textContent = "";
       pane.append(back, ...renderFinding(d, cfg.forKind ? cfg.forKind(kind) : cfg, row));
+      if (validate) {
+        if (location.hash.includes("&validate")) history.replaceState(null, "", `${location.pathname}${location.search}#${ALL ? `${project}:${key}` : key}`); // a reload must not run it again
+        const run = pane.querySelector("[data-validate]");
+        if (run && !run.disabled) {
+          run.scrollIntoView({ block: "center" });
+          run.focus();
+          run.click();
+        } else if (run == null) pane.append(el("p", "note", "Validate now is not available for this finding."));
+      }
     } catch (err) {
       if (mine !== token) return;
       pane.textContent = "";
@@ -823,29 +941,60 @@ function findingPage(mount, cfg) {
       items.forEach((item) => {
         byId.set(keyOf(item), item);
         const r = cfg.row(item);
-        const row = el("button", "host-row");
-        row.type = "button";
-        row.dataset.key = keyOf(item);
-        row.dataset.heat = r.heat || "";
-        row.append(el("span", "cve-id", r.title));
+        const row = selectableRow(keyOf(item), r.heat, "key");
+        const title = el("span", "cve-id");
+        if (r.title instanceof Node) title.append(r.title);
+        else title.textContent = r.title;
+        row.append(title);
         const meta = el("span", "host-meta");
         meta.append(...r.meta.filter(Boolean));
         row.append(meta);
-        (r.notes || []).filter(Boolean).forEach((n) => row.append(el("span", "note host-why", n)));
-        row.onclick = () => {
+        (r.notes || []).filter(Boolean).forEach((n) => row.append(n instanceof Node ? n : el("span", "note host-why", n)));
+        row.onclick = (e) => {
+          if (e.target.closest("a")) return; // a link inside the row goes where it points
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
         };
         rows.append(row);
       });
       const wanted = wantedFromHash();
-      if (current == null && wanted) show(wanted.key, wanted.project);
+      if (current == null && wanted) show(wanted.key, wanted.project, { validate: wanted.validate });
       else if (current == null && window.matchMedia("(min-width:900px)").matches && items.length) show(keyOf(items[0]), projectOf(items[0]));
     },
+  });
+  // A "Needs validation" label elsewhere on this page opens its finding here without leaving the page (and, for a match, presses
+  // Validate now); from any other page the same link navigates here and the hash does it.
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest && e.target.closest("a.needs-validation");
+    if (!link || e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    const { kind, id, project } = link.dataset;
+    // the unified Findings list opens a finding of any kind; the matches page only its own
+    const mine = cfg.kindOf ? Boolean(FINDING_KINDS[kind]) : kind === cfg.kind;
+    if (!root.isConnected || !mine || (!ALL && project !== slug)) return;
+    e.preventDefault();
+    const key = cfg.kindOf ? `${kind}-${id}` : String(id);
+    history.replaceState(null, "", location.pathname + location.search + `#${ALL ? `${project}:${key}` : key}`);
+    show(key, project, { validate: kind === "match" });
   });
   show(null);
   list.start();
   return list;
+}
+
+const FINDING_KINDS = { match: 1, vulnerability: 1, hygiene: 1, route: 1 };
+// A list row that selects an item. It is a div, not a button: a row holds links (the host, the CVE) and a link inside a button
+// is invalid HTML that browsers handle inconsistently. Keyboard use matches a button's.
+function selectableRow(id, heat, attr = "id") {
+  const row = el("div", "host-row", null, { role: "button", tabindex: "0" });
+  row.dataset[attr] = id;
+  row.dataset.heat = heat || "";
+  row.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && e.target === row) {
+      e.preventDefault();
+      row.click();
+    }
+  });
+  return row;
 }
 
 // --- targets across every project (read-only): no selection, delete, scope, discovery or scan; those are per project ----------
@@ -1091,6 +1240,7 @@ const pages = {
       [
         ["", "All"],
         ["running", "Running", "smoke"],
+        ["stalled", "Stalled", "fire"],
         ["queued", "Queued"],
         ["finished", "Finished", "clean"],
         ["failed", "Failed", "fire"],
@@ -1128,7 +1278,7 @@ const pages = {
       params: () => ({ status: status.value }),
       empty: "No scans here. Start one from Targets.",
       autoRefresh: (items) =>
-        items.some((s) => s.status === -1 || s.status === 1),
+        items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
       onLoaded: (_, reset) => reset && status.refresh(),
       render: table(
         withProject(readOnlyColumns([
@@ -1150,10 +1300,12 @@ const pages = {
             label: "Status",
             render: (s) =>
               badge(
-                s.status === -1 && s.queue_position != null
-                  ? `queued, ${s.queue_position} ahead`
-                  : SCAN_STATUS[s.status] || s.status,
-                SCAN_STATUS[s.status],
+                s.stalled
+                  ? "stalled"
+                  : s.status === -1 && s.queue_position != null
+                    ? `queued, ${s.queue_position} ahead`
+                    : SCAN_STATUS[s.status] || s.status,
+                s.stalled ? "failed" : SCAN_STATUS[s.status],
               ),
           },
           { label: "Hosts", cls: "num", render: (s) => s.hosts ?? "-" },
@@ -1486,8 +1638,8 @@ const pages = {
       stats.style.margin = "14px 0 0";
       stats.append(
         tile("Open ports", openPorts),
-        tile("Open findings", (h.vulns || []).length, { hot: "smoke" }),
-        tile("CVE matches", h.cve_matches, { hot: "fire" }),
+        tile("Open findings", h.vuln_count ?? (h.vulns || []).filter((v) => v.severity !== "info").length, { hot: "smoke" }),
+        tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
       // why the host has its colour, so the rating can be checked rather than trusted
@@ -1504,7 +1656,7 @@ const pages = {
             : el("span", "", text);
           line.append(badge(r.temp, r.temp), label, el("span", "note", r.detail));
           if (r.kind === "cve") line.append(el("span", "note host-why", r.description || "Description unavailable in the CVE feed."));
-          if (r.id) line.append(aiBadge({ classification: r.classification, status: r.classification ? "triaged" : "pending" }));
+          if (r.id) line.append(aiBadge({ classification: r.classification, status: r.classification ? "triaged" : "pending" }, { project: projectOf(h), kind: r.finding === "match" ? "match" : "vulnerability", id: r.id }));
           why.append(line);
         });
       } else if (h.heat === "clean") {
@@ -1532,7 +1684,7 @@ const pages = {
         pane.append(scoreBox);
       }
       if (h.title) pane.append(el("p", "sub", h.title));
-      if (h.target) pane.append(el("p", "note", `Target: ${h.target}`));
+      if (h.target) pane.append(el("p", "note", "Target: ", hostLink(h.target, projectOf(h))));
       const compareBox = el("div", "shot-compare");
       if (h.screenshot) {
         const img = el("img", "shot", null, {
@@ -1622,18 +1774,22 @@ const pages = {
             routesBox.append(el("p", "note", `${items.length - notable.length} other routes probed (redirects, 404s)`));
         })
         .catch(() => routesBox.append(el("p", "note", "Web routes could not be loaded.")));
-      if (h.vulns && h.vulns.length) {
-        pane.append(el("h3", "sec", `Open findings (${h.vulns.length})`));
-        h.vulns.forEach((v) => {
+      // findings (low or worse) and informational detections are counted apart, as on the Scanner findings page and the dashboard
+      const findingLines = (title, items, total) => {
+        if (!items.length) return;
+        pane.append(el("h3", "sec", `${title} (${total ?? items.length})`));
+        items.forEach((v) => {
           const line = el("div", "find");
           const label = v.id
             ? el("a", "", v.name, { href: `/cve/${encodeURIComponent(projectOf(h))}/vulns/#${v.id}` })
             : el("span", "", v.name);
           line.append(badge(v.severity, v.severity), label);
-          if (v.classification) line.append(aiBadge({ classification: v.classification, status: "triaged" }));
+          if (v.classification) line.append(aiBadge({ classification: v.classification, status: "triaged" }, { project: projectOf(h), kind: "vulnerability", id: v.id }));
           pane.append(line);
         });
-      }
+      };
+      findingLines("Open findings", (h.vulns || []).filter((v) => v.severity !== "info"), h.vuln_count);
+      findingLines("Informational detections", (h.vulns || []).filter((v) => v.severity === "info"), h.info_count);
       if (ALL) pane.append(assetInfoReadOnly(h));
       else pane.append(assetInfo(h), hostActions(h));
     }
@@ -1651,23 +1807,26 @@ const pages = {
         items.forEach((h) => {
           byId.set(h.id, h);
           const ports = h.ips.reduce((n, ip) => n + ip.ports.length, 0);
-          const row = el("button", "host-row");
-          row.type = "button";
-          row.dataset.id = h.id;
-          row.dataset.heat = h.heat || "";
-          row.append(el("span", "cve-id", h.host));
+          const row = selectableRow(h.id, h.heat);
+          // the name and the address are links to this very record (so they can be shared or opened in a new tab); a plain click selects the row
+          const nameBox = el("span", "cve-id");
+          nameBox.append(selfLink(hostAnchor(projectOf(h), h.host)));
+          row.append(nameBox);
           const meta = el("span", "host-meta");
           meta.append(
             el("span", "chip", String(h.score || 0)),
-            el("span", "note", h.ips[0] ? h.ips[0].address : "no IP"),
+            h.ips[0] ? rowIp(projectOf(h), h.ips[0].address) : el("span", "note", "no IP"),
             el("span", "note", `${ports} port${ports === 1 ? "" : "s"}`),
           );
           if (h.cve_matches) meta.append(badge(String(h.cve_matches), "fire"));
           const chip = projChip(h);
           if (chip) meta.append(chip);
           row.append(meta);
-          if (h.matched && h.matched.length) row.append(el("span", "note host-why", h.matched.slice(0, 3).join(" · ")));
-          row.onclick = () => {
+          if (h.matched && h.matched.length) row.append(rowLine(...h.matched.slice(0, 3).flatMap((t, i) => [i ? " · " : "", matchedWhy(t, projectOf(h), h.host)])));
+          row.onclick = (e) => {
+            const link = e.target.closest("a");
+            if (link && !link.classList.contains("self-link")) return;
+            if (link) e.preventDefault();
             history.replaceState(null, "", `#${h.id}`);
             showHost(h);
           };
@@ -1758,17 +1917,50 @@ const pages = {
       },
       row: (f) => ({
         heat: f.heat,
-        title: f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), badge(f.severity, f.severity), aiBadge(f.triage), validationBadge(f.triage),
+        title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
+        meta: [badge(TYPE_LABEL[f.type] || f.type), badge(f.severity, f.severity), aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, projChip(f)],
-        notes: [[f.host || "-", f.note].filter(Boolean).join(" · "), f.description || ""],
+        notes: [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),
     });
     [type, sev, status].forEach((p) => p.refresh());
   },
 
   matches(mount) {
+    // /matches/?cve=CVE-X&host=name is where a CVE named in free text points: the matches for it, narrowed to a host when known
+    const urlq = new URLSearchParams(location.search);
+    let cveOnly = /^CVE-\d{4}-\d{4,}$/i.test(urlq.get("cve") || "") ? urlq.get("cve").toUpperCase() : "";
     const q = searchBox("Filter by host", () => list.reload());
+    q.value = (urlq.get("host") || "").slice(0, 255);
+    const cveNote = el("div", "tools");
+    const paintCveNote = () => {
+      cveNote.textContent = "";
+      cveNote.hidden = !cveOnly;
+      if (!cveOnly) return;
+      const clear = el("button", "btn ghost sm", "Show all matches", { type: "button" });
+      clear.onclick = () => {
+        cveOnly = "";
+        history.replaceState(null, "", location.pathname + location.hash);
+        paintCveNote();
+        status.refresh();
+        list.reload();
+      };
+      cveNote.append(el("span", "note", `Matches for ${cveOnly}`), clear);
+    };
+    // Matches the AI has ruled out are kept (nothing is hidden) but are not what the dashboard's CVE matches counts, so the
+    // page opens on the same view and says so.
+    const verdict = select(
+      "AI verdict",
+      [
+        ["active", "Not ruled out by the AI"],
+        ["not_affected", "Ruled out by the AI"],
+        ["", "Any verdict"],
+      ],
+      () => {
+        status.refresh();
+        list.reload();
+      },
+    );
     const status = picker(
       "Remediation status",
       [
@@ -1778,7 +1970,7 @@ const pages = {
         ["fixed", "Fixed"],
         ["accepted_risk", "Accepted risk"],
       ],
-      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, page_size: 1 })}`)).count,
+      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, page_size: 1 })}`)).count,
       () => list.reload(),
     );
     const cls = select("AI classification", CLASS_OPTIONS, () => {
@@ -1791,18 +1983,19 @@ const pages = {
       noun: "match",
       plural: "matches",
       path: `${base}/matches`,
-      filters: [q, status.node, cls],
-      params: () => ({ host: q.value, status: status.value, classification: cls.value }),
+      filters: [cveNote, q, status.node, cls, verdict],
+      params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly }),
       empty: "No CVE matches yet. They appear when a new CVE matches a host in your inventory.",
       onLoaded: (_, reset) => reset && status.refresh(),
       statusControl,
       row: (m) => ({
         heat: m.cve.tier,
-        title: m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), aiBadge(m.triage), validationBadge(m.triage), projChip(m)],
-        notes: [`${m.host || "-"} · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`, m.cve.short_description || "Description unavailable in the CVE feed."],
+        title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
+        meta: [badge(m.cve.tier, m.cve.tier), aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), projChip(m)],
+        notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });
+    paintCveNote();
   },
 };
 
@@ -1847,6 +2040,7 @@ pages.hygiene = function hygiene(mount) {
     );
   };
   paintTiles();
+  liveCustom.add({ alive: () => tiles.isConnected, run: paintTiles });
 
   const dayBadge = (d) => {
     if (d == null) return "-";
@@ -2093,7 +2287,7 @@ pages.activity = function activity(mount) {
       {
         label: "Activity",
         render: (a) => {
-          const box = el("span", "", a.message);
+          const box = linkify(el("span"), a.message, projectOf(a));
           if (a.repeat > 1) box.append(el("span", "a-repeat", ` ×${a.repeat}`));
           if (a.status === "failed") box.append(document.createTextNode(" "), badge("failed", "failed"));
           return box;
@@ -2123,10 +2317,10 @@ pages.scan = async function scanDetail(mount) {
       label: "Subdomains",
       open: (m) =>
         listTab(m, "subdomains", "Search subdomains", [
-          { label: "Subdomain", render: (r) => r.name },
+          { label: "Subdomain", render: (r) => hostLink(r.name) },
           { label: "HTTP", cls: "num", render: (r) => r.http_status || "-" },
           { label: "Title", render: (r) => r.title || "-" },
-          { label: "IPs", render: (r) => r.ips.join(", ") || "-" },
+          { label: "IPs", render: (r) => (r.ips.length ? joinNodes(r.ips.map((ip) => ipAnchor(slug, ip))) : "-") },
           { label: "Tech", render: (r) => r.technologies.join(", ") || "-" },
         ], [["Export hosts", "subdomains"], ["Export URLs", "urls"]]),
     },
@@ -2201,7 +2395,7 @@ pages.scan = async function scanDetail(mount) {
           { label: "Severity", render: (v) => badge(v.severity, v.severity) },
           { label: "Finding", render: (v) => v.name },
           { label: "Host", render: (v) => hostLink(v.host) },
-          { label: "CVE", render: (v) => v.cves.join(", ") || "-" },
+          { label: "CVE", render: (v) => (v.cves.length ? joinNodes(v.cves.map((c) => cveLink(slug, c, v.cve_matches && v.cve_matches[c], v.host))) : "-") },
           { label: "URL", render: (v) => v.url || "-" },
         ],
         (v) => v.severity,
@@ -2227,7 +2421,9 @@ pages.scan = async function scanDetail(mount) {
       const live = s.status === -1 || s.status === 1;
       const head = el("div", "card scan-head");
       const top = el("div", "card-head");
-      top.append(el("h2", "", s.target), badge(SCAN_STATUS[s.status] || s.status, SCAN_STATUS[s.status]));
+      const title = el("h2");
+      title.append(hostLink(s.target, slug));
+      top.append(title, badge(SCAN_STATUS[s.status] || s.status, SCAN_STATUS[s.status]));
       const meta = el("div", "scan-meta");
       const dur = el("span", "", null);
       const paintDur = () => {
@@ -2276,7 +2472,7 @@ pages.scan = async function scanDetail(mount) {
       tiles.append(
         tile("Subdomains", s.subdomains, { onClick: go("subdomains") }),
         tile("Endpoints", s.endpoints, { onClick: go("endpoints") }),
-        tile("Findings", s.vulnerabilities, { onClick: go("findings") }),
+        tile("Findings, all severities", s.vulnerabilities, { onClick: go("findings") }),
         tile("Critical", sc.critical, { hot: "fire", onClick: go("findings") }),
         tile("High", sc.high, { hot: "fire", onClick: go("findings") }),
         tile("Medium", sc.medium, { hot: "smoke", onClick: go("findings") }),

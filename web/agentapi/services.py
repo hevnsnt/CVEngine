@@ -13,6 +13,7 @@ from typing import Optional
 
 from django.utils import timezone
 
+from cveFeed.counts import RUNNING_WINDOW
 from tenancy import roles
 
 PAGE_SIZE_DEFAULT = 50
@@ -195,11 +196,12 @@ def _target(d):
 
 def list_targets(ctx, slug, params):
     from targetApp.models import Domain
-    from django.db.models import Count, Q
+    from django.db.models import Count
     project, _ = get_project(ctx, slug)
     from cveFeed.correlation import latest_scan_q
     current = latest_scan_q('subdomain__')  # each host once, from its domain's current scan
-    exposed = Q(subdomain__cve_matches__isnull=False) | Q(subdomain__vulnerability__open_status=True, subdomain__vulnerability__severity__gte=2)
+    from cveFeed.counts import exposure_filter
+    exposed = exposure_filter('subdomain__')  # the same definition as the dashboard's Exposed hosts
     everywhere = _is_all(project)
     qs = _scoped(Domain.objects.all(), project, 'project')
     qs = qs.order_by('name', 'project_id', 'id') if everywhere else qs.order_by('name')
@@ -328,6 +330,7 @@ def _scan(s, detail=False, queued=None):
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
            'status': s.scan_status, 'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
+           'stalled': s.scan_status == 1 and s.start_scan_date < timezone.now() - RUNNING_WINDOW,  # marked running, but older than any scan can run
            'kind': 'retest' if 'retest' in (s.tasks or []) else 'hosts' if 'host_pipeline' in (s.tasks or []) else 'discovery'}
     if s.scan_status == -1:  # how many scans are ahead of this one in the queue
         from cveFeed.discovery import queue_position
@@ -358,9 +361,14 @@ def list_scans(ctx, slug, params):
     qs = _scoped(ScanHistory.objects.all(), project, 'domain__project').select_related('domain__project' if everywhere else 'domain', 'scan_type')
     if params.get('target_id'):
         qs = qs.filter(domain_id=_int_param(params['target_id'], 'target_id'))
-    wanted = SCAN_STATUS_FILTER.get(str(params.get('status', '')).lower())
-    if wanted is not None:
-        qs = qs.filter(scan_status=wanted)
+    from cveFeed import counts
+    status = str(params.get('status', '')).lower()
+    if status in ('running', '1'):  # the dashboard's definition: a scan "running" since before the window is stalled
+        qs = counts.running_scans(qs)
+    elif status == 'stalled':
+        qs = counts.stalled_scans(qs)
+    elif SCAN_STATUS_FILTER.get(status) is not None:
+        qs = qs.filter(scan_status=SCAN_STATUS_FILTER[status])
     qs = qs.order_by(
         Case(When(scan_status=1, then=Value(0)), When(scan_status=-1, then=Value(1)), default=Value(2), output_field=IntegerField()),
         Case(When(scan_status=-1, then=F('id')), default=-F('id'), output_field=IntegerField()))
@@ -447,7 +455,7 @@ def list_scan_vulnerabilities(ctx, slug, scan_id, params):
     from startScan.models import Vulnerability
     scan = _scan_in_project(ctx, slug, scan_id)
     qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict') \
-        .prefetch_related('cve_ids').order_by('-severity', '-id')
+        .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
@@ -1063,6 +1071,9 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                  'http': p.http or None, 'tls': p.tls or None} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
+            # the list above is capped and includes informational detections; these are the real counts, split the way the Scanner
+            # findings page and the dashboard split them: findings (low or worse) and informational detections
+            'vuln_count': sum(1 for v in vulns if v.severity != 0), 'info_count': sum(1 for v in vulns if v.severity == 0),
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded)}
@@ -1475,10 +1486,26 @@ def search_hosts(ctx, slug, params):
     return _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
 
 
+def _matches_of_host():
+    """Prefetch of each finding's host's CVE matches (one query for a page, whether or not any exists): where a CVE id links to."""
+    from django.db.models import Prefetch
+
+    from cveFeed.models import CVEMatch
+    return Prefetch('subdomain__cve_matches', queryset=CVEMatch.objects.select_related('cve_entry'))
+
+
+def _cve_match_ids(v):
+    """{CVE id: match id} for the CVEs this finding names that CVEngine also matched on the same host: where each CVE links to."""
+    if not v.subdomain_id:
+        return {}
+    matches = {m.cve_entry.cve_id.upper(): m.id for m in v.subdomain.cve_matches.all()}
+    return {c.name: matches[c.name.upper()] for c in v.cve_ids.all() if c.name.upper() in matches}
+
+
 def _vuln(v):
     return {'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)),
             'url': v.http_url, 'host': v.subdomain.name if v.subdomain else None, 'open': v.open_status,
-            'cves': [c.name for c in v.cve_ids.all()], 'discovered': _iso(v.discovered_date),
+            'cves': [c.name for c in v.cve_ids.all()], 'cve_matches': _cve_match_ids(v), 'discovered': _iso(v.discovered_date),
             'description': v.description, 'remediation': v.remediation, 'source': v.source,
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
@@ -1489,14 +1516,15 @@ def list_vulnerabilities(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
     qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict') \
-        .prefetch_related('cve_ids').order_by('-severity', '-id')
+        .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
     elif params.get('severity') == 'actionable':  # everything but informational: the Vulnerabilities page's default view
-        qs = qs.exclude(severity=inverse['info'])
+        from cveFeed.counts import actionable_findings
+        qs = actionable_findings(qs)
     if params.get('open') in ('true', 'false'):
         qs = qs.filter(open_status=params['open'] == 'true')
     if params.get('classification'):
@@ -1513,8 +1541,6 @@ def _cert(c):
 
 def list_certificates(ctx, slug, params):
     """TLS certificates seen on the project's hosts, soonest expiry first. ?expiring_within=30 narrows to those due."""
-    from datetime import timedelta
-
     from cveFeed.models import TlsCertificate
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
@@ -1522,7 +1548,8 @@ def list_certificates(ctx, slug, params):
     if everywhere:
         qs = qs.select_related('domain__project')
     if params.get('expiring_within', '').isdigit():
-        qs = qs.filter(not_after__lte=timezone.now() + timedelta(days=int(params['expiring_within'])))
+        from cveFeed.counts import expiring_certificates
+        qs = expiring_certificates(qs, int(params['expiring_within']))
     if params.get('q'):
         qs = qs.filter(host__icontains=params['q'])
     return paginate(qs, params, _tagged(_cert, lambda c: c.domain.project) if everywhere else _cert)
@@ -1850,12 +1877,17 @@ def list_matches(ctx, slug, params):
     qs = _matches_qs(project)
     if params.get('status'):
         qs = qs.filter(remediation_status=params['status'])
-    if params.get('verdict'):
+    if params.get('verdict') == 'active':  # not ruled out by the AI: the dashboard's CVE matches count
+        from cveFeed.counts import RULED_OUT
+        qs = qs.exclude(ai_verdict=RULED_OUT)
+    elif params.get('verdict'):
         qs = qs.filter(ai_verdict=params['verdict'])
     if params.get('classification'):
         qs = qs.filter(triage__classification=params['classification'])
     if params.get('host'):
         qs = qs.filter(subdomain__name__icontains=params['host'])
+    if params.get('cve'):  # one CVE id: where a CVE named in free text (an activity line) links to
+        qs = qs.filter(cve_entry__cve_id__iexact=params['cve'].strip()[:40])
     return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
