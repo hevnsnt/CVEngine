@@ -2,9 +2,14 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.0.1 (2026-10-25)
 
-Nothing yet.
+A security patch. Update with `make up` or the in-app updater.
+
+- **Security:** two-step sign-in could be skipped at `/admin/login/`. That URL now only forwards to `/login/`, which enforces the second step.
+- **AI-written templates are kept across updates.** They now live on a Docker volume, and a worker restores any validated template whose file is missing.
+- **`scripts/uninstall.sh` removes only this install,** not another reNgine on the same host.
+- **Proxy docs:** `CVENGINE_TRUSTED_PROXIES` should be left at its default or added to, never replaced.
 
 ## v1.0 (2026-10-25)
 

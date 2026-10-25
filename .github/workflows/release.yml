@@ -1,7 +1,7 @@
 name: 🏷️ Release
 
 # Two ways to cut a release:
-#  - push a tag such as v1.0 (publishes a GitHub release from that version's CHANGELOG.md section), or
+#  - push a tag such as v1.0 (publishes a GitHub release from that version's CHANGELOG.md section; a patch such as v1.0.1 keeps the v1.0 notes and adds its own at the end), or
 #  - run this workflow manually (Actions tab / workflow_dispatch): it creates the tag from master's web/.version
 #    (or the tag you type) and then publishes. The manual path exists because a cloud session cannot push tags.
 on:
@@ -68,13 +68,24 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          # the section from "## <tag> (" up to the next "## " heading; links made absolute at this tag
-          awk -v tag="$TAG" '
-            index($0, "## " tag " (") == 1 { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md \
-            | sed -E "s#\]\((docs/|[A-Z-]+\.md)#](https://github.com/$REPO/blob/$TAG/\1#g" > "$RUNNER_TEMP/notes.md"
+          # A section is the text from "## <tag> (" up to the next "## " heading. A patch tag (v1.0.1) keeps its minor
+          # release's notes (v1.0) and appends its own short section at the end. Links are made absolute at this tag.
+          section() {
+            awk -v tag="$1" '
+              index($0, "## " tag " (") == 1 { found = 1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md
+          }
+          base="$TAG"
+          case "$TAG" in v*.*.[1-9]*) base="${TAG%.*}" ;; esac
+          if [ "$base" != "$TAG" ]; then
+            { section "$base"; echo; echo "## $TAG"; section "$TAG"; } > "$RUNNER_TEMP/raw.md"
+            section "$TAG" | grep -q '[^[:space:]]' || : > "$RUNNER_TEMP/raw.md"
+          else
+            section "$TAG" > "$RUNNER_TEMP/raw.md"
+          fi
+          sed -E "s#\]\((docs/|[A-Z-]+\.md)#](https://github.com/$REPO/blob/$TAG/\1#g" "$RUNNER_TEMP/raw.md" > "$RUNNER_TEMP/notes.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
             echo "::error::CHANGELOG.md has no '## $TAG (' section"
             exit 1
