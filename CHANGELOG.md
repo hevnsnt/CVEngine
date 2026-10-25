@@ -2,22 +2,17 @@
 
 CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, taken in November 2025. The history of reNgine up to that point is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-CVEngine has not made a numbered release yet. Everything below is on `master`.
-
 ## Unreleased
+
+Nothing yet.
+
+## v1.0 (2026-10-25)
+
+The first numbered release of CVEngine.
 
 ### Added
 
 - **Bug bounty status dashboard.** The Overview now opens on what is happening on the targets your engagements imported: identified hosts and how many are live, how many are in scope, out of scope or unclear for each program (out-of-scope hosts are listed), scans running, queued and stalled, potential findings with a Draft report button, CVE matches that need validation with a link that runs Validate now, and a row per program. It reads `/cve/api/bounty/workbench`, uses the counting definitions in `web/cveFeed/counts.py`, and refreshes every 8 seconds while the page is visible.
-
-### Fixed
-
-- **Numbers agree everywhere.** One definition per number (`web/cveFeed/counts.py`) now feeds the dashboard status line, the section pages' chips, the Targets table, the attack-surface map, the graph overview and the agent API. Before, the status line counted host rows (874), the Hosts page distinct hosts (659) and the map only live hosts, capped (163). Now Hosts is distinct hosts per project everywhere, the map header reads "N live of M hosts", a host held by two targets counts once, the Targets table's Exposed column leaves out what the AI ruled out (as the dashboard does), the dashboard's Scanner findings tile counts exactly what the Findings page shows under Scanner, Actionable (open, low or worse), the CVE matches page opens on matches not ruled out (a filter shows the rest), the Scans page counts a scan marked running for over 11 hours as Stalled (as the dashboard does), and a host's Open findings tile counts open findings of low severity or worse with informational detections listed apart. Every dashboard tile says what it counts. `tests/test_counts.py` pins each surface against the others.
-- **Section pages update on their own.** Every page that shows a number or a list re-reads it every 8 seconds while the tab is visible (filter chips, tiles, lists), from the same endpoints. A list reloads quietly when a count moves, unless the reader pressed Load more. Scan counts on the dashboard are read fresh on every poll.
-- **Every host, address and CVE id links to its record.** Hostnames to the host record, IPs to the host that holds them, CVE ids to the match on that host (`/cve/<project>/matches/#<id>`), in lists, the activity feeds, the live ticker, graph node details, the scan pages and the bug bounty page. "Needs validation" is a link: it opens the match and runs Validate now (any other finding opens its own page). `web/static/cve/links.js` holds these rules; `web/tests/test_links.mjs` tests them.
-
-### Added
-
 - **Threat intelligence for historical CVEs.** An hourly task reads CISA KEV, ENISA EUVD (exploited), FIRST EPSS, Exploit-DB and Metasploit, plus VulnCheck KEV with a key. It reconciles every stored CVE's exploited, exploit and EPSS signals with them, and imports the exploited and exploitable CVEs the cve.now feed never delivered (about 37,000, known exploited first) from their CVE List V5 records with affected version ranges. The CVE detail names which source reported each signal. See [docs/PIPELINE.md](docs/PIPELINE.md).
 - **One Findings list.** The Findings page (formerly Scanner findings) lists CVE matches, scanner findings and hygiene findings together, hottest first, filtered by type, severity and status (actionable by default). Its heat follows the host card. The API and MCP offer the same list (`GET projects/{slug}/findings`, `list_findings`). The CVE matches and Hygiene pages stay for focused work. See [docs/FRONTEND.md](docs/FRONTEND.md).
 - **Weekly log maintenance.** AI activity, AI call and AI usage rows past their retention (30, 90 and 400 days) are archived to a tar.gz on the scan results volume, then deleted. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
@@ -48,6 +43,8 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 - **Coverage.** Paced deep nuclei runs over the whole inventory each week, and CVE details refresh when the feed updates them.
 - **Operations.** Pause all scanning with one switch, scheduler and worker health, an activity and error log for administrators, AI model usage with cost estimates, and an update script that drains running work before restarting.
 - **User interface.** A new mobile-first interface with a live dashboard, an attack-surface map, a live asset graph, a hosts page, and a command palette.
+- **Mobile account menu.** The bottom bar on phones has an Account tab that opens My account, Administration, AI model usage, Settings, About and Sign out.
+- **Updater `--force`.** `scripts/update.sh --force` skips the drain, stops discovery scans (queued again afterwards) and stops the workers with a short grace. The normal drain now tolerates a busy worker that answers slowly. See [docs/UPDATES.md](docs/UPDATES.md).
 
 ### Changed
 
@@ -58,7 +55,6 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 - **Archives.** A host a person archived stays archived until restored; rediscovery and scans no longer lift it. A failed rediscovery enqueue puts the archive back.
 - **Errors.** Stored and displayed job errors carry a diagnostic id instead of exception text. Nuclei failures say why, and the template policy reports what it excludes, including the technology detection template. Impossible dates in filters return 400.
 - **Dashboard.** The Attack surface map shows the 100 highest-scoring hosts.
-
 - Python 3.14, Django 5.2 LTS, PostgreSQL 18, Go 1.27, nmap 7.992, and Ubuntu 26.04 LTS. See [docs/UPGRADE.md](docs/UPGRADE.md) for moving an older install.
 - Database indexes on the tables that grow with every scan, and batched writes in the feed sync and scanner passes.
 - Branding and installer are CVEngine's.
@@ -66,6 +62,13 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 - **My account.** Two-step sign-in is set up and turned off on My account (QR code, confirmation code and recovery codes in place), so the separate two-step page and its menu item are gone; `/mfa/setup/` and `/mfa/disable/` forward to My account. The page lays out in two independent columns.
 - **About page.** A new About page in the account menu credits FieldCraft Cyber, Bill Swearingen, reNgine and the scanners and libraries CVEngine uses, and links to the GitHub repository.
 - **Scope of tenant domains.** The weekly apex sweep no longer promotes a tenant on a shared provider domain (`acme.jfrog.com`, `acme.atlassian.net`) to the provider's apex (`jfrog.com`, `atlassian.net`) and deep-scans all of it. A curated shared-domain list marks such targets host scoped: bbot runs with `--strict-scope` for them, the sweep skips them, and certificate transparency never queries a bare provider domain. Each target has a scope mode (`auto`, `host`, `parent`) in the Targets page, the API and MCP. On migrate, provider apexes that the sweep created earlier are deleted (with their scans and findings), and a shared domain you added yourself is kept and switched to `host`. See [docs/PIPELINE.md](docs/PIPELINE.md).
+
+### Fixed
+
+- **Numbers agree everywhere.** One definition per number (`web/cveFeed/counts.py`) now feeds the dashboard status line, the section pages' chips, the Targets table, the attack-surface map, the graph overview and the agent API. Before, the status line counted host rows (874), the Hosts page distinct hosts (659) and the map only live hosts, capped (163). Now Hosts is distinct hosts per project everywhere, the map header reads "N live of M hosts", a host held by two targets counts once, the Targets table's Exposed column leaves out what the AI ruled out (as the dashboard does), the dashboard's Scanner findings tile counts exactly what the Findings page shows under Scanner, Actionable (open, low or worse), the CVE matches page opens on matches not ruled out (a filter shows the rest), the Scans page counts a scan marked running for over 11 hours as Stalled (as the dashboard does), and a host's Open findings tile counts open findings of low severity or worse with informational detections listed apart. Every dashboard tile says what it counts. `tests/test_counts.py` pins each surface against the others.
+- **Section pages update on their own.** Every page that shows a number or a list re-reads it every 8 seconds while the tab is visible (filter chips, tiles, lists), from the same endpoints. A list reloads quietly when a count moves, unless the reader pressed Load more. Scan counts on the dashboard are read fresh on every poll.
+- **Every host, address and CVE id links to its record.** Hostnames to the host record, IPs to the host that holds them, CVE ids to the match on that host (`/cve/<project>/matches/#<id>`), in lists, the activity feeds, the live ticker, graph node details, the scan pages and the bug bounty page. "Needs validation" is a link: it opens the match and runs Validate now (any other finding opens its own page). `web/static/cve/links.js` holds these rules; `web/tests/test_links.mjs` tests them.
+- **HackerOne sign-in.** The bug bounty credential form asks for the HackerOne username (HackerOne's Hacker API signs in with the username and an API token) and says why HackerOne refused a credential. **Load the catalogue** reports a queued and a running load and redraws the page when it finishes.
 
 ### Removed
 

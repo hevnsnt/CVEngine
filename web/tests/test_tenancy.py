@@ -319,6 +319,8 @@ class MfaFlowTests(TestCase):
 		self.assertContains(r, 'reNgine')
 		self.assertContains(r, 'https://github.com/ACK-J/MailFail')
 		self.assertContains(r, 'Black Hills Information Security')
+		self.assertContains(r, f'<dt>Version</dt><dd>{settings.RENGINE_CURRENT_VERSION}</dd>')
+		self.assertNotEqual(settings.RENGINE_CURRENT_VERSION, 'unknown')
 
 
 @override_settings(ALLOWED_HOSTS=['cve.example.test'])
