@@ -56,7 +56,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | exclude host | `POST projects/{slug}/hosts/{host}/exclude`, `GET projects/{slug}/exclusions`, `DELETE projects/{slug}/exclusions/{host}` | `exclude_host`, `list_exclusions`, `remove_exclusion` |
 | API keys | `GET/PUT/DELETE projects/{slug}/api-keys[/{service}]` | none |
 
-Lists take `page` and `page_size` (up to 200), except `work`, `cves?tier=`, and `findings`, which stop at the first 200, 2,000, and 2,000 rows. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
+Lists take `page` and `page_size` (up to 200), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
 ## Targets and scans
 
@@ -82,15 +82,17 @@ The reserved slug `_all` means every project you can see. The list endpoints and
 
 Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first (`sort=name` for name order). A hostname is one host, so the list returns one row per name that covers all its current rows. `labels` holds short informational detections such as a WAF or federated sign-in. See [Host score](PIPELINE.md#host-score).
 
-`search?q=...` returns hosts with `matched` showing what each query hit. Terms are separated by spaces and ANDed.
+`search?q=...` returns hosts with `matched` showing what each query hit. Terms are separated by spaces and ANDed. A bad value for `sev:`, `auth:`, `sensitive:`, or `zombie:` is a 400. The full syntax, with examples, is in [SEARCH.md](SEARCH.md).
 
 | Term | Matches |
 | --- | --- |
-| `php` | a bare word in hostname, IP, technology, port product, service, version, CPE, OS, finding name, CVE id, or page title |
-| `tech:nginx`, `product:nginx`, `service:mysql`, `os:linux` | technology, port product, service, OS |
-| `port:3306` | open port number |
+| `php` | a bare word in hostname, IP, technology, headers, cookie names, port product, service, version, CPE, banner and script output, OS, finding name, CVE id, or page title |
+| `tech:nginx` | anything the host runs: technology, `Server` and `X-Powered-By` headers, product, version, CPE, banner, script output, cookie names |
+| `product:nginx`, `service:mysql`, `os:linux` | port product, service name, OS guess |
+| `banner:"anonymous"` | service banner, script output, or extra info on an open port |
+| `port:3306` | open port number (a number only; `port:ssh` is a 400) |
 | `cve:CVE-2024-1234` | CVE match |
-| `ip:10.0.0.5`, `ip:10.0.0.0/24` | an IP, or any IP in a CIDR range |
+| `ip:10.0.0.5`, `ip:10.0.0.0/24`, `ip:10.0.` | an IP, any IP in a CIDR range, or an address prefix |
 | `host:www` | hostname |
 | `vuln:rce`, `sev:high` | finding name, severity |
 | `auth:<state>` | hosts with a web route in that state (any state listed under Routes) |
