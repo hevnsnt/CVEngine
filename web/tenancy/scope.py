@@ -42,6 +42,10 @@ SCOPES = {
     'cveFeed.HostLabel': 'project_id',
     'cveFeed.HostProfile': 'project_id',
     'cveFeed.Triage': 'project_id',
+    'cveFeed.BountyEngagement': 'project_id',
+    'cveFeed.BountyReport': 'project_id',
+    'cveFeed.BountyEngagementTarget': 'engagement__project_id',
+    'cveFeed.BountyReportEvent': 'report__project_id',
 }
 NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity'}  # system-wide entries have no project
 

@@ -127,6 +127,15 @@ async function usersTab(panel) {
             render: (u) =>
               u.mfa_enabled ? badge("on", "success") : badge("off", "medium"),
           },
+          {
+            label: "Bug bounty",
+            render: (u) =>
+              u.is_superuser
+                ? badge("always", "success")
+                : u.bugbounty_enabled
+                  ? badge("authorized", "success")
+                  : badge("no", "info"),
+          },
           { label: "Last sign-in", render: (u) => shortDate(u.last_login) },
           {
             label: "Status",
@@ -321,6 +330,42 @@ function manageUser(u, orgs, projects, done) {
         ),
       );
       body.append(add);
+    }
+    if (me.is_superuser) {
+      body.append(el("h2", "", "Bug bounty", { style: "margin-top:20px" }));
+      if (u.is_superuser) {
+        body.append(el("p", "note", "App Admins always have bug bounty access."));
+      } else {
+        body.append(
+          el(
+            "p",
+            "note",
+            u.bugbounty_enabled
+              ? `${u.username} is authorized. They can browse programs, work them and send reports from their own HackerOne account.`
+              : `${u.username} is not authorized. Only an App Admin can authorize bug bounty, because reports and scope data go to outside platforms.`,
+          ),
+          button(
+            u.bugbounty_enabled ? "Withdraw bug bounty access" : "Authorize bug bounty",
+            async () => {
+              if (
+                !u.bugbounty_enabled &&
+                !(await ask(
+                  `${u.username} will get the Bug bounty page: program scope, importing it as targets, and sending reports to platforms under their own account. This is written to the audit log.`,
+                  { title: `Authorize bug bounty for ${u.username}?`, ok: "Authorize", danger: false },
+                ))
+              )
+                return;
+              await api("PUT", `${A}/users/${u.id}/bug-bounty`, {
+                enabled: !u.bugbounty_enabled,
+              });
+              toast(u.bugbounty_enabled ? "Bug bounty access withdrawn" : "Bug bounty authorized");
+              close();
+              done();
+            },
+            "btn ghost sm",
+          ),
+        );
+      }
     }
     body.append(el("h2", "", "Account", { style: "margin-top:20px" }));
     const row = el("div", "actions", null, { style: "flex-wrap:wrap" });

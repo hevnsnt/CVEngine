@@ -6,6 +6,7 @@ const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "
 // Where the switcher sends you when the project changes. On the dashboard it stays on the dashboard
 // (bare /cve/ for the combined view, ?project= for one project); on a section page it keeps the section.
 function projectHref(value, here) {
+  if (here === "bounty") return `/cve/bounty/?project=${encodeURIComponent(value && value !== "_all" ? value : "")}`;
   if (here === "dashboard") return value && value !== "_all" ? `/cve/?project=${encodeURIComponent(value)}` : "/cve/";
   return `/cve/${value}/${SECTIONS.includes(here) ? here : "hosts"}/`;
 }

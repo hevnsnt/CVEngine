@@ -809,3 +809,15 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:#f4f4f5;bor
 @media(max-width:1050px){.ai-usage-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:640px){.ai-usage-hero{align-items:flex-start;flex-direction:column;padding:20px;gap:14px}.ai-usage-signal{max-width:none;flex:auto;width:100%}.ai-usage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ai-usage-metric{padding:14px}.ai-usage-metric:last-child{grid-column:1/-1}.ai-usage-scroll table{min-width:0;width:100%}.ai-usage-scroll .table-wrap{overflow:visible}}
 @media(max-width:430px){.ai-usage-grid{gap:8px}.ai-usage-metric{padding:12px}.ai-usage-metric strong{font-size:1.25rem}}
+
+/* bug bounty */
+.bb-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:14px 0}
+.bb-tile .bb-n{font:700 28px var(--mono);letter-spacing:-.02em}
+.bb-tile .bb-l{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-top:2px}
+.bb-ed{display:grid;gap:0 16px;grid-template-columns:1fr;margin:14px 0}
+@media (min-width:900px){.bb-ed{grid-template-columns:1fr 1fr}.bb-ed .field:has(textarea),.bb-ed .field:nth-child(1){grid-column:1/-1}}
+.bb-pre{font:500 12.5px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;background:var(--sunk);padding:10px 12px;border-radius:var(--r)}
+.bb-scroll{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:var(--r);padding:8px 12px;margin:10px 0}
+.bb-list{margin:8px 0 12px 18px;display:grid;gap:6px;font-size:14px;line-height:1.5}
+#bounty .card{margin-bottom:14px}
+#bounty .mono{font:500 13px var(--mono);overflow-wrap:anywhere}
