@@ -160,6 +160,11 @@ def _iso(value):
     return value.isoformat() if value else None
 
 
+def _user_brief(user):
+    """{id, username, name} for a status-change actor or an assignee, None when there is none."""
+    return {'id': user.id, 'username': user.username, 'name': user.get_full_name() or user.username} if user else None
+
+
 # --- identity ----------------------------------------------------------------
 
 def me(ctx):
@@ -1656,6 +1661,7 @@ def _vuln(v):
             'description': v.description, 'remediation': v.remediation, 'source': v.source,
             'remediation_status': v.remediation_status, 'remediation_note': v.remediation_note,
             'remediation_updated': _iso(v.remediation_updated_at),
+            'status_changed_at': _iso(v.remediation_updated_at), 'status_changed_by': _user_brief(v.remediation_by),
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
 
@@ -1664,7 +1670,7 @@ def list_vulnerabilities(ctx, slug, params):
     from startScan.models import Vulnerability
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict') \
+    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict', 'remediation_by') \
         .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
@@ -1709,6 +1715,7 @@ def _hygiene(f):
             'title': f.title, 'detail': f.detail, 'evidence': f.evidence, 'status': f.status,
             'remediation_status': f.remediation_status, 'remediation_note': f.remediation_note,
             'remediation_updated': _iso(f.remediation_updated_at),
+            'status_changed_at': _iso(f.remediation_updated_at), 'status_changed_by': _user_brief(f.remediation_by),
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
             'triage': _triage_brief(_triage_of(f))}
 
@@ -1718,7 +1725,8 @@ def list_hygiene(ctx, slug, params):
     from cveFeed.models import HygieneFinding
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project').select_related('domain__project' if everywhere else 'domain', 'triage__verdict') \
+    qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project').select_related(
+        'domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by') \
         .order_by('-severity', 'host', 'id')
     qs = qs.filter(status=params.get('status') or 'open')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
@@ -2031,6 +2039,7 @@ def _match(m):
             'template_tested': _iso(m.template_tested_at),
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
             'remediation_updated': _iso(m.remediation_updated_at),
+            'status_changed_at': _iso(m.remediation_updated_at), 'status_changed_by': _user_brief(m.remediation_by),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m))}
 
@@ -2039,7 +2048,7 @@ def _matches_qs(project):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
-        .select_related('cve_entry', 'subdomain', 'triage__verdict').order_by('-confidence', '-id')
+        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'remediation_by').order_by('-confidence', '-id')
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs
 
 
@@ -2106,7 +2115,7 @@ def _finding_sources(project, params):
         sources['cve'] = qs
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
-            .select_related('subdomain', 'triage__verdict', *(['target_domain__project'] if everywhere else [])) \
+            .select_related('subdomain', 'triage__verdict', 'remediation_by', *(['target_domain__project'] if everywhere else [])) \
             .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'))
         if status == 'actionable':
             qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
@@ -2115,7 +2124,7 @@ def _finding_sources(project, params):
         sources['scanner'] = qs
     if wanted in ('all', 'hygiene'):
         qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project') \
-            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict') \
+            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by') \
             .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'))
         if status == 'actionable':
             qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
@@ -2150,7 +2159,9 @@ def _finding_row(kind, obj):
     return {'type': kind, 'kind': FINDING_TYPES[kind], 'id': obj.id, 'title': title, 'host': host, 'note': note,
             'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
             'remediation_note': getattr(obj, 'remediation_note', ''),
-            'detected': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
+            'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
+            'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)),
+            'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
 
 
 def _finding_project(kind, obj):

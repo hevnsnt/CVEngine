@@ -690,6 +690,16 @@ class FindingStatusTests(TestCase):
 		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'vendor says no'})
 		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'accepted_risk', 'vendor says no'))
 
+	def test_status_changed_at_and_by_are_set_by_a_patch(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress'})
+		self.assertEqual(status, 200)
+		self.assertIsNotNone(data['status_changed_at'])
+		self.assertEqual(data['status_changed_at'], data['remediation_updated'])
+		self.assertEqual(data['status_changed_by'], {'id': self.alice.id, 'username': 'fsalice', 'name': 'fsalice'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'fixed'})
+		self.assertEqual((status, data['status_changed_by']['username']), (200, 'fsalice'))
+
 	def test_patch_match_kind_delegates_to_the_same_route_as_matches(self):
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-50', cvss=7.0, title='x', published_at=timezone.now())
 		match = CVEMatch.objects.create(cve_entry=cve, subdomain=Subdomain.objects.create(name='m.fs.example', target_domain=self.domain), confidence=0.5)

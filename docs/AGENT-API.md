@@ -136,6 +136,8 @@ Matches also carry `distro_status` (`patched`, `vulnerable`, `unknown`, `no_data
 
 `note` on every one of these routes, `update_remediation_status` included, is a true partial-update field: leave it out of the body and the stored note is untouched; send `""` (or any string) and it replaces it. Earlier, an omitted `note` was treated the same as an explicit `""` and silently cleared it.
 
+Every match, scanner, and hygiene response (detail and `findings` rows alike) also carries `status_changed_at` and `status_changed_by` (`{id, username, name}` or `null`) — the same moment and actor as `remediation_updated`/the write that made it, under names that read naturally for aging and SLA display. `findings` rows carry `first_seen` alongside the existing `detected` (the same moment); the type-specific list and detail endpoints already had `first_seen`.
+
 ## Limits
 
 Domain names are unique across the instance. A range or CIDR target is capped at 10,000 addresses per call, and a bulk request at 10,000 lines or expanded rows (`CVENGINE_MAX_TARGETS_PER_ADD`). Loopback and link-local addresses cannot be added, and private ranges need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
