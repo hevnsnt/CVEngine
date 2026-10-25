@@ -1,32 +1,73 @@
 name: 🏷️ Release
 
-# Pushing a tag such as v1.0 publishes a GitHub release whose notes are that version's CHANGELOG.md section.
+# Two ways to cut a release:
+#  - push a tag such as v1.0 (publishes a GitHub release from that version's CHANGELOG.md section), or
+#  - run this workflow manually (Actions tab / workflow_dispatch): it creates the tag from master's web/.version
+#    (or the tag you type) and then publishes. The manual path exists because a cloud session cannot push tags.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (default: the version in web/.version, e.g. v1.0)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
     name: 🏷️ Publish the GitHub release
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Checkout the tag
+      - name: 📥 Checkout
         uses: actions/checkout@v4
+
+      - name: 🏷️ Resolve the tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          version="v$(tr -d '[:space:]' < web/.version | sed 's/^v//')"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            tag="${INPUT_TAG:-$version}"
+          else
+            tag="$REF_NAME"
+          fi
+          if [ "$tag" != "$version" ]; then
+            echo "::error::web/.version is '$version' but the tag is '$tag'. Bump web/.version or pass a matching tag."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: 🏷️ Create the tag (manual run only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on the remote; publishing from it."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "CVEngine $TAG"
+            git push origin "refs/tags/$TAG"
+          fi
 
       - name: 📝 Release notes from the changelog
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          version="$(tr -d '[:space:]' < web/.version)"
-          if [ "$version" != "$TAG" ]; then
-            echo "::error::web/.version is '$version' but the tag is '$TAG'"
-            exit 1
-          fi
           # the section from "## <tag> (" up to the next "## " heading; links made absolute at this tag
           awk -v tag="$TAG" '
             index($0, "## " tag " (") == 1 { found = 1; next }
@@ -42,7 +83,7 @@ jobs:
       - name: 🚀 Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --title "CVEngine $TAG" --notes-file "$RUNNER_TEMP/notes.md"
