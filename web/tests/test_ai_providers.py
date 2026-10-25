@@ -55,6 +55,62 @@ class ProviderTests(unittest.TestCase):
 				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
 
 
+class VisionTests(unittest.TestCase):
+	"""complete_vision() attaches one image to the user turn, in each provider's own shape, and shares the text
+	extraction and error handling of complete()."""
+	PNG = b'\x89PNG\r\n\x1a\nfake'
+
+	def test_anthropic_sends_the_image_as_a_base64_content_block(self):
+		reply = {'content': [{'type': 'text', 'text': '{"signed_in": true}'}]}
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			p = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+			self.assertEqual(p.complete_vision('sys', 'usr', self.PNG), '{"signed_in": true}')
+		_, kw = post.call_args
+		content = kw['json']['messages'][0]['content']
+		image = next(b for b in content if b['type'] == 'image')
+		text = next(b for b in content if b['type'] == 'text')
+		self.assertEqual(text['text'], 'usr')
+		self.assertEqual(image['source']['media_type'], 'image/png')
+		import base64
+		self.assertEqual(base64.b64decode(image['source']['data']), self.PNG)
+
+	def test_anthropic_vision_truncation_is_still_a_provider_error(self):
+		p = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+		with mock.patch('requests.post', return_value=FakeResp({'stop_reason': 'max_tokens', 'content': []})):
+			with self.assertRaises(ai.AIProviderError):
+				p.complete_vision('sys', 'usr', self.PNG)
+
+	def test_openai_sends_a_data_url(self):
+		with mock.patch('requests.post', return_value=FakeResp({'choices': [{'message': {'content': 'ok'}}]})) as post:
+			p = ai.get_provider('openai', api_key='k', model='m')
+			self.assertEqual(p.complete_vision('s', 'u', self.PNG, media_type='image/jpeg'), 'ok')
+		_, kw = post.call_args
+		content = kw['json']['messages'][1]['content']
+		image = next(b for b in content if b['type'] == 'image_url')
+		self.assertTrue(image['image_url']['url'].startswith('data:image/jpeg;base64,'))
+
+	def test_openrouter_inherits_vision_from_openai(self):
+		with mock.patch('requests.post', return_value=FakeResp({'choices': [{'message': {'content': 'ok'}}]})):
+			p = ai.get_provider('openrouter', api_key='k', model='m')
+			self.assertEqual(p.complete_vision('s', 'u', self.PNG), 'ok')
+
+	def test_ollama_sends_images_as_a_base64_list(self):
+		with mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
+			p = ai.get_provider('ollama', model='llava', base_url='http://100.64.0.5:11434')
+			self.assertEqual(p.complete_vision('s', 'u', self.PNG), 'ok')
+		_, kw = post.call_args
+		msg = kw['json']['messages'][1]
+		self.assertEqual(msg['content'], 'u')
+		import base64
+		self.assertEqual(base64.b64decode(msg['images'][0]), self.PNG)
+
+	def test_the_base_provider_refuses_images_by_default(self):
+		class Bare(ai.AIProvider):
+			name = 'bare'
+		with self.assertRaises(ai.AIProviderError):
+			Bare().complete_vision('s', 'u', self.PNG)
+
+
 class ModelSelectionTests(unittest.TestCase):
 	def setUp(self):
 		ai._RESOLVED.clear()

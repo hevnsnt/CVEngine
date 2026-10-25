@@ -118,12 +118,66 @@ def check_couchdb(host, port):
         return False
 
 
+def check_mysql(host, port):
+    """A single connection attempt as root with no password: open iff the server lets it straight through. Like
+    check_postgres above, this tries one specific likely-default account, never a second username or password."""
+    try:
+        import pymysql
+    except ImportError:
+        return None
+    conn = None
+    try:
+        conn = pymysql.connect(host=host, port=port, user='root', password='', connect_timeout=CONNECT_TIMEOUT,
+                               read_timeout=CONNECT_TIMEOUT, write_timeout=CONNECT_TIMEOUT)
+        version = conn.get_server_info()
+        _note(host, port, f'connected as root with no password (MySQL {version})' if version else 'connected as root with no password')
+        return True
+    except Exception:  # noqa: BLE001 - access denied, refused, reset: simply "not exposed", not a crash
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def check_mongodb(host, port):
+    """A single listDatabases command sent with no prior authentication: open iff the server lets it through. Only
+    database NAMES are read, the same care check_couchdb above takes - never a document's content. On a server
+    with access control enabled this fails with Unauthorized, which is exactly the point: it is the standard way
+    to tell a wide-open MongoDB apart from a secured one without sending any credential at all."""
+    try:
+        import pymongo
+    except ImportError:
+        return None
+    client = None
+    try:
+        client = pymongo.MongoClient(host=host, port=port, serverSelectionTimeoutMS=int(CONNECT_TIMEOUT * 1000),
+                                     connectTimeoutMS=int(CONNECT_TIMEOUT * 1000), socketTimeoutMS=int(CONNECT_TIMEOUT * 1000),
+                                     directConnection=True)
+        result = client.admin.command('listDatabases', 1, nameOnly=True)
+        names = [str(d.get('name', '')) for d in result.get('databases', [])]
+        _note(host, port, f'listDatabases answered with {len(names)} database name(s)')  # a count, never the names
+        return True
+    except Exception:  # noqa: BLE001 - Unauthorized, refused, timeout: simply "not exposed"
+        return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 CHECKS = {
     'redis': ('Redis', check_redis),
     'memcached': ('Memcached', check_memcached),
     'postgres': ('PostgreSQL', check_postgres), 'postgresql': ('PostgreSQL', check_postgres),
     'elastic': ('Elasticsearch', check_elasticsearch),
     'couchdb': ('CouchDB', check_couchdb),
+    'mysql': ('MySQL', check_mysql), 'mariadb': ('MySQL', check_mysql),
+    'mongodb': ('MongoDB', check_mongodb), 'mongo': ('MongoDB', check_mongodb),
 }
 
 

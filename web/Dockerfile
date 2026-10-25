@@ -38,6 +38,7 @@ RUN apt-get update -y && \
     build-essential \
     bzip2 \
     ca-certificates \
+    cargo \
     cmake \
     curl \
     gcc \
@@ -54,6 +55,7 @@ RUN apt-get update -y && \
     python3-dev \
     python3-pip \
     python3-venv \
+    rustc \
     tzdata \
     wget && \
     rm -rf /var/lib/apt/lists/*

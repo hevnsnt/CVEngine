@@ -642,6 +642,30 @@ class HostArchive(models.Model):
         return self.host
 
 
+class RdpScreenshot(models.Model):
+    """One RDP login-screen capture (see cveFeed.rdp_shot), only ever attempted against a server nmap's
+    rdp-enum-encryption showed accepts a connection without Network Level Authentication. The AI model reads who, if
+    anyone, the pre-authentication screen shows signed in. One row per (project, host, port); a later scan replaces it."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    address = models.CharField(max_length=64)
+    port = models.PositiveIntegerField(default=3389)
+    image_path = models.CharField(max_length=1000, blank=True, default="")
+    image_hash = models.CharField(max_length=16, blank=True, default="")  # cveFeed.shots.dhash_file
+    logged_in_user = models.CharField(max_length=300, blank=True, default="")
+    ai_summary = models.TextField(blank=True, default="")
+    ai_error = models.CharField(max_length=300, blank=True, default="")
+    captured_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "port"], name="uniq_rdpshot_project_host_port")]
+
+    def __str__(self):
+        return f"{self.host}:{self.port}"
+
+
 class HostAssessment(models.Model):
     """One requested assessment of an inventoried host. Active requests are unique per project and name."""
 

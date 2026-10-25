@@ -22,9 +22,16 @@ NMAP_BIN = 'nmap'
 # subject, issuer, validity), http-headers and http-title, ftp-anon (whether anonymous login is accepted, and the top level
 # listing it shows), rdp-ntlm-info (the OS build, host and domain names RDP's NTLM challenge reveals, without logging in),
 # rdp-enum-encryption (which RDP security layers the server accepts, so a server that does not insist on NLA is visible),
-# smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). Scripts only run on ports whose service matches.
+# smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). mysql-info, mongodb-info, redis-info,
+# memcached-info and couchdb-stats read each database's own pre-authentication greeting for its version and build details;
+# ms-sql-ntlm-info reads the same NTLM challenge rdp-ntlm-info does, over SQL Server's own protocol; ms-sql-info asks the SQL
+# Server Browser service, once per host, which instances exist and their exact version. None of these sends a credential or
+# reads a credential-protected value; cveFeed.db_intel turns their output into Port.version/Port.extra, and
+# cveFeed.db_exposure separately tests whether a database answers a real query with no authentication at all. Scripts only
+# run on ports whose service matches.
 NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'ftp-anon',
-               'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat')
+               'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat', 'mysql-info', 'ms-sql-info',
+               'ms-sql-ntlm-info', 'mongodb-info', 'redis-info', 'memcached-info', 'couchdb-stats')
 NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
 FAST_FLAGS = ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
               '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', *NSE_FLAGS]

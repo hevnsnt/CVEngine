@@ -13,6 +13,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [naabu](https://github.com/projectdiscovery/naabu) | MIT | Optional full-port discovery |
 | [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Screenshots in deep discovery |
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
+| [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial licence is needed for managed or hosted use) | WordPress vulnerability scanning |
+| [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot |
+| [node2shell-scanner](https://github.com/assetnote/node2shell-scanner) by Assetnote | MIT | Read-only detection of CVE-2026-111497; vendored (trimmed to its detection core) as `web/cveFeed/vendor/node2shell.py`, with the exact source commit in that file's header |
 
 ## Data sources
 

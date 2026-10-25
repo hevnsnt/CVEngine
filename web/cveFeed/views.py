@@ -366,6 +366,34 @@ def host_screenshot(request, slug, subdomain_id):
     return FileResponse(open(path, 'rb'))
 
 
+def host_rdp_screenshot(request, slug, subdomain_id, port):
+    """Serve a stored RDP login-screen capture (cveFeed.rdp_shot). Same tenancy check as host_screenshot: the caller's
+    access to ``slug`` is already confirmed, this only needs to confirm the subdomain belongs to that project."""
+    import os
+
+    from django.conf import settings
+    from django.http import FileResponse
+
+    from cveFeed.models import RdpScreenshot
+    from dashboard.models import Project
+    from startScan.models import Subdomain
+    project = Project.objects.filter(slug=slug).first()
+    if not project:
+        raise Http404
+    sub = Subdomain.objects.filter(pk=subdomain_id, scan_history__domain__project=project).first() or \
+        Subdomain.objects.filter(pk=subdomain_id, target_domain__project=project).first()
+    if not sub:
+        raise Http404
+    shot = RdpScreenshot.objects.filter(project=project, host=sub.name, port=port).first()
+    if not shot or not shot.image_path:
+        raise Http404
+    media_root = os.path.realpath(settings.MEDIA_ROOT)
+    path = os.path.realpath(os.path.join(media_root, shot.image_path))
+    if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
+        raise Http404
+    return FileResponse(open(path, 'rb'))
+
+
 def welcome_page(request):
     return render(request, 'cveFeed/welcome.html', ui_context(request, 'welcome'))
 

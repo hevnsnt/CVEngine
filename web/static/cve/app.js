@@ -644,6 +644,50 @@ const technologyTable = (h) => {
   }
   return box;
 };
+// A port's RDP login-screen capture (cveFeed.rdp_shot): the image, exactly as read by the AI (never guessed), and its summary.
+// Only ever present when nmap already confirmed the server accepts a connection without Network Level Authentication.
+const rdpShotCard = (shot) => {
+  const box = el("div", "rdp-shot");
+  box.append(el("div", "note", "RDP login screen (captured with no credentials sent)"));
+  if (shot.url) {
+    const img = el("img", "shot rdp-shot-img", null, { src: shot.url, alt: "RDP login screen capture", loading: "lazy" });
+    img.onerror = () => img.remove();
+    box.append(img);
+  }
+  if (shot.logged_in_user) box.append(badge(`Signed in: ${shot.logged_in_user}`, "smoke"));
+  else if (!shot.error) box.append(badge("No one signed in", "success"));
+  if (shot.summary) box.append(el("p", "note", shot.summary));
+  if (shot.error) box.append(el("p", "note", `Could not be read: ${shot.error}`));
+  if (shot.captured_at) box.append(el("p", "note", `Captured ${shortDate(shot.captured_at)}`));
+  return box;
+};
+const DB_FIELD_LABELS = {
+  version: "Version", protocol: "Protocol", role: "Role", architecture: "Architecture",
+  uptime: "Uptime", authentication: "Authentication", auth: "Authentication",
+  windows_server: "Windows server", version_number: "Version number",
+  computer_name: "Computer name", domain: "Domain", fqdn: "FQDN", dns_domain: "DNS domain", os: "Operating system",
+};
+// A database port's richer metadata (cveFeed.db_intel), read from its own pre-authentication greeting. This is
+// version and identity only, never a sign of whether the server needs a password: that question is answered
+// separately, by the critical finding cveFeed.db_exposure raises when a real connection goes through unchallenged.
+const dbFactsCard = (db) => {
+  const rows = [];
+  const seen = new Set();
+  Object.values(db || {}).forEach((facts) => {
+    Object.entries(facts || {}).forEach(([key, value]) => {
+      if (key === "admin_party" || seen.has(key) || value === "" || value == null) return;
+      seen.add(key);
+      rows.push({ label: DB_FIELD_LABELS[key] || key, value: String(value) });
+    });
+  });
+  if (!rows.length) return null;
+  const box = el("div", "db-facts");
+  box.append(kvBox(rows));
+  if (Object.values(db || {}).some((facts) => facts && facts.admin_party)) {
+    box.append(badge("Admin party: no authentication configured", "critical"));
+  }
+  return box;
+};
 const excerpt = (label, text) => {
   const box = el("div");
   box.append(el("div", "note", label), el("pre", "banner", text));
@@ -1826,8 +1870,10 @@ const pages = {
             det.append(el("summary", "mono", id), el("pre", "banner", text));
             card.append(det);
           });
+          if (p.db) { const facts = dbFactsCard(p.db); if (facts) card.append(facts); }
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
+          if (p.rdp_screenshot) card.append(rdpShotCard(p.rdp_screenshot));
           pane.append(card);
         });
       });
