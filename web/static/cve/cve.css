@@ -1242,3 +1242,18 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 .strip .spark{display:block;width:100%;height:22px;margin-top:6px}
 .spark-line{fill:none;stroke:var(--ink);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;opacity:.7}
 .spark-dot{fill:var(--brand)}
+
+/* Update in progress: the whole site is covered by a status panel until the host finishes */
+.update-veil{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--gutter);background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:grayscale(1) blur(2px)}
+.update-card{width:min(460px,100%);padding:24px;background:var(--surface);border:1px solid var(--line-2);box-shadow:inset 3px 0 0 var(--ink)}
+.update-card h2{margin:0 0 6px;font-size:20px}
+.update-card .note{margin:0 0 16px}
+.update-bar{position:relative;height:6px;background:var(--sunk);overflow:hidden;margin-bottom:16px}
+.update-bar i{position:absolute;top:0;bottom:0;width:35%;background:var(--ink);animation:update-slide 1.4s ease-in-out infinite}
+.update-bar.done i{width:100%;animation:none}
+@keyframes update-slide{0%{left:-35%}100%{left:100%}}
+.update-steps{display:flex;gap:6px;list-style:none;margin:0 0 18px;padding:0;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.update-steps li{flex:1;padding-top:6px;border-top:3px solid var(--line-2);color:var(--muted)}
+.update-steps li.ok{border-color:var(--ink);color:var(--ink)}
+.update-steps li.now{border-color:var(--ink);color:var(--ink)}
+@media (prefers-reduced-motion:reduce){.update-bar i{animation:none;width:100%;opacity:.5}}
