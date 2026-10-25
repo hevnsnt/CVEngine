@@ -1,5 +1,5 @@
 """nmap OS/service fingerprinting over every IP discovery found: one ``-O -sV`` pass (OS guess,
-service/version on the thousand most common ports plus the high-risk ones in EXTRA_PORTS, at version intensity 5 so a probe stops at the likely answer). That single run per IP is the pipeline's whole port scan; the full ``-p-`` sweep is far too slow
+service/version on the thousand most common ports plus the high-risk ones in EXTRA_PORTS, at version intensity 7 with the NSE scripts in NSE_SCRIPTS, so each service gives up its banner and what it reveals about its host). That single run per IP is the pipeline's whole port scan; the full ``-p-`` sweep is far too slow
 to run inline, so it is a slow background task of its own (see cveFeed.fullscan). Both feed
 the same Shodan-style inventory (Port / IpAddress) that bbot and nuclei write to, so correlate_cves and the hosts page see
 one consistent picture regardless of which tool found what.
@@ -17,8 +17,36 @@ from cveFeed import naabu_scan
 logger = logging.getLogger(__name__)
 
 NMAP_BIN = 'nmap'
-FAST_FLAGS = ['-sV', '--version-intensity', '5', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
-              '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit']
+# NSE scripts that read what a service says about itself and its host. All are in nmap's safe or discovery categories and none
+# exploits anything: banner (the raw greeting), ssh-hostkey and ssh2-enum-algos (SSH server identity), ssl-cert (certificate
+# subject, issuer, validity), http-headers and http-title, ftp-anon (whether anonymous login is accepted, and the top level
+# listing it shows), rdp-ntlm-info (the OS build, host and domain names RDP's NTLM challenge reveals, without logging in),
+# rdp-enum-encryption (which RDP security layers the server accepts, so a server that does not insist on NLA is visible),
+# smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). mysql-info, mongodb-info, redis-info,
+# memcached-info and couchdb-stats read each database's own pre-authentication greeting for its version and build details;
+# ms-sql-ntlm-info reads the same NTLM challenge rdp-ntlm-info does, over SQL Server's own protocol; ms-sql-info asks the SQL
+# Server Browser service, once per host, which instances exist and their exact version. None of these sends a credential or
+# reads a credential-protected value; cveFeed.db_intel turns their output into Port.version/Port.extra, and
+# cveFeed.db_exposure separately tests whether a database answers a real query with no authentication at all. Scripts only
+# run on ports whose service matches.
+NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'ftp-anon',
+               'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat', 'mysql-info', 'ms-sql-info',
+               'ms-sql-ntlm-info', 'mongodb-info', 'redis-info', 'memcached-info', 'couchdb-stats')
+NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
+# nmap's own documentation says a version scan "automatically executes the scripts in the version category" (rpcinfo,
+# hnap-info, vmware-version, skypev2-version, and more) whenever -sV runs, regardless of --script; these "cannot be
+# selected explicitly", so there is no flag that turns them off while keeping -sV. Their output is hidden from the
+# console but still written to -oX, which is exactly what this module parses. None of them have been reviewed the way
+# NSE_SCRIPTS has, so persist_inventory drops anything -sV smuggled in before it is ever stored, searched or shown.
+NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS)
+
+
+def _reviewed_scripts(scripts):
+    """``scripts`` with every id outside NSE_SCRIPT_SET dropped. See the note above NSE_SCRIPT_SET for why -sV can hand
+    us scripts nobody asked for and nobody has reviewed."""
+    return {sid: text for sid, text in (scripts or {}).items() if sid in NSE_SCRIPT_SET}
+FAST_FLAGS = ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
+              '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', *NSE_FLAGS]
 FULL_PORT_FLAGS = ['-p-', '--open', '-T4', '-Pn']
 # nmap's --top-ports ranks ports by how often they are open across the internet, not by how dangerous an open one is, so
 # the thousand it picks leave out most of the services an exposure check cares about (Redis is 2742th, MongoDB 2169th,
@@ -177,6 +205,11 @@ def persist_inventory(inventory, source='nmap'):
             ip_obj.last_seen = now
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
             hosts_with_os += 1
+        host_scripts = _reviewed_scripts(host.get('hostscripts'))
+        if host_scripts:
+            # smb-os-discovery and nbstat describe the host, not one port
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'scripts': host_scripts}
+            ip_obj.save(update_fields=['fingerprint'])
         for rec in host.get('ports', []):
             if not rec.get('number'):
                 continue
@@ -197,6 +230,12 @@ def persist_inventory(inventory, source='nmap'):
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
                           'method': rec.get('method', '')}
+            kept_scripts = _reviewed_scripts(rec.get('scripts'))
+            if kept_scripts:
+                port.extra['scripts'] = kept_scripts  # this run's reviewed NSE output; a run with none kept leaves the last in place
+                port.extra['script_text'] = '\n'.join(kept_scripts.values())  # flat text for search, without the script ids
+            if rec.get('banner'):
+                port.banner = rec['banner']
             port.distro, port.distro_release = info['distro'], info['release']
             port.package_release, port.upstream_version = info['package_release'], info['upstream_version']
             port.source = source

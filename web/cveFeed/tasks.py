@@ -862,7 +862,10 @@ def validate_sweep():
 def run_hygiene_task(domain_id):
     """Certificate, TLS and SPF/DKIM/DMARC review of one target (see cveFeed.hygiene)."""
     from cveFeed.hygiene import run_hygiene
-    return run_hygiene(domain_id)
+    result = run_hygiene(domain_id)
+    from cveFeed import archive_urls
+    archive_urls.run_for_domain(domain_id)  # passive and weekly (ledger); never raises
+    return result
 
 
 HYGIENE_SWEEP_MAX = 500
@@ -1230,13 +1233,44 @@ def prune_asset_changes():
 
 @app.task(name="reap_stuck_jobs", bind=False, queue="cve_feed_queue")
 def reap_stuck_jobs():
-    """Every 15 minutes: fail host assessments and validation jobs a lost worker left queued or running (cveFeed.reaper)."""
+    """Every 15 minutes: fail host assessments, validation jobs and AI activity rows a lost worker left queued or running (cveFeed.reaper)."""
     from cveFeed import activity, reaper
     counts = reaper.reap()
     if counts:
         activity.log('validate', 'Expired stuck jobs a restarted worker left behind: '
                      + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='failed', **counts)
     return counts
+
+
+BOOTSTRAP_LOCK = "cvengine:first-run-bootstrap"
+
+
+@app.task(name="bootstrap_first_run", bind=False, queue="cve_feed_queue")
+def bootstrap_first_run():
+    """Once, when a brand-new install's workers come up: load the CVE feed and the threat intelligence now, instead of waiting for
+    the first scheduled run (up to 30 minutes for the feed, an hour for threat intelligence), so the first dashboard already has
+    CVEs, tiers and matches to show. The sync tasks go on to correlate and auto-fire by themselves. "First run" means the CVE
+    table is empty, so an existing install (an update, a restart) never repeats it, and a first attempt that found no network
+    simply tries again the next time a worker starts. A lock keeps several workers starting together from queuing it more than once."""
+    from celery import chain
+    from django.core.cache import cache
+
+    from cveFeed import activity
+    if CVEEntry.objects.exists():
+        return {"skipped": "the CVE feed is already loaded"}
+    if not cache.add(BOOTSTRAP_LOCK, 1, timeout=1800):
+        return {"skipped": "a first-run load is already under way"}
+    activity.log("feed", "First start: loading the CVE feed and threat intelligence now, instead of waiting for the schedule")
+    chain(sync_cve_now_feed.si(), sync_threat_intel.si(), backfill_cve_now_feed.si()).apply_async()
+    return {"started": True}
+
+
+@app.task(name="snapshot_daily_stats", bind=False, queue="cve_feed_queue")
+def snapshot_daily_stats():
+    """Daily: store one point-in-time snapshot per project (cveFeed.stats_history), so Settings and the dashboard can
+    show trends (exposure over time, mean time-to-fix) that nothing else in the schema keeps a record of."""
+    from cveFeed import stats_history
+    return {'projects': stats_history.snapshot_all_projects()}
 
 
 @app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")

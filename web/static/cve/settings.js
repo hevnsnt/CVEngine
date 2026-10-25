@@ -273,7 +273,7 @@ const sections = {
           s.commits.forEach((c) => list.append(el("li", "", `${c.sha}  ${c.message}`)));
           kids.push(list);
         }
-        if (s.latest_url) kids.push(el("a", "note", "View on GitHub", { href: s.latest_url, target: "_blank", rel: "noopener noreferrer" }));
+        if (s.latest_url) kids.push(el("a", "note", "View on GitHub", { href: s.latest_url, target: "_blank", rel: "noopener noreferrer", style: "display:block;margin:0 0 14px" }));
       }
       if (s.status === "approved") {
         kids.push(

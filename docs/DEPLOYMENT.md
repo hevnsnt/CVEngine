@@ -14,7 +14,7 @@ Firewall 443 and 8082 to the people who need them. The development stack publish
 
 ## Linux, Mac, and Windows
 
-`install.sh` is for Debian and Ubuntu: it installs curl, Docker, Compose, and make, then runs the setup. On any other Linux, install Docker (Compose 2.24 or newer) and make yourself and follow the README steps.
+`install.sh` asks nothing and checks the machine first (root, memory, disk, that ports 443 and 8082 are free, that Docker's registry and GitHub are reachable). On Debian and Ubuntu it installs what is missing (curl, make, python3, git, Docker, the Compose plugin); on any other Linux it names the missing tool, so install Docker (Compose 2.24 or newer) and make yourself and run it again, or follow the README steps. It prints the log lines of the failing service when a step fails.
 
 On macOS or Windows, install Docker Desktop (with the WSL 2 backend on Windows), clone the repository, and run the README steps from a shell where `make` works, such as the macOS terminal or a WSL 2 distribution. Without `make`, the commands are plain Compose calls:
 
@@ -28,7 +28,9 @@ Give Docker Desktop at least the memory recommended above.
 
 ## HTTPS
 
-`make certs` creates a private certificate authority and a certificate for `DOMAIN_NAME` in `secrets/certs/`. Run it before `make up`. The built-in proxy serves HTTPS on 443 and redirects HTTP; browsers warn until you trust `secrets/certs/ca.crt`.
+`make certs` (run by `install.sh`) creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. Run it before `make up`, and again after changing `DOMAIN_NAME`. The built-in proxy serves HTTPS on 443 and redirects HTTP; browsers warn until you trust `secrets/certs/ca.crt`.
+
+For a public site with a browser-trusted certificate (Let's Encrypt, Cloudflare), follow [HOSTING-ONLINE.md](HOSTING-ONLINE.md).
 
 To use your own proxy or CDN, point it at the web service (`127.0.0.1:8000` on the host) and have it set `X-Forwarded-Proto` and `X-Forwarded-For`, replacing any values from the client. Then add `CVENGINE_CSRF_TRUSTED_ORIGINS` (your https address) to `.env` and run `make up`.
 

@@ -374,6 +374,44 @@ class WelcomeApiTests(TestCase):
 		self.assertTrue(self.call('GET', 'state')[1]['onboarded'])
 
 
+	def _wizard_project(self):
+		Org.objects.get_or_create(slug='default', defaults={'name': 'Default'})
+		self.call('POST', 'org', {'name': 'Acme'})
+		self.call('POST', 'project', {'name': 'Prod'})
+
+	def test_a_missing_engine_is_a_retryable_message_and_the_retry_starts_discovery(self):
+		self._wizard_project()
+		status, r = self.call('POST', 'target', {'value': 'example.org', 'authorized': True})
+		self.assertEqual(status, 503)
+		self.assertIn('try again', r['error'])
+		self.assertTrue(Domain.objects.filter(name='example.org').exists())  # the target was kept
+		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+			status, r = self.call('POST', 'target', {'value': 'example.org', 'authorized': True})
+			self.assertEqual((status, r['created'], r['already_exists']), (200, [], ['example.org']))
+			self.assertTrue(r['scan_id'])
+			again = self.call('POST', 'target', {'value': 'example.org', 'authorized': True})[1]
+		self.assertEqual(again['scan_id'], r['scan_id'])  # still the one scan: starting is safe to repeat
+		queued.assert_called_once()
+
+	def test_keys_are_saved_without_ever_being_returned(self):
+		from dashboard.models import ApiCredential
+		self._wizard_project()
+		status, r = self.call('POST', 'keys', {'keys': {'shodan': ' SECRETSHODAN ', 'virustotal': '', 'github': 'not-offered'}})
+		self.assertEqual((status, r), (200, {'saved': ['shodan']}))
+		cred = ApiCredential.objects.get(service='shodan')
+		self.assertEqual(cred.value, {'api_key': 'SECRETSHODAN'})
+		self.assertEqual(cred.project.slug, 'prod')
+		self.assertFalse(ApiCredential.objects.filter(service__in=['virustotal', 'github']).exists())
+		self.assertNotIn('SECRETSHODAN', json.dumps(self.call('GET', 'state')[1]))
+
+	def test_saving_no_keys_is_fine_and_a_non_superuser_is_refused(self):
+		self._wizard_project()
+		self.assertEqual(self.call('POST', 'keys', {'keys': {}}), (200, {'saved': []}))
+		other = client_for(User.objects.create_user('plain', 'p@x.io', 'x'))
+		self.assertEqual(other.post('/cve/api/welcome/keys', '{}', content_type='application/json').status_code, 403)
+
+
 NUCLEI_LINES = [
 	{'template': 'http/technologies/nginx-version.yaml', 'template-id': 'nginx-version', 'type': 'http',
 	 'info': {'name': 'nginx version', 'severity': 'info', 'description': 'nginx detected', 'tags': ['tech', 'nginx']},
@@ -813,6 +851,30 @@ class DiscoveryCountsTests(TestCase):
 		ProjectMembership.objects.create(user=user, project=project, role='user')
 		d = client_for(user).get(f'/cve/api/discovery?scan={scan.id}').json()
 		self.assertEqual(d['counts'], {'hosts': 3, 'ips': 2, 'ports': 4})
+
+	def test_counts_total_every_live_host_not_only_the_followed_scan(self):
+		"""The graph drawn above the ticker is the whole project's live map (every host a completed scan or rescan has
+		found so far), not just the scan being followed, so the counts below it must total the same picture; otherwise
+		a rescan that adds one host reads as "1 host" under a graph showing everything found to date."""
+		from cveFeed.discovery import HOST_PIPELINE_TASK
+		from tests.test_tenancy import client_for
+		from django.contrib.auth.models import User
+		from dashboard.models import ProjectMembership
+		org = Org.objects.create(name='D', slug='d-one')
+		project = Project.objects.create(name='Dp', slug='dp-one', insert_date=timezone.now(), org=org)
+		domain = Domain.objects.create(name='total.example', project=project, insert_date=timezone.now())
+		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		full = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+		old = Subdomain.objects.create(scan_history=full, target_domain=domain, name='old.total.example')
+		old.ip_addresses.add(IpAddress.objects.create(address='192.0.2.9', os_guess=''))
+		rescan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(),
+		                                    scan_status=2, tasks=[HOST_PIPELINE_TASK])
+		new = Subdomain.objects.create(scan_history=rescan, target_domain=domain, name='new.total.example')
+		new.ip_addresses.add(IpAddress.objects.create(address='192.0.2.10', os_guess=''))
+		user = User.objects.create_user('totaluser', password='x')
+		ProjectMembership.objects.create(user=user, project=project, role='user')
+		d = client_for(user).get(f'/cve/api/discovery?scan={rescan.id}&project=dp-one').json()
+		self.assertEqual(d['counts'], {'hosts': 2, 'ips': 2, 'ports': 0})  # old.total.example counts too, not only the followed rescan's own row
 
 
 class BbotUrlTests(TestCase):

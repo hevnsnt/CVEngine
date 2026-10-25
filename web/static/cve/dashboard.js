@@ -2,6 +2,9 @@
 // Every panel reads one endpoint each, so the numbers can never disagree with the lists beside them.
 import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
+import { sinceLastVisit } from "/staticfiles/cve/seen.js";
+import { fmtTime } from "/staticfiles/cve/prefs.js";
+import { areaChart, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -33,12 +36,15 @@ const post = (url, body) =>
       return d;
     }),
   );
-const clock = (iso) =>
-  new Date(iso).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+const ago = (iso) => {
+  const sec = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  if (sec < 5) return "now";
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+};
+const clock = (iso) => fmtTime(iso);
 const STATUS = {
   "-1": "queued",
   0: "failed",
@@ -114,7 +120,7 @@ async function pollStats() {
   }
 }
 
-// --- attack surface map: one square per host, coloured by its worst threat -------------
+// --- attack surface map: one square per host, colored by its worst threat -------------
 const HEAT_ORDER = ["fire", "smoke", "ice", "clean", "unscanned"];
 const HEAT_LABEL = { fire: "Fire", smoke: "Smoke", ice: "Ice", clean: "Clean", unscanned: "Not scanned" };
 const cells = new Map();
@@ -130,6 +136,7 @@ function fillTip(cell) {
   head.append(el("span", "tip-heat", HEAT_LABEL[cell.dataset.heat] || ""));
   tip.append(head);
   tip.append(el("div", "tip-name", cell.dataset.name));
+  if (info.project) tip.append(el("div", "tip-project", info.project));
   const facts = [];
   if (info.ips) facts.push(`${info.ips} IP${info.ips === 1 ? "" : "s"}`);
   if (info.cves) facts.push(`${info.cves} CVE${info.cves === 1 ? "" : "s"}`);
@@ -165,6 +172,7 @@ let statsNow = null;
 let mapDrawn = null; // squares on the map right now
 function paintMapCount() {
   const n = $("map-count");
+  paintMapEmpty($("map").querySelectorAll(".hx").length);
   if (!statsNow || !statsNow.hosts) {
     n.textContent = "";
     n.removeAttribute("title");
@@ -174,6 +182,35 @@ function paintMapCount() {
   const shown = mapDrawn != null && mapDrawn < live ? `Top ${mapDrawn} of ${live} live hosts` : `${live} live host${live === 1 ? "" : "s"}`;
   n.textContent = `${shown} · ${statsNow.hosts} in all`;
   n.title = "One square per live host: a host that resolved to an address or answered over HTTP, highest score first. The total is every host the Hosts page lists, live or not.";
+}
+
+// An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
+function paintMapEmpty(shown) {
+  const map = $("map");
+  let box = map.querySelector(".map-empty");
+  if (shown) {
+    if (box) box.remove();
+    return;
+  }
+  const known = statsNow ? statsNow.hosts || 0 : 0;
+  const key = known ? `known:${known}` : "none";
+  if (box && box.dataset.key === key) return;
+  if (box) box.remove();
+  box = el("div", "map-empty");
+  box.dataset.key = key;
+  if (known) {
+    box.append(
+      el("b", "", "No live hosts yet"),
+      el("p", "", `${known} host${known === 1 ? " is" : "s are"} in the inventory, but none has resolved to an address or answered over HTTP. Squares appear here as they do.`),
+    );
+    if (slug) box.append(el("a", "btn ghost sm", "Open hosts", { href: `/cve/${encodeURIComponent(slug)}/hosts/` }));
+  } else {
+    box.append(el("b", "", "Nothing to map yet"), el("p", "", "Add a target and discovery draws every host it finds here, colored by its worst threat."));
+    const add = el("button", "btn sm", "Add targets", { type: "button" });
+    add.setAttribute("data-add-targets", "");
+    box.append(add);
+  }
+  map.append(box);
 }
 
 function drawMap(nodes) {
@@ -213,9 +250,11 @@ function drawMap(nodes) {
       cells.set(h.id, cell);
     }
     const score = h.score || 0;
-    if (cell.dataset.score !== String(score)) {
+    const short = h.label.split(".")[0];
+    if (cell.dataset.score !== String(score) || cell.dataset.short !== short) {
       cell.textContent = "";
-      cell.append(el("span", "score", String(score)));
+      cell.append(el("span", "score", String(score)), el("span", "hx-name", short));
+      cell.dataset.short = short;
     }
     cell.dataset.name = h.label;
     cell.dataset.score = score;
@@ -242,10 +281,8 @@ function drawMap(nodes) {
     }
   });
   mapReady = true;
-  const empty = map.querySelector(".map-empty");
-  if (!hosts.length && !empty) map.append(el("span", "map-empty", "No hosts yet. Add a target and they appear here."));
-  else if (hosts.length && empty) empty.remove();
   mapDrawn = ordered.length;
+  paintMapEmpty(hosts.length);
   paintMapCount();
   const sig = HEAT_ORDER.map((k) => counts[k] || 0).join(",");
   const legend = $("map-legend");
@@ -427,13 +464,20 @@ function agentLine(a) {
   li.append(
     el("span", `kind k-${a.kind}`, KIND[a.kind] || a.kind),
     linkify(el("span", "a-msg"), a.message, a.project || slug),
-    el("time", "a-time", clock(a.created)),
+    el("time", "a-time", ago(a.created), { datetime: a.created, title: clock(a.created) }),
   );
   if (a.repeat > 1) li.querySelector(".a-msg").append(el("span", "a-repeat", ` ×${a.repeat}`));
   if (a.status === "running")
-    li.append(el("span", "spin", "", { "aria-label": "in progress" }));
+    li.append(el("span", "spin", "", { role: "img", "aria-label": "in progress" }));
   return li;
 }
+
+// keep the relative times honest between polls
+setInterval(() => {
+  document.querySelectorAll("#agent time[datetime]").forEach((t) => {
+    t.textContent = ago(t.getAttribute("datetime"));
+  });
+}, 10000);
 
 async function pollAgent() {
   if (activityPollActive) return;
@@ -566,3 +610,66 @@ every(pollGraph, 10000);
 every(pollDiscovery, 2500);
 every(pollAgent, 2000);
 every(pollFeed, 6000);
+
+// --- changes since you last looked ---------------------------------------------------------------
+// A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Live page
+// open, with a link to the Changes page narrowed to that moment. The baseline is per browser and moves forward when you leave.
+(async () => {
+  if (!slug) return;
+  const baseline = sinceLastVisit("live", slug);
+  if (!baseline) return;
+  try {
+    const r = await get(`/api/v1/projects/${encodeURIComponent(slug)}/changes?since=${encodeURIComponent(baseline)}&page_size=1`);
+    if (!r.count) return;
+    const strip = document.getElementById("since-strip");
+    strip.href = `/cve/${encodeURIComponent(slug)}/changes/?since=${encodeURIComponent(baseline)}`;
+    strip.textContent = "";
+    strip.append(el("b", "", `${r.count} change${r.count === 1 ? "" : "s"}`), el("span", "", `since you last looked, ${ago(baseline)}`), el("em", "", "See what changed"));
+    strip.hidden = false;
+  } catch (_) {
+    /* the strip is a convenience: stay hidden when the answer does not come */
+  }
+})();
+
+// --- trends ---------------------------------------------------------------------------------------
+// Two charts under the counters (new findings per day, inventory changes per day) and a small trend line in the CVE matches and
+// scanner findings counters. They are built in the browser from the dates the API already returns, so they show what arrived
+// and when; an "exposed over time" and a "time to fix" line need history the server does not keep yet (requested).
+(async () => {
+  if (!slug) return;
+  const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
+  const PAGES = 5;
+  const collect = async (path) => {
+    const rows = [];
+    for (let page = 1; page <= PAGES; page += 1) {
+      const sep = path.includes("?") ? "&" : "?";
+      const data = await get(`${base}/${path}${sep}page=${page}&page_size=200`);
+      const got = data.results || [];
+      rows.push(...got);
+      if (got.length < 200) break;
+    }
+    return rows;
+  };
+  try {
+    const [findings, changes] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
+    const section = $("trends");
+    if (!findings.length && !changes.length) return;
+    section.append(
+      areaChart({ title: "New findings per day", unit: "findings", ranges: [["7D", 7], ["30D", 30], ["90D", 90]], dates: findings.map((f) => f.detected) }),
+      areaChart({ title: "Inventory changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30], ["90D", 90]], dates: changes.map((c) => c.detected) }),
+    );
+    section.hidden = false;
+    const spark = (anchorId, dates, label) => {
+      const a = $(anchorId);
+      if (!a || !dates.length) return;
+      const values = dailyCounts(dates, 14).map((p) => p.v);
+      const svg = sparkline(values);
+      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days`);
+      a.append(svg, sr);
+    };
+    spark("n-matches", findings.filter((f) => f.type === "cve").map((f) => f.detected), "CVE matches");
+    spark("n-findings", findings.filter((f) => f.type === "scanner").map((f) => f.detected), "Scanner findings");
+  } catch (_) {
+    /* trends are extra: leave the section hidden when the data does not come */
+  }
+})();

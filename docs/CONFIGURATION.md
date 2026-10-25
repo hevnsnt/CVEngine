@@ -6,16 +6,16 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 
 | Variable | Purpose |
 | --- | --- |
-| `DOMAIN_NAME` | A bare hostname such as `scanner.example.com`. It is the certificate name and the host in notification links. Set it to your public hostname; the example value leaves the site answering only on loopback. |
+| `DOMAIN_NAME` | A hostname such as `scanner.example.com`, or an IPv4 address. It is the certificate name and the host in notification links. The installer sets it to this machine's detected address (or `--domain`); change it in `.env` and run `make certs up` to use a name. The certificate also covers `localhost` and `127.0.0.1`, and any names in `CERT_EXTRA_SANS` (comma separated). |
 | `CVENGINE_ALLOWED_HOSTS` | Extra hostnames Django accepts, comma separated. Any other name or IP gets 400 ([UPGRADE.md](UPGRADE.md#accepted-host-names)). Never use `*` on an Internet-facing install. |
 | `CVENGINE_HSTS_SECONDS` | HTTPS policy lifetime in seconds (3600 in production, 0 in development). Raise it only once every public route reliably uses HTTPS. |
 | `POSTGRES_PASSWORD` | Database password. Set it before the first start, because changing it later does not update the existing database. |
 | `AUTHORITY_PASSWORD` | Passed to the certificate authority step of `make certs`. The key is stored in `secrets/certs/`, so protect that directory. |
-| `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make username isNonInteractive=true` and `sudo ./install.sh -n`. A plain `make username` asks instead. |
+| `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make admin` and `sudo ./install.sh`. Leave the password empty and `make admin` generates one and prints it once (you choose your own at first sign-in); set it to choose the first one yourself. `make admin-password` generates a new one for a lost password. A plain `make username` asks instead. |
 | `COMPOSE_PROJECT_NAME`, `POSTGRES_DB`, `POSTGRES_USER` | Name the Docker volumes and the database. Change them only before the first start. Leave `POSTGRES_HOST=db` and `POSTGRES_PORT=5432` as they are. |
 | `AUTHORITY_NAME`, `COMPANY`, `COUNTRY_CODE`, `STATE`, `CITY` | Subject of the certificates `make certs` creates. |
 
-`make certs`, `make username`, and `install.sh` refuse to run while a password still says `change-me`.
+`make certs` and `install.sh` refuse to run while the database or certificate password still says `change-me`; `./scripts/init-env.sh` (which both run for you) fills them with random values and never touches one that is already set.
 
 ## Memory and workers
 
@@ -29,7 +29,7 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | `HEAVY_HEADROOM_MB` | larger of 256 and 5% | Free memory kept in reserve. |
 | `HEAVY_COST_SCALE`, `HEAVY_COST_<KIND>_MB` | `1`, none | Scale every estimated job cost, or set one kind's cost outright. |
 | `HEAVY_MAX_<KIND>` | 1 to 3 | Jobs of a kind running at once. 1 for the nuclei kinds, naabu, `nmap-full-bg`, and bbot deep. 2 for nmap, bbot standard, bbot passive, and route probes. 3 for template tests. |
-| `HEAVY_TUNE_MIN_<KIND>`, `HEAVY_TUNE_MAX_<KIND>` | `1`, the `HEAVY_MAX` value | The range the three-hour AI review may move a kind's concurrency within. Raise the maximum to let it scale up. |
+| `HEAVY_TUNE_MIN_<KIND>`, `HEAVY_TUNE_MAX_<KIND>` | `1`, the `HEAVY_MAX` value | The range the three-hour AI review may move a kind's concurrency within. Raise the maximum to let it scale up. Only `nmap`, `bbot-standard`, `bbot-passive`, `nuclei`, `template-test`, and `route-probe` are tuned. |
 | `HEAVY_WAIT_SECONDS`, `CELERY_VISIBILITY_TIMEOUT` | `86400`, `43200` | How long a job waits for its turn, and how long before an unacknowledged job goes to another worker. |
 
 `<KIND>` is the kind in capitals with `-` as `_`: `BBOT_DEEP`, `BBOT_STANDARD`, `BBOT_PASSIVE`, `NUCLEI`, `NUCLEI_LIGHT`, `NMAP`, `NMAP_FULL_BG`, `NAABU`, `TEMPLATE_TEST`, `ROUTE_PROBE`. Estimates adjust to the peak each kind actually reaches, plus 20%. **Settings, Resources** shows them.
@@ -45,11 +45,19 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_DEEP_SWEEP_MAX` | `50` | Apex domains the daily sweep queues for deep discovery. |
 | `CVENGINE_FULLSCAN` | `1` | `0` turns off the background full port scan. |
 | `CVENGINE_FULLSCAN_INTERVAL_MIN`, `_BATCH`, `_INVESTIGATE_MAX` | `10`, `1`, `50` | Minutes between sweeps (1 to 1440, read when the schedule is created), IPs per sweep (1 to 20), and new ports fingerprinted per sweep (1 to 1000). |
-| `CVENGINE_NAABU` | `0` | `1` runs a naabu full-port discovery before nmap. |
+| `CVENGINE_NAABU` | `1` | `0` turns off the naabu full-port discovery that runs ahead of nmap by default (see [Pipeline](PIPELINE.md)). |
 | `CVENGINE_NAABU_BIN`, `CVENGINE_NAABU_RATE` | `naabu`, `1000` | The binary and packets per second (100 to 5000). |
 | `CVENGINE_HYGIENE_RDAP` | `1` | `0` skips the registry lookups that check whether SPF includes and DMARC report domains are registered. |
 | `CVENGINE_SHOT_THRESHOLD` | `12` | Bits (of 64) by which screenshot hashes must differ to count as a changed front page. |
 | `CVENGINE_RETEST_MAX_HOSTS` | `25` | Hosts re-tested per source scan. The rest wait for the five-minute sweep. |
+| `CVENGINE_WPSCAN_MAX_SITES`, `CVENGINE_WPSCAN_TIMEOUT`, `CVENGINE_TTL_WPSCAN` | `10`, `900`, `24` | WordPress sites WPScan checks per scan, seconds allowed per site, and hours a site's result stays fresh (`168` for weekly). The token is an API key, not a variable: see below. |
+| `CVENGINE_ARCHIVE_LOOKUP` | `1` | Set to `0` to stop asking the Internet Archive which URLs it saved for a target (passive, nothing is sent to the target). |
+| `CVENGINE_TTL_ARCHIVE_URLS` | `168` | Hours before a target's archived URLs are read again. |
+| `CVENGINE_RDP_SHOT` | `1` | Set to `0` to turn off RDP login-screen screenshots entirely. |
+| `CVENGINE_TTL_RDP_SHOT` | `24` | Hours before a host's RDP screenshot is captured again. |
+| `CVENGINE_RDP_SHOT_MAX_HOSTS` | `10` | RDP servers screenshotted per scan; a live RDP session plus an AI call costs more than most checks. |
+| `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts fingerprinted as Node.js or Express for CVE-2026-111497. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
+| `CVENGINE_NODE2SHELL_TIMEOUT`, `CVENGINE_NODE2SHELL_MAX_HOSTS`, `CVENGINE_TTL_NODE2SHELL` | `90`, `5`, `24` | Seconds allowed per host, hosts checked per scan, and hours before a host is checked again. |
 
 ## AI limits
 
@@ -57,6 +65,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | --- | --- | --- |
 | `CVENGINE_TRIAGE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `100`, `500`, `2000` | AI triage questions per run, per project per day, and per day. One question serves every finding with the same evidence. |
 | `CVENGINE_VALIDATE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `50`, `300`, `1500` | Validation checks per task, per project per day, and per day. |
+| `CVENGINE_AUTO_VALIDATE_ALL_MATCHES` | `1` | Queue every CVE match for automatic validation, hottest first. Set to `0` to validate only fire and smoke matches automatically. |
 | `CVENGINE_TEMPLATE_GEN_MAX_PER_DAY`, `CVENGINE_TEMPLATE_GEN_CVE_DAYS` | `10`, `7` | AI template drafts per day across all projects, and one attempt per CVE per this many days. |
 
 ## CVE feeds and bug bounty data
@@ -127,6 +136,16 @@ The AI key, API vault, update token, webhook URLs, and Telegram bot token are en
 
 ## Settings in the app
 
-Superusers set the rest under **Settings**: AI model, API vault, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset. Notification channels (Slack, Discord, Telegram, Lark) get at most one message per feed sync, scan, or automatic template-test run, naming up to five matches. A match is announced only with evidence it exists: a version in the affected range, a template hit, or the distribution tracker calling it vulnerable.
+**RDP screenshots.** When nmap shows an RDP server accepts a connection without Network Level Authentication (the same finding as "RDP does not require Network Level Authentication"), cvENGINE captures its pre-authentication login screen with no credentials sent, stores the image, and asks the configured AI model whether it shows an account already signed in and what it is called. A server that requires NLA is never attempted: there is nothing to see before authentication, and nothing is guessed. The username, when the screen shows one, is not a secret; anyone who can reach the port already sees it. Needs the configured AI model to support image input; without one, the screenshot is still taken and stored, just not read.
+
+**Database metadata.** nmap's own scripts read each database's pre-authentication greeting (MySQL, Microsoft SQL Server, MongoDB, Redis, Memcached, and CouchDB) and cvENGINE parses it into the version, role, and, for MySQL and Microsoft SQL Server, the Windows identity its NTLM negotiation discloses. This fills in `Port.version` and `Port.product` only when nmap's own probe came back empty, and is shown on the host page next to the port. It never sends a credential and answering says nothing about whether one is required. That question is answered separately: alongside the existing Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB checks, cvENGINE makes one read-only, no-credential attempt against MySQL (`root` with no password) and MongoDB (an unauthenticated `listDatabases`), and a server that lets it straight through is a critical finding, the same as the others.
+
+**WPScan.** When a scan fingerprints a host as WordPress, cvENGINE runs [WPScan](https://wpscan.com/) on it at most once a day (set `CVENGINE_TTL_WPSCAN=168` for weekly): the version, plugins, themes, config backups, database exports, and the first author names, with no password guessing. Its vulnerability data comes from the wpscan.com API. Add the token under **Settings, API keys, WPScan** (per organization or project; a project's own token wins). The free plan allows 25 requests a day, and each site costs one request for the core plus one per plugin and theme, so a busy install needs a paid plan; when the token runs out the remaining sites wait for the next scan. Without a token WPScan still reports versions and exposures. Findings appear in Findings with the source `wpscan`, CVE ids included. The token is given to WPScan in its environment, never on a command line or in a log. WPScan's licence is free for testing your own systems and for penetration testing, and a commercial licence is needed to use it in a managed or hosted service, so check it before offering cvENGINE to others as a service.
+
+Superusers set the rest under **Settings**: AI model, API vault, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset.
+
+**node2shell (CVE-2026-111497).** Off by default (`CVENGINE_NODE2SHELL=0`): see above for why. When on, it runs [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) against hosts already fingerprinted as Node.js or Express. It never executes a command and never sends a credential; a host is reported vulnerable only when the detector's own controls establish a real, stable signal first.
+
+Notification channels (Slack, Discord, Telegram, Lark) get at most one message per feed sync, scan, or automatic template-test run, naming up to five matches. A match is announced only with evidence it exists: a version in the affected range, a template hit, or the distribution tracker calling it vulnerable.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [PIPELINE.md](PIPELINE.md), [documentation index](README.md).

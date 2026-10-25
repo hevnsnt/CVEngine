@@ -1,3 +1,5 @@
+import { fmtDateTime } from '/staticfiles/cve/prefs.js';
+
 // Small shared helpers for the account and administration pages (DOM built with textContent only).
 export const el = (tag, cls, text, attrs = {}) => {
   const n = document.createElement(tag);
@@ -58,7 +60,7 @@ export function button(label, onClick, cls = 'btn') {
   return b;
 }
 export const badge = (t, cls = '') => el('span', `badge ${cls}`.trim(), t);
-export const shortDate = (iso) => (iso ? iso.slice(0, 16).replace('T', ' ') : 'never');
+export const shortDate = (iso) => (iso ? fmtDateTime(iso) || iso.slice(0, 16).replace('T', ' ') : 'never');
 
 export function dialog(title, build) {
   const d = el('dialog', 'dlg', null, { 'aria-label': title });
@@ -132,4 +134,57 @@ export function ask(message, { title = 'Are you sure?', ok = 'Confirm', danger =
     });
     d.addEventListener('close', () => resolve(answer));
   });
+}
+
+// Copy to the clipboard (text, or a function returning it when the value is only known at click time). Falls back to a
+// hidden textarea where the Clipboard API is unavailable (plain http). Says so with the toast, which is also announced.
+export async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  const area = el('textarea', '', null, { 'aria-hidden': 'true', tabindex: '-1' });
+  area.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+  area.value = text;
+  document.body.append(area);
+  area.select();
+  const ok = document.execCommand('copy');
+  area.remove();
+  if (!ok) throw new Error('copy blocked');
+  return undefined;
+}
+
+export function copyButton(text, label = 'value', glyph = 'clip') {
+  const NS = 'http://www.w3.org/2000/svg';
+  const icon = (d) => {
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    d.forEach((part) => {
+      const n = document.createElementNS(NS, part.tag);
+      Object.entries(part.attrs).forEach(([k, v]) => n.setAttribute(k, v));
+      svg.append(n);
+    });
+    return svg;
+  };
+  const b = el('button', 'copy-btn', null, { type: 'button', title: `Copy ${label}`, 'aria-label': `Copy ${label}` });
+  const clip = glyph === 'link'
+    ? icon([{ tag: 'path', attrs: { d: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1' } }, { tag: 'path', attrs: { d: 'M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1' } }])
+    : icon([{ tag: 'rect', attrs: { x: 9, y: 9, width: 11, height: 11, rx: 2 } }, { tag: 'path', attrs: { d: 'M5 15V6a2 2 0 0 1 2-2h9' } }]);
+  clip.setAttribute('class', 'i-clip');
+  const tick = icon([{ tag: 'path', attrs: { d: 'M5 12.5l4.5 4.5L19 7' } }]);
+  tick.setAttribute('class', 'i-tick');
+  b.append(clip, tick);
+  b.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const value = typeof text === 'function' ? text() : text;
+    try {
+      await copyText(value);
+    } catch (_) {
+      toast(`Could not copy the ${label}`, true);
+      return;
+    }
+    b.classList.add('done');
+    toast(`Copied ${label}`);
+    setTimeout(() => b.classList.remove('done'), 1400);
+  });
+  return b;
 }

@@ -510,6 +510,19 @@ class Vulnerability(models.Model):
 	# used for subscans
 	vuln_subscan_ids = models.ManyToManyField('SubScan', related_name='vuln_subscan_ids', blank=True)
 
+	# Remediation workflow, driven by people or agents through the API / MCP. Independent of open_status above, which
+	# the scan pipeline alone manages: a finding a human marks accepted_risk stays open_status=True if the scanner still
+	# sees it, but drops out of the actionable view regardless. Same fields and choices as cveFeed.models.CVEMatch's.
+	REMEDIATION_STATUSES = ('open', 'in_progress', 'fixed', 'accepted_risk')
+	remediation_status = models.CharField(max_length=16, default='open')
+	remediation_note = models.TextField(blank=True, default='')
+	remediation_updated_at = models.DateTimeField(null=True, blank=True)
+	remediation_by = models.ForeignKey(
+		'auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+	# Who owns triaging this finding. Independent of remediation_by (who last changed the status); set through the same
+	# API/MCP surface. Same field on cveFeed.models.CVEMatch and HygieneFinding.
+	assignee = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
 	class Meta:
 		indexes = [
 			models.Index(fields=['subdomain', 'open_status', 'severity'], name='vuln_sub_open_sev_idx'),
@@ -588,7 +601,20 @@ class Waf(models.Model):
 
 class Technology(models.Model):
 	id = models.AutoField(primary_key=True)
-	name = models.CharField(max_length=500, blank=True, null=True, db_index=True)
+	name = models.CharField(max_length=500, blank=True, null=True, db_index=True)  # "Name" or "Name:version"
+	# Both follow from the name and are kept in step by save(), so the database can filter on them.
+	version = models.CharField(max_length=200, blank=True, default='')
+	category = models.CharField(max_length=40, blank=True, default='', db_index=True)  # 'web server', 'language', 'cms', ...
+
+	def save(self, *args, **kwargs):
+		from cveFeed.correlation import split_name_version
+		from cveFeed.fingerprint import categorize
+		_base, self.version = split_name_version(self.name or '')
+		self.category = categorize(self.name or '')
+		fields = kwargs.get('update_fields')
+		if fields is not None:
+			kwargs['update_fields'] = {*fields, 'version', 'category'}
+		super().save(*args, **kwargs)
 
 	def __str__(self):
 		return str(self.name)
@@ -617,6 +643,8 @@ class IpAddress(models.Model):
 	os_guess = models.CharField(max_length=255, blank=True, default='')
 	os_accuracy = models.IntegerField(null=True, blank=True)
 	last_seen = models.DateTimeField(null=True, blank=True)
+	# what the host-level NSE scripts (smb-os-discovery, nbstat) reported: {'scripts': {script id: output text}}
+	fingerprint = models.JSONField(default=dict, blank=True)
 	# the background full-port sweep (cveFeed.fullscan): when this IP was last swept (never, while null) and how many ports it had open
 	full_scanned_at = models.DateTimeField(null=True, blank=True, db_index=True)
 	full_scan_ports = models.IntegerField(default=0)

@@ -25,6 +25,10 @@ class CheckerForTests(SimpleTestCase):
 		self.assertEqual(dbx.checker_for(FakePort(service_name='postgresql'))[0], 'PostgreSQL')
 		self.assertEqual(dbx.checker_for(FakePort(product='Elasticsearch REST API'))[0], 'Elasticsearch')
 		self.assertEqual(dbx.checker_for(FakePort(service_name='http', product='CouchDB httpd'))[0], 'CouchDB')
+		self.assertEqual(dbx.checker_for(FakePort(service_name='mysql'))[0], 'MySQL')
+		self.assertEqual(dbx.checker_for(FakePort(product='MariaDB 10.11'))[0], 'MySQL')
+		self.assertEqual(dbx.checker_for(FakePort(service_name='mongodb'))[0], 'MongoDB')
+		self.assertEqual(dbx.checker_for(FakePort(product='MongoDB 7.0.4'))[0], 'MongoDB')
 
 	def test_unmatched_service_returns_none(self):
 		self.assertEqual(dbx.checker_for(FakePort(service_name='https', product='nginx')), (None, None))
@@ -103,6 +107,55 @@ class CheckPostgresTests(SimpleTestCase):
 		fake_psycopg2.connect.side_effect = Exception('password authentication failed')
 		with mock.patch.dict('sys.modules', {'psycopg2': fake_psycopg2}):
 			self.assertFalse(dbx.check_postgres('h', 5432))
+
+
+class CheckMysqlTests(SimpleTestCase):
+	def test_successful_connect_as_root_with_no_password_means_open(self):
+		fake_pymysql = mock.Mock()
+		fake_conn = mock.Mock()
+		fake_conn.get_server_info.return_value = '8.0.35'
+		fake_pymysql.connect.return_value = fake_conn
+		with mock.patch.dict('sys.modules', {'pymysql': fake_pymysql}):
+			self.assertTrue(dbx.check_mysql('h', 3306))
+			fake_pymysql.connect.assert_called_once_with(
+				host='h', port=3306, user='root', password='', connect_timeout=dbx.CONNECT_TIMEOUT,
+				read_timeout=dbx.CONNECT_TIMEOUT, write_timeout=dbx.CONNECT_TIMEOUT)
+			fake_conn.close.assert_called_once()
+
+	def test_access_denied_means_not_open(self):
+		fake_pymysql = mock.Mock()
+		fake_pymysql.connect.side_effect = Exception("(1045, \"Access denied for user 'root'@'h' (using password: NO)\")")
+		with mock.patch.dict('sys.modules', {'pymysql': fake_pymysql}):
+			self.assertFalse(dbx.check_mysql('h', 3306))
+
+	def test_missing_library_means_unknown(self):
+		with mock.patch.dict('sys.modules', {'pymysql': None}):
+			self.assertIsNone(dbx.check_mysql('h', 3306))
+
+
+class CheckMongodbTests(SimpleTestCase):
+	def test_listdatabases_success_means_open(self):
+		fake_pymongo = mock.Mock()
+		fake_client = mock.Mock()
+		fake_client.admin.command.return_value = {'databases': [{'name': 'admin'}, {'name': 'secrets'}]}
+		fake_pymongo.MongoClient.return_value = fake_client
+		with mock.patch.dict('sys.modules', {'pymongo': fake_pymongo}):
+			self.assertTrue(dbx.check_mongodb('h', 27017))
+			fake_client.admin.command.assert_called_once_with('listDatabases', 1, nameOnly=True)
+			fake_client.close.assert_called_once()
+		self.assertIn('2 database name(s)', dbx.EVIDENCE.get(('h', 27017), ''))
+
+	def test_unauthorized_means_not_open(self):
+		fake_pymongo = mock.Mock()
+		fake_client = mock.Mock()
+		fake_client.admin.command.side_effect = Exception('not authorized on admin to execute command')
+		fake_pymongo.MongoClient.return_value = fake_client
+		with mock.patch.dict('sys.modules', {'pymongo': fake_pymongo}):
+			self.assertFalse(dbx.check_mongodb('h', 27017))
+
+	def test_missing_library_means_unknown(self):
+		with mock.patch.dict('sys.modules', {'pymongo': None}):
+			self.assertIsNone(dbx.check_mongodb('h', 27017))
 
 
 class CheckHttpBackedServicesTests(SimpleTestCase):

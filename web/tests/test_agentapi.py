@@ -6,10 +6,10 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed.models import CVEEntry, CVEMatch
+from cveFeed.models import CVEEntry, CVEMatch, HygieneFinding, RouteAuth
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
 from scanEngine.models import EngineType
-from startScan.models import IpAddress, Port, Subdomain
+from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
 
@@ -26,6 +26,12 @@ def call(token, method, path, body=None):
 
 def rpc(token, method, params=None, rpc_id=1):
 	return call(token, 'POST', '/mcp/', {'jsonrpc': '2.0', 'id': rpc_id, 'method': method, 'params': params or {}})
+
+
+def tool_call(token, name, args=None):
+	status, data = rpc(token, 'tools/call', {'name': name, 'arguments': args or {}})
+	content = data['result']['content'][0]['text']
+	return data['result']['isError'], (json.loads(content) if not data['result']['isError'] else content)
 
 
 class AgentApiTests(TestCase):
@@ -164,17 +170,14 @@ class AgentApiTests(TestCase):
 			self.assertEqual(result['created_names'], ['good.example.com'])
 			self.assertEqual(len(result['invalid']), 2)
 
-	def test_start_scan_runs_discovery_not_the_classic_engine(self):
+	def test_start_scan_runs_discovery(self):
 		from startScan.models import ScanHistory
-		with mock.patch('reNgine.tasks.initiate_scan') as classic, \
-				mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
 			status, data = call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': self.engine.id})
 			self.assertEqual((status, data['status']), (202, 'queued'))
 			scan = ScanHistory.objects.get(pk=data['scan_id'])
 			self.assertEqual(scan.domain_id, self.da.id)
 			queued.assert_called_once_with(scan.id, 'standard')
-			classic.apply_async.assert_not_called()
-			classic.delay.assert_not_called()
 			# engine_id is optional, but a bogus one is still rejected
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': 99999})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.db.id})[0], 404)
@@ -204,6 +207,14 @@ class AgentApiTests(TestCase):
 		status, data = call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'fixed', 'note': 'upgraded to 1.24'})
 		self.assertEqual((status, data['remediation_status']), (200, 'fixed'))
 		self.assertEqual(call(self.t_alice, 'GET', f'{base}/work')[1]['count'], 0)
+
+	def test_patching_a_match_without_a_note_leaves_the_existing_one_alone(self):
+		base = '/api/v1/projects/proj-a'
+		call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'in_progress', 'note': 'opened PR #4'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'fixed'})  # no 'note' in the body
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'fixed', 'opened PR #4'))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/matches/{self.match.id}', {'status': 'open', 'note': ''})  # an explicit '' still clears it
+		self.assertEqual((status, data['remediation_note']), (200, ''))
 
 	def test_not_affected_verdict_is_excluded_from_work(self):
 		CVEMatch.objects.filter(pk=self.match.pk).update(ai_verdict='not_affected')
@@ -635,6 +646,237 @@ class AgentApiTests(TestCase):
 		self.assertEqual(data['remediation_status'], 'in_progress')
 		err, data = self._tool(self.t_alice, 'update_remediation_status', {'project': 'proj-a', 'match_id': mid})
 		self.assertTrue(err)  # missing status is a clean tool error
+
+
+class FindingStatusTests(TestCase):
+	"""The unified remediation-status workflow (open/in_progress/fixed/accepted_risk) on scanner and hygiene findings,
+	alongside the existing CVE-match one: PATCH findings/{kind}/{id}, the bulk POST findings/status, and how both feed
+	back into the actionable Findings view and the note's PATCH semantics."""
+
+	@classmethod
+	def setUpTestData(cls):
+		now = timezone.now()
+		org = Org.objects.create(name='FS', slug='fs-org')
+		other_org = Org.objects.create(name='FS2', slug='fs-org-2')
+		cls.proj = Project.objects.create(name='FS Project', slug='fs-proj', insert_date=now, org=org)
+		cls.other_proj = Project.objects.create(name='FS Other', slug='fs-other', insert_date=now, org=other_org)
+		cls.domain = Domain.objects.create(name='fs.example', project=cls.proj, insert_date=now)
+		other_domain = Domain.objects.create(name='fs-other.example', project=cls.other_proj, insert_date=now)
+		mk = lambda n: User.objects.create_user(n, password='x')
+		cls.alice, cls.carol = mk('fsalice'), mk('fscarol')
+		ProjectMembership.objects.create(user=cls.alice, project=cls.proj, role='user')
+		ProjectMembership.objects.create(user=cls.carol, project=cls.proj, role='audit')
+		_, cls.t_alice = create_token(cls.alice, 'agent')
+		_, cls.t_ro = create_token(cls.alice, 'readonly', read_only=True)
+		_, cls.t_carol = create_token(cls.carol, 'auditor')
+		sub = Subdomain.objects.create(name='www.fs.example', target_domain=cls.domain)
+		cls.vuln = Vulnerability.objects.create(name='Reflected XSS', severity=3, subdomain=sub, target_domain=cls.domain,
+		                                        open_status=True, http_url='https://www.fs.example/', source='nuclei')
+		cls.hyg = HygieneFinding.objects.create(domain=cls.domain, host='www.fs.example', check_name='spf_missing',
+		                                        severity=2, title='No SPF')
+		cls.route = RouteAuth.objects.create(project=cls.proj, domain=cls.domain, host='www.fs.example',
+		                                     url='https://www.fs.example/admin', path='/admin', auth_state='login')
+		other_sub = Subdomain.objects.create(name='www.fs-other.example', target_domain=other_domain)
+		cls.vuln_other = Vulnerability.objects.create(name='Other XSS', severity=3, subdomain=other_sub, target_domain=other_domain,
+		                                              open_status=True, http_url='https://www.fs-other.example/')
+
+	def _base(self):
+		return '/api/v1/projects/fs-proj'
+
+	def test_patch_sets_status_and_note_for_each_kind(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress', 'note': 'ticket #9'})
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'in_progress', 'ticket #9'))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'vendor says no'})
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'accepted_risk', 'vendor says no'))
+
+	def test_assignee_can_be_set_alone_changed_and_cleared_with_null(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': self.alice.id})
+		self.assertEqual(status, 200)
+		self.assertEqual(data['assignee'], {'id': self.alice.id, 'username': 'fsalice', 'name': 'fsalice'})
+		self.assertEqual(data['remediation_status'], 'open')  # untouched: assignee was sent alone
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': None})
+		self.assertEqual((status, data['assignee']), (200, None))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'in_progress', 'assignee': self.carol.id})
+		self.assertEqual((status, data['remediation_status'], data['assignee']['username']), (200, 'in_progress', 'fscarol'))
+
+	def test_a_patch_needs_status_or_assignee_and_the_assignee_must_be_a_member(self):
+		base = self._base()
+		self.assertEqual(call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'note': 'x'})[0], 400)
+		outsider = User.objects.create_user('fsoutsider', password='x')
+		for bad in (outsider.id, 'abc', 99999999):
+			status, _ = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': bad})
+			self.assertEqual(status, 400, bad)
+
+	def test_comments_are_listed_oldest_first_counted_and_audited(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		status, c1 = call(self.t_alice, 'POST', f'{base}/comments', {'text': 'looking into it'})
+		self.assertEqual((status, c1['text'], c1['author']['username']), (201, 'looking into it', 'fsalice'))
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'second'})
+		status, listed = call(self.t_alice, 'GET', f'{base}/comments')
+		self.assertEqual((status, [c['text'] for c in listed['results']]), (200, ['looking into it', 'second']))
+		self.assertEqual(call(self.t_alice, 'GET', base)[1]['comment_count'], 2)
+		rows = call(self.t_alice, 'GET', f'{self._base()}/vulnerabilities')[1]['results']
+		self.assertEqual(next(r for r in rows if r['id'] == self.vuln.id)['comment_count'], 2)
+		self.assertEqual(call(self.t_alice, 'POST', f'{base}/comments', {'text': '   '})[0], 400)
+		self.assertEqual(call(self.t_alice, 'POST', f'{base}/comments', {})[0], 400)
+
+	def test_comment_writes_are_gated_like_every_other_write(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}/comments'
+		self.assertEqual(call(self.t_ro, 'POST', base, {'text': 'x'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'POST', base, {'text': 'x'})[0], 403)
+		self.assertEqual(call(self.t_alice, 'GET', base.replace('fs-proj', 'fs-other'))[0], 404)
+		other = f'/api/v1/projects/fs-proj/findings/vulnerability/{self.vuln_other.id}/comments'
+		self.assertEqual(call(self.t_alice, 'POST', other, {'text': 'x'})[0], 404)  # another project's finding
+
+	def test_the_audit_trail_records_status_assignee_and_comment_with_before_and_after(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		call(self.t_alice, 'PATCH', base, {'status': 'in_progress'})
+		call(self.t_alice, 'PATCH', base, {'assignee': self.alice.id})
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'on it'})
+		status, trail = call(self.t_alice, 'GET', f'{base}/audit')
+		self.assertEqual(status, 200)
+		events = list(reversed(trail['results']))  # newest first on the wire
+		self.assertEqual([e['event'] for e in events], ['status', 'assignee', 'comment'])
+		self.assertEqual((events[0]['before'], events[0]['after']), ({'status': 'open'}, {'status': 'in_progress'}))
+		self.assertEqual((events[1]['before'], events[1]['after']['assignee']['username']), ({'assignee': None}, 'fsalice'))
+		self.assertEqual(events[2]['after']['text'], 'on it')
+		self.assertTrue(all(e['actor']['username'] == 'fsalice' for e in events))
+
+	def test_bulk_status_changes_are_audited_too(self):
+		status, _ = call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': [{'kind': 'hygiene', 'id': self.hyg.id}], 'status': 'fixed'})
+		self.assertEqual(status, 200)
+		trail = call(self.t_alice, 'GET', f'{self._base()}/findings/hygiene/{self.hyg.id}/audit')[1]['results']
+		self.assertEqual([(e['event'], e['after']) for e in trail], [('status', {'status': 'fixed'})])
+
+	def test_members_lists_direct_and_org_members_for_the_picker(self):
+		from dashboard.models import OrgMembership
+		orgish = User.objects.create_user('fsorg', password='x')
+		OrgMembership.objects.create(user=orgish, org=self.proj.org, role='user')
+		status, data = call(self.t_alice, 'GET', f'{self._base()}/members')
+		self.assertEqual(status, 200)
+		self.assertEqual([m['username'] for m in data['results']], ['fsalice', 'fscarol', 'fsorg'])
+		self.assertEqual(call(self.t_alice, 'GET', '/api/v1/projects/fs-other/members')[0], 404)
+
+	def test_detail_carries_status_assignee_and_comment_count_for_every_kind(self):
+		base = self._base()
+		call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'ok', 'assignee': self.alice.id})
+		status, data = call(self.t_alice, 'GET', f'{base}/findings/hygiene/{self.hyg.id}')
+		self.assertEqual(status, 200)
+		self.assertEqual((data['remediation']['status'], data['remediation']['note']), ('accepted_risk', 'ok'))
+		self.assertEqual((data['assignee']['username'], data['status_changed_by']['username'], data['comment_count']), ('fsalice', 'fsalice', 0))
+		self.assertIsNotNone(data['status_changed_at'])
+		route = call(self.t_alice, 'GET', f'{base}/findings/route/{self.route.id}')[1]
+		self.assertEqual((route['assignee'], route['comment_count'], route['status_changed_at']), (None, 0, None))
+
+	def test_mcp_assign_comment_audit_and_members_tools(self):
+		from tests.test_agentapi import tool_call
+		args = {'project': 'fs-proj', 'kind': 'vulnerability', 'id': self.vuln.id}
+		self.assertFalse(tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': self.alice.id})[0])
+		self.assertFalse(tool_call(self.t_alice, 'add_finding_comment', {**args, 'text': 'via mcp'})[0])
+		self.assertEqual([c['text'] for c in tool_call(self.t_alice, 'list_finding_comments', args)[1]['results']], ['via mcp'])
+		self.assertEqual({e['event'] for e in tool_call(self.t_alice, 'finding_audit', args)[1]['results']}, {'assignee', 'comment'})
+		self.assertIn('fsalice', [m['username'] for m in tool_call(self.t_alice, 'list_members', {'project': 'fs-proj'})[1]['results']])
+		unassigned = tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': None})
+		self.assertEqual((unassigned[0], unassigned[1]['assignee']), (False, None))
+
+	def test_serializers_count_comments_for_a_row_the_queryset_did_not_annotate(self):
+		from agentapi.services import _hygiene
+		from cveFeed.models import FindingComment
+		base = f'{self._base()}/findings/hygiene/{self.hyg.id}'
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'one'})
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'two'})
+		plain = HygieneFinding.objects.select_related('domain').get(pk=self.hyg.id)  # no comment_count annotation
+		self.assertFalse(hasattr(plain, 'comment_count'))
+		self.assertEqual(_hygiene(plain)['comment_count'], 2)
+		self.assertEqual(FindingComment.objects.filter(finding_kind='hygiene', finding_id=self.hyg.id).count(), 2)
+
+	def test_status_changed_at_and_by_are_set_by_a_patch(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress'})
+		self.assertEqual(status, 200)
+		self.assertIsNotNone(data['status_changed_at'])
+		self.assertEqual(data['status_changed_at'], data['remediation_updated'])
+		self.assertEqual(data['status_changed_by'], {'id': self.alice.id, 'username': 'fsalice', 'name': 'fsalice'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'fixed'})
+		self.assertEqual((status, data['status_changed_by']['username']), (200, 'fsalice'))
+
+	def test_patch_match_kind_delegates_to_the_same_route_as_matches(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-50', cvss=7.0, title='x', published_at=timezone.now())
+		match = CVEMatch.objects.create(cve_entry=cve, subdomain=Subdomain.objects.create(name='m.fs.example', target_domain=self.domain), confidence=0.5)
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/match/{match.id}', {'status': 'fixed'})
+		self.assertEqual((status, data['remediation_status']), (200, 'fixed'))
+		match.refresh_from_db()
+		self.assertEqual(match.remediation_status, 'fixed')
+
+	def test_bad_status_is_rejected(self):
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/vulnerability/{self.vuln.id}', {'status': 'bogus'})
+		self.assertEqual(status, 400)
+
+	def test_route_kind_has_no_remediation_workflow(self):
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/route/{self.route.id}', {'status': 'fixed'})
+		self.assertEqual(status, 400)
+
+	def test_cross_project_id_is_404_not_another_projects_finding(self):
+		status, data = call(self.t_alice, 'PATCH', f'{self._base()}/findings/vulnerability/{self.vuln_other.id}', {'status': 'fixed'})
+		self.assertEqual(status, 404)
+
+	def test_read_only_and_audit_role_cannot_write(self):
+		self.assertEqual(call(self.t_ro, 'PATCH', f'{self._base()}/findings/vulnerability/{self.vuln.id}', {'status': 'fixed'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'PATCH', f'{self._base()}/findings/hygiene/{self.hyg.id}', {'status': 'fixed'})[0], 403)
+
+	def test_omitting_note_preserves_it_but_an_explicit_empty_note_clears_it(self):
+		base = self._base()
+		call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress', 'note': 'keep me'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'fixed'})  # no 'note' key at all
+		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'fixed', 'keep me'))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'open', 'note': ''})
+		self.assertEqual((status, data['remediation_note']), (200, ''))
+
+	def test_marking_fixed_or_accepted_risk_drops_out_of_actionable_findings(self):
+		base = self._base()
+		before = call(self.t_alice, 'GET', f'{base}/findings')[1]
+		self.assertEqual((before['counts']['scanner'], before['counts']['hygiene']), (1, 1))
+		call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'fixed'})
+		call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk'})
+		after = call(self.t_alice, 'GET', f'{base}/findings')[1]
+		self.assertEqual((after['counts']['scanner'], after['counts']['hygiene']), (0, 0))
+		everything = call(self.t_alice, 'GET', f'{base}/findings?status=all')[1]
+		self.assertEqual((everything['counts']['scanner'], everything['counts']['hygiene']), (1, 1))  # status=all still shows them
+
+	def test_bulk_update_sets_many_and_reports_partial_failure(self):
+		base = self._base()
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}, {'kind': 'hygiene', 'id': self.hyg.id},
+		         {'kind': 'vulnerability', 'id': 999999}, {'kind': 'route', 'id': self.route.id}]
+		status, data = call(self.t_alice, 'POST', f'{base}/findings/status', {'items': items, 'status': 'accepted_risk', 'note': 'batch'})
+		self.assertEqual((status, data['updated'], len(data['failed'])), (200, 2, 2))
+		self.vuln.refresh_from_db()
+		self.hyg.refresh_from_db()
+		self.assertEqual((self.vuln.remediation_status, self.hyg.remediation_status), ('accepted_risk', 'accepted_risk'))
+
+	def test_bulk_update_caps_at_200_items(self):
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}] * 201
+		status, data = call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': items, 'status': 'fixed'})
+		self.assertEqual(status, 400)
+
+	def test_bulk_update_rejects_an_empty_or_malformed_items_list(self):
+		self.assertEqual(call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': [], 'status': 'fixed'})[0], 400)
+		self.assertEqual(call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'status': 'fixed'})[0], 400)
+
+	def test_bulk_update_needs_write_access(self):
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}]
+		self.assertEqual(call(self.t_ro, 'POST', f'{self._base()}/findings/status', {'items': items, 'status': 'fixed'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'POST', f'{self._base()}/findings/status', {'items': items, 'status': 'fixed'})[0], 403)
+
+	def test_mcp_update_finding_status_and_bulk(self):
+		err, data = tool_call(self.t_alice, 'update_finding_status', {'project': 'fs-proj', 'kind': 'hygiene', 'id': self.hyg.id, 'status': 'in_progress'})
+		self.assertFalse(err)
+		self.assertEqual(data['remediation_status'], 'in_progress')
+		items = [{'kind': 'vulnerability', 'id': self.vuln.id}, {'kind': 'hygiene', 'id': self.hyg.id}]
+		err, data = tool_call(self.t_alice, 'bulk_update_finding_status', {'project': 'fs-proj', 'items': items, 'status': 'fixed'})
+		self.assertFalse(err)
+		self.assertEqual(data['updated'], 2)
 
 
 class AgentsPageTests(TestCase):
@@ -1317,8 +1559,8 @@ class HostSearchTests(TestCase):
 		self.assertEqual(status, 200, data)
 		return data
 
-	def names(self, q):
-		return sorted(h['host'] for h in self.search(q)['results'])
+	def names(self, q, **extra):
+		return sorted(h['host'] for h in self.search(q, **extra)['results'])
 
 	def test_a_bare_word_matches_a_technology_and_a_port_product(self):
 		self.assertEqual(self.names('php'), ['port.srch.example', 'tech.srch.example', 'www.srch.example'])
@@ -1335,12 +1577,12 @@ class HostSearchTests(TestCase):
 	def test_field_filters(self):
 		self.assertEqual(self.names('port:3306'), ['db.srch.example'])  # only that host, not the other project's
 		self.assertEqual(self.names('product:mysql'), ['db.srch.example'])
-		self.assertEqual(self.names('tech:php'), ['tech.srch.example', 'www.srch.example'])
+		self.assertEqual(self.names('tech:php'), ['port.srch.example', 'tech.srch.example', 'www.srch.example'])  # tech: is everything a host runs
 		self.assertEqual(self.names('os:"linux 5"'), ['port.srch.example'])
 		self.assertEqual(self.names('service:svc port:8080'), ['port.srch.example'])  # terms are ANDed
 
 	def test_negation_and_phrases(self):
-		self.assertEqual(self.names('tech:php -host:www'), ['tech.srch.example'])
+		self.assertEqual(self.names('tech:php -host:www'), ['port.srch.example', 'tech.srch.example'])
 		self.assertEqual(self.names('-php'), ['db.srch.example'])
 		self.assertEqual(self.names('"welcome to acme"'), ['www.srch.example'])
 		self.assertEqual(self.names('welcome acme'), ['www.srch.example'])
@@ -1372,10 +1614,68 @@ class HostSearchTests(TestCase):
 			status, body = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=' + q.replace('/', '%2F'))
 			self.assertEqual(status, 400, q)
 
+	def test_heat_facets_count_the_whole_match_and_heat_filters_the_page(self):
+		from startScan.models import ScanActivity, ScanHistory, Vulnerability
+		from scanEngine.models import EngineType
+		fire = Subdomain.objects.get(name='port.srch.example')
+		Vulnerability.objects.create(name='RCE', severity=3, subdomain=fire, target_domain=fire.target_domain, http_url='x', open_status=True)
+		ice = Subdomain.objects.get(name='tech.srch.example')
+		Vulnerability.objects.create(name='Info leak', severity=1, subdomain=ice, target_domain=ice.target_domain, http_url='y', open_status=True)
+		clean = Subdomain.objects.get(name='db.srch.example')
+		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=clean.target_domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+		clean.scan_history = scan
+		clean.save(update_fields=['scan_history'])
+		ScanActivity.objects.create(scan_of=scan, name='nuclei_scan', status=2, time=timezone.now())
+		# www.srch.example stays unscanned: no findings, no nuclei activity
+		data = self.search('')
+		self.assertEqual(data['facets']['heat'], {'fire': 1, 'smoke': 0, 'ice': 1, 'clean': 1, 'unscanned': 1})
+		self.assertFalse(data['facets']['truncated'])
+		self.assertEqual(self.names('', heat='fire'), ['port.srch.example'])
+		self.assertEqual(self.names('', heat='unscanned'), ['www.srch.example'])
+		# the facet counts hold steady even while narrowed to one heat value
+		self.assertEqual(self.search('', heat='fire')['facets']['heat'], {'fire': 1, 'smoke': 0, 'ice': 1, 'clean': 1, 'unscanned': 1})
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&heat=bogus')
+		self.assertEqual(status, 400)
+
 	def test_the_search_is_an_mcp_tool(self):
 		status, data = rpc(self.tok, 'tools/call', {'name': 'search_hosts', 'arguments': {'project': 'srch-a', 'q': 'port:3306'}})
 		self.assertEqual(status, 200)
 		self.assertIn('db.srch.example', json.dumps(data))
+
+	def test_comma_is_or_within_one_filter_but_not_when_quoted(self):
+		self.assertEqual(self.names('port:3306,8080'), ['db.srch.example', 'port.srch.example'])
+		self.assertEqual(self.names('product:php,mysql'), ['db.srch.example', 'port.srch.example'])
+		# quoting a value with a comma keeps it literal, so port: (which takes a bare number) 400s instead of splitting it
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=' + 'port:"3306,8080"'.replace(',', '%2C').replace('"', '%22'))
+		self.assertEqual(status, 400)
+
+	def test_country_filters_and_shows_in_matched(self):
+		from startScan.models import CountryISO
+		us, _ = CountryISO.objects.get_or_create(iso='US', name='United States')
+		de, _ = CountryISO.objects.get_or_create(iso='DE', name='Germany')
+		IpAddress.objects.filter(address='10.0.0.5').update(geo_iso=us)
+		IpAddress.objects.filter(address='10.0.0.3').update(geo_iso=de)
+		self.assertEqual(self.names('country:US'), ['db.srch.example'])
+		self.assertEqual(self.names('country:Germany'), ['port.srch.example'])
+		why = {h['host']: h['matched'] for h in self.search('country:us')['results']}
+		self.assertEqual(why['db.srch.example'], ['country United States'])
+
+	def test_facets_count_the_whole_match_like_heat_does(self):
+		data = self.search('', facets='port,product,os')
+		self.assertEqual(sorted(data['facets']['port'], key=lambda r: r['value']),
+		                  sorted([{'value': 8080, 'count': 1}, {'value': 3306, 'count': 1}], key=lambda r: r['value']))
+		self.assertIn({'value': 'MySQL', 'count': 1}, data['facets']['product'])
+		self.assertIn({'value': 'Linux 5.X', 'count': 1}, data['facets']['os'])
+		# the same counts hold while the page is narrowed, exactly like facets.heat
+		narrowed = self.search('', heat='clean', facets='port')
+		self.assertEqual(sorted(narrowed['facets']['port'], key=lambda r: r['value']), sorted(data['facets']['port'], key=lambda r: r['value']))
+
+	def test_facet_size_bounds_and_bad_facet_name_is_400(self):
+		data = self.search('', facets='port', facet_size=1)
+		self.assertEqual(len(data['facets']['port']), 1)
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&facets=bogus')
+		self.assertEqual(status, 400)
 
 
 

@@ -38,6 +38,7 @@ RUN apt-get update -y && \
     build-essential \
     bzip2 \
     ca-certificates \
+    cargo \
     cmake \
     curl \
     gcc \
@@ -54,6 +55,7 @@ RUN apt-get update -y && \
     python3-dev \
     python3-pip \
     python3-venv \
+    rustc \
     tzdata \
     wget && \
     rm -rf /var/lib/apt/lists/*
@@ -87,31 +89,13 @@ WORKDIR /usr/src/app
 
 ENV GO111MODULE=on
 RUN printf "\
-    github.com/jaeles-project/gospider@latest\n\
-    github.com/tomnomnom/gf@latest\n\
-    github.com/tomnomnom/unfurl@latest\n\
-    github.com/tomnomnom/waybackurls@latest\n\
-    github.com/projectdiscovery/httpx/cmd/httpx@latest\n\
-    github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest\n\
-    github.com/projectdiscovery/chaos-client/cmd/chaos@latest\n\
     github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest\n\
-    github.com/projectdiscovery/naabu/v2/cmd/naabu@latest\n\
-    github.com/hakluke/hakrawler@latest\n\
-    github.com/lc/gau/v2/cmd/gau@latest\n\
-    github.com/ffuf/ffuf@latest\n\
-    github.com/projectdiscovery/tlsx/cmd/tlsx@latest\n\
-    github.com/hahwul/dalfox/v2@latest\n\
-    github.com/projectdiscovery/katana/cmd/katana@latest\n\
-    github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest\n\
-    github.com/sa7mon/s3scanner@latest\n" | \
+    github.com/projectdiscovery/naabu/v2/cmd/naabu@latest\n" | \
     xargs -L1 go install -ldflags="-s -w" -v && \
     rm -rf /go/pkg/* && rm -rf /root/.cache/go-build
 
 # Update Nuclei and Nuclei-Templates (refreshed daily at runtime by the update_nuclei_templates task)
 RUN nuclei -update-templates
-
-# update chaos
-RUN chaos -update
 
 # Application dependencies in a virtual environment (the distribution Python is externally managed)
 RUN python3 -m venv /opt/venv
@@ -123,6 +107,15 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 RUN python3 -m venv /opt/bbot-venv && \
     /opt/bbot-venv/bin/pip install --no-cache-dir bbot tzdata && \
     ln -s /opt/bbot-venv/bin/bbot /usr/local/bin/bbot
+
+# WPScan, run only against WordPress sites a scan has already fingerprinted (see docs/CONFIGURATION.md for its licence).
+# Pinned; its vulnerability metadata is fetched now and refreshed by WPScan itself while it runs.
+ARG WPSCAN_VERSION=4.1.0
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends ruby ruby-dev libcurl4-openssl-dev libxml2-dev libxslt1-dev libffi-dev zlib1g-dev && \
+    gem install wpscan -v ${WPSCAN_VERSION} --no-document && \
+    (wpscan --update --no-banner || echo "WPScan database not fetched at build time; it updates on first use") && \
+    rm -rf /var/lib/apt/lists/* /root/.gem/cache
 
 # Copy source code
 COPY . /usr/src/app/

@@ -34,3 +34,16 @@ def restore_generated_templates(*args, **kwargs):
             log.info('generated AI templates restored from the database: %s', result)
     except Exception:  # noqa: BLE001 - the database may not be reachable yet; the next worker start tries again
         log.exception('could not restore the generated AI templates')
+
+
+@worker_ready.connect()
+def start_first_run_bootstrap(*args, **kwargs):
+    """A brand-new install loads its CVE feed as soon as its workers are up, not at the first scheduled run (cveFeed.tasks.
+    bootstrap_first_run does nothing on an install that already has CVEs). The delay lets the other workers and beat settle.
+    Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed.tasks import bootstrap_first_run
+        bootstrap_first_run.apply_async(countdown=45)
+    except Exception:  # noqa: BLE001 - the broker or database may not be reachable yet; the next worker start tries again
+        logging.getLogger(__name__).exception('could not queue the first-run bootstrap')

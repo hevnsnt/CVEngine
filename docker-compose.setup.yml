@@ -6,6 +6,7 @@ services:
       - AUTHORITY_PASSWORD=${AUTHORITY_PASSWORD:-CHANGE_IT}
       - COMPANY=${COMPANY:-Company}
       - DOMAIN_NAME=${DOMAIN_NAME:-example.com}
+      - CERT_EXTRA_SANS=${CERT_EXTRA_SANS:-}
       - COUNTRY_CODE=${COUNTRY_CODE:-CC}
       - STATE=${STATE:-State}
       - CITY=${CITY:-City}

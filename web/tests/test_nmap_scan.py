@@ -59,7 +59,7 @@ class ParseXmlTests(TestCase):
 		self.assertEqual(host['ports'], [{
 			'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh',
 			'product': 'OpenSSH', 'version': '8.9', 'service_extra': 'Ubuntu', 'ostype': '',
-			'cpe': '', 'cpes': [], 'method': '',
+			'cpe': '', 'cpes': [], 'method': '', 'scripts': {}, 'banner': '',
 		}])
 
 
@@ -138,8 +138,9 @@ class RunNmapForScanTests(TestCase):
 			return FAST_XML
 		result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		self.assertEqual([c[1:] for c in calls], [(nmap_scan.FAST_FLAGS, nmap_scan.HOST_TIMEOUT_FAST)])
-		self.assertEqual(nmap_scan.FAST_FLAGS, ['-sV', '--version-intensity', '5', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn',
-			'-T4', '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit'])
+		self.assertEqual(nmap_scan.FAST_FLAGS, ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn',
+			'-T4', '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', '--script', ','.join(nmap_scan.NSE_SCRIPTS),
+			'--script-timeout', '30s'])
 		self.assertEqual(calls[0][0], ['192.0.2.10'])  # IPs only, never the hostname
 		self.assertEqual(result, {'targets': 1, 'reused': 0, 'fast': {'ports': 1, 'hosts_with_os': 1}})
 		from cveFeed.models import ServiceRun
@@ -348,3 +349,100 @@ class NaabuSwitchTests(SimpleTestCase):
 				self.assertIsNone(naabu_scan.discover(['203.0.113.5']))
 			with mock.patch.dict(os.environ, {'CVENGINE_NAABU': '1'}):
 				self.assertEqual(naabu_scan.naabu_path(), '/usr/local/bin/naabu')
+
+
+NSE_XML = '''<?xml version="1.0"?>
+<nmaprun><host>
+<address addr="192.0.2.30" addrtype="ipv4"/>
+<ports>
+<port protocol="tcp" portid="21"><state state="open"/><service name="ftp" product="vsftpd" version="3.0.5"/>
+<script id="banner" output="220 (vsFTPd 3.0.5)"/>
+<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/></port>
+<port protocol="tcp" portid="22"><state state="open"/><service name="ssh" product="OpenSSH" version="9.6"/>
+<script id="ssh-hostkey" output="256 aa:bb (ED25519)"/></port>
+<port protocol="tcp" portid="3389"><state state="open"/><service name="ms-wbt-server"/>
+<script id="rdp-ntlm-info" output="Product_Version: 10.0.20348"/></port>
+<port protocol="tcp" portid="8080"><state state="open"/><service name="http" product="nginx" servicefp="SF-Port8080-TCP:V=7.99"/></port>
+</ports>
+<hostscript><script id="smb-os-discovery" output="OS: Windows Server 2022&#xa;Computer name: WIN-ACME"/></hostscript>
+</host></nmaprun>'''
+
+
+class NseCaptureTests(TestCase):
+	def test_the_parser_keeps_each_ports_script_output_and_banner(self):
+		ports = {p['number']: p for p in nmap_scan.parse_xml(NSE_XML)[0]['ports']}
+		self.assertEqual(ports[21]['banner'], '220 (vsFTPd 3.0.5)')  # the banner script wins
+		self.assertIn('Anonymous FTP login allowed', ports[21]['scripts']['ftp-anon'])
+		self.assertEqual(ports[22]['scripts'], {'ssh-hostkey': '256 aa:bb (ED25519)'})
+		self.assertEqual(ports[8080]['banner'], 'SF-Port8080-TCP:V=7.99')  # no banner script: nmap's own probe bytes
+		self.assertEqual(ports[8080]['scripts'], {})
+
+	def test_the_parser_keeps_host_level_scripts(self):
+		host = nmap_scan.parse_xml(NSE_XML)[0]
+		self.assertIn('Windows Server 2022', host['hostscripts']['smb-os-discovery'])
+
+	def test_a_report_without_scripts_has_none(self):
+		host = nmap_scan.parse_xml(FAST_XML)[0]
+		self.assertEqual(host['hostscripts'], {})
+		self.assertEqual(host['ports'][0]['scripts'], {})
+
+	def test_script_output_is_capped(self):
+		from reNgine.nmap_service import BANNER_CAP, SCRIPT_OUTPUT_CAP
+		xml = ('<nmaprun><host><address addr="192.0.2.31" addrtype="ipv4"/><ports><port protocol="tcp" portid="25">'
+			'<state state="open"/><service name="smtp"/><script id="banner" output="' + 'A' * 9000 + '"/></port></ports></host></nmaprun>')
+		port = nmap_scan.parse_xml(xml)[0]['ports'][0]
+		self.assertEqual(len(port['banner']), BANNER_CAP)
+		self.assertEqual(len(port['scripts']['banner']), SCRIPT_OUTPUT_CAP)
+
+	def test_persisting_stores_banner_scripts_and_host_scripts(self):
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(NSE_XML))
+		ip = IpAddress.objects.get(address='192.0.2.30')
+		ftp = ip.ports.get(number=21)
+		self.assertEqual(ftp.banner, '220 (vsFTPd 3.0.5)')
+		self.assertIn('ftp-anon', ftp.extra['scripts'])
+		self.assertIn('smb-os-discovery', ip.fingerprint['scripts'])
+
+	def test_a_rescan_without_scripts_keeps_the_last_banner(self):
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(NSE_XML))
+		bare = NSE_XML.replace('<script id="banner" output="220 (vsFTPd 3.0.5)"/>', '')
+		bare = bare.replace('<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>', '')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(bare))
+		ftp = IpAddress.objects.get(address='192.0.2.30').ports.get(number=21)
+		self.assertEqual(ftp.banner, '220 (vsFTPd 3.0.5)')
+		self.assertIn('ftp-anon', ftp.extra['scripts'])
+
+
+class ReviewedScriptsTests(TestCase):
+	# nmap's -sV runs its whole "version" NSE category on top of whatever --script asked for (rpcinfo, hnap-info, and
+	# more), unasked and unreviewed; persist_inventory must never let that reach storage, search, or the host page.
+	def test_a_script_outside_nse_scripts_is_dropped_but_a_reviewed_one_is_kept(self):
+		xml = NSE_XML.replace(
+			'<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>',
+			'<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>'
+			'<script id="rpcinfo" output="ERROR: Script execution failed (use -d to debug)"/>')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml))
+		ftp = IpAddress.objects.get(address='192.0.2.30').ports.get(number=21)
+		self.assertIn('ftp-anon', ftp.extra['scripts'])
+		self.assertNotIn('rpcinfo', ftp.extra['scripts'])
+		self.assertNotIn('rpcinfo', ftp.extra['script_text'])
+
+	def test_a_port_with_only_unreviewed_scripts_keeps_the_last_reviewed_output(self):
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(NSE_XML))
+		only_unreviewed = NSE_XML.replace(
+			'<script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)&#xa;drwxr-xr-x 2 ftp ftp 4096 pub"/>',
+			'<script id="vmware-version" output="ERROR: Script execution failed (use -d to debug)"/>')
+		only_unreviewed = only_unreviewed.replace('<script id="banner" output="220 (vsFTPd 3.0.5)"/>', '')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(only_unreviewed))
+		ftp = IpAddress.objects.get(address='192.0.2.30').ports.get(number=21)
+		self.assertIn('ftp-anon', ftp.extra['scripts'])  # the earlier, reviewed run's output survives
+		self.assertNotIn('vmware-version', ftp.extra['scripts'])
+
+	def test_an_unreviewed_host_script_is_dropped(self):
+		xml = NSE_XML.replace(
+			'<hostscript><script id="smb-os-discovery" output="OS: Windows Server 2022&#xa;Computer name: WIN-ACME"/></hostscript>',
+			'<hostscript><script id="smb-os-discovery" output="OS: Windows Server 2022&#xa;Computer name: WIN-ACME"/>'
+			'<script id="hnap-info" output="ERROR: Script execution failed (use -d to debug)"/></hostscript>')
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml))
+		ip = IpAddress.objects.get(address='192.0.2.30')
+		self.assertIn('smb-os-discovery', ip.fingerprint['scripts'])
+		self.assertNotIn('hnap-info', ip.fingerprint['scripts'])

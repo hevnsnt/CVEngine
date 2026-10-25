@@ -1,9 +1,10 @@
-// First-run guided setup: organization, project, AI model, first target. Skips what is already done.
+// First-run guided setup: organization, project, AI model, first target, optional search-engine keys. Every step is shown; what already exists is
+// filled in, so a finished step is one click on Continue.
 const root = document.getElementById('wizard');
 const csrf = root.querySelector('[name=csrfmiddlewaretoken]').value;
 const stepBox = document.getElementById('step');
 const dots = document.getElementById('dots');
-const STEPS = ['welcome', 'org', 'project', 'ai', 'target'];
+const STEPS = ['welcome', 'org', 'project', 'ai', 'target', 'keys'];
 const NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter' };
 
 const el = (tag, cls, text, attrs = {}) => {
@@ -38,6 +39,8 @@ function field(label, input, help) {
 
 let state = {};
 let index = 0;
+let followScan = null; // the discovery the target step started, followed on the last step and from the dashboard
+let poller = null;
 
 function drawDots() {
   dots.textContent = '';
@@ -45,6 +48,7 @@ function drawDots() {
 }
 
 function show(i) {
+  clearInterval(poller);
   index = i;
   drawDots();
   stepBox.textContent = '';
@@ -86,7 +90,8 @@ const steps = {
     const list = el('ul', 'points');
     [['1', 'Name your organization and first project', 'Findings stay organized, teammates can be added later.'],
      ['2', 'Connect your AI model', 'It reads the CVE feed, checks your inventory, and writes and runs checks.'],
-     ['3', 'Add a target', 'Enter a domain and discovery starts immediately.']].forEach(([n, t, d]) => {
+     ['3', 'Add a target', 'Enter a domain and discovery starts immediately.'],
+     ['4', 'Optional: search-engine keys', 'Shodan and friends find more while you finish. Skip it any time.']].forEach(([n, t, d]) => {
       const li = el('li'); const c = el('div'); c.append(el('div', '', t, { style: 'font-weight:650;font-size:15px' }), el('span', '', d));
       li.append(el('b', '', n), c); list.append(li);
     });
@@ -94,7 +99,7 @@ const steps = {
     const actions = el('div', 'actions');
     actions.append(el('span', 'grow'));
     const go = el('button', 'btn', 'Get started', { type: 'button' });
-    go.onclick = () => show(state.org && state.org.named ? (state.project && state.project.named ? (state.ai_ready ? 4 : 3) : 2) : 1);
+    go.onclick = () => show(1);
     actions.append(go);
     node.append(actions);
   },
@@ -104,7 +109,12 @@ const steps = {
     form(node, {
       title: 'Name your organization', lead: 'This is the top level. Your projects and teammates live inside it.',
       body: [field('Organization name', name)], primary: 'Continue',
-      onSubmit: async () => { state = await welcome('POST', 'org', { name: name.value }); next(); },
+      onSubmit: async () => {
+        const known = state.org && state.org.named ? state.org.name : '';
+        if (known && name.value.trim() === known) { next(); return; } // already set: nothing to save
+        state = await welcome('POST', 'org', { name: name.value });
+        next();
+      },
     });
   },
 
@@ -113,7 +123,12 @@ const steps = {
     form(node, {
       title: 'Create your first project', lead: 'A project holds your targets, scans and findings. Nothing is shared between projects.',
       body: [field('Project name', name, 'Examples: Production, Client A, Lab')], primary: 'Continue',
-      onSubmit: async () => { state = await welcome('POST', 'project', { name: name.value }); next(); },
+      onSubmit: async () => {
+        const known = state.project && state.project.named ? state.project.name : '';
+        if (known && name.value.trim() === known) { next(); return; }
+        state = await welcome('POST', 'project', { name: name.value });
+        next();
+      },
     });
   },
 
@@ -129,12 +144,14 @@ const steps = {
         hint.textContent = r.provider ? `That looks like an ${NAMES[r.provider]} key.` : 'We do not recognize that key. You can keep going and pick a provider in Settings.';
       }, 250);
     });
+    if (state.ai_ready) { key.placeholder = 'Connected. Paste a new key only to replace it.'; hint.textContent = 'An AI model is already connected. Continue, or paste a new key to replace it.'; }
     const wrap = el('div', 'field'); wrap.append(el('label', '', 'API key', { for: 'ai-key' }), key, hint); key.id = 'ai-key';
     form(node, {
       title: 'Connect your AI model', lead: 'This is what confirms which hosts are really exposed and writes checks for new CVEs.',
-      body: [wrap], primary: 'Verify and continue',
+      body: [wrap], primary: state.ai_ready ? 'Continue' : 'Verify and continue',
       skip: { label: 'Skip for now', onClick: next },
       onSubmit: async () => {
+        if (!key.value.trim() && state.ai_ready) { next(); return; } // a model is already connected
         if (!key.value.trim()) throw new Error('Paste a key, or choose "Skip for now".');
         const r = await api('POST', '/cve/api/setup/save', { key: key.value });
         key.value = '';
@@ -160,10 +177,56 @@ const steps = {
       onSubmit: async () => {
         if (!auth.checked) throw new Error('Please confirm you are authorized to test this target.');
         const r = await welcome('POST', 'target', { value: value.value, authorized: true, project: state.project && state.project.slug });
-        await welcome('POST', 'finish');
-        window.location.href = `/cve/?follow=${r.scan_id || ''}`;
+        followScan = r.scan_id || null;
+        next(); // discovery is already running: the last step shows it while the optional keys are offered
       },
     });
+  },
+
+  keys(node) {
+    const offered = [['shodan', 'Shodan', 'Hosts, open ports and services Shodan has already seen'],
+                     ['virustotal', 'VirusTotal', 'Subdomains VirusTotal knows about'],
+                     ['securitytrails', 'SecurityTrails', 'Historical DNS and subdomains']];
+    const inputs = {};
+    const body = offered.map(([service, label, help]) => {
+      const input = el('input', '', null, { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Paste a key, or leave empty' });
+      inputs[service] = input;
+      return field(label, input, help);
+    });
+    const progress = el('div', 'live-hint', null, { 'aria-live': 'polite' });
+    const dot = el('span', 'live', 'live');
+    const text = document.createTextNode('Discovery is starting...');
+    progress.append(dot, text);
+    const open = () => { window.location.href = followScan ? `/cve/?follow=${followScan}` : '/cve/'; };
+    const done = async () => { await welcome('POST', 'finish'); open(); };
+    form(node, {
+      title: 'Optional: add search-engine keys',
+      lead: 'Discovery is already running with free public sources. Keys let it ask more services, and apply from the next scan on (Settings > API keys has the full list). Add them while the first results come in, or skip.',
+      body: [...body, progress], primary: 'Save and finish',
+      skip: { label: 'Skip', onClick: () => done().catch((err) => { text.textContent = err.message; }) },
+      onSubmit: async () => {
+        const keys = Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value.trim()]).filter(([, v]) => v));
+        if (Object.keys(keys).length) await welcome('POST', 'keys', { keys, project: state.project && state.project.slug });
+        Object.values(inputs).forEach((i) => { i.value = ''; });
+        await done();
+      },
+    });
+    const poll = async () => {
+      if (!followScan) { text.textContent = 'Your target is added. Discovery will start shortly.'; return; }
+      try {
+        const r = await api('GET', `/cve/api/discovery?scan=${followScan}`);
+        const scan = r.scan;
+        if (!scan) return;
+        const c = r.counts || {};
+        const found = `${c.hosts || 0} hosts, ${c.ips || 0} IP addresses`;
+        text.textContent = scan.status === -1
+          ? `Waiting for a free scanner${scan.queue_position ? ` (${scan.queue_position} ahead)` : ''}...`
+          : scan.status === 1 ? `Discovering ${scan.target}: ${found} so far` : scan.status === 2 ? `Discovery of ${scan.target} finished: ${found}` : `Discovery of ${scan.target} ended early: ${found}`;
+        if (scan.status !== -1 && scan.status !== 1) clearInterval(poller);
+      } catch (_) { /* the next poll tries again */ }
+    };
+    poll();
+    poller = setInterval(poll, 3000);
   },
 };
 

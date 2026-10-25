@@ -11,7 +11,7 @@ from collections import Counter
 
 from django.db.models import Count
 from django.http import JsonResponse
-from django.http import Http404
+from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -85,6 +85,7 @@ def _host_tip(sub, live_matches, severities):
     score_parts = [{'label': str(r.get('label', ''))[:140], 'points': int(r.get('points') or 0)}
                    for r in (sub.score_detail or [])[:8]] if hasattr(sub, 'score_detail') else []
     return {
+        'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
         'ips': len({ip.address for ip in sub.ip_addresses.all()}),
         'cves': len(live_matches),
         'top_cve': worst[0] if worst else '',
@@ -363,6 +364,61 @@ def host_screenshot(request, slug, subdomain_id):
     path = os.path.realpath(os.path.join(media_root, sub.screenshot_path))
     if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
         raise Http404
+    size = request.GET.get('size', 'full')
+    if size not in ('full', 'thumb'):
+        return HttpResponseBadRequest('size must be full or thumb')
+    if size == 'thumb':
+        from cveFeed import shots
+        thumb = shots.thumbnail_path(path)
+        if thumb:
+            return _cacheable_file(request, thumb, 'image/jpeg')
+    return _cacheable_file(request, path)
+
+
+def _cacheable_file(request, path, content_type=None):
+    """A file with an ETag (mtime and size) and a day of private caching, so a gallery grid revisits for a 304, not the bytes."""
+    import mimetypes
+    import os
+
+    from django.http import FileResponse, HttpResponseNotModified
+    from django.utils.http import http_date
+    info = os.stat(path)
+    etag = f'"{int(info.st_mtime)}-{info.st_size}"'
+    if request.META.get('HTTP_IF_NONE_MATCH') == etag:
+        response = HttpResponseNotModified()
+    else:
+        response = FileResponse(open(path, 'rb'), content_type=content_type or mimetypes.guess_type(path)[0] or 'application/octet-stream')
+        response['Last-Modified'] = http_date(info.st_mtime)
+    response['ETag'] = etag
+    response['Cache-Control'] = 'private, max-age=86400'
+    return response
+
+
+def host_rdp_screenshot(request, slug, subdomain_id, port):
+    """Serve a stored RDP login-screen capture (cveFeed.rdp_shot). Same tenancy check as host_screenshot: the caller's
+    access to ``slug`` is already confirmed, this only needs to confirm the subdomain belongs to that project."""
+    import os
+
+    from django.conf import settings
+    from django.http import FileResponse
+
+    from cveFeed.models import RdpScreenshot
+    from dashboard.models import Project
+    from startScan.models import Subdomain
+    project = Project.objects.filter(slug=slug).first()
+    if not project:
+        raise Http404
+    sub = Subdomain.objects.filter(pk=subdomain_id, scan_history__domain__project=project).first() or \
+        Subdomain.objects.filter(pk=subdomain_id, target_domain__project=project).first()
+    if not sub:
+        raise Http404
+    shot = RdpScreenshot.objects.filter(project=project, host=sub.name, port=port).first()
+    if not shot or not shot.image_path:
+        raise Http404
+    media_root = os.path.realpath(settings.MEDIA_ROOT)
+    path = os.path.realpath(os.path.join(media_root, shot.image_path))
+    if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
+        raise Http404
     return FileResponse(open(path, 'rb'))
 
 
@@ -529,6 +585,17 @@ def api_graph(request):
         payload = {**graph_payload(domain_id, scan_id), 'version': version}
         cache.set(key, payload, GRAPH_CACHE_SECONDS)
     return JsonResponse(payload)
+
+
+@require_GET
+@project_scoped
+def api_graph_live(request):
+    """Running scans, their current step and the hosts they are working on: what the graph pulses and SOC mode lists. Never cached."""
+    from cveFeed import graph_live
+    slug, domain = request.GET.get('project', ''), request.GET.get('domain', '')
+    response = JsonResponse(graph_live.live(slug if slug and slug != ALL_PROJECTS else None, int(domain) if domain.isdigit() else None))
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 @require_GET
@@ -724,7 +791,7 @@ def api_activity(request):
 def api_discovery(request):
     """Live discovery: the scan being followed (given, else the latest running, else the latest) and its new events."""
     from cveFeed.discovery import queue_position
-    from startScan.models import IpAddress, Port, ScanHistory, Subdomain
+    from startScan.models import IpAddress, Port, ScanHistory
     scan_id = request.GET.get('scan', '')
     if scan_id.isdigit():
         scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain', 'scan_type').first()
@@ -737,14 +804,17 @@ def api_discovery(request):
     events = DiscoveryEvent.objects.filter(scan=scan)
     events = events.filter(id__gt=int(after)) if after.isdigit() else events.order_by('-id')[:60]
     events = sorted(events, key=lambda e: e.id)
-    subs = Subdomain.objects.filter(scan_history=scan)
-    ips = IpAddress.objects.filter(ip_addresses__in=subs).distinct()
+    # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
+    # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
+    from cveFeed.counts import LIVE_HOST_Q, host_reps
+    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
+    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
     return JsonResponse({
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': {'hosts': subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips).distinct().count()},
+        'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips).distinct().count()},
     })
 
 

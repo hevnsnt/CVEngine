@@ -189,6 +189,9 @@ class CVEMatch(models.Model):
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
     remediation_by = models.ForeignKey(
         "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Who owns triaging this finding. Independent of remediation_by; set through the same API/MCP surface. Same field
+    # on startScan.models.Vulnerability and HygieneFinding below.
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -437,7 +440,8 @@ class AgentActivity(models.Model):
     """What the AI engine is doing, as a feed: reading the CVE feed, checking the inventory, identifying a
     target, writing / running / validating a check. Global entries (project null) are visible to every member."""
 
-    KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes")
+    KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes",
+             "remediation")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
     status = models.CharField(max_length=10, default="done")  # running | done | failed
@@ -507,6 +511,17 @@ class HygieneFinding(models.Model):
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+
+    # Remediation workflow, driven by people or agents through the API / MCP. Independent of ``status`` above, which the
+    # hygiene sweep alone manages (see cveFeed.hygiene): a finding a human marks accepted_risk stays "open" here if the
+    # check still finds it, but drops out of the actionable view regardless. Same fields and choices as CVEMatch's.
+    REMEDIATION_STATUSES = CVEMatch.REMEDIATION_STATUSES
+    remediation_status = models.CharField(max_length=16, default="open")
+    remediation_note = models.TextField(blank=True, default="")
+    remediation_updated_at = models.DateTimeField(null=True, blank=True)
+    remediation_by = models.ForeignKey(
+        "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     class Meta:
         unique_together = ("domain", "host", "check_name")
@@ -621,6 +636,49 @@ class HostState(models.Model):
 
     def __str__(self):
         return self.host
+
+
+class HostArchive(models.Model):
+    """What the web archive says a host has run (see cveFeed.archive_urls): technologies read from archived URLs. Historical
+    evidence for search only, never a current technology. One row per (project, host)."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    technologies = models.JSONField(default=dict, blank=True)  # {name: {"count": n, "sample": [paths]}}
+    tech_text = models.TextField(blank=True, default="")       # the names as flat lowercase text, which search reads
+    url_count = models.PositiveIntegerField(default=0)
+    checked_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hostarchive_project_host")]
+
+    def __str__(self):
+        return self.host
+
+
+class RdpScreenshot(models.Model):
+    """One RDP login-screen capture (see cveFeed.rdp_shot), only ever attempted against a server nmap's
+    rdp-enum-encryption showed accepts a connection without Network Level Authentication. The AI model reads who, if
+    anyone, the pre-authentication screen shows signed in. One row per (project, host, port); a later scan replaces it."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    address = models.CharField(max_length=64)
+    port = models.PositiveIntegerField(default=3389)
+    image_path = models.CharField(max_length=1000, blank=True, default="")
+    image_hash = models.CharField(max_length=16, blank=True, default="")  # cveFeed.shots.dhash_file
+    logged_in_user = models.CharField(max_length=300, blank=True, default="")
+    ai_summary = models.TextField(blank=True, default="")
+    ai_error = models.CharField(max_length=300, blank=True, default="")
+    captured_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "port"], name="uniq_rdpshot_project_host_port")]
+
+    def __str__(self):
+        return f"{self.host}:{self.port}"
 
 
 class HostAssessment(models.Model):
@@ -900,6 +958,10 @@ class Triage(models.Model):
     validation_status = models.CharField(max_length=16, default="none")
     validation_steps = models.JSONField(default=list, blank=True)  # [{kind, label, display, target, ran_at, result, output_excerpt, error}]
     validation_evidence = models.JSONField(default=dict, blank=True)  # request / response excerpts of a hit, capped; never in a prompt
+    # {commands: [{os, command, look_for}], caveat, model, generated_at}: AI-suggested, read-only commands a host owner
+    # can run themselves, only generated when validation_status is "no_check" (cveFeed.triage.suggest_local_checks).
+    # Unverified by this tool; shown as a suggestion, never as evidence a classification can rest on.
+    local_checks = models.JSONField(default=dict, blank=True)
     validated_at = models.DateTimeField(null=True, blank=True)
     attempts = models.IntegerField(default=0)
     next_attempt_at = models.DateTimeField(null=True, blank=True)
@@ -964,6 +1026,11 @@ class ScanControl(models.Model):
     """Durable global operator hold. Queued work is retained for resume."""
 
     paused = models.BooleanField(default=False)
+    # Set when cveFeed.scan_control.request_drain_pause (an approved update waiting to drain, see cveFeed.updater)
+    # requested this pause, rather than an operator's own "Pause all scanning": only a pause with this set True may be
+    # released automatically, by scripts/apply-update.sh once its deploy finishes; an operator's own pause is theirs
+    # to lift. A drain pause never calls abort_running_scans: it stops new dispatch and lets active work finish.
+    paused_by_update = models.BooleanField(default=False)
     reason = models.CharField(max_length=200, blank=True, default='')
     actor = models.CharField(max_length=150, blank=True, default='')
     last_error = models.CharField(max_length=160, blank=True, default='')
@@ -1208,3 +1275,83 @@ class BountyCredential(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "platform"], name="uniq_bountycredential_user_platform")]
+
+
+class StatsSnapshot(models.Model):
+    """One project's point-in-time inventory and findings counts for one day, written once daily by
+    cveFeed.stats_history.snapshot_all_projects. Trend charts (exposure over time, time-to-fix) need a past this
+    schema otherwise has no record of; everything else here is derived live from current rows."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="stats_snapshots")
+    date = models.DateField()
+    hosts = models.IntegerField(default=0)
+    exposed_hosts = models.IntegerField(default=0)
+    open_findings = models.JSONField(default=dict, blank=True)  # {critical, high, medium, low, info: n}, actionable set
+    cve_matches = models.JSONField(default=dict, blank=True)  # {fire, smoke, ice: n}, actionable (not ruled-out) matches
+    fixed = models.IntegerField(default=0)  # findings of any kind currently marked remediation_status=fixed
+    mean_days_to_fix = models.FloatField(null=True, blank=True)  # over currently-fixed findings; null when there are none
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "date"], name="uniq_statssnapshot_project_date")]
+        indexes = [models.Index(fields=["project", "-date"], name="statssnap_proj_date_idx")]
+        ordering = ["-date"]
+
+
+FINDING_KINDS = ("match", "vulnerability", "hygiene")  # a finding kind with a remediation workflow; same set as agentapi.services.STATUS_KINDS
+
+
+class FindingComment(models.Model):
+    """A free-text note on one finding (a CVEMatch, Vulnerability or HygieneFinding), named generically by
+    ``(finding_kind, finding_id)`` rather than three parallel FKs, the same way cveFeed.models.Triage and the activity
+    log already address a finding of any kind."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
+    finding_id = models.PositiveIntegerField()
+    author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    text = models.TextField(max_length=4000)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx")]
+        ordering = ["created_at", "id"]
+
+
+class FindingAuditEvent(models.Model):
+    """One entry of a finding's audit trail: a status change, an assignee change, or a comment, each with who did it,
+    when, and (status/assignee) what changed from and to. Written alongside the action itself (agentapi.services),
+    never derived after the fact."""
+
+    EVENTS = ("status", "assignee", "comment")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
+    finding_id = models.PositiveIntegerField()
+    event = models.CharField(max_length=16, choices=[(e, e) for e in EVENTS])
+    actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "-created_at"], name="findingaudit_target_idx")]
+        ordering = ["-created_at", "-id"]
+
+
+DEFAULT_SLA_DAYS = {"critical": 7, "high": 30, "medium": 90, "low": 180}  # days to fix, by severity; info has no SLA
+
+
+class ProjectSettings(models.Model):
+    """Settings that belong to one project and are the same for everyone who works in it, so "overdue" reads the same on
+    every screen. One row per project, created on its first write; a project without one uses the defaults."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="cve_settings")
+    sla_days = models.JSONField(default=dict, blank=True)  # only the severities changed from DEFAULT_SLA_DAYS
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    @classmethod
+    def sla_for(cls, project):
+        """The effective {severity: days} of ``project``: the defaults with its own overrides on top."""
+        row = cls.objects.filter(project=project).first()
+        return {**DEFAULT_SLA_DAYS, **{k: v for k, v in ((row.sla_days if row else None) or {}).items() if k in DEFAULT_SLA_DAYS}}

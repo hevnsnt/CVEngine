@@ -1204,35 +1204,6 @@ class StopScan(APIView):
 		return Response(response)
 
 
-class InitiateSubTask(APIView):
-	permission_classes = [HasPermission]
-	permission_required = PERM_INITATE_SCANS_SUBSCANS
-
-	def post(self, request):
-		req = self.request
-		data = req.data
-		scan_types = validate_subscan_types(data.get('tasks'))
-		subdomains = writable_batch(request.user, Subdomain, data.get('subdomain_ids'))
-		if len(subdomains) * len(scan_types) > MAX_LEGACY_BATCH:
-			return Response({'error': 'At most 100 subscan jobs per request'}, status=400)
-		# Reuse each scan's engine; never accept another engine's arbitrary configuration.
-		if data.get('engine_id') is not None:
-			return Response({'error': 'Engine override is not supported'}, status=400)
-		for subdomain in subdomains:
-			if not subdomain.scan_history_id or not subdomain.scan_history.scan_type_id:
-				return Response({'error': 'Subdomain has no scan engine'}, status=400)
-		for subdomain in subdomains:
-			for stype in scan_types:
-				initiate_subscan.apply_async(kwargs={
-					'scan_history_id': subdomain.scan_history_id,
-					'subdomain_id': subdomain.pk,
-					'scan_type': stype,
-					'actor_id': request.user.pk,
-					'project_id': subdomain.target_domain.project_id,
-				})
-		return Response({'status': True})
-
-
 class DeleteSubdomain(APIView):
 	permission_classes = [HasPermission]
 	permission_required = PERM_MODIFY_SCAN_RESULTS

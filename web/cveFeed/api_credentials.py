@@ -26,6 +26,8 @@ SERVICES = {
     'bevigil': ('BeVigil', [('api_key', 'API key', True)], [('modules.bevigil.api_key', 'api_key')]),
     'builtwith': ('BuiltWith', [('api_key', 'API key', True)], [('modules.builtwith.api_key', 'api_key')]),
     'bufferoverrun': ('BufferOver.run', [('api_key', 'API key', True)], [('modules.bufferoverrun.api_key', 'api_key')]),
+    # WPScan is run by CVEngine itself against WordPress sites it found (see cveFeed.wpscan_scan), not through bbot.
+    'wpscan': ('WPScan (WordPress vulnerability data)', [('api_key', 'API token from wpscan.com', True)], []),
     # bbot has no BinaryEdge module (3.x), so like runZero this key is storable but has nothing to feed yet.
     'binaryedge': ('BinaryEdge', [('api_key', 'API key', True)], []),
     # runZero is an asset-inventory platform, not a bbot module: there is nothing to feed it into during a
@@ -66,6 +68,9 @@ def bbot_config_args(project):
     return args
 
 
+SCAN_STAGES = frozenset({'wpscan'})  # keys a pipeline stage uses directly rather than through a bbot module
+
+
 def used_in_scans(service):
-    """Whether a scan can actually use this service's key (it maps to at least one bbot module)."""
-    return bool(SERVICES[service][2])
+    """Whether a scan can actually use this service's key (it maps to a bbot module or a pipeline stage)."""
+    return bool(SERVICES[service][2]) or service in SCAN_STAGES

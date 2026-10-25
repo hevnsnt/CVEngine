@@ -39,6 +39,8 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | routes | `GET projects/{slug}/routes` | `list_routes` |
 | changes | `GET projects/{slug}/changes?since=7d` | `list_changes` |
 | activity | `GET projects/{slug}/activity` | `list_activity` |
+| project settings | `GET/PUT projects/{slug}/settings` | `get_project_settings`, `set_project_settings` |
+| stats history | `GET projects/{slug}/stats/history?days=90` | `stats_history` |
 | all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=` | `list_findings` |
 | scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
@@ -46,6 +48,8 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | hygiene | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |
 | CVEs | `GET cves?tier=fire`, `GET cves/{id}` | `list_cves`, `get_cve` |
 | matches | `GET projects/{slug}/matches`, `PATCH .../matches/{id}` | `list_cve_matches`, `update_remediation_status` |
+| remediation status | `PATCH projects/{slug}/findings/{match,vulnerability,hygiene}/{id}`, `POST .../findings/status` (bulk) | `update_finding_status`, `bulk_update_finding_status` |
+| assignee, comments, audit | `PATCH .../findings/{kind}/{id}` (`assignee`), `GET/POST .../findings/{kind}/{id}/comments`, `GET .../findings/{kind}/{id}/audit`, `GET projects/{slug}/members` | `set_finding_assignee`, `list_finding_comments`, `add_finding_comment`, `finding_audit`, `list_members` |
 | assess a host | `POST projects/{slug}/host-assessments` (`host_id`), `GET .../host-assessments?host_id=`, `GET .../host-assessments/{id}`, `POST .../host-assessments/{id}/stop` | `assess_host`, `get_host_assessment`, `stop_host_assessment` |
 | archive a host | `POST projects/{slug}/hosts/{host}/archive` (`reason`), `.../restore`, `.../pin` (`pinned`) | `archive_host`, `restore_host`, `pin_host` |
 | validate a match | `POST projects/{slug}/matches/{id}/validate`, `GET .../matches/{id}/validate/{request_id}` | `validate_cve_match`, `get_validation_request` |
@@ -55,7 +59,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | exclude host | `POST projects/{slug}/hosts/{host}/exclude`, `GET projects/{slug}/exclusions`, `DELETE projects/{slug}/exclusions/{host}` | `exclude_host`, `list_exclusions`, `remove_exclusion` |
 | API keys | `GET/PUT/DELETE projects/{slug}/api-keys[/{service}]` | none |
 
-Lists take `page` and `page_size` (up to 200), except `work`, `cves?tier=`, and `findings`, which stop at the first 200, 2,000, and 2,000 rows. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
+Lists take `page` and `page_size` (up to 200), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
 ## Targets and scans
 
@@ -81,21 +85,30 @@ The reserved slug `_all` means every project you can see. The list endpoints and
 
 Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first (`sort=name` for name order). A hostname is one host, so the list returns one row per name that covers all its current rows. `labels` holds short informational detections such as a WAF or federated sign-in. See [Host score](PIPELINE.md#host-score).
 
-`search?q=...` returns hosts with `matched` showing what each query hit. Terms are separated by spaces and ANDed.
+`search?q=...` returns hosts with `matched` showing what each query hit. Terms are separated by spaces and ANDed. A bad value for `sev:`, `auth:`, `sensitive:`, or `zombie:` is a 400. The full syntax, with examples, is in [SEARCH.md](SEARCH.md).
 
 | Term | Matches |
 | --- | --- |
-| `php` | a bare word in hostname, IP, technology, port product, service, version, CPE, OS, finding name, CVE id, or page title |
-| `tech:nginx`, `product:nginx`, `service:mysql`, `os:linux` | technology, port product, service, OS |
-| `port:3306` | open port number |
+| `php` | a bare word in hostname, IP, technology, headers, cookie names, port product, service, version, CPE, banner and script output, OS, finding name, CVE id, or page title |
+| `tech:nginx` | anything the host runs: technology, `Server` and `X-Powered-By` headers, product, version, CPE, banner, script output, cookie names |
+| `product:nginx`, `service:mysql`, `os:linux` | port product, service name, OS guess |
+| `banner:"anonymous"` | service banner, script output, or extra info on an open port |
+| `port:3306` | open port number (a number only; `port:ssh` is a 400) |
 | `cve:CVE-2024-1234` | CVE match |
-| `ip:10.0.0.5`, `ip:10.0.0.0/24` | an IP, or any IP in a CIDR range |
+| `ip:10.0.0.5`, `ip:10.0.0.0/24`, `ip:10.0.` | an IP, any IP in a CIDR range, or an address prefix |
 | `host:www` | hostname |
 | `vuln:rce`, `sev:high` | finding name, severity |
 | `auth:<state>` | hosts with a web route in that state (any state listed under Routes) |
 | `sensitive:any`, `sensitive:credentials`, `sensitive:pii`, `sensitive:internal` | hosts with a route serving that kind of sensitive data |
 | `zombie:yes`, `zombie:no` | hosts whose name is gone but whose last address answers |
+| `country:US`, `country:Germany` | the ISO code or name of a host IP's geolocated country |
 | `-term`, `"apache tomcat"` | negate a term, or match a phrase |
+
+`?heat=fire|smoke|ice|clean|unscanned` narrows the page to that heat, the same value each host's own `heat` field carries. The response's `facets.heat` always counts every one of those five values over the whole match of `q`, ignoring `heat` itself, so a UI's heat chips keep their real totals while one is selected. Both the filter and the facet count stop after 5,000 matched hosts (`facets.truncated: true`); a search that wide needs narrowing with `q` regardless.
+
+Any field filter's value takes a comma-separated list for OR within that one filter, Shodan-style: `port:80,443` is port 80 or 443, still ANDed with every other term. Quote the value to keep a literal comma (`tech:"foo,bar"`): it is then never split.
+
+`?facets=port,product,tech,os,country` (comma-separated) adds the same whole-match, heat-chip-style counting for those fields: the response's `facets.port`, `facets.product`, and so on are each `[{value, count}]`, highest count first, up to `?facet_size=` values (default 10, max 50); `count` is the number of distinct hosts with that value, over the same (and equally 5,000-capped) match `facets.heat` counts. `org:`, `asn:`, and `hosting:` filters and facets were asked for too, but nothing in CVEngine looks up an IP's ASN or hosting provider today (only its country, via `geoiplookup`), and adding that is its own feature, not implemented here.
 
 Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs it.
 
@@ -103,7 +116,7 @@ Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs i
 
 - **`routes`** lists web routes with `auth_state` (`open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `error`), `redirect_to`, and `evidence` (markers, never page content). `sensitive` holds `{type: {count, sample}}` with the sample already masked, and `sensitive_score` runs 0 to 25. Raw values are never stored or returned. `retired_at` and `zombie_since` mark route lifecycle, and `sensitive=1` or `zombie=1` filter.
 - **`changes`** lists inventory changes newest first. `since` is an ISO 8601 datetime or `24h`, `7d`, `4w`. `kind` is one of the kinds in [Changes](PIPELINE.md#changes), and `host` matches part of a hostname. Each row has `before` and `after`.
-- **`activity`** is the AI activity log for the project plus system-wide entries. `kind` is `feed`, `inventory`, `target`, `confirm`, `write_check`, `run_check`, `validate`, `discovery`, `scan`, `hygiene`, or `changes`.
+- **`activity`** is the AI activity log for the project plus system-wide entries. `kind` is `feed`, `inventory`, `target`, `confirm`, `write_check`, `run_check`, `validate`, `discovery`, `scan`, `hygiene`, `changes`, or `remediation`.
 
 ## Triage and remediation
 
@@ -124,6 +137,20 @@ List endpoints (`vulnerabilities`, `matches`, `routes`, `hygiene`, `work`) carry
 3. `update_remediation_status` sets `open`, `in_progress`, `fixed`, or `accepted_risk` with a note.
 
 Matches also carry `distro_status` (`patched`, `vulnerable`, `unknown`, `no_data`), `distro_label`, `evidence`, and the template test result (`vulnerable`, `no_match`, `error`).
+
+**Remediation status on scanner and hygiene findings.** CVE matches, scanner findings, and hygiene findings each carry the same `remediation_status` (`open`, `in_progress`, `fixed`, `accepted_risk`), `remediation_note`, and `remediation_updated` fields, driven entirely by people or agents, never by a scan. They are independent of the finding's own auto-managed liveness signal (a CVE match's `ai_verdict`, a scanner finding's `open`, a hygiene finding's `status`): a scan re-detecting a finding never undoes a `fixed` or `accepted_risk` mark, and marking one of those statuses drops the finding out of `findings?status=actionable` (and the host's heat) immediately, whether or not the underlying check still finds it.
+
+`PATCH projects/{slug}/findings/{kind}/{id}` (`update_finding_status`, `kind` one of `match`, `vulnerability`, `hygiene`) sets one finding's status and note; `kind=match` is identical to `PATCH .../matches/{id}`, kept as its own endpoint for the simpler single-kind case. `POST projects/{slug}/findings/status` (`bulk_update_finding_status`) sets the same status and note on up to 200 findings in one call, `{items: [{kind, id}, ...], status, note}`, and answers `{updated, failed: [{kind, id, error}]}` so one bad id never blocks the rest. A web route has no remediation workflow (its `auth_state` already says what it needs), so `kind=route` is a `400`. Every write here is logged to `activity` as `kind=remediation`.
+
+`note` on every one of these routes, `update_remediation_status` included, is a true partial-update field: leave it out of the body and the stored note is untouched; send `""` (or any string) and it replaces it. Earlier, an omitted `note` was treated the same as an explicit `""` and silently cleared it.
+
+Every match, scanner, and hygiene response (detail and `findings` rows alike) also carries `status_changed_at` and `status_changed_by` (`{id, username, name}` or `null`): the same moment and actor as `remediation_updated` and the write that made it, under names that read naturally for aging and SLA display. `findings` rows carry `first_seen` alongside the existing `detected` (the same moment); the type-specific list and detail endpoints already had `first_seen`.
+
+**Assignee, comments, and audit trail.** Every match, scanner, and hygiene response (rows and detail alike) carries `assignee` (`{id, username, name}` or `null`) and `comment_count`. `PATCH projects/{slug}/findings/{kind}/{id}` (and `PATCH .../matches/{id}`) now takes `status`, `note`, and `assignee` as independent partial-update fields, at least one of `status`/`assignee` required: `assignee` is a user id, or an explicit `null` to unassign, and an id naming someone who cannot see the project is a `400`. `GET/POST .../findings/{kind}/{id}/comments` (`kind` one of `match`, `vulnerability`, `hygiene`; body `{text}`, up to 4,000 characters) lists comments oldest first and adds one; commenting is a write like any other, so read-only tokens and the audit role get `403`. `GET .../findings/{kind}/{id}/audit` answers the finding's trail newest first, `{results: [{id, event, actor, before, after, created}]}`, `event` being `status` (`before`/`after` `{status}`), `assignee` (`before`/`after` `{assignee}`) or `comment` (`after` `{comment_id, text}`); bulk status changes are audited per finding. `GET projects/{slug}/members` lists the project's direct members and its organization's, for an assignee picker (a superuser with no membership row is not listed). Validation runs are not yet written to the audit trail; the event enum can grow without changing any shape. `finding_detail` (`GET .../findings/{kind}/{id}`) now also reports `remediation.status`/`note` for scanner and hygiene findings, not only matches.
+
+**Project settings and SLA days.** `GET projects/{slug}/settings` answers `{sla_days: {critical, high, medium, low}, sla_defaults}`: how many days a finding of each severity has to be fixed, the same for everyone in the project so "overdue" reads the same on every screen (defaults 7, 30, 90, 180; informational findings have no SLA). `PUT` changes it, `{sla_days: {...}}` as a partial update: send only the severities to change, each a whole number of days from 1 to 3,650, or `null` to go back to that severity's default. Anyone with a write role may change it, as with the project's API keys (a read-only token or the audit role gets `403`; the audit role can read). A finding is overdue when `first_seen` plus its severity's days has passed and its `remediation_status` is not `fixed` or `accepted_risk`. Single-project only: `_all` is a `400`.
+
+**Stats history.** `GET projects/{slug}/stats/history` (`stats_history`) answers a bare JSON array, oldest first, of one point-in-time snapshot per day: `{date, hosts, exposed_hosts, open_findings: {critical, high, medium, low, info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}`. `?days=` bounds the window (default 90, capped at 365) to a number of calendar days ending today. Snapshots are written once a day by a beat task (`cveFeed.tasks.snapshot_daily_stats`, `cveFeed.stats_history`); a day before the feature existed, or one the task missed, is simply absent rather than backfilled. `_all` sums every visible project's rows per date; its `mean_days_to_fix` is the unweighted mean of the projects that have one that day, since the per-finding durations themselves are not stored.
 
 ## Limits
 

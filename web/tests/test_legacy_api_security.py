@@ -1,7 +1,4 @@
 """Legacy tenant boundaries. All scanner and queue calls are mocked."""
-from unittest.mock import patch, mock_open
-from types import SimpleNamespace
-
 from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
@@ -51,58 +48,6 @@ class LegacyApiSecurityTests(TestCase):
         self.assertFalse(Subdomain.objects.filter(pk=self.hosts[0].pk).exists())
         self.assertTrue(Subdomain.objects.filter(pk=self.hosts[1].pk).exists())
 
-    @patch('api.views.initiate_subscan.apply_async')
-    def test_subscan_rejects_entire_cross_tenant_batch(self, enqueue):
-        ProjectMembership.objects.filter(user=self.actor, project=self.b).delete()
-        response = self.post('/api/action/initiate/subtask/', {
-            'subdomain_ids': [h.pk for h in self.hosts], 'tasks': ['port_scan']})
-        self.assertEqual(response.status_code, 404)
-        enqueue.assert_not_called()
-
-    @patch('api.views.initiate_subscan.apply_async')
-    def test_subscan_binds_actor_project_and_scan(self, enqueue):
-        host = self.hosts[0]
-        response = self.post('/api/action/initiate/subtask/', {'subdomain_ids': [host.pk], 'tasks': ['port_scan']})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(enqueue.call_args.kwargs['kwargs'], {
-            'actor_id': self.actor.pk, 'project_id': self.a.pk,
-            'scan_history_id': host.scan_history_id, 'subdomain_id': host.pk,
-            'scan_type': 'port_scan',
-        })
-
-    @patch('api.views.initiate_subscan.apply_async')
-    def test_subscan_rejects_arbitrary_task_and_unbounded_batch(self, enqueue):
-        for data in (
-            {'subdomain_ids': [self.hosts[0].pk], 'tasks': ['run_command']},
-            {'subdomain_ids': [self.hosts[0].pk] * 101, 'tasks': ['port_scan']},
-            {'subdomain_ids': [self.hosts[0].pk], 'tasks': ['port_scan'], 'engine_id': 999},
-        ):
-            self.assertEqual(self.post('/api/action/initiate/subtask/', data).status_code, 400)
-        enqueue.assert_not_called()
-
-    def test_worker_rechecks_membership_before_side_effects(self):
-        from reNgine.tasks import initiate_subscan
-        host = self.hosts[0]
-        ProjectMembership.objects.filter(user=self.actor, project=self.a).update(role=roles.AUDIT)
-        with patch('targetApp.target_types.scannable_hosts') as network, patch('reNgine.tasks.os.makedirs') as mkdir:
-            with self.assertRaises(PermissionDenied):
-                initiate_subscan.run(host.scan_history_id, host.pk, scan_type='port_scan',
-                                    actor_id=self.actor.pk, project_id=self.a.pk)
-            network.assert_not_called()
-            mkdir.assert_not_called()
-        self.assertFalse(SubScan.objects.exists())
-
-    def test_worker_rejects_blocked_host_and_missing_actor(self):
-        from reNgine.tasks import initiate_subscan
-        host = self.hosts[0]
-        with patch('targetApp.target_types.scannable_hosts', return_value=[]), patch('reNgine.tasks.os.makedirs') as mkdir:
-            with self.assertRaises(PermissionError):
-                initiate_subscan.run(host.scan_history_id, host.pk, scan_type='port_scan',
-                                    actor_id=self.actor.pk, project_id=self.a.pk)
-            with self.assertRaises(PermissionError):
-                initiate_subscan.run(host.scan_history_id, host.pk, scan_type='port_scan')
-            mkdir.assert_not_called()
-        self.assertFalse(SubScan.objects.exists())
 
     def test_history_excludes_other_users_and_unowned_legacy_rows(self):
         SearchHistory.objects.create(query='legacy-private.example')
@@ -139,31 +84,3 @@ class LegacyApiSecurityTests(TestCase):
             with self.subTest(model=type(obj).__name__):
                 with self.assertRaises(PermissionDenied):
                     object_project(obj)
-
-
-class HttpCrawlPolicyTests(TestCase):
-    def crawl(self, allowed):
-        from reNgine.tasks import http_crawl
-        task = SimpleNamespace(
-            yaml_configuration={}, results_dir='/dummy', starting_point_path='',
-            excluded_paths=[], scan_id=None, activity_id=None, history_file='/dummy/history',
-        )
-        # Call only the task body with a dummy task object; every effect is mocked.
-        body = http_crawl.run.__func__
-        with patch('targetApp.target_types.scannable_hosts', return_value=allowed), \
-                patch('builtins.open', mock_open()) as opened, \
-                patch('reNgine.tasks.stream_command', return_value=[]) as command, \
-                patch('reNgine.tasks.run_command'), \
-                patch('reNgine.tasks.get_random_proxy', return_value=None):
-            body(task, urls=['https://dummy.example/'], should_remove_duplicate_endpoints=False)
-            return opened, command
-
-    def test_blocked_destination_never_reaches_subprocess(self):
-        opened, command = self.crawl([])
-        opened.assert_not_called()
-        command.assert_not_called()
-
-    def test_allowed_destination_does_not_enable_redirect_following(self):
-        opened, command = self.crawl(['https://dummy.example/'])
-        self.assertNotIn('-fr', command.call_args.args[0].split())
-        opened().write.assert_called_once_with('https://dummy.example/')

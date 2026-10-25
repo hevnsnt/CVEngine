@@ -8,6 +8,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0b'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial Black,Helvetica,sans-serif' font-weight='900' font-style='italic' font-size='15' fill='white'%3Ecv%3C/text%3E%3Crect x='23' y='6' width='3' height='4' fill='%23ff5a00'/%3E%3C/svg%3E">
 <title>{% block title %}CVEngine{% endblock %}</title>
 <link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
+<script src="{% asset 'cve/theme.js' %}"></script>
 <link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
 {% importmap %}
 </head>
@@ -42,7 +43,7 @@
 
 <div class="app">
 <aside class="rail" id="rail" aria-label="Primary">
-  <a class="brand" href="{% url 'cve_dashboard' %}" aria-label="CVEngine, by FieldCraft Cyber"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+  <a class="brand" href="https://fieldcraftcyber.com/" target="_blank" rel="noopener noreferrer" aria-label="CVEngine, by FieldCraft Cyber (opens fieldcraftcyber.com in a new tab)"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
   {% if projects %}
   <div class="proj-wrap">
     <label class="proj-label" for="project">Project</label>
@@ -83,6 +84,15 @@
       {% if is_admin %}<a data-nav="Administration" href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
       {% if request.user.is_superuser %}<a data-nav="{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}" href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
       <a data-nav="Settings" href="{% url 'cve_settings' %}"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
+      <button type="button" data-notify-toggle aria-pressed="false"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg><span>Desktop notifications: off</span></button>
+      <div class="theme-choice" role="group" aria-label="Theme">
+        <span>Theme</span>
+        <button type="button" data-theme-choice="light" aria-pressed="true">Light</button>
+        <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+        <button type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
+      </div>
+      <button type="button" data-tz-toggle aria-pressed="false"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg><span>Times: your time zone</span></button>
+      <button type="button" data-keys-help><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>Keyboard shortcuts</button>
       <a data-nav="About" href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>About</a>
       <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
     </div>
@@ -159,16 +169,19 @@
   </div>
 </div>
 
-<dialog class="palette" id="palette" aria-label="Jump to">
+<dialog class="palette" id="palette" aria-label="Jump to or search">
   <div class="palette-box">
     <div class="palette-in"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
-      <input id="palette-q" type="text" placeholder="Jump to a page, project or action" autocomplete="off" aria-controls="palette-list" aria-label="Jump to"></div>
+      <input id="palette-q" type="text" placeholder="Jump to a page, or search: port:443 product:nginx" autocomplete="off" aria-controls="palette-list" aria-label="Jump to a page or search hosts"></div>
     <ul id="palette-list" role="listbox"></ul>
     <p class="palette-empty" id="palette-empty" hidden>Nothing matches that.</p>
   </div>
 </dialog>
 
 <script type="module" src="{% asset 'cve/shell.js' %}"></script>
+<script type="module" src="{% asset 'cve/keys.js' %}"></script>
+<script type="module" src="{% asset 'cve/notify.js' %}"></script>
+<script type="module" src="{% asset 'cve/prefs.js' %}"></script>
 {% if slug %}<script type="module" src="{% asset 'cve/addtargets.js' %}"></script>{% endif %}
 {% if request.user.is_superuser %}<script type="module" src="{% asset 'cve/updatebar.js' %}"></script>{% endif %}
 {% block scripts %}{% endblock %}

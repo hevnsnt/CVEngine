@@ -55,6 +55,62 @@ class ProviderTests(unittest.TestCase):
 				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
 
 
+class VisionTests(unittest.TestCase):
+	"""complete_vision() attaches one image to the user turn, in each provider's own shape, and shares the text
+	extraction and error handling of complete()."""
+	PNG = b'\x89PNG\r\n\x1a\nfake'
+
+	def test_anthropic_sends_the_image_as_a_base64_content_block(self):
+		reply = {'content': [{'type': 'text', 'text': '{"signed_in": true}'}]}
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			p = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+			self.assertEqual(p.complete_vision('sys', 'usr', self.PNG), '{"signed_in": true}')
+		_, kw = post.call_args
+		content = kw['json']['messages'][0]['content']
+		image = next(b for b in content if b['type'] == 'image')
+		text = next(b for b in content if b['type'] == 'text')
+		self.assertEqual(text['text'], 'usr')
+		self.assertEqual(image['source']['media_type'], 'image/png')
+		import base64
+		self.assertEqual(base64.b64decode(image['source']['data']), self.PNG)
+
+	def test_anthropic_vision_truncation_is_still_a_provider_error(self):
+		p = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+		with mock.patch('requests.post', return_value=FakeResp({'stop_reason': 'max_tokens', 'content': []})):
+			with self.assertRaises(ai.AIProviderError):
+				p.complete_vision('sys', 'usr', self.PNG)
+
+	def test_openai_sends_a_data_url(self):
+		with mock.patch('requests.post', return_value=FakeResp({'choices': [{'message': {'content': 'ok'}}]})) as post:
+			p = ai.get_provider('openai', api_key='k', model='m')
+			self.assertEqual(p.complete_vision('s', 'u', self.PNG, media_type='image/jpeg'), 'ok')
+		_, kw = post.call_args
+		content = kw['json']['messages'][1]['content']
+		image = next(b for b in content if b['type'] == 'image_url')
+		self.assertTrue(image['image_url']['url'].startswith('data:image/jpeg;base64,'))
+
+	def test_openrouter_inherits_vision_from_openai(self):
+		with mock.patch('requests.post', return_value=FakeResp({'choices': [{'message': {'content': 'ok'}}]})):
+			p = ai.get_provider('openrouter', api_key='k', model='m')
+			self.assertEqual(p.complete_vision('s', 'u', self.PNG), 'ok')
+
+	def test_ollama_sends_images_as_a_base64_list(self):
+		with mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
+			p = ai.get_provider('ollama', model='llava', base_url='http://100.64.0.5:11434')
+			self.assertEqual(p.complete_vision('s', 'u', self.PNG), 'ok')
+		_, kw = post.call_args
+		msg = kw['json']['messages'][1]
+		self.assertEqual(msg['content'], 'u')
+		import base64
+		self.assertEqual(base64.b64decode(msg['images'][0]), self.PNG)
+
+	def test_the_base_provider_refuses_images_by_default(self):
+		class Bare(ai.AIProvider):
+			name = 'bare'
+		with self.assertRaises(ai.AIProviderError):
+			Bare().complete_vision('s', 'u', self.PNG)
+
+
 class ModelSelectionTests(unittest.TestCase):
 	def setUp(self):
 		ai._RESOLVED.clear()
@@ -202,6 +258,64 @@ class TriageParseTests(unittest.TestCase):
 			ai.triage_finding(provider, 'nuclei', {'name': 'x'})
 		self.assertIn('schema validation', str(error.exception))
 		self.assertNotIn('garbled', str(error.exception))
+
+
+GOOD_LOCAL_CHECKS = {'commands': [{'os': 'linux', 'command': 'rpm -qa | grep -i siteguard', 'look_for': 'a package name containing siteguard'}],
+					 'caveat': ''}
+
+
+class LocalChecksParseTests(unittest.TestCase):
+	def reply(self, **changes):
+		import json
+		return 'Here you go: ' + json.dumps({**GOOD_LOCAL_CHECKS, **changes}) + ' done'
+
+	def test_a_good_reply_round_trips(self):
+		parsed = ai.parse_local_checks(self.reply())
+		self.assertEqual(parsed['commands'][0]['os'], 'linux')
+		self.assertEqual(parsed['commands'][0]['look_for'], 'a package name containing siteguard')
+		self.assertEqual(parsed['caveat'], '')
+
+	def test_every_os_round_trips(self):
+		for name in ('linux', 'windows', 'any'):
+			parsed = ai.parse_local_checks(self.reply(commands=[{'os': name, 'command': 'x', 'look_for': 'y'}]))
+			self.assertEqual(parsed['commands'][0]['os'], name)
+
+	def test_an_empty_commands_list_with_a_caveat_is_valid(self):
+		parsed = ai.parse_local_checks(self.reply(commands=[], caveat='No reliable local signature is known for this product; check the vendor docs.'))
+		self.assertEqual(parsed['commands'], [])
+		self.assertIn('vendor docs', parsed['caveat'])
+
+	def test_unusable_replies_are_none(self):
+		self.assertIsNone(ai.parse_local_checks(''))
+		self.assertIsNone(ai.parse_local_checks('no json here'))
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[], caveat='')))  # nothing useful at all
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'solaris', 'command': 'x', 'look_for': 'y'}])))
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'look_for': 'y'}])))  # no command
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'command': 'x', 'look_for': 'y', 'sudo': True}])))
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'command': 'x', 'look_for': 'y'}] * 4)))  # more than 3
+		self.assertIsNone(ai.parse_local_checks('{"commands": [], "caveat": "ok", "extra": 1}'))
+
+	def test_text_is_cleaned_and_capped(self):
+		parsed = ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'command': 'a\x00b' + 'x' * 900, 'look_for': 'y' * 900}]))
+		self.assertNotIn('\x00', parsed['commands'][0]['command'])
+		self.assertEqual(len(parsed['commands'][0]['command']), 200)
+		self.assertEqual(len(parsed['commands'][0]['look_for']), 150)
+
+	def test_suggest_local_checks_returns_parsed_and_model(self):
+		provider = mock.Mock(model='m')
+		provider.name = 'anthropic'
+		provider.complete.return_value = self.reply()
+		out = ai.suggest_local_checks(provider, {'cve_id': 'CVE-2026-1', 'affected': [{'vendor': 'x', 'product': 'y'}]})
+		self.assertEqual(set(out), {'parsed', 'model'})
+		self.assertEqual(out['model'], 'anthropic:m')
+		self.assertEqual(out['parsed']['commands'][0]['os'], 'linux')
+
+	def test_suggest_local_checks_an_unparseable_reply_is_none_not_an_error(self):
+		provider = mock.Mock(model='m')
+		provider.name = 'anthropic'
+		provider.complete.return_value = 'garbled'
+		out = ai.suggest_local_checks(provider, {'cve_id': 'CVE-2026-1'})
+		self.assertIsNone(out['parsed'])
 
 
 class TriagePromptTests(unittest.TestCase):

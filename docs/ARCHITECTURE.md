@@ -13,7 +13,7 @@ cvENGINE is one Docker Compose deployment. The scanners run inside the worker im
 | `redis` | Job broker, locks, cache, and the memory queue |
 | `proxy` | nginx, terminates TLS on 443 and redirects 8082 to HTTPS |
 
-The worker image holds the scanners: [bbot](https://github.com/blacklanternsecurity/bbot), [nmap](https://nmap.org), [nuclei](https://github.com/projectdiscovery/nuclei), and optional [naabu](https://github.com/projectdiscovery/naabu), plus Go tools inherited from reNgine. bbot downloads [gowitness](https://github.com/sensepost/gowitness) for deep-mode screenshots. See [THIRD-PARTY.md](../THIRD-PARTY.md).
+The worker image holds the scanners: [bbot](https://github.com/blacklanternsecurity/bbot), [nmap](https://nmap.org), [nuclei](https://github.com/projectdiscovery/nuclei), [naabu](https://github.com/projectdiscovery/naabu), and [WPScan](https://wpscan.com/) for WordPress sites. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone. bbot downloads [gowitness](https://github.com/sensepost/gowitness) for deep-mode screenshots. See [THIRD-PARTY.md](../THIRD-PARTY.md).
 
 ## Stack
 
@@ -27,7 +27,8 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, and Go 1.2
 | `Domain` | A target: a domain, IP, or URL host |
 | `Subdomain`, `IpAddress`, `Port` | The inventory: hosts, addresses, and services with product and version |
 | `RouteAuth`, `HygieneFinding`, `TlsCertificate` | Web route auth states, email and domain findings, and certificates |
-| `Vulnerability` | Findings from nuclei, bbot, and the exposure checks |
+| `Vulnerability` | Scanner findings: nuclei, the exposure checks, nmap (RDP without NLA, anonymous FTP), WPScan, and node2shell |
+| `RdpScreenshot`, `HostArchive` | RDP login-screen captures, and archived-URL evidence of what a host once ran |
 | `CVEEntry`, `CVEMatch` | The CVE store, and which CVEs apply to which hosts |
 | `Triage`, `TriageVerdict` | One triage per finding, and the AI answer shared by findings with the same evidence |
 | `GeneratedTemplate`, `AutoFireRun` | AI-drafted nuclei templates and auto-fire runs |
@@ -43,6 +44,7 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, and Go 1.2
 - Choosing nuclei template tags from those the installed templates use.
 - Drafting a nuclei template when none exists for a CVE.
 - The three-hour coverage review and scanner capacity tuning.
+- Reading RDP login-screen screenshots, and suggesting local checks for matches no external check can settle.
 - Report text on the bug bounty page.
 
 The AI never writes severity, CVSS, KEV, or EPSS data. It can suggest a one-step severity change, which is shown but not applied. Set the provider as described in [DEPLOYMENT.md](DEPLOYMENT.md#ai-models).

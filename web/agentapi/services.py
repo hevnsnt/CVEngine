@@ -160,6 +160,34 @@ def _iso(value):
     return value.isoformat() if value else None
 
 
+def _user_brief(user):
+    """{id, username, name} for a status-change actor or an assignee, None when there is none."""
+    return {'id': user.id, 'username': user.username, 'name': user.get_full_name() or user.username} if user else None
+
+
+def _comment_count(obj, kind):
+    """``obj.comment_count`` when the queryset annotated it (every list and detail path does, in one query for the page), else a
+    count for this one row, so a serializer handed a plain, unannotated row still answers instead of raising."""
+    count = getattr(obj, 'comment_count', None)
+    if count is not None:
+        return count
+    from cveFeed.models import FindingComment
+    return FindingComment.objects.filter(finding_kind=kind, finding_id=obj.pk).count()
+
+
+def _comment_count_annotation(kind):
+    """An annotation expression counting cveFeed.models.FindingComment rows of ``kind`` for each row of the annotated
+    queryset, by a correlated subquery rather than a join (a comment is addressed by (kind, id), not a real FK, so a
+    join would fan out the outer rows). Not project-scoped: (kind, id) alone already names one finding anywhere."""
+    from django.db.models import Count, IntegerField, OuterRef, Subquery
+    from django.db.models.functions import Coalesce
+
+    from cveFeed.models import FindingComment
+    sub = FindingComment.objects.filter(finding_kind=kind, finding_id=OuterRef('pk')) \
+        .order_by().values('finding_id').annotate(n=Count('id')).values('n')
+    return Coalesce(Subquery(sub, output_field=IntegerField()), 0)
+
+
 # --- identity ----------------------------------------------------------------
 
 def me(ctx):
@@ -454,8 +482,8 @@ def list_scan_endpoints(ctx, slug, scan_id, params):
 def list_scan_vulnerabilities(ctx, slug, scan_id, params):
     from startScan.models import Vulnerability
     scan = _scan_in_project(ctx, slug, scan_id)
-    qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict') \
-        .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
+    qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .prefetch_related('cve_ids', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
@@ -1052,23 +1080,33 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     http, hosting_info, details = _host_record(sub, ips, techs, root)
     on_ip = (shared or {}).get('names_on_ip', {})
     countries = (shared or {}).get('countries', {})
+    archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
+    host_key = (sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())
+    rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
     return {'id': sub.id, 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
             'screenshot': bool(sub.screenshot_path),
             'technologies': sorted(techs),
             'technology_details': details,
+            # what the web archive says the host ran at some point: historical evidence, never a current technology
+            'archived_technologies': [{'name': n, 'urls': i.get('count', 0), 'examples': (i.get('sample') or [])[:3]}
+                                      for n, i in sorted(archived.items())],
             'http': http,
             'hosting': hosting_info,
             'names': _host_names(sub),
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
+                     'facts': (e['ip'].fingerprint or {}).get('facts') or {},
                      'full_scanned_at': e['ip'].full_scanned_at.isoformat() if e['ip'].full_scanned_at else None,
                      'full_scan_ports': e['ip'].full_scan_ports, 'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
-                 'http': p.http or None, 'tls': p.tls or None} for p in e['ports']]} for addr, e in ips.items()],
+                 'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
+                 'db': (p.extra or {}).get('db') or None,
+                 'http': p.http or None, 'tls': p.tls or None,
+                 'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
             # the list above is capped and includes informational detections; these are the real counts, split the way the Scanner
@@ -1077,6 +1115,15 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded)}
+
+
+def _rdp_screenshot_field(sub, shot):
+    """What the host record sends about one port's RDP capture (cveFeed.rdp_shot), or None when there is none."""
+    if not shot:
+        return None
+    return {'url': f'/cve/{sub.target_domain.project.slug}/hosts/{sub.id}/rdp-screenshot/{shot.port}/' if sub.target_domain else None,
+            'logged_in_user': shot.logged_in_user, 'summary': shot.ai_summary, 'error': shot.ai_error,
+            'captured_at': shot.captured_at.isoformat() if shot.captured_at else None}
 
 
 def _host_record(sub, ips, techs, root):
@@ -1132,7 +1179,13 @@ def _shared_for(project, subs):
             names[row['ip_addresses__address']] = row['n']
     geo_ids = {ip.geo_iso_id for sub in subs for ip in sub.ip_addresses.all() if ip.geo_iso_id}
     countries = {c.id: c.name or c.iso for c in CountryISO.objects.filter(id__in=geo_ids)} if geo_ids else {}
-    return {'names_on_ip': names, 'countries': countries}
+    from cveFeed.models import HostArchive, RdpScreenshot
+    archive = {(row.project_id, row.host): row.technologies for row in HostArchive.objects.filter(
+        project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs})}
+    rdp_shots = {}
+    for row in RdpScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}):
+        rdp_shots.setdefault((row.project_id, row.host), {})[row.port] = row
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -1306,20 +1359,24 @@ def list_hosts(ctx, slug, params):
     return _mark_zombies(project, _hosts_page(project, qs, params))
 
 
-SEARCH_FIELDS = ('tech', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth', 'sensitive', 'zombie')
+SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
+                  'sensitive', 'zombie', 'country')
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
 def parse_search(query):
-    """Split a search into terms: ``[(negated, field or None, value)]``. A bare word has no field; ``field:value`` filters one
-    field; ``-term`` negates; a quoted value (``"apache tomcat"``, ``tech:"apache tomcat"``) is a phrase."""
+    """Split a search into terms: ``[(negated, field or None, value, quoted)]``. A bare word has no field; ``field:value``
+    filters one field; ``-term`` negates; a quoted value (``"apache tomcat"``, ``tech:"apache tomcat"``) is a phrase, and
+    never split on comma even if it contains one (``quoted`` says so, for the comma-OR a field value otherwise gets)."""
     terms = []
-    for neg, field, quoted, bare in _SEARCH_TERM.findall(query or ''):
-        value = (quoted if quoted else bare).strip()
+    for m in _SEARCH_TERM.finditer(query or ''):
+        neg, field, quoted, bare = m.group(1), m.group(2) or '', m.group(3), m.group(4) or ''
+        is_quoted = quoted is not None
+        value = (quoted if is_quoted else bare).strip()
         if field and field.lower() not in SEARCH_FIELDS:
-            value, field = f'{field}:{value}', ''  # "http://x" or "foo:bar": not a field, just text
+            value, field, is_quoted = f'{field}:{value}', '', False  # "http://x" or "foo:bar": not a field, just text
         if value:
-            terms.append((bool(neg), field.lower() or None, value))
+            terms.append((bool(neg), field.lower() or None, value, is_quoted))
     return terms
 
 
@@ -1353,21 +1410,60 @@ def _hosts_named_in(rows, project):
     return Q(name__in=rows.values('host'))
 
 
+# The JSON keys inside the evidence stores that say what a host runs. Searched by key, never as raw JSON text, so a word like
+# "source" or "markers" does not match every row that happens to have that key.
+_ROUTE_EVIDENCE_KEYS = ('server', 'powered_by', 'fingerprint_names', 'cookies')  # RouteAuth.evidence: headers, fingerprint names, cookie names
+_PORT_TEXT = ('banner', 'service_extra', 'extra__script_text', 'http__webserver', 'http__title')  # Port: raw service text, NSE output, HTTP
+
+
+def _running_q(value, project):
+    """A Q matching hosts that run ``value`` anywhere CVEngine saw it: the technology list, the Server header and X-Powered-By,
+    the product, version and CPE nmap found, the service banner and NSE script output, the HTTP title, the cookie names and
+    fingerprints of the host's live routes. ``php`` finds a host whether the evidence is a header, a PHPSESSID cookie, an
+    OpenSSH-style banner or a technology row. Port evidence counts only on open ports, route evidence only on routes that answer."""
+    from django.db.models import Q
+
+    from cveFeed.models import RouteAuth
+    ports = 'ip_addresses__ports__'
+    open_port = Q(**{ports + 'state__in': ('', 'open')})
+    q = Q(webserver__icontains=value) | Q(technologies__name__icontains=value)
+    for lookup in ('product', 'version', 'cpe', *_PORT_TEXT):
+        q |= Q(**{f'{ports}{lookup}__icontains': value}) & open_port
+    routes = RouteAuth.objects.filter(retired_at__isnull=True)
+    route_hit = Q()
+    for key in _ROUTE_EVIDENCE_KEYS:
+        route_hit |= Q(**{f'evidence__{key}__icontains': value})
+    from cveFeed.models import HostArchive
+    return q | _hosts_named_in(routes.filter(route_hit), project) | _hosts_named_in(HostArchive.objects.filter(tech_text__icontains=value), project)
+
+
+def _banner_q(value):
+    """A Q matching hosts with ``value`` in a service banner, an NSE script's output (ssh-hostkey, ssl-cert, ftp-anon,
+    rdp-ntlm-info, smb-os-discovery ...) or the extra info nmap printed, on an open port."""
+    from django.db.models import Q
+    ports = 'ip_addresses__ports__'
+    q = Q()
+    for lookup in ('banner', 'extra__script_text', 'service_extra'):
+        q |= Q(**{f'{ports}{lookup}__icontains': value})
+    return q & Q(**{ports + 'state__in': ('', 'open')})
+
+
 def _term_filter(field, value, project=None):
     """The Q for one search term. Every lookup is a join the database does, so nothing is looped over in Python."""
     from django.db.models import Q
     ports = 'ip_addresses__ports__'
     open_port = Q(**{ports + 'state__in': ('', 'open')})  # a closed or filtered port is not on the host any more
     if field is None:
-        q = Q()
-        for lookup in ('name', 'page_title', 'technologies__name', 'ip_addresses__address', 'ip_addresses__os_guess',
+        q = _running_q(value, project)
+        for lookup in ('name', 'page_title', 'ip_addresses__address', 'ip_addresses__os_guess',
                        'vulnerability__name', 'cve_matches__cve_entry__cve_id'):
             q |= Q(**{f'{lookup}__icontains': value})
-        for lookup in (ports + 'product', ports + 'service_name', ports + 'version', ports + 'cpe'):
-            q |= Q(**{f'{lookup}__icontains': value}) & open_port
+        q |= Q(**{ports + 'service_name__icontains': value}) & open_port
         return q
     if field == 'tech':
-        return Q(technologies__name__icontains=value)
+        return _running_q(value, project)
+    if field == 'banner':
+        return _banner_q(value)
     if field == 'port':
         if not value.isdigit():
             raise ApiError(400, 'port: takes a port number, e.g. port:3306 (use product: or service: for names)')
@@ -1378,6 +1474,8 @@ def _term_filter(field, value, project=None):
         return Q(**{ports + 'service_name__icontains': value}) & open_port
     if field == 'os':
         return Q(ip_addresses__os_guess__icontains=value)
+    if field == 'country':
+        return Q(ip_addresses__geo_iso__iso__iexact=value) | Q(ip_addresses__geo_iso__name__icontains=value)
     if field == 'cve':
         return Q(cve_matches__cve_entry__cve_id__icontains=value)
     if field == 'ip':
@@ -1413,11 +1511,51 @@ def _term_filter(field, value, project=None):
     raise ApiError(400, f'unknown field {field}:')
 
 
+def _port_evidence(p, v, field):
+    """Which stored text of an open port holds ``v`` (lowercase), as a short label, or '' when none does. ``banner:`` looks only at
+    raw service text; ``tech:`` and bare words also look at product, version, CPE and the port's HTTP server and title."""
+    texts = [('banner', p.banner), ('info', p.service_extra)]
+    texts += [(sid, out) for sid, out in ((p.extra or {}).get('scripts') or {}).items()]
+    if field != 'banner':
+        http = p.http or {}
+        texts += [('product', p.product), ('version', p.version), ('cpe', p.cpe), ('web server', http.get('webserver')),
+                  ('title', http.get('title'))]
+    for label, text in texts:
+        if v in str(text or '').lower():
+            return label
+    return ''
+
+
+def _route_reasons(sub, v):
+    """What the host's live routes say it runs that holds ``v``: Server and X-Powered-By headers, fingerprints, cookie names."""
+    from cveFeed.models import RouteAuth
+    out = []
+    rows = RouteAuth.objects.filter(project_id=sub.target_domain.project_id, host=sub.name, retired_at__isnull=True)[:20]
+    for route in rows:
+        evidence = route.evidence or {}
+        for key, label in (('server', 'Server header'), ('powered_by', 'X-Powered-By')):
+            if v in str(evidence.get(key, '')).lower():
+                out.append(f'{label} {evidence[key]}')
+        for found in evidence.get('fingerprints') or []:
+            if v in str(found.get('name', '')).lower():
+                out.append(f'{found["name"]} ({found.get("source", "route")})')
+        out += [f'cookie {c}' for c in evidence.get('cookies') or [] if v in str(c).lower()]
+    return out
+
+
+def _archive_reasons(sub, v):
+    """Technologies the web archive says the host ran at some point that hold ``v``. Historical, so labelled as such."""
+    from cveFeed.models import HostArchive
+    row = HostArchive.objects.filter(project_id=sub.target_domain.project_id, host=sub.name).first()
+    return [f'seen in web archive: {name} ({info.get("count", 0)} URLs)' for name, info in (row.technologies if row else {}).items()
+            if v in name.lower()]
+
+
 def _why_matched(sub, terms):
     """What each positive term matched on this host, for the results list (read from the page's prefetched rows)."""
     from startScan.models import open_ports
     reasons = []
-    for neg, field, value in terms:
+    for neg, field, value, _quoted in terms:
         if neg:
             continue
         v = value.lower()
@@ -1437,9 +1575,15 @@ def _why_matched(sub, terms):
                         reasons.append(f'IP {ip.address}')
         if field in (None, 'tech'):
             reasons += [f'technology {t.name}' for t in sub.technologies.all() if has(t.name)]
+            if has(sub.webserver):
+                reasons.append(f'web server {sub.webserver}')
+            reasons += _route_reasons(sub, v)
+            reasons += _archive_reasons(sub, v)
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')
+            if field == 'country' and ip.geo_iso and (has(ip.geo_iso.iso) or has(ip.geo_iso.name)):
+                reasons.append(f'country {ip.geo_iso.name or ip.geo_iso.iso}')
             for p in open_ports(ip):
                 label = f'port {p.number} {" ".join(x for x in (p.product, p.version) if x) or p.service_name or ""}'.strip()
                 if field == 'port' and str(p.number) == value:
@@ -1450,6 +1594,8 @@ def _why_matched(sub, terms):
                     reasons.append(label)
                 elif field is None and (has(p.version) or has(p.cpe) or str(p.number) == value):
                     reasons.append(label)
+                elif field in (None, 'tech', 'banner') and (hit := _port_evidence(p, v, field)):
+                    reasons.append(f'{label} ({hit})')
         if field in (None, 'vuln', 'sev'):
             for x in sub.vulnerability_set.all():
                 if (field == 'sev' and SEVERITY_NAMES.get(x.severity) == v) or (field != 'sev' and has(x.name)):
@@ -1467,23 +1613,108 @@ def _why_matched(sub, terms):
     return list(dict.fromkeys(reasons))[:8]
 
 
+HEAT_FACET_VALUES = ('fire', 'smoke', 'ice', 'clean', 'unscanned')
+HEAT_FACET_CAP = 5000  # hosts a facet count (and a ?heat= filter) will walk before reporting the rest truncated; a search
+# this wide needs narrowing with q anyway, and a plain heat chip's own count stays an honest lower bound, never wrong upward
+
+
+def _heat_facets(project, qs):
+    """``({fire,smoke,ice,clean,unscanned: count}, {sub.id: heat}, truncated)`` for every host ``qs`` matches, up to
+    HEAT_FACET_CAP, computed with the same group-merge logic _host() itself uses (so a chip's count and a host's own
+    badge never disagree). ``truncated`` means more than the cap matched q; the count is then a lower bound."""
+    total = qs.count()
+    subs = list(qs.select_related('target_domain').prefetch_related(
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage',
+    ).order_by('id')[:HEAT_FACET_CAP])
+    others = _name_siblings(project, subs)
+    counts = {v: 0 for v in HEAT_FACET_VALUES}
+    heat_by_id = {}
+    for sub in subs:
+        sibs = others.get(sub.id, [])
+        _, reasons, _, _ = _merge_group(sub, sibs)
+        heat = _host_heat_merged(sub, sibs, reasons)
+        counts[heat] = counts.get(heat, 0) + 1
+        heat_by_id[sub.id] = heat
+    return counts, heat_by_id, total > HEAT_FACET_CAP
+
+
+SEARCH_FACET_FIELDS = ('port', 'product', 'tech', 'os', 'country')
+SEARCH_FACET_SIZE_DEFAULT = 10
+SEARCH_FACET_SIZE_MAX = 50
+
+
+def _search_facets(host_ids, names, size):
+    """``{facet name: [{value, count}]}``, highest count first, over the given host ids: each count is the number of
+    distinct hosts with that value, the same ids (and so the same cap and truncation) ``_heat_facets`` already counted
+    for ``facets.heat``. ``host_ids`` can be any iterable (a dict's keys included); it is only ever used as a filter."""
+    from django.db.models import Count
+    from startScan.models import Subdomain
+    base = Subdomain.objects.filter(id__in=list(host_ids))
+    sources = {
+        'port': (base.filter(ip_addresses__ports__state__in=('', 'open')).exclude(ip_addresses__ports__number=0),
+                 'ip_addresses__ports__number'),
+        'product': (base.filter(ip_addresses__ports__state__in=('', 'open')).exclude(ip_addresses__ports__product=''),
+                    'ip_addresses__ports__product'),
+        'tech': (base.exclude(technologies__name=''), 'technologies__name'),
+        'os': (base.exclude(ip_addresses__os_guess=''), 'ip_addresses__os_guess'),
+        'country': (base.exclude(ip_addresses__geo_iso__isnull=True), 'ip_addresses__geo_iso__name'),
+    }
+    out = {}
+    for name in names:
+        qs, column = sources[name]
+        rows = qs.values(column).annotate(n=Count('id', distinct=True)).order_by('-n', column)[:size]
+        out[name] = [{'value': row[column], 'count': row['n']} for row in rows]
+    return out
+
+
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
-    port product / service / version / CPE, OS, finding name, CVE id and page title; ``tech:``, ``port:``, ``product:``,
+    port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
+    page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
-    session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal) and ``zombie:`` (yes, no) filter one field; ``-term``
-    negates; quote a phrase. Each result says what matched. No ``q`` lists every host. Highest score first; ``sort=name`` for names."""
+    session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``zombie:`` (yes, no) and ``country:`` (ISO code
+    or name) filter one field; a filter value takes a comma-separated list for OR (``port:80,443``), unless quoted; ``-term``
+    negates; quote a phrase. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
+    always counts every value over the whole match of q, ignoring ``heat`` itself, so the chips keep their real totals while one is
+    selected. ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
+    each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
+    host. Highest score first; ``sort=name`` for names."""
+    from django.db.models import Q
+
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
+    heat = params.get('heat') or ''
+    if heat and heat not in HEAT_FACET_VALUES:
+        raise ApiError(400, f'heat must be one of {", ".join(HEAT_FACET_VALUES)}')
+    facet_names = [f.strip() for f in (params.get('facets') or '').split(',') if f.strip()]
+    bad_facets = [f for f in facet_names if f not in SEARCH_FACET_FIELDS]
+    if bad_facets:
+        raise ApiError(400, f'facets must be among {", ".join(SEARCH_FACET_FIELDS)}: unknown {", ".join(bad_facets)}')
+    try:
+        facet_size = min(SEARCH_FACET_SIZE_MAX, max(1, int(params.get('facet_size', SEARCH_FACET_SIZE_DEFAULT))))
+    except (TypeError, ValueError):
+        raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
-    for neg, field, value in terms:
-        q = _term_filter(field, value, project)
+    for neg, field, value, quoted in terms:
+        if field and not quoted and ',' in value:
+            q = Q()
+            for part in (p.strip() for p in value.split(',') if p.strip()):
+                q |= _term_filter(field, part, project)
+        else:
+            q = _term_filter(field, value, project)
         qs = qs.exclude(q) if neg else qs.filter(q)
-    qs = _one_per_host(qs, per_project=_is_all(project)).select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
+    qs = _one_per_host(qs, per_project=_is_all(project))
+    heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
+    search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
+    if heat:
+        qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
+    qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
-    return _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated, **search_facets}
+    return page
 
 
 def _matches_of_host():
@@ -1507,6 +1738,10 @@ def _vuln(v):
             'url': v.http_url, 'host': v.subdomain.name if v.subdomain else None, 'open': v.open_status,
             'cves': [c.name for c in v.cve_ids.all()], 'cve_matches': _cve_match_ids(v), 'discovered': _iso(v.discovered_date),
             'description': v.description, 'remediation': v.remediation, 'source': v.source,
+            'remediation_status': v.remediation_status, 'remediation_note': v.remediation_note,
+            'remediation_updated': _iso(v.remediation_updated_at),
+            'status_changed_at': _iso(v.remediation_updated_at), 'status_changed_by': _user_brief(v.remediation_by),
+            'assignee': _user_brief(v.assignee), 'comment_count': _comment_count(v, 'vulnerability'),
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
 
@@ -1515,8 +1750,8 @@ def list_vulnerabilities(ctx, slug, params):
     from startScan.models import Vulnerability
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict') \
-        .prefetch_related('cve_ids', _matches_of_host()).order_by('-severity', '-id')
+    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .prefetch_related('cve_ids', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
@@ -1558,6 +1793,10 @@ def list_certificates(ctx, slug, params):
 def _hygiene(f):
     return {'id': f.id, 'host': f.host, 'check': f.check_name, 'severity': SEVERITY_NAMES.get(f.severity, str(f.severity)),
             'title': f.title, 'detail': f.detail, 'evidence': f.evidence, 'status': f.status,
+            'remediation_status': f.remediation_status, 'remediation_note': f.remediation_note,
+            'remediation_updated': _iso(f.remediation_updated_at),
+            'status_changed_at': _iso(f.remediation_updated_at), 'status_changed_by': _user_brief(f.remediation_by),
+            'assignee': _user_brief(f.assignee), 'comment_count': _comment_count(f, 'hygiene'),
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
             'triage': _triage_brief(_triage_of(f))}
 
@@ -1567,8 +1806,9 @@ def list_hygiene(ctx, slug, params):
     from cveFeed.models import HygieneFinding
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project').select_related('domain__project' if everywhere else 'domain', 'triage__verdict') \
-        .order_by('-severity', 'host', 'id')
+    qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project').select_related(
+        'domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .annotate(comment_count=_comment_count_annotation('hygiene')).order_by('-severity', 'host', 'id')
     qs = qs.filter(status=params.get('status') or 'open')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
@@ -1628,6 +1868,60 @@ def list_changes(ctx, slug, params):
     if params.get('scan_id'):
         qs = qs.filter(scan_id=_int_param(params['scan_id'], 'scan_id'))
     return paginate(qs.order_by('-detected_at', '-id'), params, _tagged(_change, lambda c: c.project) if everywhere else _change)
+
+
+MAX_STATS_HISTORY_DAYS = 365
+
+
+def _snapshot_row(s):
+    return {'date': s.date.isoformat(), 'hosts': s.hosts, 'exposed_hosts': s.exposed_hosts,
+            'open_findings': s.open_findings, 'cve_matches': s.cve_matches, 'fixed': s.fixed,
+            'mean_days_to_fix': s.mean_days_to_fix}
+
+
+def stats_history(ctx, slug, params):
+    """Daily snapshots of this project's inventory and findings counts, oldest first, for the trend charts nothing else
+    in the schema keeps a past for: ?days= (default 90, capped at 365). Each row is {date, hosts, exposed_hosts,
+    open_findings: {critical..info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}, written once a day by
+    cveFeed.tasks.snapshot_daily_stats; a day with no row (the feature just turned on, or a day the beat task missed)
+    is simply absent rather than backfilled. ``_all`` sums every visible project's rows for each date; its
+    mean_days_to_fix is the unweighted mean of the projects that have one that day, since the raw per-finding
+    durations are not stored."""
+    from datetime import timedelta
+
+    from cveFeed.models import StatsSnapshot
+    from cveFeed.stats_history import CVE_MATCH_HEATS, OPEN_FINDING_BANDS
+    project, _ = get_project(ctx, slug)
+    try:
+        days = min(MAX_STATS_HISTORY_DAYS, max(1, int(params.get('days', 90))))
+    except (TypeError, ValueError):
+        raise ApiError(400, 'days must be an integer')
+    since = timezone.localdate() - timedelta(days=days - 1)
+    qs = _scoped(StatsSnapshot.objects.filter(date__gte=since), project, 'project').order_by('date')
+    if not _is_all(project):
+        return [_snapshot_row(s) for s in qs]
+    by_date = {}
+    for s in qs:
+        row = by_date.setdefault(s.date, {'date': s.date.isoformat(), 'hosts': 0, 'exposed_hosts': 0,
+                                           'open_findings': {b: 0 for b in OPEN_FINDING_BANDS},
+                                           'cve_matches': {h: 0 for h in CVE_MATCH_HEATS}, 'fixed': 0, '_days': []})
+        row['hosts'] += s.hosts
+        row['exposed_hosts'] += s.exposed_hosts
+        row['fixed'] += s.fixed
+        for band, n in (s.open_findings or {}).items():
+            if band in row['open_findings']:
+                row['open_findings'][band] += n
+        for heat, n in (s.cve_matches or {}).items():
+            if heat in row['cve_matches']:
+                row['cve_matches'][heat] += n
+        if s.mean_days_to_fix is not None:
+            row['_days'].append(s.mean_days_to_fix)
+    results = []
+    for row in by_date.values():
+        days_list = row.pop('_days')
+        row['mean_days_to_fix'] = round(sum(days_list) / len(days_list), 2) if days_list else None
+        results.append(row)
+    return sorted(results, key=lambda r: r['date'])
 
 
 def _activity(a):
@@ -1880,6 +2174,8 @@ def _match(m):
             'template_tested': _iso(m.template_tested_at),
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
             'remediation_updated': _iso(m.remediation_updated_at),
+            'status_changed_at': _iso(m.remediation_updated_at), 'status_changed_by': _user_brief(m.remediation_by),
+            'assignee': _user_brief(m.assignee), 'comment_count': _comment_count(m, 'match'),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m))}
 
@@ -1888,7 +2184,8 @@ def _matches_qs(project):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
-        .select_related('cve_entry', 'subdomain', 'triage__verdict').order_by('-confidence', '-id')
+        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .annotate(comment_count=_comment_count_annotation('match')).order_by('-confidence', '-id')
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs
 
 
@@ -1949,25 +2246,27 @@ def _finding_sources(project, params):
     if wanted in ('all', 'cve'):
         qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
         if status == 'actionable':
-            qs = qs.exclude(ai_verdict='not_affected')
+            qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['cve'] = qs
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
-            .select_related('subdomain', 'triage__verdict', *(['target_domain__project'] if everywhere else [])) \
-            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'))
+            .select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee', *(['target_domain__project'] if everywhere else [])) \
+            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
+                      comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
-            qs = qs.filter(open_status=True, severity__gte=1)
+            qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['scanner'] = qs
     if wanted in ('all', 'hygiene'):
         qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project') \
-            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict') \
-            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'))
+            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by', 'assignee') \
+            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'),
+                      comment_count=_comment_count_annotation('hygiene'))
         if status == 'actionable':
-            qs = qs.filter(status='open', severity__gte=1)
+            qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
             qs = qs.filter(host__icontains=params['host'])
         sources['hygiene'] = qs
@@ -1992,12 +2291,17 @@ def _finding_row(kind, obj):
         extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160)}
     elif kind == 'scanner':
         title, host, note = obj.name, obj.subdomain.name if obj.subdomain else None, obj.source or ''
-        status, extra = 'open' if obj.open_status else 'closed', {}
+        status, extra = ('closed' if not obj.open_status else obj.remediation_status), {}
     else:
-        title, host, note, status, extra = obj.title, obj.host, obj.check_name, obj.status, {}
+        title, host, note = obj.title, obj.host, obj.check_name
+        status, extra = ('resolved' if obj.status == 'resolved' else obj.remediation_status), {}
     return {'type': kind, 'kind': FINDING_TYPES[kind], 'id': obj.id, 'title': title, 'host': host, 'note': note,
             'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
-            'detected': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
+            'remediation_note': getattr(obj, 'remediation_note', ''),
+            'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
+            'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)),
+            'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
+            'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
 
 
 def _finding_project(kind, obj):
@@ -2037,18 +2341,140 @@ def list_findings(ctx, slug, params):
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
 
 
-def update_match(ctx, slug, match_id, status, note=''):
+def _apply_remediation(obj, status, note, user):
+    """Set and save the remediation fields shared by CVEMatch, Vulnerability and HygieneFinding (the same tuple of
+    statuses, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's body left
+    it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Raises on an
+    unrecognized status; never touches whatever auto-managed liveness field (open_status, HygieneFinding.status,
+    ai_verdict) the model also carries, which stays under the scan/check pipeline."""
     from cveFeed.models import CVEMatch
-    project, _ = get_project(ctx, slug, write=True)
     if status not in CVEMatch.REMEDIATION_STATUSES:
         raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
+    fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
+    obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
+    if note is not None:
+        obj.remediation_note = note[:2000]
+        fields.append('remediation_note')
+    obj.save(update_fields=fields)
+
+
+UNSET = object()  # a PATCH field the caller's body left out entirely, as opposed to an explicit null/empty value
+
+
+def _record_status_change(project, kind, finding_id, before, after, actor):
+    from cveFeed.models import FindingAuditEvent
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=finding_id, event='status',
+                                      actor=actor, before={'status': before}, after={'status': after})
+
+
+def _apply_assignee(project, kind, obj, assignee, actor):
+    """Set or clear ``obj.assignee`` (a user id, or None/''/0 to unassign) and write the audit event. The new assignee
+    must be someone who can already see this project (the same check PATCH .../profile and everywhere else that names
+    a user by id uses); an id naming nobody, or nobody with access, is a 400."""
+    from django.contrib.auth.models import User
+
+    from cveFeed.models import FindingAuditEvent
+    before = _user_brief(obj.assignee)
+    if assignee in (None, '', 0, '0'):
+        new_user = None
+    else:
+        try:
+            new_user = User.objects.get(pk=int(assignee))
+        except (TypeError, ValueError, User.DoesNotExist):
+            raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
+        if not roles.effective_role(new_user, project):
+            raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
+    obj.assignee = new_user
+    obj.save(update_fields=['assignee'])
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='assignee', actor=actor,
+                                      before={'assignee': before}, after={'assignee': _user_brief(new_user)})
+
+
+def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
+    """At least one of ``status``/``assignee`` is required; either can be sent alone, the same true-partial-update
+    semantics ``note`` already has. A status change and an assignee change are logged as separate audit events even
+    when sent in the same call, since they are independent facts a reader may want separately."""
+    from cveFeed import activity
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before body validation
+    if status is None and assignee is UNSET:
+        raise ApiError(400, 'missing field(s): status or assignee')
     m = _matches_qs(project).filter(id=match_id).first()
     if not m:
         raise ApiError(404, 'match not found')
-    m.remediation_status, m.remediation_note = status, (note or '')[:2000]
-    m.remediation_updated_at, m.remediation_by = timezone.now(), ctx.user
-    m.save(update_fields=['remediation_status', 'remediation_note', 'remediation_updated_at', 'remediation_by'])
+    if status is not None:
+        before = m.remediation_status
+        _apply_remediation(m, status, note, ctx.user)
+        _record_status_change(project, 'match', m.id, before, status, ctx.user)
+        activity.log('remediation', f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
+                     project=project, finding_kind='match', finding_id=m.id)
+    if assignee is not UNSET:
+        _apply_assignee(project, 'match', m, assignee, ctx.user)
     return _match(m)
+
+
+STATUS_KINDS = ('match', 'vulnerability', 'hygiene')  # finding kinds with a remediation workflow; a web route has none
+MAX_BULK_STATUS = 200
+
+
+def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, assignee=UNSET):
+    """Set the remediation status (open/in_progress/fixed/accepted_risk), note and/or assignee of one finding: a CVE
+    match, scanner finding or hygiene finding; at least one of status/assignee is required. Same permissions and
+    project-scoped 404 as update_match, which this delegates to for kind='match' so the two routes agree exactly. A
+    web route has no remediation workflow (its auth_state already says what it needs), so 'route' 400s here the same
+    as any other unrecognized kind."""
+    from cveFeed import activity
+    if kind == 'match':
+        return update_match(ctx, slug, finding_id, status, note=note, assignee=assignee)
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before kind/status validation
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    if status is None and assignee is UNSET:
+        raise ApiError(400, 'missing field(s): status or assignee')
+    obj = _finding_obj(project, kind, finding_id)
+    if status is not None:
+        before = obj.remediation_status
+        _apply_remediation(obj, status, note, ctx.user)
+        _record_status_change(project, kind, finding_id, before, status, ctx.user)
+        activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
+                     finding_kind=kind, finding_id=finding_id)
+    if assignee is not UNSET:
+        _apply_assignee(project, kind, obj, assignee, ctx.user)
+    return _vuln(obj) if kind == 'vulnerability' else _hygiene(obj)
+
+
+def bulk_update_finding_status(ctx, slug, items, status, note=None):
+    """Set the same remediation status and note on up to MAX_BULK_STATUS findings at once. Each item is independent
+    (one bad kind or id never blocks the rest, and a finding belonging to another project 404s exactly like a missing
+    one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures."""
+    from cveFeed import activity
+    from cveFeed.models import CVEMatch
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
+    if status not in CVEMatch.REMEDIATION_STATUSES:
+        raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
+    if not isinstance(items, list) or not items:
+        raise ApiError(400, 'items must be a non-empty list')
+    if len(items) > MAX_BULK_STATUS:
+        raise ApiError(400, f'at most {MAX_BULK_STATUS} items per call')
+    updated, failed = 0, []
+    for item in items:
+        kind = item.get('kind') if isinstance(item, dict) else None
+        finding_id = item.get('id') if isinstance(item, dict) else None
+        try:
+            if not isinstance(item, dict) or kind is None or finding_id is None:
+                raise ApiError(400, 'each item must be an object with kind and id')
+            if kind not in STATUS_KINDS:
+                raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+            obj = _finding_obj(project, kind, finding_id)
+            before = obj.remediation_status
+            _apply_remediation(obj, status, note, ctx.user)
+            _record_status_change(project, kind, finding_id, before, status, ctx.user)
+            updated += 1
+        except ApiError as e:
+            failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
+        except Exception as e:  # noqa: BLE001 - one bad row must never fail the rest of the batch
+            failed.append({'kind': kind, 'id': finding_id, 'error': str(e)})
+    activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
+    return {'updated': updated, 'failed': failed}
 
 
 def asset_matches(host_names, ips, patterns):
@@ -2183,11 +2609,13 @@ def _finding_obj(project, kind, finding_id):
         obj = _matches_qs(project).filter(pk=finding_id).first()
     elif kind == 'vulnerability':
         obj = Vulnerability.objects.filter(target_domain__project=project, pk=finding_id).select_related(
-            'subdomain', 'target_domain', 'triage__verdict').prefetch_related('cve_ids', 'cwe_ids', 'tags').first()
+            'subdomain', 'target_domain', 'triage__verdict', 'remediation_by', 'assignee') \
+            .prefetch_related('cve_ids', 'cwe_ids', 'tags').annotate(comment_count=_comment_count_annotation('vulnerability')).first()
     elif kind == 'route':
         obj = RouteAuth.objects.filter(project=project, pk=finding_id).select_related('domain', 'triage__verdict').first()
     else:
-        obj = HygieneFinding.objects.filter(domain__project=project, pk=finding_id).select_related('domain', 'triage__verdict').first()
+        obj = HygieneFinding.objects.filter(domain__project=project, pk=finding_id).select_related(
+            'domain', 'triage__verdict', 'remediation_by', 'assignee').annotate(comment_count=_comment_count_annotation('hygiene')).first()
     if obj is None:
         raise ApiError(404, 'finding not found')
     return obj
@@ -2292,8 +2720,9 @@ def finding_detail(ctx, slug, kind, finding_id):
                    if base is not None and adjust else None)
     remediation = {'text': v.remediation if v else '', 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
     if kind == 'match':
-        remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), status=obj.remediation_status,
-                           note=obj.remediation_note)
+        remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), local_checks=(t.local_checks if t else None) or None)
+    if kind in STATUS_KINDS:  # match, vulnerability, hygiene: a web route has no remediation workflow
+        remediation.update(status=obj.remediation_status, note=obj.remediation_note)
     assessment_status = ('closed_not_applicable' if kind == 'match' and obj.ai_verdict == 'not_affected' and
                          (obj.ai_reason or '').startswith('Closed automatically:')
                          else 'candidate' if kind == 'match' else None)
@@ -2349,11 +2778,123 @@ def finding_detail(ctx, slug, kind, finding_id):
                'triaged': _iso(v.created_at) if v else None, 'severity_adjust': adjust, 'severity_reason': v.severity_reason if v else '',
                'hard_evidence': (t.hard_evidence if t else []) or [], 'advice': (v.validation_notes if v else []) or []},
         'how_found': how, 'remediation': remediation,
+        'status_changed_at': _iso(obj.remediation_updated_at) if kind in STATUS_KINDS else None,
+        'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
+        'assignee': _user_brief(obj.assignee) if kind in STATUS_KINDS else None,
+        'comment_count': obj.comment_count if kind in STATUS_KINDS else 0,
         'cve': _cve_context(obj.cve_entry) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},
     }
+
+
+MAX_COMMENT_LENGTH = 4000
+
+
+def _comment(c):
+    return {'id': c.id, 'text': c.text, 'author': _user_brief(c.author), 'created': _iso(c.created_at)}
+
+
+def list_finding_comments(ctx, slug, kind, finding_id):
+    """Every comment on one finding, oldest first."""
+    from cveFeed.models import FindingComment
+    project, _ = get_one_project(ctx, slug)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    _finding_obj(project, kind, finding_id)  # 404 for an unknown finding, or one in another project
+    rows = FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('author')
+    return {'results': [_comment(c) for c in rows]}
+
+
+def add_finding_comment(ctx, slug, kind, finding_id, text):
+    """Add one comment, logged to the finding's audit trail. A write like any other (read-only tokens and the audit
+    role cannot comment; ``_all`` is never writable), even though it does not touch the finding's own remediation
+    fields, since it creates a row."""
+    from cveFeed.models import FindingAuditEvent, FindingComment
+    project, _ = get_one_project(ctx, slug, write=True)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError(400, 'text must not be empty')
+    obj = _finding_obj(project, kind, finding_id)
+    comment = FindingComment.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, author=ctx.user, text=text[:MAX_COMMENT_LENGTH])
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='comment', actor=ctx.user,
+                                      before={}, after={'comment_id': comment.id, 'text': comment.text[:200]})
+    return _comment(comment)
+
+
+def _audit_event(e):
+    return {'id': e.id, 'event': e.event, 'actor': _user_brief(e.actor), 'before': e.before, 'after': e.after, 'created': _iso(e.created_at)}
+
+
+def finding_audit(ctx, slug, kind, finding_id):
+    """One finding's audit trail, newest first: status changes, assignee changes, and comments, each with who, when,
+    and (status/assignee) what changed from and to. A comment's own text is also in GET .../comments; it is repeated
+    here as a short before/after so the trail reads as one timeline without a second request."""
+    from cveFeed.models import FindingAuditEvent
+    project, _ = get_one_project(ctx, slug)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    _finding_obj(project, kind, finding_id)
+    rows = FindingAuditEvent.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('actor')
+    return {'results': [_audit_event(e) for e in rows]}
+
+
+MAX_SLA_DAYS = 3650
+
+
+def _project_settings(project, sla):
+    from cveFeed.models import DEFAULT_SLA_DAYS
+    return {'sla_days': sla, 'sla_defaults': DEFAULT_SLA_DAYS}
+
+
+def get_project_settings(ctx, slug):
+    """This project's settings: ``sla_days`` (days to fix per severity: critical, high, medium, low), the same for everyone,
+    so a UI's "overdue" is consistent. ``sla_defaults`` is what an unset severity falls back to."""
+    from cveFeed.models import ProjectSettings
+    project, _ = get_one_project(ctx, slug)
+    return _project_settings(project, ProjectSettings.sla_for(project))
+
+
+def set_project_settings(ctx, slug, body):
+    """Change this project's settings. ``sla_days`` is a partial update: send only the severities to change, each a whole
+    number of days from 1 to 3650, or ``null`` to go back to the default. Anyone with a write role may change it, like the
+    project's API keys; a read-only token or the audit role may not."""
+    from cveFeed.models import DEFAULT_SLA_DAYS, ProjectSettings
+    project, _ = get_one_project(ctx, slug, write=True)
+    changes = body.get('sla_days') if isinstance(body, dict) else None
+    if not isinstance(changes, dict) or not changes:
+        raise ApiError(400, 'sla_days must be an object naming at least one severity')
+    unknown = [k for k in changes if k not in DEFAULT_SLA_DAYS]
+    if unknown:
+        raise ApiError(400, f'sla_days severities must be among {", ".join(DEFAULT_SLA_DAYS)}: unknown {", ".join(map(str, unknown))}')
+    row, _created = ProjectSettings.objects.get_or_create(project=project)
+    stored = dict(row.sla_days or {})
+    for severity, days in changes.items():
+        if days is None:
+            stored.pop(severity, None)
+        elif isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_SLA_DAYS:
+            raise ApiError(400, f'{severity} must be a whole number of days from 1 to {MAX_SLA_DAYS}, or null for the default')
+        else:
+            stored[severity] = days
+    row.sla_days, row.updated_by = stored, ctx.user
+    row.save(update_fields=['sla_days', 'updated_by', 'updated_at'])
+    return _project_settings(project, ProjectSettings.sla_for(project))
+
+
+def list_members(ctx, slug):
+    """Users who can act on this project, for an assignee picker: its direct members, plus an organization's members
+    when the project belongs to one (an org role already grants project access, see tenancy.roles.effective_role). A
+    superuser with no membership row of their own is not listed; assign to an actual team member instead."""
+    from django.contrib.auth.models import User
+    from django.db.models import Q
+    project, _ = get_one_project(ctx, slug)
+    members = Q(project_memberships__project=project)
+    if project.org_id:
+        members |= Q(org_memberships__org_id=project.org_id)
+    users = User.objects.filter(members).distinct().order_by('username')
+    return {'results': [_user_brief(u) for u in users]}
 
 
 def _triage_item(t):

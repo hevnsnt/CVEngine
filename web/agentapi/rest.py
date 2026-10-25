@@ -27,6 +27,12 @@ def _need(data, *keys):
     return [data[k] for k in keys]
 
 
+def _assignee_kw(body):
+    """{'assignee': ...} when the body named the key at all (a user id, or null to unassign), else {} so the service's
+    own UNSET default applies and an omitted assignee is never confused with an explicit null one."""
+    return {'assignee': body['assignee']} if 'assignee' in body else {}
+
+
 # --- token management: session users only, so a token can never mint another token ---
 
 def _session_only(request):
@@ -139,7 +145,7 @@ ROUTES = [
      lambda r, c, slug, **k: hosts.list_exclusions(c, slug)),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin)',
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, -negation; sorted by score (sort=name)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/routes', 'Web routes and how they answer an anonymous GET: open, login, session_required, sso (auth_state=, host=, sensitive=1, zombie=1)',
      lambda r, c, slug, **k: svc.list_routes(c, slug, r.GET)),
@@ -149,6 +155,8 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
+     lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=)',
      lambda r, c, slug, **k: svc.list_activity(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hygiene/run', 'Run the hygiene checks now (all targets, or {target_id})',
@@ -171,16 +179,41 @@ ROUTES = [
     ('GET', r'projects/(?P<slug>[-\w]+)/matches/(?P<match_id>\d+)/validate/(?P<request_id>\d+)',
      'Read the queued, running, completed or failed state of one validation request',
      lambda r, c, slug, match_id, request_id, **k: svc.validation_request(c, slug, int(match_id), int(request_id))),
-    ('PATCH', r'projects/(?P<slug>[-\w]+)/matches/(?P<match_id>\d+)', 'Set remediation status and note',
-     lambda r, c, slug, match_id, **k: svc.update_match(c, slug, int(match_id), *_need(_body(r), 'status'), note=_body(r).get('note', ''))),
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/matches/(?P<match_id>\d+)', 'Set remediation status, note and/or assignee (at least one of status/assignee)',
+     lambda r, c, slug, match_id, **k: svc.update_match(c, slug, int(match_id), _body(r).get('status'), note=_body(r).get('note'), **_assignee_kw(_body(r)))),
     ('GET', r'projects/(?P<slug>[-\w]+)/triage', 'AI triage of every finding: classification, status and validation state (status=, classification=, validation=, kind=)',
      lambda r, c, slug, **k: svc.list_triage(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)',
      'One finding in full: why it matters, how it was found, first and last seen with history, AI classification, remediation, every validation check with its exact command and result',
      lambda r, c, slug, kind, finding_id, **k: svc.finding_detail(c, slug, kind, int(finding_id))),
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)',
+     'Set remediation status (open, in_progress, fixed, accepted_risk), note and/or assignee (at least one of status/assignee); a web route has no remediation workflow (400)',
+     lambda r, c, slug, kind, finding_id, **k: svc.update_finding_status(c, slug, kind, int(finding_id), _body(r).get('status'),
+                                                                        note=_body(r).get('note'), **_assignee_kw(_body(r)))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/status', 'Set the same remediation status and note on up to 200 findings at once; '
+     "body {items: [{kind, id}, ...], status, note}; returns {updated, failed: [{kind, id, error}]}",
+     lambda r, c, slug, **k: svc.bulk_update_finding_status(c, slug, _body(r).get('items'), *_need(_body(r), 'status'),
+                                                             note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)/retriage',
      'Look at a finding again; CVE matches use the bounded per-match validation queue',
      lambda r, c, slug, kind, finding_id, **k: (svc.retriage_finding(c, slug, kind, int(finding_id)), 202)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/comments',
+     'Every comment on one finding, oldest first',
+     lambda r, c, slug, kind, finding_id, **k: svc.list_finding_comments(c, slug, kind, int(finding_id))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/comments',
+     'Add a comment to one finding; body {text}',
+     # text's own validation happens inside add_finding_comment, after its project gate: a body-shaped _need() here would
+     # run before that gate and 400 on a missing field before an _all/unknown-project caller ever gets its own real error.
+     lambda r, c, slug, kind, finding_id, **k: (svc.add_finding_comment(c, slug, kind, int(finding_id), _body(r).get('text')), 201)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/audit',
+     "One finding's audit trail (status, assignee and comment events, newest first), each with who, when, and before/after",
+     lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/settings', "The project's settings: sla_days (days to fix per severity: critical, high, medium, low) and the defaults",
+     lambda r, c, slug, **k: svc.get_project_settings(c, slug)),
+    ('PUT', r'projects/(?P<slug>[-\w]+)/settings', "Change the project's settings; sla_days is a partial update, a severity set to null goes back to its default",
+     lambda r, c, slug, **k: svc.set_project_settings(c, slug, _body(r))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/members', "The project's members, for an assignee picker",
+     lambda r, c, slug, **k: svc.list_members(c, slug)),
     ('GET', r'projects/(?P<slug>[-\w]+)/work', 'Remediation work for your registered assets',
      lambda r, c, slug, **k: svc.work_items(c, slug, r.GET)),
     ('GET', r'assets', 'Assets registered on this token', lambda r, c, **k: {'assets': c.token.assets if c.token else []}),
@@ -224,7 +257,7 @@ def dispatch(request, path):
         except ApiError as e:
             return JsonResponse({'error': e.message}, status=e.status)
         data, status = result if isinstance(result, tuple) else (result, 200)
-        return JsonResponse(data, status=status)
+        return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
         response = JsonResponse({'error': 'method not allowed'}, status=405)
         response['Allow'] = ', '.join(sorted(set(allowed)))

@@ -361,3 +361,100 @@ class HotValidationTests(TestCase):
         shown = detail['automatic_validation']
         self.assertEqual((shown['status'], shown['priority'], shown['ai_state']), ('failed', 0, 'failed'))
         self.assertNotIn('secret-provider-token', str(shown))
+
+
+class EveryMatchIsValidatedTests(TestCase):
+    """A CVE match of any confidence is queued for validation by itself, hottest first; the cold ones (Ice) only use what Fire and
+    Smoke leave, and are not allowed to fill a project's slots."""
+
+    def setUp(self):
+        now = timezone.now()
+        org = Org.objects.create(name='Ice', slug='ice')
+        self.project = Project.objects.create(name='Ice', slug='ice', org=org, insert_date=now)
+        domain = Domain.objects.create(name='ice.example', project=self.project, insert_date=now)
+        self.sub = Subdomain.objects.create(name='www.ice.example', target_domain=domain)
+
+        def match(cve_id, cvss, **fields):
+            entry = CVEEntry.objects.create(cve_id=cve_id, cvss=cvss, affected=[{'product': 'nginx'}], published_at=now)
+            return CVEMatch.objects.create(cve_entry=entry, subdomain=self.sub, matched_product='nginx', **fields)
+        self.fire = match('CVE-2099-10', 9.8)
+        self.smoke = match('CVE-2099-11', 7.5)
+        self.cold = match('CVE-2099-12', 4.3)
+        self.unscored = match('CVE-2099-13', None)
+        self.ruled_out = match('CVE-2099-14', 3.0, ai_verdict='not_affected')
+        self.patched = match('CVE-2099-15', 3.1, distro_status='patched')
+        triage.track([self.fire, self.smoke, self.cold, self.unscored, self.ruled_out, self.patched])
+
+    def sweep(self, **kwargs):
+        calls = []
+        record = lambda *a, **kw: calls.append(kw['priority'])  # noqa: E731
+        with mock.patch('cveFeed.hot_validation._backfill_projects', return_value=0), \
+                mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async', side_effect=record), \
+                mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async', side_effect=record):
+            return hot_validation.sweep(**kwargs), calls
+
+    def queued(self):
+        return {j.match.cve_entry.cve_id: j.priority for j in OnDemandValidation.objects.filter(status='queued').select_related('match__cve_entry')}
+
+    def test_every_match_of_any_confidence_is_queued_hottest_first(self):
+        result, calls = self.sweep()
+        self.assertEqual((result['fire'], result['smoke'], result['ice']), (1, 1, 2))
+        self.assertEqual(calls, [0, 6, 9, 9])
+        self.assertEqual(self.queued(), {'CVE-2099-10': 0, 'CVE-2099-11': 6, 'CVE-2099-12': 9, 'CVE-2099-13': 9})  # the unscored one too
+
+    def test_a_match_the_ai_ruled_out_or_the_distro_patched_is_not_validated(self):
+        self.sweep()
+        self.assertNotIn('CVE-2099-14', self.queued())
+        self.assertNotIn('CVE-2099-15', self.queued())
+        self.assertFalse(OnDemandValidation.objects.filter(match__in=[self.ruled_out, self.patched]).exists())
+
+    def test_a_second_sweep_queues_nothing_again(self):
+        self.sweep()
+        result, calls = self.sweep()
+        self.assertEqual((result['fire'], result['smoke'], result['ice'], calls), (0, 0, 0, []))
+        self.assertEqual(OnDemandValidation.objects.count(), 4)
+
+    def test_ice_only_uses_the_capacity_fire_and_smoke_leave(self):
+        result, _ = self.sweep(max_jobs=2)
+        self.assertEqual((result['fire'], result['smoke'], result['ice']), (1, 1, 0))  # the cold ones wait: no capacity left
+        result, _ = self.sweep(max_jobs=1)
+        self.assertEqual(result['ice'], 1)  # each later sweep carries on with the cold matches
+        result, _ = self.sweep(max_jobs=1)
+        self.assertEqual(result['ice'], 1)
+        self.assertEqual(OnDemandValidation.objects.filter(status='queued').count(), 4)
+
+    def test_ice_stops_at_a_lower_project_cap_than_fire_and_smoke(self):
+        cold = Triage.objects.get(match=self.cold)
+        hot = Triage.objects.get(match=self.fire)
+        with mock.patch('cveFeed.hot_validation._active_count', return_value=hot_validation.PROJECT_ICE_CAP), \
+                mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+            self.assertEqual(hot_validation.enqueue(cold, 'ice'), 'project_cap')
+            self.assertEqual(hot_validation.enqueue(hot, 'fire'), 'queued')  # five cold jobs never block a Fire one
+
+    def test_a_queued_ice_job_moves_up_when_the_cve_gets_hot(self):
+        row = Triage.objects.get(match=self.cold)
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as dispatch:
+            self.assertEqual(hot_validation.enqueue(row, 'ice'), 'queued')
+            entry = self.cold.cve_entry
+            entry.cvss = 8.1
+            entry.save(update_fields=['cvss'])
+            self.assertEqual(hot_validation.enqueue(row, 'smoke'), 'promoted')
+        self.assertEqual([c.kwargs['priority'] for c in dispatch.call_args_list], [9, 6])
+        self.assertEqual(OnDemandValidation.objects.get(match=self.cold).priority, 6)
+        self.assertEqual(OnDemandValidation.objects.filter(match=self.cold).count(), 1)
+
+    def test_a_scanner_finding_is_never_an_ice_job(self):
+        vuln = Vulnerability.objects.create(name='Low observation', severity=1, source='bbot', subdomain=self.sub, target_domain=self.sub.target_domain)
+        triage.track([vuln])
+        with mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async') as dispatch:
+            self.assertEqual(hot_validation.enqueue(Triage.objects.get(vulnerability=vuln), 'ice'), 'stale')
+        dispatch.assert_not_called()
+
+    def test_it_can_be_switched_off(self):
+        for value in ('0', 'false', 'no', 'off'):
+            OnDemandValidation.objects.all().delete()
+            with mock.patch.dict('os.environ', {'CVENGINE_AUTO_VALIDATE_ALL_MATCHES': value}):
+                result, calls = self.sweep()
+            self.assertEqual((result['ice'], calls), (0, [0, 6]), value)  # Fire and Smoke exactly as before
+            self.assertEqual(set(self.queued()), {'CVE-2099-10', 'CVE-2099-11'})
+        self.assertTrue(hot_validation.validate_all_matches())  # on by default

@@ -10,9 +10,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [nuclei](https://github.com/projectdiscovery/nuclei) | MIT | Vulnerability scanning and CVE tests |
 | [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) | MIT | The community template library |
 | [nmap](https://github.com/nmap/nmap) | [Nmap Public Source License](https://nmap.org/npsl/) | Service and OS fingerprinting |
-| [naabu](https://github.com/projectdiscovery/naabu) | MIT | Optional full-port discovery |
+| [naabu](https://github.com/projectdiscovery/naabu) | MIT | Full-port discovery ahead of nmap |
 | [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Screenshots in deep discovery |
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
+| [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial licence is needed for managed or hosted use) | WordPress vulnerability scanning |
+| [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot |
+| [node2shell-scanner](https://github.com/assetnote/node2shell-scanner) by Assetnote | MIT | Read-only detection of CVE-2026-111497; vendored (trimmed to its detection core) as `web/cveFeed/vendor/node2shell.py`, with the exact source commit in that file's header |
 
 ## Data sources
 
@@ -28,6 +31,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
+| [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran |
+| [wpscan.com API](https://wpscan.com/) | WordPress vulnerability data for WPScan, with your own token |
 | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope of bug bounty programs, read at run time |
 | [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for report categories and priority |
 

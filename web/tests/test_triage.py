@@ -649,3 +649,61 @@ class SweepAndScheduleTests(TriageDbBase):
 			stats = triage.triage_hygiene(self.domain.id)
 		self.assertEqual(stats['asked'], 1)
 		self.assertEqual(Triage.objects.get().classification, 'confirmed')  # the evaluator is deterministic
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
+class LocalChecksTests(TriageDbBase):
+	def row(self, **kw):
+		m = self.match('a.tr.test')
+		return Triage.objects.create(project=self.project, kind='cve_match', match=m, host=m.subdomain.name,
+									 validation_status='no_check', **kw)
+
+	def local_provider(self, text):
+		p = mock.Mock(model='m')
+		p.name = 'anthropic'
+		p.complete.return_value = text
+		return p
+
+	def test_a_good_reply_is_stored_on_the_row(self, _log):
+		row = self.row()
+		text = json.dumps({'commands': [{'os': 'linux', 'command': 'rpm -qa | grep -i siteguard', 'look_for': 'a siteguard package'}], 'caveat': ''})
+		self.assertTrue(triage.suggest_local_checks(row, provider=self.local_provider(text)))
+		row.refresh_from_db()
+		self.assertEqual(row.local_checks['commands'][0]['command'], 'rpm -qa | grep -i siteguard')
+		self.assertEqual(row.local_checks['model'], 'anthropic:m')
+		self.assertIn('generated_at', row.local_checks)
+
+	def test_a_row_that_already_has_local_checks_is_not_regenerated(self, _log):
+		row = self.row(local_checks={'commands': [], 'caveat': 'already here'})
+		provider = self.local_provider(json.dumps({'commands': [], 'caveat': 'new'}))
+		self.assertFalse(triage.suggest_local_checks(row, provider=provider))
+		self.assertEqual(provider.complete.call_count, 0)
+		row.refresh_from_db()
+		self.assertEqual(row.local_checks['caveat'], 'already here')
+
+	def test_a_non_match_row_is_skipped(self, _log):
+		hygiene = HygieneFinding.objects.create(domain=self.domain, host='tr.test', check_name='spf_missing', severity=2, title='No SPF')
+		row = Triage.objects.create(project=self.project, kind='hygiene', hygiene=hygiene, host='tr.test', validation_status='no_check')
+		provider = self.local_provider(json.dumps({'commands': [], 'caveat': 'x'}))
+		self.assertFalse(triage.suggest_local_checks(row, provider=provider))
+		self.assertEqual(provider.complete.call_count, 0)
+
+	def test_no_provider_is_a_no_op(self, _log):
+		row = self.row()
+		self.assertFalse(triage.suggest_local_checks(row, provider=None))
+		row.refresh_from_db()
+		self.assertEqual(row.local_checks, {})
+
+	def test_an_unparseable_reply_leaves_it_empty(self, _log):
+		row = self.row()
+		self.assertFalse(triage.suggest_local_checks(row, provider=self.local_provider('not json at all')))
+		row.refresh_from_db()
+		self.assertEqual(row.local_checks, {})
+
+	def test_a_provider_error_is_caught(self, _log):
+		row = self.row()
+		provider = self.local_provider('x')
+		provider.complete.side_effect = ai_providers.AIProviderError('down')
+		self.assertFalse(triage.suggest_local_checks(row, provider=provider))
+		row.refresh_from_db()
+		self.assertEqual(row.local_checks, {})

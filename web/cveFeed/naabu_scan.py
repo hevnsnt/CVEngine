@@ -4,11 +4,12 @@ nmap's own discovery is what limits it: ``--top-ports 1000`` misses services on 
 full ``-p-`` with ``-sV`` is far too slow. naabu (SYN mode) finds the open TCP ports of every address in a few minutes at a
 polite rate, and nmap then runs ``-sV -O`` only on those ports: full coverage for about the cost of today's pass.
 
-It is optional and never a dependency of the pipeline: with no naabu binary (``CVENGINE_NAABU_BIN`` or ``naabu`` on the PATH), a
-failed or timed out run, or an answer that looks like a firewall accepting everything, ``discover`` returns None and
-``nmap_scan`` keeps today's ``--top-ports 1000`` flags. The run waits for memory under the ``naabu`` heavy-job kind, is
-claimed in the ledger so two pipelines never scan the same address, and each address is scanned at most once per ledger TTL
-(7 days, ``CVENGINE_TTL_NAABU``). Targets go to naabu through a ``-list`` file, never the command line.
+It runs by default (``CVENGINE_NAABU=0`` turns it off) and is never a hard dependency of the pipeline: with no naabu binary
+(``CVENGINE_NAABU_BIN`` or ``naabu`` on the PATH), a failed or timed out run, or an answer that looks like a firewall
+accepting everything, ``discover`` returns None and ``nmap_scan`` keeps today's ``--top-ports 1000`` flags. The run waits
+for memory under the ``naabu`` heavy-job kind, is claimed in the ledger so two pipelines never scan the same address, and
+each address is scanned at most once per ledger TTL (7 days, ``CVENGINE_TTL_NAABU``). Targets go to naabu through a
+``-list`` file, never the command line.
 """
 import json
 import logging
@@ -29,9 +30,11 @@ RUN_TIMEOUT_MAX = 3 * 3600
 
 
 def enabled():
-    """naabu is opt-in (CVENGINE_NAABU=1): a full port sweep costs about a minute per address at the default rate, far too
-    slow for hundreds of targets, and the binary is in the image anyway, so being installed must not switch it on."""
-    return os.environ.get('CVENGINE_NAABU', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    """naabu runs by default: nmap's own --top-ports 1000 misses real services (8443, 9200, 27017, and the like), and the
+    only other way to catch them is the background full-port sweep, which can take days to reach a given host. The cost is
+    real too, about a minute per address at the default rate, so a install scanning hundreds of targets on a tight schedule
+    may want CVENGINE_NAABU=0 to fall back to nmap's top-1000 pass alone; CVENGINE_NAABU_RATE raises the rate instead."""
+    return os.environ.get('CVENGINE_NAABU', '1').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def naabu_path():

@@ -18,7 +18,7 @@ It is gated because the feature sends data to outside platforms, and a report an
 | Programs | Search and filter HackerOne, Bugcrowd, Intigriti, and YesWeHack programs by reward, safe harbor, new programs, recent scope changes, and payout, with each program's scope and a host checker |
 | Scope changes | Every scope entry or program that appeared, left, or moved between in and out of scope in the last 180 days |
 | Your targets | Domain targets in the project that a program lists, with the verdict of each |
-| Engagements | A program the project works: policy acknowledgement, a switch for "the policy allows automated scanning", notes, and scope import |
+| Engagements | A program the project works (its own project in the Bug Bounty org): policy acknowledgement, a switch for "the policy allows automated scanning", notes, and scope import |
 | Reports | Drafts from scanner findings, the checks, copy-ready fields, submission, and a timeline per report |
 | Playbook | How to take part and report, from the platforms' own published guidance, with sources |
 | My accounts | Your own HackerOne API credentials: your HackerOne **username** (the name in `hackerone.com/<username>`, not your email) and an API token from Settings, API Token on hackerone.com. **Test** says why HackerOne refused, if it did. |
@@ -45,9 +45,9 @@ Address ranges are converted to the CIDR blocks that cover them exactly. A block
 
 ## Working a program
 
-1. **Work this program** creates an engagement in the current project.
+1. **Work this program** creates the engagement in that program's own project, inside a **Bug Bounty** organization (created the first time one is worked): one project per engagement, named after the program (`bb-<platform>-<handle>`), never mixed into a client's project. The page then moves to that project. Whoever creates it becomes its admin; another authorized user who works the same program is told which project it is in (`409`) and needs a member to add them, so nobody is silently shown someone else's drafts. An App Admin sees every one. The audit role cannot create one. Engagements made before this stay in the project they were made in and keep working.
 2. **I read the policy** records who read it, when, and the scope at that time. If the scope changes later, the engagement and its reports warn.
-3. **Import scope as targets** previews first, then needs the acknowledgement, and imports up to 200 targets. Wildcards become their base domain and URLs their host. Blocks over 64 addresses, mobile apps, source code, and prose entries are listed as not imported, with the reason. Discovery starts only if you ticked that the policy allows automated scanning. Excluded hosts stay excluded.
+3. **Import scope as targets** (into the engagement's project) previews first, then needs the acknowledgement, and imports up to 200 targets. Wildcards become their base domain and URLs their host. Blocks over 64 addresses, mobile apps, source code, and prose entries are listed as not imported, with the reason. Discovery starts only if you ticked that the policy allows automated scanning. Excluded hosts stay excluded.
 
 ## Reports
 
