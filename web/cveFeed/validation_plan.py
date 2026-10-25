@@ -123,7 +123,11 @@ def generate_candidate(project_id, cve, provider):
     if claim is None:
         return {'status': 'deferred', 'reason': why}
     try:
-        candidate = templategen.generate_template(cve, provider, project=project_id, candidate_only=True)
+        try:
+            candidate = templategen.generate_template(cve, provider, project=project_id, candidate_only=True)
+        except templategen.TemplateBudgetExceeded as exc:  # no AI call was made, so the planning budget is not charged
+            TriageCall.objects.filter(pk=claim.pk).delete()
+            return {'status': 'deferred', 'reason': str(exc)}
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='succeeded', finished_at=timezone.now())
         return {'id': candidate.pk, 'status': candidate.status, 'reason': candidate.validation_output[:500],
                 'provenance': 'AI-authored draft; static, syntax and benign fixture gates only'}

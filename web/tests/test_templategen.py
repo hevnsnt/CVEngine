@@ -220,6 +220,11 @@ class RunTimeHitTests(unittest.TestCase):
 
 
 class ValidateBeforeSaveTests(unittest.TestCase):
+	def setUp(self):  # the generation budget is covered by GenerationBudgetTests
+		lease = mock.patch.object(templategen, '_generation_lease', return_value='cvengine:templategen:test')
+		lease.start()
+		self.addCleanup(lease.stop)
+
 	def test_on_demand_candidate_stays_draft_after_syntax_and_benign_fixture(self):
 		provider = mock.Mock(model='m')
 		provider.name = 'test'
@@ -277,6 +282,7 @@ class ValidateBeforeSaveTests(unittest.TestCase):
 		self.assertEqual(tmpl.status, 'invalid')
 
 
+import datetime
 import os
 from unittest import mock
 
@@ -284,7 +290,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import templategen
-from cveFeed.models import CVEEntry, CVEMatch
+from cveFeed.models import CVEEntry, CVEMatch, GeneratedTemplate
 from dashboard.models import Org, Project
 from startScan.models import EngineType, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -382,3 +388,49 @@ class RecordOutcomesTests(TestCase):
 
 if __name__ == '__main__':
 	unittest.main()
+
+
+class GenerationBudgetTests(TestCase):
+	def setUp(self):
+		from django.core.cache import cache
+		cache.clear()
+		self.provider = mock.Mock(model='m')
+		self.provider.name = 'test'
+		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-0101', cvss=9.8, title='t', published_at=timezone.now())
+
+	def generate(self, cve=None):
+		with mock.patch.object(templategen, '_generate_template', return_value='written') as write:
+			return templategen.generate_template(cve or self.cve, self.provider), write
+
+	def test_one_attempt_per_cve_inside_the_window_whatever_its_outcome(self):
+		GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='', status=GeneratedTemplate.STATUS_INVALID)
+		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already attempted'):
+			self.generate()
+		GeneratedTemplate.objects.update(created_at=timezone.now() - datetime.timedelta(days=8))
+		self.assertEqual(self.generate()[0], 'written')
+
+	def test_daily_budget_across_all_cves(self):
+		for i in range(templategen.generation_limit('TEMPLATE_GEN_MAX_PER_DAY')):
+			other = CVEEntry.objects.create(cve_id=f'CVE-2099-02{i:02d}', title='t', published_at=timezone.now())
+			GeneratedTemplate.objects.create(cve_entry=other, yaml='')
+		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'daily'):
+			self.generate()
+		with mock.patch.dict(os.environ, {'CVENGINE_TEMPLATE_GEN_MAX_PER_DAY': '50'}):
+			self.assertEqual(self.generate()[0], 'written')
+
+	def test_a_cve_being_written_is_not_written_twice_and_the_lease_is_released(self):
+		from django.core.cache import cache
+		cache.add(f'cvengine:templategen:{self.cve.pk}', 1)
+		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already being written'):
+			self.generate()
+		cache.clear()
+		self.generate()
+		self.generate()  # the lease from the first call was released (no row was written by the stub)
+
+	def test_scan_path_reports_the_budget_instead_of_calling_the_ai(self):
+		GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='')
+		with mock.patch('cveFeed.validation.resolve_template', return_value=(None, 'no installed template')):
+			outcome = templategen.run_cve_tests(self.cve, ['www.acme.example'], provider=self.provider, project=None)
+		self.assertEqual(outcome['source'], 'none')
+		self.assertIn('already attempted', outcome['reason'])
+		self.provider.complete.assert_not_called()
