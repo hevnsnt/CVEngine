@@ -15,7 +15,7 @@ Why it is gated: the feature sends data to outside platforms, and the report tex
 
 | Tab | What it gives you |
 | --- | --- |
-| Overview | Counts of drafts, open and resolved reports, bounties received, and what needs attention (scope that changed after you read a policy, reports stuck waiting) |
+| Overview | A live status dashboard for the targets your engagements imported: identified hosts (checked against each program's own scope, with out-of-scope hosts listed so nobody tests them), scans running, queued and stalled, potential findings (open scanner findings of low severity or worse that no report covers yet, each with a Draft report button), CVE matches that need validation, and a row per program. Below it: drafts, open and resolved reports, bounties received, and what needs attention (scope that changed after you read a policy, reports stuck waiting). The numbers use the same definitions as the dashboard and the Findings page and refresh every 8 seconds while the page is visible |
 | Programs | Search and filter programs on HackerOne, Bugcrowd, Intigriti and YesWeHack by reward, safe harbor, new programs, recent scope changes and payout, with the scope list of each and a host checker |
 | Scope changes | Every scope entry or program that appeared, left or moved between in and out of scope since the catalogue was first loaded |
 | Your targets | Domain targets in the project that a program lists, with the verdict of each |
@@ -49,6 +49,10 @@ Address ranges written as `a.b.c.d - e.f.g.h` are converted to the CIDR blocks t
 1. **Work this program** creates an engagement in the current project.
 2. **I read the policy** records who read it and when, and the program's scope at that time. If the scope changes later, the engagement shows it and reports to that program warn.
 3. **Import scope as targets** previews first. Wildcards become their base domain, URLs their host. A block of more than 64 addresses, mobile apps, source code and prose entries are listed as not imported with the reason. Importing needs the acknowledgement. Discovery starts only if you also ticked that the policy allows automated scanning; otherwise targets are only added. Targets the organization excluded stay excluded, and addresses the scanner may not touch are refused as everywhere else.
+
+## Status dashboard
+
+The Overview reads `GET /cve/api/bounty/workbench?project=<slug>` (same access rule as the rest of the page). It covers engagements that are not `done`, and only the domain targets they imported; a CIDR or address that could not be imported as a domain is counted under Targets, not Hosts. Each host is checked against its program's scope with the same checker as the Programs tab, up to 5000 hosts per engagement (the table says so when it stops). A host that two programs list is counted once in the totals. A finding counts as "in a report" when a report of the same program already points at it.
 
 ## Reports
 

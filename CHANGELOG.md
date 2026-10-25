@@ -6,6 +6,10 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 
 ## Unreleased
 
+### Added
+
+- **Bug bounty status dashboard.** The Overview now opens on what is happening on the targets your engagements imported: identified hosts and how many are live, how many are in scope, out of scope or unclear for each program (out-of-scope hosts are listed), scans running, queued and stalled, potential findings with a Draft report button, CVE matches that need validation with a link that runs Validate now, and a row per program. It reads `/cve/api/bounty/workbench`, uses the counting definitions in `web/cveFeed/counts.py`, and refreshes every 8 seconds while the page is visible.
+
 ### Fixed
 
 - **Numbers agree everywhere.** One definition per number (`web/cveFeed/counts.py`) now feeds the dashboard status line, the section pages' chips, the Targets table, the attack-surface map, the graph overview and the agent API. Before, the status line counted host rows (874), the Hosts page distinct hosts (659) and the map only live hosts, capped (163). Now Hosts is distinct hosts per project everywhere, the map header reads "N live of M hosts", a host held by two targets counts once, the Targets table's Exposed column leaves out what the AI ruled out (as the dashboard does), the dashboard's Scanner findings tile counts exactly what the Findings page shows under Scanner, Actionable (open, low or worse), the CVE matches page opens on matches not ruled out (a filter shows the rest), the Scans page counts a scan marked running for over 11 hours as Stalled (as the dashboard does), and a host's Open findings tile counts open findings of low severity or worse with informational detections listed apart. Every dashboard tile says what it counts. `tests/test_counts.py` pins each surface against the others.

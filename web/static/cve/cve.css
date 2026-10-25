@@ -817,6 +817,8 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:#f4f4f5;bor
 
 /* bug bounty */
 .bb-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:14px 0}
+a.bb-tile{text-decoration:none;color:inherit;display:block}
+a.bb-tile:hover,a.bb-tile:focus-visible{border-color:var(--ink)}
 .bb-tile .bb-n{font:700 28px var(--mono);letter-spacing:-.02em}
 .bb-tile .bb-l{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-top:2px}
 .bb-ed{display:grid;gap:0 16px;grid-template-columns:1fr;margin:14px 0}

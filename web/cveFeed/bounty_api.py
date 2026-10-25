@@ -698,6 +698,104 @@ def stats(request, user):
             "scope_changed": [{"engagement_id": e.id, "program": e.program.name} for e in changed if e.ack_content_hash != e.program.content_hash][:20]}
 
 
+# --- the workbench: what is happening on the targets an engagement imported ----------------------------
+
+WORKBENCH_HOST_CAP = 5000  # hosts checked against a program's scope per engagement; more than this is said, not hidden
+WORKBENCH_LIST = 15
+
+
+def _empty_scope():
+    return {"in_scope": 0, "out_of_scope": 0, "ambiguous": 0, "not_listed": 0}
+
+
+def workbench(request, user):
+    """Current scans, potential findings and identified hosts for the targets the project's engagements imported, read with the same
+    definitions as every other count (``cveFeed.counts``): what the dashboard, the Hosts page and the Findings page show for those
+    targets is what is shown here. Hosts are checked against each program's own scope, because discovery finds hosts a program does
+    not allow testing, and the page should say so before anyone does."""
+    from cveFeed import bounty_scope, counts
+    from startScan.models import ScanHistory, Vulnerability
+
+    project = _project(request, {})
+    engagements = list(BountyEngagement.objects.filter(project=project).exclude(status="done").select_related("program").order_by("-updated_at")[:100])
+    sev_name = services.SEVERITY_NAMES
+    domain_of = {}  # engagement id -> [domain ids]
+    for t in BountyEngagementTarget.objects.filter(engagement__in=engagements, domain__isnull=False).values("engagement_id", "domain_id"):
+        domain_of.setdefault(t["engagement_id"], []).append(t["domain_id"])
+    target_count = {r["engagement_id"]: r["n"] for r in BountyEngagementTarget.objects.filter(engagement__in=engagements).values("engagement_id").annotate(n=Count("id"))}
+    reported = {}  # (program id) -> vulnerability ids that already have a report
+    for r in BountyReport.objects.filter(project=project, finding_kind="vuln", finding_id__isnull=False).values("program_id", "finding_id"):
+        reported.setdefault(r["program_id"], set()).add(r["finding_id"])
+    reports_by = {}
+    for r in BountyReport.objects.filter(project=project, engagement__in=engagements).values("engagement_id", "status").annotate(n=Count("id")):
+        reports_by.setdefault(r["engagement_id"], {})[r["status"]] = r["n"]
+    all_ids = sorted({d for ids in domain_of.values() for d in ids})
+
+    rows, scans, potential, matches_to_check, out_hosts = [], [], [], [], []
+    for e in engagements:
+        ids = domain_of.get(e.id, [])
+        row = {"id": e.id, "status": e.status, "program": {"id": e.program_id, "name": e.program.name, "platform": e.program.platform},
+               "policy_read": bool(e.policy_ack_at), "scope_changed": bool(e.policy_ack_at and e.ack_content_hash != e.program.content_hash),
+               "targets": target_count.get(e.id, 0), "imported": len(ids), "hosts": 0, "live": 0, "hosts_capped": False, "scope": _empty_scope(),
+               "scans": {"running": 0, "queued": 0, "stalled": 0}, "findings": 0, "potential": 0, "matches": 0, "needs_validation": 0,
+               "reports": reports_by.get(e.id, {})}
+        if ids:
+            reps = counts.host_reps(domain_ids=ids)
+            names = list(reps.order_by("name").values_list("name", flat=True)[:WORKBENCH_HOST_CAP + 1])
+            row["hosts"] = reps.count()
+            row["live"] = reps.filter(counts.LIVE_HOST_Q).distinct().count()
+            row["hosts_capped"] = len(names) > WORKBENCH_HOST_CAP
+            index = bounty_scope.ScopeIndex(e.program.assets.filter(removed_at__isnull=True))
+            for name in names[:WORKBENCH_HOST_CAP]:
+                verdict = index.check(name)
+                row["scope"][verdict.state] += 1
+                if verdict.state == bounty_scope.OUT and len(out_hosts) < WORKBENCH_LIST:
+                    out_hosts.append({"host": name, "program": e.program.name, "engagement_id": e.id, "reason": verdict.reason})
+            qs = ScanHistory.objects.filter(domain_id__in=ids)
+            row["scans"] = {"running": counts.running_scans(qs).count(), "queued": counts.queued_scans(qs).count(), "stalled": counts.stalled_scans(qs).count()}
+            vulns = counts.actionable_findings(Vulnerability.objects.filter(target_domain_id__in=ids))
+            row["findings"] = vulns.count()
+            done = reported.get(e.program_id, set())
+            todo = vulns.exclude(pk__in=done).select_related("subdomain").order_by("-severity", "-id")
+            row["potential"] = todo.count()
+            for v in todo[:WORKBENCH_LIST]:
+                potential.append({"kind": "vuln", "id": v.id, "name": v.name, "severity": sev_name.get(v.severity, str(v.severity)), "rank": v.severity,
+                                  "host": v.subdomain.name if v.subdomain_id else None, "program": e.program.name, "engagement_id": e.id})
+            ms = counts.exposed_matches().filter(subdomain__target_domain_id__in=ids)
+            row["matches"] = ms.count()
+            need = ms.filter(triage__classification="needs_validation")
+            row["needs_validation"] = need.count()
+            for m in need.select_related("cve_entry", "subdomain").order_by("-id")[:WORKBENCH_LIST]:
+                matches_to_check.append({"kind": "match", "id": m.id, "cve": m.cve_entry.cve_id, "host": m.subdomain.name if m.subdomain_id else None,
+                                         "program": e.program.name})
+        rows.append(row)
+
+    totals = {"engagements": len(rows), "targets": sum(r["targets"] for r in rows), "imported": len(all_ids), "hosts": 0, "live": 0,
+              "scope": _empty_scope(), "scans": {"running": 0, "queued": 0, "stalled": 0}, "findings": sum(r["findings"] for r in rows),
+              "potential": sum(r["potential"] for r in rows), "matches": sum(r["matches"] for r in rows),
+              "needs_validation": sum(r["needs_validation"] for r in rows)}
+    if all_ids:
+        reps = counts.host_reps(domain_ids=all_ids)  # one host once, however many programs list it
+        totals["hosts"], totals["live"] = reps.count(), reps.filter(counts.LIVE_HOST_Q).distinct().count()
+        qs = ScanHistory.objects.filter(domain_id__in=all_ids)
+        totals["scans"] = {"running": counts.running_scans(qs).count(), "queued": counts.queued_scans(qs).count(), "stalled": counts.stalled_scans(qs).count()}
+        recent = list(qs.select_related("domain").order_by("-id")[:40])
+        active = [s for s in recent if s.scan_status in (-1, 1)]
+        finished = [s for s in recent if s.scan_status not in (-1, 1)][:5]
+        eng_of = {d: e for e in engagements for d in domain_of.get(e.id, [])}
+        for s in active + finished:
+            e = eng_of.get(s.domain_id)
+            scans.append({"id": s.id, "target": s.domain.name, "status": s.scan_status, "started": _iso(s.start_scan_date),
+                          "stalled": s.scan_status == 1 and s.start_scan_date < timezone.now() - counts.RUNNING_WINDOW,
+                          "program": e.program.name if e else None})
+    for r in rows:
+        for k in totals["scope"]:
+            totals["scope"][k] += r["scope"][k]
+    potential.sort(key=lambda p: (-p["rank"], -p["id"]))
+    return {"project": project.slug, "updated": _iso(timezone.now()), "totals": totals, "engagements": rows, "scans": scans[:WORKBENCH_LIST],
+            "potential": potential[:WORKBENCH_LIST], "matches": matches_to_check[:WORKBENCH_LIST], "out_of_scope_hosts": out_hosts}
+
+
 # --- the user's own platform accounts -----------------------------------------------------------
 
 def credential_set(request, user, platform):
@@ -756,7 +854,7 @@ ROUTES = [
     ("PATCH", r"reports/(?P<report_id>\d+)", reports_update), ("DELETE", r"reports/(?P<report_id>\d+)", reports_delete),
     ("POST", r"reports/(?P<report_id>\d+)/redact", reports_redact), ("GET", r"reports/(?P<report_id>\d+)/export", reports_export),
     ("POST", r"reports/(?P<report_id>\d+)/submit", reports_submit), ("POST", r"reports/(?P<report_id>\d+)/mark-submitted", reports_mark_submitted),
-    ("GET", r"stats", stats), ("GET", r"taxonomy", taxonomy), ("GET", r"playbook", playbook),
+    ("GET", r"stats", stats), ("GET", r"workbench", workbench), ("GET", r"taxonomy", taxonomy), ("GET", r"playbook", playbook),
     ("PUT", r"credentials/(?P<platform>[a-z]+)", credential_set), ("DELETE", r"credentials/(?P<platform>[a-z]+)", credential_clear),
     ("POST", r"credentials/(?P<platform>[a-z]+)/test", credential_test),
 ]

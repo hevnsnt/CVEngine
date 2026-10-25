@@ -2,7 +2,7 @@
 // policy acknowledgement, and reports drafted from scanner findings, checked, and tracked. Every value from the server is shown with
 // textContent; every link has to be https. The server decides who may use this page and what each action may do.
 import { ask, api, badge, button, dialog, el, field, selectOf, shortDate, table, tabs, text, toast } from "/staticfiles/cve/ui.js";
-import { hostAnchor } from "/staticfiles/cve/links.js";
+import { findingHref, hostAnchor, needsValidation } from "/staticfiles/cve/links.js";
 
 // a host of this project, named in a line of text, links to its record
 const hostLine = (name, rest) => {
@@ -71,7 +71,29 @@ async function overviewTab(panel) {
   const [status, stats] = await Promise.all([get("status"), project ? get("stats") : Promise.resolve(null)]);
   panel.textContent = "";
   const loaded = status.catalogue.some((c) => c.loaded);
-
+  if (project) {
+    const bench = el("div");
+    panel.append(bench);
+    mountWorkbench(bench);
+  }
+  if (stats) {
+    const tiles = el("div", "bb-grid");
+    const tile = (label, value, hint) => { const c = el("div", "card bb-tile"); c.append(el("div", "bb-n", String(value)), el("div", "bb-l", label)); if (hint) c.append(para(hint)); return c; };
+    const r = stats.reports;
+    const open = (r.submitted || 0) + (r.triaged || 0) + (r.needs_info || 0);
+    tiles.append(
+      tile("Drafts", (r.draft || 0) + (r.ready || 0), "not sent yet"),
+      tile("Open at programs", open, "submitted, triaged or needs info"),
+      tile("Resolved", r.resolved || 0),
+      tile("Engagements", Object.values(stats.engagements).reduce((a, b) => a + b, 0), `${stats.engagements.active || 0} active`),
+    );
+    stats.paid.forEach((p) => tiles.append(tile(`Paid ${p.currency}`.trim(), p.total, `${p.count} report${p.count === 1 ? "" : "s"}`)));
+    const attn = [];
+    stats.scope_changed.forEach((s) => attn.push(`${s.program}: the scope changed after you read its policy. Read it again.`));
+    stats.stale.forEach((s) => attn.push(`Report ${s.id} (${s.title}): ${s.why} (${s.days} days).`));
+    if (attn.length) { const c = card("Needs attention"); attn.forEach((a) => c.append(para(a, "msg busy"))); panel.insertBefore(c, panel.firstChild); }
+    panel.append(card("Reports", para("Every report in this project, with or without a program."), tiles));
+  }
   const cat = card("Program catalogue");
   cat.append(para(`Public scope data for ${Object.values(PLATFORMS).join(", ")}, from ${status.source}. It is read from raw.githubusercontent.com; nothing about you or your targets is sent.`));
   const t = table(
@@ -96,25 +118,137 @@ async function overviewTab(panel) {
   panel.append(cat);
   if (status.loading && (status.loading.requested || status.loading.running)) watchLoad(panel, progress, Date.parse(status.loading.requested) || Date.now(), status.loading);
 
-  if (stats) {
-    const tiles = el("div", "bb-grid");
-    const tile = (label, value, hint) => { const c = el("div", "card bb-tile"); c.append(el("div", "bb-n", String(value)), el("div", "bb-l", label)); if (hint) c.append(para(hint)); return c; };
-    const r = stats.reports;
-    const open = (r.submitted || 0) + (r.triaged || 0) + (r.needs_info || 0);
-    tiles.append(
-      tile("Drafts", (r.draft || 0) + (r.ready || 0), "not sent yet"),
-      tile("Open at programs", open, "submitted, triaged or needs info"),
-      tile("Resolved", r.resolved || 0),
-      tile("Engagements", Object.values(stats.engagements).reduce((a, b) => a + b, 0), `${stats.engagements.active || 0} active`),
-    );
-    stats.paid.forEach((p) => tiles.append(tile(`Paid ${p.currency}`.trim(), p.total, `${p.count} report${p.count === 1 ? "" : "s"}`)));
-    panel.append(tiles);
-    const attn = [];
-    stats.scope_changed.forEach((s) => attn.push(`${s.program}: the scope changed after you read its policy. Read it again.`));
-    stats.stale.forEach((s) => attn.push(`Report ${s.id} (${s.title}): ${s.why} (${s.days} days).`));
-    if (attn.length) { const c = card("Needs attention"); attn.forEach((a) => c.append(para(a, "msg busy"))); panel.append(c); }
-  }
   if (!loaded) panel.append(card("Start here", para("1. Load the catalogue above. 2. Programs: find one that pays and lists scope you can test. 3. Work it: read the policy, record that you did, import the scope as targets. 4. Reports: draft from a finding, fix what the checks flag, send. The Playbook tab says why each step is there, with sources.")));
+}
+
+
+// ------------------------------------------------------------------------------ status dashboard
+// What is happening on the targets the engagements imported: scans, hosts the discovery found (checked against each program's own
+// scope), findings no report covers yet, and the reports. The numbers come from the server with the same definitions as the
+// dashboard and the Findings page; the block re-reads every 8 seconds while the page is visible.
+const SCAN_WORD = { "-1": "queued", 0: "failed", 1: "running", 2: "finished", 3: "aborted" };
+const SCAN_TONE = { "-1": "info", 0: "critical", 1: "medium", 2: "success", 3: "info" };
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function mountWorkbench(box) {
+  let busy = false;
+  async function draw(first) {
+    if (busy || (document.hidden && !first)) return;
+    busy = true;
+    try {
+      const w = await get("workbench");
+      if (box.isConnected) renderWorkbench(box, w);
+    } catch (err) {
+      if (!box.childElementCount) box.append(para(`The status could not be read: ${err.message}`, "msg err"));
+    } finally {
+      busy = false;
+    }
+  }
+  draw(true);
+  const timer = setInterval(() => (box.isConnected ? draw(false) : clearInterval(timer)), 8000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && box.isConnected) draw(false); });
+}
+
+function renderWorkbench(box, w) {
+  const t = w.totals;
+  const here = `/cve/${encodeURIComponent(project)}`;
+  const out = [];
+  const head = el("div", "tools");
+  head.append(el("h2", "", "Status", { style: "margin:0;flex:1" }), el("span", "note", `Updated ${shortDate(w.updated)}`));
+  out.push(head);
+  if (!w.engagements.length) {
+    out.push(card("", para("No engagement yet. Open a program under Programs and choose Work this program; its imported targets, scans, hosts and findings show up here.", "msg busy")));
+    box.replaceChildren(...out);
+    return;
+  }
+  const tile = (label, value, hint, href) => {
+    const c = el(href ? "a" : "div", "card bb-tile");
+    if (href) c.setAttribute("href", href);
+    c.append(el("div", "bb-n", String(value)), el("div", "bb-l", label));
+    if (hint) c.append(para(hint));
+    return c;
+  };
+  const grid = el("div", "bb-grid");
+  const sc = t.scope;
+  const unclear = sc.ambiguous + sc.not_listed;
+  grid.append(
+    tile("Identified hosts", t.hosts, `${t.live} live · from ${plural(t.imported, "imported target")}`, `${here}/hosts/`),
+    tile("In scope", sc.in_scope, `${sc.out_of_scope} out of scope · ${unclear} unclear`),
+    tile("Scans running", t.scans.running, `${t.scans.queued} queued${t.scans.stalled ? ` · ${t.scans.stalled} stalled` : ""}`, `${here}/scans/`),
+    tile("Potential findings", t.potential, `of ${plural(t.findings, "open finding")} on these targets; ${t.findings - t.potential} already in a report`, `${here}/vulns/?type=scanner`),
+    tile("CVE matches to check", t.needs_validation, `of ${plural(t.matches, "match", "matches")} on these hosts`, `${here}/matches/`),
+  );
+  out.push(grid);
+
+  if (sc.out_of_scope) {
+    const c = card(`Outside the program's scope (${sc.out_of_scope})`, para("Discovery finds hosts a program does not allow testing. Do not test these; reports for them are refused.", "msg err"));
+    c.append(table([
+      { label: "Host", render: (h) => hostAnchor(project, h.host) },
+      { label: "Program", render: (h) => h.program },
+      { label: "Why", cls: "full", render: (h) => h.reason },
+    ], w.out_of_scope_hosts));
+    if (sc.out_of_scope > w.out_of_scope_hosts.length) c.append(para(`Showing ${w.out_of_scope_hosts.length} of ${sc.out_of_scope}.`));
+    out.push(c);
+  }
+
+  const progs = card("By program");
+  progs.append(table([
+    { label: "Program", cls: "full", render: (e) => { const d = el("div", "row-card"); d.append(el("span", "cve-id", e.program.name), el("span", "note", `${PLATFORMS[e.program.platform] || e.program.platform} · ${e.status}`)); return d; } },
+    { label: "Targets", render: (e) => (e.targets ? `${e.imported} of ${e.targets} imported` : "none yet") },
+    { label: "Hosts", render: (e) => (e.hosts ? `${e.live} live of ${e.hosts}${e.hosts_capped ? "+" : ""}` : "0") },
+    { label: "Scope", render: (e) => (e.hosts ? `${e.scope.in_scope} in · ${e.scope.out_of_scope} out · ${e.scope.ambiguous + e.scope.not_listed} unclear` : "") },
+    { label: "Scans", render: (e) => `${e.scans.running} running · ${e.scans.queued} queued${e.scans.stalled ? ` · ${e.scans.stalled} stalled` : ""}` },
+    { label: "Potential", render: (e) => String(e.potential) },
+    { label: "To check", render: (e) => String(e.needs_validation) },
+    { label: "Reports", render: (e) => { const r = e.reports; const open = (r.submitted || 0) + (r.triaged || 0) + (r.needs_info || 0); return `${(r.draft || 0) + (r.ready || 0)} draft · ${open} open`; } },
+    { label: "Policy", render: (e) => (!e.policy_read ? badge("not read", "medium") : e.scope_changed ? badge("scope changed", "critical") : badge("read", "success")) },
+    { label: "", render: (e) => button("Open", async () => openProgram(e.program.id), "btn ghost sm") },
+  ], w.engagements));
+  out.push(progs);
+
+  const scans = card("Current scans");
+  if (!w.scans.length) scans.append(para(t.imported ? "No scans on these targets yet." : "No targets imported yet, so nothing is scanned. Open an engagement and import its scope.", "msg busy"));
+  else {
+    scans.append(table([
+      { label: "Scan", render: (x) => el("a", "", `#${x.id}`, { href: `${here}/scans/${x.id}/` }) },
+      { label: "Target", render: (x) => hostAnchor(project, x.target) },
+      { label: "Program", render: (x) => x.program || "" },
+      { label: "Status", render: (x) => (x.stalled ? badge("stalled", "critical") : badge(SCAN_WORD[x.status] || x.status, SCAN_TONE[x.status] || "info")) },
+      { label: "Started", render: (x) => shortDate(x.started) },
+    ], w.scans));
+  }
+  out.push(scans);
+
+  const pot = card("Potential findings", para("Open scanner findings of low severity or worse on these targets that no report covers yet. They are leads: reproduce each one before you write it up.", "note"));
+  if (!w.potential.length) pot.append(para("Nothing waiting. New scanner findings on these targets appear here.", "msg busy"));
+  else {
+    pot.append(table([
+      { label: "Severity", render: (f) => badge(f.severity, f.severity) },
+      { label: "Finding", cls: "full", render: (f) => el("a", "host-link", f.name, { href: findingHref(project, "vulnerability", f.id) }) },
+      { label: "Host", render: (f) => (f.host ? hostAnchor(project, f.host) : "") },
+      { label: "Program", render: (f) => f.program },
+      { label: "", render: (f) => button("Draft report", async () => {
+        await send("POST", "reports", { engagement_id: f.engagement_id, vulnerability_id: f.id });
+        toast("Draft created. It is under Reports.");
+        const tab = document.querySelector('[data-tab="reports"]');
+        if (tab) tab.click();
+      }, "btn ghost sm") },
+    ], w.potential));
+    if (t.potential > w.potential.length) pot.append(para(`Showing the ${w.potential.length} most severe of ${t.potential}. The Findings page lists them all.`));
+  }
+  out.push(pot);
+
+  if (w.matches.length) {
+    const c = card("CVE matches to check", para("CVEngine matched these CVEs to your hosts but could not confirm them. Needs validation runs the safe checks.", "note"));
+    c.append(table([
+      { label: "CVE", render: (m) => el("a", "host-link cve-link", m.cve, { href: `${here}/matches/#${m.id}` }) },
+      { label: "Host", render: (m) => (m.host ? hostAnchor(project, m.host) : "") },
+      { label: "Program", render: (m) => m.program },
+      { label: "", render: (m) => needsValidation(project, "match", m.id) },
+    ], w.matches));
+    out.push(c);
+  }
+  box.replaceChildren(...out);
 }
 
 // ------------------------------------------------------------------------------ programs
