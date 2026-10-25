@@ -11,6 +11,14 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 
+def _feed_time(value):
+    """A feed timestamp, or None when it is missing or not a real date: one malformed entry must not stop the sync."""
+    try:
+        return parse_datetime(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
 class CVEEntry(models.Model):
     cve_id = models.CharField(max_length=64, unique=True, db_index=True)
     title = models.TextField(blank=True, default="")
@@ -99,8 +107,8 @@ class CVEEntry(models.Model):
             "references": entry.get("references") or [],
             "sources": entry.get("sources") or [],
             "status": entry.get("status") or "",
-            "published_at": parse_datetime(entry["publishedAt"]) if entry.get("publishedAt") else None,
-            "first_seen_at": parse_datetime(entry["firstSeenAt"]) if entry.get("firstSeenAt") else None,
+            "published_at": _feed_time(entry.get("publishedAt")),
+            "first_seen_at": _feed_time(entry.get("firstSeenAt")),
             "raw": entry,
         }
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds

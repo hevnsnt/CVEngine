@@ -648,7 +648,10 @@ def api_activity(request):
     settled = list(AgentActivity.objects.filter(id__in=running_ids).exclude(status='running')) if running_ids else []
     # a line reported again is the same row with a new time and a higher repeat count: send those the client already has
     bumped = []
-    since = parse_datetime(request.GET.get('since', ''))
+    try:
+        since = parse_datetime(request.GET.get('since', ''))
+    except ValueError:  # an impossible date is no cursor, not a server error
+        since = None
     if since and after.isdigit() and int(after) > 0:
         bumped = list(AgentActivity.objects.filter(id__lte=int(after), repeat__gt=1, created_at__gt=since).order_by('id')[:50])
     return JsonResponse({'items': [_serialize_activity(a) for a in items],
