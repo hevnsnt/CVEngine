@@ -753,7 +753,7 @@ def api_activity(request):
 def api_discovery(request):
     """Live discovery: the scan being followed (given, else the latest running, else the latest) and its new events."""
     from cveFeed.discovery import queue_position
-    from startScan.models import IpAddress, Port, ScanHistory, Subdomain
+    from startScan.models import IpAddress, Port, ScanHistory
     scan_id = request.GET.get('scan', '')
     if scan_id.isdigit():
         scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain', 'scan_type').first()
@@ -766,14 +766,17 @@ def api_discovery(request):
     events = DiscoveryEvent.objects.filter(scan=scan)
     events = events.filter(id__gt=int(after)) if after.isdigit() else events.order_by('-id')[:60]
     events = sorted(events, key=lambda e: e.id)
-    subs = Subdomain.objects.filter(scan_history=scan)
-    ips = IpAddress.objects.filter(ip_addresses__in=subs).distinct()
+    # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
+    # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
+    from cveFeed.counts import LIVE_HOST_Q, host_reps
+    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
+    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
     return JsonResponse({
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': {'hosts': subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips).distinct().count()},
+        'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips).distinct().count()},
     })
 
 

@@ -30,6 +30,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Findings counted wrongly.** `save_vulnerability` returned the created flag of its last tag, CVE or reference lookup instead of the finding's own, so new-finding counts were off.
 - **Test suite.** `tests.test_hard_lockout` calls the current lockout helpers, and the placeholder `tests.test_nmap` is gone with the code it was meant to test.
 - **Unreviewed NSE scripts showing up in service output.** nmap's `-sV` silently runs its whole "version" script category (`rpcinfo`, `hnap-info`, `vmware-version`, and more) on top of whatever `--script` asked for, and writes their output to the XML cvENGINE parses, win or error. None of those scripts have been reviewed for the read-only guarantee the rest of this list has, so they are now dropped before anything is stored, searched, or shown. A one-time migration scrubs any already stored on an upgrade, instead of leaving it there until that host's next scan.
+- **The dashboard's live-discovery counts undercounted the graph above them.** Hosts, IPs and open ports were totaled from only the scan being followed, so a rescan that added one host to an already-populated project read as "1 host" under a graph showing everything found to date. They now total the same live inventory the graph draws.
 
 ## v1.0.1 (2026-10-25)
 

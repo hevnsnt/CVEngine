@@ -814,6 +814,30 @@ class DiscoveryCountsTests(TestCase):
 		d = client_for(user).get(f'/cve/api/discovery?scan={scan.id}').json()
 		self.assertEqual(d['counts'], {'hosts': 3, 'ips': 2, 'ports': 4})
 
+	def test_counts_total_every_live_host_not_only_the_followed_scan(self):
+		"""The graph drawn above the ticker is the whole project's live map (every host a completed scan or rescan has
+		found so far), not just the scan being followed, so the counts below it must total the same picture; otherwise
+		a rescan that adds one host reads as "1 host" under a graph showing everything found to date."""
+		from cveFeed.discovery import HOST_PIPELINE_TASK
+		from tests.test_tenancy import client_for
+		from django.contrib.auth.models import User
+		from dashboard.models import ProjectMembership
+		org = Org.objects.create(name='D', slug='d-one')
+		project = Project.objects.create(name='Dp', slug='dp-one', insert_date=timezone.now(), org=org)
+		domain = Domain.objects.create(name='total.example', project=project, insert_date=timezone.now())
+		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		full = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+		old = Subdomain.objects.create(scan_history=full, target_domain=domain, name='old.total.example')
+		old.ip_addresses.add(IpAddress.objects.create(address='192.0.2.9', os_guess=''))
+		rescan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(),
+		                                    scan_status=2, tasks=[HOST_PIPELINE_TASK])
+		new = Subdomain.objects.create(scan_history=rescan, target_domain=domain, name='new.total.example')
+		new.ip_addresses.add(IpAddress.objects.create(address='192.0.2.10', os_guess=''))
+		user = User.objects.create_user('totaluser', password='x')
+		ProjectMembership.objects.create(user=user, project=project, role='user')
+		d = client_for(user).get(f'/cve/api/discovery?scan={rescan.id}&project=dp-one').json()
+		self.assertEqual(d['counts'], {'hosts': 2, 'ips': 2, 'ports': 0})  # old.total.example counts too, not only the followed rescan's own row
+
 
 class BbotUrlTests(TestCase):
 	def setUp(self):
