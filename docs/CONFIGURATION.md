@@ -54,6 +54,7 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | `CVENGINE_FULLSCAN_INTERVAL_MIN`, `_BATCH`, `_INVESTIGATE_MAX` | `10`, `1`, `50` | Minutes between sweeps (read when the schedule is created), IPs per sweep, and new ports fingerprinted per sweep. |
 | `CVENGINE_NAABU` | `0` | Set to `1` to run a naabu full-port discovery before nmap. |
 | `CVENGINE_NAABU_BIN`, `CVENGINE_NAABU_RATE`, `CVENGINE_TTL_NAABU` | `naabu`, `1000`, `168` | The binary, packets per second (100 to 5000), and how long an IP's result stays fresh. |
+| `CVENGINE_HYGIENE_RDAP` | `1` | Set to `0` to skip the registry (RDAP) lookups that check whether SPF includes and DMARC report domains are registered. |
 | `CVENGINE_TRIAGE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `100`, `500`, `2000` | AI triage questions per run, per project per day, and per day. One question serves every finding with the same evidence. |
 | `CVENGINE_VALIDATE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `50`, `300`, `1500` | Validation checks per task, per project per day, and per day. |
 | `CVENGINE_RETEST_MAX_HOSTS` | `25` | Hosts re-tested right away after a change in one scan. The rest wait for the five-minute sweep. |

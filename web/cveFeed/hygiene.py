@@ -137,7 +137,10 @@ def evaluate_dmarc(domain, txt_records, has_mx):
                                 'Good. p=reject is the strongest setting.', domain, {'record': dmarc[0]}))
     pct = tags.get('pct')
     if pct and pct.isdigit() and int(pct) < 100 and policy != 'none':
-        findings.append(Finding('dmarc_partial', LOW, f'DMARC applies to only {pct}% of mail', 'Raise pct to 100.', domain, {'pct': int(pct)}))
+        weaker = 'quarantine' if policy == 'reject' else 'none'
+        findings.append(Finding('dmarc_partial', LOW, f'DMARC applies to only {pct}% of mail',
+                                f'The other {100 - int(pct)}% of failing mail is treated as p={weaker} (RFC 7489 §6.6.4). Raise pct to 100.',
+                                domain, {'pct': int(pct)}))
     if not tags.get('rua'):
         findings.append(Finding('dmarc_no_reports', LOW, 'DMARC has no aggregate report address (rua)',
                                 'Without reports you cannot see who is sending as this domain.', domain, {'record': dmarc[0]}))
@@ -372,19 +375,41 @@ def has_record(name, rtype, resolver=None):
         return False
 
 
-def email_findings(domain, fetch=fetch_txt, mx=has_record):
-    """SPF, DMARC, DKIM and CAA review for one domain, with injectable DNS for tests."""
+def fetch_records(name, rtype, resolver=None):
+    """Any record type as text (MX "10 mx.example.com.", TLSA, DNSKEY, NS), [] when there is none or DNS fails."""
+    import dns.exception
+    import dns.resolver
+    try:
+        return [rdata.to_text() for rdata in (resolver or _resolver()).resolve(name, rtype)]
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers, dns.exception.Timeout, dns.exception.DNSException):
+        return []
+
+
+def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None):
+    """SPF, DMARC, DKIM and CAA review for one domain, plus the checks adapted from MailFail (cveFeed.mailfail), with
+    injectable DNS for tests. With injected DNS, other record types default to none and no outbound request is made."""
+    from cveFeed import mailfail
+    real_dns = fetch is fetch_txt
+    records = records or (fetch_records if real_dns else (lambda name, rtype: []))
     has_mx = mx(domain, 'MX')
     txt = fetch(domain)
     findings = evaluate_spf(domain, txt, has_mx, count_spf_lookups(domain, fetch))
-    findings += evaluate_dmarc(domain, fetch(f'_dmarc.{domain}'), has_mx)
-    found = {}
-    for selector in DKIM_SELECTORS:
-        for record in fetch(f'{selector}._domainkey.{domain}'):
-            if 'v=dkim1' in record.lower() or 'p=' in record.lower():
-                found[selector] = record
+    dmarc = fetch(f'_dmarc.{domain}')
+    findings += evaluate_dmarc(domain, dmarc, has_mx)
+    selectors = DKIM_SELECTORS + mailfail.EXTRA_DKIM_SELECTORS
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        answers = pool.map(lambda selector: fetch(f'{selector}._domainkey.{domain}'), selectors)
+        found = {}
+        for selector, rows in zip(selectors, answers):
+            for record in rows:
+                if 'v=dkim1' in record.lower() or 'p=' in record.lower():
+                    found[selector] = record
     findings += evaluate_dkim(domain, found, has_mx)
     findings += evaluate_caa(domain, mx(domain, 'CAA'))
+    try:
+        findings += mailfail.review(domain, has_mx, txt, dmarc, found, fetch, records, http=real_dns)
+    except Exception:  # noqa: BLE001 - the established checks above stand on their own
+        logger.exception('MailFail checks failed for %s', domain)
     return findings, has_mx
 
 
@@ -464,9 +489,21 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
                 cert_changes += 1
             found += evaluate_cert(info, now=now)
     mail_hosts = email_domains(domain, mx) if hosts is None else ([domain.name] if domain.name in hosts and not is_ip(domain.name) else [])
+    if mail_hosts:  # the email review includes the checks adapted from MailFail: credit it where people watch the work
+        from cveFeed.mailfail import CREDIT
+        shown = ', '.join(mail_hosts[:3]) + (f' and {len(mail_hosts) - 3} more' if len(mail_hosts) > 3 else '')
+        credited = activity.log('hygiene', f'Running MailFail email-security checks on {shown} '
+                                '(MailFail by Black Hills Information Security)', project=project, status='running', credit=CREDIT)
+    mail_found = []
     for name in mail_hosts:
         findings, _ = emailer(name)
-        found += findings
+        mail_found += findings
+    found += mail_found
+    if mail_hosts:
+        issues = len([f for f in mail_found if f.severity >= LOW and (f.evidence or {}).get('credit') == CREDIT])
+        activity.settle(credited, 'done', message=(
+            f'MailFail checks (Black Hills Information Security) on {shown}: {issues} issue{"s" if issues != 1 else ""}'),
+            credit=CREDIT, mail_domains=len(mail_hosts), issues=issues)
 
     keep = set()
     for f in found:
