@@ -59,7 +59,7 @@ class ParseXmlTests(TestCase):
 		self.assertEqual(host['ports'], [{
 			'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh',
 			'product': 'OpenSSH', 'version': '8.9', 'service_extra': 'Ubuntu', 'ostype': '',
-			'cpe': '', 'cpes': [], 'method': '',
+			'cpe': '', 'cpes': [], 'method': '', 'scripts': {}, 'banner': '',
 		}])
 
 
