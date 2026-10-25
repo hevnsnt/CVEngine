@@ -3,9 +3,9 @@
 A fast, deterministic pre-classification of a CVE from its exploitation and
 severity signals, so the pipeline can prioritize what the AI looks at first:
 
-  fire  🔥  actively dangerous now  — CISA KEV, Exploit-DB, a critical score (CVSS 9+), or high EPSS + CVSS
-  smoke 💨  emerging / warning signs — high CVSS, or EPSS threshold reached
-  ice   🧊  cold, low-priority watch — everything else
+  fire  🔥  actively dangerous now: CISA KEV, Exploit-DB, a critical score (CVSS 9+), or high EPSS + CVSS
+  smoke 💨  emerging / warning signs: high CVSS, or EPSS threshold reached
+  ice   🧊  cold, low-priority watch: everything else
 
 Thresholds are intentionally in one place and easy to retune.
 """

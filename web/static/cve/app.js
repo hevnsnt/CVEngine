@@ -1562,7 +1562,7 @@ const pages = {
         if (job.error) assessBody.append(el("p", "note", job.error));
         (job.stages || []).forEach((stage) => {
           const state = { "-1": "queued", "0": "failed", "1": "running", "2": "completed", "3": "stopped" }[String(stage.status)] || "unknown";
-          assessBody.append(el("p", "note", `${stage.title || stage.name}: ${state}${stage.error_message ? ` — ${stage.error_message}` : ""}`));
+          assessBody.append(el("p", "note", `${stage.title || stage.name}: ${state}${stage.error_message ? `: ${stage.error_message}` : ""}`));
         });
         if (job.status === "queued" || job.status === "running") {
           assessButton.disabled = true;

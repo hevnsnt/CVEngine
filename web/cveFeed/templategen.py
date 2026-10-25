@@ -537,6 +537,38 @@ def save_template_file(template_id, yaml_text):
     return path
 
 
+def restore_missing_files():
+    """Write back the file of every validated AI template that is missing from GENERATED_DIR, from the copy kept in the database.
+    A container that is recreated (every update does) starts with an empty directory unless it is a volume; without this the
+    templates would have to be regenerated and re-reviewed after each deploy. A template is written back only if its row is still
+    ``valid``, its recorded path is inside GENERATED_DIR, and it passes the static safety gate again. Returns the counts."""
+    from cveFeed.models import GeneratedTemplate
+    generated = os.path.realpath(GENERATED_DIR)
+    restored = skipped = 0
+    for tmpl in GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).exclude(path='').select_related('cve_entry'):
+        if os.path.lexists(tmpl.path):
+            continue
+        stem, ext = os.path.splitext(os.path.basename(tmpl.path))
+        if os.path.dirname(os.path.realpath(tmpl.path)) != generated or ext != '.yaml' or not ID_RE.fullmatch(stem):
+            skipped += 1
+            continue
+        ok, reason = static_check(tmpl.yaml, expected_cve_id=tmpl.cve_entry.cve_id)
+        if not ok:
+            logger.warning('not restoring generated template %s: %s', tmpl.template_id, reason)
+            skipped += 1
+            continue
+        try:
+            save_template_file(stem, tmpl.yaml)
+        except FileExistsError:
+            continue
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning('could not restore generated template %s: %s', tmpl.template_id, exc)
+            skipped += 1
+            continue
+        restored += 1
+    return {'restored': restored, 'skipped': skipped}
+
+
 def approve_reviewed_template(template_pk):
     """Promote a draft only after a checked-in, independent CVE fixture detects
     the positive response and rejects the negative response on loopback.

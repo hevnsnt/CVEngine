@@ -111,7 +111,7 @@ if (mount) {
       hero.append(identity, signal);
       output.append(hero);
       const cards = el("div", "ai-usage-grid");
-      const successRate = data.attempts ? `${Math.round(data.successes / data.attempts * 100)}%` : "—";
+      const successRate = data.attempts ? `${Math.round(data.successes / data.attempts * 100)}%` : "-";
       const inputTokens = data.models.reduce((sum, row) => sum + (row.input_sum || 0), 0);
       const outputTokens = data.models.reduce((sum, row) => sum + (row.output_sum || 0), 0);
       const costLabel = !data.priced_attempts ? "Not priced" : money(data.known_estimated_usd);
