@@ -13,7 +13,7 @@ cvENGINE is one Docker Compose deployment. The scanners run inside the worker im
 | `redis` | Job broker, locks, cache, and the memory queue |
 | `proxy` | nginx, terminates TLS on 443 and redirects 8082 to HTTPS |
 
-The worker image holds the scanners: [bbot](https://github.com/blacklanternsecurity/bbot), [nmap](https://nmap.org), [nuclei](https://github.com/projectdiscovery/nuclei), [naabu](https://github.com/projectdiscovery/naabu) (optional), and [WPScan](https://wpscan.com/) for WordPress sites. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone. bbot downloads [gowitness](https://github.com/sensepost/gowitness) for deep-mode screenshots. See [THIRD-PARTY.md](../THIRD-PARTY.md).
+The worker image holds the scanners: [bbot](https://github.com/blacklanternsecurity/bbot), [nmap](https://nmap.org), [nuclei](https://github.com/projectdiscovery/nuclei), [naabu](https://github.com/projectdiscovery/naabu), and [WPScan](https://wpscan.com/) for WordPress sites. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone. bbot downloads [gowitness](https://github.com/sensepost/gowitness) for deep-mode screenshots. See [THIRD-PARTY.md](../THIRD-PARTY.md).
 
 ## Stack
 

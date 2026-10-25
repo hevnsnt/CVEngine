@@ -1618,6 +1618,8 @@ def _vuln(v):
             'url': v.http_url, 'host': v.subdomain.name if v.subdomain else None, 'open': v.open_status,
             'cves': [c.name for c in v.cve_ids.all()], 'cve_matches': _cve_match_ids(v), 'discovered': _iso(v.discovered_date),
             'description': v.description, 'remediation': v.remediation, 'source': v.source,
+            'remediation_status': v.remediation_status, 'remediation_note': v.remediation_note,
+            'remediation_updated': _iso(v.remediation_updated_at),
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
 
@@ -1669,6 +1671,8 @@ def list_certificates(ctx, slug, params):
 def _hygiene(f):
     return {'id': f.id, 'host': f.host, 'check': f.check_name, 'severity': SEVERITY_NAMES.get(f.severity, str(f.severity)),
             'title': f.title, 'detail': f.detail, 'evidence': f.evidence, 'status': f.status,
+            'remediation_status': f.remediation_status, 'remediation_note': f.remediation_note,
+            'remediation_updated': _iso(f.remediation_updated_at),
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
             'triage': _triage_brief(_triage_of(f))}
 
@@ -2060,7 +2064,7 @@ def _finding_sources(project, params):
     if wanted in ('all', 'cve'):
         qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
         if status == 'actionable':
-            qs = qs.exclude(ai_verdict='not_affected')
+            qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['cve'] = qs
@@ -2069,7 +2073,7 @@ def _finding_sources(project, params):
             .select_related('subdomain', 'triage__verdict', *(['target_domain__project'] if everywhere else [])) \
             .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'))
         if status == 'actionable':
-            qs = qs.filter(open_status=True, severity__gte=1)
+            qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['scanner'] = qs
@@ -2078,7 +2082,7 @@ def _finding_sources(project, params):
             .select_related('domain__project' if everywhere else 'domain', 'triage__verdict') \
             .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'))
         if status == 'actionable':
-            qs = qs.filter(status='open', severity__gte=1)
+            qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
             qs = qs.filter(host__icontains=params['host'])
         sources['hygiene'] = qs
@@ -2103,11 +2107,13 @@ def _finding_row(kind, obj):
         extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160)}
     elif kind == 'scanner':
         title, host, note = obj.name, obj.subdomain.name if obj.subdomain else None, obj.source or ''
-        status, extra = 'open' if obj.open_status else 'closed', {}
+        status, extra = ('closed' if not obj.open_status else obj.remediation_status), {}
     else:
-        title, host, note, status, extra = obj.title, obj.host, obj.check_name, obj.status, {}
+        title, host, note = obj.title, obj.host, obj.check_name
+        status, extra = ('resolved' if obj.status == 'resolved' else obj.remediation_status), {}
     return {'type': kind, 'kind': FINDING_TYPES[kind], 'id': obj.id, 'title': title, 'host': host, 'note': note,
             'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
+            'remediation_note': getattr(obj, 'remediation_note', ''),
             'detected': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
 
 
@@ -2148,18 +2154,88 @@ def list_findings(ctx, slug, params):
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
 
 
-def update_match(ctx, slug, match_id, status, note=''):
+def _apply_remediation(obj, status, note, user):
+    """Set and save the remediation fields shared by CVEMatch, Vulnerability and HygieneFinding (the same tuple of
+    statuses, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's body left
+    it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Raises on an
+    unrecognized status; never touches whatever auto-managed liveness field (open_status, HygieneFinding.status,
+    ai_verdict) the model also carries, which stays under the scan/check pipeline."""
     from cveFeed.models import CVEMatch
-    project, _ = get_project(ctx, slug, write=True)
     if status not in CVEMatch.REMEDIATION_STATUSES:
         raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
+    fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
+    obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
+    if note is not None:
+        obj.remediation_note = note[:2000]
+        fields.append('remediation_note')
+    obj.save(update_fields=fields)
+
+
+def update_match(ctx, slug, match_id, status, note=None):
+    from cveFeed import activity
+    project, _ = get_project(ctx, slug, write=True)
     m = _matches_qs(project).filter(id=match_id).first()
     if not m:
         raise ApiError(404, 'match not found')
-    m.remediation_status, m.remediation_note = status, (note or '')[:2000]
-    m.remediation_updated_at, m.remediation_by = timezone.now(), ctx.user
-    m.save(update_fields=['remediation_status', 'remediation_note', 'remediation_updated_at', 'remediation_by'])
+    _apply_remediation(m, status, note, ctx.user)
+    activity.log('remediation', f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
+                 project=project, finding_kind='match', finding_id=m.id)
     return _match(m)
+
+
+STATUS_KINDS = ('match', 'vulnerability', 'hygiene')  # finding kinds with a remediation workflow; a web route has none
+MAX_BULK_STATUS = 200
+
+
+def update_finding_status(ctx, slug, kind, finding_id, status, note=None):
+    """Set the remediation status (open/in_progress/fixed/accepted_risk) and note of one finding: a CVE match, scanner
+    finding or hygiene finding. Same permissions and project-scoped 404 as update_match, which this delegates to for
+    kind='match' so the two routes agree exactly. A web route has no remediation workflow (its auth_state already says
+    what it needs), so 'route' 400s here the same as any other unrecognized kind."""
+    from cveFeed import activity
+    if kind == 'match':
+        return update_match(ctx, slug, finding_id, status, note=note)
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before kind/status validation
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    obj = _finding_obj(project, kind, finding_id)
+    _apply_remediation(obj, status, note, ctx.user)
+    activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
+                 finding_kind=kind, finding_id=finding_id)
+    return _vuln(obj) if kind == 'vulnerability' else _hygiene(obj)
+
+
+def bulk_update_finding_status(ctx, slug, items, status, note=None):
+    """Set the same remediation status and note on up to MAX_BULK_STATUS findings at once. Each item is independent
+    (one bad kind or id never blocks the rest, and a finding belonging to another project 404s exactly like a missing
+    one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures."""
+    from cveFeed import activity
+    from cveFeed.models import CVEMatch
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
+    if status not in CVEMatch.REMEDIATION_STATUSES:
+        raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
+    if not isinstance(items, list) or not items:
+        raise ApiError(400, 'items must be a non-empty list')
+    if len(items) > MAX_BULK_STATUS:
+        raise ApiError(400, f'at most {MAX_BULK_STATUS} items per call')
+    updated, failed = 0, []
+    for item in items:
+        kind = item.get('kind') if isinstance(item, dict) else None
+        finding_id = item.get('id') if isinstance(item, dict) else None
+        try:
+            if not isinstance(item, dict) or kind is None or finding_id is None:
+                raise ApiError(400, 'each item must be an object with kind and id')
+            if kind not in STATUS_KINDS:
+                raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+            obj = _finding_obj(project, kind, finding_id)
+            _apply_remediation(obj, status, note, ctx.user)
+            updated += 1
+        except ApiError as e:
+            failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
+        except Exception as e:  # noqa: BLE001 - one bad row must never fail the rest of the batch
+            failed.append({'kind': kind, 'id': finding_id, 'error': str(e)})
+    activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
+    return {'updated': updated, 'failed': failed}
 
 
 def asset_matches(host_names, ips, patterns):
@@ -2404,7 +2480,7 @@ def finding_detail(ctx, slug, kind, finding_id):
     remediation = {'text': v.remediation if v else '', 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
     if kind == 'match':
         remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), status=obj.remediation_status,
-                           note=obj.remediation_note)
+                           note=obj.remediation_note, local_checks=(t.local_checks if t else None) or None)
     assessment_status = ('closed_not_applicable' if kind == 'match' and obj.ai_verdict == 'not_affected' and
                          (obj.ai_reason or '').startswith('Closed automatically:')
                          else 'candidate' if kind == 'match' else None)

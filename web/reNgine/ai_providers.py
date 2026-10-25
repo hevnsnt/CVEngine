@@ -586,6 +586,83 @@ def triage_finding(provider, kind, payload):
 	return {'parsed': parsed, 'model': f'{provider.name}:{provider.model}'}
 
 
+LOCAL_CHECK_KEYS = {'commands', 'caveat'}
+LOCAL_CHECK_COMMAND_KEYS = {'os', 'command', 'look_for'}
+LOCAL_CHECK_CAPS = {'command': 200, 'look_for': 150, 'caveat': 300}
+LOCAL_CHECK_OS = ('linux', 'windows', 'any')
+MAX_LOCAL_CHECKS = 3
+LOCAL_CHECK_SYSTEM_PROMPT = (
+	'A system administrator has direct shell access to their own host and wants to check, locally, whether a specific '
+	'product named in a CVE advisory is installed, because it could not be confirmed from outside. Given the product '
+	'and vendor names from the advisory, suggest at most 3 short, read-only checks a person could run themselves: a '
+	'process or package name, an install or config path, a service name, an admin port, or a log file, for how that '
+	'product is typically installed on Linux and/or Windows. Prefer a short command over prose when you give one. Be '
+	'honest when you are not confident about the exact detection method for this specific product: say what to check '
+	'against the vendor\'s own documentation instead of inventing a precise path. Never suggest a command that changes '
+	'anything, needs a login or credential, or needs more than read access. Respond with ONLY a JSON object with '
+	'exactly these keys: {"commands": [{"os": "linux" | "windows" | "any", '
+	'"command": "<a short, read-only command, at most 200 characters>", '
+	'"look_for": "<what in its output would mean the product is present, at most 150 characters>"}], '
+	'"caveat": "<when unsure, what to check instead or where to look it up; empty string otherwise, at most 300 characters>"}. '
+	'Use at most 3 commands, and an empty list when you have nothing read-only and specific enough to suggest. Omit a '
+	'field only when unavailable; do not add extra keys.' + UNTRUSTED_NOTICE)
+
+
+def parse_local_checks(text):
+	"""Extract and validate a local-check suggestion from a model reply, or None when it is unusable (not JSON, an
+	unknown key, more than 3 commands, an unknown os, a missing command). Pure: no Django."""
+	decoder = json.JSONDecoder()
+	objects = []
+	for match in re.finditer(r'\{', text or ''):
+		try:
+			candidate, _ = decoder.raw_decode(text, match.start())
+		except (json.JSONDecodeError, TypeError):
+			continue
+		if isinstance(candidate, dict) and 'commands' in candidate:
+			objects.append(candidate)
+	if len(objects) != 1:
+		return None
+	obj = objects[0]
+	if not isinstance(obj, dict) or set(obj) - LOCAL_CHECK_KEYS:
+		return None
+	commands = obj.get('commands', [])
+	if not isinstance(commands, list) or len(commands) > MAX_LOCAL_CHECKS:
+		return None
+	caveat = _triage_text(obj.get('caveat', ''), LOCAL_CHECK_CAPS['caveat'])
+	if caveat is None:
+		return None
+	out = {'commands': [], 'caveat': caveat}
+	for item in commands:
+		if not isinstance(item, dict) or set(item) - LOCAL_CHECK_COMMAND_KEYS:
+			return None
+		os_name = str(item.get('os', '')).strip().lower()
+		if os_name not in LOCAL_CHECK_OS:
+			return None
+		command = _triage_text(item.get('command', ''), LOCAL_CHECK_CAPS['command'])
+		look_for = _triage_text(item.get('look_for', ''), LOCAL_CHECK_CAPS['look_for'])
+		if not command or look_for is None:
+			return None
+		out['commands'].append({'os': os_name, 'command': command, 'look_for': look_for})
+	if not out['commands'] and not out['caveat']:
+		return None
+	return out
+
+
+def build_local_check_prompt(context):
+	return untrusted_block('ADVISORY', _triage_clean(context))
+
+
+def suggest_local_checks(provider, context):
+	"""Ask ``provider`` for short, read-only local commands a host owner can run themselves to check whether the
+	product named in ``context`` (cve_id, title, affected vendor/product names) is installed, for a finding no external
+	check can settle. Returns {'parsed': dict or None, 'model': 'provider:model'}; the raw reply is dropped. Never
+	raises for an unusable reply, only when the provider itself cannot be reached (AIProviderError): the caller treats
+	either as "try again later", never as evidence."""
+	with usage_stage('local_check_suggestion'):
+		reply = provider.complete(LOCAL_CHECK_SYSTEM_PROMPT, build_local_check_prompt(context))
+	return {'parsed': parse_local_checks(reply), 'model': f'{provider.name}:{provider.model}'}
+
+
 def detect_provider(api_key):
 	"""Guess the provider from an API key's prefix; None when it is not recognisable.
 

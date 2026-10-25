@@ -510,6 +510,16 @@ class Vulnerability(models.Model):
 	# used for subscans
 	vuln_subscan_ids = models.ManyToManyField('SubScan', related_name='vuln_subscan_ids', blank=True)
 
+	# Remediation workflow, driven by people or agents through the API / MCP. Independent of open_status above, which
+	# the scan pipeline alone manages: a finding a human marks accepted_risk stays open_status=True if the scanner still
+	# sees it, but drops out of the actionable view regardless. Same fields and choices as cveFeed.models.CVEMatch's.
+	REMEDIATION_STATUSES = ('open', 'in_progress', 'fixed', 'accepted_risk')
+	remediation_status = models.CharField(max_length=16, default='open')
+	remediation_note = models.TextField(blank=True, default='')
+	remediation_updated_at = models.DateTimeField(null=True, blank=True)
+	remediation_by = models.ForeignKey(
+		'auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
 	class Meta:
 		indexes = [
 			models.Index(fields=['subdomain', 'open_status', 'severity'], name='vuln_sub_open_sev_idx'),

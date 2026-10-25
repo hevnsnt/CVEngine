@@ -788,6 +788,28 @@ const excerpt = (label, text) => {
   box.append(el("div", "note", label), el("pre", "banner", text));
   return box;
 };
+const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows" };
+// When no external check can settle a finding, the model suggests short, read-only local commands a host owner
+// can run themselves (cveFeed.triage.suggest_local_checks). Unverified by this tool: shown as a suggestion, not evidence.
+const localChecksBox = (local) => {
+  const box = el("div", "local-checks");
+  const commands = local?.commands || [];
+  if (!commands.length && !local?.caveat) return box;
+  box.append(el("p", "note", "AI-suggested, unverified: confirm against the vendor's own documentation."));
+  commands.forEach((c) => {
+    const row = el("div", "local-check");
+    const head = el("div", "tools");
+    head.append(badge(OS_LABEL[c.os] || c.os, "queued"));
+    const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
+    copy.onclick = () => navigator.clipboard.writeText(c.command);
+    head.append(copy);
+    row.append(head, el("pre", "banner", c.command));
+    if (c.look_for) row.append(el("p", "note", `Looks for: ${c.look_for}`));
+    box.append(row);
+  });
+  if (local?.caveat) box.append(el("p", "note", local.caveat));
+  return box;
+};
 
 function renderFinding(d, cfg, row) {
   const out = [];
@@ -1000,6 +1022,7 @@ function renderFinding(d, cfg, row) {
     skipped_blocked: "The checks were not run: the host is outside this project or resolves to an address that must not be scanned.",
   };
   if (!v.steps.length) check.append(el("p", "note", none[v.status] || none.none));
+  if (v.status === "no_check") check.append(localChecksBox(d.remediation.local_checks));
   v.steps.forEach((step) => {
     const card = el("div", "svc");
     if (step.display) card.append(el("pre", "banner mono", step.display));
@@ -2803,6 +2826,7 @@ const ACTIVITY_KIND = {
   scan: "Scan",
   hygiene: "Hygiene",
   changes: "Changes",
+  remediation: "Remediation",
 };
 const ACTIVITY_BADGE = { target: "fire", validate: "success", hygiene: "success" };
 

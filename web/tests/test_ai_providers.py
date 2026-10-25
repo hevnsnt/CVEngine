@@ -260,6 +260,64 @@ class TriageParseTests(unittest.TestCase):
 		self.assertNotIn('garbled', str(error.exception))
 
 
+GOOD_LOCAL_CHECKS = {'commands': [{'os': 'linux', 'command': 'rpm -qa | grep -i siteguard', 'look_for': 'a package name containing siteguard'}],
+					 'caveat': ''}
+
+
+class LocalChecksParseTests(unittest.TestCase):
+	def reply(self, **changes):
+		import json
+		return 'Here you go: ' + json.dumps({**GOOD_LOCAL_CHECKS, **changes}) + ' done'
+
+	def test_a_good_reply_round_trips(self):
+		parsed = ai.parse_local_checks(self.reply())
+		self.assertEqual(parsed['commands'][0]['os'], 'linux')
+		self.assertEqual(parsed['commands'][0]['look_for'], 'a package name containing siteguard')
+		self.assertEqual(parsed['caveat'], '')
+
+	def test_every_os_round_trips(self):
+		for name in ('linux', 'windows', 'any'):
+			parsed = ai.parse_local_checks(self.reply(commands=[{'os': name, 'command': 'x', 'look_for': 'y'}]))
+			self.assertEqual(parsed['commands'][0]['os'], name)
+
+	def test_an_empty_commands_list_with_a_caveat_is_valid(self):
+		parsed = ai.parse_local_checks(self.reply(commands=[], caveat='No reliable local signature is known for this product; check the vendor docs.'))
+		self.assertEqual(parsed['commands'], [])
+		self.assertIn('vendor docs', parsed['caveat'])
+
+	def test_unusable_replies_are_none(self):
+		self.assertIsNone(ai.parse_local_checks(''))
+		self.assertIsNone(ai.parse_local_checks('no json here'))
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[], caveat='')))  # nothing useful at all
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'solaris', 'command': 'x', 'look_for': 'y'}])))
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'look_for': 'y'}])))  # no command
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'command': 'x', 'look_for': 'y', 'sudo': True}])))
+		self.assertIsNone(ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'command': 'x', 'look_for': 'y'}] * 4)))  # more than 3
+		self.assertIsNone(ai.parse_local_checks('{"commands": [], "caveat": "ok", "extra": 1}'))
+
+	def test_text_is_cleaned_and_capped(self):
+		parsed = ai.parse_local_checks(self.reply(commands=[{'os': 'linux', 'command': 'a\x00b' + 'x' * 900, 'look_for': 'y' * 900}]))
+		self.assertNotIn('\x00', parsed['commands'][0]['command'])
+		self.assertEqual(len(parsed['commands'][0]['command']), 200)
+		self.assertEqual(len(parsed['commands'][0]['look_for']), 150)
+
+	def test_suggest_local_checks_returns_parsed_and_model(self):
+		provider = mock.Mock(model='m')
+		provider.name = 'anthropic'
+		provider.complete.return_value = self.reply()
+		out = ai.suggest_local_checks(provider, {'cve_id': 'CVE-2026-1', 'affected': [{'vendor': 'x', 'product': 'y'}]})
+		self.assertEqual(set(out), {'parsed', 'model'})
+		self.assertEqual(out['model'], 'anthropic:m')
+		self.assertEqual(out['parsed']['commands'][0]['os'], 'linux')
+
+	def test_suggest_local_checks_an_unparseable_reply_is_none_not_an_error(self):
+		provider = mock.Mock(model='m')
+		provider.name = 'anthropic'
+		provider.complete.return_value = 'garbled'
+		out = ai.suggest_local_checks(provider, {'cve_id': 'CVE-2026-1'})
+		self.assertIsNone(out['parsed'])
+
+
 class TriagePromptTests(unittest.TestCase):
 	def test_forbidden_keys_and_secrets_never_reach_the_prompt(self):
 		payload = {'name': 'Exposed panel', 'host': 'secret-host.example.com', 'request': 'GET /SECRET-REQUEST', 'response': 'SECRET-BODY',

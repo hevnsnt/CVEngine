@@ -615,6 +615,39 @@ def _resolve_provider(provider):
         return None
 
 
+def suggest_local_checks(row, provider=False):
+    """AI-suggested, read-only commands a host owner can run themselves to check whether the CVE's own affected
+    product (not what was fingerprinted; a CVE match often names a distinct, externally-unconfirmable add-on layered
+    on top of the matched one, such as a vendor module bundled with nginx) is actually installed. Only worth asking
+    once validation itself found there is no external check at all (``row.validation_status == 'no_check'``); kept on
+    the row itself and never regenerated once set, since a no_check row is already the rare case. Never raises: a
+    missing provider or an unusable reply just leaves it empty for the next time this row comes up. Returns whether
+    anything was stored."""
+    if row.kind != 'cve_match' or row.local_checks or not row.match_id:
+        return False
+    cve = row.match.cve_entry
+    resolved = _resolve_provider(provider)
+    if resolved is None:
+        return False
+    from reNgine.ai_providers import AIProviderError, suggest_local_checks as ask
+    context = {
+        'cve_id': cve.cve_id, 'title': cve.title,
+        'affected': [{k: item.get(k) for k in ('vendor', 'product') if isinstance(item.get(k), str) and item.get(k)}
+                     for item in (cve.affected if isinstance(cve.affected, list) else [])[:10] if isinstance(item, dict)],
+        'matched_product': row.match.matched_product,
+    }
+    try:
+        answer = ask(resolved, context)
+    except AIProviderError as exc:
+        logger.warning('local-check suggestion failed for %s: %s', cve.cve_id, exc)
+        return False
+    if answer['parsed'] is None:
+        return False
+    row.local_checks = {**answer['parsed'], 'model': answer['model'], 'generated_at': timezone.now().isoformat()}
+    row.save(update_fields=['local_checks', 'updated_at'])
+    return True
+
+
 def _store_verdict(kind, signature, outcome, model):
     from django.db import IntegrityError
 

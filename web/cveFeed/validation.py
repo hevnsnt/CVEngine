@@ -702,6 +702,10 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                     if notes else []
                 row.save(update_fields=['validation_status', 'validation_steps', 'updated_at'])
                 stats['no_check'] += 1
+                try:
+                    triage.suggest_local_checks(row)
+                except Exception:  # noqa: BLE001 - a suggestion is advisory; it must never break the validation sweep
+                    logger.exception('local-check suggestion failed for %s', row.pk)
                 continue
             for check in checks:
                 # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
