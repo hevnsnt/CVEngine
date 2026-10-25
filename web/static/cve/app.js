@@ -366,7 +366,11 @@ const tile = (label, n, { hot = "", onClick = null, href = "" } = {}) => {
     t.type = "button";
     t.onclick = onClick;
   }
-  t.append(el("b", "", n ?? "-"), el("span", "", label));
+  // Big counts read as 1.2M, with the exact figure on hover; a 7-digit number would otherwise fill the whole tile.
+  const big = typeof n === "number" && n >= 100000;
+  const figure = el("b", "", big ? new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n) : n ?? "-");
+  if (big) figure.title = n.toLocaleString();
+  t.append(figure, el("span", "", label));
   return t;
 };
 

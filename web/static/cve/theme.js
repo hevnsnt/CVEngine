@@ -12,6 +12,8 @@
     var dark = pref === "dark" || (pref === "auto" && mq && mq.matches);
     root.setAttribute("data-theme", dark ? "dark" : "light");
     root.setAttribute("data-theme-pref", pref);
+    var bar = document.querySelector('meta[name="theme-color"]');
+    if (bar) bar.setAttribute("content", dark ? "#0e0f11" : "#f4f4f5"); // the phone status bar follows the theme in force
   }
   apply();
   if (mq && mq.addEventListener) {
