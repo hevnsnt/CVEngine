@@ -296,6 +296,8 @@ class MfaFlowTests(TestCase):
 		r = client_for(nobody).get('/cve/about/')
 		self.assertContains(r, 'github.com/hevnsnt/CVEngine')
 		self.assertContains(r, 'reNgine')
+		self.assertContains(r, 'https://github.com/ACK-J/MailFail')
+		self.assertContains(r, 'Black Hills Information Security')
 
 
 @override_settings(ALLOWED_HOSTS=['cve.example.test'])
