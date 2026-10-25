@@ -8,12 +8,13 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0b'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial Black,Helvetica,sans-serif' font-weight='900' font-style='italic' font-size='15' fill='white'%3Ecv%3C/text%3E%3Crect x='23' y='6' width='3' height='4' fill='%23ff5a00'/%3E%3C/svg%3E">
 <title>{% block title %}CVEngine{% endblock %}</title>
 <link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
+<script src="{% asset 'cve/theme.js' %}"></script>
 <link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
 </head>
 <body>
 <main class="auth">
   <div class="auth-card">
-    <a class="brand" href="/" aria-label="CVEngine, by FieldCraft Cyber"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+    <a class="brand" href="https://fieldcraftcyber.com/" target="_blank" rel="noopener noreferrer" aria-label="CVEngine, by FieldCraft Cyber (opens fieldcraftcyber.com in a new tab)"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
     {% block content %}{% endblock %}
   </div>
 </main>

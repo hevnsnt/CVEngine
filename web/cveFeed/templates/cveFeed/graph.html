@@ -21,13 +21,13 @@
 <div class="card graph-card">
   <div id="graph" role="img" aria-label="Interactive bubble graph of discovered assets"></div>
   <div class="legend graph-legend">
-    <span><i style="background:#0a0a0b"></i>domain</span>
-    <span><i style="border:2px solid #b3261e;background:rgba(179,38,30,.14)"></i>vulnerable</span>
-    <span><i style="border:2px solid #4a8062;background:#fff"></i>scanned, clean</span>
-    <span><i style="border:1.5px solid #9a9aa2;background:transparent"></i>not scanned</span>
-    <span><i style="background:#9a9aa2"></i>ip</span>
-    <span><i style="background:#cfcfd4"></i>port</span>
-    <span><i style="border:2px solid #47678d;background:#f2f6fc"></i>project / registered domain (all domains)</span>
+    <span><i style="background:var(--ink)"></i>domain</span>
+    <span><i style="border:2px solid var(--fire);background:color-mix(in srgb,var(--fire) 14%,transparent)"></i>vulnerable</span>
+    <span><i style="border:2px solid var(--ok);background:var(--surface)"></i>scanned, clean</span>
+    <span><i style="border:1.5px solid var(--graph-ip);background:transparent"></i>not scanned</span>
+    <span><i style="background:var(--graph-ip)"></i>ip</span>
+    <span><i style="background:var(--line-2)"></i>port</span>
+    <span><i style="border:2px solid var(--graph-node-border);background:var(--graph-node-bg)"></i>project / registered domain (all domains)</span>
   </div>
 </div>
 <div class="card node-card" id="detail" aria-live="polite"></div>

@@ -1,4 +1,5 @@
-// First-run guided setup: organization, project, AI model, first target. Skips what is already done.
+// First-run guided setup: organization, project, AI model, first target. Every step is shown; what already exists is
+// filled in, so a finished step is one click on Continue.
 const root = document.getElementById('wizard');
 const csrf = root.querySelector('[name=csrfmiddlewaretoken]').value;
 const stepBox = document.getElementById('step');
@@ -94,7 +95,7 @@ const steps = {
     const actions = el('div', 'actions');
     actions.append(el('span', 'grow'));
     const go = el('button', 'btn', 'Get started', { type: 'button' });
-    go.onclick = () => show(state.org && state.org.named ? (state.project && state.project.named ? (state.ai_ready ? 4 : 3) : 2) : 1);
+    go.onclick = () => show(1);
     actions.append(go);
     node.append(actions);
   },
@@ -104,7 +105,12 @@ const steps = {
     form(node, {
       title: 'Name your organization', lead: 'This is the top level. Your projects and teammates live inside it.',
       body: [field('Organization name', name)], primary: 'Continue',
-      onSubmit: async () => { state = await welcome('POST', 'org', { name: name.value }); next(); },
+      onSubmit: async () => {
+        const known = state.org && state.org.named ? state.org.name : '';
+        if (known && name.value.trim() === known) { next(); return; } // already set: nothing to save
+        state = await welcome('POST', 'org', { name: name.value });
+        next();
+      },
     });
   },
 
@@ -113,7 +119,12 @@ const steps = {
     form(node, {
       title: 'Create your first project', lead: 'A project holds your targets, scans and findings. Nothing is shared between projects.',
       body: [field('Project name', name, 'Examples: Production, Client A, Lab')], primary: 'Continue',
-      onSubmit: async () => { state = await welcome('POST', 'project', { name: name.value }); next(); },
+      onSubmit: async () => {
+        const known = state.project && state.project.named ? state.project.name : '';
+        if (known && name.value.trim() === known) { next(); return; }
+        state = await welcome('POST', 'project', { name: name.value });
+        next();
+      },
     });
   },
 
@@ -129,12 +140,14 @@ const steps = {
         hint.textContent = r.provider ? `That looks like an ${NAMES[r.provider]} key.` : 'We do not recognize that key. You can keep going and pick a provider in Settings.';
       }, 250);
     });
+    if (state.ai_ready) { key.placeholder = 'Connected. Paste a new key only to replace it.'; hint.textContent = 'An AI model is already connected. Continue, or paste a new key to replace it.'; }
     const wrap = el('div', 'field'); wrap.append(el('label', '', 'API key', { for: 'ai-key' }), key, hint); key.id = 'ai-key';
     form(node, {
       title: 'Connect your AI model', lead: 'This is what confirms which hosts are really exposed and writes checks for new CVEs.',
-      body: [wrap], primary: 'Verify and continue',
+      body: [wrap], primary: state.ai_ready ? 'Continue' : 'Verify and continue',
       skip: { label: 'Skip for now', onClick: next },
       onSubmit: async () => {
+        if (!key.value.trim() && state.ai_ready) { next(); return; } // a model is already connected
         if (!key.value.trim()) throw new Error('Paste a key, or choose "Skip for now".');
         const r = await api('POST', '/cve/api/setup/save', { key: key.value });
         key.value = '';

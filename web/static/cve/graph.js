@@ -1,24 +1,31 @@
 // Shared VivaGraphJS asset graph (loaded after vivagraph.min.js): labelled nodes, click for details.
+// Colors come from the page's CSS variables, read when a node is drawn, so the graph follows the theme (light by default).
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const mixed = (name, pct) => `color-mix(in srgb, ${css(name)} ${pct}%, transparent)`;
 const COLORS = {
-  domain: "#0a0a0b",
-  subdomain: "#0a0a0b",
-  ip: "#9a9aa2",
+  get domain() { return css("--ink"); },
+  get subdomain() { return css("--ink"); },
+  get ip() { return css("--graph-ip"); },
 };
-const CVE_COLORS = { fire: "#b3261e", smoke: "#b9822a", ice: "#7a8594" };
+const CVE_COLORS = {
+  get fire() { return css("--fire"); },
+  get smoke() { return css("--smoke"); },
+  get ice() { return css("--ice"); },
+};
 // A subdomain's fill tracks how far along it is, not just what kind of node it is: hollow (no fill, just
 // the usual blue outline) means CVEngine knows about it but nothing has scanned it yet; filled green means
 // scanned and clean; filled red means it has an open, non-informational finding or an unresolved CVE match.
 const STATUS_FILL = {
   unscanned: "none",
-  scanned: "#c9ced5",
-  vulnerable: "#b3261e",
+  get scanned() { return css("--clean"); },
+  get vulnerable() { return css("--fire"); },
 };
-// Hosts have three looks: an empty grey circle (nuclei has not looked at it), a green outline (nuclei ran and found nothing),
+// Hosts have three looks: an empty gray circle (nuclei has not looked at it), a green outline (nuclei ran and found nothing),
 // a red outline with a faint red fill (it has vulnerabilities, whatever their temperature).
 const HOST_LOOK = {
-  unscanned: { fill: "none", stroke: "#9a9aa2", width: "1.5" },
-  clean: { fill: "#ffffff", stroke: "#4a8062", width: "2" },
-  vulnerable: { fill: "rgba(179,38,30,.14)", stroke: "#b3261e", width: "2" },
+  unscanned: { fill: "none", get stroke() { return css("--graph-ip"); }, width: "1.5" },
+  clean: { get fill() { return css("--surface"); }, get stroke() { return css("--ok"); }, width: "2" },
+  vulnerable: { get fill() { return mixed("--fire", 14); }, get stroke() { return css("--fire"); }, width: "2" },
 };
 const hostState = (d) => {
   if (["fire", "smoke", "ice"].includes(d.heat) || d.status === "vulnerable") return "vulnerable";
@@ -43,7 +50,7 @@ const MIN_LABEL_SCALE = 0.45; // below this zoom only hubs and hovered nodes are
 const DRAG_PX = 4; // a pointer that moves less than this is a click
 
 const colorOf = (d) =>
-  d.kind === "cve" ? CVE_COLORS[d.tier] || "#7a8594" : COLORS[d.kind] || "#888";
+  d.kind === "cve" ? CVE_COLORS[d.tier] || css("--ice") : COLORS[d.kind] || css("--muted");
 const shorten = (text) =>
   text.length > MAX_LABEL ? `${text.slice(0, MAX_LABEL - 1)}…` : text;
 // Under its target a host reads as its leftmost part: app.stg.example.com -> teleport.stg40.
@@ -267,13 +274,13 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       if (d.kind === "subdomain") {
         styleHost(c, d);
       } else if (d.kind === "project" || d.kind === "root") {
-        c.setAttribute("fill", d.kind === "project" ? "#e7eef8" : "#f2f6fc");
-        c.setAttribute("stroke", "#47678d");
+        c.setAttribute("fill", d.kind === "project" ? css("--graph-project-bg") : css("--graph-node-bg"));
+        c.setAttribute("stroke", css("--graph-node-border"));
         c.setAttribute("stroke-width", d.kind === "project" ? "3" : "2");
       } else if (d.kind === "domain") {
         // the target itself: a heavy ring rather than a solid black disc, so it never reads as a host that is scanned
-        c.setAttribute("fill", "#ffffff");
-        c.setAttribute("stroke", "#0a0a0b");
+        c.setAttribute("fill", css("--surface"));
+        c.setAttribute("stroke", css("--ink"));
         c.setAttribute("stroke-width", "3");
       } else {
         c.setAttribute("fill", colorOf(d));
@@ -314,7 +321,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
   graphics.link((link) => {
     const l = Viva.Graph.svg("line");
     if (link.fromId === "__hub") l.setAttribute("visibility", "hidden");
-    l.setAttribute("stroke", link.fromId.startsWith('__project:') || link.fromId.startsWith('__root:') ? '#8ba3c1' : '#cfcfd4');
+    l.setAttribute("stroke", link.fromId.startsWith('__project:') || link.fromId.startsWith('__root:') ? css('--graph-link-hi') : css('--line-2'));
     l.setAttribute("stroke-width", link.fromId.startsWith('__project:') ? '1.8' : '1');
     if (link.data?.crossCluster) l.setAttribute('stroke-dasharray', '4 4');
     return l;

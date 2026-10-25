@@ -46,3 +46,24 @@ Finding and match detail panes show why it matters, how it was found, when it wa
 Page logic lives in `web/static/cve/app.js`. To add a section, add an entry to `SECTIONS` in `cveFeed/views.py`, a URL pattern, and a function in `pages`. The pages inherited from reNgine are retired and forward to their cvENGINE equivalents. The scan report (`/scan/create_report/<id>`) and the plain-text exports (`/scan/export/{subdomains,urls,endpoints}/<id>`) remain.
 
 See also: [AGENT-API.md](AGENT-API.md), [TENANCY.md](TENANCY.md), [documentation index](README.md).
+
+## Themes, preferences and the keyboard
+
+Light is the default and is always on. Dark applies only when the viewer picks Dark, or Auto while the system is dark (account
+menu, Theme). `static/cve/theme.js` runs in the head before the stylesheet and sets `data-theme` on `<html>`, so there is no flash.
+Every color in `cve.css` is a token: the dark palette is one block of overrides after `:root`. `--ink` is the high-contrast
+foreground and also the fill of selected rows and primary buttons, so in dark it becomes light and `--on-ink` (the text on that
+fill) becomes dark. Text on solid fire, smoke, ice and ok fills stays white through `--on-solid`. Do not add a raw hex or `rgba()`
+outside the token blocks; the one allowed exception is the QR code, which must stay black on white.
+
+Per-browser preferences (localStorage, nothing sent to the server): theme (`cve.theme`), time zone (`cve.tz`, local or UTC),
+saved views (`cve.views.v1.<project>.<page>`), the "new since you last looked" baseline (`cve.seen.v1.<project>.<page>`) and
+desktop notifications (`cve.notify.desktop`).
+
+Modules: `views.js` (filters in the URL and saved views), `bulk.js` (select mode and the action bar; actions run the single-item
+request four at a time), `keys.js` (vim-style keys and the `?` sheet), `seen.js` (new markers), `notify.js` (scan notices),
+`prefs.js` (time zone formatting, theme chooser), `charts.js` (area chart, heatmap). Script URLs are content-hashed, so restart the
+web container after editing a static file.
+
+Checks used while building these: axe-core (WCAG 2.0 and 2.1 A and AA) on 18 pages in light, dark and auto, with zero
+violations, plus a computed-style comparison showing the light theme is unchanged by the token work.
