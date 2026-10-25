@@ -10,6 +10,7 @@ CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, take
 
 ### Changed
 
+- **Every CVE match is validated automatically.** Before, only fire and smoke matches were queued for AI validation and the rest waited for someone to press Validate now. Now a match of any confidence or score is queued by itself, hottest first (fire, smoke, then ice at the lowest priority, using the capacity the hot ones leave), except one the AI ruled out or the distribution patched. Ice stops at five active jobs per project so it cannot crowd out hot findings, and the daily validation caps still apply. `CVENGINE_AUTO_VALIDATE_ALL_MATCHES=0` restores fire and smoke only.
 - **More nuclei templates run.** Installed templates that follow redirects on the same host (`host-redirects`, at most three hops) now pass the read-only policy, about 1,250 more (6,531 of 13,903 in the current community set, up from 5,280), among them the technology detection template, so hosts get fingerprinted again. A template that merely recognizes an interactsh server by its header is no longer taken for an out-of-band check. Redirects to other hosts stay refused, and AI-written templates still follow none.
 
 ### Fixed

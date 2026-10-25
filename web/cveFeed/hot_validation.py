@@ -1,9 +1,12 @@
-"""Bounded, durable Fire/Smoke validation dispatch.
+"""Bounded, durable validation dispatch: every CVE match, and the Fire/Smoke scanner findings.
 
 The sweep only selects findings already in an owned inventory. The worker rechecks scope and
-evidence before any check runs. Broker priority 0 (Fire) precedes 3 (manual) and 6 (Smoke)
-on the reserved validation worker; a duplicate delivery after promotion is harmless.
+evidence before any check runs. Broker priority 0 (Fire) precedes 3 (manual), 6 (Smoke) and
+9 (Ice, every other CVE match) on the reserved validation worker; a duplicate delivery after
+promotion is harmless. A CVE match of any confidence is queued by itself, hottest first; the
+per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave.
 """
+import os
 from datetime import timedelta
 
 from django.db import transaction
@@ -13,12 +16,20 @@ from django.utils import timezone
 from cveFeed import activity, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
-from cveFeed.threat import FIRE, SMOKE, classify_threat_tier, match_temperature
+from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, match_temperature
 
 PAGE = 100
 MAX_ENQUEUE = 20
 PROJECT_ACTIVE_CAP = 10
+PROJECT_ICE_CAP = 5  # Ice stops here, so a project's cold matches cannot fill the slots a Fire or Smoke finding needs
+PRIORITY = {FIRE: 0, SMOKE: 6, ICE: 9}  # Redis steps: 0 Fire, 3 manual, 6 Smoke, 9 Ice
 MAX_ATTEMPTS = 7  # failed tries of the same evidence before it is left alone (a changed signature starts again)
+
+
+def validate_all_matches():
+    """Whether every CVE match is validated automatically, not only the Fire and Smoke ones. On unless
+    CVENGINE_AUTO_VALIDATE_ALL_MATCHES is 0, false, no or off."""
+    return os.environ.get('CVENGINE_AUTO_VALIDATE_ALL_MATCHES', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
 def retry_after(attempts, capped_only=False):
@@ -86,6 +97,12 @@ def _candidate_rows(lane):
                 | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
                 | (Q(match__ai_verdict='affected') & Q(match__cve_entry__cvss__gte=7)))
     cve_hot = cve_fire | Q(match__cve_entry__cvss__gte=7) | Q(match__cve_entry__epss_reached=True)
+    if lane == ICE:
+        # every other current CVE match, whatever its confidence or score (an unscored CVE too); one the AI ruled out or the distro
+        # patched is not a finding to validate
+        cold = (Q(match__isnull=False) & ~cve_hot & ~Q(match__ai_verdict='not_affected') & ~Q(match__distro_status='patched')
+                & latest_scan_q('match__subdomain__'))
+        return Triage.objects.filter(cold).select_related('match__cve_entry', 'match__subdomain__target_domain').order_by('pk')
     severity = 3 if lane == FIRE else 2
     candidate = ((cve_fire if lane == FIRE else cve_hot) & Q(match__isnull=False)
                  & latest_scan_q('match__subdomain__'))
@@ -133,18 +150,19 @@ def enqueue(row, lane):
     """Idempotent dispatch of this persisted finding. No target argument reaches the broker."""
     from cveFeed.tasks import automatic_validate_finding, validate_match_on_demand
 
-    priority = 0 if lane == FIRE else 6
+    priority = PRIORITY[lane]
+    cap = PROJECT_ICE_CAP if lane == ICE else PROJECT_ACTIVE_CAP
     now = timezone.now()
     with transaction.atomic():
         row = Triage.objects.select_for_update(of=('self',)).select_related(
             'match__cve_entry', 'match__subdomain__target_domain', 'vulnerability', 'route', 'hygiene').get(pk=row.pk)
-        if tier_for(row) != lane:
+        if tier_for(row) != lane or (lane == ICE and not row.match_id):
             return 'stale'
         if row.match_id:
             previous = OnDemandValidation.objects.filter(match_id=row.match_id).order_by('-id').first()
             if previous and previous.status in ('queued', 'running'):
-                if lane == FIRE and previous.status == 'queued' and previous.priority > 0:
-                    previous.priority = 0
+                if previous.status == 'queued' and previous.priority > priority:
+                    previous.priority = priority
                     previous.save(update_fields=['priority'])
                     job, task, promoted = previous, validate_match_on_demand, True
                 else:
@@ -152,7 +170,7 @@ def enqueue(row, lane):
             elif _recently_handled(previous, row.signature, now):
                 return 'fresh'
             else:
-                if _active_count(row.project_id) >= PROJECT_ACTIVE_CAP:
+                if _active_count(row.project_id) >= cap:
                     return 'project_cap'
                 job = OnDemandValidation.objects.create(match_id=row.match_id, project_id=row.project_id,
                     evidence_signature=row.signature, priority=priority,
@@ -161,8 +179,8 @@ def enqueue(row, lane):
         else:
             previous = AutomaticValidation.objects.filter(triage=row).order_by('-id').first()
             if previous and previous.status in ('queued', 'running'):
-                if lane == FIRE and previous.status == 'queued' and previous.priority > 0:
-                    previous.priority = 0
+                if previous.status == 'queued' and previous.priority > priority:
+                    previous.priority = priority
                     previous.save(update_fields=['priority'])
                     job, task, promoted = previous, automatic_validate_finding, True
                 else:
@@ -170,7 +188,7 @@ def enqueue(row, lane):
             elif _recently_handled(previous, row.signature, now):
                 return 'fresh'
             else:
-                if _active_count(row.project_id) >= PROJECT_ACTIVE_CAP:
+                if _active_count(row.project_id) >= cap:
                     return 'project_cap'
                 job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id,
                     signature=row.signature, priority=priority,
@@ -211,9 +229,9 @@ def _backfill_projects(limit=2):
 def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
     page = max(1, min(int(page), PAGE))
     max_jobs = max(1, min(int(max_jobs), MAX_ENQUEUE))
-    stats = {'projects': _backfill_projects(), 'fire': 0, 'smoke': 0, 'promoted': 0,
+    stats = {'projects': _backfill_projects(), 'fire': 0, 'smoke': 0, 'ice': 0, 'promoted': 0,
              'fresh': 0, 'inflight': 0, 'project_cap': 0, 'failed': 0}
-    for lane in (FIRE, SMOKE):
+    for lane in (FIRE, SMOKE, ICE) if validate_all_matches() else (FIRE, SMOKE):
         cursor, _ = HotValidationCursor.objects.get_or_create(lane=lane)
         base = _candidate_rows(lane)
         rows = list(base.filter(pk__gt=cursor.last_pk)[:page])
@@ -221,7 +239,7 @@ def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
             cursor.last_pk = 0
             rows = list(base[:page])
         for row in rows:
-            if stats[FIRE] + stats[SMOKE] >= max_jobs:
+            if stats[FIRE] + stats[SMOKE] + stats[ICE] >= max_jobs:
                 break  # next sweep starts with the first deferred row
             result = enqueue(row, lane)
             if result in stats:

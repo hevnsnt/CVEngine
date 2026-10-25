@@ -63,6 +63,7 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | `CVENGINE_HYGIENE_RDAP` | `1` | Set to `0` to skip the registry (RDAP) lookups that check whether SPF includes and DMARC report domains are registered. |
 | `CVENGINE_TRIAGE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `100`, `500`, `2000` | AI triage questions per run, per project per day, and per day. One question serves every finding with the same evidence. |
 | `CVENGINE_VALIDATE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `50`, `300`, `1500` | Validation checks per task, per project per day, and per day. |
+| `CVENGINE_AUTO_VALIDATE_ALL_MATCHES` | `1` | Queue every CVE match for automatic validation, hottest first. Set to `0` to validate only fire and smoke matches automatically. |
 | `CVENGINE_TEMPLATE_GEN_MAX_PER_DAY`, `CVENGINE_TEMPLATE_GEN_CVE_DAYS` | `10`, `7` | AI-written nuclei checks: at most this many attempts in any 24 hours across all projects, and one attempt per CVE in this many days, whatever its outcome. |
 | `CVENGINE_RETEST_MAX_HOSTS` | `25` | Hosts re-tested in one batch. A batch serves the project whose re-tests were dispatched longest ago, hottest hosts first, so one large discovery cannot starve the other projects. The rest wait for the five-minute sweep. |
 | `CVENGINE_CHANGES_RETENTION_DAYS` | `90` | Days the Changes log is kept. |
