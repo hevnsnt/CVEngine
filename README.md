@@ -27,7 +27,7 @@
 
 Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. cvENGINE runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the one question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
 
-- **Total visibility.** Domains, subdomains, IPs, ports, products, versions, TLS, and technologies in one Shodan-style inventory that keeps itself current.
+- **Total visibility.** Domains, subdomains, IPs, ports, products, versions, TLS, and technologies are auto-discovered and stored in one Shodan-style inventory that keeps itself current. Just enter your domain name and cvENGINE does the rest.
 - **Matched to your environment.** The live [cve.now](https://cve.now) feed and the major exploitation sources are rated [fire, smoke, or ice](docs/FIRE-SMOKE-ICE.md) and matched to what you actually run, by product and version, with distribution backports understood.
 - **Verdicts, not noise.** AI triages your findings, read-only checks reproduce what they can, and fixed rules mean the model can never wave away hard evidence. Every check records exactly what it ran.
 - **Nothing changes unseen.** New hosts, opened ports, version bumps, new certificates, login pages that appear, and front pages that change all land on a timeline.
