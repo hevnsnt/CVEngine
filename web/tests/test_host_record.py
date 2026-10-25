@@ -74,9 +74,9 @@ class FingerprintTests(unittest.TestCase):
 
 class ClassifyTests(unittest.TestCase):
 	def test_a_netlify_cname_is_a_shared_platform(self):
-		info = hosting.classify(name='archive.oceanx.org', cname='oceanx-website.netlify.app.')
+		info = hosting.classify(name='archive.acme-example.org', cname='acme-website.netlify.app.')
 		self.assertEqual((info['provider'], info['kind'], info['shared_ip']), ('Netlify', 'paas', True))
-		self.assertIn('CNAME oceanx-website.netlify.app', info['evidence'])
+		self.assertIn('CNAME acme-website.netlify.app', info['evidence'])
 
 	def test_the_name_itself_and_the_server_header_also_say_so(self):
 		self.assertEqual(hosting.classify(name='site.vercel.app')['provider'], 'Vercel')
@@ -117,9 +117,9 @@ class CanonicalNameTests(unittest.TestCase):
 		self.addCleanup(hosting._canon.clear)
 
 	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'oceanx-website.netlify.app', ('1.2.3.4', 0))]) as lookup:
-			self.assertEqual(hosting.canonical_name('archive.oceanx.org'), 'oceanx-website.netlify.app')
-			self.assertEqual(hosting.canonical_name('ARCHIVE.oceanx.org.'), 'oceanx-website.netlify.app')
+		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'acme-website.netlify.app', ('1.2.3.4', 0))]) as lookup:
+			self.assertEqual(hosting.canonical_name('archive.acme-example.org'), 'acme-website.netlify.app')
+			self.assertEqual(hosting.canonical_name('ARCHIVE.acme-example.org.'), 'acme-website.netlify.app')
 		self.assertEqual(lookup.call_count, 1)
 
 	def test_a_plain_host_and_a_failed_lookup_have_no_canonical_name(self):
@@ -139,7 +139,7 @@ class Fixture(TestCase):
 	def setUp(self):
 		now = timezone.now()
 		self.project = Project.objects.create(name='P', slug='hr', insert_date=now, org=Org.objects.create(name='H', slug='hr'))
-		self.domain = Domain.objects.create(name='oceanx.test', project=self.project, insert_date=now)
+		self.domain = Domain.objects.create(name='acme.test', project=self.project, insert_date=now)
 		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
 		patch = mock.patch('cveFeed.hosting.canonical_name', return_value='')
@@ -155,7 +155,7 @@ class Fixture(TestCase):
 
 class SharedAddressTests(Fixture):
 	def test_an_address_with_a_platform_cname_is_found_and_flagged(self):
-		self.host('archive.oceanx.test', '198.51.100.7', cname='oceanx-website.netlify.app')
+		self.host('archive.acme.test', '198.51.100.7', cname='acme-website.netlify.app')
 		self.host('www.plain.test', '198.51.100.8')
 		found = hosting.shared_by_address(['198.51.100.7', '198.51.100.8'])
 		self.assertEqual(list(found), ['198.51.100.7'])
@@ -164,19 +164,19 @@ class SharedAddressTests(Fixture):
 		self.assertFalse(IpAddress.objects.get(address='198.51.100.8').is_cdn)
 
 	def test_a_cname_that_was_never_stored_is_looked_up(self):
-		self.host('archive.oceanx.test', '198.51.100.7')
-		found = hosting.shared_by_address(['198.51.100.7'], lookup=lambda name: 'oceanx-website.netlify.app')
+		self.host('archive.acme.test', '198.51.100.7')
+		found = hosting.shared_by_address(['198.51.100.7'], lookup=lambda name: 'acme-website.netlify.app')
 		self.assertEqual(found['198.51.100.7']['provider'], 'Netlify')
 
 	def test_lookups_per_call_are_bounded(self):
 		for i in range(40):
-			self.host(f'h{i}.oceanx.test', f'198.51.100.{i + 10}')
+			self.host(f'h{i}.acme.test', f'198.51.100.{i + 10}')
 		seen = []
 		hosting.shared_by_address([f'198.51.100.{i + 10}' for i in range(40)], lookup=lambda n: seen.append(n) or '')
 		self.assertEqual(len(seen), hosting.MAX_LOOKUPS)
 
 	def test_the_server_header_alone_is_enough(self):
-		self.host('x.oceanx.test', '198.51.100.9', webserver='Netlify')
+		self.host('x.acme.test', '198.51.100.9', webserver='Netlify')
 		self.assertIn('198.51.100.9', hosting.shared_by_address(['198.51.100.9']))
 
 	def test_empty_input(self):
@@ -192,7 +192,7 @@ class PortScanGuardTests(Fixture):
 			p.start()
 
 	def test_the_background_sweep_never_scans_a_shared_platform_address(self):
-		_, shared = self.host('archive.oceanx.test', '192.0.2.50', cname='oceanx-website.netlify.app')
+		_, shared = self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
 		_, own = self.host('www.own.test', '192.0.2.51')
 		self.assertFalse(fullscan.in_scope(shared))
 		self.assertTrue(IpAddress.objects.get(pk=shared.pk).is_cdn)  # flagged, so the queue never offers it again
@@ -200,7 +200,7 @@ class PortScanGuardTests(Fixture):
 		self.assertEqual([i.address for i in fullscan.candidates()], ['192.0.2.51'])
 
 	def test_the_host_nmap_pass_leaves_a_shared_platform_address_alone(self):
-		self.host('archive.oceanx.test', '192.0.2.50', cname='oceanx-website.netlify.app')
+		self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
 		runner = mock.Mock()
 		out = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		runner.assert_not_called()
@@ -208,7 +208,7 @@ class PortScanGuardTests(Fixture):
 		self.assertTrue(IpAddress.objects.get(address='192.0.2.50').is_cdn)
 
 	def test_the_host_nmap_pass_still_scans_the_rest(self):
-		self.host('archive.oceanx.test', '192.0.2.50', cname='oceanx-website.netlify.app')
+		self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
 		self.host('www.own.test', '192.0.2.51')
 		seen = []
 
@@ -222,7 +222,7 @@ class PortScanGuardTests(Fixture):
 
 class RouteFingerprintTests(Fixture):
 	def _probe(self, **kw):
-		base = {'url': 'https://archive.oceanx.test/', 'status': 200, 'location': '', 'www_authenticate': '', 'cookies': [],
+		base = {'url': 'https://archive.acme.test/', 'status': 200, 'location': '', 'www_authenticate': '', 'cookies': [],
 				'content_type': 'text/html', 'body': '', 'title': 'T', 'bytes': 0, 'server': '', 'powered_by': ''}
 		return {**base, **kw}
 
@@ -245,17 +245,17 @@ class RouteFingerprintTests(Fixture):
 		return {'evidence': {'fingerprints': [{'name': n, 'source': 'header:x-powered-by'} for n in fingerprints]}}
 
 	def test_the_root_page_names_the_hosts_technologies_once(self):
-		sub, _ = self.host('archive.oceanx.test', '192.0.2.60')
-		probed = {'https://archive.oceanx.test/': self._result(['PHP:8.2.30', 'nginx:1.25.3']),
-				  'http://archive.oceanx.test/': self._result(['PHP:8.2.30']),
-				  'https://archive.oceanx.test/admin': self._result(['Secret:9'])}
+		sub, _ = self.host('archive.acme.test', '192.0.2.60')
+		probed = {'https://archive.acme.test/': self._result(['PHP:8.2.30', 'nginx:1.25.3']),
+				  'http://archive.acme.test/': self._result(['PHP:8.2.30']),
+				  'https://archive.acme.test/admin': self._result(['Secret:9'])}
 		self.assertEqual(route_auth.link_technologies(self.scan, probed), 2)
 		self.assertEqual(sorted(t.name for t in sub.technologies.all()), ['PHP:8.2.30', 'nginx:1.25.3'])
 		self.assertEqual(route_auth.link_technologies(self.scan, probed), 0)  # nothing added twice
 		self.assertEqual(Technology.objects.filter(name='PHP:8.2.30').count(), 1)
 
 	def test_a_host_that_is_not_in_the_scan_is_left_alone(self):
-		self.assertEqual(route_auth.link_technologies(self.scan, {'https://nobody.oceanx.test/': self._result(['PHP:8.2.30'])}), 0)
+		self.assertEqual(route_auth.link_technologies(self.scan, {'https://nobody.acme.test/': self._result(['PHP:8.2.30'])}), 0)
 		self.assertEqual(route_auth.link_technologies(self.scan, {}), 0)
 
 
@@ -265,21 +265,21 @@ class HostRecordTests(Fixture):
 		return services.host_group(self.project, sub)
 
 	def test_the_route_check_fills_what_the_host_row_lacks(self):
-		sub, ip = self.host('archive.oceanx.test', '192.0.2.70', cname='oceanx-website.netlify.app')
+		sub, ip = self.host('archive.acme.test', '192.0.2.70', cname='acme-website.netlify.app')
 		ip.reverse_pointer = 'ec2-192-0-2-70.compute-1.amazonaws.com'
 		ip.save()
-		self.host('other.oceanx.test', '192.0.2.70')
+		self.host('other.acme.test', '192.0.2.70')
 		RouteAuth.objects.create(
-			project=self.project, domain=self.domain, host='archive.oceanx.test', url='https://archive.oceanx.test/', path='/',
-			auth_state='open', http_status=200, title='OceanX', content_type='text/html',
+			project=self.project, domain=self.domain, host='archive.acme.test', url='https://archive.acme.test/', path='/',
+			auth_state='open', http_status=200, title='Acme', content_type='text/html',
 			evidence={'server': 'Netlify', 'powered_by': 'PHP/8.2.30',
 					  'fingerprints': [{'name': 'Netlify', 'source': 'header:server'}, {'name': 'PHP:8.2.30', 'source': 'header:x-powered-by'}]})
 		sub.technologies.add(Technology.objects.create(name='next.js'))
 		record = self._record(sub)
-		self.assertEqual((record['http_status'], record['title']), (200, 'OceanX'))
+		self.assertEqual((record['http_status'], record['title']), (200, 'Acme'))
 		self.assertEqual(record['http']['webserver'], 'Netlify')
 		self.assertEqual(record['http']['powered_by'], 'PHP/8.2.30')
-		self.assertEqual((record['http']['source'], record['http']['cname']), ('web route check', 'oceanx-website.netlify.app'))
+		self.assertEqual((record['http']['source'], record['http']['cname']), ('web route check', 'acme-website.netlify.app'))
 		self.assertEqual((record['hosting']['provider'], record['hosting']['shared_ip'], record['hosting']['infrastructure']),
 			('Netlify', True, 'Amazon Web Services (EC2)'))
 		details = {d['name']: d for d in record['technology_details']}
@@ -289,31 +289,31 @@ class HostRecordTests(Fixture):
 		self.assertEqual(record['ips'][0]['names_on_ip'], 2)
 
 	def test_the_host_rows_own_values_win(self):
-		sub, _ = self.host('archive.oceanx.test', '192.0.2.71', http_status=301, page_title='Own', webserver='Caddy')
-		RouteAuth.objects.create(project=self.project, domain=self.domain, host='archive.oceanx.test', url='https://archive.oceanx.test/', path='/',
+		sub, _ = self.host('archive.acme.test', '192.0.2.71', http_status=301, page_title='Own', webserver='Caddy')
+		RouteAuth.objects.create(project=self.project, domain=self.domain, host='archive.acme.test', url='https://archive.acme.test/', path='/',
 			auth_state='open', http_status=200, title='Route', evidence={'server': 'Netlify'})
 		record = self._record(sub)
 		self.assertEqual((record['http_status'], record['title'], record['http']['webserver'], record['http']['source']),
 			(301, 'Own', 'Caddy', 'host scan'))
 
 	def test_a_host_nobody_probed_is_shown_as_unprobed_not_invented(self):
-		sub, _ = self.host('quiet.oceanx.test', '192.0.2.72')
+		sub, _ = self.host('quiet.acme.test', '192.0.2.72')
 		record = self._record(sub)
 		self.assertEqual((record['http_status'], record['title'], record['http']['source']), (0, None, ''))
 		self.assertEqual((record['hosting']['provider'], record['hosting']['shared_ip']), ('', False))
 		self.assertEqual(record['technology_details'], [])
 
 	def test_a_retired_route_does_not_speak_for_the_host(self):
-		sub, _ = self.host('gone.oceanx.test', '192.0.2.73')
-		RouteAuth.objects.create(project=self.project, domain=self.domain, host='gone.oceanx.test', url='https://gone.oceanx.test/', path='/',
+		sub, _ = self.host('gone.acme.test', '192.0.2.73')
+		RouteAuth.objects.create(project=self.project, domain=self.domain, host='gone.acme.test', url='https://gone.acme.test/', path='/',
 			auth_state='not_found', http_status=404, retired_at=timezone.now(), evidence={'server': 'Netlify'})
 		self.assertEqual(self._record(sub)['http']['webserver'], '')
 
 	def test_another_projects_route_never_leaks_in(self):
 		other = Project.objects.create(name='O', slug='other', insert_date=timezone.now(), org=Org.objects.create(name='O', slug='other'))
 		domain = Domain.objects.create(name='o.test', project=other, insert_date=timezone.now())
-		sub, _ = self.host('shared-name.oceanx.test', '192.0.2.74')
-		RouteAuth.objects.create(project=other, domain=domain, host='shared-name.oceanx.test', url='https://shared-name.oceanx.test/', path='/',
+		sub, _ = self.host('shared-name.acme.test', '192.0.2.74')
+		RouteAuth.objects.create(project=other, domain=domain, host='shared-name.acme.test', url='https://shared-name.acme.test/', path='/',
 			auth_state='open', http_status=200, title='Other project', evidence={'server': 'Netlify'})
 		record = self._record(sub)
 		self.assertEqual((record['title'], record['http']['webserver']), (None, ''))
