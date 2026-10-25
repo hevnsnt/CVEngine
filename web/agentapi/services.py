@@ -2831,6 +2831,48 @@ def finding_audit(ctx, slug, kind, finding_id):
     return {'results': [_audit_event(e) for e in rows]}
 
 
+MAX_SLA_DAYS = 3650
+
+
+def _project_settings(project, sla):
+    from cveFeed.models import DEFAULT_SLA_DAYS
+    return {'sla_days': sla, 'sla_defaults': DEFAULT_SLA_DAYS}
+
+
+def get_project_settings(ctx, slug):
+    """This project's settings: ``sla_days`` (days to fix per severity: critical, high, medium, low), the same for everyone,
+    so a UI's "overdue" is consistent. ``sla_defaults`` is what an unset severity falls back to."""
+    from cveFeed.models import ProjectSettings
+    project, _ = get_one_project(ctx, slug)
+    return _project_settings(project, ProjectSettings.sla_for(project))
+
+
+def set_project_settings(ctx, slug, body):
+    """Change this project's settings. ``sla_days`` is a partial update: send only the severities to change, each a whole
+    number of days from 1 to 3650, or ``null`` to go back to the default. Anyone with a write role may change it, like the
+    project's API keys; a read-only token or the audit role may not."""
+    from cveFeed.models import DEFAULT_SLA_DAYS, ProjectSettings
+    project, _ = get_one_project(ctx, slug, write=True)
+    changes = body.get('sla_days') if isinstance(body, dict) else None
+    if not isinstance(changes, dict) or not changes:
+        raise ApiError(400, 'sla_days must be an object naming at least one severity')
+    unknown = [k for k in changes if k not in DEFAULT_SLA_DAYS]
+    if unknown:
+        raise ApiError(400, f'sla_days severities must be among {", ".join(DEFAULT_SLA_DAYS)}: unknown {", ".join(map(str, unknown))}')
+    row, _created = ProjectSettings.objects.get_or_create(project=project)
+    stored = dict(row.sla_days or {})
+    for severity, days in changes.items():
+        if days is None:
+            stored.pop(severity, None)
+        elif isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_SLA_DAYS:
+            raise ApiError(400, f'{severity} must be a whole number of days from 1 to {MAX_SLA_DAYS}, or null for the default')
+        else:
+            stored[severity] = days
+    row.sla_days, row.updated_by = stored, ctx.user
+    row.save(update_fields=['sla_days', 'updated_by', 'updated_at'])
+    return _project_settings(project, ProjectSettings.sla_for(project))
+
+
 def list_members(ctx, slug):
     """Users who can act on this project, for an assignee picker: its direct members, plus an organization's members
     when the project belongs to one (an org role already grants project access, see tenancy.roles.effective_role). A

@@ -1336,3 +1336,22 @@ class FindingAuditEvent(models.Model):
     class Meta:
         indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "-created_at"], name="findingaudit_target_idx")]
         ordering = ["-created_at", "-id"]
+
+
+DEFAULT_SLA_DAYS = {"critical": 7, "high": 30, "medium": 90, "low": 180}  # days to fix, by severity; info has no SLA
+
+
+class ProjectSettings(models.Model):
+    """Settings that belong to one project and are the same for everyone who works in it, so "overdue" reads the same on
+    every screen. One row per project, created on its first write; a project without one uses the defaults."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="cve_settings")
+    sla_days = models.JSONField(default=dict, blank=True)  # only the severities changed from DEFAULT_SLA_DAYS
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    @classmethod
+    def sla_for(cls, project):
+        """The effective {severity: days} of ``project``: the defaults with its own overrides on top."""
+        row = cls.objects.filter(project=project).first()
+        return {**DEFAULT_SLA_DAYS, **{k: v for k, v in ((row.sla_days if row else None) or {}).items() if k in DEFAULT_SLA_DAYS}}
