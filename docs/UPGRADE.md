@@ -22,6 +22,16 @@ Installs made before 23 October 2026 ran PostgreSQL 12. The current release runs
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume.
 
+## Accepted host names
+
+Older versions accepted any `Host` header. The current release accepts only the host of `DOMAIN_NAME`, loopback (for health checks) and the names in `CVENGINE_ALLOWED_HOSTS`. Any other name gets **400 Bad Request** on every page, including the sign-in page. Before you update, check how people reach the server:
+
+- **By the name in `DOMAIN_NAME`.** Nothing to do.
+- **By another name, or by IP address** (for example `https://192.0.2.10/`). Add each one to `.env`, comma separated, then restart: `CVENGINE_ALLOWED_HOSTS=scanner.internal.example,192.0.2.10`.
+- **`DOMAIN_NAME` unset, or still the example value.** Set it to the server's public name.
+
+`python3 manage.py check` (which also runs when the web container migrates at start) prints warning `cvengine.W001` when `DOMAIN_NAME` would leave only loopback accepted. The web container's log names each refused host (`Invalid HTTP_HOST header: '...'`). Do not use `*` on an Internet-facing installation.
+
 ## Scope of targets on shared provider domains
 
 Earlier versions promoted a tenant such as `acme.jfrog.com` to `jfrog.com` in the weekly deep-discovery sweep and enumerated the whole provider. The update fixes that, and its database migration cleans up after it:

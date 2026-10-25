@@ -7,7 +7,7 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | Variable | Purpose |
 | --- | --- |
 | `DOMAIN_NAME` | A bare hostname such as `scanner.example.com`. It is the certificate name and the host in notification links. |
-| `CVENGINE_ALLOWED_HOSTS` | Optional comma-separated additional hostnames accepted by Django, for example a second public name behind a trusted proxy. The configured `DOMAIN_NAME` and loopback health checks are accepted automatically. Do not use `*` on an Internet-facing installation. |
+| `CVENGINE_ALLOWED_HOSTS` | Optional comma-separated additional hostnames accepted by Django, for example a second public name behind a trusted proxy. The configured `DOMAIN_NAME` and loopback health checks are accepted automatically; any other name or IP address gets 400 Bad Request (see [UPGRADE.md](UPGRADE.md#accepted-host-names)). Do not use `*` on an Internet-facing installation. |
 | `CVENGINE_HSTS_SECONDS` | HTTPS browser policy lifetime in seconds (default 3600 in production, 0 in development). Increase it only after confirming every public route reliably uses HTTPS; no subdomain or preload policy is set automatically. |
 | `POSTGRES_PASSWORD` | Database password. Set it before the first start. |
 | `AUTHORITY_PASSWORD` | Passed to the certificate authority step of `make certs`. The key is stored in `secrets/certs/`, so protect that directory. |
