@@ -67,17 +67,47 @@ cvENGINE stands on excellent open source work. Full credits and licenses are in 
 Add a target and cvENGINE runs one pipeline for it. Each scanner runs once per host inside a time window, so repeat scans stay fast.
 
 ```mermaid
-flowchart TD
-    A["Add target"] --> B["Discovery<br/>bbot, screenshots in deep mode"]
-    B --> C["Inventory<br/>nmap fingerprint"]
-    C --> D["Exposure checks<br/>open databases"]
-    D --> E["nuclei<br/>technology pass"]
-    E --> R["Web route checks"]
-    R --> F["CVE correlation"]
-    F --> G["nuclei<br/>AI-targeted pass"]
-    G --> H["AI triage and validation"]
-    H --> I["Changes, host score,<br/>dashboard, API, alerts"]
-    I -.-> J["Hygiene<br/>TLS, SPF, DKIM, DMARC, CAA"]
+flowchart LR
+    T(["Add a target<br/>domain, IP, CIDR, URL"])
+
+    subgraph FIND["1 &nbsp; FIND"]
+        direction TB
+        D["Discovery<br/>bbot"] --> I["Inventory<br/>nmap, naabu"]
+    end
+
+    subgraph PROBE["2 &nbsp; PROBE"]
+        direction TB
+        X["Exposure checks<br/>open databases"] --> N1["nuclei<br/>technology pass"] --> R["Web route<br/>checks"]
+    end
+
+    subgraph MATCH["3 &nbsp; MATCH"]
+        direction TB
+        C["CVE correlation"] --> N2["nuclei<br/>AI-targeted pass"]
+    end
+
+    subgraph DECIDE["4 &nbsp; DECIDE"]
+        direction TB
+        A["AI triage<br/>and validation"] --> O["Changes, host score,<br/>dashboard, API, alerts"]
+    end
+
+    H["Hygiene<br/>TLS, SPF, DKIM, DMARC, CAA"]
+
+    T --> FIND --> PROBE --> MATCH --> DECIDE
+    DECIDE -.-> H
+
+    style FIND fill:#e8f1ff,stroke:#3b82f6,color:#0b3b8c
+    style PROBE fill:#f1eaff,stroke:#8b5cf6,color:#3b1d8c
+    style MATCH fill:#fff4e0,stroke:#f59e0b,color:#7a4a00
+    style DECIDE fill:#e6f7ec,stroke:#22c55e,color:#0b5a2a
+    linkStyle default stroke:#555,stroke-width:2px
+
+    classDef start fill:#111,stroke:#111,color:#fff
+    classDef step fill:#fff,stroke:#444,color:#111
+    classDef out fill:#fff,stroke:#16a34a,stroke-width:2px,color:#111
+    class T start
+    class D,I,X,N1,R,C,N2,A step
+    class O out
+    class H step
 ```
 
 Meanwhile the CVE feed runs on its own schedule:
@@ -94,6 +124,13 @@ flowchart LR
     M --> V["AI triage"]
     V --> X["Validate<br/>read-only checks"]
     X --> OUT["Finding<br/>tracked through the API"]
+
+    classDef fire fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    classDef smoke fill:#fef3c7,stroke:#f59e0b,color:#78350f
+    classDef ice fill:#e0f2fe,stroke:#0ea5e9,color:#0c4a6e
+    class FIRE fire
+    class SMOKE smoke
+    class ICE ice
 ```
 
 See [Pipeline](docs/PIPELINE.md) for each stage and [Architecture](docs/ARCHITECTURE.md) for the services.
