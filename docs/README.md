@@ -1,19 +1,19 @@
 # Documentation
 
-Start with the [project README](../README.md) for what CVEngine is and how to install it.
+Start with the [project README](../README.md) for what cvENGINE is and how to install it.
 
 | Document | What it covers |
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Services, stack, main models, and where AI is used |
-| [FIRE-SMOKE-ICE.md](FIRE-SMOKE-ICE.md) | How CVEngine rates every CVE and why |
+| [FIRE-SMOKE-ICE.md](FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why |
 | [PIPELINE.md](PIPELINE.md) | How a target becomes findings: stages, triage, changes, CVE intelligence, schedules |
-| [CONFIGURATION.md](CONFIGURATION.md) | Environment variables for memory, workers, network, and re-scan windows |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | HTTPS, proxies, AI models, backups, dev stack, and factory reset |
+| [CONFIGURATION.md](CONFIGURATION.md) | Every environment variable: memory, workers, scan windows, AI limits, feeds, retention, access |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Ports, HTTPS, proxies, AI models, backups and restore, dev stack, factory reset, uninstall |
 | [TENANCY.md](TENANCY.md) | Organizations, projects, roles, and two-step sign-in |
 | [BUG-BOUNTY.md](BUG-BOUNTY.md) | The bug bounty page: who may use it, program scope, reports, and submission |
 | [AI-USAGE.md](AI-USAGE.md) | AI model usage, tokens, and cost estimates |
 | [AGENT-API.md](AGENT-API.md) | REST and MCP interface for agents |
-| [UPDATES.md](UPDATES.md) | Approving and applying updates |
+| [UPDATES.md](UPDATES.md) | Automatic deployment, in-app approval, and the manual updater |
 | [UPGRADE.md](UPGRADE.md) | Moving an older install to the current release |
 | [FRONTEND.md](FRONTEND.md) | Design system, pages, and settings |
 | [../CHANGELOG.md](../CHANGELOG.md) | What changed |
