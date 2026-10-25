@@ -2195,9 +2195,9 @@ def update_finding_status(ctx, slug, kind, finding_id, status, note=None):
     from cveFeed import activity
     if kind == 'match':
         return update_match(ctx, slug, finding_id, status, note=note)
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before kind/status validation
     if kind not in STATUS_KINDS:
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
-    project, _ = get_project(ctx, slug, write=True)
     obj = _finding_obj(project, kind, finding_id)
     _apply_remediation(obj, status, note, ctx.user)
     activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
@@ -2211,13 +2211,13 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
     one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures."""
     from cveFeed import activity
     from cveFeed.models import CVEMatch
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
     if status not in CVEMatch.REMEDIATION_STATUSES:
         raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
     if not isinstance(items, list) or not items:
         raise ApiError(400, 'items must be a non-empty list')
     if len(items) > MAX_BULK_STATUS:
         raise ApiError(400, f'at most {MAX_BULK_STATUS} items per call')
-    project, _ = get_project(ctx, slug, write=True)
     updated, failed = 0, []
     for item in items:
         kind = item.get('kind') if isinstance(item, dict) else None

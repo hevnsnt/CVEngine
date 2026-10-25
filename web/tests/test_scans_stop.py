@@ -150,6 +150,8 @@ class ScansListAndStopTests(TestCase):
         from agentapi import services
         ids = self.bulk(1)
         scan = ScanHistory.objects.get(pk=ids[0])
+        self.addCleanup(resources.clear_abort, scan.id)  # before any assertion: a failure here must not leak this scan's
+        # real, reusable pk as permanently aborted in Redis (24h TTL) for whichever later test's fresh scan reuses it
         events = [{'type': 'DNS_NAME', 'id': 'D1', 'data': 'h0.acme.example', 'host': 'h0.acme.example', 'module': 'SEED',
                    'resolved_hosts': ['192.0.2.1'], 'parent': 'S'}]
         later = []
@@ -168,7 +170,6 @@ class ScansListAndStopTests(TestCase):
         scan.refresh_from_db()
         self.assertEqual(scan.scan_status, 3)  # not overwritten with finished
         self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='nuclei_light_scan').exists())
-        resources.clear_abort(scan.id)
 
     def test_stopping_kills_the_scanner_process_and_releases_the_memory_reservation(self):
         store = resources.MemoryStore()
