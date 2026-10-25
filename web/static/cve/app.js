@@ -647,10 +647,14 @@ function renderFinding(d, cfg, row) {
     } else advisory.append(el("p", "note", "Affected product and version data is unavailable."));
     const exploitation = d.cve.exploitation || {};
     const signal = (value, yes, no) => value === true ? yes : value === false ? no : "Unknown";
+    // who reported each signal, when the threat-intelligence sources did (CISA KEV, ENISA EUVD, EPSS, Exploit-DB, Metasploit)
+    const by = (exploitation.exploited_by || []).map((e) => `${e.source}${e.since ? ` since ${e.since}` : ""}${e.ransomware ? ", used in ransomware" : ""}`);
+    const exploits = Object.entries(exploitation.public_exploits || {}).map(([source, n]) => `${source} (${n})`);
+    const epss = exploitation.epss ? `${(exploitation.epss.score * 100).toFixed(1)}% chance of exploitation in 30 days${exploitation.epss.percentile != null ? ` (${Math.round(exploitation.epss.percentile * 100)}th percentile)` : ""}` : "";
     advisory.append(kvBox([
-      { label: "CISA known exploited catalog", value: signal(exploitation.cisa_kev, "Listed", "Not listed in the current feed") },
-      { label: "Exploit-DB entry", value: signal(exploitation.exploit_db, "Reported by feed", "No entry reported by feed") },
-      { label: "EPSS elevated", value: signal(exploitation.epss_elevated, "Reported by feed", "Not reported by feed") },
+      { label: "Exploited in the wild", value: by.length ? `Listed: ${by.join("; ")}` : signal(exploitation.cisa_kev, "Listed in CISA KEV", "Not listed in the current feed") },
+      { label: "Public exploit", value: exploits.length ? exploits.join(", ") : signal(exploitation.exploit_db, "Reported by feed", "No entry reported by feed") },
+      { label: "EPSS", value: epss || signal(exploitation.epss_elevated, "Elevated (reported by feed)", "Not reported by feed") },
     ]));
     advisory.append(el("p", "note", exploitation.note || "Advisory signals do not prove this host is vulnerable."));
     if (d.cve.sources && d.cve.sources.length) {

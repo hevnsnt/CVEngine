@@ -1783,7 +1783,8 @@ def _cve_context(c):
             refs.append(url)
     if re.fullmatch(r'CVE-\d{4}-\d{4,}', c.cve_id, re.I):
         refs = [f'https://www.cve.org/CVERecord?id={c.cve_id}', f'https://nvd.nist.gov/vuln/detail/{c.cve_id}', *refs]
-    if c.kev is True:
+    listed = ((getattr(c, 'intel', None) or {}).get('kev') or {}) if isinstance(getattr(c, 'intel', None), dict) else {}
+    if c.kev is True and (not listed or 'cisa_kev' in listed):  # known exploited by CISA, not only by another catalogue
         refs.insert(0, 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog')
     affected = []
     for item in (c.affected if isinstance(c.affected, list) else [])[:30]:
@@ -1797,8 +1798,27 @@ def _cve_context(c):
             'summary': (c.summary or '').strip()[:3000], 'affected': affected, 'references': list(dict.fromkeys(refs))[:40],
             'sources': [s for s in (c.sources if isinstance(c.sources, list) else [])[:20]
                         if isinstance(s, (str, dict))],
-            'exploitation': {'cisa_kev': c.kev, 'exploit_db': c.exploit_db, 'epss_elevated': c.epss_reached,
+            'exploitation': {'cisa_kev': c.kev, 'exploit_db': c.exploit_db, 'epss_elevated': c.epss_reached, **_intel_brief(c),
                              'note': 'Catalog and exploit references describe the CVE, not proof that this host is vulnerable.'}}
+
+
+def _intel_brief(c):
+    """Who reported each exploitation signal (cveFeed.intel), for the advisory panel; empty when only cve.now spoke."""
+    from cveFeed.intel import SOURCES
+    intel = c.intel if isinstance(getattr(c, 'intel', None), dict) else {}
+    kev = intel.get('kev') if isinstance(intel.get('kev'), dict) else {}
+    exploits = intel.get('exploits') if isinstance(intel.get('exploits'), dict) else {}
+    epss = intel.get('epss') if isinstance(intel.get('epss'), dict) else {}
+    out = {}
+    if kev:
+        out['exploited_by'] = [{'source': SOURCES[name]['label'], 'since': str((detail or {}).get('added') or (detail or {}).get('since') or '')[:40],
+                                'ransomware': bool((detail or {}).get('ransomware'))} for name, detail in kev.items() if name in SOURCES]
+    if exploits:
+        out['public_exploits'] = {SOURCES[name]['label']: len(items) for name, items in exploits.items()
+                                  if name in SOURCES and isinstance(items, list)}
+    if isinstance(epss.get('score'), (int, float)):
+        out['epss'] = {'score': epss['score'], 'percentile': epss.get('percentile')}
+    return out
 
 def _cve(c, brief=False):
     from cveFeed.threat import classify_threat_tier

@@ -8,8 +8,8 @@ Thousands of CVEs are published every month, and most are never exploited in the
 
 CVEngine combines severity with evidence of real-world danger:
 
-- **CISA KEV**, the catalog of vulnerabilities known to be exploited.
-- **Exploit-DB**, which means a public exploit exists.
+- **Known exploitation**: CISA KEV, ENISA EUVD's exploited list, or VulnCheck KEV (with a key), catalogs of vulnerabilities known to be exploited.
+- **A public exploit**: an Exploit-DB entry or a Metasploit module.
 - **EPSS**, a probability that the CVE will be exploited. CVEngine treats 0.1 or more as "reached".
 - **CVSS**, the severity score.
 
@@ -19,7 +19,7 @@ The result is a short, honest list: the CVEs that are dangerous right now, the o
 
 | Tier | Meaning | Rule |
 | --- | --- | --- |
-| **Fire** | Dangerous now | In CISA KEV, **or** has an Exploit-DB entry, **or** CVSS 9.0 or higher, **or** EPSS of 0.1 or more together with CVSS 7.0 or higher |
+| **Fire** | Dangerous now | Known exploited (CISA KEV, ENISA EUVD, VulnCheck KEV), **or** has a public exploit (Exploit-DB, Metasploit), **or** CVSS 9.0 or higher, **or** EPSS of 0.1 or more together with CVSS 7.0 or higher |
 | **Smoke** | Warning signs | Not fire, and CVSS 7.0 or higher **or** EPSS of 0.1 or more |
 | **Ice** | Cold, low priority | Everything else |
 
