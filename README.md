@@ -36,7 +36,7 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 
 **Discover.** [bbot](https://github.com/blacklanternsecurity/bbot) subdomain and asset discovery in passive, standard, and deep modes (screenshots in deep). A certificate transparency watch that pulls new hostnames straight into assessment. Targets as domains, IPs, CIDR ranges, or URLs, bulk added by organization and project. Every apex domain gets a deep sweep each week.
 
-**Understand.** One record per host: ports, services, products, versions, OS, banners, TLS, and technologies, from [nmap](https://nmap.org) and [nuclei](https://github.com/projectdiscovery/nuclei). A background sweep of all 65,535 ports, one host at a time, plus optional [naabu](https://github.com/projectdiscovery/naabu). Web route checks that label each route open, login, session required, SSO, or redirect. Exposure checks for Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB that answer without a login. Email and domain hygiene: SPF, DKIM, DMARC, CAA, MTA-STS, DANE, DNSSEC, and TLS. Then search all of it the way you search Shodan: `port:3389 -host:vpn`, `tech:"apache tomcat" sev:high`, `ip:203.0.113.0/24 product:nginx` ([Search](docs/SEARCH.md)).
+**Understand.** One record per host: ports, services, products, versions, OS, banners, TLS, and technologies, from [nmap](https://nmap.org) and [nuclei](https://github.com/projectdiscovery/nuclei). A background sweep of all 65,535 ports, one host at a time, plus optional [naabu](https://github.com/projectdiscovery/naabu). Web route checks that label each route open, login, session required, SSO, or redirect. Exposure checks for Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, and CouchDB that answer without a login. Email and domain hygiene: SPF, DKIM, DMARC, CAA, MTA-STS, DANE, DNSSEC, and TLS. Then search all of it the way you search Shodan: `port:3389 -host:vpn`, `tech:"apache tomcat" sev:high`, `ip:203.0.113.0/24 product:nginx` ([Search](docs/SEARCH.md)).
 
 **Prioritize.** [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) ratings from [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [Metasploit](https://github.com/rapid7/metasploit-framework), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [EPSS](https://www.first.org/epss/), [CVSS](https://www.first.org/cvss/), and optionally [VulnCheck KEV](https://vulncheck.com). A 0 to 100 score for every host, with the reasons shown. AI triage of every finding into confirmed, likely, needs validation, likely false positive, or not applicable. Connect your own AI, with your own API keys (Anthropic, OpenAI, OpenRouter) or a model on your own hardware (Ollama, vLLM), and a review every three hours queues the next triage, validation, or rescan per project and tunes scanner concurrency from real measurements.
 
@@ -52,7 +52,7 @@ cvENGINE stands on excellent open source work. Full credits and licenses are in 
 
 | | |
 | --- | --- |
-| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot) discovery, [nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [nmap](https://nmap.org), [naabu](https://github.com/projectdiscovery/naabu), [gowitness](https://github.com/sensepost/gowitness) screenshots |
+| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot) discovery, [nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [nmap](https://nmap.org), [naabu](https://github.com/projectdiscovery/naabu), [gowitness](https://github.com/sensepost/gowitness) screenshots, [WPScan](https://wpscan.com/) for WordPress, [aardwolf](https://github.com/skelsec/aardwolf) RDP screenshots, [node2shell](https://github.com/assetnote/node2shell-scanner) detection |
 | **Exploitation intelligence** | [CVE feed cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
 | **Backport and certificate data** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh) |
 | **Email security checks** | adapted from [MailFail](https://github.com/ACK-J/MailFail) |
@@ -75,7 +75,7 @@ flowchart LR
 
     subgraph PROBE["2 &nbsp; PROBE"]
         direction TB
-        X["Exposure checks<br/>open databases"] --> N1["nuclei<br/>technology pass"] --> R["Web route<br/>checks"]
+        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Web route<br/>checks"] --> W["WPScan<br/>node2shell, opt-in"]
     end
 
     subgraph MATCH["3 &nbsp; MATCH"]
@@ -103,7 +103,7 @@ flowchart LR
     classDef step fill:#fff,stroke:#444,color:#111
     classDef out fill:#fff,stroke:#16a34a,stroke-width:2px,color:#111
     class T start
-    class D,I,X,N1,R,C,N2,A step
+    class D,I,X,N1,R,W,C,N2,A step
     class O out
     class H step
 ```
@@ -167,7 +167,7 @@ Create a token on **API tokens and MCP** and send `Authorization: Bearer <token>
 
 ## Safe by design
 
-- nuclei runs only templates that pass read-only and destination checks, and credentials are never guessed.
+- nuclei runs only templates that pass read-only and destination checks, and no password lists are ever tried: each database gets one attempt with no password (or none at all).
 - Loopback, link-local, and cloud metadata addresses are never scanned, private ranges stay off until you allow them, and addresses on shared platforms such as CDNs are never port-scanned.
 - Injection attempts are blocked, and at the strike threshold the account is disabled and the source IP is blocked for 24 hours.
 - Each project's data is isolated, and stored secrets are encrypted.

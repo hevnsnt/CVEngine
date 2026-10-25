@@ -31,6 +31,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
+| [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran |
+| [wpscan.com API](https://wpscan.com/) | WordPress vulnerability data for WPScan, with your own token |
 | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope of bug bounty programs, read at run time |
 | [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for report categories and priority |
 
