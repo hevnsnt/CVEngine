@@ -180,6 +180,43 @@ class SweepTests(FullScanBase):
 		other = self.ip('192.0.2.2')
 		self.assertEqual(fullscan.pick().pk, other.pk)  # the stuck host does not come back first
 
+	def test_an_ip_that_keeps_failing_backs_off_and_goes_behind_clean_ones(self):
+		from datetime import timedelta
+		from django.utils import timezone
+		ip = self.ip('192.0.2.1')
+
+		def boom(targets, flags, host_timeout):
+			raise RuntimeError('nmap crashed reading /srv/private/x')
+		fullscan.run(runner=boom)
+		ip.refresh_from_db()
+		self.assertEqual(ip.full_scan_failures, 1)
+		self.assertAlmostEqual((ip.full_scan_retry_at - timezone.now()).total_seconds(), 6 * 3600, delta=60)
+		message = AgentActivity.objects.filter(status='failed').latest('id').message
+		self.assertNotIn('/srv/private', message)
+		self.assertIn('next try after', message)
+		# after the lease and the backoff, a clean never-swept IP still goes first
+		type(ip).objects.filter(pk=ip.pk).update(full_scan_started_at=timezone.now() - timedelta(days=1),
+												 full_scan_retry_at=timezone.now() - timedelta(minutes=1))
+		clean = self.ip('192.0.2.9')
+		self.assertEqual(fullscan.pick().pk, clean.pk)
+		self.assertGreater(fullscan._back_off(ip) - timezone.now(), timedelta(hours=11))  # second failure: 12 hours
+		for _ in range(10):
+			retry = fullscan._back_off(ip)
+		self.assertLessEqual((retry - timezone.now()).total_seconds(), 7 * 86400 + 60)  # capped at a week
+		fullscan._advance(ip, 3)  # a successful sweep clears it
+		ip.refresh_from_db()
+		self.assertEqual((ip.full_scan_failures, ip.full_scan_retry_at), (0, None))
+
+	def test_waiting_for_memory_is_not_the_addresss_failure(self):
+		from reNgine.resources import MemoryBusy
+		ip = self.ip('192.0.2.1')
+
+		def busy(targets, flags, host_timeout):
+			raise MemoryBusy('nmap-full-bg waited too long for memory')
+		fullscan.run(runner=busy)
+		ip.refresh_from_db()
+		self.assertEqual((ip.full_scan_failures, ip.full_scan_retry_at), (0, None))
+
 	def test_the_claim_allows_one_sweep_at_a_time(self):
 		self.ip('192.0.2.1')
 		runner = mock.Mock()

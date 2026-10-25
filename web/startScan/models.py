@@ -621,6 +621,8 @@ class IpAddress(models.Model):
 	full_scanned_at = models.DateTimeField(null=True, blank=True, db_index=True)
 	full_scan_ports = models.IntegerField(default=0)
 	full_scan_started_at = models.DateTimeField(null=True, blank=True, db_index=True)  # a sweep is in flight; cleared-by-advance once full_scanned_at passes it
+	full_scan_failures = models.PositiveSmallIntegerField(default=0)  # consecutive failed sweeps (cveFeed.fullscan backs off)
+	full_scan_retry_at = models.DateTimeField(null=True, blank=True, db_index=True)  # not picked again before this
 	# this is used for querying which ip was discovered during subcan
 	ip_subscan_ids = models.ManyToManyField('SubScan', related_name='ip_subscan_ids')
 
