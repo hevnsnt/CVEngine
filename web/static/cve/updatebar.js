@@ -18,17 +18,17 @@ function watchUpdate(first) {
   const bar = el("div", "update-live");
   bar.setAttribute("role", "status");
   bar.setAttribute("aria-live", "polite");
-  const head = el("div", "ul-head");
+  const text = el("div", "ul-text");
   const msg = el("strong", "", "");
   const detail = el("span", "ul-detail", "");
-  const more = el("a", "ul-link", "Details");
-  more.href = "/cve/settings/#updates";
-  head.append(msg, detail, more);
+  text.append(msg, detail);
   const steps = el("ol", "ul-steps");
   const items = STEPS.map((t) => steps.appendChild(el("li", "", t)));
+  const more = el("a", "btn sm ul-link", "Details");
+  more.href = "/cve/settings/#updates";
   const track = el("div", "ul-track");
   track.append(el("i"));
-  bar.append(head, steps, track);
+  bar.append(el("span", "ul-dot"), text, steps, more, track);
   const layout = document.querySelector(".layout") || document.getElementById("main");
   layout.parentNode.insertBefore(bar, layout.parentNode.firstChild);
   const body = [...document.querySelectorAll(".layout, #main")];
@@ -93,8 +93,8 @@ function watchUpdate(first) {
     } else {
       grey(false);
       const n = now.scans_running != null ? now.scans_running : await scansNow();
-      if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start. The rebuild begins when they are done.");
-      else paint(1, `Updating to ${now.latest}`, "No scans are running. Waiting for the host updater to start the rebuild.");
+      if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start meanwhile.");
+      else paint(1, `Updating to ${now.latest}`, "Waiting for the host to start the rebuild.");
     }
     setTimeout(tick, POLL_MS);
   };

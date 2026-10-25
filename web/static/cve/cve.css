@@ -1245,19 +1245,26 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 .spark-dot{fill:var(--brand)}
 
 /* Update in progress: an orange bar at the top says what the update is doing; the page greys only while the services rebuild */
-.update-live{position:sticky;top:0;z-index:150;padding:10px var(--gutter) 0;background:var(--brand);color:var(--on-brand);font-size:14px}
-.update-live .ul-head{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline}
-.update-live strong{font-weight:700}
-.update-live .ul-detail{flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
-.update-live .ul-link{color:var(--on-brand);text-decoration:underline;font-weight:600}
-.update-live .ul-steps{display:flex;gap:6px;list-style:none;margin:8px 0 0;padding:0;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-.update-live .ul-steps li{flex:1;padding:4px 0;border-top:3px solid color-mix(in srgb,var(--on-brand) 35%,transparent);color:var(--on-brand)}
-.update-live .ul-steps li.ok,.update-live .ul-steps li.now{border-color:var(--on-brand);color:var(--on-brand)}
-.update-live .ul-track{position:relative;height:3px;margin:0 calc(var(--gutter) * -1);overflow:hidden;background:color-mix(in srgb,var(--on-brand) 18%,transparent)}
+.update-live{position:sticky;top:0;z-index:150;display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;padding:10px var(--gutter) 12px;background:var(--brand);color:var(--on-brand);font-size:14px;line-height:1.35}
+.update-live .ul-dot{width:9px;height:9px;flex:none;border-radius:50%;background:var(--on-brand);animation:update-pulse 1.4s ease-in-out infinite}
+.update-live .ul-text{flex:1 1 320px;min-width:0;display:flex;flex-wrap:wrap;gap:0 10px;align-items:baseline}
+.update-live strong{font-weight:700;font-size:15px}
+.update-live .ul-detail{min-width:0;overflow-wrap:anywhere}
+.update-live .ul-steps{display:flex;gap:4px;align-items:center;list-style:none;margin:0;padding:0;font-size:12px;font-weight:600}
+.update-live .ul-steps li{padding:3px 10px;border-radius:999px;white-space:nowrap}
+.update-live .ul-steps li.ok::before{content:"\2713\00a0"}
+.update-live .ul-steps li.now{background:var(--on-brand);color:var(--brand)}
+.update-live .ul-link{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
+.update-live .ul-track{position:absolute;left:0;right:0;bottom:0;height:3px;overflow:hidden;background:color-mix(in srgb,var(--on-brand) 18%,transparent)}
 .update-live .ul-track i{position:absolute;top:0;bottom:0;width:30%;background:var(--on-brand);animation:update-slide 1.4s ease-in-out infinite}
 .update-live .ul-track.done i{width:100%;animation:none}
 .update-live.failed{background:var(--fire);color:var(--on-solid)}
-.update-live.failed *{color:var(--on-solid)}
+.update-live.failed .ul-dot,.update-live.failed .ul-track i{background:var(--on-solid);animation:none}
+.update-live.failed .ul-link{color:var(--on-solid);border-color:var(--on-solid)}
+.update-live.failed .ul-steps li.now{background:var(--on-solid);color:var(--fire)}
 @keyframes update-slide{0%{left:-30%}100%{left:100%}}
+@keyframes update-pulse{50%{transform:scale(.6);opacity:.5}}
+@media (max-width:760px){.update-live .ul-steps{order:5;flex:1 0 100%;overflow-x:auto}}
+@media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}.update-live .ul-dot{animation:none}}
 html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointer-events:none;transition:opacity .3s}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
