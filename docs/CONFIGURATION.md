@@ -43,6 +43,11 @@ A scanner skips a host it covered inside its window. Hours unless noted.
 | `CVENGINE_TTL_NMAP_FAST` | `168` | nmap fingerprint of an IP. |
 | `CVENGINE_BOUNTY_CATALOGUE` | `1` | Set to `0` to stop CVEngine from fetching the public bug bounty program data (and to disable the page's load button). Nothing is fetched until someone loads the catalogue once. |
 | `CVENGINE_CVE_COVERAGE_DAYS` | `14` | How many days of the cve.now feed the hourly coverage task keeps stored. `0` turns it off. |
+| `CVENGINE_INTEL` | `1` | `0` turns off the threat-intelligence sources (CISA KEV, ENISA EUVD, EPSS, Exploit-DB, Metasploit). See [PIPELINE.md](PIPELINE.md#cve-intelligence). |
+| `CVENGINE_INTEL_SOURCES` | all | Comma-separated subset of `cisa_kev,euvd,vulncheck_kev,epss,exploit_db,metasploit`. |
+| `CVENGINE_VULNCHECK_API_KEY` | none | A free VulnCheck community key adds VulnCheck KEV (about 80% more exploited CVEs than CISA). |
+| `CVENGINE_INTEL_IMPORT`, `CVENGINE_INTEL_IMPORT_PER_RUN` | `kev,metasploit,epss,exploit_db`, `2000` | Which groups of missing CVEs are imported from the CVE List, in that order, and how many per hourly run (`0` imports none and only updates the signals of stored CVEs). |
+| `CVENGINE_INTEL_DIR` | `/usr/src/scan_results/.threat-intel` | Where the downloaded source files are cached between runs. |
 | `CVENGINE_CVE_WATCH_TECHS` | `php` | Technology slugs whose cve.now feed the coverage task reads, comma separated. |
 | `CVENGINE_TTL_BBOT`, `CVENGINE_TTL_BBOT_DEEP` | `168` | Discovery of a target, and deep discovery of an apex domain. |
 | `CVENGINE_TTL_NUCLEI`, `_NUCLEI_LIGHT`, `_NUCLEI_CVE` | `24` | Full, light, and CVE template runs per host. |

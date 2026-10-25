@@ -14,6 +14,7 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 
 ### Added
 
+- **Threat intelligence for historical CVEs.** An hourly task reads CISA KEV, ENISA EUVD (exploited), FIRST EPSS, Exploit-DB and Metasploit, plus VulnCheck KEV with a key. It reconciles every stored CVE's exploited, exploit and EPSS signals with them, and imports the exploited and exploitable CVEs the cve.now feed never delivered (about 37,000, known exploited first) from their CVE List V5 records with affected version ranges. The CVE detail names which source reported each signal. See [docs/PIPELINE.md](docs/PIPELINE.md).
 - **One Findings list.** The Findings page (formerly Scanner findings) lists CVE matches, scanner findings and hygiene findings together, hottest first, filtered by type, severity and status (actionable by default). Its heat follows the host card. The API and MCP offer the same list (`GET projects/{slug}/findings`, `list_findings`). The CVE matches and Hygiene pages stay for focused work. See [docs/FRONTEND.md](docs/FRONTEND.md).
 - **Weekly log maintenance.** AI activity, AI call and AI usage rows past their retention (30, 90 and 400 days) are archived to a tar.gz on the scan results volume, then deleted. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 - **Stuck-job expiry.** Host assessments and validation jobs that a restarted worker left queued or running are expired every 15 minutes, freeing their slots.

@@ -47,6 +47,7 @@ class CVEEntry(models.Model):
     first_seen_at = models.DateTimeField(null=True, blank=True)
 
     raw = models.JSONField(default=dict, blank=True)  # full entry, for fields not yet modelled
+    intel = models.JSONField(default=dict, blank=True)  # per-source exploitation detail (cveFeed.intel): kev, epss, exploits
     needs_recorrelation = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     synced_at = models.DateTimeField(auto_now=True)
@@ -116,7 +117,26 @@ class CVEEntry(models.Model):
             limit = getattr(field, "max_length", None)
             if limit and field.name in defaults and isinstance(defaults[field.name], str):
                 defaults[field.name] = defaults[field.name][:limit]
-        return cls.objects.update_or_create(cve_id=str(entry["id"])[:64], defaults=defaults)
+        cve_id = str(entry["id"])[:64]
+        intel = cls.objects.filter(cve_id=cve_id).values_list("intel", flat=True).first()
+        if intel:  # what the other sources reported stays: cve.now rewriting the entry must not clear it (cveFeed.intel)
+            from cveFeed.intel import merged_flags
+            defaults["kev"], defaults["epss_reached"], defaults["exploit_db"] = merged_flags(exploitation, intel)
+        return cls.objects.update_or_create(cve_id=cve_id, defaults=defaults)
+
+
+class IntelSource(models.Model):
+    """One threat-intelligence source (cveFeed.intel.SOURCES): when it was last read and what it answered."""
+    name = models.CharField(max_length=32, primary_key=True)
+    etag = models.CharField(max_length=200, blank=True, default="")
+    last_modified = models.CharField(max_length=100, blank=True, default="")
+    last_checked = models.DateTimeField(null=True, blank=True)
+    last_changed = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    cves = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return self.name
 
 
 class CVEMatch(models.Model):

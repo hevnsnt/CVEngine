@@ -303,6 +303,41 @@ def sync_bounty_catalogue(platforms=None, force=False):
     return results
 
 
+@app.task(name='sync_threat_intel', bind=False, queue='cve_feed_queue')
+def sync_threat_intel():
+    """Hourly: refresh the due threat-intelligence sources (CISA KEV, ENISA EUVD, EPSS, Exploit-DB, Metasploit, VulnCheck KEV
+    with a key), reconcile every stored CVE's exploitation signals with them, and import the CVEs they name that the cve.now
+    feed never delivered (cveFeed.intel). New CVEs go through the same correlation and announcement as the feed's own; hosts
+    matched to a CVE whose signals changed are rescored."""
+    from django.core.cache import cache
+
+    from cveFeed import activity, intel
+    from cveFeed.models import CVEMatch
+    from cveFeed.threat import FIRE, SMOKE
+    if not cache.add('cvengine:threat-intel', 1, timeout=2 * 3600):
+        return {'skipped': 'another threat-intel run is in progress'}
+    try:
+        result = intel.run()
+    finally:
+        cache.delete('cvengine:threat-intel')
+    if result.get('status') == 'disabled':
+        return result
+    created, changed = result['imported'], result['signals_changed']
+    if changed:
+        from cveFeed import scoring
+        scoring.rescore_for_matches(list(CVEMatch.objects.filter(cve_entry_id__in=changed[:5000]).select_related('subdomain__target_domain')[:2000]))
+    if created:
+        auto_fire_new_cves.delay([c.pk for c in created])
+    tiers = [c.threat_tier for c in created]
+    if created or changed or result['errors']:
+        activity.log('feed', (f"Threat intelligence: {len(created)} CVEs imported from the CVE List ({tiers.count(FIRE)} fire, "
+                              f"{tiers.count(SMOKE)} smoke), {len(changed)} stored CVEs changed exploitation signals; sources: "
+                              + ', '.join(f"{intel.SOURCES[n]['label']} {count:,}" for n, count in result['sources'].items()))
+                     + ''.join(f"; {intel.SOURCES[n]['label']} failed: {e}" for n, e in result['errors'].items()),
+                     status='failed' if result['errors'] else 'done', imported=len(created), changed=len(changed))
+    return {**result, 'imported': len(created), 'signals_changed': len(changed)}
+
+
 @app.task(name='correlate_refreshed_cves', bind=False, queue='cve_feed_queue')
 def correlate_refreshed_cves():
     """Recheck only materially updated CVEs and reset their dependent AI rows."""

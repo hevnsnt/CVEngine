@@ -9,12 +9,13 @@ from django_celery_beat.schedulers import DatabaseScheduler
 
 
 # Work that never touches a customer target and costs no AI budget keeps running during a pause: the CVE feed, distribution
-# fixes and bug bounty catalogue, the update check and template download, notifications, pruning and other bookkeeping. Everything else (discovery,
-# scanners, validation, AI triage and reviews, certificate watching) waits for the resume.
+# fixes, bug bounty catalogue and threat intelligence, the update check and template download, notifications, pruning and
+# other bookkeeping. Everything else (discovery, scanners, validation, AI triage and reviews, certificate watching) waits.
 PAUSE_EXEMPT_TASKS = frozenset({
-    'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'sync_bounty_catalogue', 'check_for_updates',
-    'update_nuclei_templates', 'prune_asset_changes', 'report_resources', 'rescore_all_hosts', 'reconcile_invalid_correlations',
-    'weekly_maintenance', 'reap_stuck_jobs', 'send_notif', 'send_scan_notif', 'send_task_notif', 'send_file_to_discord',
+    'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'sync_bounty_catalogue', 'sync_threat_intel',
+    'check_for_updates', 'update_nuclei_templates', 'prune_asset_changes', 'report_resources', 'rescore_all_hosts',
+    'reconcile_invalid_correlations', 'weekly_maintenance', 'reap_stuck_jobs', 'send_notif', 'send_scan_notif',
+    'send_task_notif', 'send_file_to_discord',
 })
 
 
