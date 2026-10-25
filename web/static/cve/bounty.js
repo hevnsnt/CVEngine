@@ -78,11 +78,15 @@ async function overviewTab(panel) {
   );
   cat.append(t);
   status.catalogue.filter((c) => c.error).forEach((c) => cat.append(para(`${c.label}: ${c.error}`, "msg err")));
-  cat.append(row(button(loaded ? "Refresh now" : "Load the catalogue", async () => {
+  const progress = para("", "msg busy");
+  progress.hidden = true;
+  cat.append(progress, row(button(loaded ? "Refresh now" : "Load the catalogue", async () => {
     await api("POST", `${API}/catalogue/refresh`, {});
-    toast("Loading. This takes under a minute; reload the page after.");
+    toast("Queued. The table fills in when the load finishes.");
+    watchLoad(panel, progress, Date.now());
   }, "btn sm"), para(loaded ? "It refreshes by itself every hour." : "Loading it once also turns on the hourly refresh.")));
   panel.append(cat);
+  if (status.loading && (status.loading.requested || status.loading.running)) watchLoad(panel, progress, Date.parse(status.loading.requested) || Date.now(), status.loading);
 
   if (stats) {
     const tiles = el("div", "bb-grid");
@@ -477,17 +481,55 @@ async function playbookTab(panel) {
   const lim = card("What this page does not do"); const ul = el("ul", "bb-list"); pb.limits.forEach((p) => ul.append(el("li", "", p))); lim.append(ul); panel.append(lim);
 }
 
+// Follow a queued catalogue load: say whether it is waiting for a worker or running, and redraw the overview when it is done.
+// A load that has not started after two minutes is waiting for the CVE feed worker (paused scanning, a long task, or a stopped worker).
+let loadWatch = 0;
+function watchLoad(panel, progress, since, first) {
+  const mine = (loadWatch += 1);
+  const show = (loading) => {
+    progress.hidden = false;
+    const waited = Math.round((Date.now() - since) / 1000);
+    progress.textContent = loading.running ? "Loading the catalogue now…"
+      : waited > 120 ? `Queued ${Math.round(waited / 60)} minutes ago and not started yet. The load runs on the CVE feed worker: it starts when that worker is free, and waits while scanning is paused. Administration, Scheduler health shows the workers and queues.`
+      : "Queued; waiting for a worker to pick it up…";
+  };
+  if (first) show(first);
+  const tick = async () => {
+    if (mine !== loadWatch || !panel.isConnected) return;
+    try {
+      const s = await get("status");
+      if (!s.loading.requested && !s.loading.running) return overviewTab(reset(panel));
+      show(s.loading);
+    } catch (_) { /* the next tick tries again */ }
+    setTimeout(tick, 5000);
+  };
+  setTimeout(tick, 3000);
+}
+
 async function accountsTab(panel) {
   loading(panel);
   const s = await get("status");
   panel.textContent = "";
   const h1 = s.credentials.hackerone;
-  const c = card("HackerOne", para("Reports go out only under your own HackerOne account, never a shared key. Create an API token in your HackerOne settings and enter it here. It is stored encrypted and is never shown again."));
-  const user = text(h1 || "", { placeholder: "API identifier", autocomplete: "off" });
+  const c = card("HackerOne", para("Reports go out only under your own HackerOne account, never a shared key. HackerOne's Hacker API signs in with your HackerOne username and an API token: create the token under Settings, API Token on hackerone.com (it shows no separate identifier). The token is stored encrypted and is never shown again."));
+  const user = text(h1 || "", { placeholder: "your HackerOne username, as in hackerone.com/username", autocomplete: "off" });
   const token = el("input", "", null, { type: "password", placeholder: h1 ? "saved; enter a new token to replace it" : "API token", autocomplete: "new-password" });
-  c.append(field("API identifier", user), field("API token", token));
-  c.append(row(button("Save", async () => { const x = await api("PUT", `${API}/credentials/hackerone`, { username: user.value, token: token.value }); token.value = ""; toast(x.verified === true ? "Saved and accepted by HackerOne" : x.verified === false ? "Saved, but HackerOne refused them" : "Saved; HackerOne could not be reached to check", x.verified === false); accountsTab(reset(panel)); }, "btn sm"),
-    h1 ? button("Test", async () => { const x = await api("POST", `${API}/credentials/hackerone/test`, {}); toast(x.verified === true ? "HackerOne accepts them" : x.verified === false ? "HackerOne refuses them" : "Could not reach HackerOne", x.verified !== true); }, "btn ghost sm") : el("span"),
+  const result = para("", "msg");
+  result.hidden = true;
+  const report = (x, ok, refused) => {
+    result.hidden = false;
+    result.className = `msg ${x.verified === true ? "ok" : "err"}`;
+    result.textContent = x.verified === true ? ok : x.verified === false ? `${refused} ${x.reason || ""}`.trim() : x.reason || "Could not reach HackerOne.";
+  };
+  c.append(field("HackerOne username", user), field("API token", token), result);
+  c.append(row(button("Save", async () => {
+    const x = await api("PUT", `${API}/credentials/hackerone`, { username: user.value, token: token.value });
+    token.value = "";
+    toast(x.verified === true ? "Saved and accepted by HackerOne" : x.verified === false ? "Saved, but HackerOne refused them" : "Saved; HackerOne could not be reached to check", x.verified === false);
+    await accountsTab(reset(panel));
+    if (x.verified !== true) report(x, "", "Saved, but HackerOne refused them.");
+  }, "btn sm"),
+    h1 ? button("Test", async () => { const x = await api("POST", `${API}/credentials/hackerone/test`, {}); report(x, "HackerOne accepts this username and token.", "HackerOne refuses them."); }, "btn ghost sm") : el("span"),
     h1 ? button("Remove", async () => { await api("DELETE", `${API}/credentials/hackerone`); accountsTab(reset(panel)); }, "btn ghost sm") : el("span")));
   panel.append(c, card("Other platforms", para("Bugcrowd, Intigriti and YesWeHack have no submit button here. Copy the finished fields into the platform and mark the report submitted.")));
 }

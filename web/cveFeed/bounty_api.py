@@ -153,6 +153,10 @@ def report_dict(r, full=False):
 
 # --- status and catalogue -----------------------------------------------------------------------
 
+CATALOGUE_REQUESTED = "bounty-catalogue-requested"  # set when someone asks for a load, cleared when the task finishes it
+CATALOGUE_RUNNING = "bounty-catalogue-running"  # set while the task is loading
+
+
 def status(request, user):
     sources = {s.platform: s for s in BountySource.objects.all()}
     creds = {c.platform: c.username for c in BountyCredential.objects.filter(user=user)}
@@ -162,6 +166,7 @@ def status(request, user):
                            "checked": _iso(sources[p].last_checked) if p in sources else None,
                            "changed": _iso(sources[p].last_changed) if p in sources else None,
                            "error": sources[p].last_error if p in sources else ""} for p, label in BountyProgram.PLATFORMS],
+            "loading": {"requested": cache.get(CATALOGUE_REQUESTED), "running": cache.get(CATALOGUE_RUNNING)},
             "source": "https://github.com/arkadiyt/bounty-targets-data", "credentials": creds,
             "vrt_release": bounty_report.vrt()["release_date"], "platforms_with_submit": list(SUBMIT_PLATFORMS)}
 
@@ -174,6 +179,7 @@ def catalogue_refresh(request, user):
         raise ApiError(429, "the catalogue was refreshed a moment ago; the source updates about every 30 minutes")
     from cveFeed.tasks import sync_bounty_catalogue
     sync_bounty_catalogue.delay(force=True)
+    cache.set(CATALOGUE_REQUESTED, timezone.now().isoformat(), 6 * 3600)  # the page shows "queued" until the task picks it up
     audit(user, "bounty.catalogue_refresh", "bounty-targets-data")
     return {"queued": True}, 202
 
@@ -698,12 +704,16 @@ def credential_set(request, user, platform):
     if platform not in SUBMIT_PLATFORMS:
         raise ApiError(404, "no submit integration for that platform")
     data = _body(request)
-    username, token = str(data.get("username", "")).strip()[:200], str(data.get("token", "")).strip()
+    username = bounty_submit.hackerone_username(data.get("username", ""))[:200]
+    token = str(data.get("token", "")).strip()
     if not username or not token or len(token) > 500:
-        raise ApiError(400, "give your API identifier and token")
+        raise ApiError(400, "give your HackerOne username and API token")
+    if "@" in username:
+        raise ApiError(400, "that looks like an email address: the Hacker API signs in with your HackerOne username, the name in "
+                            "hackerone.com/<username>")
     BountyCredential.objects.update_or_create(user=user, platform=platform, defaults={"username": username, "token": token})
     audit(user, "bounty.credential_set", platform)
-    return {"platform": platform, "username": username, "verified": bounty_submit.check_hackerone(username, token)}
+    return {"platform": platform, "username": username, **bounty_submit.verify_hackerone(username, token)}
 
 
 def credential_clear(request, user, platform):
@@ -716,7 +726,7 @@ def credential_test(request, user, platform):
     cred = BountyCredential.objects.filter(user=user, platform=platform).first()
     if not cred:
         raise ApiError(404, "no credentials saved")
-    return {"verified": bounty_submit.check_hackerone(cred.username, cred.token)}
+    return bounty_submit.verify_hackerone(cred.username, cred.token)
 
 
 def taxonomy(request, user):

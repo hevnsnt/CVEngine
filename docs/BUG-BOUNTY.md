@@ -22,13 +22,13 @@ Why it is gated: the feature sends data to outside platforms, and the report tex
 | Engagements | A program the project works: policy acknowledgement, a switch for "the policy allows automated scanning", notes, and scope import |
 | Reports | Drafts from scanner findings, the checks, copy-ready fields, submission, and a timeline per report |
 | Playbook | How to take part and report, from the platforms' own published guidance, with sources |
-| My accounts | Your own HackerOne API credentials |
+| My accounts | Your own HackerOne API credentials: your HackerOne **username** (the name in `hackerone.com/<username>`, not your email) and an API token from Settings, API Token on hackerone.com. HackerOne shows no separate identifier. **Test** says why HackerOne refused, if it did. |
 
 ## Where the program data comes from
 
 [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) publishes one JSON file per platform, refreshed about every 30 minutes from the platforms' public program pages. CVEngine reads them from `raw.githubusercontent.com` with an ETag, so an unchanged file costs one small request, and nothing about your targets or findings is sent.
 
-- Nothing is fetched until someone with access presses **Load the catalogue** once. After that the `sync_bounty_catalogue` task runs hourly.
+- Nothing is fetched until someone with access presses **Load the catalogue** once. After that the `sync_bounty_catalogue` task runs hourly. The load runs on the CVE feed worker. The page follows it ("queued", then "loading") and fills in the table when it finishes; the activity log records the outcome. A load still queued after two minutes is waiting for that worker: it is busy, or scanning was paused on a version before the pause stopped applying to bookkeeping.
 - `CVENGINE_BOUNTY_CATALOGUE=0` turns the fetch off completely, including the button.
 - A file that does not parse, is far smaller than the stored one (under half the programs), is empty, or is over 120 MB is refused and the stored catalogue stays; the Overview tab shows the error.
 - The data holds public programs only. Private and invitation-only programs are not in it.

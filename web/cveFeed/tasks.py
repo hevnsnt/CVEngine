@@ -277,13 +277,30 @@ def sync_bounty_catalogue(platforms=None, force=False):
     someone with bug bounty access has loaded the catalogue once from the page (``force``), so an instance that never uses the
     feature never makes the request. ``CVENGINE_BOUNTY_CATALOGUE=0`` turns it off entirely. An unchanged file costs one conditional
     request (ETag)."""
-    from cveFeed import bounty_data
+    from django.core.cache import cache
+    from django.utils import timezone
+
+    from cveFeed import activity, bounty_data
+    from cveFeed.bounty_api import CATALOGUE_REQUESTED, CATALOGUE_RUNNING
     from cveFeed.models import BountySource
     if os.environ.get('CVENGINE_BOUNTY_CATALOGUE', '1') == '0':
+        cache.delete(CATALOGUE_REQUESTED)
         return {'status': 'disabled'}
     if not force and not BountySource.objects.filter(last_changed__isnull=False).exists():
         return {'status': 'not loaded yet'}
-    return bounty_data.sync_all(platforms)
+    cache.set(CATALOGUE_RUNNING, timezone.now().isoformat(), 1800)
+    entry = activity.log('feed', 'Loading the bug bounty program catalogue (bounty-targets-data)', status='running') if force else None
+    try:
+        results = bounty_data.sync_all(platforms)
+    finally:
+        cache.delete(CATALOGUE_RUNNING)
+        cache.delete(CATALOGUE_REQUESTED)
+    failed = [r for r in results if r.get('status') == 'error']
+    summary = ', '.join(f"{r['platform']} {r.get('programs', 0)}" if r.get('status') == 'updated' else f"{r['platform']} {r['status']}"
+                        for r in results)
+    activity.settle(entry, 'failed' if failed else 'done', message=f'Bug bounty catalogue: {summary}'
+                    + (''.join(f"; {r['platform']}: {r.get('error', '')}" for r in failed)))
+    return results
 
 
 @app.task(name='correlate_refreshed_cves', bind=False, queue='cve_feed_queue')
