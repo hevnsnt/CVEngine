@@ -1,0 +1,51 @@
+name: 🏷️ Release
+
+# Pushing a tag such as v1.0 publishes a GitHub release whose notes are that version's CHANGELOG.md section.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 🏷️ Publish the GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout the tag
+        uses: actions/checkout@v4
+
+      - name: 📝 Release notes from the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          version="$(tr -d '[:space:]' < web/.version)"
+          if [ "$version" != "$TAG" ]; then
+            echo "::error::web/.version is '$version' but the tag is '$TAG'"
+            exit 1
+          fi
+          # the section from "## <tag> (" up to the next "## " heading; links made absolute at this tag
+          awk -v tag="$TAG" '
+            index($0, "## " tag " (") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md \
+            | sed -E "s#\]\((docs/|[A-Z-]+\.md)#](https://github.com/$REPO/blob/$TAG/\1#g" > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no '## $TAG (' section"
+            exit 1
+          fi
+
+      - name: 🚀 Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "CVEngine $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" --verify-tag --latest --title "CVEngine $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi

@@ -8,6 +8,13 @@ on:
     branches: 
       - master
       - release/*
+  schedule:
+    # weekly rebuild without the layer cache, so the @latest tools and templates are re-fetched
+    - cron: '17 6 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   security-tests:
@@ -87,22 +94,22 @@ jobs:
         run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs
 
   build:
-    name: 🐳 Build Docker image
-    if: github.event_name == 'pull_request'
+    name: 🐳 Build Docker image (${{ matrix.platform }})
     needs: security-tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
-          # - linux/arm/v7
+        include:
+          # each platform builds on a native runner; arm64 under QEMU took over 1.5 hours
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: 📥 Checkout the git repo
         uses: actions/checkout@v4
-
-      - name: 🖥️ Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: 🏗️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -113,11 +120,13 @@ jobs:
         with:
           images: hevnsnt/cvengine
           tags: |
-            type=raw,value=pr-${{ github.event.pull_request.number }}
+            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
             type=sha,prefix=sha-
             type=ref,event=branch
             type=ref,event=pr
 
+      # Pull requests can read the layer cache of master but not of other pull requests, so master
+      # and the weekly run write it (one scope per platform) and pull requests only read it.
       - name: 🏗️ Build Docker image
         uses: docker/build-push-action@v5
         with:
@@ -126,5 +135,6 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=image-{0}', matrix.arch) || '' }}
