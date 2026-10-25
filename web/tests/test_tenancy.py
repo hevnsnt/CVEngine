@@ -298,6 +298,20 @@ class MfaFlowTests(TestCase):
 			r = c.get(path)
 			self.assertEqual((r.status_code, r['Location']), (302, '/cve/account/#security'))
 
+	def test_the_mobile_bar_has_an_account_tab_with_the_account_menu(self):
+		nobody = User.objects.create_user('acct-tab', password='x')
+		html = client_for(nobody).get('/cve/about/').content.decode()
+		self.assertIn('id="acct-btn"', html)
+		sheet = html[html.index('id="acct-sheet"'):]
+		sheet = sheet[:sheet.index('</div>\n</div>')]
+		for item in ('My account', 'About', 'Sign out'):
+			self.assertIn(item, sheet)
+		self.assertNotIn('Administration', sheet)  # only for admins
+		more = html[html.index('id="sheet"'):html.index('id="acct-sheet"')]
+		self.assertNotIn('Sign out', more)  # the account items moved out of More
+		root = User.objects.create_superuser('acct-root', 'r@x.io', 'x')
+		self.assertIn('Administration', client_for(root).get('/cve/about/').content.decode().split('id="acct-sheet"')[1])
+
 	def test_about_page_is_open_to_any_signed_in_user(self):
 		nobody = User.objects.create_user('noaccess', password='x')
 		r = client_for(nobody).get('/cve/about/')

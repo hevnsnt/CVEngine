@@ -114,7 +114,8 @@
   {% else %}
   <a href="{% url 'cve_graph' %}" {% if active == 'graph' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Graph</a>
   {% endif %}
-  <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg>More</button>
+  <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg>More</button>
+  <button type="button" id="acct-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="acct-sheet" {% if active == 'account' or active == 'admin' or active == 'settings' or active == 'about' %}aria-current="page"{% endif %}><span class="tab-avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span>Account</button>
 </nav>
 
 <div class="sheet-scrim" id="sheet-scrim" hidden></div>
@@ -141,6 +142,14 @@
     <a href="{% url 'cve_graph' %}"><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>
     {% if bounty_enabled %}<a href="{% url 'cve_bounty' %}{% if slug and not all_projects %}?project={{ slug }}{% endif %}"><svg viewBox="0 0 24 24"><use href="#i-flag"/></svg>Bug bounty</a>{% endif %}
     <a href="{% url 'cve_agents' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens</a>
+  </div>
+</div>
+
+<div class="sheet" id="acct-sheet" role="dialog" aria-label="Account" hidden>
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="acct-head"><span class="avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span>
+    <span><b>{{ request.user.get_full_name|default:request.user.username }}</b><span class="note">{{ request.user.username }}{% if request.user.is_superuser %} · App Admin{% elif is_admin %} · Organization admin{% endif %}</span></span></div>
+  <div class="sheet-list">
     <a href="{% url 'cve_account' %}"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg>My account</a>
     {% if is_admin %}<a href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
     {% if request.user.is_superuser %}<a href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
