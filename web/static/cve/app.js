@@ -121,7 +121,11 @@ async function api(method, path, body) {
   } catch (_) {
     /* empty body */
   }
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -1084,28 +1088,69 @@ function findingPage(mount, cfg) {
   split.append(side, pane);
   mount.append(split);
   const rows = el("div", "host-rows");
-  // Bulk status change: only CVE matches have a status the server can set (PATCH matches/<id>). The note is read first and sent
-  // back unchanged, because that route replaces the note with whatever it is given, an empty one included.
-  const isMatch = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind) === "match";
+  // Bulk status change for CVE matches, scanner findings and hygiene findings through one server route
+  // (POST findings/status, up to 200 items per request, per-item results). A server without that route still handles CVE
+  // matches one at a time through PATCH matches/<id>; that older route replaces the note, so the fallback sends the old one back.
+  const BULK_KINDS = ["match", "vulnerability", "hygiene"];
+  const BULK_MAX = 200;
+  const itemKind = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
+  const isBulkable = (item) => BULK_KINDS.includes(itemKind(item));
+  async function setStatusBatch(items, value) {
+    const ok = [];
+    const failed = [];
+    const groups = new Map(); // one request series per project (the all-projects view mixes them)
+    items.forEach((item) => {
+      const p = projectOf(item);
+      if (!groups.has(p)) groups.set(p, []);
+      groups.get(p).push(item);
+    });
+    for (const [project, group] of groups) {
+      const where = baseOf(project);
+      for (let at = 0; at < group.length; at += BULK_MAX) {
+        const chunk = group.slice(at, at + BULK_MAX);
+        try {
+          const r = await api("POST", `${where}/findings/status`, { items: chunk.map((i) => ({ kind: itemKind(i), id: i.id })), status: value });
+          const bad = new Map((r.failed || []).map((f) => [`${f.kind}-${f.id}`, f.error || "not updated"]));
+          chunk.forEach((i) => (bad.has(`${itemKind(i)}-${i.id}`) ? failed.push({ item: i, error: bad.get(`${itemKind(i)}-${i.id}`) }) : ok.push(i)));
+        } catch (err) {
+          if (err.status === 404 && err.message === "not found") {
+            // this server does not have the bulk route yet
+            for (const i of chunk) {
+              if (itemKind(i) !== "match") {
+                failed.push({ item: i, error: "This server cannot set a status on this kind of finding yet. Update the server." });
+                continue;
+              }
+              try {
+                const detail = await api("GET", `${where}/findings/match/${i.id}`);
+                await api("PATCH", `${where}/matches/${i.id}`, { status: value, note: (detail.remediation && detail.remediation.note) || "" });
+                ok.push(i);
+              } catch (e) {
+                failed.push({ item: i, error: e.message });
+              }
+            }
+          } else {
+            chunk.forEach((i) => failed.push({ item: i, error: err.message }));
+          }
+        }
+      }
+    }
+    return { ok, failed };
+  }
   const bulk = cfg.bulk
     ? createBulk({
         side,
         rows,
-        noun: "match",
+        noun: "finding",
         labelOf: (item) => item.title || (item.cve && item.cve.id) || `#${item.id}`,
-        selectable: isMatch,
-        hint: cfg.kindOf ? "Only CVE matches can be changed in bulk. Scanner and hygiene findings have no status the server can set yet." : "",
+        selectable: isBulkable,
+        hint: "",
         afterRun: () => list.reload(),
         actions: [
           {
             select: { label: "Mark as", options: [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]] },
             verb: "Updating",
             done: "Updated",
-            run: async (item, value) => {
-              const where = baseOf(projectOf(item));
-              const detail = await api("GET", `${where}/findings/match/${item.id}`);
-              await api("PATCH", `${where}/matches/${item.id}`, { status: value, note: (detail.remediation && detail.remediation.note) || "" });
-            },
+            runBatch: setStatusBatch,
           },
         ],
       })

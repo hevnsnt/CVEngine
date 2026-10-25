@@ -141,13 +141,16 @@ export function createBulk({
     [...controls.querySelectorAll("button,select"), all, clear].forEach(
       (c) => (c.disabled = true),
     );
-    const result = await runBulk(
-      items,
-      (item) => action.run(item, value),
-      (done, total) => {
-        status.textContent = `${action.verb} ${done} of ${total}`;
-      },
-    );
+    status.textContent = `${action.verb} ${items.length}`;
+    const result = action.runBatch
+      ? await action.runBatch(items, value)
+      : await runBulk(
+          items,
+          (item) => action.run(item, value),
+          (done, total) => {
+            status.textContent = `${action.verb} ${done} of ${total}`;
+          },
+        );
     status.textContent = "";
     bar.classList.remove("busy");
     [...controls.querySelectorAll("button,select"), all, clear].forEach(
