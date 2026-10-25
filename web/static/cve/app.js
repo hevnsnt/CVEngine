@@ -1,8 +1,14 @@
 // CVEngine project pages: targets, scans, hosts, vulnerabilities, CVE matches (the last two as list plus detail, like hosts).
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
+import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
+import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
+import { createBulk } from "/staticfiles/cve/bulk.js";
+import { fmtDateTime, fmtDay, fmtTime, zoneLabel } from "/staticfiles/cve/prefs.js";
+import { isNewSince, newTag, newToggle, sinceLastVisit } from "/staticfiles/cve/seen.js";
 import {
   ask,
   button as uiButton,
+  copyButton,
   dialog,
   field,
   text as uiText,
@@ -115,7 +121,11 @@ async function api(method, path, body) {
   } catch (_) {
     /* empty body */
   }
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -136,6 +146,41 @@ const query = (obj) => {
 };
 
 // --- generic paginated list -------------------------------------------------
+// What a list shows while its first page loads: the shape of the thing that is coming, not a spinner. "rows" is the
+// two-line host and finding row; "table" is a header-less run of table lines.
+function loadingSkeleton(shape) {
+  const bar = (w) => {
+    const b = el("span", "sk-bar");
+    b.style.width = w;
+    return b;
+  };
+  const out = [el("span", "sr", "Loading", { role: "status" })];
+  if (shape === "rows") {
+    ["68%", "54%", "72%", "60%", "66%", "48%"].forEach((w) => {
+      const row = el("div", "sk-row", null, { "aria-hidden": "true" });
+      row.append(bar(w), bar("38%"));
+      out.push(row);
+    });
+  } else {
+    ["92%", "84%", "88%", "78%", "90%"].forEach((w) => {
+      const line = el("div", "sk-line", null, { "aria-hidden": "true" });
+      line.append(bar("6%"), bar(w));
+      out.push(line);
+    });
+  }
+  return out;
+}
+
+// A list that could not load says so, says why in the server's words, and offers the same request again.
+function loadError(err, retry, inline = false) {
+  const box = el("div", `load-error${inline ? " inline" : ""}`, null, { role: "alert" });
+  box.append(el("b", "", inline ? "Could not load more" : "Could not load this list"), el("span", "note", err.message || "The request failed."));
+  const again = el("button", "btn ghost sm", "Try again", { type: "button" });
+  again.onclick = retry;
+  box.append(again);
+  return box;
+}
+
 function createList({
   mount,
   path,
@@ -144,6 +189,8 @@ function createList({
   empty,
   autoRefresh,
   onLoaded,
+  skeleton = "table",
+  onReset,
 }) {
   let page = 1;
   let timer = null;
@@ -156,13 +203,12 @@ function createList({
   async function load(reset, quiet = false) {
     if (reset) page = 1;
     if (reset && !quiet) {
+      if (onReset) onReset();
       body.textContent = "";
-      body.append(
-        el("div", "skeleton"),
-        el("div", "skeleton"),
-        el("div", "skeleton"),
-      );
+      body.setAttribute("aria-busy", "true");
+      body.append(...loadingSkeleton(skeleton));
     }
+    more.textContent = "";
     try {
       const data = await api(
         "GET",
@@ -171,6 +217,7 @@ function createList({
       const items = data.results || [];
       lastCount = data.count;
       if (reset) body.textContent = "";
+      body.removeAttribute("aria-busy");
       if (reset && !items.length) body.append(el("p", "empty", empty));
       else render(body, items, reset);
       if (onLoaded) onLoaded(data, reset);
@@ -193,8 +240,16 @@ function createList({
         timer = setTimeout(() => load(true), REFRESH_MS);
     } catch (err) {
       if (quiet) return; // a failed background refresh keeps what is on screen
+      body.removeAttribute("aria-busy");
+      if (!reset) {
+        // a failed "Load more" keeps the rows already shown and offers the same page again
+        page = Math.max(1, page - 1);
+        more.append(loadError(err, () => { page += 1; load(false); }, true));
+        return;
+      }
+      if (onReset) onReset();
       body.textContent = "";
-      body.append(el("p", "msg err", err.message));
+      body.append(loadError(err, () => load(true)));
     }
   }
   const live = {
@@ -315,7 +370,11 @@ const tile = (label, n, { hot = "", onClick = null, href = "" } = {}) => {
     t.type = "button";
     t.onclick = onClick;
   }
-  t.append(el("b", "", n ?? "-"), el("span", "", label));
+  // Big counts read as 1.2M, with the exact figure on hover; a 7-digit number would otherwise fill the whole tile.
+  const big = typeof n === "number" && n >= 100000;
+  const figure = el("b", "", big ? new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n) : n ?? "-");
+  if (big) figure.title = n.toLocaleString();
+  t.append(figure, el("span", "", label));
   return t;
 };
 
@@ -326,7 +385,16 @@ const debounce = (fn, ms = 300) => {
     t = setTimeout(() => fn(...a), ms);
   };
 };
-const shortDate = (iso) => (iso ? iso.slice(0, 16).replace("T", " ") : "-");
+const shortDate = (iso) => (iso ? fmtDateTime(iso) || iso.slice(0, 16).replace("T", " ") : "-");
+// A timestamp on one line: the time to the second, then the day (Today, Yesterday or Oct 24), in the viewer's time zone.
+// The full ISO time is the tooltip, so nothing is lost; the cell never wraps, so a column of them stays aligned.
+const whenCell = (iso) => {
+  if (!iso) return el("span", "note", "-");
+  if (!fmtTime(iso)) return el("span", "note", shortDate(iso));
+  const t = el("time", "when", null, { datetime: iso, title: `${fmtDateTime(iso)} ${zoneLabel()} (${iso.replace("T", " ").slice(0, 19)} UTC)` });
+  t.append(el("b", "", fmtTime(iso)), el("span", "", fmtDay(iso)));
+  return t;
+};
 
 function searchBox(placeholder, onChange) {
   const input = el("input", "", null, {
@@ -589,6 +657,33 @@ const factLine = (facts) => {
   return [f.os, f.computer_name, f.fqdn || f.dns_domain || f.domain].filter(Boolean).join("  ·  ");
 };
 // The top of the host page, Shodan-style: who hosts it, what answers on the web, what the operating system is
+// Shodan-style surface summary: every address with the services that answer on it, as chips that open the Services tab.
+const surfaceCard = (h, openServices) => {
+  const box = el("div", "why surface");
+  box.append(el("h3", "sec", "Exposed surface"));
+  if (!h.ips.length) {
+    box.append(el("p", "note", "No address is recorded yet. A rescan starts with fresh resolution."));
+    return box;
+  }
+  h.ips.forEach((ip) => {
+    const row = el("div", "surface-ip");
+    const top = el("div", "surface-top");
+    top.append(el("b", "mono", ip.address), copyButton(ip.address, "address"));
+    [ip.os, ip.country, ip.is_cdn ? "CDN" : ""].filter(Boolean).forEach((t) => top.append(el("span", "chip", t)));
+    row.append(top);
+    const chips = el("div", "surface-ports");
+    if (!ip.ports.length) chips.append(el("span", "note", "No open ports recorded"));
+    ip.ports.forEach((p) => {
+      const b = el("button", "svc-chip", null, { type: "button", title: "Open in Services" });
+      b.append(el("b", "", String(p.number)), el("span", "", [p.product || p.service, p.version].filter(Boolean).join(" ") || p.protocol || "tcp"));
+      b.onclick = openServices;
+      chips.append(b);
+    });
+    row.append(chips);
+    box.append(row);
+  });
+  return box;
+};
 const hostOverview = (h) => {
   const http = h.http || {};
   const hosting = h.hosting || {};
@@ -698,7 +793,7 @@ function renderFinding(d, cfg, row) {
   const out = [];
   const project = projectOf(row); // the finding's own project: its host, history and screenshots live there
   const head = el("div", "host-head");
-  head.append(el("h2", "host-title", d.title));
+  head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
   if (d.severity) head.append(badge(d.severity, d.severity));
   if (d.assessment_status === "closed_not_applicable") head.append(badge("Closed: invalid product match", "ice"));
   head.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
@@ -944,7 +1039,7 @@ function matchStatusControl(d) {
     ],
     async () => {
       try {
-        await api("PATCH", `${base}/matches/${d.id}`, { status: s.value });
+        await api("PATCH", `${base}/matches/${d.id}`, { status: s.value, note: d.remediation.note || "" }); // the route replaces the note, so send it back
         d.remediation.status = s.value;
         toast("Status updated");
       } catch (err) {
@@ -960,6 +1055,31 @@ function matchStatusControl(d) {
   return box;
 }
 
+// Group a detail pane into sections (a heading and what follows it) and fold the ones that have nothing to say into a
+// single line, so a host with no routes, changes or services does not read as a page of empty headings. Idempotent:
+// run it again after a section fills in.
+function foldPane(pane) {
+  pane.querySelectorAll(":scope > .pane-sec").forEach((s) => s.replaceWith(...s.childNodes));
+  const groups = [];
+  let group = null;
+  [...pane.children].forEach((n) => {
+    if (n.matches("h3.sec")) {
+      group = [n];
+      groups.push(group);
+    } else if (n.matches(".why,.tiles,.host-labels,.back,.host-head,.shot,.shot-compare")) group = null;
+    else if (group) group.push(n);
+  });
+  const onlyNote = (n) =>
+    n.matches("p.note") || (n.matches(".recent-changes,.web-routes") && n.children.length > 0 && [...n.children].every((c) => c.matches("p.note")));
+  groups.forEach((g) => {
+    const rest = g.slice(1);
+    const empty = rest.length > 0 && rest.length <= 2 && rest.every(onlyNote) && rest.map((r) => r.textContent).join("").length < 110;
+    const sec = el("section", `pane-sec${empty ? " is-empty" : ""}`);
+    g[0].before(sec);
+    sec.append(...g);
+  });
+}
+
 function findingPage(mount, cfg) {
   const split = el("div", "split");
   const side = el("aside", "split-list card");
@@ -968,7 +1088,81 @@ function findingPage(mount, cfg) {
   split.append(side, pane);
   mount.append(split);
   const rows = el("div", "host-rows");
-  side.append(...cfg.filters, rows);
+  // Bulk status change for CVE matches, scanner findings and hygiene findings through one server route
+  // (POST findings/status, up to 200 items per request, per-item results). A server without that route still handles CVE
+  // matches one at a time through PATCH matches/<id>; that older route replaces the note, so the fallback sends the old one back.
+  const BULK_KINDS = ["match", "vulnerability", "hygiene"];
+  const BULK_MAX = 200;
+  const itemKind = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
+  const isBulkable = (item) => BULK_KINDS.includes(itemKind(item));
+  async function setStatusBatch(items, value) {
+    const ok = [];
+    const failed = [];
+    const groups = new Map(); // one request series per project (the all-projects view mixes them)
+    items.forEach((item) => {
+      const p = projectOf(item);
+      if (!groups.has(p)) groups.set(p, []);
+      groups.get(p).push(item);
+    });
+    for (const [project, group] of groups) {
+      const where = baseOf(project);
+      for (let at = 0; at < group.length; at += BULK_MAX) {
+        const chunk = group.slice(at, at + BULK_MAX);
+        try {
+          const r = await api("POST", `${where}/findings/status`, { items: chunk.map((i) => ({ kind: itemKind(i), id: i.id })), status: value });
+          const bad = new Map((r.failed || []).map((f) => [`${f.kind}-${f.id}`, f.error || "not updated"]));
+          chunk.forEach((i) => (bad.has(`${itemKind(i)}-${i.id}`) ? failed.push({ item: i, error: bad.get(`${itemKind(i)}-${i.id}`) }) : ok.push(i)));
+        } catch (err) {
+          if (err.status === 404 && err.message === "not found") {
+            // this server does not have the bulk route yet
+            for (const i of chunk) {
+              if (itemKind(i) !== "match") {
+                failed.push({ item: i, error: "This server cannot set a status on this kind of finding yet. Update the server." });
+                continue;
+              }
+              try {
+                const detail = await api("GET", `${where}/findings/match/${i.id}`);
+                await api("PATCH", `${where}/matches/${i.id}`, { status: value, note: (detail.remediation && detail.remediation.note) || "" });
+                ok.push(i);
+              } catch (e) {
+                failed.push({ item: i, error: e.message });
+              }
+            }
+          } else {
+            chunk.forEach((i) => failed.push({ item: i, error: err.message }));
+          }
+        }
+      }
+    }
+    return { ok, failed };
+  }
+  const bulk = cfg.bulk
+    ? createBulk({
+        side,
+        rows,
+        noun: "finding",
+        labelOf: (item) => item.title || (item.cve && item.cve.id) || `#${item.id}`,
+        selectable: isBulkable,
+        hint: "",
+        afterRun: () => list.reload(),
+        actions: [
+          {
+            select: { label: "Mark as", options: [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]] },
+            verb: "Updating",
+            done: "Updated",
+            runBatch: setStatusBatch,
+          },
+        ],
+      })
+    : null;
+  const fresh = newToggle(rows);
+  const lastLook = cfg.seenPage && !ALL ? sinceLastVisit(cfg.seenPage, slug) : null;
+  const metaRow = el("div", "list-meta");
+  const metaTools = el("span", "meta-tools");
+  metaTools.append(fresh.node);
+  if (bulk) metaTools.append(bulk.toggle);
+  metaRow.append(el("span"), metaTools);
+  side.append(...cfg.filters, metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
   const byId = new Map();
   let current = null;
   let token = 0;
@@ -1038,6 +1232,11 @@ function findingPage(mount, cfg) {
 
   const list = createList({
     mount: side,
+    skeleton: "rows",
+    onReset: () => {
+      rows.textContent = "";
+      byId.clear();
+    },
     path: cfg.path,
     params: cfg.params,
     empty: cfg.empty,
@@ -1057,6 +1256,10 @@ function findingPage(mount, cfg) {
         row.append(title);
         const meta = el("span", "host-meta");
         meta.append(...r.meta.filter(Boolean));
+        if (isNewSince(item.detected, lastLook)) {
+          row.dataset.fresh = "1";
+          meta.prepend(newTag());
+        }
         row.append(meta);
         (r.notes || []).filter(Boolean).forEach((n) => row.append(n instanceof Node ? n : el("span", "note host-why", n)));
         row.onclick = (e) => {
@@ -1064,8 +1267,12 @@ function findingPage(mount, cfg) {
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
         };
+        if (bulk) bulk.decorate(row, item, keyOf(item));
         rows.append(row);
       });
+      settleRows(rows);
+      fresh.update();
+      if (bulk) bulk.prune();
       const wanted = wantedFromHash();
       if (current == null && wanted) show(wanted.key, wanted.project, { validate: wanted.validate });
       else if (current == null && window.matchMedia("(min-width:900px)").matches && items.length) show(keyOf(items[0]), projectOf(items[0]));
@@ -1093,8 +1300,18 @@ function findingPage(mount, cfg) {
 const FINDING_KINDS = { match: 1, vulnerability: 1, hygiene: 1, route: 1 };
 // A list row that selects an item. It is a div, not a button: a row holds links (the host, the CVE) and a link inside a button
 // is invalid HTML that browsers handle inconsistently. Keyboard use matches a button's.
+// A selectable row is one control (role=button); the links inside it (host, address) stay clickable but leave the tab order,
+// so the row never nests focusable content. Run after a page of rows is drawn.
+const settleRows = (container) => container.querySelectorAll(".host-row a").forEach((a) => a.setAttribute("tabindex", "-1"));
+
 function selectableRow(id, heat, attr = "id") {
-  const row = el("div", "host-row", null, { role: "button", tabindex: "0" });
+  // A focusable row with no button role: it holds links (host, address), and a button may not contain interactive content.
+  // The selected state is mirrored to aria-current so screen readers can tell which row the detail pane shows.
+  const row = el("div", "host-row", null, { tabindex: "0" });
+  new MutationObserver(() => (row.classList.contains("sel") ? row.setAttribute("aria-current", "true") : row.removeAttribute("aria-current"))).observe(row, {
+    attributes: true,
+    attributeFilter: ["class"],
+  });
   row.dataset[attr] = id;
   row.dataset.heat = heat || "";
   row.addEventListener("keydown", (e) => {
@@ -1380,7 +1597,14 @@ const pages = {
     const bar = el("div", "scans-bar");
     bar.append(status.node);
     if (!ALL) bar.append(stopAll); // stopping scans is per project
-    mount.append(bar);
+    const rhythm = el("div", "chart-slot");
+    mount.append(rhythm, bar);
+    api("GET", `${base}/scans?${query({ page_size: 200 })}`)
+      .then((r) => {
+        const dates = r.results.map((x) => x.started).filter(Boolean);
+        if (dates.length > 1) rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+      })
+      .catch(() => {});
     const list = createList({
       mount,
       path: `${base}/scans`,
@@ -1470,13 +1694,11 @@ const pages = {
     mount.append(split);
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
+    // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all" };
     const syncUrl = () => {
-      const next = new URLSearchParams(location.search);
-      next.delete("host");
-      if (q.value.trim()) next.set("q", q.value);
-      else next.delete("q");
-      const qs = next.toString();
-      history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : ""));
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter }, HOST_DEFAULTS, ["host"]);
+      views.refresh();
     };
     const q = searchBox("Search hosts: php, port:3306, tech:nginx, auth:open -host:www", () => {
       syncUrl();
@@ -1491,11 +1713,144 @@ const pages = {
         ["score", "Highest score first"],
         ["name", "Name"],
       ],
-      () => list.reload(),
+      () => {
+        syncUrl();
+        list.reload();
+      },
     );
+    sortBy.value = readParam("sort", "score", ["score", "name"]);
     const rows = el("div", "host-rows");
-    side.append(q, sortBy, rows);
+    const controls = el("div", "list-tools");
+    controls.append(q, sortBy);
+    // heat filter: narrows the hosts already loaded; the counts say so when more are still to load
+    const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
+    let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
+    let totalHosts = 0;
+    const heatChips = el("div", "picker heat-chips", null, { role: "group", "aria-label": "Temperature" });
+    const chipBtn = new Map();
+    HEAT_CHIPS.forEach(([key, label, dot]) => {
+      const b = el("button", "", null, { type: "button", "aria-pressed": String(key === "all") });
+      if (dot) b.append(el("span", `dot ${dot}`));
+      b.append(document.createTextNode(label), el("b", "", "0"));
+      b.onclick = () => {
+        heatFilter = key;
+        syncUrl();
+        paintHeat();
+        bulk.prune();
+        settleSelection();
+      };
+      chipBtn.set(key, b);
+      heatChips.append(b);
+    });
+    const countLine = el("p", "list-count note");
+    // The pane never shows a host the list is hiding: when a filter or a new search drops the selected host, the pane follows
+    // to the first host that is still listed (or empties on a phone, where the list and the pane take turns).
+    function settleSelection() {
+      if (current == null) return;
+      const row = rows.querySelector(`.host-row[data-id="${current}"]`);
+      if (row && !row.hidden) return;
+      const next = [...byId.values()].find((h) => heatFilter === "all" || (h.heat || "unscanned") === heatFilter);
+      if (next && window.matchMedia("(min-width:900px)").matches) showHost(next);
+      else showHost(null);
+    }
+    function paintHeat() {
+      const n = { all: 0 };
+      byId.forEach((h) => {
+        const k = h.heat || "unscanned";
+        n[k] = (n[k] || 0) + 1;
+        n.all += 1;
+      });
+      const partial = totalHosts > byId.size;
+      chipBtn.forEach((b, key) => {
+        b.setAttribute("aria-pressed", String(key === heatFilter));
+        b.lastChild.textContent = `${n[key] || 0}${partial && key === "all" ? "+" : ""}`;
+      });
+      let shown = 0;
+      rows.querySelectorAll(".host-row").forEach((r) => {
+        const keep = heatFilter === "all" || r.dataset.heatKey === heatFilter;
+        r.hidden = !keep;
+        if (keep) shown += 1;
+      });
+      countLine.textContent = byId.size
+        ? `${shown} host${shown === 1 ? "" : "s"}${heatFilter !== "all" ? ` ${heatFilter === "unscanned" ? "not scanned" : heatFilter}` : ""}${partial ? ` of ${totalHosts} (load more to include the rest)` : ""}`
+        : "";
+    }
+    const views = savedViews({
+      page: "hosts",
+      slug,
+      defaults: HOST_DEFAULTS,
+      read: () => ({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter }),
+      apply: (v) => {
+        q.value = v.q;
+        sortBy.value = v.sort;
+        heatFilter = v.heat;
+        syncUrl();
+        paintHeat();
+        list.reload();
+      },
+    });
+    // Bulk actions: the server has no bulk host routes, so each action runs the single-host request for every selected row.
+    const hostProfile = (h) => ({ owner: (h.profile || {}).owner || "", purpose: (h.profile || {}).purpose || "", criticality: (h.profile || {}).criticality || "unknown" });
+    const bulk = createBulk({
+      side,
+      rows,
+      noun: "host",
+      labelOf: (h) => h.host,
+      afterRun: () => list.reload(),
+      actions: [
+        { label: "Pin", verb: "Pinning", done: "Pinned", run: (h) => api("POST", hostPath(h, "pin"), { pinned: true }) },
+        { label: "Unpin", verb: "Unpinning", done: "Unpinned", run: (h) => api("POST", hostPath(h, "pin"), { pinned: false }) },
+        {
+          label: "Archive",
+          verb: "Archiving",
+          done: "Archived",
+          confirm: (n) => `${n} host${n === 1 ? "" : "s"} will leave active scan scheduling. Their history is kept and you can restore them later.`,
+          run: (h) => api("POST", hostPath(h, "archive"), { reason: "Archived in bulk from the Hosts page" }),
+        },
+        { label: "Restore", verb: "Restoring", done: "Restored", run: (h) => api("POST", hostPath(h, "restore"), {}) },
+        {
+          select: { label: "Criticality", options: [["unknown", "Unknown"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["critical", "Critical"]] },
+          verb: "Updating",
+          done: "Criticality set on",
+          run: (h, v) => api("POST", hostPath(h, "profile"), { ...hostProfile(h), criticality: v }),
+        },
+        {
+          label: "Set owner",
+          prompt: { title: "Set the owner", label: "Owner", placeholder: "Team or person responsible", help: "Applied to every selected host. Purpose and criticality are kept." },
+          verb: "Updating",
+          done: "Owner set on",
+          run: (h, v) => api("POST", hostPath(h, "profile"), { ...hostProfile(h), owner: v }),
+        },
+      ],
+    });
+    const fresh = newToggle(rows);
+    const lastLook = sinceLastVisit("hosts", slug);
+    let newHosts = new Set();
+    function markNewHosts() {
+      rows.querySelectorAll(".host-row").forEach((row) => {
+        const isNew = newHosts.has(row.dataset.host);
+        if (isNew) row.dataset.fresh = "1";
+        else delete row.dataset.fresh;
+        const top = row.querySelector(".hr-top");
+        if (isNew && top && !top.querySelector(".new-tag")) top.insertBefore(newTag(), top.lastChild);
+      });
+      fresh.update();
+    }
+    if (lastLook && !ALL) {
+      api("GET", `${base}/changes?${query({ since: lastLook, kind: "host_new", page_size: 200 })}`)
+        .then((d) => {
+          newHosts = new Set((d.results || []).map((c) => c.host));
+          markNewHosts();
+        })
+        .catch(() => {});
+    }
+    const metaRow = el("div", "list-meta");
+    const metaTools = el("span", "meta-tools");
+    metaTools.append(fresh.node, bulk.toggle);
+    metaRow.append(countLine, metaTools);
+    side.append(views.node, controls, heatChips, metaRow, bulk.bar, rows);
     const byId = new Map();
+    let hostTab = "overview";
     let current = null;
 
     const kv = (k, v) => {
@@ -1630,6 +1985,7 @@ const pages = {
       };
       const head = el("div", "host-head");
       head.append(el("h2", "host-title", h.host));
+      head.append(copyButton(h.host, "hostname"), copyButton(() => `${location.origin}${location.pathname}#${h.id}`, "link to this host", "link"));
       const HEAT = { fire: ["Fire", "fire"], smoke: ["Smoke", "smoke"], ice: ["Ice", "ice"], clean: ["Clean", "success"], unscanned: ["Not scanned", "queued"] };
       if (HEAT[h.heat]) head.append(badge(HEAT[h.heat][0], HEAT[h.heat][1]));
       if (h.http_status) head.append(badge(`HTTP ${h.http_status}`));
@@ -1640,7 +1996,22 @@ const pages = {
       if (h.excluded) head.append(badge("Excluded: never scanned", "smoke"));
       if (h.archived) head.append(badge("Archived: history retained", "queued"));
       if (h.pinned) head.append(badge("Pinned", "success"));
-      pane.append(back, head);
+      const S = {};
+      ["overview", "services", "web", "findings", "changes", "manage"].forEach((k) => (S[k] = el("div", `host-tab host-tab-${k}`)));
+      const OV = { main: el("div", "host-col"), side: el("div", "host-col") };
+      S.overview.append(OV.main, OV.side);
+      const tabBtns = {};
+      const setTabCount = (name, n) => {
+        const b = tabBtns[name];
+        if (!b) return;
+        let c = b.querySelector(".tabcount");
+        if (!c) b.append((c = el("b", "tabcount")));
+        c.textContent = String(n);
+      };
+      const foldTabs = () => Object.values(S).forEach((box) => foldPane(box));
+      const hdr = el("div", "host-hdr");
+      hdr.append(head);
+      pane.append(back, hdr);
       const assessBox = el("div", "why");
       const assessHead = el("div", "host-assess-head");
       assessHead.append(el("h3", "sec", "Host assessment"));
@@ -1648,10 +2019,11 @@ const pages = {
       assessButton.type = "button";
       assessButton.disabled = !!(h.excluded || h.archived);
       assessButton.title = h.excluded ? "This host is excluded from scanning" : h.archived ? "Restore this host before scanning" : "Refresh DNS and run the permitted host checks now";
-      assessHead.append(assessButton);
+      assessButton.classList.add("host-rescan");
+      head.append(assessButton);
       const assessBody = el("div", "note", "Checking for an existing assessment…");
       assessBox.append(assessHead, assessBody);
-      pane.append(assessBox);
+      S.manage.append(assessBox);
       const assessPath = `${baseOf(projectOf(h))}/host-assessments`;
       let pollToken = 0;
       const drawAssessment = (job) => {
@@ -1701,7 +2073,7 @@ const pages = {
       api("GET", `${assessPath}?host_id=${h.id}`).then(drawAssessment).catch((e) => {
         if (current === h.id) assessBody.textContent = e.message;
       });
-      if (!h.ips.length) pane.append(el("p", "note", "No scannable address is recorded. A rescan starts with fresh resolution; until then, service reachability is unknown."));
+      if (!h.ips.length) S.services.append(el("p", "note", "No scannable address is recorded. A rescan starts with fresh resolution; until then, service reachability is unknown."));
       if (h.archived || !ALL) {
         const archiveBox = el("div", "why");
         archiveBox.append(el("h3", "sec", "Asset lifecycle"));
@@ -1734,24 +2106,24 @@ const pages = {
           actions.append(change);
           archiveBox.append(actions);
         }
-        pane.append(archiveBox);
+        S.manage.append(archiveBox);
       }
       // informational detections (a WAF, a server version, federated sign-in): chips, not findings
       if (h.labels && h.labels.length) {
         const chips = el("div", "host-labels");
         h.labels.forEach((l) => chips.append(el("span", "chip", l.label, l.detail ? { title: l.detail } : {})));
-        pane.append(chips);
+        hdr.append(chips);
       }
       const openPorts = h.ips.reduce((n, ip) => n + ip.ports.length, 0);
       const stats = el("div", "tiles");
       stats.style.margin = "14px 0 0";
       stats.append(
-        tile("Open ports", openPorts),
-        tile("Open findings", h.vuln_count ?? (h.vulns || []).filter((v) => v.severity !== "info").length, { hot: "smoke" }),
+        tile("Open ports", openPorts, { onClick: () => openTab("services") }),
+        tile("Open findings", h.vuln_count ?? (h.vulns || []).filter((v) => v.severity !== "info").length, { hot: "smoke", onClick: () => openTab("findings") }),
         tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
-      pane.append(hostOverview(h));
+      OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");
       const reasons = h.heat_reasons || [];
@@ -1772,7 +2144,8 @@ const pages = {
       } else if (h.heat === "clean") {
         why.append(el("p", "note", "No CVE matches and no open findings are recorded for this host."));
       }
-      pane.append(why);
+      OV.main.prepend(surfaceCard(h, () => openTab("services")));
+      OV.main.append(why);
       // the score is the sum of these lines, so it can be checked rather than trusted
       if (h.score_detail && h.score_detail.length) {
         const scoreBox = el("div", "why");
@@ -1791,10 +2164,10 @@ const pages = {
           );
           scoreBox.append(line);
         });
-        pane.append(scoreBox);
+        OV.main.append(scoreBox);
       }
-      if (h.title) pane.append(el("p", "sub", h.title));
-      if (h.target) pane.append(el("p", "note", "Target: ", hostLink(h.target, projectOf(h))));
+      if (h.title) hdr.append(el("p", "sub", h.title));
+      if (h.target) hdr.append(el("p", "note", `Target ${h.target}`));
       const compareBox = el("div", "shot-compare");
       if (h.screenshot) {
         const img = el("img", "shot", null, {
@@ -1803,17 +2176,18 @@ const pages = {
           loading: "lazy",
         });
         img.onerror = () => img.remove();
-        pane.append(img);
-        pane.append(compareBox);
+        S.web.append(img);
+        S.web.append(compareBox);
       }
       const techBox = technologyTable(h);
-      if (techBox) pane.append(techBox);
+      if (techBox) OV.side.append(techBox);
       const recent = el("div", "recent-changes");
-      pane.append(el("h3", "sec", "Recent changes"), recent);
+      S.changes.append(el("h3", "sec", "Recent changes"), recent);
       api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "30d", page_size: 10 })}`)
         .then((data) => {
           if (current !== h.id) return;
           const items = (data.results || []).filter((c) => c.host === h.host);
+          setTabCount("changes", items.length);
           if (!items.length) recent.append(el("p", "note", "No changes in the last 30 days."));
           const shot = items.find((c) => c.kind === "screenshot_changed" && c.before && c.before.subdomain_id);
           if (shot) {
@@ -1837,23 +2211,24 @@ const pages = {
             line.append(badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)), changeCell(c, projectOf(h)), el("span", "note", shortDate(c.detected)));
             recent.append(line);
           });
+          foldTabs();
         })
         .catch(() => recent.append(el("p", "note", "Changes could not be loaded.")));
       if (h.names && h.names.length) {
-        pane.append(el("h3", "sec", "Names this IP answers to"));
+        S.services.append(el("h3", "sec", "Names this IP answers to"));
         h.names.forEach(([how, name]) =>
-          pane.append(el("div", "ip-line", `${name}  ·  ${how === "ptr" ? "reverse DNS" : "certificate"}`)),
+          S.services.append(el("div", "ip-line", `${name}  ·  ${how === "ptr" ? "reverse DNS" : "certificate"}`)),
         );
-        pane.append(el("p", "note", "Not added as targets: they may be out of scope."));
+        S.services.append(el("p", "note", "Not added as targets: they may be out of scope."));
       }
       const portTotal = h.ips.reduce((n, ip) => n + ip.ports.length, 0);
-      pane.append(el("h3", "sec", `Services (${portTotal})`));
-      if (!h.ips.length) pane.append(el("p", "note", "No IP addresses resolved yet."));
+      S.services.append(el("h3", "sec", `Services (${portTotal})`));
+      if (!h.ips.length) S.services.append(el("p", "note", "No IP addresses resolved yet."));
       h.ips.forEach((ip) => {
-        pane.append(el("div", "ip-line", ip.address + (ip.os ? `  ·  ${ip.os}` : "")));
+        S.services.append(el("div", "ip-line", ip.address + (ip.os ? `  ·  ${ip.os}` : "")));
         const identity = factLine(ip.facts);
-        if (identity) pane.append(el("div", "note", identity));
-        pane.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
+        if (identity) S.services.append(el("div", "note", identity));
+        S.services.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
         ip.ports.forEach((p) => {
           const card = el("div", "svc");
           const top = el("div", "svc-top");
@@ -1874,28 +2249,30 @@ const pages = {
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
           if (p.rdp_screenshot) card.append(rdpShotCard(p.rdp_screenshot));
-          pane.append(card);
+          S.services.append(card);
         });
       });
       const routesBox = el("div", "web-routes");
-      pane.append(el("h3", "sec", "Web routes"), routesBox);
+      S.web.append(el("h3", "sec", "Web routes"), routesBox);
       api("GET", `${baseOf(projectOf(h))}/routes?${query({ host: h.host, page_size: 50 })}`)
         .then((data) => {
           if (current !== h.id) return;
           const items = (data.results || []).filter((r) => r.host === h.host);
           // only routes that matter: an open page, a login, a session-gated page or SSO. 404s, plain redirects and errors are noise
           const notable = items.filter((r) => NOTABLE_ROUTES.includes(r.auth_state));
+          setTabCount("web", notable.length);
           if (!items.length) routesBox.append(el("p", "note", "No web routes have been checked on this host."));
           else if (!notable.length) routesBox.append(el("p", "note", "No notable web routes."));
           notable.forEach((r) => routesBox.append(routeLine(r)));
           if (notable.length && items.length > notable.length)
             routesBox.append(el("p", "note", `${items.length - notable.length} other routes probed (redirects, 404s)`));
+          foldTabs();
         })
         .catch(() => routesBox.append(el("p", "note", "Web routes could not be loaded.")));
       // findings (low or worse) and informational detections are counted apart, as on the Scanner findings page and the dashboard
       const findingLines = (title, items, total) => {
         if (!items.length) return;
-        pane.append(el("h3", "sec", `${title} (${total ?? items.length})`));
+        S.findings.append(el("h3", "sec", `${title} (${total ?? items.length})`));
         items.forEach((v) => {
           const line = el("div", "find");
           const label = v.id
@@ -1903,20 +2280,50 @@ const pages = {
             : el("span", "", v.name);
           line.append(badge(v.severity, v.severity), label);
           if (v.classification) line.append(aiBadge({ classification: v.classification, status: "triaged" }, { project: projectOf(h), kind: "vulnerability", id: v.id }));
-          pane.append(line);
+          S.findings.append(line);
         });
       };
       findingLines("Open findings", (h.vulns || []).filter((v) => v.severity !== "info"), h.vuln_count);
       findingLines("Informational detections", (h.vulns || []).filter((v) => v.severity === "info"), h.info_count);
-      if (ALL) pane.append(assetInfoReadOnly(h));
-      else pane.append(assetInfo(h), hostActions(h));
+      if (ALL) S.manage.append(assetInfoReadOnly(h));
+      else S.manage.append(assetInfo(h), hostActions(h));
+      foldTabs();
+      const tabLabels = { overview: "Overview", services: "Services", web: "Web", findings: "Findings", changes: "Changes", manage: "Manage" };
+      const findingCount = (h.vulns || []).length;
+      const openTab = (name) => {
+        hostTab = name;
+        Object.entries(S).forEach(([k, box]) => (box.hidden = k !== name));
+        Object.entries(tabBtns).forEach(([k, b]) => b.setAttribute("aria-selected", String(k === name)));
+      };
+      const tabBar = el("div", "tools host-tabs", null, { role: "tablist" });
+      Object.keys(S).forEach((k) => {
+        const b = el("button", "btn ghost sm", tabLabels[k], { role: "tab", "aria-selected": "false", type: "button" });
+        b.onclick = () => openTab(k);
+        tabBtns[k] = b;
+        tabBar.append(b);
+      });
+      setTabCount("services", portTotal);
+      setTabCount("findings", h.vuln_count ?? findingCount);
+      pane.append(tabBar, ...Object.values(S));
+      openTab(hostTab in S ? hostTab : "overview");
     }
 
     const list = createList({
       mount: side,
+      skeleton: "rows",
+      onReset: () => {
+        rows.textContent = "";
+        byId.clear();
+        paintHeat();
+        settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
+      },
       path: `${base}/search`,
       params: () => ({ q: q.value, sort: sortBy.value }),
       empty: "No hosts match. Hosts appear as discovery and port scans finish.",
+      onLoaded: (data) => {
+        totalHosts = data.count || 0;
+        paintHeat();
+      },
       render: (m, items, reset) => {
         if (reset) {
           rows.textContent = "";
@@ -1926,20 +2333,26 @@ const pages = {
           byId.set(h.id, h);
           const ports = h.ips.reduce((n, ip) => n + ip.ports.length, 0);
           const row = selectableRow(h.id, h.heat);
-          // the name and the address are links to this very record (so they can be shared or opened in a new tab); a plain click selects the row
+          row.dataset.heatKey = h.heat || "unscanned";
+          row.dataset.host = h.host;
+          // line one: the name (a link to this very record, so it can be shared) and the score; line two: address, ports, CVEs
+          const top = el("span", "hr-top");
           const nameBox = el("span", "cve-id");
           nameBox.append(selfLink(hostAnchor(projectOf(h), h.host)));
-          row.append(nameBox);
+          top.append(nameBox, el("span", "hr-score", String(h.score || 0), { title: "Score" }));
           const meta = el("span", "host-meta");
-          meta.append(
-            el("span", "chip", String(h.score || 0)),
-            h.ips[0] ? rowIp(projectOf(h), h.ips[0].address) : el("span", "note", "no IP"),
-            el("span", "note", `${ports} port${ports === 1 ? "" : "s"}`),
-          );
-          if (h.cve_matches) meta.append(badge(String(h.cve_matches), "fire"));
+          meta.append(h.ips[0] ? rowIp(projectOf(h), h.ips[0].address) : el("span", "note", "no IP"));
+          const portNumbers = [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => p.number)))];
+          const ribbon = el("span", "hr-ports");
+          if (!portNumbers.length) ribbon.append(el("span", "note", "no ports"));
+          portNumbers.slice(0, 4).forEach((n) => ribbon.append(el("i", "", String(n))));
+          if (portNumbers.length > 4) ribbon.append(el("i", "more", `+${portNumbers.length - 4}`));
+          meta.append(ribbon);
+          if (h.cve_matches) meta.append(badge(`${h.cve_matches} CVE`, "fire"));
           const chip = projChip(h);
           if (chip) meta.append(chip);
-          row.append(meta);
+          row.append(top, meta);
+          bulk.decorate(row, h, h.id);
           if (h.matched && h.matched.length) row.append(rowLine(...h.matched.slice(0, 3).flatMap((t, i) => [i ? " · " : "", matchedWhy(t, projectOf(h), h.host)])));
           row.onclick = (e) => {
             const link = e.target.closest("a");
@@ -1950,12 +2363,20 @@ const pages = {
           };
           rows.append(row);
         });
+        settleRows(rows);
+        paintHeat();
+        markNewHosts();
+        bulk.prune();
+        settleSelection();
         const wanted = Number(location.hash.slice(1));
         const named = wantedHost && items.find((h) => h.host === wantedHost);
         if (current == null && named) showHost(named);
         else if (current == null && wanted && byId.has(wanted)) showHost(byId.get(wanted));
-        else if (current == null && window.matchMedia("(min-width:900px)").matches && items.length)
-          showHost(items[0]);
+        else if (current == null && window.matchMedia("(min-width:900px)").matches && items.length) {
+          // open the first host the heat filter lets through, so the pane never shows a host the list is hiding
+          const first = items.find((h) => heatFilter === "all" || (h.heat || "unscanned") === heatFilter);
+          if (first) showHost(first);
+        }
       },
     });
     showHost(null);
@@ -1973,6 +2394,7 @@ const pages = {
     const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value });
     const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 1 })}`)).total;
     const q = searchBox("Filter by host", () => reload());
+    q.value = wanted.get("host") || "";
     const type = picker(
       "Type",
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
@@ -1998,17 +2420,39 @@ const pages = {
       countOf((key) => ({ status: key })),
       () => reload(),
     );
-    [[type, "type", ["all", "cve", "scanner", "hygiene"]], [sev, "severity", ["all", "critical", "high", "medium", "low", "info"]],
-     [status, "status", ["actionable", "all"]]].forEach(([p, key, allowed]) => {
-      const start = initial(key, allowed);
-      if (start) {
-        p.value = start;
-        p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(allowed[i] === start)));
-      }
+    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "all"] };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "" };
+    const setPicker = (p, key, value) => {
+      p.value = value;
+      p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
+    };
+    [[type, "type"], [sev, "severity"], [status, "status"]].forEach(([p, key]) => {
+      const start = initial(key, ALLOWED[key]);
+      if (start) setPicker(p, key, start);
     });
-    const hint = el("p", "note", "Actionable is what makes a host hot on its card: CVE matches the AI has not ruled out, and open scanner and hygiene findings above info. Everything adds informational, closed and ruled-out findings.");
+    // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
+    const syncUrl = () => {
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim() }, FINDING_DEFAULTS);
+      views.refresh();
+    };
+    const views = savedViews({
+      page: "findings",
+      slug,
+      defaults: FINDING_DEFAULTS,
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim() }),
+      apply: (v) => {
+        setPicker(type, "type", v.type);
+        setPicker(sev, "severity", v.severity);
+        setPicker(status, "status", v.status);
+        q.value = v.host;
+        reload();
+      },
+    });
+    const hint = el("details", "how-filter");
+    hint.append(el("summary", "", "What does Actionable mean?"), el("p", "", "Actionable is what makes a host hot on its card: CVE matches the AI has not ruled out, and open scanner and hygiene findings above info. Everything adds informational, closed and ruled-out findings."));
     mount.append(hint);
     function reload() {
+      syncUrl();
       [type, sev, status].forEach((p) => p.refresh());
       list.reload();
     }
@@ -2021,13 +2465,15 @@ const pages = {
       if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
     }
     const list = findingPage(mount, {
+      bulk: true,
+      seenPage: "findings",
       kind: "vulnerability",
       kindOf: (item) => item.kind,
       forKind: (kind) => (kind === "match" ? { kind, statusControl: matchStatusControl } : { kind }),
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [q, type.node, sev.node, status.node],
+      filters: [views.node, q, type.node, sev.node, status.node],
       params,
       empty: "No findings match these filters.",
       onLoaded: (data, reset) => {
@@ -2097,6 +2543,8 @@ const pages = {
     });
     const statusControl = matchStatusControl;
     const list = findingPage(mount, {
+      bulk: true,
+      seenPage: "matches",
       kind: "match",
       noun: "match",
       plural: "matches",
@@ -2280,7 +2728,12 @@ pages.changes = function changes(mount) {
       list.reload();
     },
   );
-  since.value = "7d";
+  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Live page: offer it as one more choice
+  const sinceParam = new URLSearchParams(location.search).get("since") || "";
+  if (Number.isFinite(Date.parse(sinceParam)) && !/^\d+[hdw]$/.test(sinceParam)) {
+    since.prepend(Object.assign(el("option", "", "Since you last looked"), { value: sinceParam }));
+    since.value = sinceParam;
+  } else since.value = "7d";
   const host = searchBox("Filter by host", () => {
     kinds.refresh();
     list.reload();
@@ -2309,7 +2762,14 @@ pages.changes = function changes(mount) {
     count,
     () => list.reload(),
   );
-  mount.append(tools, kinds.node);
+  const trend = el("div", "chart-slot");
+  mount.append(trend, tools, kinds.node);
+  api("GET", `${base}/changes?${query({ since: "30d", page_size: 200 })}`)
+    .then((r) => {
+      const dates = (r.results || []).map((c) => c.detected).filter(Boolean);
+      if (dates.length) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], dates, compare: false }));
+    })
+    .catch(() => {});
   const list = createList({
     mount,
     path: `${base}/changes`,
@@ -2317,7 +2777,7 @@ pages.changes = function changes(mount) {
     empty: "No changes in this period. Changes appear when a scan finds something different from the last one.",
     onLoaded: (_, reset) => reset && kinds.refresh(),
     render: table(withProject([
-      { label: "When", render: (c) => shortDate(c.detected) },
+      { label: "When", render: (c) => whenCell(c.detected) },
       { label: "Kind", render: (c) => badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)) },
       { label: "Host", cls: "mono", render: (c) => hostLink(c.host, projectOf(c)) },
       { label: "Detail", render: (c) => changeCell(c, projectOf(c)) },
@@ -2400,7 +2860,7 @@ pages.activity = function activity(mount) {
     params: () => ({ kind: kinds.value }),
     empty: "No activity yet. The engine reports here as it reads the feed, checks the inventory and runs scans.",
     render: table(withProject([
-      { label: "When", render: (a) => shortDate(a.created) },
+      { label: "When", render: (a) => whenCell(a.created) },
       { label: "Kind", render: (a) => badge(ACTIVITY_KIND[a.kind] || a.kind, ACTIVITY_BADGE[a.kind] || "") },
       {
         label: "Activity",
@@ -2536,6 +2996,12 @@ pages.scan = async function scanDetail(mount) {
       }
       clearInterval(ticker);
       m.textContent = "";
+      [["subdomains", s.subdomains], ["endpoints", s.endpoints], ["findings", s.vulnerabilities]].forEach(([name, n]) => {
+        const b = tabs.querySelector(`[data-tab="${name}"]`);
+        if (!b) return;
+        b.textContent = `${tabDefs[name].label} `;
+        b.append(el("b", "tabcount", String(n ?? 0)));
+      });
       const live = s.status === -1 || s.status === 1;
       const head = el("div", "card scan-head");
       const top = el("div", "card-head");
@@ -2543,18 +3009,19 @@ pages.scan = async function scanDetail(mount) {
       title.append(hostLink(s.target, slug));
       top.append(title, badge(SCAN_STATUS[s.status] || s.status, SCAN_STATUS[s.status]));
       const meta = el("div", "scan-meta");
-      const dur = el("span", "", null);
-      const paintDur = () => {
-        dur.textContent = "";
-        dur.append(document.createTextNode("Duration "), el("b", "", duration(s.started, s.finished)));
+      const fact = (label, value) => {
+        const box = el("span", "fact");
+        const v = el("b", "", value);
+        box.append(el("small", "", label), v);
+        return [box, v];
       };
-      paintDur();
+      const [durBox, durValue] = fact("Duration", duration(s.started, s.finished));
+      const paintDur = () => {
+        durValue.textContent = duration(s.started, s.finished);
+      };
       if (live) ticker = setInterval(paintDur, 1000);
-      const eng = el("span");
-      eng.append(document.createTextNode("Engine "), el("b", "", s.engine));
-      const began = el("span");
-      began.append(document.createTextNode("Started "), el("b", "", shortDate(s.started)));
-      meta.append(eng, began, dur);
+      meta.append(fact("Engine", s.engine)[0], fact("Started", shortDate(s.started))[0], durBox);
+      if (s.finished) meta.append(fact("Finished", shortDate(s.finished))[0]);
       // report downloads: a PDF built by the server from this scan's results and the branding in Settings > Reports
       const pop = el("details", "pop");
       pop.append(el("summary", "btn ghost sm", "Download report"));
@@ -2607,6 +3074,14 @@ pages.scan = async function scanDetail(mount) {
         const card = el("div", "card");
         card.append(el("h2", "", "Findings by severity"), bar);
         card.querySelector("h2").style.marginBottom = "10px";
+        const legend = el("ul", "sev-legend");
+        ["critical", "high", "medium", "low", "info"].forEach((k) => {
+          if (!sc[k]) return;
+          const li = el("li");
+          li.append(el("i", k), document.createTextNode(`${k} `), el("b", "", String(sc[k])));
+          legend.append(li);
+        });
+        card.append(legend);
         m.append(card);
       }
       clearTimeout(refresh);
