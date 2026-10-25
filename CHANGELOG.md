@@ -50,6 +50,7 @@ CVEngine has not made a numbered release yet. Everything below is on `master`.
 
 ### Security
 
+- **Detection gaps found on a live host.** A Netlify site tagged `datocms` matched Craft CMS advisories, and neither PHP2Shell CVE (CVE-2026-109618, CVE-2026-109619) was in the scanner. Name matching now requires whole words (`cms` is not in `datocms`, `php` is not `phpMyAdmin`); an advisory that lists only fixed branches leaves older branches *unknown*, not cleared; the feed gets an hourly coverage task, `sync_cve_now --backfill-days/--tech/--ids`, and retry with backoff; and the host record shows the web server, technologies with versions and categories, hosting, and shared-IP flags. nmap and the full-port sweep no longer scan addresses that belong to a shared platform.
 - Closed a command injection hole and a cross-organization account takeover.
 - Tenant-scoped media, a filter for internal addresses in outbound requests, and shell commands replaced with contained file operations.
 - Hardened the AI features against prompt injection, and added a static safety check for generated templates.

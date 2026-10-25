@@ -92,6 +92,11 @@ def in_scope(ip, *, strict=False):
     address = (ip.address or '').strip()
     if not address or ip.is_cdn or not target_types.is_scannable_ip(address):
         return False
+    from cveFeed import hosting
+    shared = hosting.shared_by_address([address])
+    if shared:  # a shared platform's edge (Netlify, Vercel, a CDN): other customers answer here. Flag it so the queue skips it for good.
+        hosting.mark_shared(shared)
+        return False
     from cveFeed.exclusions import excluded_names
     from cveFeed.archive_rediscovery import archived_names
     rows = list(active_attached(ip)

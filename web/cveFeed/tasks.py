@@ -6,6 +6,8 @@ django_celery_beat (e.g. every 30 minutes).
 """
 import logging
 import os
+import re
+import time
 
 from reNgine.celery import app
 from cveFeed.cve_now import CVENowClient
@@ -77,6 +79,8 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
         consecutive_existing = 0
         try:
             entry = client.get_entry(cve_id)
+            if isinstance(entry, dict) and summary.get("firstSeenAt"):
+                entry.setdefault("firstSeenAt", summary["firstSeenAt"])
             obj, _ = CVEEntry.from_api(entry)
             new_entries.append(obj)
             created += 1
@@ -127,6 +131,143 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
         auto_fire_new_cves.delay([e.pk for e in new_entries if getattr(e, "pk", None)])
     if pending_recorrelation:
         correlate_refreshed_cves.delay()
+    return result
+
+
+COVERAGE_DAYS_DEFAULT = 14
+BACKFILL_ID_RE = re.compile(r'^(CVE-\d{4}-\d{4,9}|GHSA(-[a-z0-9]{4}){3}|OSV-[A-Za-z0-9-]{4,40})$', re.IGNORECASE)
+
+
+def _coverage_days():
+    try:
+        return int(os.environ.get('CVENGINE_CVE_COVERAGE_DAYS', COVERAGE_DAYS_DEFAULT))
+    except ValueError:
+        return COVERAGE_DAYS_DEFAULT
+
+
+def _watch_techs():
+    raw = os.environ.get('CVENGINE_CVE_WATCH_TECHS', 'php')
+    return [t.strip().lower() for t in raw.split(',') if t.strip()]
+
+
+def _oldest_first_seen():
+    """When the oldest stored entry was first seen by the feed (None when nothing is stored or none carries the time)."""
+    from django.db.models import Min
+    return CVEEntry.objects.aggregate(oldest=Min('first_seen_at'))['oldest']
+
+
+def _parse_time(value):
+    from django.utils.dateparse import parse_datetime
+    try:
+        return parse_datetime(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+@app.task(name='backfill_cve_now_feed', bind=False, queue='cve_feed_queue')
+def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs=None, pause=0.2, force=False, sleep=None):
+    """Fill the gap behind the incremental sync.
+
+    The scheduled sync walks the feed newest-first and stops after 40 known entries in a row or 200 new ones, so entries older
+    than its first run were never read. This task reads them:
+
+    * ``ids``: exactly these entries (a CVE, GHSA or OSV id), whatever the listing says.
+    * ``techs``: the entries cve.now files under a technology slug (default the CVENGINE_CVE_WATCH_TECHS list, php), read from
+      its per-technology feed, which lists entries the newest-first walk does not reach.
+    * otherwise the last ``days`` days (CVENGINE_CVE_COVERAGE_DAYS, 14; 0 turns the scheduled run off) of the newest-first
+      listing, without the known-in-a-row stop. Skipped at once, with no request, when the oldest stored entry was first seen
+      before that window (``force`` walks anyway).
+
+    Bounded per run (``max_new`` entries, ``max_scan`` listed, ``pause`` seconds between entry fetches) and safe to repeat: stored
+    entries are skipped, so each run continues where the last stopped. A refusal (403) or repeated failure stops the run
+    instead of retrying, so a block on the feed is never made worse."""
+    import requests
+    from datetime import timedelta
+    from django.utils import timezone
+    from cveFeed import activity
+    from cveFeed.threat import FIRE, SMOKE
+    pause_for = sleep or time.sleep
+    explicit = bool(ids or techs)
+    if not explicit:
+        window = _coverage_days() if days is None else int(days)
+        if window <= 0:
+            return {'status': 'disabled'}
+        cutoff = timezone.now() - timedelta(days=window)
+        oldest = _oldest_first_seen()
+        if not force and oldest is not None and oldest <= cutoff:
+            return {'status': 'covered', 'oldest': oldest.isoformat()}
+    client = CVENowClient()
+    result = {'status': 'ok', 'listed': 0, 'wanted': 0, 'created': 0, 'failed': 0, 'blocked': False, 'invalid': []}
+    wanted, first_seen = [], {}
+
+    def want(entry_id):
+        if entry_id not in first_seen and entry_id not in wanted:
+            wanted.append(entry_id)
+
+    try:
+        for raw in (ids or []):
+            entry_id = str(raw).strip()
+            if BACKFILL_ID_RE.match(entry_id):
+                want(entry_id.upper() if entry_id.upper().startswith('CVE-') else entry_id)
+            else:
+                result['invalid'].append(entry_id[:64])
+        for tech in ((techs if techs is not None else []) if explicit else _watch_techs()):
+            try:
+                listed = client.tech_entry_ids(tech)
+            except ValueError:
+                result['invalid'].append(str(tech)[:64])
+                continue
+            known = set(CVEEntry.objects.filter(cve_id__in=listed).values_list('cve_id', flat=True))
+            for entry_id in listed:
+                if force or entry_id not in known:
+                    want(entry_id)
+        if not explicit:
+            walked = 0
+            for summary, known in _known_in_batches(client.iter_entries(max_entries=max_scan, page_pause=0.3)):
+                walked += 1
+                seen_at = _parse_time(summary.get('firstSeenAt') or summary.get('publishedAt'))
+                if seen_at and seen_at < cutoff:
+                    break
+                entry_id = summary.get('id')
+                if entry_id and (force or entry_id not in known):
+                    want(entry_id)
+                    first_seen[entry_id] = summary.get('firstSeenAt')
+                if len(wanted) >= max_new:
+                    break
+            result['listed'] = walked
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        result['blocked'] = status in (401, 403, 429)
+        result['status'] = 'blocked' if result['blocked'] else 'failed'
+        logger.warning('cve.now backfill could not read the listing: %s', exc)
+        if not wanted:
+            return result
+    result['wanted'] = len(wanted)
+    created_rows = []
+    for entry_id in wanted[:max_new]:
+        try:
+            entry = client.get_entry(entry_id)
+            if isinstance(entry, dict) and first_seen.get(entry_id):
+                entry.setdefault('firstSeenAt', first_seen[entry_id])
+            obj, _ = CVEEntry.from_api(entry)
+            created_rows.append(obj)
+            result['created'] += 1
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            result['failed'] += 1
+            logger.warning('cve.now backfill: failed to fetch %s: %s', entry_id, exc)
+            if status in (401, 403, 429):
+                result['blocked'], result['status'] = True, 'blocked'
+                break
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
+            result['failed'] += 1
+            logger.warning('cve.now backfill: failed to save %s: %s', entry_id, exc)
+        pause_for(pause)
+    tiers = [e.threat_tier for e in created_rows]
+    if created_rows:
+        activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
+                     + (f"; {result['failed']} could not be read" if result['failed'] else ''), status='done')
+        auto_fire_new_cves.delay([e.pk for e in created_rows if getattr(e, 'pk', None)])
     return result
 
 

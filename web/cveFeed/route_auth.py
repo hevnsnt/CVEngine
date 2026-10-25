@@ -15,6 +15,8 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 
+from cveFeed import fingerprint
+
 logger = logging.getLogger(__name__)
 
 SERVICE = 'route-auth'
@@ -168,6 +170,13 @@ def classify(probe):
     body = probe.get('body') or ''
     evidence = {'markers': [], 'bytes': probe.get('bytes', len(body)), 'cookies': sorted(probe.get('cookies') or [])}
     markers = evidence['markers']
+    # what the response says it runs: kept (headers cut short, never the body) so the host record can show it
+    for key, field in (('server', 'server'), ('powered_by', 'powered_by')):
+        if probe.get(field):
+            evidence[key] = str(probe[field])[:100]
+    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''))
+    if found:
+        evidence['fingerprints'] = found
 
     def done(state, provider='', redirect_to=''):
         evidence['provider'] = provider
@@ -529,4 +538,33 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
         RouteAuth.objects.bulk_create(part, ignore_conflicts=True)
     for part in _chunks(old_rows):
         RouteAuth.objects.bulk_update(part, list(STORED_FIELDS), batch_size=CHUNK)
+    link_technologies(scan, probed)
     return {'by_state': by_state, 'sensitive': sum(1 for r in probed.values() if r['sensitive_score'] > 0)}
+
+
+def link_technologies(scan, probed):
+    """Record what each host's front page says it runs (see cveFeed.fingerprint) as the host's technologies in this scan, so the
+    correlation engine reads a PHP version from an X-Powered-By header like any other detected technology. Only the root page of a
+    host speaks for the host; names already on the host are left alone. Returns the number of links added."""
+    from startScan.models import Subdomain, Technology
+    names = {}
+    for url, result in probed.items():
+        parsed = urlparse(url)
+        if (parsed.path or '/') != '/' or not parsed.hostname:
+            continue
+        for found in (result.get('evidence') or {}).get('fingerprints') or []:
+            names.setdefault(parsed.hostname.lower(), set()).add(found['name'])
+    if not names:
+        return 0
+    cache, added = {}, 0
+    for sub in Subdomain.objects.filter(scan_history_id=scan.id, name__in=list(names)).prefetch_related('technologies'):
+        have = {t.name for t in sub.technologies.all()}
+        new = []
+        for name in sorted(names.get(sub.name.lower(), ()) - have):
+            if name not in cache:
+                cache[name] = Technology.objects.filter(name=name).first() or Technology.objects.create(name=name)
+            new.append(cache[name])
+        if new:
+            sub.technologies.add(*new)
+            added += len(new)
+    return added
