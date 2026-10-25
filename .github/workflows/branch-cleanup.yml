@@ -1,0 +1,35 @@
+name: 🧹 Delete branches
+
+# Standing admin tool, dispatched by hand when needed: the cloud session's push credential can push and update
+# branches but is refused (403) when it tries to delete a ref, the same restriction that blocks a tag push (see
+# release.yml). This dispatches the deletion with the Actions token instead. It does nothing unless someone with
+# write access to the repository dispatches it with explicit branch names.
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: 'Branch names to delete, comma or newline separated'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+      - name: 🧹 Delete the given branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCHES: ${{ github.event.inputs.branches }}
+        run: |
+          status=0
+          echo "$BRANCHES" | tr ',' '\n' | while read -r branch; do
+            branch=$(echo "$branch" | xargs)
+            [ -n "$branch" ] || continue
+            echo "Deleting $branch"
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$branch" || status=1
+          done
+          exit "$status"
