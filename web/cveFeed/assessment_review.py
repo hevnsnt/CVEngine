@@ -21,6 +21,9 @@ MAX_MODEL_CALLS = 100
 MAX_QUEUED_ACTIONS = 20
 LEASE = timedelta(minutes=10)
 PERIOD = timedelta(hours=3)
+# Beat fires every PERIOD but the task starts after queue latency, so two runs can be a little less than PERIOD apart; without
+# slack the second is "not due" and the review waits a whole extra cycle.
+DUE_SLACK = timedelta(minutes=20)
 SYSTEM = (
     'You review assessment coverage for one authorized project. The JSON input contains only stored counts and IDs. '
     'Choose at most one action from the offered actions. An offered action is a candidate, not proof it is needed. '
@@ -209,9 +212,11 @@ def _claim(review_id=None):
                 review = None
             if review is None:
                 last = AssessmentReview.objects.order_by('-id').first()
-                if last and last.period_end > now - PERIOD:
+                if last and last.period_end > now - PERIOD + DUE_SLACK:
                     return None, 'not due'
-                review = AssessmentReview.objects.create(period_start=now-PERIOD, period_end=now,
+                # windows are contiguous: this one starts where the last ended (unless that was more than two periods ago)
+                start = last.period_end if last and last.period_end > now - 2 * PERIOD else now - PERIOD
+                review = AssessmentReview.objects.create(period_start=start, period_end=now,
                     total_projects=Project.objects.count(),
                     cursor_project_id=last.cursor_project_id if last and last.model_calls >= MAX_MODEL_CALLS else 0)
         if review is None or review.status in ('completed', 'failed'):
