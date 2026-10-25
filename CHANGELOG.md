@@ -4,17 +4,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## v1.0.1 (2026-10-25)
 
-A security patch for v1.0. Update with `make up` or the in-app updater.
+A security patch. Update with `make up` or the in-app updater.
 
-### Security
-
-- **Two-step sign-in could be skipped at `/admin/login/`.** Django's own admin login signed a staff user in with the password alone and made a normal session for the whole app. `/admin/login/` now only forwards to the app's `/login/`, which enforces the second step.
-
-### Fixed
-
-- **AI-written templates survived no update.** Their directory was not on a Docker volume, so each deploy deleted them and they had to be regenerated and reviewed again. It is now the `generated_templates` volume in all three services that share it, and a worker restores any validated template whose file is missing from the database copy, through the same safety check, when it starts.
-- **`scripts/uninstall.sh` removed anything with `rengine` in its name,** including another reNgine install on the host. It now removes only this install's Docker Compose project, selected by its exact label, and lists what it will remove before asking.
-- **Proxy documentation.** It told operators to set `CVENGINE_TRUSTED_PROXIES` to their proxy's network, which replaces the Docker default and makes the IP allowlist and abuse guard see the Docker gateway for every request. The docs now say to leave the default or add to it.
+- **Security:** two-step sign-in could be skipped at `/admin/login/`. That URL now only forwards to `/login/`, which enforces the second step.
+- **AI-written templates are kept across updates.** They now live on a Docker volume, and a worker restores any validated template whose file is missing.
+- **`scripts/uninstall.sh` removes only this install,** not another reNgine on the same host.
+- **Proxy docs:** `CVENGINE_TRUSTED_PROXIES` should be left at its default or added to, never replaced.
 
 ## v1.0 (2026-10-25)
 
