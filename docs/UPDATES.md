@@ -32,7 +32,7 @@ CVEngine checks its GitHub repository twice a day (05:23 and 17:23 UTC) and tell
 
 1. **Check.** The check reads the head of the configured branch (default `hevnsnt/CVEngine@master`) and compares it with the installed commit (the first line of `web/.commit`, written by `make up` and `make build`). A private repository needs a fine-grained read-only token under **Settings, Updates, Update source**, stored write-only.
 2. **Ask.** A bar at the top of every page and **Settings, Updates** list the new commits. Superusers can approve, dismiss (until a newer commit appears), or check again.
-3. **Apply.** Approving writes the commit id to `web/.update-approved`. The web container has no Git or Docker access, so the host script `scripts/apply-update.sh` does the work: it fast-forwards to that commit, builds, migrates, recreates the application containers, waits while scans or validation jobs run, and on failure restarts the previous code. Migrations are not rolled back.
+3. **Apply.** Approving writes the commit id to `web/.update-approved`. The web container has no Git or Docker access, so the host script `scripts/apply-update.sh` does the work: it pauses new scan dispatch (active scans are left to finish, never stopped), fast-forwards to that commit, builds, migrates, recreates the application containers, and on failure restarts the previous code; scanning resumes once the run reaches a stable state, whether that is the new commit or the restored previous one. Migrations are not rolled back. **Settings, Updates** shows the live phase (`draining`, `applying`, `done`, `failed`) and whether scanning is currently paused for the update, from `GET /cve/api/settings/updates`'s `phase`, `phase_detail`, `phase_scans_running`, `phase_changed_at`, and `scans_paused_by_update` fields.
 
 Install the host side once, as the user that owns the checkout and can run Docker:
 
@@ -80,7 +80,7 @@ For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. T
 ## Branches and releases
 
 - `master` holds released versions only. Each release is tagged (`v1.0`, `v1.1`, ...); pushing the tag, or running the Release workflow by hand, publishes the GitHub release with that version's section of the [changelog](../CHANGELOG.md) as its notes (`.github/workflows/release.yml`). A patch such as `v1.0.1` keeps the notes of `v1.0` and adds its own short section at the end. The tag must match `web/.version`.
-- `develop` is the next version in progress (`web/.version` reads `v1.1-dev`). Changes go to `develop` by pull request, and `develop` is merged into `master` for a release.
+- `develop` is the next version in progress (`web/.version` reads the next version with a `-dev` suffix, such as `v1.2-dev` once `v1.1` is released). Changes go to `develop` by pull request, and `develop` is merged into `master` for a release.
 - Keep an installation on `master` (the default update source). Point it at `develop` under Settings, Updates, Update source only on a test server.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).

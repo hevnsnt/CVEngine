@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/feed', views.api_feed, name='cve_api_feed'),
     path('api/stats', views.api_stats, name='cve_api_stats'),
     path('api/graph', views.api_graph, name='cve_api_graph'),
+    path('api/graph-live', views.api_graph_live, name='cve_api_graph_live'),
     path('api/graph-overview', views.api_graph_overview, name='cve_api_graph_overview'),
     path('api/graph-hosts', views.api_graph_hosts, name='cve_api_graph_hosts'),
     path('api/node', views.api_node, name='cve_api_node'),

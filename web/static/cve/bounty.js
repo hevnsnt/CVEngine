@@ -330,7 +330,12 @@ async function openProgram(id) {
     if (project) {
       acts.append(p.engagement
         ? para(`Working it: ${p.engagement.status}${p.engagement.policy_ack_at ? ", policy read" : ", policy not read yet"}. See the Engagements tab.`)
-        : button("Work this program", async () => { await send("POST", "engagements", { program_id: p.id }); toast("Added to Engagements"); close(); }, "btn sm"));
+        : button("Work this program", async () => {
+          // an engagement lives in its own project in the Bug Bounty org, not in the project this page is open on: go there
+          const e = await send("POST", "engagements", { program_id: p.id });
+          toast("Added to Engagements"); close();
+          if (e.project && e.project !== project) location.href = `${location.pathname}?project=${encodeURIComponent(e.project)}`;
+        }, "btn sm"));
     }
     body.append(acts);
     const host = text("", { placeholder: "host, URL or IP to check against this scope" });

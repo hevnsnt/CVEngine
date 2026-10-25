@@ -20,11 +20,13 @@ from django.utils import timezone
 
 from agentapi import services
 from agentapi.services import ApiError
+from tenancy import roles
 from cveFeed import bounty_report, bounty_scope, bounty_submit
 from cveFeed.admin_api import audit
 from cveFeed.models import (BountyAsset, BountyCredential, BountyEngagement, BountyEngagementTarget, BountyProgram, BountyReport,
                             BountyReportEvent, BountyScopeChange, BountySource)
 
+BOUNTY_ORG_SLUG, BOUNTY_ORG_NAME = "bug-bounty", "Bug Bounty"
 PAGE = 25
 MAX_BODY = 2 * 1024 * 1024
 REFRESH_COOLDOWN = 300
@@ -100,7 +102,9 @@ def asset_dict(a):
 
 def engagement_dict(e):
     p = e.program
-    return {"id": e.id, "program": program_dict(p), "status": e.status, "policy_url": e.policy_url or p.url, "policy_ack_at": _iso(e.policy_ack_at),
+    project = e.project
+    return {"id": e.id, "project": project.slug, "project_name": project.name,
+            "org": project.org.slug if project.org_id else None, "program": program_dict(p), "status": e.status, "policy_url": e.policy_url or p.url, "policy_ack_at": _iso(e.policy_ack_at),
             "policy_ack_by": e.policy_ack_by.username if e.policy_ack_by_id else None,
             "scope_changed_since_ack": bool(e.policy_ack_at and e.ack_content_hash != p.content_hash),
             "automated_ok": e.automated_ok, "notes": e.notes, "targets": e.targets.count(), "updated": _iso(e.updated_at),
@@ -235,7 +239,7 @@ def program_detail(request, user, program_id):
     out = {**program_dict(p, detail=True), "assets": [asset_dict(a) for a in assets], "assets_truncated": p.assets.filter(removed_at__isnull=True).count() > 3000,
            "changes": [{"kind": c.kind, "asset_kind": c.asset_kind, "identifier": c.identifier, "in_scope": c.in_scope, "at": _iso(c.detected_at)} for c in changes]}
     if request.GET.get("project"):
-        eng = BountyEngagement.objects.filter(project=_project(request, {}), program=p).select_related("program", "policy_ack_by").first()
+        eng = BountyEngagement.objects.filter(project=_project(request, {}), program=p).select_related("program", "policy_ack_by", "project__org").first()
         out["engagement"] = engagement_dict(eng) if eng else None
     return out
 
@@ -314,26 +318,84 @@ def scope_check(request, user):
 # --- engagements --------------------------------------------------------------------------------
 
 def engagements_list(request, user):
-    project = _project(request, {})
-    rows = BountyEngagement.objects.filter(project=project).select_related("program", "policy_ack_by").order_by("-updated_at")[:500]
+    """The engagements of one project (``?project=``), or, with no project named, every engagement in the Bug Bounty org
+    that the caller can see: where each program's own project lives."""
+    if request.GET.get("project"):
+        rows = BountyEngagement.objects.filter(project=_project(request, {}))
+    else:
+        rows = BountyEngagement.objects.filter(project__org__slug=BOUNTY_ORG_SLUG)
+        allowed_ids = roles.allowed_project_ids(user)
+        if allowed_ids is not None:
+            rows = rows.filter(project_id__in=allowed_ids)
+    rows = rows.select_related("program", "policy_ack_by", "project__org").order_by("-updated_at")[:500]
     return {"results": [engagement_dict(e) for e in rows]}
 
 
+def bounty_org():
+    """The one organization every bug bounty engagement lives in, created the first time one is worked."""
+    from dashboard.models import Org
+    return Org._base_manager.get_or_create(slug=BOUNTY_ORG_SLUG, defaults={"name": BOUNTY_ORG_NAME})[0]
+
+
+def _program_slug(program):
+    """A stable project slug for one program: ``bb-<platform>-<handle>``, shortened with a hash when the handle is long, and
+    suffixed if a project that is not a Bug Bounty one already holds it."""
+    import hashlib
+    from django.utils.text import slugify
+    base = slugify(f"bb-{program.platform}-{program.handle}") or f"bb-{program.platform}"
+    if len(base) > 44:
+        base = f"{base[:37].rstrip('-')}-{hashlib.sha1(base.encode()).hexdigest()[:6]}"
+    return base
+
+
+def project_for_program(program, user, org):
+    """``(project, created)``: the project of ``program`` inside the Bug Bounty ``org``, one per engagement. A user who is not
+    an App Admin becomes its admin when they create it, so they can open what they just made."""
+    from dashboard.models import Project, ProjectMembership
+    base = _program_slug(program)
+    for attempt in range(20):
+        slug = base if attempt == 0 else f"{base}-{attempt + 1}"
+        # the unscoped manager: another user's project must be seen here, or its slug would look free and collide on create
+        project, created = Project._base_manager.get_or_create(
+            slug=slug, defaults={"name": program.name[:500] or program.handle, "insert_date": timezone.now(), "org": org})
+        if project.org_id == org.id:
+            break
+    else:
+        raise ApiError(500, "could not find a free project name for this program")
+    if created and not user.is_superuser:
+        ProjectMembership.objects.get_or_create(user=user, project=project, defaults={"role": "admin"})
+    return project, created
+
+
 def engagements_create(request, user):
+    """Work a program: the engagement lives in that program's own project in the Bug Bounty organization, created on first use
+    (one project per engagement, never mixed into a client's project), and the answer names it so the caller can go there.
+    ``project`` in the body is no longer where it goes. Needs a role that can write somewhere: the audit role cannot."""
     data = _body(request)
-    project = _project(request, data, write=True)
+    role = roles.user_best_role(user)
+    if not role or role == roles.AUDIT:
+        raise ApiError(403, "audit role is read only")
     program = BountyProgram.objects.filter(pk=_int(data.get("program_id"), "program_id"), removed_at__isnull=True).first()
     if not program:
         raise ApiError(404, "program not found")
-    eng, created = BountyEngagement.objects.get_or_create(project=project, program=program, defaults={"created_by": user, "policy_url": program.url})
-    if created:
-        audit(user, "bounty.engagement_create", f"{program.platform}:{program.handle}", org=project.org, project=project.slug)
-    return engagement_dict(eng), (201 if created else 200)
+    with transaction.atomic():
+        org = bounty_org()
+        existing = BountyEngagement._base_manager.filter(program=program, project__org=org).select_related("project__org").first()
+        if existing:
+            if not roles.effective_role(user, existing.project):
+                raise ApiError(409, f"this program is already being worked in project {existing.project.slug}; ask one of its members to add you")
+            return engagement_dict(existing), 200
+        project, project_created = project_for_program(program, user, org)
+        eng = BountyEngagement.objects.create(project=project, program=program, created_by=user, policy_url=program.url)
+        if project_created:
+            audit(user, "bounty.project_create", f"{program.platform}:{program.handle}", org=org, project=project.slug)
+        audit(user, "bounty.engagement_create", f"{program.platform}:{program.handle}", org=org, project=project.slug)
+    return engagement_dict(eng), 201
 
 
 def _engagement(request, data, engagement_id, write=False):
     project = _project(request, data, write=write)
-    eng = BountyEngagement.objects.filter(pk=engagement_id, project=project).select_related("program", "policy_ack_by").first()
+    eng = BountyEngagement.objects.filter(pk=engagement_id, project=project).select_related("program", "policy_ack_by", "project__org").first()
     if not eng:
         raise ApiError(404, "engagement not found")
     return project, eng

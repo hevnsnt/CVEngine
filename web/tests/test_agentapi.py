@@ -690,6 +690,118 @@ class FindingStatusTests(TestCase):
 		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'vendor says no'})
 		self.assertEqual((status, data['remediation_status'], data['remediation_note']), (200, 'accepted_risk', 'vendor says no'))
 
+	def test_assignee_can_be_set_alone_changed_and_cleared_with_null(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': self.alice.id})
+		self.assertEqual(status, 200)
+		self.assertEqual(data['assignee'], {'id': self.alice.id, 'username': 'fsalice', 'name': 'fsalice'})
+		self.assertEqual(data['remediation_status'], 'open')  # untouched: assignee was sent alone
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': None})
+		self.assertEqual((status, data['assignee']), (200, None))
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'in_progress', 'assignee': self.carol.id})
+		self.assertEqual((status, data['remediation_status'], data['assignee']['username']), (200, 'in_progress', 'fscarol'))
+
+	def test_a_patch_needs_status_or_assignee_and_the_assignee_must_be_a_member(self):
+		base = self._base()
+		self.assertEqual(call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'note': 'x'})[0], 400)
+		outsider = User.objects.create_user('fsoutsider', password='x')
+		for bad in (outsider.id, 'abc', 99999999):
+			status, _ = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'assignee': bad})
+			self.assertEqual(status, 400, bad)
+
+	def test_comments_are_listed_oldest_first_counted_and_audited(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		status, c1 = call(self.t_alice, 'POST', f'{base}/comments', {'text': 'looking into it'})
+		self.assertEqual((status, c1['text'], c1['author']['username']), (201, 'looking into it', 'fsalice'))
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'second'})
+		status, listed = call(self.t_alice, 'GET', f'{base}/comments')
+		self.assertEqual((status, [c['text'] for c in listed['results']]), (200, ['looking into it', 'second']))
+		self.assertEqual(call(self.t_alice, 'GET', base)[1]['comment_count'], 2)
+		rows = call(self.t_alice, 'GET', f'{self._base()}/vulnerabilities')[1]['results']
+		self.assertEqual(next(r for r in rows if r['id'] == self.vuln.id)['comment_count'], 2)
+		self.assertEqual(call(self.t_alice, 'POST', f'{base}/comments', {'text': '   '})[0], 400)
+		self.assertEqual(call(self.t_alice, 'POST', f'{base}/comments', {})[0], 400)
+
+	def test_comment_writes_are_gated_like_every_other_write(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}/comments'
+		self.assertEqual(call(self.t_ro, 'POST', base, {'text': 'x'})[0], 403)
+		self.assertEqual(call(self.t_carol, 'POST', base, {'text': 'x'})[0], 403)
+		self.assertEqual(call(self.t_alice, 'GET', base.replace('fs-proj', 'fs-other'))[0], 404)
+		other = f'/api/v1/projects/fs-proj/findings/vulnerability/{self.vuln_other.id}/comments'
+		self.assertEqual(call(self.t_alice, 'POST', other, {'text': 'x'})[0], 404)  # another project's finding
+
+	def test_the_audit_trail_records_status_assignee_and_comment_with_before_and_after(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		call(self.t_alice, 'PATCH', base, {'status': 'in_progress'})
+		call(self.t_alice, 'PATCH', base, {'assignee': self.alice.id})
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'on it'})
+		status, trail = call(self.t_alice, 'GET', f'{base}/audit')
+		self.assertEqual(status, 200)
+		events = list(reversed(trail['results']))  # newest first on the wire
+		self.assertEqual([e['event'] for e in events], ['status', 'assignee', 'comment'])
+		self.assertEqual((events[0]['before'], events[0]['after']), ({'status': 'open'}, {'status': 'in_progress'}))
+		self.assertEqual((events[1]['before'], events[1]['after']['assignee']['username']), ({'assignee': None}, 'fsalice'))
+		self.assertEqual(events[2]['after']['text'], 'on it')
+		self.assertTrue(all(e['actor']['username'] == 'fsalice' for e in events))
+
+	def test_bulk_status_changes_are_audited_too(self):
+		status, _ = call(self.t_alice, 'POST', f'{self._base()}/findings/status', {'items': [{'kind': 'hygiene', 'id': self.hyg.id}], 'status': 'fixed'})
+		self.assertEqual(status, 200)
+		trail = call(self.t_alice, 'GET', f'{self._base()}/findings/hygiene/{self.hyg.id}/audit')[1]['results']
+		self.assertEqual([(e['event'], e['after']) for e in trail], [('status', {'status': 'fixed'})])
+
+	def test_members_lists_direct_and_org_members_for_the_picker(self):
+		from dashboard.models import OrgMembership
+		orgish = User.objects.create_user('fsorg', password='x')
+		OrgMembership.objects.create(user=orgish, org=self.proj.org, role='user')
+		status, data = call(self.t_alice, 'GET', f'{self._base()}/members')
+		self.assertEqual(status, 200)
+		self.assertEqual([m['username'] for m in data['results']], ['fsalice', 'fscarol', 'fsorg'])
+		self.assertEqual(call(self.t_alice, 'GET', '/api/v1/projects/fs-other/members')[0], 404)
+
+	def test_detail_carries_status_assignee_and_comment_count_for_every_kind(self):
+		base = self._base()
+		call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'accepted_risk', 'note': 'ok', 'assignee': self.alice.id})
+		status, data = call(self.t_alice, 'GET', f'{base}/findings/hygiene/{self.hyg.id}')
+		self.assertEqual(status, 200)
+		self.assertEqual((data['remediation']['status'], data['remediation']['note']), ('accepted_risk', 'ok'))
+		self.assertEqual((data['assignee']['username'], data['status_changed_by']['username'], data['comment_count']), ('fsalice', 'fsalice', 0))
+		self.assertIsNotNone(data['status_changed_at'])
+		route = call(self.t_alice, 'GET', f'{base}/findings/route/{self.route.id}')[1]
+		self.assertEqual((route['assignee'], route['comment_count'], route['status_changed_at']), (None, 0, None))
+
+	def test_mcp_assign_comment_audit_and_members_tools(self):
+		from tests.test_agentapi import tool_call
+		args = {'project': 'fs-proj', 'kind': 'vulnerability', 'id': self.vuln.id}
+		self.assertFalse(tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': self.alice.id})[0])
+		self.assertFalse(tool_call(self.t_alice, 'add_finding_comment', {**args, 'text': 'via mcp'})[0])
+		self.assertEqual([c['text'] for c in tool_call(self.t_alice, 'list_finding_comments', args)[1]['results']], ['via mcp'])
+		self.assertEqual({e['event'] for e in tool_call(self.t_alice, 'finding_audit', args)[1]['results']}, {'assignee', 'comment'})
+		self.assertIn('fsalice', [m['username'] for m in tool_call(self.t_alice, 'list_members', {'project': 'fs-proj'})[1]['results']])
+		unassigned = tool_call(self.t_alice, 'set_finding_assignee', {**args, 'assignee': None})
+		self.assertEqual((unassigned[0], unassigned[1]['assignee']), (False, None))
+
+	def test_serializers_count_comments_for_a_row_the_queryset_did_not_annotate(self):
+		from agentapi.services import _hygiene
+		from cveFeed.models import FindingComment
+		base = f'{self._base()}/findings/hygiene/{self.hyg.id}'
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'one'})
+		call(self.t_alice, 'POST', f'{base}/comments', {'text': 'two'})
+		plain = HygieneFinding.objects.select_related('domain').get(pk=self.hyg.id)  # no comment_count annotation
+		self.assertFalse(hasattr(plain, 'comment_count'))
+		self.assertEqual(_hygiene(plain)['comment_count'], 2)
+		self.assertEqual(FindingComment.objects.filter(finding_kind='hygiene', finding_id=self.hyg.id).count(), 2)
+
+	def test_status_changed_at_and_by_are_set_by_a_patch(self):
+		base = self._base()
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/vulnerability/{self.vuln.id}', {'status': 'in_progress'})
+		self.assertEqual(status, 200)
+		self.assertIsNotNone(data['status_changed_at'])
+		self.assertEqual(data['status_changed_at'], data['remediation_updated'])
+		self.assertEqual(data['status_changed_by'], {'id': self.alice.id, 'username': 'fsalice', 'name': 'fsalice'})
+		status, data = call(self.t_alice, 'PATCH', f'{base}/findings/hygiene/{self.hyg.id}', {'status': 'fixed'})
+		self.assertEqual((status, data['status_changed_by']['username']), (200, 'fsalice'))
+
 	def test_patch_match_kind_delegates_to_the_same_route_as_matches(self):
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-50', cvss=7.0, title='x', published_at=timezone.now())
 		match = CVEMatch.objects.create(cve_entry=cve, subdomain=Subdomain.objects.create(name='m.fs.example', target_domain=self.domain), confidence=0.5)
@@ -1530,6 +1642,40 @@ class HostSearchTests(TestCase):
 		status, data = rpc(self.tok, 'tools/call', {'name': 'search_hosts', 'arguments': {'project': 'srch-a', 'q': 'port:3306'}})
 		self.assertEqual(status, 200)
 		self.assertIn('db.srch.example', json.dumps(data))
+
+	def test_comma_is_or_within_one_filter_but_not_when_quoted(self):
+		self.assertEqual(self.names('port:3306,8080'), ['db.srch.example', 'port.srch.example'])
+		self.assertEqual(self.names('product:php,mysql'), ['db.srch.example', 'port.srch.example'])
+		# quoting a value with a comma keeps it literal, so port: (which takes a bare number) 400s instead of splitting it
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=' + 'port:"3306,8080"'.replace(',', '%2C').replace('"', '%22'))
+		self.assertEqual(status, 400)
+
+	def test_country_filters_and_shows_in_matched(self):
+		from startScan.models import CountryISO
+		us, _ = CountryISO.objects.get_or_create(iso='US', name='United States')
+		de, _ = CountryISO.objects.get_or_create(iso='DE', name='Germany')
+		IpAddress.objects.filter(address='10.0.0.5').update(geo_iso=us)
+		IpAddress.objects.filter(address='10.0.0.3').update(geo_iso=de)
+		self.assertEqual(self.names('country:US'), ['db.srch.example'])
+		self.assertEqual(self.names('country:Germany'), ['port.srch.example'])
+		why = {h['host']: h['matched'] for h in self.search('country:us')['results']}
+		self.assertEqual(why['db.srch.example'], ['country United States'])
+
+	def test_facets_count_the_whole_match_like_heat_does(self):
+		data = self.search('', facets='port,product,os')
+		self.assertEqual(sorted(data['facets']['port'], key=lambda r: r['value']),
+		                  sorted([{'value': 8080, 'count': 1}, {'value': 3306, 'count': 1}], key=lambda r: r['value']))
+		self.assertIn({'value': 'MySQL', 'count': 1}, data['facets']['product'])
+		self.assertIn({'value': 'Linux 5.X', 'count': 1}, data['facets']['os'])
+		# the same counts hold while the page is narrowed, exactly like facets.heat
+		narrowed = self.search('', heat='clean', facets='port')
+		self.assertEqual(sorted(narrowed['facets']['port'], key=lambda r: r['value']), sorted(data['facets']['port'], key=lambda r: r['value']))
+
+	def test_facet_size_bounds_and_bad_facet_name_is_400(self):
+		data = self.search('', facets='port', facet_size=1)
+		self.assertEqual(len(data['facets']['port']), 1)
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&facets=bogus')
+		self.assertEqual(status, 400)
 
 
 

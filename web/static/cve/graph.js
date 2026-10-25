@@ -244,6 +244,27 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     return ids;
   };
 
+  // Live scan highlighting (SOC mode and the plain page alike): the domains and hosts a scan is working on right now carry a
+  // pulsing ring. Domains are matched by id, hosts by lower-cased name, so it holds in the clustered view too.
+  const active = { domains: new Set(), hosts: new Set() };
+  const isActive = (node) => {
+    const d = node.data || {};
+    if (d.kind === "domain") return active.domains.has(String(d.detail_id || node.id).replace(/^dom:/, ""));
+    if (d.kind === "subdomain") return active.hosts.has(String(d.label || "").toLowerCase());
+    return false;
+  };
+  function applyActive() {
+    let any = false;
+    graph.forEachNode((n) => {
+      const ui = uis.get(n.id);
+      if (!ui || (n.data && n.data.kind === "hub")) return;
+      const on = isActive(n);
+      any = any || on;
+      ui.classList.toggle("gn-live", on);
+    });
+    container.classList.toggle("has-live", any);
+  }
+
   graphics
     .node((node) => {
       const d = node.data || {};
@@ -253,7 +274,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
         uis.set(node.id, g);
         return g;
       }
-      g.setAttribute("class", `gn gn-${d.kind}`);
+      g.setAttribute("class", `gn gn-${d.kind}${isActive(node) ? " gn-live" : ""}`);
       g.setAttribute("role", "button");
       g.setAttribute("tabindex", "0");
       g.style.touchAction = "none";
@@ -601,6 +622,12 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
 
   return {
     setClustered(value) { clustered = Boolean(value); },
+    // the domain ids and host names a scan is working on now; call again with what is true next poll
+    setActive(domains = [], hosts = []) {
+      active.domains = new Set(domains.map(String));
+      active.hosts = new Set(hosts.map((h) => String(h).toLowerCase()));
+      applyActive();
+    },
     fit() {
       auto = true;
       lastBox = "";
@@ -673,6 +700,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
         group.delete(id);
         if (selected === id) selected = null;
       });
+      applyActive();
       return { nodes: data.nodes.length, edges: data.edges.length };
     },
   };

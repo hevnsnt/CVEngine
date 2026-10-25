@@ -1,4 +1,4 @@
-"""First-run wizard API (/cve/api/welcome/): organization, project, AI key, first target.
+"""First-run wizard API (/cve/api/welcome/): organization, project, AI key, first target, optional search-engine keys.
 
 Superusers only. A fresh install already has an untouched "Default" org (the tenancy migration creates
 it), so the wizard renames that in place instead of leaving a stray "Default" behind.
@@ -111,12 +111,43 @@ def add_first_target(request):
     except services.ApiError as exc:
         raise WelcomeError(exc.status, exc.message)
     domains = result['created']
+    names = [d['name'] for d in domains]
     scan_id = None
-    if domains and data.get('start', True):
-        scan = discovery.start_discovery(Domain.objects.get(id=domains[0]['id']))
-        scan_id = scan.id
-    return {'created': [d['name'] for d in domains], 'already_exists': result['already_exists'], 'scan_id': scan_id,
-            'project': slug}
+    if data.get('start', True):
+        # A target that already exists (the page was reloaded, or the first attempt failed after saving it) starts discovery
+        # too: starting is safe to repeat, since one that is already queued or running is returned instead of a second.
+        again = [] if domains else list(Domain._base_manager.filter(name__in=result['already_exists'], project__slug=slug).order_by('id'))
+        starting = list(Domain.objects.filter(id__in=[d['id'] for d in domains]).order_by('id')) or again
+        if starting:
+            try:
+                scan_id = discovery.start_discoveries(starting)[0].id
+            except RuntimeError:  # no scan engine yet (a fresh install is still setting itself up)
+                raise WelcomeError(503, 'The scanner is still starting up. Your target is saved; try again in a few seconds.')
+    return {'created': names, 'already_exists': result['already_exists'], 'scan_id': scan_id, 'project': slug}
+
+
+# Services the wizard offers: the keys that most improve passive discovery, in the order shown. The rest are in Settings.
+WIZARD_KEY_SERVICES = ('shodan', 'virustotal', 'securitytrails')
+
+
+def save_keys(request):
+    """Save the optional keys from the wizard's last step. Values are written and never echoed back; a blank one is ignored."""
+    from agentapi import services
+    data = _body(request)
+    keys = data.get('keys') if isinstance(data.get('keys'), dict) else {}
+    slug = data.get('project') or Project.objects.order_by('id').values_list('slug', flat=True).first()
+    ctx = services.Ctx(user=request.user)
+    saved = []
+    for service in WIZARD_KEY_SERVICES:
+        value = str(keys.get(service) or '').strip()
+        if not value:
+            continue
+        try:
+            services.set_api_credential(ctx, slug, service, {'api_key': value})
+        except services.ApiError as exc:
+            raise WelcomeError(exc.status, exc.message)
+        saved.append(service)
+    return {'saved': saved}
 
 
 def finish(request):
@@ -128,7 +159,7 @@ def finish(request):
 
 ROUTES = {
     ('GET', 'state'): state, ('POST', 'org'): save_org, ('POST', 'project'): save_project,
-    ('POST', 'target'): add_first_target, ('POST', 'finish'): finish,
+    ('POST', 'target'): add_first_target, ('POST', 'keys'): save_keys, ('POST', 'finish'): finish,
 }
 
 

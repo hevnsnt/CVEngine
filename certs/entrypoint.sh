@@ -1,5 +1,19 @@
 #!/bin/sh
 
+# subjectAltName value for a host name or IPv4 address (a :port is dropped), plus localhost, 127.0.0.1 and CERT_EXTRA_SANS
+# (comma separated names or addresses).
+san_list() {
+  host=${1%%:*}
+  list=""
+  for name in "${host}" localhost 127.0.0.1 $(echo "${CERT_EXTRA_SANS:-}" | tr ',' ' '); do
+    [ -n "${name}" ] || continue
+    if echo "${name}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then entry="IP:${name}"; else entry="DNS:${name}"; fi
+    case ",${list}," in *",${entry},"*) continue ;; esac
+    list="${list:+${list},}${entry}"
+  done
+  echo "${list}"
+}
+
 cert() {
   COMMON_NAME=${1}
   FILENAME=${2:-app}
@@ -19,8 +33,9 @@ cert() {
      -out ${FILENAME}.csr \
      -subj "/C=${COUNTRY_CODE}/ST=${STATE}/L=${CITY}/O=${COMPANY}/CN=${COMMON_NAME}"
 
-  # Creating SAN extension which is needed by modern browsers
-  echo "subjectAltName=DNS:${COMMON_NAME}" > client-ext.cnf
+  # Creating SAN extension which is needed by modern browsers. An IP address needs an IP entry (a DNS entry never matches it),
+  # and the loopback names are always added so the address works from the machine itself.
+  echo "subjectAltName=$(san_list "${COMMON_NAME}")" > client-ext.cnf
 
   # Create a new certificate using our own CA
   openssl x509 -req -sha256 -passin pass:${AUTHORITY_PASSWORD} -days 3650 \

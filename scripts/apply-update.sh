@@ -90,12 +90,16 @@ deploy() {
     services+=(proxy)
   fi
   DEPLOY_STAGE=build
+  phase applying "$DEPLOY_STAGE"
   "${compose[@]}" build web celery celery-beat || return 1
   DEPLOY_STAGE=datastores
+  phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1
   DEPLOY_STAGE=migrate
+  phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1
   DEPLOY_STAGE=migrated
+  phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 }
@@ -110,6 +114,25 @@ running_scans() {
     out=$("${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py shell -c "$RUNNING_QUERY" 2>/dev/null | tail -n1) || true
   fi
   printf '%s\n' "$out"
+}
+
+# Phase file and scan-pause for Settings > Updates to show live progress and avoid a restart interrupting a scan.
+# Both are best-effort: a failure here never blocks the update itself, since nothing this script already did
+# without them was any less safe.
+phase() { python3 "$STATE_HELPER" phase "$1" "${2:-}" "${3:-}" >>"$LOG" 2>&1 || true; }
+
+pause_scanning() {
+  local compose=(docker compose -f "${COMPOSE_FILE_OVERRIDE:-docker-compose.yml}")
+  "${compose[@]}" exec -T web python3 manage.py update_scan_pause --request >>"$LOG" 2>&1 ||
+    "${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py update_scan_pause --request >>"$LOG" 2>&1 ||
+    log "could not request the update's scan-pause; scanning was not paused for this run"
+}
+
+resume_scanning() {
+  local compose=(docker compose -f "${COMPOSE_FILE_OVERRIDE:-docker-compose.yml}")
+  "${compose[@]}" exec -T web python3 manage.py update_scan_pause --release >>"$LOG" 2>&1 ||
+    "${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py update_scan_pause --release >>"$LOG" 2>&1 ||
+    log "could not release the update's scan-pause; release it by hand in Settings > Scan control"
 }
 
 if ! SHA=$(python3 "$STATE_HELPER" approval); then
@@ -130,12 +153,15 @@ if [ -n "$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?
   exit 1
 fi
 
+pause_scanning
 RUNNING=$(running_scans)
 if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
+  resume_scanning
   log "refusing: could not verify active scans; approval kept for retry"
   exit 1
 fi
 if [[ $RUNNING =~ ^[1-9][0-9]*$ ]]; then
+  phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
   log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
   exit 0
 fi
@@ -145,13 +171,17 @@ if [ "$PREV" = "$SHA" ]; then
   log "already at $SHA"
   python3 "$STATE_HELPER" commit "$SHA"
   rm -f "$FLAG"
+  resume_scanning
+  phase done
   exit 0
 fi
 
 log "updating $PREV -> $SHA"
+phase applying merging
 backup_env
 if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
   restore_env
+  resume_scanning
   log "refusing: $SHA is not a fast-forward of the local branch"
   rm -f "$FLAG"
   exit 1
@@ -161,6 +191,8 @@ restore_env
 if deploy >>"$LOG" 2>&1; then
   python3 "$STATE_HELPER" commit "$SHA"
   rm -f "$FLAG"
+  resume_scanning
+  phase done
   log "updated to $SHA"
 elif [ "$DEPLOY_STAGE" = migrated ]; then
   # The database already has $SHA's schema, so $PREV's code must not run on it: keep $SHA and retry the restart.
@@ -168,8 +200,11 @@ elif [ "$DEPLOY_STAGE" = migrated ]; then
   if deploy >>"$LOG" 2>&1; then
     python3 "$STATE_HELPER" commit "$SHA"
     rm -f "$FLAG"
+    resume_scanning
+    phase done
     log "updated to $SHA"
   else
+    phase failed "restart of $SHA failed after migration; database already on new schema, scanning stays paused"
     log "could not restart $SHA; the database is already migrated, so $PREV is not restored. The approval is kept and the next run retries; see $LOG"
     exit 1
   fi
@@ -177,7 +212,13 @@ else
   log "update failed before the database was migrated (at: $DEPLOY_STAGE); returning to $PREV"
   git reset --hard "$PREV" >>"$LOG" 2>&1
   restore_env
-  deploy >>"$LOG" 2>&1 || log "could not restart the previous version; redeploy by hand"
+  if deploy >>"$LOG" 2>&1; then
+    resume_scanning
+    phase done
+  else
+    log "could not restart the previous version; redeploy by hand"
+    phase failed "could not restart $PREV after rolling back a failed update; scanning stays paused"
+  fi
   rm -f "$FLAG"
   exit 1
 fi

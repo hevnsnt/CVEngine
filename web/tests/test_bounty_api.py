@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from cveFeed import bounty_data, bounty_report, bounty_submit
 from cveFeed.models import (BountyCredential, BountyEngagement, BountyEngagementTarget, BountyProgram, BountyReport, BountySource)
-from dashboard.models import AuditLog, Org, OrgMembership, Project, UserProfile
+from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership, UserProfile
 from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
@@ -237,16 +237,21 @@ class CatalogueTests(BountyBase):
             self.assertEqual(sync_bounty_catalogue.run(force=True)['status'], 'disabled')
 
 
+def legacy_engagement(project, program, user):
+    """An engagement in a client's own project, as every engagement was before the Bug Bounty org: still supported."""
+    from cveFeed.bounty_api import engagement_dict
+    eng, _ = BountyEngagement.objects.get_or_create(project=project, program=program, defaults={'created_by': user, 'policy_url': program.url})
+    return engagement_dict(eng)
+
+
 class EngagementTests(BountyBase):
     def make(self, client=None):
-        _, e = call(client or self.c, 'POST', B + 'engagements', {'project': 'a1', 'program_id': self.acme.pk})
-        return e
+        return legacy_engagement(self.pa, self.acme, self.granted)
 
-    def test_create_is_idempotent_and_project_scoped(self):
-        e = self.make()
-        self.assertEqual(self.make()['id'], e['id'])
+    def test_an_existing_engagement_is_project_scoped(self):
+        self.make()
+        self.assertEqual(self.make()['id'], self.make()['id'])
         self.assertEqual(BountyEngagement.objects.filter(project=self.pa).count(), 1)
-        self.assertEqual(call(self.c, 'POST', B + 'engagements', {'project': 'b1', 'program_id': self.acme.pk})[0], 404)
         self.assertEqual(call(client_for(self.granted_b), 'GET', B + 'engagements?project=a1')[0], 404)
 
     def test_gates_need_the_policy_acknowledgement(self):
@@ -318,6 +323,101 @@ class EngagementTests(BountyBase):
         self.assertEqual(call(self.c, 'DELETE', f'{B}engagements/{e["id"]}?project=a1')[0], 200)
 
 
+class BugBountyOrgTests(BountyBase):
+    """Working a program puts it in that program's own project in the Bug Bounty org, never in a client's project."""
+
+    def create(self, client=None, program=None, **body):
+        return call(client or self.c, 'POST', B + 'engagements', {'program_id': (program or self.acme).pk, **body})
+
+    def test_a_program_gets_its_own_project_in_a_bug_bounty_org_created_on_first_use(self):
+        self.assertFalse(Org.objects.filter(slug='bug-bounty').exists())
+        status, e = self.create()
+        self.assertEqual((status, e['project'], e['org'], e['project_name']), (201, 'bb-hackerone-acme', 'bug-bounty', self.acme.name))
+        org = Org.objects.get(slug='bug-bounty')
+        self.assertEqual(org.name, 'Bug Bounty')
+        project = Project.objects.get(slug='bb-hackerone-acme')
+        self.assertEqual(project.org, org)
+        self.assertEqual(BountyEngagement.objects.get(pk=e['id']).project, project)
+
+    def test_each_program_gets_a_separate_project_in_the_same_org(self):
+        bc = BountyProgram.objects.get(platform='bugcrowd')
+        _, one = self.create()
+        _, two = self.create(program=bc)
+        self.assertNotEqual(one['project'], two['project'])
+        self.assertEqual(Org.objects.filter(slug='bug-bounty').count(), 1)
+        self.assertEqual(Project.objects.filter(org__slug='bug-bounty').count(), 2)
+
+    def test_the_project_passed_in_is_not_where_it_goes(self):
+        _, e = self.create(project='a1')
+        self.assertNotEqual(e['project'], 'a1')
+        self.assertFalse(BountyEngagement.objects.filter(project=self.pa).exists())
+        self.assertEqual(self.create(project='b1')[0], 200)  # not even a project this user may see: it is not looked at
+
+    def test_creating_again_returns_the_same_engagement(self):
+        _, first = self.create()
+        status, again = self.create()
+        self.assertEqual((status, again['id']), (200, first['id']))
+        self.assertEqual(BountyEngagement.objects.filter(program=self.acme).count(), 1)
+
+    def test_the_creator_can_open_what_they_made_and_it_is_audited(self):
+        _, e = self.create()
+        self.assertEqual(ProjectMembership.objects.get(user=self.granted, project__slug=e['project']).role, 'admin')
+        self.assertEqual(call(self.c, 'GET', f'{B}engagements?project={e["project"]}')[0], 200)
+        self.assertEqual(call(client_for(self.granted_b), 'GET', f'{B}engagements?project={e["project"]}')[0], 404)
+        self.assertTrue(AuditLog.objects.filter(action='bounty.project_create', actor_name='granted', detail__project=e['project']).exists())
+        self.assertTrue(AuditLog.objects.filter(action='bounty.engagement_create', actor_name='granted').exists())
+
+    def test_another_user_cannot_silently_join_an_engagement_they_were_not_added_to(self):
+        _, e = self.create()
+        status, body = self.create(client=client_for(self.granted_b))
+        self.assertEqual(status, 409)
+        self.assertIn(e['project'], body['error'])
+        self.assertFalse(ProjectMembership.objects.filter(user=self.granted_b, project__slug=e['project']).exists())
+        self.assertEqual(self.create(client=client_for(self.root))[0], 200)  # an App Admin sees every project
+
+    def test_the_audit_role_and_a_user_with_no_role_cannot_create(self):
+        self.assertEqual(self.create(client=client_for(self.audit))[0], 403)
+        nobody = User.objects.create_user('nobody', password='pw-Secret-1')
+        UserProfile.objects.update_or_create(user=nobody, defaults={'bugbounty_enabled': True})
+        self.assertEqual(self.create(client=client_for(nobody))[0], 403)
+        self.assertFalse(Org.objects.filter(slug='bug-bounty').exists())
+
+    def test_the_list_without_a_project_shows_only_the_bug_bounty_projects_the_caller_can_see(self):
+        bc = BountyProgram.objects.get(platform='bugcrowd')
+        self.create()
+        self.create(client=client_for(self.granted_b), program=bc)
+        legacy_engagement(self.pa, bc, self.granted)  # a client project's own engagement is not in the Bug Bounty org
+        mine = call(self.c, 'GET', B + 'engagements')[1]['results']
+        self.assertEqual([r['project'] for r in mine], ['bb-hackerone-acme'])
+        self.assertEqual({r['project'] for r in call(client_for(self.root), 'GET', B + 'engagements')[1]['results']},
+                         {'bb-hackerone-acme', 'bb-bugcrowd-beta'})
+        legacy = call(self.c, 'GET', B + 'engagements?project=a1')[1]['results']
+        self.assertEqual([r['project'] for r in legacy], ['a1'])
+
+    def test_importing_scope_adds_the_targets_to_the_engagements_own_project(self):
+        _, e = self.create()
+        call(self.c, 'PATCH', f'{B}engagements/{e["id"]}', {'project': e['project'], 'acknowledge': True})
+        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('agentapi.services._start_discoveries'):
+            status, out = call(self.c, 'POST', f'{B}engagements/{e["id"]}/import', {'project': e['project'], 'dry_run': False, 'values': ['www.acme.test']})
+        self.assertEqual((status, out['created']), (200, 1))
+        self.assertTrue(Domain.objects.filter(project__slug=e['project'], name='www.acme.test').exists())
+        self.assertFalse(Domain.objects.filter(project=self.pa, name='www.acme.test').exists())
+
+    def test_a_long_handle_still_makes_a_valid_unique_slug(self):
+        long_one = BountyProgram.objects.create(platform='hackerone', handle='a' * 150 + '-one', name='Long One')
+        long_two = BountyProgram.objects.create(platform='hackerone', handle='a' * 150 + '-two', name='Long Two')
+        _, one = self.create(program=long_one)
+        _, two = self.create(program=long_two)
+        self.assertLessEqual(len(one['project']), 50)
+        self.assertNotEqual(one['project'], two['project'])
+
+    def test_a_clashing_slug_held_by_a_non_bounty_project_is_stepped_around(self):
+        Project.objects.create(name='Squatter', slug='bb-hackerone-acme', insert_date=timezone.now(), org=self.org_a)
+        _, e = self.create()
+        self.assertEqual(e['project'], 'bb-hackerone-acme-2')
+        self.assertEqual(Project.objects.get(slug='bb-hackerone-acme-2').org.slug, 'bug-bounty')
+
+
 class ReportBase(BountyBase):
     def setUp(self):
         super().setUp()
@@ -327,7 +427,7 @@ class ReportBase(BountyBase):
         self.vuln = Vulnerability.objects.create(
             name='Exposed admin panel', severity=3, http_url='https://www.acme.test/admin', target_domain=self.dom, subdomain=self.sub, description='Reachable.',
             curl_command="curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwx' https://www.acme.test/admin", template_id='admin-panel')
-        _, self.eng = call(self.c, 'POST', B + 'engagements', {'project': 'a1', 'program_id': self.acme.pk})
+        self.eng = legacy_engagement(self.pa, self.acme, self.granted)
         call(self.c, 'PATCH', f'{B}engagements/{self.eng["id"]}', {'project': 'a1', 'acknowledge': True})
 
     def draft(self, client=None, **extra):
@@ -573,7 +673,7 @@ class SubmitTests(ReportBase):
 
     def test_other_platforms_use_mark_submitted(self):
         bc = BountyProgram.objects.get(platform='bugcrowd')
-        _, e = call(self.c, 'POST', B + 'engagements', {'project': 'a1', 'program_id': bc.pk})
+        e = legacy_engagement(self.pa, bc, self.granted)
         status, r = call(self.c, 'POST', B + 'reports', {'project': 'a1', 'engagement_id': e['id'], 'vulnerability_id': self.vuln.pk})
         self.assertEqual(status, 201)
         BountyCredential.objects.create(user=self.granted, platform='hackerone', username='u', token='t')

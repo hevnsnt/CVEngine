@@ -189,6 +189,9 @@ class CVEMatch(models.Model):
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
     remediation_by = models.ForeignKey(
         "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Who owns triaging this finding. Independent of remediation_by; set through the same API/MCP surface. Same field
+    # on startScan.models.Vulnerability and HygieneFinding below.
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -518,6 +521,7 @@ class HygieneFinding(models.Model):
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
     remediation_by = models.ForeignKey(
         "auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     class Meta:
         unique_together = ("domain", "host", "check_name")
@@ -1022,6 +1026,11 @@ class ScanControl(models.Model):
     """Durable global operator hold. Queued work is retained for resume."""
 
     paused = models.BooleanField(default=False)
+    # Set when cveFeed.scan_control.request_drain_pause (an approved update waiting to drain, see cveFeed.updater)
+    # requested this pause, rather than an operator's own "Pause all scanning": only a pause with this set True may be
+    # released automatically, by scripts/apply-update.sh once its deploy finishes; an operator's own pause is theirs
+    # to lift. A drain pause never calls abort_running_scans: it stops new dispatch and lets active work finish.
+    paused_by_update = models.BooleanField(default=False)
     reason = models.CharField(max_length=200, blank=True, default='')
     actor = models.CharField(max_length=150, blank=True, default='')
     last_error = models.CharField(max_length=160, blank=True, default='')
@@ -1266,3 +1275,83 @@ class BountyCredential(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "platform"], name="uniq_bountycredential_user_platform")]
+
+
+class StatsSnapshot(models.Model):
+    """One project's point-in-time inventory and findings counts for one day, written once daily by
+    cveFeed.stats_history.snapshot_all_projects. Trend charts (exposure over time, time-to-fix) need a past this
+    schema otherwise has no record of; everything else here is derived live from current rows."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="stats_snapshots")
+    date = models.DateField()
+    hosts = models.IntegerField(default=0)
+    exposed_hosts = models.IntegerField(default=0)
+    open_findings = models.JSONField(default=dict, blank=True)  # {critical, high, medium, low, info: n}, actionable set
+    cve_matches = models.JSONField(default=dict, blank=True)  # {fire, smoke, ice: n}, actionable (not ruled-out) matches
+    fixed = models.IntegerField(default=0)  # findings of any kind currently marked remediation_status=fixed
+    mean_days_to_fix = models.FloatField(null=True, blank=True)  # over currently-fixed findings; null when there are none
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "date"], name="uniq_statssnapshot_project_date")]
+        indexes = [models.Index(fields=["project", "-date"], name="statssnap_proj_date_idx")]
+        ordering = ["-date"]
+
+
+FINDING_KINDS = ("match", "vulnerability", "hygiene")  # a finding kind with a remediation workflow; same set as agentapi.services.STATUS_KINDS
+
+
+class FindingComment(models.Model):
+    """A free-text note on one finding (a CVEMatch, Vulnerability or HygieneFinding), named generically by
+    ``(finding_kind, finding_id)`` rather than three parallel FKs, the same way cveFeed.models.Triage and the activity
+    log already address a finding of any kind."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
+    finding_id = models.PositiveIntegerField()
+    author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    text = models.TextField(max_length=4000)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx")]
+        ordering = ["created_at", "id"]
+
+
+class FindingAuditEvent(models.Model):
+    """One entry of a finding's audit trail: a status change, an assignee change, or a comment, each with who did it,
+    when, and (status/assignee) what changed from and to. Written alongside the action itself (agentapi.services),
+    never derived after the fact."""
+
+    EVENTS = ("status", "assignee", "comment")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
+    finding_id = models.PositiveIntegerField()
+    event = models.CharField(max_length=16, choices=[(e, e) for e in EVENTS])
+    actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "-created_at"], name="findingaudit_target_idx")]
+        ordering = ["-created_at", "-id"]
+
+
+DEFAULT_SLA_DAYS = {"critical": 7, "high": 30, "medium": 90, "low": 180}  # days to fix, by severity; info has no SLA
+
+
+class ProjectSettings(models.Model):
+    """Settings that belong to one project and are the same for everyone who works in it, so "overdue" reads the same on
+    every screen. One row per project, created on its first write; a project without one uses the defaults."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="cve_settings")
+    sla_days = models.JSONField(default=dict, blank=True)  # only the severities changed from DEFAULT_SLA_DAYS
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    @classmethod
+    def sla_for(cls, project):
+        """The effective {severity: days} of ``project``: the defaults with its own overrides on top."""
+        row = cls.objects.filter(project=project).first()
+        return {**DEFAULT_SLA_DAYS, **{k: v for k, v in ((row.sla_days if row else None) or {}).items() if k in DEFAULT_SLA_DAYS}}

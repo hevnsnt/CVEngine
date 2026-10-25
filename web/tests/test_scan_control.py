@@ -11,7 +11,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed.models import ScanControl
-from cveFeed.scan_control import PauseAwareScheduler, PauseAwareTask, updater_idle
+from cveFeed.scan_control import PauseAwareScheduler, PauseAwareTask, release_update_pause, request_drain_pause, updater_idle
 from dashboard.models import Org, OrgMembership, Project
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory
@@ -129,6 +129,42 @@ class ScanControlTests(TestCase):
                 fcntl.flock(hold, fcntl.LOCK_UN)
             with updater_idle():
                 pass
+
+    def test_request_drain_pause_pauses_scanning_and_marks_it_as_an_update_pause(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            request_drain_pause(reason='An update is being applied')
+        control = ScanControl.current()
+        self.assertEqual((control.paused, control.paused_by_update, control.reason), (True, True, 'An update is being applied'))
+
+    def test_request_drain_pause_never_overrides_an_operators_own_pause(self):
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': False, 'reason': 'manual hold'})
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            request_drain_pause(reason='An update is being applied')
+        control = ScanControl.current()
+        self.assertEqual((control.paused, control.paused_by_update, control.reason), (True, False, 'manual hold'))
+
+    def test_release_update_pause_only_clears_a_pause_it_set(self):
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': False, 'reason': 'manual hold'})
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            release_update_pause()
+        control = ScanControl.current()
+        self.assertEqual((control.paused, control.paused_by_update, control.reason), (True, False, 'manual hold'))
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True, 'reason': 'An update is being applied'})
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            release_update_pause()
+        control = ScanControl.current()
+        self.assertEqual((control.paused, control.paused_by_update, control.reason), (False, False, ''))
+
+    def test_drain_pause_and_release_respect_the_updater_lock(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            path = os.path.join(directory, '.update-lock')
+            with open(path, 'w') as hold:
+                fcntl.flock(hold, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(RuntimeError, 'update is running'):
+                    request_drain_pause()
+                with self.assertRaisesRegex(RuntimeError, 'update is running'):
+                    release_update_pause()
+                fcntl.flock(hold, fcntl.LOCK_UN)
 
     def test_legacy_process_monitor_stops_process_group_on_global_pause(self):
         from reNgine.resources import LegacyProcessMonitor

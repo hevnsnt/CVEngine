@@ -109,6 +109,46 @@ class StateTests(TestCase):
 		state = updater.state(row)
 		self.assertEqual((state['status'], state['installed_known']), ('available', False))
 
+	def test_state_defaults_to_an_idle_phase_with_no_phase_file(self):
+		self.install(OLD)
+		row = updater.check(get=fake_github())
+		state = updater.state(row)
+		self.assertEqual((state['phase'], state['phase_detail'], state['phase_scans_running'], state['phase_changed_at']),
+						  ('idle', '', None, None))
+		self.assertFalse(state['scans_paused_by_update'])
+
+	def test_state_reads_the_phase_file_apply_update_sh_writes(self):
+		self.install(OLD)
+		row = updater.check(get=fake_github())
+		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
+			json.dump({'phase': 'draining', 'detail': 'waiting for 2 scan(s) to finish', 'scans_running': 2, 'changed_at': 1_800_000_000}, f)
+		state = updater.state(row)
+		self.assertEqual((state['phase'], state['phase_detail'], state['phase_scans_running']), ('draining', 'waiting for 2 scan(s) to finish', 2))
+		self.assertTrue(state['phase_changed_at'].startswith('2027-01-15'))
+
+	def test_a_malformed_or_unrecognized_phase_file_falls_back_to_idle(self):
+		self.install(OLD)
+		row = updater.check(get=fake_github())
+		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
+			f.write('not json')
+		self.assertEqual(updater.state(row)['phase'], 'idle')
+		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
+			json.dump({'phase': 'not-a-real-phase'}, f)
+		self.assertEqual(updater.state(row)['phase'], 'idle')
+
+	def test_scans_paused_by_update_reads_scancontrol_live_not_the_phase_file(self):
+		from cveFeed.models import ScanControl
+		self.install(OLD)
+		row = updater.check(get=fake_github())
+		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
+			json.dump({'phase': 'draining', 'detail': '', 'scans_running': 1, 'changed_at': 1_800_000_000}, f)
+		self.assertFalse(updater.state(row)['scans_paused_by_update'])  # no row yet: not paused
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True})
+		self.assertTrue(updater.state(row)['scans_paused_by_update'])
+		# an operator's own pause is not the update's pause, even while the phase file still says draining
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': False})
+		self.assertFalse(updater.state(row)['scans_paused_by_update'])
+
 
 class UpdatesApiTests(TestCase):
 	def setUp(self):

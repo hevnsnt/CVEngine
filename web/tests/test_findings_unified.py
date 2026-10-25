@@ -109,6 +109,19 @@ class UnifiedFindingsTests(TestCase):
 		self.assertEqual(status, 200)
 		self.assertIn('CVE-2099-7001', str(body))
 
+	def test_rows_carry_first_seen_and_who_last_changed_status(self):
+		body = self.get()
+		fire = next(r for r in body['results'] if r['type'] == 'cve' and r['id'] == self.fire_match.id)
+		self.assertEqual(fire['first_seen'], fire['detected'])
+		self.assertIsNotNone(fire['first_seen'])
+		self.assertIsNone(fire['status_changed_at'])
+		self.assertIsNone(fire['status_changed_by'])
+		status, data = call(self.token, 'PATCH', f'/api/v1/projects/uf-a/findings/match/{self.fire_match.id}', {'status': 'in_progress'})
+		self.assertEqual(status, 200)
+		row = next(r for r in self.get()['results'] if r['type'] == 'cve' and r['id'] == self.fire_match.id)
+		self.assertIsNotNone(row['status_changed_at'])
+		self.assertEqual(row['status_changed_by'], {'id': self.alice.id, 'username': 'uf-alice', 'name': 'uf-alice'})
+
 	def test_the_cap_bounds_the_pages_not_the_counts(self):
 		from unittest import mock
 		with mock.patch('agentapi.services.MAX_FINDINGS', 3):
