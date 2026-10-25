@@ -6,7 +6,7 @@
 
 <p align="center">
   Know what you expose. Know what is exploitable. Fix it first.<br>
-  cvEngine finds every asset you have on the internet, fingerprints every service and version, and tells you which of today's CVEs actually hit you, then proves it with safe, read-only checks. Enterprise-grade attack surface management with no license fee, no per-asset pricing, and no black box.
+  cvENGINE finds every asset you have on the internet, fingerprints every service and version, and tells you which of today's CVEs actually hit you, then proves it with safe, read-only checks. Enterprise-grade attack surface management with no license fee, no per-asset pricing, and no black box.
 </p>
 
 <p align="center">
@@ -20,12 +20,12 @@
 ---
 
 <p align="center">
-  <img src="docs/images/cvengine-tour.gif" alt="A tour of cvEngine: the live dashboard, hosts ranked by score, a validated CVE match, the change timeline with screenshot diffs, and the asset graph" width="900">
+  <img src="docs/images/cvengine-tour.gif" alt="A tour of cvENGINE: the live dashboard, hosts ranked by score, a validated CVE match, the change timeline with screenshot diffs, and the asset graph" width="900">
 </p>
 
-## Why cvEngine
+## Why cvENGINE
 
-Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. cvEngine runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the only question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
+Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. cvENGINE runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the only question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
 
 - **Total visibility.** Domains, subdomains, IPs, ports, products, versions, TLS, and technologies in one inventory that keeps itself current, from the first scan to the weekly deep dive.
 - **Every CVE, matched to your internet facing environment.** The live [cve.now](https://cve.now) feed is rated [fire, smoke, or ice](docs/FIRE-SMOKE-ICE.md) and matched to what you actually run, by product and version, with distribution backports understood.
@@ -57,7 +57,7 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 
 **Verify**
 - Automatic read-only validation: a vetted nuclei template, a single-port nmap check, a version banner probe, or the database check. Fire and smoke findings jump the queue, and each result records the exact command it ran.
-- **Validate now** on any CVE match: the AI plans the checks, cvEngine runs them, and the AI reviews the evidence.
+- **Validate now** on any CVE match: the AI plans the checks, cvENGINE runs them, and the AI reviews the evidence.
 - When no template exists for a CVE, the AI drafts one. It runs on your hosts only after it passes static, syntax, and fixture checks and a reviewed positive test proves it detects the flaw.
 - Optional auto-fire tests matching CVEs on their hosts as soon as the feed delivers them.
 
@@ -71,11 +71,11 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 - Notifications to Slack, Discord, Telegram, and Lark.
 - Memory-aware scheduling that keeps small servers healthy, and updates that drain running work before they restart anything.
 
-**Bring your own AI.** Anthropic, OpenAI, OpenRouter, Ollama, or vLLM, with keys stored encrypted. Without a model cvEngine still discovers, scans, matches CVEs, and validates findings. The AI adds triage, targeted scans, and generated templates.
+**Bring your own AI.** Anthropic, OpenAI, OpenRouter, Ollama, or vLLM, with keys stored encrypted. Without a model cvENGINE still discovers, scans, matches CVEs, and validates findings. The AI adds triage, targeted scans, and generated templates.
 
 ## How it works
 
-Add a target and cvEngine runs one pipeline for it. Each scanner runs once per host inside a time window, so repeat scans stay fast.
+Add a target and cvENGINE runs one pipeline for it. Each scanner runs once per host inside a time window, so repeat scans stay fast.
 
 ```mermaid
 flowchart TD
@@ -113,8 +113,8 @@ See [Pipeline](docs/PIPELINE.md) for each stage and [Architecture](docs/ARCHITEC
 You need Linux, [Docker Engine](https://docs.docker.com/engine/install/) with the Compose plugin, `git`, and `make`. 8 GB of RAM and 20 GB of disk are recommended.
 
 ```bash
-git clone https://github.com/hevnsnt/cvEngine.git
-cd cvEngine
+git clone https://github.com/hevnsnt/cvENGINE.git
+cd cvENGINE
 cp .env.example .env     # set DOMAIN_NAME and replace every change-me
 make certs               # HTTPS certificate for the built-in proxy
 make up                  # build and start (the first build takes about 30 minutes)
@@ -129,7 +129,7 @@ Updates are one command (`scripts/update.sh`), or approve them in the app. Detai
 
 ## Built for teams and agents
 
-Paste targets grouped by organization and project, and cvEngine creates the projects for you:
+Paste targets grouped by organization and project, and cvENGINE creates the projects for you:
 
 ```text
 ##Acme Corp
@@ -156,7 +156,7 @@ Only scan systems you own or are authorized to test.
 
 | Doc | What it covers |
 | --- | --- |
-| [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | How cvEngine rates every CVE and why |
+| [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why |
 | [Pipeline](docs/PIPELINE.md) | How a target becomes findings |
 | [Architecture](docs/ARCHITECTURE.md) | Services, data, and where AI is used |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables |
@@ -169,6 +169,6 @@ Only scan systems you own or are authorized to test.
 
 ## Credits and license
 
-cvEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x and builds on [bbot](https://github.com/blacklanternsecurity/bbot), [nuclei](https://github.com/projectdiscovery/nuclei), [nmap](https://nmap.org), [gowitness](https://github.com/sensepost/gowitness), [VivaGraphJS](https://github.com/anvaka/VivaGraphJS), [naabu](https://github.com/projectdiscovery/naabu), and the [cve.now](https://cve.now) feed. See the [changelog](CHANGELOG.md), [contributors](CONTRIBUTORS.md), and [third-party software](THIRD-PARTY.md).
+cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x and builds on [bbot](https://github.com/blacklanternsecurity/bbot), [nuclei](https://github.com/projectdiscovery/nuclei), [nmap](https://nmap.org), [gowitness](https://github.com/sensepost/gowitness), [VivaGraphJS](https://github.com/anvaka/VivaGraphJS), [naabu](https://github.com/projectdiscovery/naabu), and the [cve.now](https://cve.now) feed. See the [changelog](CHANGELOG.md), [contributors](CONTRIBUTORS.md), and [third-party software](THIRD-PARTY.md).
 
 Released under the GPL-3.0. See [LICENSE](LICENSE).
