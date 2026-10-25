@@ -46,10 +46,12 @@ def enqueue(project, sub, *, source='manual', user=None):
     existing = HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).order_by('id').first()
     if existing:
         return existing, False
-    active_scans = ScanHistory.objects.filter(Q(scan_status=-1) | Q(scan_status=1,
-                                                                    start_scan_date__gte=timezone.now() - timedelta(hours=11)))
-    if HostAssessment.objects.filter(status__in=ACTIVE).count() >= 20 or \
-            HostAssessment.objects.filter(project=project, status__in=ACTIVE).count() >= 5 or \
+    # The global caps count every project: _base_manager is not narrowed to the caller's projects by the tenancy scope, which
+    # inside a request would make "20 at once across the installation" mean 20 per user.
+    active_scans = ScanHistory._base_manager.filter(Q(scan_status=-1) | Q(scan_status=1,
+                                                                          start_scan_date__gte=timezone.now() - timedelta(hours=11)))
+    if HostAssessment._base_manager.filter(status__in=ACTIVE).count() >= 20 or \
+            HostAssessment._base_manager.filter(project=project, status__in=ACTIVE).count() >= 5 or \
             active_scans.count() >= 20:
         raise RuntimeError('host assessment queue is at capacity; retry later')
     try:

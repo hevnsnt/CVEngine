@@ -110,6 +110,19 @@ class HostAssessmentTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.error, 'Failed stages: nmap_scan')  # the pipeline's own explanation is not hidden
 
+    def test_the_global_cap_counts_projects_the_caller_cannot_see(self):
+        from tenancy import scope
+        hidden = Domain.objects.create(name='hidden.example', project=self.other, insert_date=timezone.now())
+        for i in range(20):
+            HostAssessment.objects.create(project=self.other, domain=hidden, host=f'h{i}.hidden.example', status='running')
+        tokens = scope.set_scope({self.project.pk}, self.user)  # a request by a user of this project only
+        try:
+            self.assertEqual(HostAssessment.objects.filter(status='running').count(), 0)  # the caller sees none of them
+            with self.assertRaisesRegex(RuntimeError, 'capacity'):
+                enqueue(self.project, self.host)
+        finally:
+            scope.reset_scope(tokens)
+
     def test_no_resolution_is_inconclusive_and_does_not_mark_coverage(self):
         job = HostAssessment.objects.create(project=self.project, domain=self.domain, host=self.host.name)
         HostAssessment.objects.filter(pk=job.pk).update(status='running')
