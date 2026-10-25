@@ -2,9 +2,19 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.0.1 (2026-10-25)
 
-Nothing yet.
+A security patch for v1.0. Update with `make up` or the in-app updater.
+
+### Security
+
+- **Two-step sign-in could be skipped at `/admin/login/`.** Django's own admin login signed a staff user in with the password alone and made a normal session for the whole app. `/admin/login/` now only forwards to the app's `/login/`, which enforces the second step.
+
+### Fixed
+
+- **AI-written templates survived no update.** Their directory was not on a Docker volume, so each deploy deleted them and they had to be regenerated and reviewed again. It is now the `generated_templates` volume in all three services that share it, and a worker restores any validated template whose file is missing from the database copy, through the same safety check, when it starts.
+- **`scripts/uninstall.sh` removed anything with `rengine` in its name,** including another reNgine install on the host. It now removes only this install's Docker Compose project, selected by its exact label, and lists what it will remove before asking.
+- **Proxy documentation.** It told operators to set `CVENGINE_TRUSTED_PROXIES` to their proxy's network, which replaces the Docker default and makes the IP allowlist and abuse guard see the Docker gateway for every request. The docs now say to leave the default or add to it.
 
 ## v1.0 (2026-10-25)
 

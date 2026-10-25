@@ -38,6 +38,7 @@ services:
       - scan_results:/usr/src/scan_results
       - gf_patterns:/root/.gf
       - nuclei_templates:/root/nuclei-templates
+      - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
@@ -96,6 +97,7 @@ services:
       - scan_results:/usr/src/scan_results
       - gf_patterns:/root/.gf
       - nuclei_templates:/root/nuclei-templates
+      - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     networks:
       - rengine_network
@@ -134,6 +136,7 @@ services:
       - scan_results:/usr/src/scan_results
       - gf_patterns:/root/.gf
       - nuclei_templates:/root/nuclei-templates
+      - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     ports:
       - "8000:8000"
@@ -151,6 +154,7 @@ volumes:
   postgres18_data:
   gf_patterns:
   nuclei_templates:
+  generated_templates:
   github_repos:
   wordlist:
   scan_results:

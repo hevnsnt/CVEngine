@@ -109,7 +109,7 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `NUCLEI_TEMPLATES_DIR` | `/root/nuclei-templates` | nuclei's installed templates. |
-| `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where reviewed AI-written templates are written. It must sit outside `NUCLEI_TEMPLATES_DIR`, and the app says so at startup if it does not. |
+| `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where validated AI-written templates live. It must sit outside `NUCLEI_TEMPLATES_DIR`, and the app says so at startup if it does not. In the shipped compose files it is the `generated_templates` volume, so validated templates survive an update, and a worker rewrites any validated template whose file is missing from the copy kept in the database when it starts. |
 | `RENGINE_SECRET_KEY` | the key in `web/secret` | Provide the Django secret key from the environment instead of the file. |
 
 The AI key, API vault, update token, webhook URLs, and Telegram bot token are encrypted in the database with a key derived from the secret key. Keep `web/secret` when you restore a backup. With another key the stored secrets read as empty and must be entered again.
@@ -121,7 +121,7 @@ The AI key, API vault, update token, webhook URLs, and Telegram bot token are en
 | `CVENGINE_ALLOW_PRIVATE_TARGETS` | `0` | `1` allows private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`). Loopback, link-local, multicast, `0.0.0.0/8`, and cloud metadata addresses are always refused. |
 | `CVENGINE_BLOCKED_CIDRS` | none | Extra networks that are never scanned. |
 | `CVENGINE_MAX_TARGETS_PER_ADD` | `10000` | Most addresses one CIDR, range, or bulk add may expand to. |
-| `CVENGINE_TRUSTED_PROXIES` | `172.16.0.0/12` | Networks whose forwarded client address is trusted, for the IP allowlist and input guard. Setting it replaces the default. The default suits a proxy on the Docker host. |
+| `CVENGINE_TRUSTED_PROXIES` | `172.16.0.0/12` | The addresses the web container sees connecting to it whose `X-Forwarded-For` is believed, for the IP allowlist and the input guard. The default covers Docker's networks, so the bundled proxy, or your own proxy on the Docker host, works with no setting. Add to it, never replace it with your proxy's own network, or every request appears to come from the Docker gateway. See [Deployment](DEPLOYMENT.md#https). The default applies to the production compose file. |
 | `CVENGINE_CSRF_TRUSTED_ORIGINS` | none | Your public https address when you use your own proxy or CDN, such as `https://scanner.example.com`. |
 | `CVENGINE_GUARD_STRIKES` | `3` | Points within 15 minutes before the input guard disables the account, revokes its tokens, and blocks a public client address for 24 hours. A command injection attempt is worth 3. Superusers are only logged. |
 

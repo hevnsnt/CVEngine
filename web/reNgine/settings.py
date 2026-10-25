@@ -215,6 +215,7 @@ STATICFILES_DIRS = [
 LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'login',
     'mfa_verify',
+    'admin_login_redirect',
 ]
 
 LOGIN_URL = 'login'
