@@ -1447,8 +1447,8 @@ class HostSearchTests(TestCase):
 		self.assertEqual(status, 200, data)
 		return data
 
-	def names(self, q):
-		return sorted(h['host'] for h in self.search(q)['results'])
+	def names(self, q, **extra):
+		return sorted(h['host'] for h in self.search(q, **extra)['results'])
 
 	def test_a_bare_word_matches_a_technology_and_a_port_product(self):
 		self.assertEqual(self.names('php'), ['port.srch.example', 'tech.srch.example', 'www.srch.example'])
@@ -1501,6 +1501,30 @@ class HostSearchTests(TestCase):
 		for q in ('port:abc', 'sev:nope', 'ip:1.2.3.4/99'):
 			status, body = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=' + q.replace('/', '%2F'))
 			self.assertEqual(status, 400, q)
+
+	def test_heat_facets_count_the_whole_match_and_heat_filters_the_page(self):
+		from startScan.models import ScanActivity, ScanHistory, Vulnerability
+		from scanEngine.models import EngineType
+		fire = Subdomain.objects.get(name='port.srch.example')
+		Vulnerability.objects.create(name='RCE', severity=3, subdomain=fire, target_domain=fire.target_domain, http_url='x', open_status=True)
+		ice = Subdomain.objects.get(name='tech.srch.example')
+		Vulnerability.objects.create(name='Info leak', severity=1, subdomain=ice, target_domain=ice.target_domain, http_url='y', open_status=True)
+		clean = Subdomain.objects.get(name='db.srch.example')
+		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=clean.target_domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+		clean.scan_history = scan
+		clean.save(update_fields=['scan_history'])
+		ScanActivity.objects.create(scan_of=scan, name='nuclei_scan', status=2, time=timezone.now())
+		# www.srch.example stays unscanned: no findings, no nuclei activity
+		data = self.search('')
+		self.assertEqual(data['facets']['heat'], {'fire': 1, 'smoke': 0, 'ice': 1, 'clean': 1, 'unscanned': 1})
+		self.assertFalse(data['facets']['truncated'])
+		self.assertEqual(self.names('', heat='fire'), ['port.srch.example'])
+		self.assertEqual(self.names('', heat='unscanned'), ['www.srch.example'])
+		# the facet counts hold steady even while narrowed to one heat value
+		self.assertEqual(self.search('', heat='fire')['facets']['heat'], {'fire': 1, 'smoke': 0, 'ice': 1, 'clean': 1, 'unscanned': 1})
+		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&heat=bogus')
+		self.assertEqual(status, 400)
 
 	def test_the_search_is_an_mcp_tool(self):
 		status, data = rpc(self.tok, 'tools/call', {'name': 'search_hosts', 'arguments': {'project': 'srch-a', 'q': 'port:3306'}})
