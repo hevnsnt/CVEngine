@@ -7,7 +7,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 Update with `make up` or the in-app updater.
 
 - **The update bar shows what an update is doing.** The update-available bar is orange. After you approve, a slim bar shows the steps (Pause, Drain scans, Rebuild, Resume) with a pulse dot and a thin progress line, using the update phase the server now reports, and the page greys out only while the services rebuild.
-- **An organization switcher.** When you can see projects in two or more organizations, the sidebar and the mobile sheet show an Organization select above Project; choosing one opens the project you last used in it, and the Project list shows only that organization's projects. Ctrl+K gets "Switch to organization" and "Switch to project". With one organization nothing changes.
+- **An organization switcher.** When you can see projects in two or more organizations, the sidebar and the mobile sheet show an Organization select above Project; choosing one opens the project you last used in it, and the Project list shows only that organization's projects. Ctrl+K gets "Switch to organization" and "Switch to project". With one organization nothing changes. The switch only navigates to a well-formed project slug, the same rule the project switcher already had.
 - **Releases carry downloadable archives.** Each release now has `cvengine-<version>.zip`, `.tar.gz` and a `SHA256SUMS` file attached, next to the automatic source links. A git checkout stays the supported way to install, because the updater works through git.
 
 ## v1.1 (2026-10-25)
