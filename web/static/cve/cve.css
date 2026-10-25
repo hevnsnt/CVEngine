@@ -18,7 +18,7 @@
   --ice:#7a8594;--ice-ink:#4d5663;--ice-bg:#eaedf1;
   --ok:#4a8062;--ok-ink:#2f6048;--ok-bg:#e7f0ea;--violet:#5d5d66;--violet-bg:#ececee;
   --clean:#c9ced5;
-  --brand:#ff5a00;
+  --brand:#ff5a00;--on-brand:#0a0a0b;
   --accent:var(--ink);--accent-ink:var(--ink);--accent-soft:#ececee;--accent-ring:rgba(10,10,11,.14);
   --pop:0 8px 22px -10px rgba(10,10,11,.4);--pop-s:0 5px 14px -8px rgba(10,10,11,.4);
   --ring:0 0 0 1px var(--line-2);
@@ -363,7 +363,8 @@ a.cve-link{font-family:var(--mono)}
 .sheet-grid button.out{color:var(--fire-ink)}@media (hover:hover) and (pointer:fine){.menu a:hover{background:var(--sunk)}}
 
 /* update bar */
-.updatebar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px var(--gutter);background:var(--sunk);color:var(--ink);font-size:14px;font-weight:600;border-bottom:1px solid var(--line-2);box-shadow:inset 3px 0 0 var(--ink)}
+.updatebar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px var(--gutter);background:var(--brand);color:var(--on-brand);font-size:14px;font-weight:600}
+.updatebar .btn.ghost{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
 .updatebar span{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
 
 /* ================= live dashboard ================= */
@@ -1243,17 +1244,20 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 .spark-line{fill:none;stroke:var(--ink);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;opacity:.7}
 .spark-dot{fill:var(--brand)}
 
-/* Update in progress: the whole site is covered by a status panel until the host finishes */
-.update-veil{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--gutter);background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:grayscale(1) blur(2px)}
-.update-card{width:min(460px,100%);padding:24px;background:var(--surface);border:1px solid var(--line-2);box-shadow:inset 3px 0 0 var(--ink)}
-.update-card h2{margin:0 0 6px;font-size:20px}
-.update-card .note{margin:0 0 16px}
-.update-bar{position:relative;height:6px;background:var(--sunk);overflow:hidden;margin-bottom:16px}
-.update-bar i{position:absolute;top:0;bottom:0;width:35%;background:var(--ink);animation:update-slide 1.4s ease-in-out infinite}
-.update-bar.done i{width:100%;animation:none}
-@keyframes update-slide{0%{left:-35%}100%{left:100%}}
-.update-steps{display:flex;gap:6px;list-style:none;margin:0 0 18px;padding:0;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
-.update-steps li{flex:1;padding-top:6px;border-top:3px solid var(--line-2);color:var(--muted)}
-.update-steps li.ok{border-color:var(--ink);color:var(--ink)}
-.update-steps li.now{border-color:var(--ink);color:var(--ink)}
-@media (prefers-reduced-motion:reduce){.update-bar i{animation:none;width:100%;opacity:.5}}
+/* Update in progress: an orange bar at the top says what the update is doing; the page greys only while the services rebuild */
+.update-live{position:sticky;top:0;z-index:150;padding:10px var(--gutter) 0;background:var(--brand);color:var(--on-brand);font-size:14px}
+.update-live .ul-head{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline}
+.update-live strong{font-weight:700}
+.update-live .ul-detail{flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
+.update-live .ul-link{color:var(--on-brand);text-decoration:underline;font-weight:600}
+.update-live .ul-steps{display:flex;gap:6px;list-style:none;margin:8px 0 0;padding:0;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.update-live .ul-steps li{flex:1;padding:4px 0;border-top:3px solid color-mix(in srgb,var(--on-brand) 35%,transparent);color:var(--on-brand)}
+.update-live .ul-steps li.ok,.update-live .ul-steps li.now{border-color:var(--on-brand);color:var(--on-brand)}
+.update-live .ul-track{position:relative;height:3px;margin:0 calc(var(--gutter) * -1);overflow:hidden;background:color-mix(in srgb,var(--on-brand) 18%,transparent)}
+.update-live .ul-track i{position:absolute;top:0;bottom:0;width:30%;background:var(--on-brand);animation:update-slide 1.4s ease-in-out infinite}
+.update-live .ul-track.done i{width:100%;animation:none}
+.update-live.failed{background:var(--fire);color:var(--on-solid)}
+.update-live.failed *{color:var(--on-solid)}
+@keyframes update-slide{0%{left:-30%}100%{left:100%}}
+html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointer-events:none;transition:opacity .3s}
+@media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
