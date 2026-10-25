@@ -60,7 +60,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "$TAG" -m "CVEngine $TAG"
-            git push origin "refs/tags/$TAG"
+            git push origin HEAD
           fi
 
       - name: 📝 Release notes from the changelog
@@ -101,3 +101,17 @@ jobs:
           else
             gh release create "$TAG" --verify-tag --latest --title "CVEngine $TAG" --notes-file "$RUNNER_TEMP/notes.md"
           fi
+
+      - name: 📦 Attach source archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # The tree of the tag, without .git or any untracked file (so nothing from a working copy such as secrets/ or .env can
+          # end up in it). A git checkout stays the supported way to install, because the updater works through git; these are
+          # for reading, mirroring and offline transfer.
+          mkdir -p "$RUNNER_TEMP/assets"
+          git archive --format=zip    --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.zip"    HEAD
+          git archive --format=tar.gz --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.tar.gz" HEAD
+          (cd "$RUNNER_TEMP/assets" && sha256sum cvengine-"$TAG".zip cvengine-"$TAG".tar.gz > SHA256SUMS)
+          gh release upload "$TAG" "$RUNNER_TEMP"/assets/* --clobber
