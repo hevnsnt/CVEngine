@@ -17,10 +17,9 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 .PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help
 
-# .env is not tracked. Create it on first use, with the database and certificate passwords already generated, then stop so
-# DOMAIN_NAME can be set.
+# .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
-	@test -f .env || { ./scripts/init-env.sh; echo "Set DOMAIN_NAME in .env (the passwords are already generated), then run make again."; exit 1; }
+	@test -f .env || ./scripts/init-env.sh
 
 # First-run guard: refuse to continue while a password still holds the public example value from .env.example, and say how to fix it.
 # (Not part of up/build/down, so an existing deployment's updates and restarts are never blocked by it.)

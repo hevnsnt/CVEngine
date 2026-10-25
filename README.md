@@ -135,21 +135,28 @@ See [Pipeline](docs/PIPELINE.md) for each stage and [Architecture](docs/ARCHITEC
 
 ## Quick start
 
-You need Linux with [Docker Engine](https://docs.docker.com/engine/install/) and the Compose plugin, plus `git`, `make`, and `python3`. 8 GB of RAM and 20 GB of disk are recommended.
+On a Linux server (Debian or Ubuntu is easiest; 4 GB of RAM and 20 GB of disk or more), one command does everything:
 
 ```bash
 git clone https://github.com/hevnsnt/CVEngine.git
 cd CVEngine
-./scripts/init-env.sh    # creates .env and generates its database and certificate passwords
-nano .env                # set DOMAIN_NAME to the name people will type
+sudo ./install.sh
+```
+
+It asks nothing. It checks the machine, installs Docker and the other tools it needs, generates every secret, detects the address to use, creates the HTTPS certificate, builds and starts CVEngine (the first build takes several minutes), waits until it answers, and prints the address, your username, and a generated password. Copy the password from the terminal: it is shown once, and you choose your own at your first sign-in. Lost it: `make admin-password` prints a new one. To use a name instead of the detected address, run `sudo ./install.sh --domain scanner.example.com`. Running it again is safe and updates in place.
+
+Open the printed address. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt`. The setup wizard creates your organization and project, offers an optional AI model, adds your first target (discovery starts the moment you add it), and offers optional search-engine keys. The CVE feed starts loading as soon as the services are up.
+
+Prefer to run the steps yourself (any Linux with [Docker Engine](https://docs.docker.com/engine/install/), the Compose plugin, `git`, `make`, and `python3`)?
+
+```bash
+./scripts/init-env.sh    # creates .env: generates its passwords and sets DOMAIN_NAME to this machine's address
 make certs               # HTTPS certificate for the built-in proxy
-make up                  # build and start (the first build takes about 30 minutes)
+make up                  # build and start
 make admin               # create your admin account: its password is generated and printed once
 ```
 
-`make admin` prints your username and a generated password once, so copy it from the terminal. You choose your own at your first sign-in. If you lose it before then, `make admin-password` prints a new one. (To pick the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` first, or run `make username`.)
-
-Open `https://<your DOMAIN_NAME>/`. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt`. The setup wizard creates your organization and project, offers an optional AI model, adds your first target (discovery starts the moment you add it), and offers optional search-engine keys. On a fresh Debian or Ubuntu machine, `sudo ./install.sh` installs Docker and runs these steps for you, ending with the admin password.
+To choose the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` first, or run `make username`.
 
 Update with `scripts/update.sh`, or deploy every new commit automatically ([updates](docs/UPDATES.md)). Reverse proxies, backups, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
 

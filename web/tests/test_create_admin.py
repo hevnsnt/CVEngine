@@ -119,8 +119,9 @@ class InitEnvScriptTests(TestCase):
 		shutil.copy(ROOT / 'scripts' / 'init-env.sh', Path(self.dir) / 'scripts' / 'init-env.sh')
 		shutil.copy(ROOT / '.env.example', Path(self.dir) / '.env.example')
 
-	def init(self):
-		return subprocess.run(['bash', 'scripts/init-env.sh'], cwd=self.dir, capture_output=True, text=True, check=True).stdout
+	def init(self, *args, **env):
+		return subprocess.run(['bash', 'scripts/init-env.sh', *args], cwd=self.dir, capture_output=True, text=True, check=True,
+		                      env={**os.environ, **env}).stdout
 
 	def env(self):
 		return dict(line.split('=', 1) for line in (Path(self.dir) / '.env').read_text().splitlines() if '=' in line and not line.startswith('#'))
@@ -133,7 +134,8 @@ class InitEnvScriptTests(TestCase):
 			self.assertIn(f'Generated {key}', out)
 		self.assertNotEqual(env['POSTGRES_PASSWORD'], env['AUTHORITY_PASSWORD'])
 		self.assertEqual(env['DJANGO_SUPERUSER_PASSWORD'], '')  # the admin password is make admin's job
-		self.assertEqual(env['DOMAIN_NAME'], 'cvengine.example.com')  # nothing else is touched
+		self.assertNotEqual(env['DOMAIN_NAME'], 'cvengine.example.com')  # the example name is replaced by a detected address
+		self.assertEqual(env['COMPOSE_PROJECT_NAME'], 'rengine')  # nothing else is touched
 		self.assertEqual(stat.S_IMODE(os.stat(Path(self.dir) / '.env').st_mode), 0o600)
 
 	def test_running_it_again_changes_nothing(self):
@@ -159,3 +161,26 @@ class InitEnvScriptTests(TestCase):
 		env = self.env()
 		self.assertEqual((env['DOMAIN_NAME'], env['AUTHORITY_PASSWORD']), ('mine.example', 'keepme'))
 		self.assertRegex(env['POSTGRES_PASSWORD'], r'^[A-Za-z0-9]{24}$')  # an empty value counts as unset
+
+	def test_the_example_domain_becomes_the_detected_address(self):
+		out = self.init(CVENGINE_DETECT_IP='10.1.2.3')
+		self.assertEqual(self.env()['DOMAIN_NAME'], '10.1.2.3')
+		self.assertIn('Detected the address: 10.1.2.3', out)
+
+	def test_without_a_network_address_it_falls_back_to_localhost(self):
+		self.init(CVENGINE_DETECT_IP='')
+		self.assertEqual(self.env()['DOMAIN_NAME'], 'localhost')
+
+	def test_a_domain_the_owner_set_is_kept_even_when_an_address_is_detected(self):
+		(Path(self.dir) / '.env').write_text('DOMAIN_NAME=scan.example.org\nPOSTGRES_PASSWORD=x\nAUTHORITY_PASSWORD=y\n')
+		self.init(CVENGINE_DETECT_IP='10.1.2.3')
+		self.assertEqual(self.env()['DOMAIN_NAME'], 'scan.example.org')
+
+	def test_an_explicit_domain_wins_and_is_validated(self):
+		self.init('scanner.example.com', CVENGINE_DETECT_IP='10.1.2.3')
+		self.assertEqual(self.env()['DOMAIN_NAME'], 'scanner.example.com')
+		self.init('10.9.9.9')  # a later run may change it on request
+		self.assertEqual(self.env()['DOMAIN_NAME'], '10.9.9.9')
+		bad = subprocess.run(['bash', 'scripts/init-env.sh', 'bad name;rm'], cwd=self.dir, capture_output=True, text=True)
+		self.assertNotEqual(bad.returncode, 0)
+		self.assertEqual(self.env()['DOMAIN_NAME'], '10.9.9.9')
