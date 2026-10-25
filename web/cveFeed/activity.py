@@ -17,6 +17,16 @@ def _project_id(project):
     return getattr(project, 'pk', project)
 
 
+def diagnostic(what, raw, kind=''):
+    """A failure line safe to store and show to project members: what failed, the exception type, and a diagnostic id. The raw
+    text (an exception message can carry paths, addresses or provider replies) goes to the worker log under that id only."""
+    import hashlib
+    raw = str(raw or '')
+    stamp = hashlib.sha256(f'{what}:{raw}:{timezone.now().isoformat()}'.encode()).hexdigest()[:12]
+    logger.warning('%s failed (diagnostic %s): %s', what, stamp, raw[:2000])
+    return f'{what} failed{f" ({kind})" if kind else ""}; diagnostic {stamp} is in the worker log'
+
+
 def discard(entry):
     """Drop an entry that turned out to be nothing worth showing (a "running" line whose step found nothing to report)."""
     if entry is None:

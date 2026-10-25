@@ -590,7 +590,8 @@ def validate_match_on_demand(request_id):
         logger.exception('on-demand validation %s failed', request_id)
         from cveFeed.hot_validation import retry_after
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-            status='failed', error=f'{type(exc).__name__}: {exc}'[:300], finished_at=timezone.now(),
+            status='failed', error=activity.diagnostic(f'Validation request #{job.pk}', f'{type(exc).__name__}: {exc}',
+                                                       type(exc).__name__)[:300], finished_at=timezone.now(),
             next_attempt_at=retry_after(job.attempts))
         activity.settle(progress, 'failed', f'Validation request #{job.pk} failed for {cve_id}: {type(exc).__name__}')
         return {'error': str(exc)[:200]}
