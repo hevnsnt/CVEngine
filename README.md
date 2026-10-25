@@ -4,9 +4,7 @@
 
 <h3 align="center">The most advanced external attack surface assessment you can get for free.</h3>
 
-<p align="center">
-  Know what you expose. Know what is exploitable. Fix it first.<br>
-  cvENGINE automatically discovers and maps your internet-facing assets, fingerprints every service and version it finds, and tells you which of today's exploited CVEs actually hit you, then reproduces what it can with safe, read-only checks. Enterprise-grade attack surface management with no license fee, no per-asset pricing, and fully opensource.
+<p align="center">cvENGINE automatically discovers and maps your internet-facing assets, fingerprints every service and version it finds, and tells you which of today's exploited CVEs actually hit you, then reproduces what it can with safe, read-only checks. Enterprise-grade attack surface management with no license fee, no per-asset pricing, and fully opensource.
 </p>
 
 <p align="center">
