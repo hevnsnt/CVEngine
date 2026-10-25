@@ -171,7 +171,10 @@ class ManualUpdateTests(UpdateScriptCase):
         (self.stub / 'active').write_text('{' + ','.join(f'"{name}@local":[{{"id":"work"}}]' for name in
             ('discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker')) + '}')
         (self.stub / 'finish_after_one').touch()
-        result = self.run_update()
+        # The script compares whole seconds (bash SECONDS) with the deadline after its first poll, so a one second deadline fails
+        # whenever the first poll lands across a second boundary on a loaded runner. Five is far from that edge, and the work
+        # still finishes after one poll (the next one runs after the script's own five second pause).
+        result = self.run_update(CVENGINE_UPDATE_DRAIN_SECONDS='5')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         calls = self.calls()
         self.assertLess(next(i for i, c in enumerate(calls) if ' stop -t 30 celery-beat' in c),
