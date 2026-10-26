@@ -360,6 +360,88 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     container.classList.toggle("has-live", any);
   }
 
+  // Float. Every bubble drifts a few pixels on slow, unequal cycles, so the graph feels like it hangs in space. The drift is drawn on top of
+  // the layout (the layout, the fit and the saved positions never see it), it is a fixed few pixels on screen at any zoom, and the bubble
+  // under the pointer or in the open card holds still. It is bounded, so nothing can float out of view.
+  const FLOAT_PX = 5;
+  const floatOn = !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  let zoomK = 1;
+  const readZoom = () => {
+    const root = container.querySelector("svg > g");
+    const m = root && /matrix\(([^)]+)\)/.exec(root.getAttribute("transform") || "");
+    zoomK = Math.max(Number(m ? m[1].split(/[ ,]+/)[0] : 1) || 1, 0.02);
+  };
+  const zoomTimer = setInterval(readZoom, 250);
+  const driftOf = (ui, id) => {
+    if (!floatOn || id === hovered || id === selected || group.has(id)) return [0, 0];
+    if (ui.__p === undefined) ui.__p = [stableAngle(id), stableAngle(`${id}~`), 0.8 + (stableAngle(`${id}#`) / 6.283) * 0.5];
+    const [p1, p2, f] = ui.__p;
+    const t = performance.now() * 0.001 * f;
+    const a = FLOAT_PX / zoomK / 1.5;
+    return [a * (Math.sin(t * 0.45 + p1) + 0.5 * Math.sin(t * 0.91 + p2)), a * (Math.cos(t * 0.38 + p2) + 0.5 * Math.sin(t * 0.83 + p1))];
+  };
+  const nodePoint = (id) => {
+    const p = layout.getNodePosition(id);
+    const ui = uis.get(id);
+    if (!p || !ui) return null;
+    const [dx, dy] = driftOf(ui, id);
+    return { x: p.x * spread.x + dx, y: p.y * spread.y + dy };
+  };
+  function placeNodeUi(ui, pos) {
+    const id = ui.__gid;
+    const [dx, dy] = id === undefined ? [0, 0] : driftOf(ui, id);
+    ui.setAttribute("transform", `translate(${pos.x * spread.x + dx},${pos.y * spread.y + dy})`);
+  }
+  function placeLinkUi(ui, from, to) {
+    const a = ui.__from !== undefined && uis.get(ui.__from);
+    const b = ui.__to !== undefined && uis.get(ui.__to);
+    const [ax, ay] = a ? driftOf(a, ui.__from) : [0, 0];
+    const [bx, by] = b ? driftOf(b, ui.__to) : [0, 0];
+    ui.setAttribute("x1", from.x * spread.x + ax);
+    ui.setAttribute("y1", from.y * spread.y + ay);
+    ui.setAttribute("x2", to.x * spread.x + bx);
+    ui.setAttribute("y2", to.y * spread.y + by);
+  }
+  // While the layout rests (the renderer is paused) nothing repaints, so the drift repaints by itself, about 30 times a second, and only
+  // while the graph is on screen. While the layout runs the renderer repaints every frame and applies the drift itself.
+  const linkUis = new Map();
+  let floatRaf = 0;
+  let floatLast = 0;
+  let onScreen = true;
+  function floatFrame(now) {
+    floatRaf = 0;
+    if (!resting || !floatOn || !onScreen || document.hidden) return;
+    if (now - floatLast >= 33) {
+      floatLast = now;
+      graph.forEachNode((n) => {
+        const ui = uis.get(n.id);
+        const pt = ui && n.data && n.data.kind !== "hub" ? nodePoint(n.id) : null;
+        if (pt) ui.setAttribute("transform", `translate(${pt.x},${pt.y})`);
+      });
+      graph.forEachLink((l) => {
+        const ui = linkUis.get(l.id);
+        const a = nodePoint(l.fromId);
+        const b = nodePoint(l.toId);
+        if (!ui || !a || !b) return;
+        ui.setAttribute("x1", a.x);
+        ui.setAttribute("y1", a.y);
+        ui.setAttribute("x2", b.x);
+        ui.setAttribute("y2", b.y);
+      });
+    }
+    floatRaf = requestAnimationFrame(floatFrame);
+  }
+  const startFloat = () => {
+    if (!floatRaf && floatOn) floatRaf = requestAnimationFrame(floatFrame);
+  };
+  new IntersectionObserver((entries) => {
+    onScreen = entries.some((e) => e.isIntersecting);
+    if (onScreen) startFloat();
+  }).observe(container);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) startFloat();
+  });
+
   graphics
     .node((node) => {
       const d = node.data || {};
@@ -434,24 +516,21 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
           resync();
         }
       });
+      g.__gid = node.id;
       uis.set(node.id, g);
       return g;
     })
-    .placeNode((ui, pos) => {
-      ui.setAttribute("transform", `translate(${pos.x * spread.x},${pos.y * spread.y})`);
-    })
-    .placeLink((ui, from, to) => {
-      ui.setAttribute("x1", from.x * spread.x);
-      ui.setAttribute("y1", from.y * spread.y);
-      ui.setAttribute("x2", to.x * spread.x);
-      ui.setAttribute("y2", to.y * spread.y);
-    });
+    .placeNode((ui, pos) => placeNodeUi(ui, pos))
+    .placeLink((ui, from, to) => placeLinkUi(ui, from, to));
   graphics.link((link) => {
     const l = Viva.Graph.svg("line");
     if (link.fromId === "__hub") l.setAttribute("visibility", "hidden");
     l.setAttribute("stroke", link.fromId.startsWith('__project:') || link.fromId.startsWith('__root:') ? css('--graph-link-hi') : css('--line-2'));
     l.setAttribute("stroke-width", link.fromId.startsWith('__project:') ? '1.8' : '1');
     if (link.data?.crossCluster) l.setAttribute('stroke-dasharray', '4 4');
+    l.__from = link.fromId;
+    l.__to = link.toId;
+    linkUis.set(link.id, l);
     return l;
   });
 
@@ -654,6 +733,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     if ((still && quiet > 2500) || quiet > 10000) {
       renderer.pause();
       resting = true;
+      startFloat();
     }
   }, 500);
   container.addEventListener("click", () => {
@@ -863,6 +943,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       clearInterval(timer);
       clearInterval(labelTimer);
       clearInterval(settleTimer);
+      clearInterval(zoomTimer);
+      cancelAnimationFrame(floatRaf);
       document.removeEventListener("keydown", onKey);
     },
     clear() {
