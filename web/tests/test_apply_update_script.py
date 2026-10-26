@@ -246,6 +246,43 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertTrue(self.approved())
         self.assertEqual(self.head(), self.prev)
 
+    def phase_file(self):
+        import json
+        path = self.work / 'web' / '.update-phase.json'
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def test_a_dirty_checkout_is_reported_in_the_ui_not_just_refused(self):
+        (self.work / 'web' / 'README').write_text('edited locally\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'failed')
+        self.assertIn('web/README', phase.get('detail', ''))
+        self.assertTrue(self.approved())  # kept: it retries once the checkout is clean
+
+    def test_an_unreachable_origin_is_reported_and_the_approval_kept(self):
+        self.git('remote', 'set-url', 'origin', str(self.tmp / 'does-not-exist.git'), cwd=self.work)
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'draining')
+        self.assertIn('could not reach origin', phase.get('detail', ''))
+        self.assertTrue(self.approved())
+        self.assertEqual(self.head(), self.prev)
+
+    def test_an_unexpected_failure_leaves_a_line_in_the_log_instead_of_nothing(self):
+        state = self.work / '.git' / 'cvengine-update'
+        (state / 'update-state.py').mkdir(parents=True)  # the helper copy lands inside it and cannot be run
+        self.approve()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        log = (state / 'update.log').read_text()
+        self.assertIn('the update script stopped at line', log)
+        self.assertIn('migrate-log', log)  # the command that stopped it
+        self.assertTrue(self.approved())
+
     def test_a_failed_build_returns_to_the_previous_commit_and_redeploys_it(self):
         (self.stub / 'fail_up').write_text('')
         self.approve()
