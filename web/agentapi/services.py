@@ -6,6 +6,7 @@ a role above audit, and a read-only token can never write. Queries are filtered
 to the project explicitly, in addition to the request-wide data scope.
 """
 import ipaddress
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from django.utils import timezone
 
 from cveFeed.counts import RUNNING_WINDOW
 from tenancy import roles
+
+logger = logging.getLogger(__name__)
 
 PAGE_SIZE_DEFAULT = 50
 PAGE_SIZE_MAX = 200
@@ -732,7 +735,11 @@ def _start_discoveries(domains, mode, project_id):
 
 
 _SCHEME_RE = re.compile(r'^[a-z][a-z0-9+.\-]*://', re.I)
-_MD_LINK_RE = re.compile(r'\[[^\]]*\]\(([^)\s]*)\)')
+# Both parts are bounded and cannot contain another '[' or '(': a long run of '[' with no ']' then costs one short scan per '[',
+# not a scan to the end of the line for each (the unbounded form was quadratic, and it runs before any authorization).
+_MD_LINK_RE = re.compile(r'\[[^\[\]]{0,500}\]\(([^()\s]{0,2048})\)')
+MAX_TARGET_TEXT = 2_000_000  # characters of pasted text one request may carry
+MAX_TARGET_TOKEN = 2048  # a longer token is never a domain, IP, CIDR or range
 _CIDR_LIKE_RE = re.compile(r'^[0-9a-fA-F:.]+/\d{1,3}$')
 _HOST_PORT_RE = re.compile(r'^(.+):(\d{1,5})$')
 
@@ -767,9 +774,11 @@ def normalize_target(token):
 def parse_target_list(text):
     """Split pasted text (newlines, commas, spaces, # comments, markdown links, URLs) into unique targets, in order."""
     seen, out = set(), []
-    for line in (text or '').splitlines():
+    for line in (text or '')[:MAX_TARGET_TEXT].splitlines():
         line = _MD_LINK_RE.sub(r'\1', line.split('#', 1)[0])  # a comment, then [text](url) -> url
         for token in re.split(r'[,\s;]+', line):
+            if len(token) > MAX_TARGET_TOKEN:
+                continue
             token = normalize_target(token)
             if token and token not in seen:
                 seen.add(token)
@@ -956,12 +965,15 @@ def _add_targets(ctx, slug, values, discover, mode):
         except ApiError as exc:
             invalid.append({'value': entry, 'error': exc.message})
             continue
-        for name in expanded:
-            if name not in seen:
-                seen.add(name)
-                names.append(name)
-                if kind == DOMAIN:
-                    domain_names.append(name)
+        fresh = [n for n in dict.fromkeys(expanded) if n not in seen]
+        if len(names) + len(fresh) > BULK_MAX_EXPANDED:  # the cap counts what is added, so the last range cannot overshoot it
+            invalid.append({'value': entry, 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
+            continue
+        for name in fresh:
+            seen.add(name)
+            names.append(name)
+            if kind == DOMAIN:
+                domain_names.append(name)
     excluded = []
     created, existing = _create_domains(project, names, excluded=excluded)
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in excluded]
@@ -1361,6 +1373,7 @@ def list_hosts(ctx, slug, params):
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
                   'sensitive', 'zombie', 'country')
+MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
@@ -1368,15 +1381,24 @@ def parse_search(query):
     """Split a search into terms: ``[(negated, field or None, value, quoted)]``. A bare word has no field; ``field:value``
     filters one field; ``-term`` negates; a quoted value (``"apache tomcat"``, ``tech:"apache tomcat"``) is a phrase, and
     never split on comma even if it contains one (``quoted`` says so, for the comma-OR a field value otherwise gets)."""
+    query = query or ''
+    if not isinstance(query, str):
+        raise ApiError(400, 'q must be text')
+    if len(query) > MAX_SEARCH_QUERY:
+        raise ApiError(400, f'the search is longer than {MAX_SEARCH_QUERY} characters')
     terms = []
-    for m in _SEARCH_TERM.finditer(query or ''):
+    for m in _SEARCH_TERM.finditer(query):
         neg, field, quoted, bare = m.group(1), m.group(2) or '', m.group(3), m.group(4) or ''
         is_quoted = quoted is not None
         value = (quoted if is_quoted else bare).strip()
         if field and field.lower() not in SEARCH_FIELDS:
             value, field, is_quoted = f'{field}:{value}', '', False  # "http://x" or "foo:bar": not a field, just text
         if value:
+            if len(value) > MAX_SEARCH_VALUE:
+                raise ApiError(400, f'a search term is longer than {MAX_SEARCH_VALUE} characters')
             terms.append((bool(neg), field.lower() or None, value, is_quoted))
+    if len(terms) > MAX_SEARCH_TERMS:
+        raise ApiError(400, f'a search may have at most {MAX_SEARCH_TERMS} terms')
     return terms
 
 
@@ -1700,7 +1722,7 @@ def search_hosts(ctx, slug, params):
     for neg, field, value, quoted in terms:
         if field and not quoted and ',' in value:
             q = Q()
-            for part in (p.strip() for p in value.split(',') if p.strip()):
+            for part in [p.strip() for p in value.split(',') if p.strip()][:MAX_SEARCH_TERMS]:
                 q |= _term_filter(field, part, project)
         else:
             q = _term_filter(field, value, project)
@@ -2471,8 +2493,9 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             updated += 1
         except ApiError as e:
             failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
-        except Exception as e:  # noqa: BLE001 - one bad row must never fail the rest of the batch
-            failed.append({'kind': kind, 'id': finding_id, 'error': str(e)})
+        except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
+            logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
+            failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
     activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
     return {'updated': updated, 'failed': failed}
 

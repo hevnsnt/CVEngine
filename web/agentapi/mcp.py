@@ -4,6 +4,7 @@ Tools are thin wrappers over agentapi.services, so they inherit the same
 tenancy scoping, role checks and read-only-token rules as the REST API.
 """
 import json
+import logging
 
 from django.http import HttpResponse, JsonResponse
 from django.core.exceptions import RequestDataTooBig
@@ -12,6 +13,8 @@ from agentapi import host_manage as hosts
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi.services import ApiError, Ctx
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_VERSIONS = ('2025-06-18', '2025-03-26', '2024-11-05')
 SERVER_INFO = {'name': 'cvengine', 'version': '1.0.0'}
@@ -253,8 +256,9 @@ def call_tool(ctx, name, arguments):
         svc.require_write_token(ctx)
     try:
         return handler(ctx, arguments or {})
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ApiError(400, f'bad arguments: {exc}')
+    except (KeyError, TypeError, ValueError, AttributeError):
+        logger.warning('MCP tool %s called with invalid arguments', name, exc_info=True)
+        raise ApiError(400, 'bad arguments: a field is missing or has the wrong type')
 
 
 def handle_message(ctx, msg):

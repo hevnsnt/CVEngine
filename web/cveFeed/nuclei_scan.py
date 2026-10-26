@@ -289,17 +289,18 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
 def scan_targets(scan):
     """Hostnames, IPs and (host, port) pairs discovered for ``scan``."""
     from startScan.models import Subdomain, open_ports
-    from targetApp.target_types import is_scannable_ip, resolves_to_blocked
+    from targetApp.target_types import blocked_names, is_scannable_ip
     from cveFeed.exclusions import excluded_names, normalize
     hostnames, ips, ports = set(), set(), set()
     banned = excluded_names(scan.domain.project_id)  # hosts the organization excluded for good: never a target
     from cveFeed.archive_rediscovery import archived_names
     banned = banned | archived_names(scan.domain.project_id)
-    for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
-        if banned and normalize(sub.name) in banned:
-            continue
-        # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside
-        if resolves_to_blocked(sub.name):
+    subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
+            if not (banned and normalize(s.name) in banned)]
+    # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
+    pointing_inside = blocked_names([s.name for s in subs])
+    for sub in subs:
+        if sub.name in pointing_inside:
             continue
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():

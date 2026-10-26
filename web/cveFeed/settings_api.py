@@ -506,16 +506,16 @@ def factory_reset_get(request):
 def factory_reset_post(request):
     """Wipe the instance back to a new install. Needs the exact phrase and the administrator's password (a few wrong
     passwords lock the button for ten minutes), and refuses while scans are running unless told to go ahead."""
-    from django.core.cache import cache
     from cveFeed import factory_reset
+    from tenancy import throttle
     data = _body(request)
     if data.get('confirm') != factory_reset.CONFIRM_PHRASE:
         raise SettingsError(400, f'type {factory_reset.CONFIRM_PHRASE} exactly to confirm')
     key = f'factory-reset-fail:{request.user.pk}'
-    if cache.get(key, 0) >= RESET_MAX_FAILURES:
+    if throttle.exceeded(key, RESET_MAX_FAILURES):
         raise SettingsError(429, 'too many wrong passwords; try again in a few minutes')
     if not request.user.check_password(str(data.get('password') or '')):
-        cache.set(key, cache.get(key, 0) + 1, RESET_LOCK_SECONDS)
+        throttle.count(key, RESET_LOCK_SECONDS)
         raise SettingsError(403, 'that is not your password')
     running = factory_reset.running_scans()
     if running and not data.get('force'):

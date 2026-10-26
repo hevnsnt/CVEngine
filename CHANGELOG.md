@@ -4,6 +4,20 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Security
+
+Fixes from an adversarial review of the whole code base.
+
+- **The sign-in form can no longer be used to guess passwords.** Wrong passwords are counted per address and name, per address and per name (5, 30 and 50 in five minutes); past a limit the form answers 429 before it checks the password, and a right password clears the pair's count. Changing a password uses the same counters, and so does the factory reset.
+- **Pasted target lists and searches are bounded.** Parsing a list was quadratic on a long run of `[` and ran before authorization; it is linear now, with size caps for the paste and each token. One request can never add more targets than the cap even when the last range is large, and a search accepts at most 15 terms, 200 characters each, 1000 in all.
+- **Wrong-typed API fields give a clean 400** (REST and MCP) instead of a 500 or an exception message, and the bulk remediation call no longer returns raw exception text.
+- **`system_status` shows non-admins only whether scanning is paused and the update phase.** Who paused it, why, the last error and the instance-wide running count are for App Admins.
+- **Nuclei templates may not use YAML anchors or aliases.** A few hundred bytes of nested aliases hung the safety gate (and could exhaust memory). Installed templates that use an anchor are skipped like any template that fails the policy.
+- **Page analysis cannot be stalled by a hostile page.** The generator, script and login-form patterns scanned a page in quadratic time; they now read one tag at a time.
+- **Mail-hygiene checks have a budget.** An SPF include tree stops after 50 lookups, and the EPSS feed is refused if it expands past 512 MB.
+- **The SSRF filter covers more addresses.** IPv6 forms that carry an IPv4 address (NAT64, 6to4, IPv4-compatible) are judged by that address, and the Azure, Oracle, Alibaba and AWS IPv6 metadata addresses, Teredo, benchmarking and reserved ranges are always refused. Name checks now run in parallel with a per-name timeout and an overall budget.
+- **The Netlas key is no longer written to the log, the Command table or the history file.**
+
 ### Changed
 
 - **CI runs the test suite in parallel.** `manage.py test --parallel` now works: a test runner (`reNgine/test_runner.py`, the project's `TEST_RUNNER`) gives every worker two Redis databases of its own, so one worker's `cache.clear()` or held lock can no longer break a test in another (up to 7 workers). On a 4-core machine the suite went from 543 seconds to 213 seconds. CI uses `--parallel auto` and installs `tblib` so a failure in a worker shows its real traceback. A normal one-process run is unchanged.

@@ -1,7 +1,8 @@
 """One read-only snapshot of the instance for the REST API and MCP: is it healthy, what is queued and running, how much memory
 and disk is left, and how big the inventory is.
 
-Anyone may read the inventory part (their own projects' targets, hosts, scans and open findings). The infrastructure part
+Anyone may read the inventory part (their own projects' targets, hosts, scans and open findings) and whether scanning is paused
+or an update is running. The infrastructure part
 (database and broker, queue depths, workers, schedules, memory, disk, feeds, AI budget) belongs to an App Admin: it describes the
 whole server, not a project, so for anyone else it is left out and ``system_note`` says so.
 
@@ -218,19 +219,23 @@ def _system(user, problems, notes):
 
 def system_status(ctx):
     problems, notes = [], []
+    admin = ctx.user.is_superuser
     scanning = _probe(problems, 'scan control', _scanning)
     if scanning.get('paused'):
-        notes.append('scanning is paused' + (f": {scanning['reason']}" if scanning.get('reason') else ''))
+        notes.append('scanning is paused' + (f": {scanning['reason']}" if admin and scanning.get('reason') else ''))
     update = _probe(problems, 'update', _update)
     if update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
+    if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
+        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error') if k in scanning}
+        update = {k: update.get(k) for k in ('phase', 'error') if k in update}
     projects = _probe(problems, 'inventory', lambda: _projects(ctx))
     totals = _totals(projects) if isinstance(projects, list) else None
     if totals and totals['scans_stalled']:
         problems.append(f"{totals['scans_stalled']} scan(s) marked running for too long (stalled)")
     out = {'at': timezone.now().isoformat(), 'version': _version(), 'scanning': scanning, 'update': update,
            'totals': totals, 'projects': projects if isinstance(projects, list) else []}
-    if ctx.user.is_superuser:
+    if admin:
         out['system'] = _system(ctx.user, problems, notes)
         out['scope'] = 'instance'
     else:

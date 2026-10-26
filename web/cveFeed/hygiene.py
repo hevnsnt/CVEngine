@@ -26,6 +26,8 @@ TLS_WORKERS = 20
 DKIM_SELECTORS = ('default', 'google', 'selector1', 'selector2', 'k1', 'k2', 'k3', 's1', 's2', 'dkim', 'mail', 'smtp',
                   'mandrill', 'mxvault', 'zoho', 'protonmail', 'fm1', 'fm2')
 SPF_LOOKUP_LIMIT = 10
+SPF_MAX_QUERIES = 50  # records fetched for one domain: the owner of a scanned domain controls how wide its include tree is
+SPF_MAX_TERMS = 200  # terms read from one record
 EXPIRY_BANDS = ((0, CRITICAL, 'has expired'), (7, HIGH, 'expires within 7 days'),
                 (30, MEDIUM, 'expires within 30 days'), (60, LOW, 'expires within 60 days'))
 
@@ -86,14 +88,14 @@ def evaluate_spf(domain, txt_records, has_mx, lookup_count=None):
 def count_spf_lookups(domain, fetch_txt, depth=0, seen=None):
     """DNS-lookup cost of a domain's SPF record, following include/redirect (a, mx, ptr, exists, include, redirect each cost one)."""
     seen = seen if seen is not None else set()
-    if depth > 10 or domain in seen:
-        return 0
+    if depth > 10 or domain in seen or len(seen) >= SPF_MAX_QUERIES:
+        return 0  # past the budget the count is already far over the limit of 10
     seen.add(domain)
     spf = next((_txt_value(r) for r in fetch_txt(domain) if _txt_value(r).lower().startswith('v=spf1')), None)
     if not spf:
         return 0
     total = 0
-    for term in spf.split()[1:]:
+    for term in spf.split()[1:SPF_MAX_TERMS]:
         t = term.lstrip('+-~?').lower()
         if t.startswith(('include:', 'redirect=')):
             total += 1 + count_spf_lookups(re.split('[:=]', t, 1)[1], fetch_txt, depth + 1, seen)
