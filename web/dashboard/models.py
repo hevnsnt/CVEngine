@@ -87,6 +87,8 @@ class AIProviderSettings(models.Model):
 	# How many times a day the model may be asked to plan validation checks (each is a paid request): in total, and for one project.
 	plan_daily_total = models.PositiveIntegerField(default=200)
 	plan_daily_per_project = models.PositiveIntegerField(default=20)
+	# How many CVEs a day the model may write or revise guidance for (each is a paid request); the catalogue is covered in this many days.
+	cve_guidance_daily = models.PositiveIntegerField(default=25)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')

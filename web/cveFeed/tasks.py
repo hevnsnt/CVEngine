@@ -1238,6 +1238,55 @@ def author_cve_detections():
     return out
 
 
+@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue")
+def build_cve_seed():
+    """Write the whole catalog with its shared detection records to the exports folder (Settings > CVE seed), ready to publish."""
+    import os
+    from django.core.cache import cache
+    from cveFeed import activity, detection_author, seed
+    from cveFeed.settings_api import SEED_BUILDING, SEED_NAME, seed_dir
+    handle = activity.log('inventory', 'Building the CVE seed', status='running')
+    try:
+        while detection_author.author_rules(batch=5000):
+            pass
+        detection_author.refresh_rules(batch=5000)
+        os.makedirs(seed_dir(), exist_ok=True)
+        manifest = seed.export_seed(os.path.join(seed_dir(), SEED_NAME))
+        activity.settle(handle, 'done', message=f"Built the CVE seed: {manifest['count']} CVEs, {manifest['with_detection']} with a detection record")
+        return {k: manifest[k] for k in ('count', 'with_detection', 'bytes')}
+    except Exception:
+        activity.settle(handle, 'failed', message='Building the CVE seed failed; see the worker log')
+        raise
+    finally:
+        cache.delete(SEED_BUILDING)
+
+
+@app.task(name="write_cve_guidance_now", bind=False, queue="cve_feed_queue")
+def write_cve_guidance_now(count=200):
+    """An administrator asked the model to write guidance for the next ``count`` CVEs now (Settings > AI model), whatever is left of the
+    day's budget. Matchable CVEs first. Works in rounds of 50 so progress shows and a stop request is honoured between rounds."""
+    from cveFeed import activity, detection_author
+    from reNgine.ai_settings import get_configured_provider
+    provider = get_configured_provider()
+    if provider is None:
+        return {'written': 0, 'error': 'no AI provider is configured'}
+    detection_author.author_rules(batch=5000)
+    done, count = 0, max(1, min(int(count), 5000))
+    handle = activity.log('inventory', f'Writing CVE guidance for up to {count} CVEs', status='running')
+    try:
+        while done < count:
+            wrote = detection_author.author_with_ai(provider, per_run=min(50, count - done), workers=4, within_budget=False)
+            if not wrote:
+                break
+            done += wrote
+    finally:
+        activity.settle(handle, 'done', message=f'Wrote CVE guidance for {done} CVEs')
+    from cveFeed import locality
+    locality.refresh()
+    locality.close_local_matches()
+    return {'written': done}
+
+
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")
 def report_resources():
     """Every 30 seconds: publish this container's memory and budget so Settings > Resources (served by another

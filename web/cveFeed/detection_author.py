@@ -16,7 +16,7 @@ from cveFeed.models import CVEDetection, CVEEntry
 
 logger = logging.getLogger(__name__)
 
-DEFAULTS = {'DETECTION_RULES_BATCH': 500, 'DETECTION_AI_PER_DAY': 25, 'DETECTION_AI_PER_RUN': 5}
+DEFAULTS = {'DETECTION_RULES_BATCH': 500, 'DETECTION_AI_PER_DAY': 25}
 AI_RETRY_AFTER = datetime.timedelta(days=7)
 AI_ID_PREFIX = 'ai-'
 
@@ -153,10 +153,43 @@ def build_user_prompt(cve, current=None, guidance=''):
     return text
 
 
+def daily_limit():
+    """How many CVEs the model may write or revise a day: Settings > AI model, else CVENGINE_DETECTION_AI_PER_DAY, else the default."""
+    try:
+        from dashboard.models import AIProviderSettings
+        cfg = AIProviderSettings.objects.first()
+        if cfg is not None:
+            return cfg.cve_guidance_daily
+    except Exception:  # noqa: BLE001 - a settings problem must not stop authoring: fall back to the environment
+        logger.warning('could not read the CVE guidance budget', exc_info=True)
+    return limit('DETECTION_AI_PER_DAY')
+
+
+def per_run_for(daily):
+    """The periodic task runs every 30 minutes: its share of the day's budget, at least one and at most 100 a run."""
+    return max(1, min(100, -(-daily // 48))) if daily else 0
+
+
 def ai_budget_left(now=None):
     now = now or timezone.now()
     used = CVEDetection.objects.filter(ai_attempted_at__gte=now - datetime.timedelta(days=1)).count()
-    return max(0, limit('DETECTION_AI_PER_DAY') - used)
+    return max(0, daily_limit() - used)
+
+
+def progress():
+    """Where the catalogue stands: how many CVEs there are, whose guidance rules wrote, the model wrote, a person wrote, how many the model
+    has still to read (matchable ones first), and how many it handled in the last day."""
+    from django.db.models import Count, Q
+    totals = CVEEntry.objects.aggregate(total=Count('id'), local=Count('id', filter=Q(local_only=True)))
+    by_source = dict(CVEDetection.objects.exclude(strategy={}).values_list('source').annotate(n=Count('id')))
+    now = timezone.now()
+    waiting = CVEDetection.objects.filter(ai_attempted_at__isnull=True).exclude(source='manual')
+    daily = daily_limit()
+    pending = waiting.count() + CVEEntry.objects.filter(detection__isnull=True).count()
+    return {'cves': totals['total'], 'local_only': totals['local'], 'rules': by_source.get('rules', 0), 'ai': by_source.get('ai', 0),
+            'manual': by_source.get('manual', 0), 'ai_pending': pending,
+            'ai_last_day': CVEDetection.objects.filter(ai_attempted_at__gte=now - datetime.timedelta(days=1)).count(),
+            'daily_budget': daily, 'days_left': (-(-pending // daily) if daily else None)}
 
 
 def _claim_ai(row, now):
@@ -237,19 +270,41 @@ def revise_with_guidance(row, provider, guidance):
     return _apply_answer(row, strategy, problems, provider, input_hash(cve)), problems
 
 
-def author_with_ai(provider, per_run=None):
-    """Spend the AI budget on the hottest unanswered CVEs. Returns how many records gained AI checks."""
-    per_run = limit('DETECTION_AI_PER_RUN') if per_run is None else per_run
-    allowed = min(per_run, ai_budget_left())
+def _enrich_in_thread(row_id, provider):
+    from django.db import connection
+    try:
+        row = CVEDetection.objects.select_related('cve_entry').get(pk=row_id)
+        return bool(enrich_with_ai(row, provider))
+    except Exception:  # noqa: BLE001 - one CVE must not stop the rest
+        logger.exception('detection authoring failed for record %s', row_id)
+        return False
+    finally:
+        connection.close()  # a worker thread owns its own database connection
+
+
+def author_with_ai(provider, per_run=None, workers=1, within_budget=True):
+    """Spend the AI budget: first the CVEs a scan can match (attackers' favourites first: known exploited, public exploit, exploit
+    probability, score), then the ones only usable from the host itself. Every tier is covered; the daily budget is the only limit.
+    ``workers`` asks the model for several CVEs at once. Returns how many records gained the model's answer."""
+    per_run = per_run_for(daily_limit()) if per_run is None else per_run
+    allowed = min(per_run, ai_budget_left()) if within_budget else per_run  # an administrator's explicit "write N now" is not held to the day's budget
     if allowed <= 0:
         return 0
     now = timezone.now()
     due = Q(ai_attempted_at__isnull=True) | (Q(ai_attempted_at__lt=now - AI_RETRY_AFTER) & Q(ai_model=''))
-    ids = _priority(CVEEntry.objects.filter(hot_q(), detection__isnull=False, local_only=False).filter(
-        Q(detection__ai_attempted_at__isnull=True) | (Q(detection__ai_attempted_at__lt=now - AI_RETRY_AFTER) & Q(detection__ai_model='')))
-        .exclude(detection__source='manual')).values_list('detection__id', flat=True)[:allowed]
+    pool = CVEEntry.objects.filter(detection__isnull=False).filter(
+        Q(detection__ai_attempted_at__isnull=True) | (Q(detection__ai_attempted_at__lt=now - AI_RETRY_AFTER) & Q(detection__ai_model=''))
+    ).exclude(detection__source='manual')
+    ids = _priority(pool).order_by('local_only', F('kev').desc(nulls_last=True), F('exploit_db').desc(nulls_last=True),
+                                   F('epss_reached').desc(nulls_last=True), F('cvss').desc(nulls_last=True), '-published_at', '-id'
+                                   ).values_list('detection__id', flat=True)[:allowed]
+    ids = list(ids)
+    if workers > 1 and len(ids) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool_:
+            return sum(pool_.map(lambda i: _enrich_in_thread(i, provider), ids))
     added = 0
-    for row in CVEDetection.objects.filter(due, pk__in=list(ids)).select_related('cve_entry'):
+    for row in CVEDetection.objects.filter(due, pk__in=ids).select_related('cve_entry'):
         try:
             added += bool(enrich_with_ai(row, provider))
         except Exception:  # noqa: BLE001 - one CVE must not stop the rest
@@ -272,7 +327,7 @@ def author_pending(provider=None):
     out = {'rules': author_rules(), 'refreshed': refresh_rules(), 'ai': 0, 'revisions_queued': 0}
     if provider is not None:
         out['revisions_queued'] = mark_changed_for_revision()
-        out['ai'] = author_with_ai(provider)
+        out['ai'] = author_with_ai(provider, workers=4)
     return out
 
 

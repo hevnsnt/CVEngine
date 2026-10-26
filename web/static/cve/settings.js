@@ -191,8 +191,19 @@ const sections = {
       min: "0",
       max: "100000",
     });
+    const guideDaily = text(s.cve_guidance_daily, { type: "number", min: "0", max: "100000" });
+    const gp = s.cve_guidance;
+    const guideNote = el("p", "note", gp
+      ? `${gp.cves.toLocaleString()} CVEs: guidance written by rules for ${gp.rules.toLocaleString()}, by the model for ${gp.ai.toLocaleString()}, by a person for ${gp.manual.toLocaleString()}. ${gp.local_only.toLocaleString()} are only usable from the host itself and never matched. ${gp.ai_pending.toLocaleString()} still wait for the model${gp.days_left ? `: about ${gp.days_left.toLocaleString()} day${gp.days_left === 1 ? "" : "s"} at ${gp.daily_budget.toLocaleString()} a day` : ""}. The model handled ${gp.ai_last_day.toLocaleString()} in the last day.`
+      : "CVE guidance progress is not available yet.");
+    const guideNow = text("200", { type: "number", min: "1", max: "5000" });
+    const guideRun = button("Write now", async () => {
+      const r = await api("POST", "cve_guidance/run", { count: guideNow.value });
+      guideNote.textContent = `Queued: the model writes guidance for the next ${r.queued} CVEs. Progress shows here after a refresh.`;
+    }, "btn ghost sm");
     const save = async () => {
       await api("PUT", "ai", {
+        cve_guidance_daily: guideDaily.value,
         plan_daily_total: planTotal.value,
         plan_daily_per_project: planProject.value,
         provider: provider.value,
@@ -220,6 +231,14 @@ const sections = {
         enabled.wrap,
         field("Validation planning requests per day, all projects", planTotal),
         field("Validation planning requests per day, one project", planProject),
+        (() => {
+          const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
+          f.append(guideNote);
+          const row = el("div", "tools");
+          row.append(el("span", "note", "Or write the next"), guideNow, el("span", "note", "CVEs now, whatever is left of today's budget:"), guideRun);
+          f.append(row);
+          return f;
+        })(),
         button("Save", async () => {
           await save();
           toast("Saved");
@@ -234,6 +253,37 @@ const sections = {
           },
           "btn ghost",
         ),
+      ),
+    );
+    const seedState = await api("GET", "cve_seed");
+    const seedNote = el("p", "note", "");
+    const showSeed = (st) => {
+      const b = st.built;
+      seedNote.textContent = st.building
+        ? "Building the seed: this takes a few minutes. Refresh to see it."
+        : b
+          ? `Last build ${new Date(b.generated_at).toLocaleString()}: ${b.count.toLocaleString()} CVEs (fire ${b.tiers.fire.toLocaleString()}, smoke ${b.tiers.smoke.toLocaleString()}, ice ${b.tiers.ice.toLocaleString()}), ${b.with_detection.toLocaleString()} with guidance, ${Math.round(b.bytes / 1048576)} MB.`
+          : "No seed has been built on this server yet.";
+    };
+    showSeed(seedState);
+    const seedLinks = el("div", "tools");
+    if (seedState.file) {
+      seedLinks.append(
+        el("a", "btn ghost sm", "Download the seed", { href: "/cve/api/settings/cve_seed/download/seed" }),
+        el("a", "btn ghost sm", "Download its manifest", { href: "/cve/api/settings/cve_seed/download/manifest" }),
+      );
+    }
+    m.append(
+      el("div", "", null, { style: "height:16px" }),
+      card(
+        "CVE catalog seed",
+        el("p", "note", "A new install loads this file on first start, so it begins with every CVE and its guidance instead of rebuilding them one by one. Build it here once the guidance is written, then attach both files to the cve-seed release on GitHub (scripts/publish-cve-seed.sh does it from a machine with gh)."),
+        seedNote,
+        button("Build the seed", async () => {
+          showSeed(await api("POST", "cve_seed/build").then(() => ({ building: true })));
+          toast("Building the seed");
+        }),
+        seedLinks,
       ),
     );
     m.append(

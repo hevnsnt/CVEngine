@@ -226,3 +226,140 @@ class IntakeTests(TestCase):
 			svc.update_cve_detection(ctx, cve.cve_id, strategy={'local_checks': [{'kind': 'shell', 'params': {'command': 'id'}}]})
 		with self.assertRaises(svc.ApiError):
 			svc.update_cve_detection(ctx, cve.cve_id)
+
+
+class CatalogueTests(TestCase):
+	def test_every_tier_is_covered_matchable_ones_first_workers_work_and_progress_counts(self):
+		from unittest import mock
+		from dashboard.models import AIProviderSettings
+		now = timezone.now()
+		hot = CVEEntry.objects.create(cve_id='CVE-2099-7201', title='h', affected=NGINX, cvss=9.8, kev=True, published_at=now, original_description='d')
+		cold = CVEEntry.objects.create(cve_id='CVE-2099-7202', title='c', affected=NGINX, cvss=3.1, published_at=now, original_description='d')
+		local = CVEEntry.objects.create(cve_id='CVE-2099-7203', title='l', affected=NGINX, cvss=9.8, kev=True, local_only=True, published_at=now,
+										original_description='d')
+		detection_author.author_rules(batch=10)
+		cfg = AIProviderSettings.objects.create(cve_guidance_daily=3)
+		self.assertEqual((detection_author.daily_limit(), detection_author.per_run_for(3), detection_author.per_run_for(0)), (3, 1, 0))
+		self.assertEqual(detection_author.per_run_for(5000), 100)
+		asked = []
+
+		class P(Provider):
+			def complete(self, system, user):
+				asked.append(user)
+				return answer(scope='local_only' if 'CVE-2099-7203' in user else 'external', scope_reason='r')
+		self.assertEqual(detection_author.author_with_ai(P(''), per_run=1), 1)
+		self.assertIn('CVE-2099-7201', asked[0])  # matchable and hottest first
+		# worker threads open their own database connections, which a test's transaction hides: check what they are given instead
+		given = []
+		with mock.patch.object(detection_author, '_enrich_in_thread', side_effect=lambda i, p: given.append(i) or True):
+			self.assertEqual(detection_author.author_with_ai(P(''), per_run=5, workers=3), 2)
+		order = list(CVEDetection.objects.filter(pk__in=given).values_list('cve_entry__cve_id', flat=True))
+		self.assertEqual(sorted(order), ['CVE-2099-7202', 'CVE-2099-7203'])
+		self.assertEqual(CVEDetection.objects.get(pk=given[0]).cve_entry.cve_id, 'CVE-2099-7202')  # the matchable one before the local-only one
+		self.assertEqual(detection_author.author_with_ai(P(''), per_run=5), 2)  # (spend them inline so the budget and progress below are real)
+		# the day's budget is spent; an administrator's explicit count is not held to it
+		self.assertEqual(detection_author.ai_budget_left(), 0)
+		more = CVEEntry.objects.create(cve_id='CVE-2099-7204', title='m', affected=NGINX, cvss=9.8, kev=True, published_at=now, original_description='d')
+		detection_author.author_rules(batch=10)
+		self.assertEqual(detection_author.author_with_ai(P(''), per_run=5), 0)
+		self.assertEqual(detection_author.author_with_ai(P(''), per_run=5, within_budget=False), 1)
+		got = detection_author.progress()
+		self.assertEqual((got['cves'], got['local_only'], got['ai'], got['ai_pending'], got['daily_budget']), (4, 1, 4, 0, 3))
+		cfg.delete()
+		self.assertEqual(detection_author.daily_limit(), 25)  # no setting row: the environment, then the default
+
+	def test_the_settings_api_carries_the_budget_and_progress_and_write_now_is_validated(self):
+		from unittest import mock
+		from cveFeed import settings_api
+		from dashboard.models import AIProviderSettings
+		CVEEntry.objects.create(cve_id='CVE-2099-7301', title='x', affected=NGINX, published_at=timezone.now(), original_description='d')
+		cfg = AIProviderSettings.objects.create(enabled=False)
+		admin = User.objects.create_user('cg-admin', password='x', is_superuser=True)
+
+		class R:
+			user = admin
+			body = b'{"cve_guidance_daily": 120}'
+			method = 'PUT'
+		got = settings_api.ai_put(R())
+		self.assertEqual(got['cve_guidance_daily'], 120)
+		self.assertEqual(got['cve_guidance']['cves'], 1)
+		R.body = b'{"cve_guidance_daily": -3}'
+		with self.assertRaises(settings_api.SettingsError):
+			settings_api.ai_put(R())
+		R.body = b'{"count": 10}'
+		with self.assertRaises(settings_api.SettingsError) as cm:  # the model is off
+			settings_api.cve_guidance_run(R())
+		self.assertEqual(cm.exception.status, 409)
+		AIProviderSettings.objects.update(enabled=True)
+		with mock.patch('cveFeed.tasks.write_cve_guidance_now.delay') as delay:
+			self.assertEqual(settings_api.cve_guidance_run(R()), {'queued': 10})
+		delay.assert_called_once_with(10)
+		R.body = b'{"count": 99999}'
+		with self.assertRaises(settings_api.SettingsError):
+			settings_api.cve_guidance_run(R())
+
+
+class SeedAdminTests(TestCase):
+	def setUp(self):
+		import tempfile
+		from unittest import mock
+		self.dir = tempfile.mkdtemp()
+		patcher = mock.patch('cveFeed.settings_api.seed_dir', return_value=self.dir)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		self.admin = User.objects.create_user('seed-admin', password='x', is_superuser=True)
+		self.client.force_login(self.admin)
+		from django.core.cache import cache
+		cache.delete('cvengine:cve-seed-building')
+
+	def test_build_queues_once_and_status_and_download_follow_the_files(self):
+		import os
+		from unittest import mock
+		from cveFeed import seed
+		self.assertEqual(self.client.get('/cve/api/settings/cve_seed').json(), {'built': None, 'building': False, 'file': None})
+		self.assertEqual(self.client.get('/cve/api/settings/cve_seed/download/seed').status_code, 404)
+		with mock.patch('cveFeed.tasks.build_cve_seed.delay') as delay:
+			self.assertEqual(self.client.post('/cve/api/settings/cve_seed/build', content_type='application/json').json(), {'building': True})
+			self.assertEqual(self.client.post('/cve/api/settings/cve_seed/build', content_type='application/json').status_code, 409)
+		delay.assert_called_once()
+		self.assertTrue(self.client.get('/cve/api/settings/cve_seed').json()['building'])
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-7401', title='x', affected=NGINX, published_at=timezone.now(), original_description='d',
+									  cvss_vector='CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')
+		detection_author.author_rules(batch=5)
+		manifest = seed.export_seed(os.path.join(self.dir, 'cve-seed.jsonl.gz'))
+		self.assertEqual((manifest['count'], manifest['with_detection']), (1, 1))
+		status = self.client.get('/cve/api/settings/cve_seed').json()
+		self.assertEqual((status['built']['count'], status['file']), (1, 'cve-seed.jsonl.gz'))
+		got = self.client.get('/cve/api/settings/cve_seed/download/seed')
+		self.assertEqual(got.status_code, 200)
+		self.assertIn('attachment', got['Content-Disposition'])
+		body = b''.join(got.streaming_content)
+		self.assertEqual(len(body), manifest['bytes'])
+		got = self.client.get('/cve/api/settings/cve_seed/download/manifest')
+		self.assertEqual(json.loads(b''.join(got.streaming_content))['sha256'], manifest['sha256'])
+		self.client.force_login(User.objects.create_user('seed-user', password='x'))
+		self.assertEqual(self.client.get('/cve/api/settings/cve_seed').status_code, 403)  # App Admin only
+		self.assertEqual(self.client.get('/cve/api/settings/cve_seed/download/seed').status_code, 403)
+		self.client.logout()
+		self.assertIn(self.client.get('/cve/api/settings/cve_seed').status_code, (302, 401, 403))
+
+	def test_the_guidance_survives_the_seed_round_trip(self):
+		import os
+		from cveFeed import seed
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-7402', title='x', affected=NGINX, published_at=timezone.now(), original_description='d',
+									  cvss_vector='CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', kev=True)
+		detection_author.author_rules(batch=5)
+		row = CVEDetection.objects.get(cve_entry=cve)
+		detection_author.enrich_with_ai(row, Provider(ai_with_guidance()))
+		path = os.path.join(self.dir, 'cve-seed.jsonl.gz')
+		seed.export_seed(path)
+		CVEEntry.objects.all().delete()
+		counts = seed.import_seed(path)
+		self.assertEqual((counts['created'], counts['detections']), (1, 1))
+		back = CVEDetection.objects.get(cve_entry__cve_id='CVE-2099-7402')
+		self.assertEqual(back.source, 'ai')
+		self.assertTrue(back.strategy['identify'].startswith('nginx 1.0.0'))
+		self.assertEqual(back.strategy['confirm_steps'][0].split()[0], 'Read')
+		self.assertTrue(back.strategy['local_checks'][0]['commands'])  # re-rendered here, never taken from the file
+		from cveFeed import locality
+		self.assertEqual(locality.refresh(), 1)  # a CVE with no classification yet is classified after an import
