@@ -58,3 +58,4 @@ echo 'Logs: journalctl -u cvengine-auto-deploy    Remove: scripts/install-auto-d
 if crontab -l 2>/dev/null | grep -qF '# cvengine-auto-update'; then
     echo 'Note: the approval-based updater (scripts/install-updater.sh) is also installed; remove it with scripts/install-updater.sh --remove so only one updater runs.'
 fi
+echo 'The timer deploys new master commits only while Settings > Updates is set to Automatic; with the default, Manual, it does nothing.'

@@ -1,10 +1,12 @@
 # Updates
 
+**Nothing changes the code of an install on its own.** Under Settings, Updates, *How updates are installed* is **Manual** by default: CVEngine tells you when a new version exists and installs nothing until an administrator clicks Approve. Choose **Automatic** there, and only then, to have a found update approved for you; automatic deployment (below) deploys only while it is set to Automatic too. The choice is stored in `web/.update-mode`, and a missing or unreadable file counts as Manual.
+
 Three ways to stay current. Pick one. Running `install.sh` again is not an update: it rebuilds the code you already have checked out and does not fetch anything new.
 
 | Way | Who acts | Script | Best for |
 | --- | --- | --- | --- |
-| [Automatic deployment](#automatic-deployment) | nobody | `scripts/update.sh`, started by a timer | A server that should always run the latest `master` |
+| [Automatic deployment](#automatic-deployment) | nobody, once Settings is set to Automatic | `scripts/update.sh`, started by a timer | A server that should always run the latest `master` |
 | [Approval in the app](#approval-in-the-app) | an administrator clicks Approve | `scripts/apply-update.sh`, started by cron | Installs that want a human in the loop |
 | [By hand](#by-hand) | you run one command | `scripts/update.sh` | Everything else |
 
@@ -29,7 +31,7 @@ scripts/install-auto-deploy.sh            # checks master every 3 minutes
 scripts/install-auto-deploy.sh --remove   # turn it off
 ```
 
-The timer first fires 5 minutes after boot, then 3 minutes after each run ends. When `origin/master` moves ahead of the checkout, `scripts/auto-deploy.sh`:
+The timer first fires 5 minutes after boot, then 3 minutes after each run ends. It does nothing while Settings, Updates is set to Manual (the default; the journal says so once). When it is Automatic and `origin/master` moves ahead of the checkout, `scripts/auto-deploy.sh`:
 
 1. backs up the database and the secret key. The last 7 database dumps are kept in `.git/cvengine-auto-deploy/backups`. The secret key is one file, `backups/secret`, replaced when it changes;
 2. runs `scripts/update.sh --stop-scans`, which stops every running and queued scan, applies and verifies the update, and queues the stopped discovery scans again.
@@ -38,7 +40,7 @@ With backups turned on (the default) it never deploys without one. A failed back
 
 ## Approval in the app
 
-cvENGINE checks its GitHub repository twice a day (05:23 and 17:23 UTC) and tells superusers when something newer exists. It installs nothing by itself.
+cvENGINE checks its GitHub repository twice a day (05:23 and 17:23 UTC) and tells superusers when something newer exists. In Manual mode (the default) it installs nothing by itself; in Automatic mode it approves what the check finds, as an administrator would, and the host script below installs it.
 
 1. **Check.** The check reads the head of the configured branch (default `hevnsnt/CVEngine@master`) and compares it with the installed commit (the first line of `web/.commit`). `make up`, `make build`, `update.sh`, and `apply-update.sh` write it. A plain `docker compose up` does not, and the installed commit then shows as unknown. A private repository needs a fine-grained read-only token under **Settings, Updates, Update source**, stored write-only.
 2. **Ask.** A bar at the top of every page shows the newest commit message and how many commits are new. **Settings, Updates** lists up to 20 of them and is the only place to **Check now**. Superusers can approve, dismiss (offered while an update is available, until a newer commit appears), or check again.
@@ -97,6 +99,6 @@ For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. `
 
 - `master` holds released versions only. Each release is tagged (`v1.0`, `v1.1`, ...); pushing the tag, or running the Release workflow by hand, publishes the GitHub release with that version's section of the [changelog](../CHANGELOG.md) as its notes, plus the source archives and checksums (`.github/workflows/release.yml`). A patch such as `v1.0.1` keeps the notes of `v1.0` and adds its own short section at the end. The tag must match `web/.version`.
 - `develop` is the next version in progress (its `web/.version` may carry a `-dev` suffix). Changes go to `develop` by pull request, and `develop` is merged into `master` for a release.
-- Keep an installation on `master` (the default update source); `update.sh` and automatic deployment only work on `master`. Use `develop` only on a test server. Approving an update from another branch than the one checked out on the server (the branch set under Settings, Updates, Update source) makes the host script move its checkout to that branch first, as long as it is an upgrade: the branch must contain the installed commit and the local branch must not hold commits that are not on `origin`. A branch that does not exist, a detached checkout, a dirty checkout and a would-be downgrade are refused with the reason shown in Settings, Updates, and nothing moves. Migrations are never rolled back, which is why going back to an older branch is not done for you.
+- Keep an installation on `master` (the default update source); `update.sh` and automatic deployment only work on `master`. Use `develop` only on a test server. Approving an update from another branch than the one checked out on the server (the branch set under Settings, Updates, Update source) makes the host script move its checkout to that branch first, as long as it is an upgrade: the branch must contain the installed commit (or, when the histories differ, still have every database migration the installed code has) and the local branch must not hold commits that are not on `origin`. A branch that does not exist, a detached checkout, a dirty checkout and a would-be downgrade are refused with the reason shown in Settings, Updates, and nothing moves. Migrations are never rolled back, which is why going back to an older branch is not done for you.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).

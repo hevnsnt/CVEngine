@@ -78,6 +78,37 @@ def host_updater():
     return {'seen': True, 'alive': age <= HEARTBEAT_ALIVE_SECONDS, 'age_seconds': age}
 
 
+MODES = ('manual', 'auto')
+
+
+def read_mode():
+    """How updates are installed: ``manual`` (the default: nothing is installed until an administrator approves it) or ``auto`` (a new
+    version found by the check is approved for them). Kept in ``.update-mode`` beside the approval so the host scripts read the same
+    answer; a missing, unreadable or unexpected file is manual. Nothing changes the code of an install unless this says ``auto``."""
+    try:
+        with open(_file('.update-mode')) as f:
+            return 'auto' if f.read(16).strip() == 'auto' else 'manual'
+    except OSError:
+        return 'manual'
+
+
+def set_mode(mode):
+    if mode not in MODES:
+        raise UpdateError('the update mode must be manual or auto')
+    tmp = _file('.update-mode.tmp')
+    with open(tmp, 'w') as f:
+        f.write(mode + '\n')
+    os.replace(tmp, _file('.update-mode'))
+
+
+def auto_approve(row):
+    """In automatic mode, approve the version the check just found, as the administrator would have. Returns whether it did."""
+    if read_mode() != 'auto' or state(row)['status'] != 'available':
+        return False
+    approve(row, 'automatic')
+    return True
+
+
 def read_phase():
     """scripts/apply-update.sh's current progress ({phase, detail, scans_running, changed_at}), 'idle' when there is
     no phase file (no update has ever run, or the previous one's result was already superseded) or it cannot be
@@ -213,7 +244,7 @@ def approve(row, user):
         f.write(row.branch + '\n')
     os.replace(branch_tmp, _file('.update-branch'))
     os.replace(tmp, _file('.update-approved'))
-    row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, user.username, timezone.now()
+    row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, getattr(user, 'username', user), timezone.now()
     row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
     return row
 
@@ -249,6 +280,9 @@ def state(row):
     else:
         status = 'up_to_date'
     phase = read_phase()
+    # A phase older than the approval is the result of an earlier update (a failure from last time), not of this one.
+    if row.approved_at and phase['changed_at'] and datetime.fromisoformat(phase['changed_at']) < row.approved_at:
+        phase = {'phase': 'idle', 'detail': '', 'scans_running': None, 'changed_at': None}
     # Read live, not from the phase file: apply-update.sh's own pause/release calls can fail independently of the
     # phase it last wrote, and an admin's manual resume can clear it between runs without rewriting the phase file.
     control = ScanControl.current()
@@ -264,4 +298,5 @@ def state(row):
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
         'host_updater': host_updater(),
+        'mode': read_mode(),
     }

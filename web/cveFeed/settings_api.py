@@ -450,6 +450,16 @@ def updates_put(request):
         row.behind_by, row.commits, row.latest_date = None, [], None
         updater.cancel_approval(row)
     row.repo, row.branch = repo, branch
+    if 'mode' in data:
+        from cveFeed.admin_api import audit
+        mode = str(data['mode'])
+        if mode not in updater.MODES:
+            raise SettingsError(400, 'updates are installed manually or automatically')
+        if mode != updater.read_mode():
+            updater.set_mode(mode)
+            audit(request.user, 'update.mode_changed', mode)
+            if mode == 'manual' and row.approved_by == 'automatic':
+                updater.cancel_approval(row)  # an approval nobody gave is withdrawn when the administrator takes control back
     row.token = _text(data, 'token', row.token, secret=True)
     if 'enabled' in data:
         row.enabled = bool(data['enabled'])
@@ -461,6 +471,9 @@ def updates_check(request):
     from cveFeed import updater
     row = _update_row()
     updater.check(row)
+    if updater.auto_approve(row):
+        from cveFeed.admin_api import audit
+        audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by, mode='automatic')
     return updater.state(row)
 
 
