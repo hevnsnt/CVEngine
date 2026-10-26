@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+## v1.2.0 (2026-10-26)
+
+Update with the in-app updater (Settings > Updates) or `make up`. A release is only cut after an upgrade rehearsal: CI installs the previous version, seeds it with data (duplicate IP addresses included), updates it with the real update scripts, plain and behind a host proxy, and checks the site, the workers, the migrations and the data. This release adds database migrations; the update applies them and rolls back if one fails.
+
 ### Changed
 
 - **Scans can run every Nuclei template.** Settings > Scan engines has a new "Nuclei templates" switch. Off (the default), only templates that make plain GET, HEAD or OPTIONS requests run, as before. On, every template Nuclei ships runs, in the broad scans and when a CVE match is validated; the AI-written templates stay read-only and Nuclei's denial-of-service templates stay excluded. Changing it is recorded in the audit log and makes hosts due for a fresh pass with the new set.
@@ -12,6 +16,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **`scripts/update.sh` no longer refuses to update because of the stack's own ports.** Run by an ordinary user (a member of the `docker` group, not root), `ss` cannot name the process behind Docker's own listeners, so the port check took the stack's published port 443 for "an unknown process" and stopped the update before building anything. A port the running containers publish themselves is now recognized through `docker ps`; a port held by anything else still stops the update. Found by the upgrade rehearsal.
 - **The nuclei WAF and favicon templates no longer lose what they found.** Real hosts showed a technology named just `WAF` or `DNS WAF` (the template's own name, with the vendor that fired dropped), `favicon-detection` with the icon's hash stored as its *version*, and `AWS Service -`. The WAF and favicon templates now name the product by matcher, a favicon hash is no longer a version, and the dangling dash is gone.
 - **The node2shell / HTTP2Shell check (CVE-2026-111497) looks at every runtime that carries the decoder.** The Brotli decoder is compiled into Node.js, Bun and Envoy, but the check only considered hosts fingerprinted as Node.js or Express. It now also takes Bun, Envoy (and the Istio sidecars built on it) and the frameworks that run on Node (Next.js, Nuxt, NestJS, Fastify, Koa and others), and `CVENGINE_NODE2SHELL_SCOPE=all` checks every web host for what a name cannot show (a Python service using Brotli, a container base image). It stays off unless `CVENGINE_NODE2SHELL=1`, because it uploads about 23 MB to each host it checks.
 - **`make redis-auth` and `make rotate-field-key` keep the install's Compose layout.** They recreated services from `docker-compose.yml` alone, the mistake that took a host with an overlay down through the updater. They now use the files, env file and project from `CVENGINE_COMPOSE_*` (environment or `.env`), else those the running stack was started with (`scripts/compose-layout.sh`). `make redis-auth` also writes the password to the env file the stack is started with (an overlay's `.env.vps`): Compose reads `${REDIS_PASSWORD}` from that file, so a password only in `.env` left Redis open while the script said it was closed. Found by the upgrade rehearsal.
