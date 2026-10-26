@@ -8,7 +8,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo ".env not found: run this from the CVEngine directory of a running installation." >&2; exit 1; }
 
-compose() { if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi; }
+# recreate services with the Compose files, env file and project the installation runs with (an overlay must not be dropped)
+. scripts/compose-layout.sh
+cvengine_compose_layout || exit 1
+compose() { "${COMPOSE[@]}" "$@"; }
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32; }
 value_of() { grep -E "^$1=" .env | tail -n 1 | cut -d= -f2- || true; }
 set_value() {
