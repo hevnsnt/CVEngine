@@ -191,8 +191,8 @@ class UserProfile(models.Model):
 	user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='tenancy_profile')
 	bugbounty_enabled = models.BooleanField(default=False)
 	mfa_enabled = models.BooleanField(default=False)
-	mfa_secret = models.CharField(max_length=64, blank=True, default='')
-	recovery_codes = models.JSONField(default=list, blank=True)  # sha256 hashes of unused codes
+	mfa_secret = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default='')  # the TOTP seed: encrypted at rest
+	recovery_codes = models.JSONField(default=list, blank=True)  # keyed hashes of unused codes (tenancy.mfa)
 	mfa_last_step = models.BigIntegerField(default=0)  # last accepted TOTP step, blocks code replay
 	onboarded = models.BooleanField(default=False)  # finished the first-run wizard
 	must_change_password = models.BooleanField(default=False)  # set when an admin issued a temporary password

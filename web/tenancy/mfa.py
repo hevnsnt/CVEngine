@@ -11,6 +11,7 @@ STEP = 30
 DIGITS = 6
 WINDOW = 1  # accept one step either side for clock drift
 RECOVERY_CODE_COUNT = 8
+KEYED_PREFIX = 'h2:'
 ISSUER = 'CVEngine'
 
 
@@ -51,20 +52,32 @@ def otpauth_uri(secret, username):
     return f'otpauth://totp/{label}?secret={secret}&issuer={quote(ISSUER)}&digits={DIGITS}&period={STEP}'
 
 
+def _normalize(code):
+    return code.strip().lower().replace('-', '')
+
+
+def _legacy_hash(code):
+    """The unkeyed hash older versions stored (codes of 48 bits); still accepted until the user makes new codes."""
+    return hashlib.sha256(_normalize(code).encode()).hexdigest()
+
+
 def _hash(code):
-    return hashlib.sha256(code.strip().lower().replace('-', '').encode()).hexdigest()
+    """Keyed with the server's secret, so a copy of the database alone cannot be used to search for a code."""
+    from django.conf import settings
+    return KEYED_PREFIX + hmac.new(settings.SECRET_KEY.encode(), b'cvengine/mfa-recovery/v2:' + _normalize(code).encode(),
+                                   hashlib.sha256).hexdigest()
 
 
 def new_recovery_codes():
-    """Return (plain codes to show once, hashes to store)."""
-    plain = [f'{secrets.token_hex(3)}-{secrets.token_hex(3)}' for _ in range(RECOVERY_CODE_COUNT)]
+    """Return (plain codes to show once, hashes to store). Each code is 80 bits."""
+    plain = [f'{secrets.token_hex(5)}-{secrets.token_hex(5)}' for _ in range(RECOVERY_CODE_COUNT)]
     return plain, [_hash(c) for c in plain]
 
 
 def consume_recovery_code(hashes, code):
     """Return the remaining hashes if ``code`` matched one (single use), else None."""
-    digest = _hash(code)
+    digests = (_hash(code), _legacy_hash(code))
     for stored in hashes:
-        if hmac.compare_digest(stored, digest):
+        if any(hmac.compare_digest(str(stored), digest) for digest in digests):
             return [h for h in hashes if h != stored]
     return None
