@@ -1407,8 +1407,7 @@ function findingPage(mount, cfg) {
         const run = pane.querySelector("[data-validate]");
         if (run && !run.disabled) {
           run.scrollIntoView({ block: "center" });
-          run.focus();
-          run.click();
+          run.focus(); // never click for the visitor: a link or a pasted URL must not start a validation run by itself
         } else if (run == null) pane.append(el("p", "note", "Validate now is not available for this finding."));
       }
     } catch (err) {

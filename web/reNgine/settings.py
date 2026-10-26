@@ -137,6 +137,7 @@ MIDDLEWARE = [
     'tenancy.middleware.RetireClassicUiMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'reNgine.middleware.UserPreferencesMiddleware',
+    'reNgine.middleware.ContentSecurityPolicyMiddleware',
 ]
 TEMPLATES = [
     {

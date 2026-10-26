@@ -77,6 +77,8 @@ def ai_put(request):
     if provider in ('ollama', 'vllm') and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:11434 if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
+    if cfg.api_key == old_connection[3] and (cfg.provider, (cfg.base_url or '').strip()) != (old_connection[0], (old_connection[2] or '').strip()):
+        cfg.api_key = ''  # a stored key is never sent to a different service or address: type it again for the new one
     if (cfg.provider, cfg.model, cfg.base_url, cfg.api_key) != old_connection:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
     if 'enabled' in data:
@@ -107,8 +109,9 @@ def ai_models(request):
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
-    key = str(data.get('api_key') or '').strip() or (cfg.api_key if provider == cfg.provider else '')
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    same_service = provider == cfg.provider and base_url.strip() == (cfg.base_url or '').strip()
+    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service else '')  # the stored key goes only where it was saved for
     try:
         listed = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
     except AIProviderError as exc:

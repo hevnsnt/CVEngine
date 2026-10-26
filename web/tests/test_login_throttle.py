@@ -100,3 +100,17 @@ class MfaSecretStorageTests(TestCase):
 		rest = mfa.consume_recovery_code(legacy, 'ABC123-DEF456')
 		self.assertEqual(rest, [])
 		self.assertIsNone(mfa.consume_recovery_code(rest, 'abc123-def456'))
+
+
+class SecurityHeaderTests(TestCase):
+	def test_every_response_carries_a_content_security_policy(self):
+		response = Client().get('/login/')
+		policy = response['Content-Security-Policy']
+		for directive in ("base-uri 'self'", "object-src 'none'", "frame-ancestors 'none'", "form-action 'self'"):
+			self.assertIn(directive, policy)
+		self.assertEqual(response['X-Content-Type-Options'], 'nosniff')
+
+	def test_the_validate_deep_link_only_focuses_the_button(self):
+		import os
+		source = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'app.js'), encoding='utf-8').read()
+		self.assertNotIn('run.click()', source)
