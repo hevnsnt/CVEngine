@@ -1,3 +1,4 @@
+from datetime import timedelta
 import itertools
 from unittest import mock
 
@@ -48,6 +49,23 @@ class HotCveSelectionTests(TestCase):
 		self.assertEqual(len(ctx), 1)  # classifying the rows loads nothing more
 		self.assertFalse([q['sql'] for q in ctx if '"raw"' in q['sql']])
 		self.assertEqual(sorted(tiers), [FIRE, SMOKE])
+
+	def test_a_run_that_errored_is_tried_again_for_two_days_then_left_alone(self):
+		failed = CVEEntry.objects.create(cve_id='CVE-2099-5', kev=True, affected=[])
+		stale = CVEEntry.objects.create(cve_id='CVE-2099-6', kev=True, affected=[])
+		empty = CVEEntry.objects.create(cve_id='CVE-2099-7', kev=True, affected=[])
+		AutoFireRun.objects.create(cve_entry=failed, tier='fire', status='error', error='provider down')
+		old = AutoFireRun.objects.create(cve_entry=stale, tier='fire', status='error')
+		AutoFireRun.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(hours=49))
+		AutoFireRun.objects.create(cve_entry=empty, tier='fire', status='no_targets')
+		self.assertEqual({c.id for c in hot_cves_without_run()}, {failed.id})
+
+	def test_firing_again_reuses_the_errored_row(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-8', kev=True, affected=[])
+		AutoFireRun.objects.create(cve_entry=cve, tier='fire', status='error', error='boom')
+		run = fire_for_cve(cve, test_dispatcher=lambda *a: None)
+		self.assertEqual(AutoFireRun.objects.filter(cve_entry=cve).count(), 1)
+		self.assertEqual((run.status, run.error), ('no_targets', ''))
 
 
 class MemoisedConfirmTests(TestCase):

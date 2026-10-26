@@ -98,7 +98,7 @@ class AgentApiTests(TestCase):
 
 	def test_csrf_enforced_for_sessions_but_not_tokens(self):
 		from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
-		from django.contrib.sessions.backends.db import SessionStore
+		from reNgine.hashed_sessions import SessionStore
 		from django.conf import settings
 		ss = SessionStore()
 		ss[SESSION_KEY], ss[HASH_SESSION_KEY] = str(self.alice.pk), self.alice.get_session_auth_hash()

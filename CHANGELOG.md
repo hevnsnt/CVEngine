@@ -15,6 +15,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 Fixes from an adversarial review of the whole code base.
 
+- **The legacy findings API no longer returns user rows.** Every serializer in the old `/api/` expanded a finding's `assignee`, `remediation_by` and a scan's `initiated_by` into the whole user, password hash included, to any project member (read-only ones too). All of them now return the username only.
+- **Sessions are stored under a keyed hash**, not the cookie value, so a copy of the `django_session` table is no longer a list of working logins. Existing sessions are ended once by the update (everyone signs in again).
+- **The Django admin shows no stored secret.** Models with an encrypted field (the API keys, webhook URLs, tokens) leave those fields out of their admin forms and lists, and the key models no longer print their value.
 - **A dedicated key for stored secrets, with rotation.** New installs generate `CVENGINE_FIELD_KEY` in `.env`: the stored API keys, webhook URLs, update token and two-step sign-in seeds are encrypted under it instead of a key derived from the Django secret, so reading `web/` no longer yields it and the session-signing secret and the encryption key are separate. Existing values keep reading; `make rotate-field-key` (or `manage.py rotate_field_key`) re-encrypts everything under a new key, with `CVENGINE_FIELD_KEY_PREVIOUS` for the old one and `CVENGINE_FIELD_KEY_FILE` for a Docker secret. Back up `.env` with the database. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 - **The sign-in form can no longer be used to guess passwords.** Wrong passwords are counted per address and name, per address and per name (5, 30 and 50 in five minutes); past a limit the form answers 429 before it checks the password, and a right password clears the pair's count. Changing a password uses the same counters, and so does the factory reset.
 - **Pasted target lists and searches are bounded.** Parsing a list was quadratic on a long run of `[` and ran before authorization; it is linear now, with size caps for the paste and each token. One request can never add more targets than the cap even when the last range is large, and a search accepts at most 15 terms, 200 characters each, 1000 in all.
@@ -47,6 +50,10 @@ Also from the review.
 - **A hygiene finding marked fixed that comes back is reopened**, with a note, instead of staying hidden.
 - **A bounty scope entry longer than the column is shown as text** instead of aborting the sync.
 - **The findings list no longer fails on 29 February.**
+- **Detection accuracy.** CVEs that arrive with no affected-product data are refreshed again for 90 days instead of staying blank; version ranges the CVE List gives only as text are read; CPE and product-name spellings (`Apache httpd`, `OpenSSH_9.6`) resolve to the same product; a match a template or validation already confirmed stays open when a later scan sees a different version; a changed product on a port resets the stored version; portable patch levels (`8.9p1`, `8.9p2`), date versions and MariaDB's `5.5.5-` banner prefix compare correctly.
+- **Rejected CVEs are closed** and never matched again, the CVSS score is taken from the best-preferred metric instead of whichever was listed last, and a remediation state (fixed, accepted risk) carries from one scan's finding to the next instead of reopening.
+- **A slow AI answer cannot overwrite newer data.** Triage re-reads each row after the provider replies; a finding whose evidence changed meanwhile waits for its next review, and a validation hit that landed meanwhile keeps the finding confirmed.
+- **Auto-fire retries a CVE whose run failed** (a provider outage, say) for 48 hours instead of marking it done forever.
 
 ### Changed
 

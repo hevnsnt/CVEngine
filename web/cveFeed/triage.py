@@ -672,6 +672,17 @@ def _apply(verdict, group):
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     now = timezone.now()
     rows = []
+    # The rows were read before the model answered, which can take a while. Re-read them: a row whose evidence changed meanwhile
+    # (new signature) or that was deleted is left for the next pass, and a validation hit that landed meanwhile is honoured.
+    fresh = {t.pk: t for t in Triage.objects.filter(pk__in=[row.pk for row, _ in group])}
+    current = []
+    for row, d in group:
+        latest = fresh.get(row.pk)
+        if latest is None or latest.signature != d['signature']:
+            continue
+        row.validation_status, row.reason = latest.validation_status, latest.reason
+        current.append((row, d))
+    group = current
     matches_by_id = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in group if row.match_id])}
     for row, d in group:
         classification, reason = verdict.classification, verdict.reason

@@ -11,38 +11,10 @@ from targetApp.models import *
 from dashboard.models import InAppNotification
 
 
-class HackerOneProgramAttributesSerializer(serializers.Serializer):
-	"""
-		Serializer for HackerOne Program
-		IMP: THIS is not a model serializer, programs will not be stored in db
-		due to ever changing nature of programs, rather cache will be used on these serializers
-	"""
-	handle = serializers.CharField(required=False)
-	name = serializers.CharField(required=False)
-	currency = serializers.CharField(required=False)
-	submission_state = serializers.CharField(required=False)
-	triage_active = serializers.BooleanField(allow_null=True, required=False)
-	state = serializers.CharField(required=False)
-	started_accepting_at = serializers.DateTimeField(required=False)
-	bookmarked = serializers.BooleanField(required=False)
-	allows_bounty_splitting = serializers.BooleanField(required=False)
-	offers_bounties = serializers.BooleanField(required=False)
-	open_scope = serializers.BooleanField(allow_null=True, required=False)
-	fast_payments = serializers.BooleanField(allow_null=True, required=False)
-	gold_standard_safe_harbor = serializers.BooleanField(allow_null=True, required=False)
-
-	def to_representation(self, instance):
-		return {key: value for key, value in instance.items()}
+from reNgine.safe_serializers import SafeModelSerializer, UserNameOnly as _UserNameOnly  # noqa: E402,F401
 
 
-class HackerOneProgramSerializer(serializers.Serializer):
-	id = serializers.CharField()
-	type = serializers.CharField()
-	attributes = HackerOneProgramAttributesSerializer()
-
-
-
-class InAppNotificationSerializer(serializers.ModelSerializer):
+class InAppNotificationSerializer(SafeModelSerializer):
 	class Meta:
 		model = InAppNotification
 		fields = [
@@ -64,13 +36,13 @@ class InAppNotificationSerializer(serializers.ModelSerializer):
 		return obj.project.name if obj.project else None
 
 
-class SearchHistorySerializer(serializers.ModelSerializer):
+class SearchHistorySerializer(SafeModelSerializer):
 	class Meta:
 		model = SearchHistory
 		fields = ['query']
 
 
-class DomainSerializer(serializers.ModelSerializer):
+class DomainSerializer(SafeModelSerializer):
 	vuln_count = serializers.SerializerMethodField()
 	organization = serializers.SerializerMethodField()
 	most_recent_scan = serializers.SerializerMethodField()
@@ -112,7 +84,7 @@ class DomainSerializer(serializers.ModelSerializer):
 			return naturaltime(obj.start_scan_date).title()
 
 
-class SubScanResultSerializer(serializers.ModelSerializer):
+class SubScanResultSerializer(SafeModelSerializer):
 
 	task = serializers.SerializerMethodField('get_task_name')
 	subdomain_name = serializers.SerializerMethodField('get_subdomain_name')
@@ -147,7 +119,7 @@ class SubScanResultSerializer(serializers.ModelSerializer):
 		return ''
 
 
-class ReconNoteSerializer(serializers.ModelSerializer):
+class ReconNoteSerializer(SafeModelSerializer):
 
 	domain_name = serializers.SerializerMethodField('get_domain_name')
 	subdomain_name = serializers.SerializerMethodField('get_subdomain_name')
@@ -170,13 +142,13 @@ class ReconNoteSerializer(serializers.ModelSerializer):
 			return note.scan_history.start_scan_date
 
 
-class OnlySubdomainNameSerializer(serializers.ModelSerializer):
+class OnlySubdomainNameSerializer(SafeModelSerializer):
 	class Meta:
 		model = Subdomain
 		fields = ['name', 'id']
 
 
-class SubScanSerializer(serializers.ModelSerializer):
+class SubScanSerializer(SafeModelSerializer):
 
 	subdomain_name = serializers.SerializerMethodField('get_subdomain_name')
 	time_taken = serializers.SerializerMethodField('get_total_time_taken')
@@ -206,14 +178,14 @@ class SubScanSerializer(serializers.ModelSerializer):
 		return ''
 
 
-class CommandSerializer(serializers.ModelSerializer):
+class CommandSerializer(SafeModelSerializer):
 	class Meta:
 		model = Command
 		fields = '__all__'
 		depth = 1
 
 
-class MinimalUserSerializer(serializers.ModelSerializer):
+class MinimalUserSerializer(SafeModelSerializer):
 	"""
 		Serializer for User model
 		Purpose of this serializer is to return minimal information about user
@@ -224,7 +196,7 @@ class MinimalUserSerializer(serializers.ModelSerializer):
 		fields = ['username']
 
 
-class ScanHistorySerializer(serializers.ModelSerializer):
+class ScanHistorySerializer(SafeModelSerializer):
 
 	subdomain_count = serializers.SerializerMethodField('get_subdomain_count')
 	endpoint_count = serializers.SerializerMethodField('get_endpoint_count')
@@ -289,14 +261,14 @@ class ScanHistorySerializer(serializers.ModelSerializer):
 		return [org.name for org in scan_history.domain.get_organization()]
 
 
-class OrganizationSerializer(serializers.ModelSerializer):
+class OrganizationSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Organization
 		fields = '__all__'
 
 
-class EngineSerializer(serializers.ModelSerializer):
+class EngineSerializer(SafeModelSerializer):
 
 	tasks = serializers.SerializerMethodField('get_tasks')
 
@@ -314,7 +286,7 @@ class EngineSerializer(serializers.ModelSerializer):
 		]
 
 
-class OrganizationTargetsSerializer(serializers.ModelSerializer):
+class OrganizationTargetsSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Domain
@@ -323,7 +295,7 @@ class OrganizationTargetsSerializer(serializers.ModelSerializer):
 		]
 
 
-class VisualiseVulnerabilitySerializer(serializers.ModelSerializer):
+class VisualiseVulnerabilitySerializer(SafeModelSerializer):
 
 	description = serializers.SerializerMethodField('get_description')
 
@@ -338,7 +310,7 @@ class VisualiseVulnerabilitySerializer(serializers.ModelSerializer):
 		return vulnerability.name
 
 
-class VisualisePortSerializer(serializers.ModelSerializer):
+class VisualisePortSerializer(SafeModelSerializer):
 
 	description = serializers.SerializerMethodField('get_description')
 	title = serializers.SerializerMethodField('get_title')
@@ -359,7 +331,7 @@ class VisualisePortSerializer(serializers.ModelSerializer):
 			return "Uncommon Port"
 
 
-class VisualiseTechnologySerializer(serializers.ModelSerializer):
+class VisualiseTechnologySerializer(SafeModelSerializer):
 
 	description = serializers.SerializerMethodField('get_description')
 
@@ -373,7 +345,7 @@ class VisualiseTechnologySerializer(serializers.ModelSerializer):
 		return tech.name
 
 
-class VisualiseIpSerializer(serializers.ModelSerializer):
+class VisualiseIpSerializer(SafeModelSerializer):
 
 	description = serializers.SerializerMethodField('get_description')
 	children = serializers.SerializerMethodField('get_children')
@@ -396,7 +368,7 @@ class VisualiseIpSerializer(serializers.ModelSerializer):
 		return serializer.data
 
 
-class VisualiseEndpointSerializer(serializers.ModelSerializer):
+class VisualiseEndpointSerializer(SafeModelSerializer):
 
 	description = serializers.SerializerMethodField('get_description')
 
@@ -411,7 +383,7 @@ class VisualiseEndpointSerializer(serializers.ModelSerializer):
 		return endpoint.http_url
 
 
-class VisualiseSubdomainSerializer(serializers.ModelSerializer):
+class VisualiseSubdomainSerializer(SafeModelSerializer):
 
 	children = serializers.SerializerMethodField('get_children')
 	description = serializers.SerializerMethodField('get_description')
@@ -552,7 +524,7 @@ class VisualiseSubdomainSerializer(serializers.ModelSerializer):
 		return return_data
 
 
-class VisualiseEmailSerializer(serializers.ModelSerializer):
+class VisualiseEmailSerializer(SafeModelSerializer):
 	title = serializers.SerializerMethodField('get_title')
 	description = serializers.SerializerMethodField('get_description')
 
@@ -574,7 +546,7 @@ class VisualiseEmailSerializer(serializers.ModelSerializer):
 			return "Exposed Creds"
 
 
-class VisualiseDorkSerializer(serializers.ModelSerializer):
+class VisualiseDorkSerializer(SafeModelSerializer):
 
 	title = serializers.SerializerMethodField('get_title')
 	description = serializers.SerializerMethodField('get_description')
@@ -598,7 +570,7 @@ class VisualiseDorkSerializer(serializers.ModelSerializer):
 		return dork.url
 
 
-class VisualiseEmployeeSerializer(serializers.ModelSerializer):
+class VisualiseEmployeeSerializer(SafeModelSerializer):
 
 	description = serializers.SerializerMethodField('get_description')
 
@@ -614,7 +586,7 @@ class VisualiseEmployeeSerializer(serializers.ModelSerializer):
 		return employee.name
 
 
-class VisualiseDataSerializer(serializers.ModelSerializer):
+class VisualiseDataSerializer(SafeModelSerializer):
 
 	title = serializers.ReadOnlyField(default='Target')
 	description = serializers.SerializerMethodField('get_description')
@@ -730,7 +702,7 @@ class VisualiseDataSerializer(serializers.ModelSerializer):
 		return return_data
 
 
-class SubdomainChangesSerializer(serializers.ModelSerializer):
+class SubdomainChangesSerializer(SafeModelSerializer):
 
 	change = serializers.SerializerMethodField('get_change')
 	is_interesting = serializers.SerializerMethodField('get_is_interesting')
@@ -750,7 +722,7 @@ class SubdomainChangesSerializer(serializers.ModelSerializer):
 		)
 
 
-class EndPointChangesSerializer(serializers.ModelSerializer):
+class EndPointChangesSerializer(SafeModelSerializer):
 
 	change = serializers.SerializerMethodField('get_change')
 
@@ -762,34 +734,34 @@ class EndPointChangesSerializer(serializers.ModelSerializer):
 		return EndPoint.change
 
 
-class InterestingSubdomainSerializer(serializers.ModelSerializer):
+class InterestingSubdomainSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Subdomain
 		fields = ['name']
 
 
-class EmailSerializer(serializers.ModelSerializer):
+class EmailSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Email
 		fields = '__all__'
 
 
-class DorkSerializer(serializers.ModelSerializer):
+class DorkSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Dork
 		fields = '__all__'
 
 
-class EmployeeSerializer(serializers.ModelSerializer):
+class EmployeeSerializer(SafeModelSerializer):
 	class Meta:
 		model = Employee
 		fields = '__all__'
 
 
-class MetafinderDocumentSerializer(serializers.ModelSerializer):
+class MetafinderDocumentSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = MetaFinderDocument
@@ -797,14 +769,14 @@ class MetafinderDocumentSerializer(serializers.ModelSerializer):
 		depth = 1
 
 
-class MetafinderUserSerializer(serializers.ModelSerializer):
+class MetafinderUserSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = MetaFinderDocument
 		fields = ['author']
 
 
-class InterestingEndPointSerializer(serializers.ModelSerializer):
+class InterestingEndPointSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = EndPoint
@@ -821,19 +793,19 @@ class DorkCountSerializer(serializers.Serializer):
 	type = serializers.CharField()
 
 
-class TechnologySerializer(serializers.ModelSerializer):
+class TechnologySerializer(SafeModelSerializer):
 	class Meta:
 		model = Technology
 		fields = '__all__'
 
 
-class PortSerializer(serializers.ModelSerializer):
+class PortSerializer(SafeModelSerializer):
 	class Meta:
 		model = Port
 		fields = '__all__'
 
 
-class IpSerializer(serializers.ModelSerializer):
+class IpSerializer(SafeModelSerializer):
 
 	ports = PortSerializer(many=True)
 
@@ -842,14 +814,14 @@ class IpSerializer(serializers.ModelSerializer):
 		fields = '__all__'
 
 
-class DirectoryFileSerializer(serializers.ModelSerializer):
+class DirectoryFileSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = DirectoryFile
 		fields = '__all__'
 
 
-class DirectoryScanSerializer(serializers.ModelSerializer):
+class DirectoryScanSerializer(SafeModelSerializer):
 	scanned_date = serializers.SerializerMethodField()
 	formatted_date_for_id = serializers.SerializerMethodField()
 	directory_files = DirectoryFileSerializer(many=True)
@@ -865,21 +837,21 @@ class DirectoryScanSerializer(serializers.ModelSerializer):
 		return DirectoryScan.scanned_date.strftime("%b_%d_%Y_%H_%M")
 
 
-class IpSubdomainSerializer(serializers.ModelSerializer):
+class IpSubdomainSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Subdomain
 		fields = ['name', 'ip_addresses']
 		depth = 1
 
-class WafSerializer(serializers.ModelSerializer):
+class WafSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = Waf
 		fields = '__all__'
 
 
-class SubdomainSerializer(serializers.ModelSerializer):
+class SubdomainSerializer(SafeModelSerializer):
 
 	vuln_count = serializers.SerializerMethodField('get_vuln_count')
 
@@ -946,7 +918,7 @@ class SubdomainSerializer(serializers.ModelSerializer):
 			return None
 
 
-class EndpointSerializer(serializers.ModelSerializer):
+class EndpointSerializer(SafeModelSerializer):
 
 	techs = TechnologySerializer(many=True)
 
@@ -955,14 +927,14 @@ class EndpointSerializer(serializers.ModelSerializer):
 		fields = '__all__'
 
 
-class EndpointOnlyURLsSerializer(serializers.ModelSerializer):
+class EndpointOnlyURLsSerializer(SafeModelSerializer):
 
 	class Meta:
 		model = EndPoint
 		fields = ['http_url']
 
 
-class VulnerabilitySerializer(serializers.ModelSerializer):
+class VulnerabilitySerializer(SafeModelSerializer):
 
 	discovered_date = serializers.SerializerMethodField()
 	severity = serializers.SerializerMethodField()

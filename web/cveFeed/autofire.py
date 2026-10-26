@@ -6,6 +6,7 @@ ran once per host. The human monitors; this is the loop that acts.
 ``select_hosts`` is pure so it is unit-testable without a database.
 """
 import logging
+from datetime import timedelta
 
 from cveFeed.threat import FIRE, SMOKE
 
@@ -15,6 +16,7 @@ HOT_TIERS = (FIRE, SMOKE)
 MIN_DETERMINISTIC_CONFIDENCE = 0.7  # used when no AI verdict exists
 CANDIDATE_LIMIT = 500
 DEFAULT_MAX_HOSTS = 200  # hosts tested per CVE
+ERROR_RETRY_WINDOW = timedelta(hours=48)  # a run that errored is tried again until it is this old (a feed or provider outage ends)
 
 
 def keep_match(ai_verdict, confidence, distro_status=""):
@@ -42,11 +44,16 @@ def select_hosts(matches, max_hosts):
 
 
 def hot_cves_without_run(limit=CANDIDATE_LIMIT):
-    """FIRE and SMOKE CVEs that have not fired yet, newest first. The tier is decided by the database, and only the columns
-    correlation and the AI prompt read are loaded (never ``raw``)."""
+    """FIRE and SMOKE CVEs that have not fired yet, newest first, plus those whose only run ended in an error within the retry
+    window (one failed run, say an AI outage, must not leave a CVE unchecked for good). The tier is decided by the database, and
+    only the columns correlation and the AI prompt read are loaded (never ``raw``)."""
+    from django.db.models import Q
+    from django.utils import timezone
+
     from cveFeed.models import CVEEntry
     from cveFeed.threat import hot_tier_q
-    return list(CVEEntry.objects.filter(autofire__isnull=True).filter(hot_tier_q()).only(
+    retry = Q(autofire__status='error', autofire__created_at__gte=timezone.now() - ERROR_RETRY_WINDOW)
+    return list(CVEEntry.objects.filter(Q(autofire__isnull=True) | retry).filter(hot_tier_q()).only(
         "id", "cve_id", "title", "summary", "original_description", "cvss", "affected", "kev", "epss_reached", "exploit_db",
         "published_at").order_by("-published_at")[:limit])
 
@@ -88,7 +95,10 @@ def fire_for_cve(cve, engine_id=None, max_hosts=DEFAULT_MAX_HOSTS, provider=None
     from cveFeed.models import AutoFireRun, CVEMatch
 
     from cveFeed import activity
-    run = AutoFireRun(cve_entry=cve, tier=cve.threat_tier)
+    run = AutoFireRun.objects.filter(cve_entry=cve).first()  # a retry reuses the errored row (one run per CVE)
+    if run is None:
+        run = AutoFireRun(cve_entry=cve)
+    run.tier, run.status, run.error, run.matches_found, run.targets, run.scan_ids = cve.threat_tier, 'done', '', 0, [], []
     hunting = activity.log('target', f'{cve.cve_id} is {run.tier.upper()}: looking for exposed hosts',
                            cve_id=cve.cve_id, status='running')
     project_ids = set()

@@ -95,7 +95,12 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     from cveFeed.models import MatchVerdict
     from django.utils import timezone
     from datetime import timedelta
-    due = CVEEntry.objects.filter(matches__isnull=False, synced_at__lt=timezone.now() - timedelta(hours=12)) \
+    from django.db.models import Q
+    now = timezone.now()
+    # a CVE with a match is kept current; so is a recent one the feed published with no affected data yet (the CNA's first record often
+    # names no version, and the enrichment that makes it matchable arrives days later: without this it would never be read again)
+    needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
+    due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
         .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
     for old in list(due):
         try:
@@ -366,10 +371,11 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     project (project_slug), or everything. `cve_limit` caps the CVE pool to the
     most recently published N (useful for a fresh-CVE focused pass).
     """
-    from cveFeed.correlation import candidate_subdomains, correlate_subdomains, cve_pool
+    from cveFeed.correlation import candidate_subdomains, close_rejected, correlate_subdomains, cve_pool
     from startScan.models import Subdomain, ScanHistory
     from cveFeed import activity
 
+    close_rejected()  # a CVE rejected since the last run stops being a finding
     cve_by_id, index = cve_pool(cve_limit)
     scan = None
     if scan_history_id:

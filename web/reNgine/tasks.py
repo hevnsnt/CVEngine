@@ -631,8 +631,8 @@ def fetch_whois_data_using_netlas(target):
 	secrets = ()
 	if netlas_key:
 		if netlas_key.key and netlas_key.key != "None":
-			command += f' -a {netlas_key}'
-			secrets = (str(netlas_key),)
+			command += f' -a {netlas_key.key}'
+			secrets = (netlas_key.key,)
 
 	try:
 		_, result = run_command(command, remove_ansi_sequence=True, redact=secrets)
@@ -796,6 +796,21 @@ VULNERABILITY_KEY = ('target_domain', 'scan_history', 'subdomain', 'endpoint', '
 					 'matcher_name')
 
 
+def _carry_finding_state(vuln, lookup):
+	"""A finding seen again on a later scan is a new row (rows are per scan); give it the remediation state a person set on the same
+	finding (same host, template, name, URL and matcher) in an earlier scan, so what was marked fixed or accepted does not reopen."""
+	subdomain, domain = lookup.get('subdomain'), lookup.get('target_domain')
+	if subdomain is None or domain is None:
+		return
+	same = {k: lookup[k] for k in ('source', 'template_id', 'name', 'http_url', 'matcher_name') if k in lookup}
+	earlier = (Vulnerability._base_manager.filter(target_domain=domain, subdomain__name=subdomain.name, **same)
+			   .exclude(pk=vuln.pk).exclude(remediation_status='open').order_by('-id').first())
+	if earlier is not None:
+		vuln.remediation_status, vuln.remediation_note = earlier.remediation_status, earlier.remediation_note
+		vuln.remediation_updated_at, vuln.remediation_by_id, vuln.assignee_id = (
+			earlier.remediation_updated_at, earlier.remediation_by_id, earlier.assignee_id)
+
+
 def save_vulnerability(**vuln_data):
 	references = vuln_data.pop('references', [])
 	cve_ids = vuln_data.pop('cve_ids', [])
@@ -819,6 +834,7 @@ def save_vulnerability(**vuln_data):
 	if created:
 		vuln.discovered_date = timezone.now()
 		vuln.open_status = True
+		_carry_finding_state(vuln, lookup)
 		vuln.save()
 	else:
 		# seen again: keep the newest evidence, and it is evidently still there
