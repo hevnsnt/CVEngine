@@ -191,6 +191,7 @@ Only scan systems you own or are authorized to test.
 | Doc | What it covers |
 | --- | --- |
 | [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why |
+| [Compare](docs/COMPARISON.md) | cvENGINE and ProjectDiscovery, feature by feature, including where they are ahead |
 | [Search](docs/SEARCH.md) | Shodan-style search over your inventory, with examples |
 | [Pipeline](docs/PIPELINE.md) | How a target becomes findings |
 | [Architecture](docs/ARCHITECTURE.md) | Services, data, and where AI is used |
