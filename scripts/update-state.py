@@ -115,6 +115,15 @@ def main():
             if not re.fullmatch(rb'[0-9a-f]{40}', value):
                 raise ValueError('approval must contain exactly one commit id')
             print(value.decode('ascii'))
+        elif action == 'approval-branch':
+            # the branch the administrator chose in Settings, or nothing when the file is missing or not a plain branch name
+            try:
+                with os.fdopen(regular_fd('.update-branch', dir_fd=web_fd), 'rb') as source:
+                    value = source.read(128).strip()
+            except FileNotFoundError:
+                return
+            if re.fullmatch(rb'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}', value) and b'..' not in value and not value.endswith((b'/', b'.lock')):
+                print(value.decode('ascii'))
         elif action == 'commit':
             value = sys.argv[2]
             if not re.fullmatch(r'[0-9a-f]{40}', value):
