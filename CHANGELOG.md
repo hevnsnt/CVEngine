@@ -2,6 +2,13 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Changed
+
+- **CI runs the test suite in parallel.** `manage.py test --parallel` now works: a test runner (`reNgine/test_runner.py`, the project's `TEST_RUNNER`) gives every worker two Redis databases of its own, so one worker's `cache.clear()` or held lock can no longer break a test in another (up to 7 workers). On a 4-core machine the suite went from 543 seconds to 213 seconds. CI uses `--parallel auto` and installs `tblib` so a failure in a worker shows its real traceback. A normal one-process run is unchanged.
+- **`scripts/update.sh` has a setting for its polling pause.** `CVENGINE_UPDATE_POLL_SECONDS` (default 5, unchanged) is the pause between checks while it waits for workers and readiness; the update script tests set it to 0.2, which cut that module from about 100 seconds to about 34.
+
 ## v1.1.2 (2026-10-26)
 
 Update with `make up` or the in-app updater. Includes everything in v1.1.1 (the update bar, the organization switcher, release archives).

@@ -24,6 +24,7 @@
 #   CVENGINE_COMPOSE_PROJECT       Compose project name (-p)
 #   CVENGINE_UPDATE_DRAIN_SECONDS  Longest wait for active tasks, 1 to 10800 (default 10800)
 #   CVENGINE_UPDATE_READY_SECONDS  Longest wait for readiness, 1 to 900 (default 600)
+#   CVENGINE_UPDATE_POLL_SECONDS   Pause between checks while waiting, in seconds (default 5; the tests use a shorter one)
 #   CVENGINE_UPDATE_STOP_SCANS=1   Same as --stop-scans
 #   CVENGINE_UPDATE_MISSING_POLLS  Drain polls in a row a worker may miss before it counts as gone (default 12)
 # CVENGINE_COMPOSE_FILE (a single file) is still accepted.
@@ -62,6 +63,11 @@ die() {
     exit 1
 }
 step() { echo; echo "==> $*"; }
+
+# Pause between checks while waiting for workers and readiness. Five seconds is right for a real update; the tests lower it.
+poll_seconds=${CVENGINE_UPDATE_POLL_SECONDS:-5}
+[[ $poll_seconds =~ ^[0-9]+([.][0-9]+)?$ ]] && [[ $poll_seconds != *[1-9]* ]] && poll_seconds=5  # 0 would busy-loop
+[[ $poll_seconds =~ ^[0-9]+([.][0-9]+)?$ ]] || die 'CVENGINE_UPDATE_POLL_SECONDS must be a number of seconds.'
 failure() {
     local status=$?
     trap - ERR
@@ -502,7 +508,7 @@ restore_dispatch() {
                             echo 'Celery Beat is running. The update still failed; inspect the reported readiness issue.' >&2
                             exit "$code"
                         fi
-                        sleep 5
+                        sleep "$poll_seconds"
                     done
                 fi
                 echo 'Celery Beat could not be restored. Inspect its container log and start it after fixing the reported issue.' >&2
@@ -638,7 +644,7 @@ except (ValueError, TypeError, KeyError):
                     last_drain_report=$SECONDS
                 fi
                 (( SECONDS < drain_deadline )) || die 'The bounded drain ended while a worker was not answering; update aborted without killing work.'
-                sleep 5; continue;;
+                sleep "$poll_seconds"; continue;;
             CONSUMING\|*)
                 consuming_polls=$((consuming_polls + 1)); missing_polls=0
                 echo "Drain poll: still consuming ${drain_state#CONSUMING|} (${consuming_polls}/3)" >>"$diagnostic_log"
@@ -650,7 +656,7 @@ except (ValueError, TypeError, KeyError):
                     "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 10 -d "${pair%%|*}" cancel_consumer "${pair#*|}" \
                         >/dev/null 2>>"$diagnostic_log" || die "Could not pause ${pair%%|*}/${pair#*|} again."
                 done
-                sleep 5; continue;;
+                sleep "$poll_seconds"; continue;;
         esac
         missing_polls=0; consuming_polls=0
         drain_state=${drain_state#COUNTS|}
@@ -665,7 +671,7 @@ except (ValueError, TypeError, KeyError):
         if (( SECONDS >= drain_deadline )); then
             die "$remaining task(s) still active after the bounded drain; update aborted without killing them."
         fi
-        sleep 5
+        sleep "$poll_seconds"
     done
     echo 'All active and reserved worker tasks finished; stopping workers without replacing Redis...'
 fi
@@ -747,7 +753,7 @@ while (( SECONDS < deadline )); do
         rm -f "$diagnostic_log"
         exit 0
     fi
-    sleep 5
+    sleep "$poll_seconds"
 done
 echo "Readiness failed: last local HTTP status $status; check worker queues and Beat before treating the update as complete." >&2
 false

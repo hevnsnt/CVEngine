@@ -395,6 +395,9 @@ def _cache_url():
     return urlunsplit((parts.scheme, parts.netloc, f'/{db}', '', ''))
 
 
+# `manage.py test --parallel` gives every worker Redis databases of its own (see reNgine/test_runner.py)
+TEST_RUNNER = 'reNgine.test_runner.IsolatedRedisRunner'
+
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',

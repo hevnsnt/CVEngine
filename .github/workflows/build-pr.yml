@@ -67,7 +67,7 @@ jobs:
       - name: Install application dependencies
         run: |
           sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
-          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11
+          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2  # tblib lets a failure in a parallel test worker show its real traceback
       - name: Nuclei positive and negative loopback fixture smoke
         working-directory: web
         env:
@@ -86,7 +86,8 @@ jobs:
         working-directory: web
         env:
           DEBUG: '0'
-        run: python manage.py test --noinput
+        # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
+        run: python manage.py test --noinput --parallel auto
       - name: Graph cluster regression gate
         run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs
 
