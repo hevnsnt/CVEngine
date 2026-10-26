@@ -10,7 +10,7 @@ Every probe is wrapped, so one that fails or times out turns into ``{"error": ..
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
@@ -176,6 +176,45 @@ def _ai():
             'validation_attempts_today': today}
 
 
+TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without one means it is failing
+_VERSION_CACHE = {}
+
+
+def _tool_version(argv):
+    """First line of ``<tool> -version`` output, cached for ten minutes; None when the tool is missing or slow."""
+    import subprocess
+    now = time.monotonic()
+    cached = _VERSION_CACHE.get(argv)
+    if cached and now - cached[0] < 600:
+        return cached[1]
+    try:
+        proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
+        text = ((proc.stdout or '') + (proc.stderr or '')).strip().splitlines()
+        value = next((line.strip()[:120] for line in text if line.strip()), None)
+    except (OSError, subprocess.SubprocessError):
+        value = None
+    _VERSION_CACHE[argv] = (now, value)
+    return value
+
+
+def _tools():
+    """How current the detection tools are: the nuclei templates (when they were last refreshed) and the scanner versions."""
+    import os
+    from django_celery_beat.models import PeriodicTask
+    root = os.environ.get('NUCLEI_TEMPLATES_DIR', '/root/nuclei-templates')
+    marker = os.path.join(root, '.checksum')
+    try:
+        updated = datetime.fromtimestamp(os.stat(marker).st_mtime, tz=dt_timezone.utc)
+    except OSError:
+        updated = None
+    last_run = PeriodicTask.objects.filter(task='update_nuclei_templates').values_list('last_run_at', flat=True).first()
+    return {'nuclei_templates': {'updated_at': _iso(updated),
+                                 'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
+                                 'last_refresh_dispatch': _iso(last_run)},
+            'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
+
+
 def _system(user, problems, notes):
     out = {}
     out['database'] = _probe(problems, 'database', _database)
@@ -211,6 +250,10 @@ def _system(user, problems, notes):
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['ai'] = _probe(problems, 'ai', _ai)
+    out['tools'] = _probe(problems, 'tools', _tools)
+    age = ((out['tools'] or {}).get('nuclei_templates') or {}).get('age_hours')
+    if age is not None and age > TEMPLATE_STALE_HOURS:
+        problems.append(f'nuclei templates: not refreshed for {int(age)} hours')
     queues = out['queues']
     if isinstance(queues, dict) and queues.get('waiting_total'):
         notes.append(f"{queues['waiting_total']} message(s) waiting in the work queues")

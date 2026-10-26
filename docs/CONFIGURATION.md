@@ -119,9 +119,14 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 | --- | --- | --- |
 | `NUCLEI_TEMPLATES_DIR` | `/root/nuclei-templates` | nuclei's installed templates. |
 | `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where validated AI-written templates live. It must sit outside `NUCLEI_TEMPLATES_DIR`, and the app says so at startup if it does not. In the shipped compose files it is the `generated_templates` volume, so validated templates survive an update, and a worker rewrites any validated template whose file is missing from the copy kept in the database when it starts. |
+| `CVENGINE_CVE_SEED` | `1` | Load the published CVE catalog on first start (`off` to skip). `CVENGINE_CVE_SEED_URL` points it at another https location. See [PIPELINE.md](PIPELINE.md#seeding-the-catalog). |
+| `CVENGINE_DETECTION_AI_PER_DAY` | `25` | How many CVEs the AI is asked to write detection checks for in 24 hours (rules-written checks have no limit). |
+| `CVENGINE_FIELD_KEY` | generated into `.env` | The key that encrypts stored secrets. `CVENGINE_FIELD_KEY_PREVIOUS` (comma separated) lists older keys that only decrypt, and `CVENGINE_FIELD_KEY_FILE` reads the key from a file. |
 | `RENGINE_SECRET_KEY` | the key in `web/secret` | Provide the Django secret key from the environment instead of the file. |
 
-The AI key, API vault, update token, webhook URLs, and Telegram bot token are encrypted in the database with a key derived from the secret key. Keep `web/secret` when you restore a backup. With another key the stored secrets read as empty and must be entered again.
+The AI key, API vault, update token, webhook URLs, Telegram bot token and the two-step sign-in seeds are encrypted in the database. New installs get a dedicated key, `CVENGINE_FIELD_KEY` in `.env`, separate from the Django secret in `web/secret` (which signs sessions) and outside the `web/` directory every container mounts. An installation that predates it keeps reading its old values with the key derived from `web/secret`, and `make rotate-field-key` moves everything under a dedicated key: it writes a new key to `.env`, keeps the old one in `CVENGINE_FIELD_KEY_PREVIOUS` (which only decrypts), recreates the services and re-encrypts every stored secret. Back up `.env` with the database: a restored database needs the same keys, and with another key the stored secrets read as empty and must be entered again. To keep the key in a Docker secret instead, point `CVENGINE_FIELD_KEY_FILE` at the mounted file.
+
+What this protects: a database dump, a backup, or SQL injection reads only ciphertext, and a file read in `web/` no longer includes the key. What it does not: code execution inside a container that decrypts the secrets (the web service or a worker) can use the key that container holds. The settings API never returns a secret, only whether one is set.
 
 ## Network and access
 

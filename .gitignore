@@ -94,3 +94,6 @@ venv/
 .pytest_cache/
 .coverage
 logs/
+
+# a CVE catalog seed written by export_cve_seed (published as a release asset, never committed)
+web/cve-seed*

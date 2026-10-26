@@ -1196,6 +1196,23 @@ def update_nuclei_templates():
     return {"updated": proc.returncode == 0, "returncode": proc.returncode}
 
 
+@app.task(name="author_cve_detections", bind=False, queue="cve_feed_queue")
+def author_cve_detections():
+    """Every 30 minutes: write the shared detection record of every CVE that has none (hottest first, so new CVEs and the back
+    catalogue are covered the same way), refresh rules-written checks whose CVE changed, and spend the daily AI budget on the
+    CVEs attackers use. See cveFeed.detection and cveFeed.detection_author."""
+    from cveFeed import detection_author
+    from reNgine.ai_settings import get_configured_provider
+    try:
+        provider = get_configured_provider()
+    except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
+        logger.warning("could not build the AI provider for detection authoring", exc_info=True)
+        provider = None
+    out = detection_author.author_pending(provider)
+    out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
+    return out
+
+
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")
 def report_resources():
     """Every 30 seconds: publish this container's memory and budget so Settings > Resources (served by another
@@ -1245,6 +1262,33 @@ def reap_stuck_jobs():
 BOOTSTRAP_LOCK = "cvengine:first-run-bootstrap"
 
 
+SEED_BELOW = 5000  # an instance with fewer CVEs than this is offered the published seed (once a day at most)
+
+
+@app.task(name="load_cve_seed", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def load_cve_seed():
+    """Import the published CVE catalog (cveFeed.seed) so a new install starts with every CVE and its detection record instead of
+    hydrating them one request at a time. Never fails the caller: offline, a bad checksum or a missing release is logged and the
+    incremental feed carries on as before."""
+    from cveFeed import activity, seed
+    if not seed.seed_enabled():
+        return {"skipped": "CVENGINE_CVE_SEED is off"}
+    note = activity.log("feed", "Loading the published CVE catalog (all fire, smoke and ice CVEs with their detection records)", status="running")
+    try:
+        counts = seed.load_published_seed()
+    except Exception as exc:  # noqa: BLE001 - the feed sync that follows still works without the seed
+        logger.warning("could not load the published CVE seed: %s", exc)
+        activity.settle(note, "failed", message="The published CVE catalog could not be loaded; the feed will build it up gradually")
+        return {"loaded": False, "error": str(exc)[:200]}
+    counts.pop("manifest", None)
+    activity.settle(note, "done", message=f"Loaded {counts['created']} CVEs and {counts['detections']} detection records from the published catalog")
+    if counts["created"]:
+        from startScan.models import Subdomain
+        if Subdomain.objects.exists():  # an instance with hosts needs the new CVEs checked against them
+            correlate_cves.delay()
+    return {"loaded": True, **counts}
+
+
 @app.task(name="bootstrap_first_run", bind=False, queue="cve_feed_queue")
 def bootstrap_first_run():
     """Once, when a brand-new install's workers come up: load the CVE feed and the threat intelligence now, instead of waiting for
@@ -1257,11 +1301,13 @@ def bootstrap_first_run():
 
     from cveFeed import activity
     if CVEEntry.objects.exists():
+        if CVEEntry.objects.count() < SEED_BELOW and cache.add("cvengine:seed-offer", 1, timeout=24 * 3600):
+            load_cve_seed.apply_async()  # an install that predates the seed and has only a few CVEs gets the catalog too
         return {"skipped": "the CVE feed is already loaded"}
     if not cache.add(BOOTSTRAP_LOCK, 1, timeout=1800):
         return {"skipped": "a first-run load is already under way"}
     activity.log("feed", "First start: loading the CVE feed and threat intelligence now, instead of waiting for the schedule")
-    chain(sync_cve_now_feed.si(), sync_threat_intel.si(), backfill_cve_now_feed.si()).apply_async()
+    chain(load_cve_seed.si(), sync_cve_now_feed.si(), sync_threat_intel.si(), backfill_cve_now_feed.si()).apply_async()
     return {"started": True}
 
 

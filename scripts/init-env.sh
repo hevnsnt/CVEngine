@@ -35,6 +35,11 @@ fill() {
   fi
 }
 
+# The key that encrypts the stored API keys, webhook URLs and TOTP seeds, apart from Django's secret. A value already set is
+# never changed (that is what rotation is for: manage.py rotate_field_key); values stored before it existed still read.
+grep -q '^CVENGINE_FIELD_KEY=' .env || echo 'CVENGINE_FIELD_KEY=' >> .env
+fill CVENGINE_FIELD_KEY
+
 # The address other machines reach this one on: the source of the default route, else the first non-loopback address, else localhost.
 detect_host() {
   local ip=''

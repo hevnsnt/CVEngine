@@ -9,6 +9,7 @@ from django.utils import timezone
 from dashboard.models import Project
 from targetApp.models import Organization, Domain
 from startScan.models import EndPoint, IpAddress
+from startScan.ip_rows import get_or_create_ip
 from reNgine.settings import LOGGING
 from reNgine.common_func import *
 
@@ -173,7 +174,7 @@ def store_ip(ip_address, project, description, h1_team_handle):
 	
 	ip_data = get_ip_info(ip_address)
 	ip_data = get_ip_info(ip_address)
-	ip, created = IpAddress.objects.get_or_create(address=ip_address)
+	ip, created = get_or_create_ip(ip_address)
 	ip.reverse_pointer = ip_data.reverse_pointer
 	ip.is_private = ip_data.is_private
 	ip.version = ip_data.version

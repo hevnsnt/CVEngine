@@ -221,15 +221,16 @@ class RouteFixture:
 		self.asked = []
 		self.answers = {}
 
-	def scan(self, names=('www.rt.test',), ports=((443, 'https'),)):
+	def scan(self, names=('www.rt.test',), ports=((443, 'https'),), ip='203.0.113.5'):
 		scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=1, tasks=[],
 			results_dir='x')
 		for name in names:
 			sub = Subdomain.objects.create(name=name, target_domain=self.domain, scan_history=scan)
-			ip = IpAddress.objects.create(address='203.0.113.5')
+			ip, _ = IpAddress.objects.get_or_create(address=ip)  # one row per address, shared by every host that resolves there
 			sub.ip_addresses.add(ip)
 			for number, service in ports:
-				ip.ports.add(Port.objects.create(number=number, service_name=service, state='open'))
+				if not ip.ports.filter(number=number).exists():
+					ip.ports.add(Port.objects.create(number=number, service_name=service, state='open'))
 		return scan
 
 	def probe(self, url):

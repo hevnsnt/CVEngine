@@ -165,6 +165,9 @@ TOOLS = [
      lambda c, a: svc.list_cve_feed(c, a), False),
     ('get_cve', 'One CVE with description, affected ranges and references.', _schema({'cve_id': {'type': 'string'}}, ['cve_id']),
      lambda c, a: svc.get_cve(c, a.get('cve_id', '')), False),
+    ('get_cve_detection', 'How to tell whether a product is affected by a CVE: the shared detection strategy, remote and local checks '
+     'as read-only data (version ranges, HTTP markers, package and config checks, nuclei template). The same for every organization.',
+     _schema({'cve_id': {'type': 'string'}}, ['cve_id']), lambda c, a: svc.get_cve_detection(c, a.get('cve_id', '')), False),
     ('list_cve_matches', 'CVEs matched to hosts, with AI verdicts and remediation status.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string'}, 'verdict': {'type': 'string'}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_matches(c, a.get('project'), a), False),

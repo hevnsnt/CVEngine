@@ -79,7 +79,7 @@ class ScannerTargetFilterTests(TestCase):
 		cve = self._cve()
 		for name in ('good.sec.test', 'bad.sec.test'):
 			sub = Subdomain.objects.create(name=name, target_domain=self.domain)
-			ip = IpAddress.objects.create(address='198.51.100.9')
+			ip, _ = IpAddress.objects.get_or_create(address='198.51.100.9')
 			sub.ip_addresses.add(ip)
 			CVEMatch.objects.create(cve_entry=cve, subdomain=sub, matched_product='nginx', confidence=0.9, version_in_range=True)
 		calls = []

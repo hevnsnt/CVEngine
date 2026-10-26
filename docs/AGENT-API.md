@@ -47,7 +47,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
 | triage | `GET projects/{slug}/triage`, `POST .../findings/{kind}/{id}/retriage` | `list_triage`, `retriage_finding` |
 | hygiene | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |
-| CVEs | `GET cves?tier=fire`, `GET cves/{id}` | `list_cves`, `get_cve` |
+| CVEs | `GET cves?tier=fire`, `GET cves/{id}`, `GET cves/{id}/detection` | `list_cves`, `get_cve`, `get_cve_detection` |
 | matches | `GET projects/{slug}/matches`, `PATCH .../matches/{id}` | `list_cve_matches`, `update_remediation_status` |
 | remediation status | `PATCH projects/{slug}/findings/{match,vulnerability,hygiene}/{id}`, `POST .../findings/status` (bulk) | `update_finding_status`, `bulk_update_finding_status` |
 | assignee, comments, audit | `PATCH .../findings/{kind}/{id}` (`assignee`), `GET/POST .../findings/{kind}/{id}/comments`, `GET .../findings/{kind}/{id}/audit`, `GET projects/{slug}/members` | `set_finding_assignee`, `list_finding_comments`, `add_finding_comment`, `finding_audit`, `list_members` |

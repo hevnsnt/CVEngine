@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -123,6 +124,27 @@ class SystemStatusTests(TestCase):
 		with mock.patch.object(system_status.shutil, 'disk_usage', lambda path: usage):
 			_, data = self.run_status(self.t_root, health=healthy)
 		self.assertEqual((data['overall'], data['problems']), ('ok', []))
+
+	def test_stale_nuclei_templates_are_a_problem_and_fresh_ones_report_their_age(self):
+		import os
+		import tempfile
+		with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {'NUCLEI_TEMPLATES_DIR': root}), \
+				mock.patch.object(system_status, '_tool_version', lambda argv: 'v-test'):
+			marker = os.path.join(root, '.checksum')
+			open(marker, 'w').close()
+			_, data = self.run_status(self.t_root)
+			tools = data['system']['tools']
+			self.assertLess(tools['nuclei_templates']['age_hours'], 1)
+			self.assertEqual(tools['versions']['nuclei'], 'v-test')
+			self.assertFalse(any(p.startswith('nuclei templates') for p in data['problems']))
+			old = timezone.now().timestamp() - 3 * 24 * 3600
+			os.utime(marker, (old, old))
+			_, data = self.run_status(self.t_root)
+			self.assertTrue(any(p.startswith('nuclei templates: not refreshed for') for p in data['problems']))
+
+	def test_members_do_not_see_the_tool_versions(self):
+		_, data = self.get(self.t_member)
+		self.assertNotIn('tools', json.dumps(data))
 
 	def test_a_probe_that_fails_is_reported_and_does_not_fail_the_answer(self):
 		class Down(FakeBroker):

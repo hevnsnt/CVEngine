@@ -192,6 +192,7 @@ def persist_inventory(inventory, source='nmap'):
     here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
     Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
     seen on one IP's 443 onto every IP's 443."""
+    from startScan.ip_rows import get_or_create_ip
     from startScan.models import IpAddress, Port
     ports_written = hosts_with_os = 0
     now = timezone.now()
@@ -199,7 +200,7 @@ def persist_inventory(inventory, source='nmap'):
         ip_addr = host.get('ip')
         if not ip_addr:
             continue
-        ip_obj, _ = IpAddress.objects.get_or_create(address=ip_addr)
+        ip_obj, _ = get_or_create_ip(ip_addr)
         if host.get('os_guess'):
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')

@@ -654,6 +654,10 @@ class IpAddress(models.Model):
 	# this is used for querying which ip was discovered during subcan
 	ip_subscan_ids = models.ManyToManyField('SubScan', related_name='ip_subscan_ids')
 
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['address'], condition=models.Q(address__isnull=False) & ~models.Q(address=''),
+											   name='uniq_ipaddress_address')]
+
 	def __str__(self):
 		return str(self.address)
 
