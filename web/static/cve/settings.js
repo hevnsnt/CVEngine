@@ -181,8 +181,20 @@ const sections = {
       min: "1",
       max: "5000",
     });
+    const planTotal = text(s.plan_daily_total, {
+      type: "number",
+      min: "0",
+      max: "100000",
+    });
+    const planProject = text(s.plan_daily_per_project, {
+      type: "number",
+      min: "0",
+      max: "100000",
+    });
     const save = async () => {
       await api("PUT", "ai", {
+        plan_daily_total: planTotal.value,
+        plan_daily_per_project: planProject.value,
         provider: provider.value,
         model: model.value,
         api_key: key.value,
@@ -206,6 +218,8 @@ const sections = {
         keyField,
         baseField,
         enabled.wrap,
+        field("Validation planning requests per day, all projects", planTotal),
+        field("Validation planning requests per day, one project", planProject),
         button("Save", async () => {
           await save();
           toast("Saved");

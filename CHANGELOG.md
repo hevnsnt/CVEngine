@@ -6,6 +6,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Changed
 
+- **The AI planning budget is a setting.** "AI planning daily budget reached; generic external checks deferred" came from a fixed limit of 20 planning requests a day per project and 200 in total. Both are now fields under Settings > AI model (the same defaults; 0 turns AI planning off), and the message says where to change them.
 - **Names that point at the same servers are one host.** `example.com` and `www.example.com` resolving to exactly the same addresses used to be two hosts on the map, the Hosts page and the counts, each with its own copy of every finding. They are now one host (the project's own target name is the one shown, otherwise the shortest) that lists its other names ("Also answers to"), and its CVE matches, findings and exposure are the host's, counted once. Names behind a CDN or other shared edge address, names with a different set of addresses, names that never resolved, and the same addresses in another project stay separate hosts. The dashboard, the Hosts page, the group overview and the history count the same way.
 
 ### Fixed

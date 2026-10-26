@@ -84,6 +84,9 @@ class AIProviderSettings(models.Model):
 	auto_fire = models.BooleanField(default=False)
 	auto_fire_engine_id = models.IntegerField(null=True, blank=True)  # scanEngine.EngineType id
 	auto_fire_max_scans = models.IntegerField(default=200)  # hosts tested per CVE (the column keeps its old name)
+	# How many times a day the model may be asked to plan validation checks (each is a paid request): in total, and for one project.
+	plan_daily_total = models.PositiveIntegerField(default=200)
+	plan_daily_per_project = models.PositiveIntegerField(default=20)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')

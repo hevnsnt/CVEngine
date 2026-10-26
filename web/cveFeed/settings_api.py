@@ -57,7 +57,8 @@ def ai_get(request):
             'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
             'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
             'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire, 'auto_fire_engine_id': cfg.auto_fire_engine_id,
-            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'default_models': DEFAULT_MODELS,
+            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
+            'plan_daily_per_project': cfg.plan_daily_per_project, 'default_models': DEFAULT_MODELS,
             'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
 
 
@@ -98,6 +99,15 @@ def ai_put(request):
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
+    for key in ('plan_daily_total', 'plan_daily_per_project'):
+        if key in data:
+            try:
+                value = int(data[key])
+            except (TypeError, ValueError):
+                raise SettingsError(400, f'{key} must be a number')
+            if not 0 <= value <= 100000:
+                raise SettingsError(400, f'{key} must be between 0 and 100000')
+            setattr(cfg, key, value)
     cfg.save()
     return ai_get(request)
 

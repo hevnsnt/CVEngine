@@ -53,8 +53,15 @@ def parse_plan(reply, checks, can_generate):
             'source': 'ai'}
 
 
+def daily_limits():
+    """(all projects, one project) planning requests a day, from the AI settings; 0 stops AI planning."""
+    from dashboard.models import AIProviderSettings
+    cfg = AIProviderSettings.objects.first()
+    return (cfg.plan_daily_total, cfg.plan_daily_per_project) if cfg else (200, 20)
+
+
 def _reserve(project_id, signature):
-    """One in-flight plan per signature; a project has at most 20, and all projects 200, billable attempts daily."""
+    """One in-flight plan per signature; billable attempts per day are capped per project and in total (Settings > AI model)."""
     with transaction.atomic():
         if connection.vendor == 'postgresql':
             with connection.cursor() as cursor:
@@ -66,8 +73,9 @@ def _reserve(project_id, signature):
             return None, 'another planning request is running for this evidence'
         since = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today = TriageCall.objects.filter(kind='validation_plan', started_at__gte=since)
-        if today.count() >= 200 or today.filter(project_id=project_id).count() >= 20:
-            return None, 'AI planning daily budget reached'
+        total, per_project = daily_limits()
+        if today.count() >= total or today.filter(project_id=project_id).count() >= per_project:
+            return None, 'AI planning daily budget reached (raise it in Settings > AI model)'
         return TriageCall.objects.create(kind='validation_plan', project_id=project_id, signature=signature,
                                          expires_at=now + timedelta(minutes=5)), ''
 
