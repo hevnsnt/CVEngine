@@ -45,7 +45,7 @@ def fail(user):
     key = f'mfa_fail:{user.pk}'
     throttle.count(key, LOCKOUT_SECONDS)
     if cache.get(key, 0) == MAX_FAILURES:  # the attempt that closes the door, recorded once
-        audit.record_for_user(user, 'account.mfa_locked', user)
+        audit.record_for_user_quietly(user, 'account.mfa_locked', user)
 
 
 def clear_failures(user):
@@ -140,7 +140,7 @@ class MFALoginView(LoginView):
         if cache.get(keys['pair'], 0) == dict(LOGIN_LIMITS)['pair']:  # the attempt that locks this address out of this name, recorded once
             account = User.objects.filter(username__iexact=_login_name(self.request.POST.get('username'))).first()
             if account:
-                audit.record_for_user(account, 'account.login_locked', account, ip=client_ip(self.request) or '')
+                audit.record_for_user_quietly(account, 'account.login_locked', account, ip=client_ip(self.request) or '')
         return super().form_invalid(form)
 
     def form_valid(self, form):

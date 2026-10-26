@@ -70,6 +70,16 @@ class LoginThrottleTests(TestCase):
 		self.attempt('wrong', username='nobody-here')  # an unknown name has no account to record against
 		self.assertEqual(AuditLog.objects.filter(action='account.login_locked').count(), 1)
 
+	def test_a_failing_audit_write_never_stops_the_lockout(self):
+		from unittest import mock
+		with mock.patch('tenancy.audit.record', side_effect=RuntimeError('database went away')):
+			for _ in range(views.MAX_FAILURES):
+				views.fail(self.user)
+			for _ in range(dict(views.LOGIN_LIMITS)['pair']):
+				self.attempt('wrong')
+		self.assertTrue(views.locked(self.user))
+		self.assertEqual(self.attempt('right-pw-1').status_code, 429)
+
 
 class PasswordChangeThrottleTests(TestCase):
 	def setUp(self):
