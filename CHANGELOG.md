@@ -2,9 +2,9 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.1.2 (2026-10-26)
 
-### Added
+Update with `make up` or the in-app updater. Includes everything in v1.1.1 (the update bar, the organization switcher, release archives).
 
 - **The REST API and MCP can read the server's state.** `GET /api/v1/system/status` and the MCP tool `get_system_status` answer one snapshot: overall `ok` or `degraded` with the problems and notes behind it, whether scanning is paused, the update phase, and for every project the caller can see its targets, hosts, exposed hosts, scans running, queued and stalled, and open findings. An App Admin also gets the database and broker health, queue depths, whether each worker answers and consumes its queue, schedules past due, memory per scanner container, disk, CVE feed freshness and today's AI validation budget. Every probe is independent (one that fails shows up as a problem, not as a failed call) and nothing returned includes an address, credential or task argument. See [docs/AGENT-API.md](docs/AGENT-API.md#endpoints-and-tools).
 
