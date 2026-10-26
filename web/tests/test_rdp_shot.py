@@ -210,7 +210,7 @@ class RunForScanTests(RouteFixture, TestCase):
 		self.assertEqual(out['captured'], 1)
 
 	def test_no_candidates_is_a_no_op(self):
-		other = self.scan(names=('plain.rt.test',), ports=((443, 'https'),))
+		other = self.scan(names=('plain.rt.test',), ports=((443, 'https'),), ip='203.0.113.99')
 		with mock.patch('cveFeed.rdp_shot.available', return_value=True):
 			out = rdp_shot.run_for_scan(other.id, capturer=self.capturer, reader=self.reader)
 		self.assertEqual(out, {'attempted': 0})

@@ -185,6 +185,7 @@ def _technologies(report):
 def persist_report(scan, sub, url, report):
     """Save one site's report; returns ``(new findings, technologies added)``."""
     from reNgine.tasks import save_vulnerability
+    from startScan.ip_rows import get_or_create_first
     from startScan.models import Technology
     new = 0
     for name, severity, description, cves, refs, component in _vuln_rows(report, url):
@@ -195,7 +196,7 @@ def persist_report(scan, sub, url, report):
         new += int(created)
     added = 0
     for tech_name in _technologies(report):
-        tech, _ = Technology.objects.get_or_create(name=tech_name)
+        tech, _ = get_or_create_first(Technology, name=tech_name)
         if not sub.technologies.filter(pk=tech.pk).exists():
             sub.technologies.add(tech)
             added += 1

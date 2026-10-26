@@ -21,6 +21,7 @@ from reNgine.llm import *
 from reNgine.utilities import *
 from scanEngine.models import (EngineType, InstalledExternalTool, Notification)
 from startScan.models import *
+from startScan.ip_rows import get_or_create_first, get_or_create_ip
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 
@@ -82,7 +83,7 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		if not subdomain:
 			continue
-		tech, _ = Technology.objects.get_or_create(name=tech_name[:500])
+		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
 		subdomain.technologies.add(tech)
 	_persist_bbot_findings(result, ctx, subdomains)
 	_persist_bbot_urls(result, ctx, subdomains)
@@ -910,7 +911,8 @@ def save_subdomain(subdomain_name, ctx={}):
 		if normalize(subdomain_name) in banned:  # the organization excluded this exact host for good
 			logger.info(f'{subdomain_name} is excluded for this organization. Skipping.')
 			return None, False
-	subdomain, created = Subdomain.objects.get_or_create(
+	subdomain, created = get_or_create_first(
+		Subdomain,
 		scan_history=scan,
 		target_domain=domain,
 		name=subdomain_name)
@@ -932,7 +934,7 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, **kwargs):
 		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
 		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
 		return None, False
-	ip, created = IpAddress.objects.get_or_create(address=ip_address)
+	ip, created = get_or_create_ip(ip_address)
 	# if created:
 	# 	logger.warning(f'Found new IP {ip_address}')
 
