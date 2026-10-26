@@ -4,10 +4,13 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Fixed
+
+- **A finding marked fixed (or an accepted risk) no longer keeps its host hot.** The host's colour, score, "why this host is fire" list, the exposed counts and the graph only skipped CVE matches the AI had ruled out; a match or scanner finding someone had closed still counted, so a host with every finding closed stayed "fire". Closed findings now drop out of all of them, and marking a finding fixed, accepted, reopened or in progress rescores its host at once (a bulk update rescores each host once) instead of at the next daily pass. A host closed before this change is corrected by the next rescore.
+
 ## v1.2.1 (2026-10-26)
 
 Update with the in-app updater (Settings > Updates) or `make up`. Includes everything in v1.2.0. No database migrations.
-
 ### Changed
 
 - **A triage answer the validator rejects is sent back to the AI, with why.** "AI review failed (schema_invalid)" meant the model's reply broke the strict answer schema (an extra key, `severity_adjust` as text, a step kind outside nuclei, nmap, curl and manual, two JSON objects ...) and the finding was left unreviewed until the next sweep. The rejected reply and the exact reason now go back to the model once, and its second answer is used; if that is also rejected the failure is recorded as before, now with the reason (`reason`, `attempts` in the diagnostic, never any reply text). The retry is a separate step in AI usage (`finding_triage_repair`).
