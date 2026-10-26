@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Changed
+
+- **A triage answer the validator rejects is sent back to the AI, with why.** "AI review failed (schema_invalid)" meant the model's reply broke the strict answer schema (an extra key, `severity_adjust` as text, a step kind outside nuclei, nmap, curl and manual, two JSON objects ...) and the finding was left unreviewed until the next sweep. The rejected reply and the exact reason now go back to the model once, and its second answer is used; if that is also rejected the failure is recorded as before, now with the reason (`reason`, `attempts` in the diagnostic, never any reply text). The retry is a separate step in AI usage (`finding_triage_repair`).
+
 ## v1.2.0 (2026-10-26)
 
 Update with the in-app updater (Settings > Updates) or `make up`. A release is only cut after an upgrade rehearsal: CI installs the previous version, seeds it with data (duplicate IP addresses included), updates it with the real update scripts, plain and behind a host proxy, and checks the site, the workers, the migrations and the data. This release adds database migrations; the update applies them and rolls back if one fails.
