@@ -1323,3 +1323,9 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .proj-wrap.top:has(.org-switch) .select+.proj-label+.select{margin-top:0}
 .page-head.compact{margin-bottom:12px;align-items:center}.page-head.compact .sub{margin:0}
 .page-head.compact:not(:has(.btn)){margin-bottom:0}.page-head.compact:has(.btn){justify-content:flex-end}
+
+/* Add targets: where they go */
+.dlg-dest{display:grid;grid-template-columns:1fr;gap:10px;margin:10px 0 4px}
+@media (min-width:560px){.dlg-dest{grid-template-columns:1fr 1fr}}
+.dlg-dest-field{display:flex;flex-direction:column;gap:5px;margin:0}
+.dlg-dest .select select{min-height:40px;font-weight:600}
