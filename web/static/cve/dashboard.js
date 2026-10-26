@@ -165,14 +165,72 @@ function hostsHref(name, project) {
   return where ? `/cve/${encodeURIComponent(where)}/hosts/?host=${encodeURIComponent(name)}` : "#";
 }
 
-const MAP_LIMIT = 100; // the map shows the highest-scoring hosts; the legend still counts every host
+const MAP_POOL = 400; // tiles built; the layout below shows as many of the highest-scoring hosts as fill the card in whole rows
+const MAP_GAP = 6;
+// Tile tiers, richest first: the minimum size each needs. The layout picks the richest tier that holds every host, then stretches the
+// tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
+// all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
+const MAP_TIERS = [
+  { name: "rich", size: "xl", w: 96, h: 104 },
+  { name: "card", size: "xl", w: 92, h: 56 },
+  { name: "chip", size: "l", w: 50, h: 40 },
+  { name: "dot", size: "s", w: 34, h: 32 },
+];
+function fitTier(W, H, n, t) {
+  let best = null;
+  const maxCols = Math.floor((W + MAP_GAP) / (t.w + MAP_GAP));
+  for (let c = 1; c <= Math.min(maxCols, n); c++) {
+    const r = Math.ceil(n / c);
+    const tw = (W - (c - 1) * MAP_GAP) / c;
+    const th = (H - (r - 1) * MAP_GAP) / r;
+    if (th < t.h) continue;
+    const aspect = tw / th;
+    const shape = aspect >= 0.9 && aspect <= 2 ? 1 : 0.6; // prefer tiles that are not slivers
+    const score = Math.min(tw, 210) * Math.min(th, 150) * (n / (c * r)) * shape;
+    if (!best || score > best.score) best = { cols: c, rows: r, tw, th, score };
+  }
+  return best;
+}
+function planMap(W, H, n) {
+  for (const t of MAP_TIERS) {
+    const fit = fitTier(W, H, n, t);
+    if (fit) return { tier: t, show: n, ...fit };
+  }
+  const t = MAP_TIERS[MAP_TIERS.length - 1];
+  const cols = Math.max(1, Math.floor((W + MAP_GAP) / (t.w + MAP_GAP)));
+  const rows = Math.max(1, Math.floor((H + MAP_GAP) / (t.h + MAP_GAP)));
+  return { tier: t, show: Math.min(n, cols * rows), cols, rows, tw: (W - (cols - 1) * MAP_GAP) / cols, th: (H - (rows - 1) * MAP_GAP) / rows };
+}
+let mapOrdered = [];
+function layoutMap() {
+  const map = $("map");
+  const W = map.clientWidth;
+  const H = map.clientHeight;
+  if (!W || !H || !mapOrdered.length) return;
+  const plan = planMap(W, H, mapOrdered.length);
+  map.dataset.size = plan.tier.size;
+  map.dataset.tier = plan.tier.name;
+  map.dataset.narrow = plan.tw < 150 ? "1" : "0"; // narrow tiles drop the long "why" lines, which would only be cut off
+  map.dataset.lines = String(plan.tier.name === "rich" ? Math.max(1, Math.min(5, Math.floor((plan.th - 50) / 15))) : 0);
+  map.style.setProperty("--cols", plan.cols);
+  map.style.setProperty("--rows", plan.rows);
+  mapOrdered.forEach((h, i) => {
+    const cell = cells.get(h.id);
+    if (cell) cell.hidden = i >= plan.show;
+  });
+  if (mapDrawn !== plan.show) {
+    mapDrawn = plan.show;
+    paintMapCount();
+  }
+}
+new ResizeObserver(() => requestAnimationFrame(layoutMap)).observe($("map"));
 // The header of the attack-surface map reads the same numbers as the Exposed hosts tile, so the two cannot disagree: the map
 // draws live hosts (they resolved, or answered over HTTP), the tile counts every host the Hosts page lists.
 let statsNow = null;
 let mapDrawn = null; // squares on the map right now
 function paintMapCount() {
   const n = $("map-count");
-  paintMapEmpty($("map").querySelectorAll(".hx").length);
+  paintMapEmpty($("map").querySelectorAll(".hx:not([hidden])").length);
   if (!statsNow || !statsNow.hosts) {
     n.textContent = "";
     n.removeAttribute("title");
@@ -213,6 +271,29 @@ function paintMapEmpty(shown) {
   map.append(box);
 }
 
+// The extra lines a roomy tile shows: the worst CVE or finding, the counts, then the biggest reasons for the score.
+function hostDetails(info) {
+  const box = el("span", "hx-details");
+  if (info.top_cve) {
+    box.append(el("span", "hx-d hx-cve", info.top_cve));
+  } else if (info.max_sev) {
+    box.append(el("span", "hx-d", `Worst finding: ${info.max_sev}`));
+  } else {
+    box.append(el("span", "hx-d", "No CVEs"));
+  }
+  if (info.cves) box.append(el("span", "hx-d", `${info.cves} CVE${info.cves === 1 ? "" : "s"}`));
+  if (info.findings) box.append(el("span", "hx-d", `${info.findings} finding${info.findings === 1 ? "" : "s"}`));
+  if (info.ips) box.append(el("span", "hx-d", `${info.ips} IP${info.ips === 1 ? "" : "s"}`));
+  const reasons = (info.score_parts || []).length ? info.score_parts.map((p) => `${p.label} +${p.points}`) : (info.reasons || []);
+  reasons.slice(0, 3).forEach((r) => box.append(el("span", "hx-d hx-why", r)));
+  return box;
+}
+
+function hostTag(info) {
+  const tier = info.top_tier || (info.top_cve ? "cve" : "");
+  return tier ? el("i", `hx-tag ${info.top_tier || ""}`, tier.toUpperCase()) : null;
+}
+
 function drawMap(nodes) {
   const hosts = nodes.filter((n) => n.kind === "subdomain");
   const map = $("map");
@@ -223,8 +304,7 @@ function drawMap(nodes) {
   const ordered = hosts
     .slice()
     .sort((a, b) => (b.score || 0) - (a.score || 0) || HEAT_ORDER.indexOf(a.heat) - HEAT_ORDER.indexOf(b.heat) || a.label.localeCompare(b.label))
-    .slice(0, MAP_LIMIT);
-  map.dataset.size = ordered.length <= 12 ? "xl" : ordered.length <= 60 ? "l" : "s";
+    .slice(0, MAP_POOL);
   const cellsInOrder = ordered.map((h, i) => {
     const heat = heatOf(h);
     seen.add(h.id);
@@ -251,14 +331,17 @@ function drawMap(nodes) {
     }
     const score = h.score || 0;
     const short = h.label.split(".")[0];
-    if (cell.dataset.score !== String(score) || cell.dataset.short !== short) {
+    const infoJson = JSON.stringify(h.info || {});
+    if (cell.dataset.score !== String(score) || cell.dataset.short !== short || cell.dataset.info !== infoJson) {
       cell.textContent = "";
-      cell.append(el("span", "score", String(score)), el("span", "hx-name", short));
+      cell.append(el("span", "score", String(score)), el("span", "hx-name", short), hostDetails(h.info || {}));
+      const tag = hostTag(h.info || {});
+      if (tag) cell.append(tag);
       cell.dataset.short = short;
     }
     cell.dataset.name = h.label;
     cell.dataset.score = score;
-    cell.dataset.info = JSON.stringify(h.info || {});
+    cell.dataset.info = infoJson;
     if (cell.dataset.heat !== heat) {
       cell.dataset.heat = heat;
       HEAT_ORDER.forEach((k) => cell.classList.toggle(k, k === heat));
@@ -281,7 +364,8 @@ function drawMap(nodes) {
     }
   });
   mapReady = true;
-  mapDrawn = ordered.length;
+  mapOrdered = ordered;
+  layoutMap();
   paintMapEmpty(hosts.length);
   paintMapCount();
   const sig = HEAT_ORDER.map((k) => counts[k] || 0).join(",");
