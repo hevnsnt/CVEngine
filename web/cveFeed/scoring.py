@@ -123,10 +123,11 @@ def _chunks(items, size=CHUNK):
 
 
 def _cve_inputs(sub):
+    from cveFeed.counts import match_is_live
     from cveFeed.threat import classify_threat_tier, match_temperature
     out = []
     for m in sub.cve_matches.all():
-        if m.ai_verdict == 'not_affected':
+        if not match_is_live(m):  # ruled out, fixed or an accepted risk
             continue
         c = m.cve_entry
         tier = classify_threat_tier(kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss)
@@ -160,6 +161,7 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
     scans' copies too, so sorting is consistent) and on HostState. The inputs come from one Subdomain row per name: the row of
     ``scan_id`` when it is given (the scan that was just recorded), else that of the newest finished scan; rows of failed, aborted
     or queued scans are never used. Bounded: 500 names per round of queries. Returns how many hosts were scored."""
+    from cveFeed.counts import finding_is_live
     from cveFeed.models import AssetChange, HostState, RouteAuth
     from startScan.models import Subdomain
     now = now or timezone.now()
@@ -185,7 +187,7 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         scores = {}
         for name, sub in subs.items():
             inputs = {'cves': _cve_inputs(sub),
-                      'findings': [{'severity': v.severity, 'name': v.name} for v in sub.vulnerability_set.all() if v.open_status],
+                      'findings': [{'severity': v.severity, 'name': v.name} for v in sub.vulnerability_set.all() if finding_is_live(v)],
                       'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ())}
             inputs.update(zombies.get(name, {}))
             scores[name] = score_host(inputs)

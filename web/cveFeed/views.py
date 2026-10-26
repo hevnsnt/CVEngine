@@ -127,7 +127,7 @@ def graph_payload(domain_id=None, scan_id=None):
             return True
         return False
 
-    from cveFeed.counts import LIVE_HOST_Q
+    from cveFeed.counts import CLOSED, LIVE_HOST_Q, match_is_live
     subs = subs.filter(LIVE_HOST_Q).distinct()
     sub_list = list(subs[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
@@ -135,11 +135,11 @@ def graph_payload(domain_id=None, scan_id=None):
     # second query narrows to the ones severe enough, open, and not ruled out, to call "vulnerable".
     scanned_ids = set(Vulnerability.objects.filter(subdomain_id__in=sub_ids).values_list('subdomain_id', flat=True))
     vulnerable_ids = set(Vulnerability.objects.filter(
-        subdomain_id__in=sub_ids, open_status=True, severity__gte=1).values_list('subdomain_id', flat=True))
-    vulnerable_ids |= {s.pk for s in sub_list if any(m.ai_verdict != 'not_affected' for m in s.cve_matches.all())}
+        subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', flat=True))
+    vulnerable_ids |= {s.pk for s in sub_list if any(match_is_live(m) for m in s.cve_matches.all())}
 
     severities = {}
-    for sub_id, severity in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).values_list('subdomain_id', 'severity'):
+    for sub_id, severity in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', 'severity'):
         severities.setdefault(sub_id, []).append(severity)
 
     # one host, several names: the evidence of the other names on the same addresses counts for the host drawn
@@ -148,16 +148,16 @@ def graph_payload(domain_id=None, scan_id=None):
     sibling_ids = {i for rows in siblings.values() for i, _ in rows}
     sibling_matches, sibling_findings, sibling_seen = {}, {}, set()
     if sibling_ids:
-        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').only(
+        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
                 'subdomain_id', 'ai_verdict', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
                 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry'):
             sibling_matches.setdefault(m.subdomain_id, []).append(m)
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1) \
+        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
                 .values_list('subdomain_id', 'severity', 'name'):
             sibling_findings.setdefault(sid, []).append((severity, name))
     own_findings = {}
     if sibling_ids:
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1) \
+        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
                 .values_list('subdomain_id', 'severity', 'name'):
             own_findings.setdefault(sid, set()).add((severity, name))
 
@@ -167,7 +167,7 @@ def graph_payload(domain_id=None, scan_id=None):
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
-        live = [m for m in sub.cve_matches.all() if m.ai_verdict != 'not_affected']
+        live = [m for m in sub.cve_matches.all() if match_is_live(m)]
         sev = list(severities.get(sub.pk, []))
         sibs = siblings.get(sub.pk, [])
         have = {m.cve_entry.cve_id for m in live}
@@ -199,7 +199,7 @@ def graph_payload(domain_id=None, scan_id=None):
             if node(f'ip:{ip.pk}', 'ip', ip.address):
                 edges.add((sid, f'ip:{ip.pk}'))
         for match in sub.cve_matches.all():
-            if match.ai_verdict == 'not_affected':
+            if not match_is_live(match):
                 continue
             cve = match.cve_entry
             if node(f'cve:{cve.pk}', 'cve', cve.cve_id, tier=_tier(cve)):

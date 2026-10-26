@@ -29,6 +29,17 @@ from django.utils import timezone
 RUNNING_WINDOW = timedelta(hours=11)
 CERT_WARNING_DAYS = 30
 RULED_OUT = 'not_affected'  # the AI verdict that takes a CVE match off every list of exposure
+CLOSED = ('fixed', 'accepted_risk')  # remediation states that do the same: someone dealt with the finding or decided to live with it
+
+
+def match_is_live(match):
+    """A CVE match that still counts toward a host's heat, score and exposure: not ruled out by the AI, not fixed, not an accepted risk."""
+    return match.ai_verdict != RULED_OUT and match.remediation_status not in CLOSED
+
+
+def finding_is_live(finding):
+    """A scanner finding that still counts: open, and not fixed or an accepted risk."""
+    return bool(finding.open_status) and finding.remediation_status not in CLOSED
 
 # a host that resolved to an address, or that something saw answer over HTTP
 LIVE_HOST_Q = Q(ip_addresses__isnull=False) | Q(http_status__gt=0)
@@ -131,8 +142,8 @@ def exposure_filter(prefix=''):
     """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(subdomain=None).values('subdomain')
-    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(subdomain=None).values('subdomain')
+    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
+    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
     return Q(**{prefix + 'pk__in': matches}) | Q(**{prefix + 'pk__in': findings})
 
 
@@ -143,13 +154,13 @@ def exposed_host_count():
 def exposed_matches():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).filter(latest_scan_q('subdomain__'))
+    return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).filter(latest_scan_q('subdomain__'))
 
 
 def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
-    informational detections and closed findings are the rest (``status=all``)."""
-    return qs.filter(open_status=True, severity__gte=1)
+    informational detections and closed findings (fixed or an accepted risk too) are the rest (``status=all``)."""
+    return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
 
 
 def expiring_certificates(qs, days=CERT_WARNING_DAYS):

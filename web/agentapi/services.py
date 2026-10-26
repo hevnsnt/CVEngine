@@ -1000,11 +1000,12 @@ def _add_targets(ctx, slug, values, discover, mode):
 
 def _heat_reasons(sub):
     """What a host's colour rests on: its CVE matches (rated as they apply to a host) and its open findings, hottest first."""
+    from cveFeed.counts import finding_is_live, match_is_live
     from cveFeed.distro import label_for
     from cveFeed.threat import SEVERITY_HEAT, classify_threat_tier, match_temperature
     reasons = []
     for m in sub.cve_matches.all():
-        if m.ai_verdict == 'not_affected':
+        if not match_is_live(m):  # ruled out by the AI, fixed or an accepted risk: not a reason for the host's colour
             continue
         c = m.cve_entry
         tier = classify_threat_tier(kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss)
@@ -1015,7 +1016,7 @@ def _heat_reasons(sub):
                         'temp': match_temperature(tier, c.cvss, m.ai_verdict, m.distro_status),
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
     for v in sub.vulnerability_set.all():
-        if v.open_status and v.severity in SEVERITY_HEAT:
+        if finding_is_live(v) and v.severity in SEVERITY_HEAT:
             reasons.append({'kind': 'finding', 'label': v.name, 'detail': SEVERITY_NAMES.get(v.severity, str(v.severity)),
                             'temp': SEVERITY_HEAT[v.severity], 'finding': 'vulnerability', 'id': v.id,
                             'classification': _classification_of(v)})
@@ -1053,6 +1054,7 @@ def _merge_group(sub, others):
     """The whole host as one: ``sub`` (the richest copy of the name) plus its other current-inventory copies. IPs are merged by
     address and ports by (address, number, protocol), CVE matches by CVE id and open findings by id, so the counts agree with the
     score and the web routes, which are both read by name."""
+    from cveFeed.counts import finding_is_live, match_is_live
     from startScan.models import open_ports
     ips, seen_ports = {}, set()
     reasons, seen_reasons = [], set()
@@ -1074,10 +1076,10 @@ def _merge_group(sub, others):
                 seen_reasons.add(key)
                 reasons.append(r)
         for m in row.cve_matches.all():
-            if m.ai_verdict != 'not_affected':
+            if match_is_live(m):
                 cves.add(m.cve_entry.cve_id)
         for v in row.vulnerability_set.all():
-            if v.open_status and v.id not in seen_vulns:
+            if finding_is_live(v) and v.id not in seen_vulns:
                 seen_vulns.add(v.id)
                 vulns[v.id] = v
     rank = {'fire': 0, 'smoke': 1, 'ice': 2}
@@ -2397,7 +2399,25 @@ def list_findings(ctx, slug, params):
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
 
 
-def _apply_remediation(obj, status, note, user):
+def _host_of(obj):
+    """``(project id, host name)`` of a finding that belongs to a host, else None (a hygiene finding belongs to a domain)."""
+    sub = getattr(obj, 'subdomain', None)
+    domain = getattr(sub, 'target_domain', None) if sub else None
+    return (domain.project_id, sub.name) if sub and domain and domain.project_id else None
+
+
+def _rescore_hosts(hosts):
+    """Rescore these ``(project id, host name)`` pairs: a finding fixed or reopened changes the host's score and colour at once, not at
+    the next daily pass."""
+    from cveFeed import scoring
+    by_project = {}
+    for project_id, name in hosts:
+        by_project.setdefault(project_id, set()).add(name)
+    for project_id, names in by_project.items():
+        scoring.rescore_quietly(project_id, sorted(names)[:scoring.CHUNK])
+
+
+def _apply_remediation(obj, status, note, user, rescore=True):
     """Set and save the remediation fields shared by CVEMatch, Vulnerability and HygieneFinding (the same tuple of
     statuses, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's body left
     it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Raises on an
@@ -2412,6 +2432,9 @@ def _apply_remediation(obj, status, note, user):
         obj.remediation_note = note[:2000]
         fields.append('remediation_note')
     obj.save(update_fields=fields)
+    host = _host_of(obj) if rescore else None
+    if host:
+        _rescore_hosts([host])
 
 
 UNSET = object()  # a PATCH field the caller's body left out entirely, as opposed to an explicit null/empty value
@@ -2511,7 +2534,7 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
         raise ApiError(400, 'items must be a non-empty list')
     if len(items) > MAX_BULK_STATUS:
         raise ApiError(400, f'at most {MAX_BULK_STATUS} items per call')
-    updated, failed = 0, []
+    updated, failed, hosts = 0, [], set()
     for item in items:
         kind = item.get('kind') if isinstance(item, dict) else None
         finding_id = item.get('id') if isinstance(item, dict) else None
@@ -2522,14 +2545,18 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
                 raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
             obj = _finding_obj(project, kind, finding_id)
             before = obj.remediation_status
-            _apply_remediation(obj, status, note, ctx.user)
+            _apply_remediation(obj, status, note, ctx.user, rescore=False)
             _record_status_change(project, kind, finding_id, before, status, ctx.user)
+            host = _host_of(obj)
+            if host:
+                hosts.add(host)
             updated += 1
         except ApiError as e:
             failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
         except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
             logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
             failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
+    _rescore_hosts(hosts)  # once per host, not once per finding
     activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
     return {'updated': updated, 'failed': failed}
 

@@ -28,7 +28,7 @@ def groups(project_slug=None):
     count it: the same name in two targets of one project is one host (see ``cveFeed.counts``). Per-target numbers are summed
     nowhere; every group and project total is a count of distinct hosts."""
     from cveFeed.correlation import latest_scan_q
-    from cveFeed.counts import RULED_OUT
+    from cveFeed.counts import CLOSED, RULED_OUT
     from startScan.models import Subdomain
 
     domains = _domains(project_slug)
@@ -71,9 +71,9 @@ def groups(project_slug=None):
         scan_history__scanactivity__status=2))
     from startScan.models import Vulnerability
     from cveFeed.models import CVEMatch
-    finding_pks = Vulnerability.objects.filter(subdomain_id__in=current.values('pk'), open_status=True, severity__gte=1).values('subdomain')
+    finding_pks = Vulnerability.objects.filter(subdomain_id__in=current.values('pk'), open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values('subdomain')
     findings_of = names_by_domain(current.filter(pk__in=finding_pks))
-    match_pks = CVEMatch.objects.filter(subdomain_id__in=current.values('pk')).exclude(ai_verdict=RULED_OUT).values('subdomain')
+    match_pks = CVEMatch.objects.filter(subdomain_id__in=current.values('pk')).exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).values('subdomain')
     candidates_of = names_by_domain(current.filter(pk__in=match_pks))
 
     projects = {}
@@ -127,9 +127,10 @@ def hosts(project_slug, root, page=1, q=''):
     ids = list(reps[(page-1)*HOST_PAGE:page*HOST_PAGE])
     rows = list(Subdomain.objects.filter(pk__in=ids).select_related('target_domain')
                 .prefetch_related('ip_addresses__ports').order_by('name'))
-    found = set(Vulnerability.objects.filter(subdomain_id__in=ids, open_status=True, severity__gte=1)
+    from cveFeed.counts import CLOSED
+    found = set(Vulnerability.objects.filter(subdomain_id__in=ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
                 .values_list('subdomain_id', flat=True))
-    matched = set(CVEMatch.objects.filter(subdomain_id__in=ids).exclude(ai_verdict='not_affected')
+    matched = set(CVEMatch.objects.filter(subdomain_id__in=ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED)
                   .values_list('subdomain_id', flat=True))
     scanned = set(ScanActivity.objects.filter(scan_of_id__in=[r.scan_history_id for r in rows if r.scan_history_id],
                   name__in=('nuclei_scan', 'nuclei_targeted_scan'), status=2).values_list('scan_of_id', flat=True))
