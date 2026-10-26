@@ -555,8 +555,10 @@ circle.pop{animation:popin .5s ease}
 .gn.sel text{fill:var(--ink);font-weight:700}
 .gn .ring{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:3 3;pointer-events:none}
 /* live scan highlighting: a domain or host a scan is working on right now pulses */
-.gn-live .ring{display:inline!important;stroke:var(--fire);stroke-width:2.5;stroke-dasharray:none;animation:gn-pulse 1.4s ease-in-out infinite}
-.gn-live circle:not(.ring){stroke-width:3px}
+.gn-live .ring{display:inline!important;stroke:var(--brand);stroke-width:3.5;stroke-dasharray:none;animation:gn-pulse 1.2s ease-in-out infinite}
+.gn-live circle:not(.ring){stroke:var(--brand);stroke-width:3px}
+.gn-live text{fill:var(--ink);font-weight:800}
+.has-live .gn:not(.gn-live){opacity:.5}
 @keyframes gn-pulse{0%,100%{stroke-opacity:1}50%{stroke-opacity:.2}}
 @media (prefers-reduced-motion:reduce){.gn-live .ring{animation:none}}
 /* SOC mode: the graph over the whole window, with a status bar and the scans running now */
@@ -1392,3 +1394,15 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (hover:hover) and (pointer:fine){.mx-cell:hover{outline:2px solid var(--ink);outline-offset:1px}}
 .mx-busy{font-size:12px}
 @media (max-width:999px){.mx-body{grid-template-columns:minmax(0,1fr);gap:10px}.mx-leads,.mx-sides{grid-template-rows:none;grid-template-columns:1fr 1fr;gap:12px}.mx-grid{gap:1px;grid-auto-rows:28px}}
+
+/* "Scanning now" chips on the Live discovery card, and the legend key for the pulsing ring */
+.scanning-now{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin:0 0 10px}
+.scanning-now[hidden]{display:none}
+.scanning-now .eyebrow{display:inline-flex;align-items:center;gap:6px;margin-right:2px}
+.scanning-now .eyebrow::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--brand);animation:update-pulse 1.2s ease-in-out infinite}
+.scan-chip{all:unset;box-sizing:border-box;cursor:pointer;display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:0 9px;border:1px solid var(--brand);border-radius:999px;font:600 12px var(--mono);color:var(--ink);background:color-mix(in srgb,var(--brand) 10%,var(--surface))}
+.scan-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media (hover:hover) and (pointer:fine){.scan-chip:hover{background:color-mix(in srgb,var(--brand) 22%,var(--surface))}}
+.scan-chip small{font:500 11px var(--mono);color:var(--muted)}
+.legend-live::before{content:"";display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2.5px solid var(--brand);vertical-align:-1px;box-sizing:border-box}
+@media (prefers-reduced-motion:reduce){.scanning-now .eyebrow::before{animation:none}}

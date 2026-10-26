@@ -188,6 +188,9 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     },
   });
   const graphics = Viva.Graph.View.svgGraphics();
+  // Use the room: a force layout comes out roughly round but these cards are wide, so what is drawn is stretched along the short side
+  // (per axis, at draw time; the layout and the saved positions stay in their own round coordinates). fit() sets it.
+  const spread = { x: 1, y: 1 };
   let selected = null; // the node whose card is open
   const group = new Set(); // ids of the nodes in the multi-selection
   let hovered = null;
@@ -246,12 +249,13 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
 
   // Live scan highlighting (SOC mode and the plain page alike): the domains and hosts a scan is working on right now carry a
   // pulsing ring. Domains are matched by id, hosts by lower-cased name, so it holds in the clustered view too.
-  const active = { domains: new Set(), hosts: new Set() };
+  const active = { domains: new Set(), hosts: new Set(), labels: new Set() };
   const isActive = (node) => {
     const d = node.data || {};
     if (d.kind === "domain") return active.domains.has(String(d.detail_id || node.id).replace(/^dom:/, ""));
-    if (d.kind === "subdomain") return active.hosts.has(String(d.label || "").toLowerCase());
-    return false;
+    if (d.kind === "subdomain" && active.hosts.has(String(d.label || "").toLowerCase())) return true;
+    // an address or name a running job names (for example "Background full port scan of 198.51.100.34")
+    return active.labels.size > 0 && ["ip", "subdomain", "domain"].includes(d.kind) && active.labels.has(String(d.label || "").toLowerCase());
   };
   function applyActive() {
     let any = false;
@@ -337,7 +341,13 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       return g;
     })
     .placeNode((ui, pos) => {
-      ui.setAttribute("transform", `translate(${pos.x},${pos.y})`);
+      ui.setAttribute("transform", `translate(${pos.x * spread.x},${pos.y * spread.y})`);
+    })
+    .placeLink((ui, from, to) => {
+      ui.setAttribute("x1", from.x * spread.x);
+      ui.setAttribute("y1", from.y * spread.y);
+      ui.setAttribute("x2", to.x * spread.x);
+      ui.setAttribute("y2", to.y * spread.y);
     });
   graphics.link((link) => {
     const l = Viva.Graph.svg("line");
@@ -359,7 +369,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     const m = root && /matrix\(([^)]+)\)/.exec(root.getAttribute("transform") || "");
     const [k, , , , tx, ty] = m ? m[1].split(/[ ,]+/).map(Number) : [1, 0, 0, 1, 0, 0];
     const box = svg.getBoundingClientRect();
-    return { x: (cx - box.left - tx) / k, y: (cy - box.top - ty) / k };
+    return { x: (cx - box.left - tx) / k / spread.x, y: (cy - box.top - ty) / k / spread.y };
   }
   function attachPointer(g, node) {
     const stopViva = (e) => e.stopPropagation(); // the renderer pans the canvas on mousedown/touchstart; a node press is not a pan
@@ -621,11 +631,12 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       for (let cx = left; cx <= right; cx++) for (let cy = top; cy <= bottom; cy++) cells.push(`${cx}:${cy}`);
       const free = cells.every(cell => !taken.has(cell));
       const kind = n.data?.kind;
-      const show = clustered ?
+      const live = ui.classList.contains("gn-live");
+      const show = live || (clustered ?
         rank === 0 || (kind === 'project' && free) ||
         (kind === 'root' && scale >= 0.16 && free) ||
         ((!zoomedOut || picked) && rank >= 3 && free) :
-        rank === 0 || rank === 3 || ((!zoomedOut || picked) && free);
+        rank === 0 || rank === 3 || ((!zoomedOut || picked) && free));
       if (show) cells.forEach(cell => taken.add(cell));
       text.setAttribute("display", show ? "" : "none");
     });
@@ -654,15 +665,34 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     const w = container.clientWidth,
       h = container.clientHeight;
     if (!w || !h) return;
-    const pad = clustered ? 440 : 70; // room for each root's host bubbles and labels
-    const bw = Math.max(x2 - x1, 1) + pad * 2,
-      bh = Math.max(y2 - y1, 1) + pad;
-    const k = Math.min(w / bw, h / bh, 1.4);
-    const key = [x1, y1, x2, y2, w, h].map((v) => Math.round(v / 6)).join();
+    // fit by screen margin instead of a fixed padding in graph units, so the picture uses the room it is given; a clustered
+    // graph also needs space for each root's host bubbles and labels around it
+    const margin = 26;
+    const room = clustered ? 260 : 14; // graph units around the outermost node centers (node radius, label)
+    // spread the short side so the picture matches the card's shape (a little rounder than the card, for the labels). The padding
+    // around the outermost nodes does not stretch, so it is solved for: (bw*sx + 2*room) / (bh*sy + 2*room) = the wanted ratio.
+    const bw0 = Math.max(x2 - x1, 1);
+    const bh0 = Math.max(y2 - y1, 1);
+    const want = Math.max((w - margin * 2) / Math.max(h - margin * 2, 1), 0.2) * 0.9;
+    let sx = 1;
+    let sy = 1;
+    if (!clustered && graph.getNodesCount() >= 4) {
+      if ((bw0 + room * 2) / (bh0 + room * 2) < want) sx = Math.min(Math.max((want * (bh0 + room * 2) - room * 2) / bw0, 1), 4);
+      else sy = Math.min(Math.max(((bw0 + room * 2) / want - room * 2) / bh0, 1), 4);
+    }
+    if (Math.abs(sx - spread.x) > 0.04 || Math.abs(sy - spread.y) > 0.04) {
+      spread.x = sx;
+      spread.y = sy;
+      renderer.rerender();
+    }
+    const bw = bw0 * spread.x + room * 2,
+      bh = bh0 * spread.y + room * 2;
+    const k = Math.min((w - margin * 2) / bw, (h - margin * 2) / bh, clustered ? 1.8 : 3);
+    const key = [x1, y1, x2, y2, w, h, spread.x, spread.y].map((v) => Math.round(v / 6)).join();
     if (key === lastBox) return;
     lastBox = key;
     graphics.resetScale();
-    renderer.moveTo((x1 + x2) / 2, (y1 + y2) / 2);
+    renderer.moveTo(((x1 + x2) / 2) * spread.x, ((y1 + y2) / 2) * spread.y);
     graphics.scale(k, { x: w / 2, y: h / 2 });
   }
   const stop = () => {
@@ -683,10 +713,28 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
   return {
     setClustered(value) { clustered = Boolean(value); },
     // the domain ids and host names a scan is working on now; call again with what is true next poll
-    setActive(domains = [], hosts = []) {
+    setActive(domains = [], hosts = [], labels = []) {
       active.domains = new Set(domains.map(String));
       active.hosts = new Set(hosts.map((h) => String(h).toLowerCase()));
+      active.labels = new Set(labels.map((l) => String(l).toLowerCase()));
       applyActive();
+    },
+    // Pan and zoom to a node by its name or address (the "scanning now" chips use it); returns whether it was found.
+    locate(label) {
+      const want = String(label || "").toLowerCase();
+      let found = null;
+      graph.forEachNode((n) => {
+        if (!found && String((n.data && n.data.label) || "").toLowerCase() === want) found = n;
+      });
+      if (!found) return false;
+      const p = layout.getNodePosition(found.id);
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      auto = false;
+      graphics.resetScale();
+      renderer.moveTo(p.x * spread.x, p.y * spread.y);
+      graphics.scale(1.4, { x: w / 2, y: h / 2 });
+      return true;
     },
     fit() {
       auto = true;

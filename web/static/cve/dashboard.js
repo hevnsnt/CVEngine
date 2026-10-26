@@ -781,3 +781,41 @@ every(pollFeed, 6000);
     /* trends are extra: leave the section hidden when the data does not come */
   }
 })();
+
+// --- scanning now ---------------------------------------------------------------------------------
+// What is being worked on right now, so it can be told apart on the graph: the domains and hosts of the running scans (the server's
+// graph-live view) plus the addresses and names the running AI-activity lines mention ("Background full port scan of 198.51.100.34").
+// They pulse on the graph and are listed as chips above it; a chip pans and zooms the graph to its node.
+const SCAN_TOKEN = /\b(?:\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi;
+const MAX_CHIPS = 6;
+async function pollScanning() {
+  if (document.hidden) return;
+  try {
+    const live = await get(`/cve/api/graph-live${projParam ? "?" + projParam : ""}`);
+    const labels = new Set();
+    running.forEach((li) => (String(li.dataset.msg || "").split("|").slice(1).join("|").match(SCAN_TOKEN) || []).forEach((t) => labels.add(t.toLowerCase())));
+    graph.setActive(live.domains, live.hosts, [...labels]);
+    const box = $("d-scanning");
+    const targets = new Map(); // name -> stage
+    live.scans.forEach((s) => targets.set(s.domain.toLowerCase(), s.stage || ""));
+    labels.forEach((l) => { if (!targets.has(l)) targets.set(l, ""); });
+    box.textContent = "";
+    if (!targets.size) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.append(el("span", "eyebrow", "Scanning now"));
+    [...targets].slice(0, MAX_CHIPS).forEach(([name, stage]) => {
+      const chip = el("button", "scan-chip", name, { type: "button", title: `Show ${name} on the graph` });
+      if (stage) chip.append(el("small", "", stage));
+      chip.addEventListener("click", () => graph.locate(name));
+      box.append(chip);
+    });
+    if (targets.size > MAX_CHIPS) box.append(el("span", "note", `+${targets.size - MAX_CHIPS} more`));
+  } catch (_) {
+    /* the next poll tries again */
+  }
+}
+pollScanning();
+setInterval(pollScanning, 3000);
