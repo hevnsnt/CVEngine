@@ -15,6 +15,13 @@ echo "docker $*" >> "$STUB_DIR/calls.log"
 case " $* " in
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
+  *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
+  *" inspect "*) case "$*" in
+      *config_files*) cat "$STUB_DIR/running_config_files" 2>/dev/null;;
+      *environment_file*) cat "$STUB_DIR/running_env_file" 2>/dev/null;;
+      *'.compose.project"'*) cat "$STUB_DIR/running_project" 2>/dev/null;;
+    esac; echo; exit 0;;
+  *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
@@ -247,6 +254,137 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if ' build ' in c])
         self.assertFalse(self.approved())
 
+    def test_the_stack_is_recreated_with_the_overlay_and_env_file_it_was_started_with(self):
+        # a host behind its own proxy: the overlay moves the published port and sets limits, the env file holds its settings
+        (self.work / 'docker-compose.vps.yml').write_text('services: {}\n')
+        (self.work / '.env.vps').write_text('X=1\n')
+        (self.stub / 'running_config_files').write_text(f'{self.work}/docker-compose.yml,{self.work}/docker-compose.vps.yml\n')
+        (self.stub / 'running_env_file').write_text(f'{self.work}/.env.vps\n')
+        (self.stub / 'running_project').write_text('cvengine\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        deploys = [c for c in calls if ' build web' in c or '--force-recreate' in c or ' migrate ' in c or ' exec ' in c]
+        self.assertTrue(deploys)
+        for call in deploys:
+            self.assertIn('--env-file .env.vps -p cvengine -f docker-compose.yml -f docker-compose.vps.yml', call)
+        self.assertEqual(self.head(), self.new)
+
+    def test_settings_in_env_say_the_layout_without_asking_the_running_stack(self):
+        (self.work / 'docker-compose.vps.yml').write_text('services: {}\n')
+        (self.work / '.env.vps').write_text('X=1\n')
+        (self.work / '.env').write_text('CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.vps.yml\nCVENGINE_COMPOSE_ENV_FILE=.env.vps\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('docker compose --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
+
+    def test_an_overlay_that_nothing_says_to_use_stops_the_update_before_anything_is_recreated(self):
+        (self.work / 'docker-compose.vps.yml').write_text('services: {}\n')  # untracked: this install's own file
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(self.approved())  # kept: it retries once the setting is there
+        self.assertEqual(self.head(), self.prev)
+        self.assertFalse([c for c in self.calls() if '--force-recreate' in c or ' build ' in c])
+        self.assertIn('docker-compose.vps.yml', (self.work / 'web' / '.update-log').read_text())
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'failed')
+        self.assertIn('CVENGINE_COMPOSE_FILES', phase.get('detail', ''))
+
+    def test_a_running_stack_started_from_files_elsewhere_is_not_guessed_at(self):
+        (self.stub / 'running_config_files').write_text('/srv/elsewhere/docker-compose.yml\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(self.approved())
+        self.assertFalse([c for c in self.calls() if '--force-recreate' in c or ' build ' in c])
+
+    def test_a_service_that_does_not_start_makes_the_update_a_failure_not_a_success(self):
+        (self.stub / 'service_down').write_text('')  # the proxy stays "created": its port is taken
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.approved())  # the database is migrated, so it keeps retrying the restart
+        self.assertIn('not running: proxy', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+
+    def develop_ahead(self, commit=True):
+        """origin/develop: master plus one commit. Returns its tip."""
+        other = self.tmp / 'other'
+        self.git('checkout', '-b', 'develop', cwd=other)
+        (other / 'web' / 'README').write_text('v3\n')
+        self.git('commit', '-am', 'three', cwd=other)
+        self.git('push', 'origin', 'develop', cwd=other)
+        return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def choose_branch(self, branch):
+        (self.work / 'web' / '.update-branch').write_text(branch + '\n')
+
+    def test_a_different_update_branch_moves_the_checkout_to_it(self):
+        tip = self.develop_ahead()
+        self.approve(tip)
+        self.choose_branch('develop')
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'develop')
+        self.assertEqual(self.head(), tip)
+        self.assertFalse(self.approved())
+        self.assertFalse((self.work / 'web' / '.update-branch').exists())
+        self.assertIn('switching this checkout from master to develop', (self.work / 'web' / '.update-log').read_text())
+
+    def test_an_update_branch_that_does_not_exist_is_reported_and_nothing_moves(self):
+        self.approve()
+        self.choose_branch('no-such-branch')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'master')
+        self.assertTrue(self.approved())  # a fetch that fails is retried
+        self.assertFalse([c for c in self.calls() if ' build ' in c])
+        self.assertIn('no-such-branch', self.phase_file().get('detail', ''))
+
+    def test_a_commit_that_is_not_on_the_chosen_branch_is_refused_and_says_to_check_again(self):
+        self.develop_ahead()
+        self.approve('0123456789abcdef0123456789abcdef01234567')
+        self.choose_branch('develop')
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'master')
+        self.assertFalse(self.approved())
+        self.assertIn('not on develop', self.phase_file().get('detail', ''))
+
+    def test_moving_to_a_branch_that_does_not_contain_what_is_installed_is_a_downgrade_and_refused(self):
+        other = self.tmp / 'other'
+        self.git('checkout', '--orphan', 'old-line', cwd=other)  # a line of history that does not contain the installed commit
+        self.git('commit', '-m', 'old line', cwd=other)
+        self.git('push', 'origin', 'old-line', cwd=other)
+        tip = self.git('rev-parse', 'HEAD', cwd=other)
+        self.approve(tip)
+        self.choose_branch('old-line')
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'master')
+        self.assertFalse(self.approved())
+        self.assertIn('downgrade', self.phase_file().get('detail', ''))
+        self.assertFalse([c for c in self.calls() if ' build ' in c])
+
+    def test_a_failed_build_after_switching_returns_to_the_previous_branch_and_commit(self):
+        tip = self.develop_ahead()
+        (self.stub / 'fail_up').write_text('')
+        self.approve(tip)
+        self.choose_branch('develop')
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'master')
+        self.assertEqual(self.head(), self.prev)
+
+    def test_a_detached_checkout_is_not_moved_and_the_reason_is_shown(self):
+        tip = self.develop_ahead()
+        self.git('checkout', '-q', '--detach', cwd=self.work)
+        self.approve(tip)
+        self.choose_branch('develop')
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertIn('not on a branch', self.phase_file().get('detail', ''))
+
     def test_a_bad_compose_file_value_is_refused_before_anything_runs(self):
         self.approve()
         for bad in ('../docker-compose.dev.yml', 'x; touch /tmp/pwned', 'missing.yml', 'docker-compose.dev.txt'):
@@ -263,7 +401,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         # the reason reaches Settings > Updates: the usual cause is an update branch that is not the one checked out on the server
         phase = self.phase_file()
         self.assertEqual(phase.get('phase'), 'failed')
-        self.assertIn('branch checked out on this server', phase.get('detail', ''))
+        self.assertIn('is not on master', phase.get('detail', ''))
 
     def test_local_changes_to_tracked_files_block_the_update_and_keep_the_approval(self):
         (self.work / 'web' / 'README').write_text('edited locally\n')

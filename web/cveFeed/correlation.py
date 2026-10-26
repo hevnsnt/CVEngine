@@ -344,6 +344,14 @@ def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
     return False
 
 
+def _names_exactly(item, token, aliases=(), cpe_product=None):
+    """Whether one affected entry names the discovered product itself, not a longer name that merely contains it."""
+    tokens = affected_product_tokens(item)
+    if token in tokens or (cpe_product and cpe_product in tokens):
+        return True
+    return any(a in tokens and (a not in _ALIAS_VENDOR or _vendor_ok(item, *_ALIAS_VENDOR[a])) for a in aliases)
+
+
 def _bounded(rng):
     return version_in_range((0,), rng) is not None  # a range with at least one usable bound
 
@@ -404,6 +412,12 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor)]
         if not hit:
             continue
+        # When the advisory names the product itself ("jquery"), the entries that only contain its name ("jquery-rails", a Ruby gem
+        # versioned 4.x, "org.webjars.npm:jquery") are repackagings or wrappers with their own version numbers: jQuery 3.5.1 is not
+        # inside the gem's "fixed 4.4.0". Only the entries that name the product exactly are tested.
+        exact = [(i, item) for i, item in hit if _names_exactly(item, token, aliases, cpe_product)]
+        if exact:
+            hit = exact
         in_range, matched_product = None, name
         if ver is not None:
             in_range, unknown = False, False

@@ -4,6 +4,18 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Changed
+
+- **Names that point at the same servers are one host.** `example.com` and `www.example.com` resolving to exactly the same addresses used to be two hosts on the map, the Hosts page and the counts, each with its own copy of every finding. They are now one host (the project's own target name is the one shown, otherwise the shortest) that lists its other names ("Also answers to"), and its CVE matches, findings and exposure are the host's, counted once. Names behind a CDN or other shared edge address, names with a different set of addresses, names that never resolved, and the same addresses in another project stay separate hosts. The dashboard, the Hosts page, the group overview and the history count the same way.
+
+### Fixed
+
+- **Changing the update branch moves the server to it.** Choosing another branch in Settings > Updates and approving used to fail with "not on the branch checked out on this server". The host script now fetches that branch and checks it out (an upgrade only: the branch must contain the installed commit, the local branch must not hold unpushed commits, the checkout must be clean and on a branch), rebuilds, and returns to the previous branch and commit if the build fails before the migration. When it cannot, nothing moves and Settings > Updates says why.
+
+- **The in-app updater keeps the Compose layout the stack runs with.** It recreated the containers from `docker-compose.yml` alone, so on a host with an overlay (a host proxy on port 443, memory limits) and its own env file the proxy could not bind its port and the site went down. It now reads `CVENGINE_COMPOSE_FILES`, `CVENGINE_COMPOSE_ENV_FILE` and `CVENGINE_COMPOSE_PROJECT` (environment or `.env`, as `update.sh` does), otherwise uses the files, env file and project the running `web` container was started with, and stops with the reason (approval kept) when the checkout holds an overlay nothing says to use. After the restart it checks that every service is running and reports a failed update when one is not. `scripts/update.sh` passes its layout on when it installs the watcher.
+
+- **A patched jQuery was reported as vulnerable to CVE-2020-11023.** The advisory lists `jquery` (fixed 3.5.0) next to the Ruby gem `jquery-rails` (fixed 4.4.0), and the matcher tested the detected jQuery 3.5.1 against the gem's version range too, so a host already past the fix was reported as "jquery-rails 3.5.1" inside the affected range. When an advisory names the product itself, only the entries that name it exactly are tested now; wrappers and repackagings that merely contain the name (`jquery-rails`, `org.webjars.npm:jquery`) no longer decide the match. Existing matches of this kind close on the next correlation pass.
+
 ### Added
 
 - **Settings > Updates says what will happen and how long it takes.** After Approve it shows each step (approved, the host picks it up, scans pause and drain, files update, services rebuild, scanning resumes) with what it is waiting on, how long it usually takes and the time since approval, refreshing on its own. When no host updater is reporting it says so and shows the one command to run on the server, with a Copy button; the orange bar says the same after 20 seconds instead of waiting quietly. `scripts/install-updater.sh` now starts the watcher straight away, and `scripts/apply-update.sh` rebuilds when the files are already at the approved commit (after a manual `git pull`) but the running build is older, instead of declaring the update done.

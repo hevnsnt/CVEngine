@@ -284,6 +284,7 @@ function hostDetails(info) {
   if (info.cves) box.append(el("span", "hx-d", `${info.cves} CVE${info.cves === 1 ? "" : "s"}`));
   if (info.findings) box.append(el("span", "hx-d", `${info.findings} finding${info.findings === 1 ? "" : "s"}`));
   if (info.ips) box.append(el("span", "hx-d", `${info.ips} IP${info.ips === 1 ? "" : "s"}`));
+  if ((info.aliases || []).length) box.append(el("span", "hx-d", `Also ${info.aliases.slice(0, 3).join(", ")}${info.aliases.length > 3 ? ` +${info.aliases.length - 3}` : ""}`));
   const reasons = (info.score_parts || []).length ? info.score_parts.map((p) => `${p.label} +${p.points}`) : (info.reasons || []);
   reasons.slice(0, 3).forEach((r) => box.append(el("span", "hx-d hx-why", r)));
   return box;

@@ -98,10 +98,13 @@ class StateTests(TestCase):
 		self.assertEqual(updater.state(row)['status'], 'approved')
 		with open(os.path.join(self.dir, '.update-approved')) as f:
 			self.assertEqual(f.read().strip(), NEW)
+		with open(os.path.join(self.dir, '.update-branch')) as f:  # the host moves its checkout to the branch chosen in Settings
+			self.assertEqual(f.read().strip(), row.branch)
 		self.install(NEW)  # the host script finished
 		row = updater.check(row, get=fake_github())
 		self.assertEqual(updater.state(row)['status'], 'up_to_date')
 		self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-approved')))
+		self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-branch')))
 		self.assertEqual(row.approved_sha, '')
 
 	def test_approve_needs_something_newer(self):

@@ -1112,6 +1112,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'http': http,
             'hosting': hosting_info,
             'names': _host_names(sub),
+            # the other names that point at this host's addresses: one host, several domain names
+            'aliases': sorted({o.name for o in others if o.name.lower() != sub.name.lower()}, key=str.lower),
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
@@ -1253,38 +1255,47 @@ def _host_heat_merged(sub, others, reasons):
 
 
 def _name_siblings(project, subs):
-    """``{sub.id: [other current rows of the same name in the same project]}`` for a page of hosts: one query for the whole page.
-    A name in another project is a different host: copies are grouped by (project, name), never by name alone."""
-    from cveFeed.correlation import latest_scan_q
+    """``{sub.id: [other current rows of the same host]}`` for a page of hosts: a few queries for the whole page. The same host is
+    the same name in the same project (other targets and scans) and every other name that resolves to exactly the same addresses
+    (see ``cveFeed.counts.with_host_key``); a name in another project is a different host."""
+    from cveFeed.counts import host_siblings
     from startScan.models import Subdomain
     subs = list(subs)
     if not subs:
         return {}
-    rows = Subdomain.objects.filter(target_domain__project_id__in=_pids_of(project, subs), name__in={s.name for s in subs}).filter(latest_scan_q()) \
-        .exclude(id__in=[s.id for s in subs]).select_related('target_domain') \
-        .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')
-    by_name = {}
-    for row in rows:
-        by_name.setdefault((row.target_domain.project_id, row.name), []).append(row)
-    return {s.id: by_name.get((_pid_of(project, s), s.name), []) for s in subs}
+    ids = host_siblings([s.id for s in subs])
+    wanted = {i for rows in ids.values() for i, _ in rows}
+    rows = {r.id: r for r in Subdomain.objects.filter(id__in=wanted).select_related('target_domain').prefetch_related(
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')}
+    return {s.id: [rows[i] for i, _ in ids.get(s.id, []) if i in rows] for s in subs}
 
 
 def _one_per_host(qs, per_project=False):
-    """Collapse a Subdomain queryset to one row per hostname: the one with the most open ports, then the most IPs, then the newest
-    scan (a scan-less row last). A single Postgres DISTINCT ON over the filtered ids, then a plain ``id__in`` so ordering and paging
-    stay ordinary. Richness comes from subqueries on a fresh queryset, so search joins cannot inflate the counts. ``per_project``
-    (the all-projects view) keeps one row per (project, hostname): the same name in two projects is two hosts."""
-    from django.db.models import Count, F, OuterRef, Subquery, Value
-    from django.db.models.functions import Coalesce
+    """Collapse a Subdomain queryset to one row per host. First one row per hostname: the one with the most open ports, then the most
+    IPs, then the newest scan (a scan-less row last). Then names that resolve to exactly the same addresses (``example.com`` and
+    ``www.example.com``) become one host: the project's own target name first, else the shortest name (see
+    ``cveFeed.counts.with_host_key``; a name behind a CDN, or without an address, stays alone). Two Postgres DISTINCT ON passes over
+    the filtered ids, then a plain ``id__in`` so ordering and paging stay ordinary. Richness comes from subqueries on a fresh
+    queryset, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row per (project,
+    hostname): the same name in two projects is two hosts."""
+    from django.db.models import Case, Count, F, IntegerField, OuterRef, Subquery, Value, Window, When
+    from django.db.models.functions import Coalesce, Length, RowNumber
+    from cveFeed.counts import with_host_key
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
     ports = Port.objects.filter(state__in=OPEN_PORT_STATES, ports__ip_addresses=OuterRef('pk')).order_by() \
         .values('ports__ip_addresses').annotate(c=Count('id', distinct=True)).values('c')
     ips = Subdomain.ip_addresses.through.objects.filter(subdomain_id=OuterRef('pk')).order_by() \
         .values('subdomain_id').annotate(c=Count('id')).values('c')
     keys = ('target_domain__project_id', 'name') if per_project else ('name',)
-    rep = Subdomain.objects.filter(id__in=qs.order_by().values('id')).order_by(
+    by_name = Subdomain.objects.filter(id__in=qs.order_by().values('id')).order_by(
         *keys, Coalesce(Subquery(ports), Value(0)).desc(), Coalesce(Subquery(ips), Value(0)).desc(),
         F('scan_history_id').desc(nulls_last=True), '-id').distinct(*keys).values('id')
+    own_target = Case(When(name=F('target_domain__name'), then=Value(0)), default=Value(1), output_field=IntegerField())
+    # a window rather than DISTINCT ON: the key is an annotation, which DISTINCT ON cannot keep once the query is cut to ids
+    rep = with_host_key(Subdomain.objects.filter(id__in=by_name)).annotate(_rank=Window(
+        RowNumber(), partition_by=[F('host_key')],
+        order_by=[own_target.asc(), Length('name').asc(), F('name').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
+    ).filter(_rank=1).values('id')
     return Subdomain.objects.filter(id__in=rep)
 
 
