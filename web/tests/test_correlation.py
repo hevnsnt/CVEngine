@@ -232,6 +232,20 @@ class TestKnownVulnerableMatches(unittest.TestCase):
         cve = FakeCVE(11022, [{"vendor": "jquery", "product": "jquery", "ranges": [{"introduced": "1.2", "fixed": "3.5.0"}]}])
         self.assertEqual(_hits([cve], "jQuery:1.12.4"), [(11022, True, 0.85)])
 
+    def test_a_wrapper_package_named_like_the_product_does_not_decide_the_match(self):
+        # CVE-2020-11023 lists jquery (fixed 3.5.0) next to the Ruby gem jquery-rails (fixed 4.4.0) and repackagings of jQuery. The
+        # gem's version numbers are its own: jQuery 3.5.1, already patched, is not "before 4.4.0".
+        cve = FakeCVE(11023, [
+            {"vendor": "jquery", "product": "jquery", "ranges": [{"introduced": "1.0.3", "fixed": "3.5.0"}]},
+            {"package": "jquery-rails", "ranges": [{"introduced": "0", "fixed": "4.4.0"}]},
+            {"package": "org.webjars.npm:jquery", "ranges": [{"introduced": "1.0.3", "fixed": "3.5.0"}]},
+            {"package": "components/jquery", "ranges": [{"introduced": "1.0.3", "fixed": "3.5.0"}]}])
+        self.assertEqual(_hits([cve], "jQuery:3.5.1"), [(11023, False, 0.0)])
+        self.assertEqual(_hits([cve], "jQuery:3.4.1"), [(11023, True, 0.85)])
+        # the evidence names the product that decided it, not the wrapper
+        found = list(_match_candidates("jQuery", (3, 4, 1), "jquery", build_product_index([cve]), {11023: cve}))
+        self.assertEqual([(c.id, product, ok) for c, product, ok in found], [(11023, "jquery", True)])
+
     def test_fixed_is_exclusive_and_last_affected_inclusive(self):
         fixed = FakeCVE(31, [{"product": "nginx", "ranges": [{"introduced": "1.0", "fixed": "1.20.0"}]}])
         last = FakeCVE(32, [{"product": "nginx", "ranges": [{"introduced": "1.0", "lastAffected": "1.20.0"}]}])
