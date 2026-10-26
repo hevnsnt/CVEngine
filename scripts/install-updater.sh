@@ -32,3 +32,9 @@ chmod +x "$ROOT/scripts/apply-update.sh"
 chmod +x "$ROOT/scripts/update-watch.sh"
 printf '%s\n* * * * * %s%s/scripts/update-watch.sh >/dev/null 2>&1 %s\n' "$CURRENT" "$ENVPREFIX" "$ROOT" "$MARK" | sed '/^$/d' | crontab -
 echo "Installed: $ROOT/scripts/update-watch.sh starts every minute and applies an approved update within seconds (log: $ROOT/web/.update-log)${COMPOSE_FILE:+, deploying with $COMPOSE_FILE}."
+# Start listening now rather than at the top of the next minute, so an approval already waiting is applied at once and Settings > Updates
+# sees the heartbeat straight away. (CVENGINE_NO_START=1 only installs the cron entry.)
+if [ -z "${CVENGINE_NO_START:-}" ]; then
+  nohup env ${COMPOSE_FILE:+CVENGINE_COMPOSE_FILE=$COMPOSE_FILE} "$ROOT/scripts/update-watch.sh" >/dev/null 2>&1 &
+  echo "The watcher is running now; an approved update starts within seconds."
+fi

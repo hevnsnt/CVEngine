@@ -162,6 +162,7 @@ if ! git fetch --quiet origin "$BRANCH" >>"$LOG" 2>&1; then
 fi
 if ! git merge-base --is-ancestor "$SHA" "origin/$BRANCH"; then
   log "refusing: $SHA is not on origin/$BRANCH"
+  phase failed "approved commit is not on $BRANCH, the branch checked out on this server. Set the update branch in Settings to $BRANCH, or git checkout the other one here"
   rm -f "$FLAG"
   exit 1
 fi
@@ -191,7 +192,10 @@ fi
 rm -f "$STATE/last-wait" "$STATE/last-refusal"
 
 PREV=$(git rev-parse HEAD)
-if [ "$PREV" = "$SHA" ]; then
+# The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
+# without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
+BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
+if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ]; then
   log "already at $SHA"
   python3 "$STATE_HELPER" commit "$SHA"
   rm -f "$FLAG"
@@ -200,17 +204,22 @@ if [ "$PREV" = "$SHA" ]; then
   exit 0
 fi
 
-log "updating $PREV -> $SHA"
-phase applying merging
-backup_env
-if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
+if [ "$PREV" = "$SHA" ]; then
+  log "the files are at $SHA but the running build is ${BUILT:-unknown}; rebuilding"
+  phase applying "files are current, rebuilding the services"
+else
+  log "updating $PREV -> $SHA"
+  phase applying merging
+  backup_env
+  if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
+    restore_env
+    resume_scanning
+    log "refusing: $SHA is not a fast-forward of the local branch"
+    rm -f "$FLAG"
+    exit 1
+  fi
   restore_env
-  resume_scanning
-  log "refusing: $SHA is not a fast-forward of the local branch"
-  rm -f "$FLAG"
-  exit 1
 fi
-restore_env
 
 if deploy >>"$LOG" 2>&1; then
   python3 "$STATE_HELPER" commit "$SHA"
