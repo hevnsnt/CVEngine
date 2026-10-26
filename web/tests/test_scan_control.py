@@ -202,3 +202,39 @@ def app_task_names():
     from reNgine.celery import app
     import cveFeed.tasks, reNgine.tasks  # noqa: F401,E401 - registers every task
     return set(app.tasks)
+
+
+class OperatorPauseVersusUpdatePauseTests(TestCase):
+    def setUp(self):
+        self.root = User.objects.create_superuser('opv-root', 'opv@example.test', 'pw')
+        self.client_root = client_for(self.root)
+        self.pause = {'action': 'pause', 'confirm': 'Pause all scanning'}
+        self.resume = {'action': 'resume', 'confirm': 'Resume scanning'}
+
+    def test_an_operator_pause_during_an_update_pause_becomes_the_operators_own(self):
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True, 'reason': 'An update is being applied'})
+        self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.pause)[0], 200)
+        control = ScanControl.current()
+        self.assertEqual((control.paused, control.paused_by_update), (True, False))
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            release_update_pause()  # the finishing update must not lift the operator's hold
+        self.assertTrue(ScanControl.current().paused)
+
+    def test_an_operator_resume_clears_the_update_flag_too(self):
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True, 'reason': 'x'})
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.resume)[0], 200)
+        control = ScanControl.current()
+        self.assertEqual((control.paused, control.paused_by_update), (False, False))
+
+    def test_resume_is_refused_while_the_update_script_is_draining_or_applying(self):
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True, 'reason': 'x'})
+        phase = {'phase': 'applying', 'detail': '', 'scans_running': 0,
+                 'changed_at': timezone.now().isoformat()}
+        with mock.patch('cveFeed.updater.read_phase', return_value=phase):
+            self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.resume)[0], 409)
+        self.assertTrue(ScanControl.current().paused)
+        phase['changed_at'] = (timezone.now() - timezone.timedelta(hours=5)).isoformat()  # a script that died long ago
+        with mock.patch('cveFeed.updater.read_phase', return_value=phase), \
+                tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+            self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.resume)[0], 200)

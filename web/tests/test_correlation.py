@@ -265,7 +265,8 @@ class TestParseVersion(unittest.TestCase):
         self.assertEqual(_vcmp(parse_version("1.18"), parse_version("1.18.0")), 0)
 
     def test_an_openssl_patch_letter_or_a_distro_word_is_not_a_pre_release(self):
-        self.assertEqual(parse_version("1.0.2k"), (1, 0, 2))
+        from cveFeed.correlation import _vcmp
+        self.assertGreater(_vcmp(parse_version("1.0.2k"), parse_version("1.0.2")), 0)  # a patch letter is later, never a pre-release
         self.assertEqual(parse_version("2.4.52-alpine"), (2, 4, 52))
         self.assertEqual(parse_version("1.2.3-RELEASE"), (1, 2, 3))
 

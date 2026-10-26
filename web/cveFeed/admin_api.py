@@ -685,13 +685,17 @@ def scan_control_set(request, actor):
     if action not in ('pause', 'resume') or body.get('confirm') != {'pause': 'Pause all scanning', 'resume': 'Resume scanning'}.get(action):
         raise AdminError(400, 'confirm the exact global scanning action')
     if action == 'resume':
+        from cveFeed import updater
+        if updater.update_in_progress():  # the host script's own lock is outside this container; its phase file is what we can see
+            raise AdminError(409, 'An update is running; scanning cannot resume until it finishes')
         try:
             with updater_idle(), transaction.atomic():
                 row = ScanControl.current()
                 row = ScanControl.objects.select_for_update().get(pk=row.pk)
                 if row.paused:
-                    row.paused, row.reason, row.actor, row.changed_at, row.last_error = False, '', actor.username, timezone.now(), ''
-                    row.save(update_fields=['paused', 'reason', 'actor', 'changed_at', 'last_error'])
+                    row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
+                        False, False, '', actor.username, timezone.now(), ''
+                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
                     audit(actor, 'scanning.resume', 'all projects')
         except (OSError, RuntimeError) as exc:
             raise AdminError(409, 'An update is running or its lock is unavailable; scanning cannot resume yet') from exc
@@ -699,9 +703,10 @@ def scan_control_set(request, actor):
         with transaction.atomic():
             row = ScanControl.current()
             row = ScanControl.objects.select_for_update().get(pk=row.pk)
-            if not row.paused:
-                row.paused, row.reason, row.actor, row.changed_at, row.last_error = True, 'Paused by App Admin', actor.username, timezone.now(), ''
-                row.save(update_fields=['paused', 'reason', 'actor', 'changed_at', 'last_error'])
+            if not row.paused or row.paused_by_update:  # an operator's pause is theirs to lift, never the update's
+                row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
+                    True, False, 'Paused by App Admin', actor.username, timezone.now(), ''
+                row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
                 audit(actor, 'scanning.pause', 'all projects')
             elif row.last_error:
                 row.last_error = ''

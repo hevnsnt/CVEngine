@@ -1307,18 +1307,17 @@ def rescore_all_hosts():
     """Daily: recompute every host's score (the latest finished scan's hosts and the certificate watch's), per project, 500 at a
     time and at most MAX_RESCORE_HOSTS a project, least recently scored first, so "new this week" decays and CVE feed updates
     land on the score."""
-    from django.db.models import F, Max, Q
+    from django.db.models import F
 
     from cveFeed import ledger, scoring
+    from cveFeed.correlation import latest_scan_q
     from dashboard.models import Project
-    from startScan.models import ScanHistory, Subdomain
+    from startScan.models import Subdomain
     if not ledger.sweep_claim("rescore", 3600):
         return {"hosts": 0, "skipped": "another rescore is running"}
-    latest = ScanHistory.objects.filter(scan_status=2).values("domain_id").annotate(last=Max("id")).values("last")
     total = 0
     for project_id in Project.objects.values_list("id", flat=True):
-        names = Subdomain.objects.filter(target_domain__project_id=project_id).filter(
-            Q(scan_history_id__in=latest) | Q(scan_history__isnull=True)).order_by(
+        names = Subdomain.objects.filter(target_domain__project_id=project_id).filter(latest_scan_q()).order_by(
             F("scored_at").asc(nulls_first=True), "id").values_list("name", flat=True)[:scoring.MAX_RESCORE_HOSTS]
         try:
             total += scoring.rescore_hosts(project_id, list(dict.fromkeys(names)))

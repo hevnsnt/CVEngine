@@ -197,6 +197,19 @@ class HygieneRunnerTests(TestCase):
 		messages = list(AgentActivity.objects.filter(kind='hygiene').order_by('id').values_list('message', flat=True))
 		self.assertTrue(messages[0].startswith('Hygiene check of example.test: 2 certificates, 3 issues (worst: high)'))
 
+	def test_a_finding_marked_fixed_that_comes_back_is_reopened(self):
+		mail = lambda name: ([hy.Finding('dmarc_none', hy.MEDIUM, 'DMARC policy is p=none', host=name)], False)
+		none = lambda host, port: None
+		self.run_with(none, mail)
+		self.run_with(none, lambda name: ([], False))  # the sweep sees it gone: resolved
+		row = HygieneFinding.objects.get(domain=self.domain, check_name='dmarc_none')
+		self.assertEqual(row.status, 'resolved')
+		HygieneFinding.objects.filter(pk=row.pk).update(remediation_status='fixed')
+		self.run_with(none, mail)  # the regression
+		row.refresh_from_db()
+		self.assertEqual((row.status, row.remediation_status), ('open', 'open'))
+		self.assertIn('Reopened', row.remediation_note)
+
 	def test_ip_targets_skip_email_checks(self):
 		ip_domain = Domain.objects.create(name='203.0.113.9', project=self.project, insert_date=timezone.now())
 		self.assertEqual(hy.email_domains(ip_domain, lambda n, t: True), [])

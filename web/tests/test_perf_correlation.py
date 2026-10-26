@@ -102,3 +102,73 @@ class CorrelationPerfTests(TestCase):
 		match = CVEMatch.objects.get()
 		self.assertEqual(match.ai_verdict, 'affected')
 		self.assertEqual(match.updated_at, stamp)
+
+
+class PartialScanInventoryTests(CorrelationPerfTests):
+	def test_a_host_pipeline_scan_of_one_host_does_not_hide_the_rest_of_the_inventory(self):
+		from cveFeed.discovery import HOST_PIPELINE_TASK
+		full = self._scan()
+		a_old = self._host('a.perf.test', full, tech='nginx')
+		b = self._host('b.perf.test', full, tech='nginx')
+		partial = self._scan()
+		ScanHistory.objects.filter(pk=partial.pk).update(tasks=[HOST_PIPELINE_TASK])
+		a_new = self._host('a.perf.test', partial, tech='nginx')
+		_, index = correlation.cve_pool()
+		ids = set(correlation.candidate_subdomains(index).values_list('id', flat=True))
+		self.assertEqual(ids, {b.id, a_new.id})  # b stays; a's newest row wins over the older copy
+		self.assertNotIn(a_old.id, ids)
+		self.assertEqual(correlate_cves()['subdomains'], 2)
+
+
+class PatchLetterVersionTests(TestCase):
+	def test_openssl_patch_letters_order_versions(self):
+		from cveFeed.correlation import parse_version, version_in_range
+		rng = {'introduced': '1.1.1', 'fixed': '1.1.1n'}
+		self.assertTrue(parse_version('1.1.1k') < parse_version('1.1.1n') < parse_version('1.1.1za'))
+		self.assertTrue(version_in_range(parse_version('1.1.1k'), rng))
+		self.assertFalse(version_in_range(parse_version('1.1.1n'), rng))
+		self.assertFalse(version_in_range(parse_version('1.1.1w'), rng))
+		self.assertTrue(version_in_range(parse_version('1.1.1'), rng))
+		self.assertFalse(version_in_range(parse_version('1.0.2zh'), {'introduced': '1.0.2', 'fixed': '1.0.2zf'}))
+		self.assertEqual(parse_version('8.9p1'), (8, 9))  # OpenSSH's p is not a patch letter
+
+	def test_cve_list_wildcards_name_a_whole_branch(self):
+		from cveFeed import intel
+		ranges = intel._ranges({'versions': [
+			{'version': '2.3.x', 'status': 'affected'},
+			{'version': '0', 'lessThanOrEqual': '3.1.x', 'status': 'affected'},
+			{'version': '1.0', 'lessThan': '1.5.x', 'status': 'affected'}]})
+		self.assertEqual([(r.get('introduced'), r.get('fixed')) for r in ranges], [('2.3', '2.4'), (None, '3.2'), ('1.0', '1.5')])
+		from cveFeed.correlation import parse_version, version_in_range
+		self.assertTrue(version_in_range(parse_version('2.3.9'), ranges[0]))
+		self.assertFalse(version_in_range(parse_version('2.4.0'), ranges[0]))
+
+
+class MalformedAffectedTests(CorrelationPerfTests):
+	def test_a_malformed_affected_entry_does_not_stop_correlation_of_the_rest(self):
+		self._host('web.perf.test', self._scan(), tech='nginx')
+		CVEEntry.objects.create(cve_id='CVE-2099-2', published_at=timezone.now(),
+			affected=['junk', None, {'product': 'nginx', 'ranges': 'not-a-list'}, {'product': 'nginx', 'ranges': [None, 5, {'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
+		correlation._INDEX_CACHE.update(key=None, value=None)
+		out = correlate_cves()
+		self.assertEqual(out['subdomains'], 1)
+		self.assertTrue(CVEMatch.objects.filter(cve_entry__cve_id='CVE-2099-1').exists())
+
+	def test_from_api_stores_clean_shapes(self):
+		obj, _ = CVEEntry.from_api({'id': 'CVE-2099-3', 'severity': [], 'exploitation': 'x', 'affected': 'nope', 'references': {}, 'sources': 3})
+		self.assertEqual((obj.affected, obj.references, obj.sources), ([], [], []))
+		obj, _ = CVEEntry.from_api({'id': 'CVE-2099-4', 'affected': [{'product': 'p', 'ranges': [1, {'fixed': '2'}]}, 'x']})
+		self.assertEqual(obj.affected, [{'product': 'p', 'ranges': [{'fixed': '2'}]}])
+
+
+class StrongestSightingTests(CorrelationPerfTests):
+	def test_the_strongest_of_two_sightings_is_kept_not_the_last(self):
+		sub = self._host('web.perf.test', self._scan(), tech='nginx')
+		base = dict(cve_entry_id=self.cve.id, subdomain_id=sub.id, source='correlation', matched_product='nginx',
+					confidence=0.5, scan_history_id=sub.scan_history_id, distro_status='', distro_fixed_version='', evidence={})
+		rows = [{**base, 'matched_version': '1.18.0', 'version_in_range': True},
+				{**base, 'matched_version': '1.25.0', 'version_in_range': False}]
+		for ordered in (rows, rows[::-1]):
+			CVEMatch.objects.all().delete()
+			correlation.save_matches(ordered)
+			self.assertTrue(CVEMatch.objects.get().version_in_range)

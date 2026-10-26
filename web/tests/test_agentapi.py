@@ -1989,3 +1989,11 @@ class TriageApiTests(TestCase):
 		self.assertEqual(created, 6)
 		self.assertEqual(Triage.objects.filter(project=self.pb).count(), 0)
 		self.assertEqual(triage.backfill(self.pa.id), 0)
+
+
+class LeapDayFindingsTests(FindingStatusTests):
+	def test_the_findings_list_works_on_29_february(self):
+		from datetime import datetime, timezone as tz
+		with mock.patch('django.utils.timezone.now', return_value=datetime(2028, 2, 29, 12, tzinfo=tz.utc)):
+			status, data = call(self.t_alice, 'GET', '/api/v1/projects/fs-proj/findings')
+		self.assertEqual(status, 200, data)

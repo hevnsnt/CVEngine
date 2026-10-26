@@ -11,6 +11,11 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 
+def _clean_affected(value):
+    from cveFeed.correlation import clean_affected
+    return clean_affected(value)
+
+
 def _feed_time(value):
     """A feed timestamp, or None when it is missing or not a real date: one malformed entry must not stop the sync."""
     try:
@@ -89,8 +94,10 @@ class CVEEntry(models.Model):
         summary = entry.get("summary") or {}
         if not isinstance(summary, dict):
             summary = {}
-        severity = entry.get("severity") or {}
-        exploitation = entry.get("exploitation") or {}
+        severity = entry.get("severity")
+        severity = severity if isinstance(severity, dict) else {}
+        exploitation = entry.get("exploitation")
+        exploitation = exploitation if isinstance(exploitation, dict) else {}
         exploit_db = exploitation.get("exploitDb")
         defaults = {
             "title": entry.get("title") or "",
@@ -104,9 +111,9 @@ class CVEEntry(models.Model):
             "kev": exploitation.get("kev"),
             "epss_reached": exploitation.get("epssReached"),
             "exploit_db": None if exploit_db is None else bool(exploit_db),
-            "affected": entry.get("affected") or [],
-            "references": entry.get("references") or [],
-            "sources": entry.get("sources") or [],
+            "affected": _clean_affected(entry.get("affected")),
+            "references": entry.get("references") if isinstance(entry.get("references"), list) else [],
+            "sources": entry.get("sources") if isinstance(entry.get("sources"), list) else [],
             "status": entry.get("status") or "",
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),

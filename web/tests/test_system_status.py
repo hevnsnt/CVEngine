@@ -119,7 +119,9 @@ class SystemStatusTests(TestCase):
 
 	def test_a_healthy_instance_says_ok(self):
 		healthy = dict(HEALTH, schedules=[{'name': 'x', 'next_due_state': 'estimated'}])
-		_, data = self.run_status(self.t_root, health=healthy)
+		usage = type('Usage', (), {'total': 100 << 30, 'used': 40 << 30, 'free': 60 << 30})()  # not this machine's real disk
+		with mock.patch.object(system_status.shutil, 'disk_usage', lambda path: usage):
+			_, data = self.run_status(self.t_root, health=healthy)
 		self.assertEqual((data['overall'], data['problems']), ('ok', []))
 
 	def test_a_probe_that_fails_is_reported_and_does_not_fail_the_answer(self):

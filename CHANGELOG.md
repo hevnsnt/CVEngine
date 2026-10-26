@@ -18,6 +18,20 @@ Fixes from an adversarial review of the whole code base.
 - **The SSRF filter covers more addresses.** IPv6 forms that carry an IPv4 address (NAT64, 6to4, IPv4-compatible) are judged by that address, and the Azure, Oracle, Alibaba and AWS IPv6 metadata addresses, Teredo, benchmarking and reserved ranges are always refused. Name checks now run in parallel with a per-name timeout and an overall budget.
 - **The Netlas key is no longer written to the log, the Command table or the history file.**
 
+### Fixed
+
+Also from the review.
+
+- **An OpenSSL-style patch letter is no longer dropped from a version.** `1.1.1k` and `1.1.1n` compared equal, so a host on 1.1.1k looked fixed by every advisory that names 1.1.1n. One or two letters after a three-part version (`1.0.2k`, `0.9.8zh`) now order the version; `8.9p1` is unchanged.
+- **CVE List wildcards (`2.3.x`, `<= 3.1.x`) name a whole branch** instead of the bound `2.3`, which missed 2.3.5.
+- **A scan of one host no longer hides the rest of the inventory** from correlation and from the daily rescore; both read the same current inventory as the host list.
+- **A malformed `affected` entry from the CVE feed cannot stop correlation.** Entries that are not objects, and ranges that are not a list, are dropped when the feed is read and again when the index is built. Two sightings of one product on one host keep the stronger evidence, not the last one saved.
+- **An operator's pause is the operator's own.** Pausing while an update holds the pause converts it, so the finishing update does not resume scanning; resuming clears the update flag, and resume is refused while the update script is draining or applying.
+- **Long banners from a scanned host cannot cost an nmap chunk**: every text value is clipped to its column and one bad port no longer drops the rest.
+- **A hygiene finding marked fixed that comes back is reopened**, with a note, instead of staying hidden.
+- **A bounty scope entry longer than the column is shown as text** instead of aborting the sync.
+- **The findings list no longer fails on 29 February.**
+
 ### Changed
 
 - **CI runs the test suite in parallel.** `manage.py test --parallel` now works: a test runner (`reNgine/test_runner.py`, the project's `TEST_RUNNER`) gives every worker two Redis databases of its own, so one worker's `cache.clear()` or held lock can no longer break a test in another (up to 7 workers). On a 4-core machine the suite went from 543 seconds to 213 seconds. CI uses `--parallel auto` and installs `tblib` so a failure in a worker shows its real traceback. A normal one-process run is unchanged.

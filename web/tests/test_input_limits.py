@@ -55,3 +55,4 @@ class WrongTypeArgumentTests(SimpleTestCase):
 				mcp.call_tool(None, 'x', {})
 		self.assertEqual(ctx.exception.status, 400)
 		self.assertNotIn('secret-internal-detail', ctx.exception.message)
+

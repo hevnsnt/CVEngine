@@ -148,6 +148,8 @@ def normalize_asset(raw_type, identifier):
 def _asset(row_type, identifier, in_scope, eligible, severity, instruction):
     out = []
     for kind, ident in normalize_asset(row_type, identifier):
+        if len(ident) > 500:  # longer than the column: a cut-off host or URL would name something else, so it is only shown as text
+            kind, ident = "other", ident[:500]
         out.append({"kind": kind, "identifier": ident, "raw_type": clean_text(row_type, 64), "in_scope": bool(in_scope),
                     "eligible_for_bounty": eligible, "max_severity": severity if severity in SEVERITIES else "",
                     "instruction": clean_text(instruction, 1000)})

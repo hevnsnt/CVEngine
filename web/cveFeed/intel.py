@@ -398,6 +398,22 @@ def _bound(value):
     return (found.group(1), False) if found else (None, False)
 
 
+_WILDCARD = re.compile(r"^(?:version|ver\.?|v)?\s*(\d+(?:\.\d+)*)\.(?:x|\*)$", re.I)
+
+
+def _wildcard_base(value):
+    """"2.3.x" or "2.3.*" -> "2.3" (the branch a wildcard names), else None."""
+    found = _WILDCARD.match(str(value or "").strip())
+    return found.group(1) if found else None
+
+
+def _next_branch(base):
+    """"2.3" -> "2.4": the first version after every release of branch ``base``."""
+    parts = base.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
 def _ranges(entry):
     """CVE 5 ``versions`` entries -> correlation ranges ({introduced, fixed | lastAffected}), split at ``changes``. An upper
     bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts."""
@@ -406,19 +422,26 @@ def _ranges(entry):
         if not isinstance(v, dict) or v.get("status") != "affected":
             continue
         kind = "GIT" if str(v.get("versionType") or "").lower() == "git" else "SEMVER"
-        start = _bound(v.get("version"))[0]
+        branch = _wildcard_base(v.get("version"))  # "2.3.x": every release of 2.3 (a wildcard is not a version bound)
+        start = branch or _bound(v.get("version"))[0]
         start = None if start in ("0", "0.0", "0.0.0") else start
         upper = {}
         if v.get("lessThan"):
-            bound, exact = _bound(v.get("lessThan"))
+            below = _wildcard_base(v.get("lessThan"))
+            bound, exact = (below, True) if below else _bound(v.get("lessThan"))
             if bound:
                 upper = {"fixed": bound} if exact else {"lastAffected": bound}
         elif v.get("lessThanOrEqual"):
+            through = _wildcard_base(v.get("lessThanOrEqual"))
             bound, _exact = _bound(v.get("lessThanOrEqual"))
-            if bound:
+            if through:  # "<= 2.3.x" ends after the last 2.3 release
+                upper = {"fixed": _next_branch(through)}
+            elif bound:
                 upper = {"lastAffected": bound}
         if not v.get("lessThan") and not v.get("lessThanOrEqual"):
-            if start:  # one exact version
+            if branch:
+                out.append({"type": kind, "introduced": branch, "fixed": _next_branch(branch)})
+            elif start:  # one exact version
                 out.append({"type": kind, "introduced": start, "lastAffected": start})
             continue
         affected, seg_start = True, start

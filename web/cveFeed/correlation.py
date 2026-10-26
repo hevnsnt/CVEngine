@@ -51,6 +51,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)  # a git commit, not a
 # becomes a negative component (2.0-beta9 -> (2, 0, -3, 9) < (2, 0)). The bare letters a/b/m need a number after them: "1.0.2a"
 # is OpenSSL's patch letter, not an alpha.
 _PRE_RE = re.compile(r"^[-_.~+ ]?(?:(alpha|beta|rc|cr|pre|dev|snapshot)|(a|b|m))[-_. ]?(\d+)?", re.IGNORECASE)
+# one or two letters straight after a three-part version, then the end or a separator: 1.0.2k, 1.1.1n-fips, 0.9.8zh. Not "8.9p1"
+# (OpenSSH portable's p is followed by a digit and the version has two parts).
+_PATCH_LETTER_RE = re.compile(r"^([a-z]{1,2})(?![a-z0-9])", re.IGNORECASE)
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
 
@@ -74,9 +77,14 @@ def parse_version(value, strict=False):
         parts = [int(part) for part in match.group(1).split(".")]
     except ValueError:
         return None
-    pre = _PRE_RE.match(text[match.end():])
+    rest = text[match.end():]
+    pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
+    elif len(parts) == 3:
+        letters = _PATCH_LETTER_RE.match(rest)
+        if letters:  # OpenSSL's 1.1.1k < 1.1.1n < 1.1.1zh: the letters are a fourth component, so a patch level is not dropped
+            parts.append(sum(ord(c) - 96 for c in letters.group(1).lower()))
     return tuple(parts)
 
 
@@ -247,6 +255,26 @@ class ProductIndex(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.memo = {}
+
+
+MAX_AFFECTED_ITEMS = 500
+MAX_RANGES_PER_ITEM = 100
+
+
+def clean_affected(value):
+    """The dict entries of a CVE's ``affected`` list, each with a list of dict ranges. A third-party feed decides this shape, and one
+    malformed entry (a string, a null, ranges that are not a list) must not stop correlation for every CVE after it."""
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value[:MAX_AFFECTED_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        ranges = item.get("ranges")
+        if ranges is not None:
+            item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
+        out.append(item)
+    return out
 
 
 def build_product_index(cves):
@@ -496,7 +524,7 @@ def invalid_identity_reason(match):
     if (match.template_result == 'vulnerable' or match.distro_status == 'vulnerable'
             or match.version_in_range is True):
         return ''
-    affected = match.cve_entry.affected or []
+    affected = clean_affected(match.cve_entry.affected)
     if not any(isinstance(item, dict) and affected_product_tokens(item) for item in affected):
         return ''
     token = _norm(match.matched_product)
@@ -567,6 +595,13 @@ _MATCH_FIELDS = ("matched_version", "version_in_range", "confidence", "scan_hist
                  "evidence")
 
 
+def _row_strength(row):
+    """Orders sightings of one match: hard evidence (a template hit, a distribution tracker), then a version inside the range, then an
+    unknown range, then outside it."""
+    return (row.get("template_result") == "vulnerable" or row.get("distro_status") == "vulnerable",
+            row.get("version_in_range") is True, row.get("version_in_range") is None)
+
+
 def save_matches(rows, covered=None):
     """Upsert CVEMatch rows in two statements: bulk_create(ignore_conflicts) for the new ones, bulk_update for the
     existing ones whose evidence changed. Remediation fields are never touched. When the version or its range result
@@ -581,7 +616,11 @@ def save_matches(rows, covered=None):
 
     from cveFeed.models import CVEMatch, MatchVerdict
 
-    unique = {(r["cve_entry_id"], r["subdomain_id"], r["source"], r["matched_product"]): r for r in rows}
+    unique = {}
+    for r in rows:  # two sightings of one product on one host (two ports, two banners): keep the strongest evidence, not the last
+        key = (r["cve_entry_id"], r["subdomain_id"], r["source"], r["matched_product"])
+        if key not in unique or _row_strength(r) >= _row_strength(unique[key]):
+            unique[key] = r
     touched = set()  # hosts whose verdict was reset or whose match was closed: their score must follow
     if covered:
         touched |= close_stale(unique, covered)
@@ -757,6 +796,8 @@ def cve_pool(cve_limit=None):
     if cve_limit:
         qs = qs[:cve_limit]
     cve_by_id = {c.id: c for c in qs}
+    for c in cve_by_id.values():
+        c.affected = clean_affected(c.affected)
     value = (cve_by_id, build_product_index(cve_by_id.values()))
     _INDEX_CACHE.update(key=key, value=value)
     return value
@@ -796,12 +837,13 @@ def latest_scan_q(prefix=""):
 
 def candidate_subdomains(product_index, base=None):
     """Subdomains worth correlating against ``product_index``: hosts carrying a technology or an nmap product that
-    matches one of its tokens, from each domain's latest successful scan plus the scan-less rows certificate
-    transparency created. Older scans' copies of the same host are skipped. Returns a queryset."""
-    from django.db.models import Max, Q
+    matches one of its tokens, from each domain's current inventory (latest_scan_q: the latest full scan, the host-pipeline scans after
+    it, and the scan-less rows certificate transparency created). A partial scan of one host is not the whole inventory, and older
+    scans' copies of the same host are skipped. Returns a queryset."""
+    from django.db.models import Q
 
     from cveFeed.models import CVEMatch
-    from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
+    from startScan.models import IpAddress, Port, Subdomain, Technology
 
     tech_ids, tokens = [], {}
     for tech_id, tech_name in Technology.objects.values_list("id", "name").iterator():
@@ -821,10 +863,8 @@ def candidate_subdomains(product_index, base=None):
     by_tech = Subdomain.technologies.through.objects.filter(technology_id__in=tech_ids).values("subdomain_id")
     ips = IpAddress.ports.through.objects.filter(port__product__in=products).values("ipaddress_id")
     by_port = Subdomain.ip_addresses.through.objects.filter(ipaddress_id__in=ips).values("subdomain_id")
-    latest = ScanHistory.objects.filter(scan_status=2).values("domain_id").annotate(last=Max("id")).values("last")
     matched = CVEMatch.objects.filter(source__in=_CORRELATED_SOURCES).values("subdomain_id")  # re-checked so a stale match closes
-    qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(
-        Q(scan_history_id__in=latest) | Q(scan_history__isnull=True))
+    qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")
 
 
