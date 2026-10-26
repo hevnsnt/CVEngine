@@ -35,6 +35,7 @@ import yaml
 from django.utils import timezone
 
 from cveFeed import triage
+from cveFeed.safeyaml import load_template
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def readonly_problem(yaml_text):
     if not yaml_text or len(yaml_text.encode()) > MAX_INSTALLED_TEMPLATE_BYTES:
         return 'template not validated: empty or too large'
     try:
-        doc = yaml.safe_load(yaml_text)
+        doc = load_template(yaml_text)
     except yaml.YAMLError:
         return 'template not validated: not valid YAML'
     if not isinstance(doc, dict):

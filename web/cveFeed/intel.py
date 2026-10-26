@@ -23,7 +23,7 @@ CNA's affected products and version ranges and CISA's ADP enrichment), most impo
 weaponized, then likely (EPSS), then any public exploit. Each run imports a bounded number, so a fresh install fills in over a
 few hours, and the new CVEs are correlated against the inventory and announced like any new fire-tier CVE.
 """
-import gzip
+import zlib
 import io
 import json
 import logging
@@ -41,6 +41,7 @@ CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
 CVE_IN_TEXT = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
 USER_AGENT = "CVEngine threat intelligence (+https://github.com/hevnsnt/CVEngine)"
 MAX_BYTES = 64 * 1024 * 1024
+MAX_DECOMPRESSED = 512 * 1024 * 1024  # what a feed file may expand to (the real EPSS file is about 20 MB)
 EPSS_THRESHOLD = 0.1  # the CVEEntry.epss_reached meaning
 CVE5_URL = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/{year}/{bucket}xxx/{cve}.json"
 
@@ -187,9 +188,18 @@ def parse_vulncheck(items):
     return out
 
 
+def _gunzip(raw, limit):
+    """Decompress a gzip body, refusing one that expands past ``limit`` bytes (a few KB can claim many GB)."""
+    stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = stream.decompress(raw, limit + 1)
+    if len(out) > limit or stream.unconsumed_tail:
+        raise SourceError("the feed expands past the size limit")
+    return out
+
+
 def parse_epss(raw):
     out = {}
-    text = gzip.decompress(raw).decode("utf-8", "replace")
+    text = _gunzip(raw, MAX_DECOMPRESSED).decode("utf-8", "replace")
     for line in text.splitlines():
         if not line.startswith("CVE-"):
             continue  # the model-version comment and the header
