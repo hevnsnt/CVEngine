@@ -76,6 +76,13 @@ restore_env() {
 }
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
+# The watcher (scripts/update-watch.sh) calls this script again every few seconds while an approval is waiting; say each reason once,
+# not on every call.
+log_once() {
+  [ "$(cat "$STATE/last-refusal" 2>/dev/null)" = "$*" ] && return 0
+  printf '%s' "$*" > "$STATE/last-refusal"
+  log "$*"
+}
 
 COMPOSE_FILE_OVERRIDE=${CVENGINE_COMPOSE_FILE:-}
 if [ -n "$COMPOSE_FILE_OVERRIDE" ] && ! [[ $COMPOSE_FILE_OVERRIDE =~ ^[A-Za-z0-9._-]+\.ya?ml$ && -f $COMPOSE_FILE_OVERRIDE ]]; then
@@ -149,8 +156,8 @@ fi
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if ! git fetch --quiet origin "$BRANCH" >>"$LOG" 2>&1; then
-  log "refusing: could not fetch origin/$BRANCH (network or credentials); approval kept, will retry"
-  phase draining "the host could not reach origin/$BRANCH; it retries every few minutes (see the update log)"
+  log_once "refusing: could not fetch origin/$BRANCH (network or credentials); approval kept, will retry"
+  phase draining "the host could not reach origin/$BRANCH; it keeps retrying (see the update log)"
   exit 1
 fi
 if ! git merge-base --is-ancestor "$SHA" "origin/$BRANCH"; then
@@ -161,7 +168,7 @@ fi
 DIRTY=$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?$' || true)
 if [ -n "$DIRTY" ]; then
   names=$(printf '%s\n' "$DIRTY" | sed 's/^...//' | head -n 5 | paste -sd, -)
-  log "refusing: the checkout has local changes to tracked files ($names); commit or stash them (approval kept, will retry)"
+  log_once "refusing: the checkout has local changes to tracked files ($names); commit or stash them (approval kept, will retry)"
   phase failed "the host checkout has local changes to tracked files ($names); commit or stash them, the update then retries by itself"
   exit 1
 fi
@@ -174,10 +181,14 @@ if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 if [[ $RUNNING =~ ^[1-9][0-9]*$ ]]; then
-  phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
-  log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
-  exit 0
+  if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
+    phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
+    log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
+    printf '%s' "$RUNNING" > "$STATE/last-wait"
+  fi
+  exit 3  # "still waiting": the watcher polls slowly for this; cron treats any status the same
 fi
+rm -f "$STATE/last-wait" "$STATE/last-refusal"
 
 PREV=$(git rev-parse HEAD)
 if [ "$PREV" = "$SHA" ]; then

@@ -120,6 +120,8 @@ def main():
             if not re.fullmatch(r'[0-9a-f]{40}', value):
                 raise ValueError('invalid commit id')
             publish(web_fd, '.commit', [(value + '\n').encode('ascii')])
+        elif action == 'heartbeat':
+            publish(web_fd, '.updater-heartbeat', [json.dumps({'at': time.time()}).encode('ascii')])
         elif action == 'log':
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
                 publish(web_fd, '.update-log', iter(lambda: source.read(65536), b''))

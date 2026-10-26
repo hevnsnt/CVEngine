@@ -8,7 +8,7 @@ const el = (tag, cls, text) => {
 };
 
 const POLL_MS = 4000;
-const HOST_PATIENCE_MS = 12 * 60 * 1000; // cron runs every 5 minutes: two missed runs and a bit more
+const HOST_PATIENCE_MS = 6 * 60 * 1000; // an updater that does not report applies approvals within 5 minutes
 const STEPS = ["Pause", "Drain scans", "Rebuild", "Resume"];
 
 // After approval an orange bar sits at the top of every page and says what the update is doing. The page is greyed out only while
@@ -97,8 +97,15 @@ function watchUpdate(first) {
       if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start meanwhile.");
       else {
         const waited = now.approved_at ? Date.now() - Date.parse(now.approved_at) : 0;
+        const hu = now.host_updater || {};
         if (now.phase_detail) paint(1, `Updating to ${now.latest}`, now.phase_detail);
-        else if (waited > HOST_PATIENCE_MS)
+        else if (hu.seen && !hu.alive && waited > 30000)
+          paint(
+            1,
+            `Updating to ${now.latest}`,
+            "The host updater stopped reporting, so nothing will start. On the server, check that cron is running and run scripts/install-updater.sh."
+          );
+        else if (!hu.seen && waited > HOST_PATIENCE_MS)
           paint(
             1,
             `Updating to ${now.latest}`,

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installs the host-side half of CVEngine's auto-update: a cron entry that runs scripts/apply-update.sh every
-# 5 minutes. It only ever acts on an update an administrator approved in Settings > Updates.
+# Installs the host-side half of CVEngine's auto-update: a cron entry that starts scripts/update-watch.sh every minute. The
+# watcher listens for the whole minute, so an update an administrator approves in Settings > Updates starts within seconds, and it
+# reports that it is alive so the app can tell when nothing on the host is listening. It only ever acts on an approved update.
 # Run once, as the user that owns this checkout and may run Docker:   scripts/install-updater.sh
 # Remove with:                                                        scripts/install-updater.sh --remove
 # A host that runs a different compose file than docker-compose.yml (the dev box runs docker-compose.dev.yml)
@@ -28,5 +29,6 @@ if [ -n "$COMPOSE_FILE" ]; then
 fi
 
 chmod +x "$ROOT/scripts/apply-update.sh"
-printf '%s\n*/5 * * * * %s%s/scripts/apply-update.sh >/dev/null 2>&1 %s\n' "$CURRENT" "$ENVPREFIX" "$ROOT" "$MARK" | sed '/^$/d' | crontab -
-echo "Installed: $ROOT/scripts/apply-update.sh runs every 5 minutes (log: $ROOT/web/.update-log)${COMPOSE_FILE:+, deploying with $COMPOSE_FILE}."
+chmod +x "$ROOT/scripts/update-watch.sh"
+printf '%s\n* * * * * %s%s/scripts/update-watch.sh >/dev/null 2>&1 %s\n' "$CURRENT" "$ENVPREFIX" "$ROOT" "$MARK" | sed '/^$/d' | crontab -
+echo "Installed: $ROOT/scripts/update-watch.sh starts every minute and applies an approved update within seconds (log: $ROOT/web/.update-log)${COMPOSE_FILE:+, deploying with $COMPOSE_FILE}."

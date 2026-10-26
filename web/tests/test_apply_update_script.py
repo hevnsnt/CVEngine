@@ -219,7 +219,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 3)  # "still waiting": cron ignores it, the watcher polls slowly on it
         self.assertEqual(self.head(), self.prev)
         self.assertTrue(self.approved())
         self.assertFalse([c for c in self.calls() if ' up ' in c or 'restart' in c or c.startswith('make')])
@@ -283,6 +283,71 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('migrate-log', log)  # the command that stopped it
         self.assertTrue(self.approved())
 
+    def install_watcher(self):
+        shutil.copy(SCRIPTS / 'update-watch.sh', self.work / 'scripts' / 'update-watch.sh')
+        (self.work / 'scripts' / 'update-watch.sh').chmod(0o755)
+        (self.work / 'scripts' / 'apply-update.sh').chmod(0o755)
+
+    def run_watch(self, seconds=6):
+        return subprocess.run(['bash', 'scripts/update-watch.sh', str(seconds)], cwd=self.work, env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_the_watcher_applies_an_approval_within_seconds_and_reports_that_it_is_alive(self):
+        import time
+        self.install_watcher()
+        self.approve()
+        started = time.monotonic()
+        result = self.run_watch(8)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)  # updated
+        self.assertFalse(self.approved())
+        self.assertTrue(any(c.endswith('build web celery celery-beat') for c in self.calls()))
+        heartbeat = (self.work / 'web' / '.updater-heartbeat')
+        self.assertTrue(heartbeat.exists())
+        self.assertLess(time.time() - float(__import__('json').loads(heartbeat.read_text())['at']), 30)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_the_watcher_with_nothing_approved_only_heartbeats(self):
+        self.install_watcher()
+        result = self.run_watch(4)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / 'web' / '.updater-heartbeat').exists())
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.head(), self.prev)
+
+    def test_two_watchers_do_not_run_at_once(self):
+        self.install_watcher()
+        first = subprocess.Popen(['bash', 'scripts/update-watch.sh', '6'], cwd=self.work, env=self.env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(first.kill)
+        import time
+        time.sleep(1)
+        started = time.monotonic()
+        second = self.run_watch(6)
+        self.assertEqual(second.returncode, 0)
+        self.assertLess(time.monotonic() - started, 3)  # it found the lock taken and left at once
+        first.wait(timeout=30)
+
+    def test_waiting_for_scans_exits_with_3_reports_once_and_keeps_the_approval(self):
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        first = self.run_script()
+        second = self.run_script()
+        self.assertEqual((first.returncode, second.returncode), (3, 3))
+        self.assertTrue(self.approved())
+        log = (self.work / '.git' / 'cvengine-update' / 'update.log').read_text()
+        self.assertEqual(log.count('waiting: 2 scan(s) running'), 1)  # once, not on every call
+        self.assertEqual(self.phase_file().get('phase'), 'draining')
+        self.assertEqual(self.head(), self.prev)
+
+    def test_a_refusal_is_logged_once_however_often_the_watcher_calls(self):
+        (self.work / 'web' / 'README').write_text('edited locally\n')
+        self.approve()
+        for _ in range(3):
+            self.assertEqual(self.run_script().returncode, 1)
+        log = (self.work / '.git' / 'cvengine-update' / 'update.log').read_text()
+        self.assertEqual(log.count('refusing: the checkout has local changes'), 1)
+
     def test_a_failed_build_returns_to_the_previous_commit_and_redeploys_it(self):
         (self.stub / 'fail_up').write_text('')
         self.approve()
@@ -335,7 +400,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.stub / 'running_count').write_text('3\n')
         self.approve()
         result = self.run_script()
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 3)
         self.assertEqual(self.head(), self.prev)
         self.assertTrue(self.approved())
 
