@@ -1247,14 +1247,14 @@ def get_domain_info_from_db(target):
 		Returns:
 			Domain: The Domain object if found, otherwise None.
 	"""
-	try:
-		domain = Domain.objects.get(name=target)
-		if not domain.insert_date:
-			domain.insert_date = timezone.now()
-			domain.save()
-		return extract_domain_info(domain)
-	except Domain.DoesNotExist:
+	# WHOIS data describes the public name, not a tenant, so any organization's record of it will do (the oldest)
+	domain = Domain.objects.filter(name=target).order_by('id').first()
+	if domain is None:
 		return None
+	if not domain.insert_date:
+		domain.insert_date = timezone.now()
+		domain.save()
+	return extract_domain_info(domain)
 	
 def extract_domain_info(domain):
 	"""
@@ -1475,8 +1475,8 @@ def parse_dns_records(domain_info, dns):
 
 def save_domain_info_to_db(target, domain_info):
 	"""Save domain info to the database."""
-	if Domain.objects.filter(name=target).exists():
-		domain, _ = Domain.objects.get_or_create(name=target)
+	domain = Domain.objects.filter(name=target).order_by('id').first()
+	if domain is not None:
 		
 		# Create or update DomainInfo
 		domain_info_obj, created = DomainInfo.objects.get_or_create(domain=domain)

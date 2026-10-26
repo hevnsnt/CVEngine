@@ -146,7 +146,10 @@ class Organization(models.Model):
 
 class Domain(models.Model):
 	id = models.AutoField(primary_key=True)
-	name = models.CharField(max_length=300, unique=True)
+	# Unique per organization, not across the instance: two organizations may each track example.com, and neither can see, detect or
+	# block the other's record. ``org`` is the project's organization, kept in step by save().
+	name = models.CharField(max_length=300, db_index=True)
+	org = models.ForeignKey('dashboard.Org', on_delete=models.CASCADE, null=True, blank=True, related_name='+', editable=False)
 	h1_team_handle = models.CharField(max_length=100, blank=True, null=True)
 	ip_address_cidr = models.CharField(max_length=100, blank=True, null=True)
 	description = models.TextField(blank=True, null=True)
@@ -160,6 +163,23 @@ class Domain(models.Model):
 	SCOPE_AUTO, SCOPE_HOST, SCOPE_PARENT = 'auto', 'host', 'parent'
 	SCOPE_MODES = ((SCOPE_AUTO, 'auto'), (SCOPE_HOST, 'host'), (SCOPE_PARENT, 'parent'))
 	scope_mode = models.CharField(max_length=8, choices=SCOPE_MODES, default=SCOPE_AUTO)
+
+	class Meta:
+		constraints = [
+			models.UniqueConstraint(fields=['org', 'name'], condition=models.Q(org__isnull=False), name='uniq_domain_org_name'),
+			models.UniqueConstraint(fields=['project', 'name'], condition=models.Q(org__isnull=True), name='uniq_domain_project_name'),
+		]
+
+	def save(self, *args, **kwargs):
+		# read from the database, not the cached project: a new project is placed in its organization just after it is saved
+		if self.project_id:
+			from dashboard.models import Project
+			org_id = Project._base_manager.filter(pk=self.project_id).values_list('org_id', flat=True).first()
+			if org_id != self.org_id:
+				self.org_id = org_id
+				if kwargs.get('update_fields') is not None and 'org' not in kwargs['update_fields']:
+					kwargs['update_fields'] = [*kwargs['update_fields'], 'org']
+		super().save(*args, **kwargs)
 
 	def is_host_scoped(self):
 		"""True when only this host (never its parent domain) is in scope: scope_mode 'host', or 'auto' for a tenant of a
@@ -182,3 +202,14 @@ class Domain(models.Model):
 
 	def __str__(self):
 		return str(self.name)
+
+
+def org_domains(project):
+	"""Every Domain in the organization ``project`` (an object or an id) belongs to (unscoped), or just the project's own when it has no organization. A
+	domain name is unique within this set, never across the instance."""
+	from dashboard.models import Project
+	project_id = getattr(project, 'pk', project)
+	org_id = Project._base_manager.filter(pk=project_id).values_list('org_id', flat=True).first()
+	if org_id:
+		return Domain._base_manager.filter(org_id=org_id)
+	return Domain._base_manager.filter(project_id=project_id)

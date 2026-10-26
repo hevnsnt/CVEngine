@@ -186,7 +186,7 @@ def parse_xml(xml_text):
     return extract_nmap_inventory(data)
 
 
-def persist_inventory(inventory, source='nmap'):
+def persist_inventory(inventory, source='nmap', org_id=None):
     """Write parsed nmap records onto Port/IpAddress, creating a Port row if nothing found it first
     (unlike reNgine.tasks.persist_nmap_service_inventory, which only enriches rows naabu already made:
     here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
@@ -200,7 +200,7 @@ def persist_inventory(inventory, source='nmap'):
         ip_addr = host.get('ip')
         if not ip_addr:
             continue
-        ip_obj, _ = get_or_create_ip(ip_addr)
+        ip_obj, _ = get_or_create_ip(ip_addr, org_id)
         if host.get('os_guess'):
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
@@ -285,7 +285,7 @@ def close_unreported_ports(ip_obj, host):
     return closed
 
 
-def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_for=None):
+def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_for=None, org_id=None):
     """Run nmap over ``targets`` in chunks and persist each chunk as it finishes. If a run is stopped for memory, that
     chunk is halved and retried (down to a handful of hosts) before giving up. ``flags_for(chunk)`` may choose each chunk's flags
     (naabu's open ports); None from it means the chunk has nothing to fingerprint. Returns the summed persist counts."""
@@ -306,7 +306,7 @@ def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_
             logger.warning('nmap was stopped for memory on %s hosts; retrying as %s + %s', len(chunk), half, len(chunk) - half)
             pending[0:0] = [chunk[:half], chunk[half:]]
             continue
-        result = persist_inventory(parse_xml(xml))
+        result = persist_inventory(parse_xml(xml), org_id=org_id)
         for key in totals:
             totals[key] += result.get(key, 0)
     return totals
@@ -327,6 +327,8 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
+    from startScan.ip_rows import org_id_of_project
+    org_id = org_id_of_project(project)
     _hostnames, ips, _ports = scan_targets(scan)
     all_ips = build_targets(ips, limit=None)
     from cveFeed import hosting
@@ -343,14 +345,14 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
             activity.log('run_check', f'nmap skipped for {domain.name}: discovery found no IPs to scan', project=project)
         return {'targets': 0, 'shared': len(shared)} if shared else {'targets': 0}
 
-    fast_todo = all_ips if force else [i for i in all_ips if i not in ledger.fresh('nmap-fast', all_ips)]
+    fast_todo = all_ips if force else [i for i in all_ips if i not in ledger.fresh('nmap-fast', all_ips, project)]
     if not fast_todo:
         activity.log('run_check', f'nmap skipped for {domain.name}: all {_plural(len(all_ips), "IP")} were fingerprinted '
                      f'in the last {ledger.ttl_label("nmap-fast")}', project=project, scan_id=scan.id)
         return {'targets': len(all_ips), 'reused': len(all_ips)}
     result = {'targets': len(all_ips), 'reused': len(all_ips) - len(fast_todo)}
 
-    with ledger.claim_many('nmap-fast', fast_todo) as won:
+    with ledger.claim_many(f'nmap-fast@{project}', fast_todo) as won:
         targets = build_targets(won)
         if targets:
             reused = len(all_ips) - len(fast_todo)
@@ -363,13 +365,14 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                 ports_by_ip = naabu_scan.discover(targets, scan, naabu_runner)
                 flags = fast_flags()
                 fast = scan_in_chunks(runner, targets, flags, HOST_TIMEOUT_FAST,
-                                      flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None)
+                                      flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None,
+                                      org_id=org_id)
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)
-                ledger.record('nmap-fast', targets, None, scan, 'failed')
+                ledger.record('nmap-fast', targets, project, scan, 'failed')
                 activity.settle(fast_running, 'failed', message=f'nmap failed for {domain.name}: {exc}')
                 return {**result, 'error': str(exc)}
-            ledger.record('nmap-fast', targets, None, scan)
+            ledger.record('nmap-fast', targets, project, scan)
             activity.settle(fast_running, 'done', message=(
                 f'nmap fingerprinted {domain.name}: {_plural(fast["ports"], "service")}, '
                 f'{fast["hosts_with_os"]} OS guess{"es" if fast["hosts_with_os"] != 1 else ""}'), **fast)

@@ -11,10 +11,16 @@ from targetApp.models import Domain
 
 
 class UniqueIpTests(TransactionTestCase):
-	def test_the_database_refuses_a_second_row_for_an_address(self):
-		IpAddress.objects.create(address='192.0.2.1')
+	def test_the_database_refuses_a_second_row_for_an_address_in_the_same_organization(self):
+		from dashboard.models import Org
+		a, b = Org.objects.create(name='A', slug='ua'), Org.objects.create(name='B', slug='ub')
+		IpAddress.objects.create(address='192.0.2.1', org=a)
+		IpAddress.objects.create(address='192.0.2.1', org=b)  # another organization has its own row for the same address
 		with self.assertRaises(IntegrityError), transaction.atomic():
-			IpAddress.objects.create(address='192.0.2.1')
+			IpAddress.objects.create(address='192.0.2.1', org=a)
+		IpAddress.objects.create(address='192.0.2.5')
+		with self.assertRaises(IntegrityError), transaction.atomic():
+			IpAddress.objects.create(address='192.0.2.5')
 		IpAddress.objects.create(address='')  # blanks and nulls are not addresses: several may exist
 		IpAddress.objects.create(address='')
 		IpAddress.objects.create(address=None)
@@ -29,9 +35,10 @@ class UniqueIpTests(TransactionTestCase):
 
 	def test_the_migration_merges_duplicates_keeping_links_ports_and_facts(self):
 		migration = importlib.import_module('startScan.migrations.0019_unique_ipaddress')
-		constraint = next(c for c in IpAddress._meta.constraints if c.name == 'uniq_ipaddress_address')
+		constraints = [c for c in IpAddress._meta.constraints if c.name.startswith('uniq_ipaddress_')]
 		with connection.schema_editor() as editor:
-			editor.remove_constraint(IpAddress, constraint)
+			for constraint in constraints:
+				editor.remove_constraint(IpAddress, constraint)
 		try:
 			from django.utils import timezone
 			domain = Domain.objects.create(name='dup.test', insert_date=timezone.now())
@@ -49,7 +56,8 @@ class UniqueIpTests(TransactionTestCase):
 			migration.merge_duplicates(apps, None)
 		finally:
 			with connection.schema_editor() as editor:
-				editor.add_constraint(IpAddress, constraint)
+				for constraint in constraints:
+					editor.add_constraint(IpAddress, constraint)
 		self.assertEqual(IpAddress.objects.filter(address='198.51.100.9').count(), 1)
 		keeper = IpAddress.objects.get(address='198.51.100.9')
 		self.assertEqual(keeper.pk, first.pk)

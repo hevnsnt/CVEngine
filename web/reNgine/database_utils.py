@@ -9,7 +9,8 @@ from django.utils import timezone
 from dashboard.models import Project
 from targetApp.models import Organization, Domain
 from startScan.models import EndPoint, IpAddress
-from startScan.ip_rows import get_or_create_ip
+from startScan.ip_rows import get_or_create_ip, org_id_of_project
+from targetApp.models import org_domains
 from reNgine.settings import LOGGING
 from reNgine.common_func import *
 
@@ -108,7 +109,7 @@ def store_domain(domain_name, project, description, h1_team_handle):
 	"""
 		This function is used to store domain in reNgine
 	"""
-	existing_domain = Domain.objects.filter(name=domain_name).first()
+	existing_domain = org_domains(project).filter(name=domain_name).first()
 
 	if existing_domain:
 		logger.info(f'Domain {domain_name} already exists. skipping.')
@@ -133,7 +134,7 @@ def store_url(url, project, description, h1_team_handle):
 	http_url = parsed_url.geturl()
 	domain_name = parsed_url.netloc
 
-	domain = Domain.objects.filter(name=domain_name).first()
+	domain = org_domains(project).filter(name=domain_name).first()
 
 	if domain:
 		logger.info(f'Domain {domain_name} already exists. skipping...')
@@ -157,7 +158,7 @@ def store_url(url, project, description, h1_team_handle):
 
 def store_ip(ip_address, project, description, h1_team_handle):
 
-	domain = Domain.objects.filter(name=ip_address).first()
+	domain = org_domains(project).filter(name=ip_address).first()
 	
 	if domain:
 		logger.info(f'Domain {ip_address} already exists. skipping...')
@@ -174,7 +175,7 @@ def store_ip(ip_address, project, description, h1_team_handle):
 	
 	ip_data = get_ip_info(ip_address)
 	ip_data = get_ip_info(ip_address)
-	ip, created = get_or_create_ip(ip_address)
+	ip, created = get_or_create_ip(ip_address, org_id_of_project(project.pk))
 	ip.reverse_pointer = ip_data.reverse_pointer
 	ip.is_private = ip_data.is_private
 	ip.version = ip_data.version

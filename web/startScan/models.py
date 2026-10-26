@@ -248,7 +248,7 @@ class Subdomain(models.Model):
 
 	@property
 	def get_endpoint_count(self):
-		endpoints = EndPoint.objects.filter(subdomain__name=self.name)
+		endpoints = EndPoint.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id)
 		if self.scan_history:
 			endpoints = endpoints.filter(scan_history=self.scan_history)
 		return endpoints.count()
@@ -299,14 +299,14 @@ class Subdomain(models.Model):
 
 	@property
 	def get_vulnerabilities(self):
-		vulns = Vulnerability.objects.filter(subdomain__name=self.name)
+		vulns = Vulnerability.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id)
 		if self.scan_history:
 			vulns = vulns.filter(scan_history=self.scan_history)
 		return vulns
 
 	@property
 	def get_vulnerabilities_without_info(self):
-		vulns = Vulnerability.objects.filter(subdomain__name=self.name).exclude(severity=0)
+		vulns = Vulnerability.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id).exclude(severity=0)
 		if self.scan_history:
 			vulns = vulns.filter(scan_history=self.scan_history)
 		return vulns
@@ -631,6 +631,7 @@ class CountryISO(models.Model):
 
 class IpAddress(models.Model):
 	id = models.AutoField(primary_key=True)
+	org = models.ForeignKey('dashboard.Org', on_delete=models.CASCADE, null=True, blank=True, related_name='+', editable=False)
 	address = models.CharField(max_length=100, blank=True, null=True)
 	is_cdn = models.BooleanField(default=False)
 	ports = models.ManyToManyField('Port', related_name='ports')
@@ -655,8 +656,13 @@ class IpAddress(models.Model):
 	ip_subscan_ids = models.ManyToManyField('SubScan', related_name='ip_subscan_ids')
 
 	class Meta:
-		constraints = [models.UniqueConstraint(fields=['address'], condition=models.Q(address__isnull=False) & ~models.Q(address=''),
-											   name='uniq_ipaddress_address')]
+		# one row per address per organization: banners and service data of one organization are never another's
+		constraints = [
+			models.UniqueConstraint(fields=['org', 'address'], condition=models.Q(org__isnull=False) & models.Q(address__isnull=False) & ~models.Q(address=''),
+									name='uniq_ipaddress_org_address'),
+			models.UniqueConstraint(fields=['address'], condition=models.Q(org__isnull=True) & models.Q(address__isnull=False) & ~models.Q(address=''),
+									name='uniq_ipaddress_noorg_address'),
+		]
 
 	def __str__(self):
 		return str(self.address)
