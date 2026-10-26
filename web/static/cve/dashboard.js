@@ -567,6 +567,7 @@ const KIND = {
   scan: "scan",
   hygiene: "hygiene",
   changes: "changes",
+  saved_search: "saved search",
 };
 let lastActivity = 0;
 let activityNow = ""; // the server's clock at the last answer, to ask which lines were repeated since

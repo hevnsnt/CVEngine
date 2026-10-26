@@ -16,6 +16,7 @@ ip:203.0.113.0/24 product:nginx     nginx anywhere in a network range
 | **Anywhere in the app** | Press `Ctrl+K` (`Cmd+K` on a Mac) or `/`. Filter names and values complete as you type, up to six matching hosts preview live, and the help sheet lists every filter. |
 | **REST API** | `GET /api/v1/projects/<slug>/search?q=...` ([AGENT-API.md](AGENT-API.md)) |
 | **MCP** | The `search_hosts` tool, so an agent can ask the same questions |
+| **Saved searches** | Keep a search and be told when it finds something new ([below](#saved-searches-and-alerts)) |
 
 Use the slug `_all` to search every project you can see.
 
@@ -116,5 +117,36 @@ curl -s -H "Authorization: Bearer $CVENGINE_TOKEN" \
 ```
 
 `page_size` goes up to 200. With no `q`, the search lists every host.
+
+## Saved searches and alerts
+
+A search you run again and again can be kept. On the Hosts page, type a search and choose **Save search**; **Saved searches** lists yours. A saved search is a query in the syntax above, kept on the server, private to you and to one project. Within ten minutes of saving it (or at once, with **Run now**) cvENGINE runs it for the first time and records which hosts match. That first check is silent: it sets the baseline, so saving a search never floods a channel with every host that already matches. From the next check on you are told what changed.
+
+```text
+port:5432 -ip:10.0.0.0/8        Postgres reachable on a public address
+tech:grafana                    every Grafana, and a message when a new one appears
+auth:open sensitive:credentials a route that serves credentials without a login
+zombie:yes tech:wordpress       retired names that still answer and run WordPress
+```
+
+| Setting | What it does |
+| --- | --- |
+| **How often** | Every hour, day or week (default: every day). Checks run when due, at most 25 searches every ten minutes, oldest first. |
+| **Alert when a host starts to match** | On by default. One message, naming up to five new hosts and counting the rest, with a link that opens the search. |
+| **Alert when a host stops matching** | Off by default. Same message, for hosts that left the result. |
+| **Alert when the match count reaches** | Optional. Once each time the count rises to that number; it re-arms when the count falls below it. |
+| **Send alerts to** | Slack, Discord, Telegram, or Lark, among those switched on in Settings, Notifications. Nothing ticked means every channel that is on. |
+
+How it behaves:
+
+- **Same results as the search box.** A saved search runs through the same code as the live search, so it finds exactly what the Hosts page finds. The query is checked when you save it: an empty query, an unusable value (`port:abc`, `sev:scary`), more than 15 terms or 1,000 characters is refused with the same message the search gives.
+- **One host is one match.** Names that point at the same addresses are one host (see the Hosts page), so `example.com` gaining a `www.example.com` on the same servers is not a new match. A host whose set of addresses changes does count as a new one.
+- **At most one message per search per check**, plus a line in the Activity feed (kind **Saved search**), even when Settings has no channel switched on. Alerts use the "Interesting findings" switch under Settings, Notifications.
+- **Your access, at every check.** The search runs with your rights as they are then. If you leave the project or your account is deactivated, the search is switched off with the reason shown on the list; it is never run with the access it was saved under. Switching it on again (which needs access) restarts its baseline.
+- **Too broad.** A search that matches more than 1,000 hosts is flagged **too broad** and is not alerted on until you narrow it: a set that large shifts all the time and cannot be compared cheaply.
+- **Limits.** 25 saved searches per person and 100 per project. Editing the query restarts the baseline. Each check has a 20 second database limit; a failure is recorded in the Activity feed and retried at the next time.
+- **Browser views stay.** The saved views kept in your browser (Hosts, Findings) keep working. **Import browser views** on the Saved searches list copies the ones that hold a search into saved searches, with alerts off, and leaves the local copies alone.
+
+Over the API ([AGENT-API.md](AGENT-API.md#saved-searches)) the same operations are `GET/POST projects/{slug}/saved-searches`, `GET/PATCH/DELETE .../saved-searches/{id}`, `POST .../{id}/run` and `GET .../{id}/matches`, and the MCP tools `list_saved_searches`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `run_saved_search` and `get_saved_search_matches`.
 
 See also: [PIPELINE.md](PIPELINE.md) for what fills the inventory, [FRONTEND.md](FRONTEND.md), [documentation index](README.md).

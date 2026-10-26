@@ -10,6 +10,7 @@ from django.http import HttpResponse, JsonResponse
 from django.core.exceptions import RequestDataTooBig
 
 from agentapi import host_manage as hosts
+from agentapi import saved_search as saved
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi.services import ApiError, Ctx
@@ -39,6 +40,14 @@ def _page_props(extra=None):
     props = {'page': {'type': 'integer'}, 'page_size': {'type': 'integer'}}
     props.update(extra or {})
     return props
+
+
+SAVED_SEARCH_PROPS = {'project': SLUG, 'name': {'type': 'string'}, 'query': {'type': 'string', 'description': 'a search_hosts query, for example "port:5432 -ip:10.0.0.0/8"'},
+    'enabled': {'type': 'boolean'}, 'alert_new': {'type': 'boolean', 'description': 'alert when a host starts to match (default true)'},
+    'alert_gone': {'type': 'boolean', 'description': 'alert when a host stops matching'},
+    'threshold': {'type': ['integer', 'null'], 'description': 'alert when the number of matches reaches this'},
+    'channels': {'type': 'array', 'items': {'type': 'string', 'enum': ['slack', 'discord', 'telegram', 'lark']}, 'description': 'empty: every channel Settings has on'},
+    'frequency': {'type': 'string', 'enum': ['hourly', 'daily', 'weekly']}}
 
 
 # name, description, input schema, handler(ctx, args), writes
@@ -104,6 +113,22 @@ TOOLS = [
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
      lambda c, a: svc.search_hosts(c, a.get('project'), a), False),
+    ('list_saved_searches', 'Your saved searches in a project (private to you): query, alert settings, last run, last match count and status, plus the limits and which notification channels are on.',
+     _schema({'project': SLUG}, ['project']), lambda c, a: saved.list_saved_searches(c, a.get('project')), False),
+    ('create_saved_search', 'Save a host search (the search_hosts syntax) and optionally be alerted. It is evaluated on its frequency (default daily) with your own access. The first evaluation only records the hosts that match now; later ones alert, in one message per search per evaluation, on new matches (alert_new), on hosts that stopped matching (alert_gone) and when the count reaches a threshold. The query is validated like a live search. Limits: 25 per user, 100 per project.',
+     _schema(SAVED_SEARCH_PROPS, ['project', 'name', 'query']), lambda c, a: saved.create_saved_search(c, a.get('project'), {k: v for k, v in a.items() if k != 'project'})[0], True),
+    ('update_saved_search', 'Change a saved search: any subset of name, query, enabled, alert_new, alert_gone, threshold, channels, frequency. A new query, or switching a search back on, restarts its baseline (silently).',
+     _schema({**SAVED_SEARCH_PROPS, 'id': {'type': 'integer'}}, ['project', 'id']),
+     lambda c, a: saved.update_saved_search(c, a.get('project'), int(a['id']), {k: v for k, v in a.items() if k not in ('project', 'id')}), True),
+    ('delete_saved_search', 'Delete one of your saved searches.', _schema({'project': SLUG, 'id': {'type': 'integer'}}, ['project', 'id']),
+     lambda c, a: saved.delete_saved_search(c, a.get('project'), int(a['id'])), True),
+    ('run_saved_search', 'Evaluate a saved search now, as the schedule would: compare with the last evaluation, alert if it asked to, return the count and up to five new hosts. The first run only learns the baseline. At most once every 30 seconds per search.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}}, ['project', 'id']),
+     lambda c, a: saved.run_saved_search(c, a.get('project'), int(a['id'])), True),
+    ('get_saved_search_matches', 'The hosts a saved search matches now (the search_hosts result for its query, with the same paging, sort, heat and facets). Read only.',
+     _schema(_page_props({'project': SLUG, 'id': {'type': 'integer'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
+                          'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']}}), ['project', 'id']),
+     lambda c, a: saved.saved_search_matches(c, a.get('project'), int(a['id']), a), False),
     ('stop_scan', 'Stop one running or queued scan: its scanner processes are killed and the next queued scan proceeds.', _schema(
         {'project': SLUG, 'scan_id': {'type': 'integer'}}, ['project', 'scan_id']),
      lambda c, a: svc.stop_scan(c, a.get('project'), int(a['scan_id'])), True),

@@ -37,6 +37,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | scan detail | `GET .../scans/{id}/subdomains`, `endpoints`, `vulnerabilities`, `activity` | `list_scan_subdomains`, `list_scan_endpoints`, `list_scan_vulnerabilities`, `get_scan_activity` |
 | inventory | `GET projects/{slug}/hosts` | `list_hosts` |
 | search | `GET projects/{slug}/search?q=...` | `search_hosts` |
+| saved searches | `GET/POST projects/{slug}/saved-searches`, `GET/PATCH/DELETE .../saved-searches/{id}`, `POST .../{id}/run`, `GET .../{id}/matches` | `list_saved_searches`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `run_saved_search`, `get_saved_search_matches` |
 | routes | `GET projects/{slug}/routes` | `list_routes` |
 | changes | `GET projects/{slug}/changes?since=7d` | `list_changes` |
 | activity | `GET projects/{slug}/activity` | `list_activity` |
@@ -114,11 +115,21 @@ Any field filter's value takes a comma-separated list for OR within that one fil
 
 Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs it.
 
+## Saved searches
+
+A saved search is a `search_hosts` query kept on the server, re-run on a schedule, with alerts through the notification channels ([SEARCH.md](SEARCH.md#saved-searches-and-alerts)). It is private to its owner inside one project: another member, or a user of another project, gets 404 for it, and `_all` is a 400. Reading (`list`, `get`, `matches`) needs the access the search itself needs. Creating, changing, deleting and running one need any role except audit and a token that is not read only, because a run can notify.
+
+`POST projects/{slug}/saved-searches` takes `name` (clipped to 80 characters), `query` (checked like a live search: an empty query, an unusable filter value, more than 15 terms or 1,000 characters is a 400), and optionally `enabled` (default true), `alert_new` (true), `alert_gone` (false), `threshold` (null, or 1 to 1,000), `channels` (a list of `slack`, `discord`, `telegram`, `lark`; empty means every channel Settings has on) and `frequency` (`hourly`, `daily` default, `weekly`). Unknown fields, a wrong type, a duplicate name (per owner and project, ignoring case) and the caps (25 per user, 100 per project) are 400s. `PATCH` takes any subset; a new `query`, or switching `enabled` back on, restarts the baseline.
+
+A saved search row has `id`, `project`, `name`, `query`, `enabled`, `alert_new`, `alert_gone`, `threshold`, `channels`, `frequency`, `baseline` (false until the first check), `last_run_at`, `next_run_at`, `last_match_count`, `last_status` (`ok`, `too_broad` for more than 1,000 matches, `error`, `disabled`), `last_error`, `last_alert_at`, `created` and `updated`. The list also returns `limits` and `channels_available` (names only). A search whose owner lost access to the project, or whose account is deactivated, is switched off at its next check: `enabled` is false, `last_status` is `disabled`, and `last_error` says why.
+
+`POST .../{id}/run` evaluates the search now, as the schedule would: it compares with the last check, alerts if asked, and answers `{status, count, new_count, gone_count, baseline, alerted, new: [up to five names], saved_search}`. The first run only records the baseline (`baseline: true`, `alerted: false`). A disabled search is a 400, a second run within 30 seconds is a 429, and one that is being checked right now is a 409. `GET .../{id}/matches` is `search` with the saved query (`page`, `page_size`, `sort`, `heat`, `facets`, `facet_size`) plus `saved_search`; it never touches the baseline.
+
 ## Routes, changes, and activity
 
 - **`routes`** lists web routes with `auth_state` (`open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `error`), `redirect_to`, and `evidence` (markers, never page content). `sensitive` holds `{type: {count, sample}}` with the sample already masked, and `sensitive_score` runs 0 to 25. Raw values are never stored or returned. `retired_at` and `zombie_since` mark route lifecycle, and `sensitive=1` or `zombie=1` filter.
 - **`changes`** lists inventory changes newest first. `since` is an ISO 8601 datetime or `24h`, `7d`, `4w`. `kind` is one of the kinds in [Changes](PIPELINE.md#changes), and `host` matches part of a hostname. Each row has `before` and `after`.
-- **`activity`** is the AI activity log for the project plus system-wide entries. `kind` is `feed`, `inventory`, `target`, `confirm`, `write_check`, `run_check`, `validate`, `discovery`, `scan`, `hygiene`, `changes`, or `remediation`.
+- **`activity`** is the AI activity log for the project plus system-wide entries. `kind` is `feed`, `inventory`, `target`, `confirm`, `write_check`, `run_check`, `validate`, `discovery`, `scan`, `hygiene`, `changes`, `remediation`, or `saved_search`.
 
 ## Triage and remediation
 

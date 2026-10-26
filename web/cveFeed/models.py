@@ -453,7 +453,7 @@ class AgentActivity(models.Model):
     target, writing / running / validating a check. Global entries (project null) are visible to every member."""
 
     KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes",
-             "remediation")
+             "remediation", "saved_search")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
     status = models.CharField(max_length=10, default="done")  # running | done | failed
@@ -1396,3 +1396,44 @@ class CVEDetection(models.Model):
 
     def __str__(self):
         return f"detection for {self.cve_entry_id}"
+
+
+class SavedSearch(models.Model):
+    """A host search (the Hosts page / ``search_hosts`` syntax) a person keeps and, optionally, is alerted about. Private to its
+    owner, inside one project. The evaluator (cveFeed.saved_searches) re-runs due searches with the owner's own access and keeps
+    ``matched`` (host key hash -> host name, one entry per host, aliases of one machine counted once) to tell new matches from old."""
+
+    FREQUENCIES = {"hourly": 60, "daily": 24 * 60, "weekly": 7 * 24 * 60}  # minutes between evaluations
+    CHANNELS = ("slack", "discord", "telegram", "lark")
+    MAX_PER_USER, MAX_PER_PROJECT = 25, 100
+    MAX_NAME, MAX_QUERY, MAX_MATCHES = 80, 1000, 1000  # a search with more matches than MAX_MATCHES is too broad to watch
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    owner = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
+    name = models.CharField(max_length=MAX_NAME)
+    query = models.CharField(max_length=MAX_QUERY)
+    enabled = models.BooleanField(default=True)  # evaluated on schedule; off after the owner loses access, until they switch it on again
+    alert_new = models.BooleanField(default=True)  # a host starts to match
+    alert_gone = models.BooleanField(default=False)  # a host stops matching
+    threshold = models.PositiveIntegerField(null=True, blank=True)  # the match count reaches this (once per crossing)
+    channels = models.JSONField(default=list, blank=True)  # subset of CHANNELS; empty means every channel Settings has on
+    frequency = models.CharField(max_length=8, default="daily")
+    next_run_at = models.DateTimeField(default=timezone.now)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_alert_at = models.DateTimeField(null=True, blank=True)
+    last_match_count = models.PositiveIntegerField(default=0)
+    last_status = models.CharField(max_length=12, blank=True, default="")  # ok | too_broad | error | disabled
+    last_error = models.CharField(max_length=200, blank=True, default="")
+    baseline_at = models.DateTimeField(null=True, blank=True)  # null until the first evaluation, which alerts nothing
+    matched = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "owner", "name"], name="uniq_savedsearch_project_owner_name")]
+        indexes = [models.Index(fields=["enabled", "next_run_at"], name="savedsearch_due_idx"),
+                   models.Index(fields=["owner", "project"], name="savedsearch_owner_proj_idx")]
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return f"{self.name}: {self.query}"

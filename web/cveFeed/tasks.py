@@ -1395,6 +1395,21 @@ def snapshot_daily_stats():
     return {'projects': stats_history.snapshot_all_projects()}
 
 
+@app.task(name="evaluate_saved_searches", bind=False, queue="cve_feed_queue")
+def evaluate_saved_searches():
+    """Every ten minutes: run the saved searches whose time has come (cveFeed.saved_searches), alert on new matches and record
+    each outcome. Bounded per run; one run at a time, so a slow run is not doubled by the next beat."""
+    from django.core.cache import cache
+
+    from cveFeed import saved_searches
+    if not cache.add("cvengine:saved-searches", 1, timeout=900):
+        return {"skipped": "another evaluation is running"}
+    try:
+        return saved_searches.evaluate_due()
+    finally:
+        cache.delete("cvengine:saved-searches")
+
+
 @app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")
 def weekly_maintenance():
     """Weekly: archive the AI activity feed, AI call leases and AI usage rows past their retention to a tar.gz and delete them

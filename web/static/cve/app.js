@@ -2,6 +2,7 @@
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
 import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
+import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
 import { collectAll, exportButton, stamp } from "/staticfiles/cve/csv.js";
 import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
@@ -1995,6 +1996,7 @@ const pages = {
     const syncUrl = () => {
       writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list" }, HOST_DEFAULTS, ["host"]);
       views.refresh();
+      if (searches) searches.refresh();
     };
     const q = searchBox("Search hosts: php, port:3306, tech:nginx, auth:open -host:www", () => {
       syncUrl();
@@ -2086,6 +2088,18 @@ const pages = {
         list.reload();
       },
     });
+    // Searches kept on the server (with alerts) beside this browser's own views. They belong to one project, so not in "_all".
+    const searches = ALL
+      ? null
+      : savedSearches({
+          slug,
+          read: () => q.value,
+          apply: (query) => {
+            q.value = query;
+            syncUrl();
+            list.reload();
+          },
+        });
     // Bulk actions: the server has no bulk host routes, so each action runs the single-host request for every selected row.
     const hostProfile = (h) => ({ owner: (h.profile || {}).owner || "", purpose: (h.profile || {}).purpose || "", criticality: (h.profile || {}).criticality || "unknown" });
     const bulk = createBulk({
@@ -2292,7 +2306,7 @@ const pages = {
     }
     metaTools.append(fresh.node, galleryBtn, csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, controls, heatChips, metaRow, bulk.bar, rows, gallery);
+    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, metaRow, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
     let hostTab = "overview";
@@ -3299,6 +3313,7 @@ const ACTIVITY_KIND = {
   hygiene: "Hygiene",
   changes: "Changes",
   remediation: "Remediation",
+  saved_search: "Saved search",
 };
 const ACTIVITY_BADGE = { target: "fire", validate: "success", hygiene: "success" };
 
