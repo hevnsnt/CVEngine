@@ -173,7 +173,7 @@ const MAP_MIN_SCORE = 30; // hosts that score lower are left off the map (they a
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
   { name: "rich", size: "xl", w: 96, h: 104 },
-  { name: "card", size: "xl", w: 92, h: 56 },
+  { name: "card", size: "xl", w: 92, h: 64 },
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
 ];
@@ -304,6 +304,22 @@ function hostTag(info) {
   return tier ? el("i", `hx-tag ${info.top_tier || ""}`, tier.toUpperCase()) : null;
 }
 
+// What a tile calls its host. An address is shown whole (cutting it at the first dot leaves "52" or "20"); a name is shown as its
+// first part ("staging", "www"), with the domain it belongs to underneath, so two "www" tiles from different targets can be told apart.
+const IP_LIKE = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]*:[0-9a-f:]+)$/i;
+const tileName = (h) => {
+  const label = String(h.label || "");
+  const target = String(h.target || "").toLowerCase();
+  if (IP_LIKE.test(label) || (target && label.toLowerCase() === target)) return label;
+  return label.split(".")[0];
+};
+function hostName(short, h) {
+  const name = el("span", "hx-name", short);
+  const target = String(h.target || "");
+  if (target && target.toLowerCase() !== String(h.label || "").toLowerCase() && !IP_LIKE.test(String(h.label || ""))) name.append(el("small", "hx-target", target));
+  return name;
+}
+
 function drawMap(nodes) {
   const liveHosts = nodes.filter((n) => n.kind === "subdomain");
   const hosts = liveHosts.filter((h) => (h.score || 0) >= MAP_MIN_SCORE);
@@ -343,14 +359,14 @@ function drawMap(nodes) {
       cells.set(h.id, cell);
     }
     const score = h.score || 0;
-    const short = h.label.split(".")[0];
+    const short = tileName(h);
     const infoJson = JSON.stringify(h.info || {});
-    if (cell.dataset.score !== String(score) || cell.dataset.short !== short || cell.dataset.info !== infoJson) {
+    if (cell.dataset.score !== String(score) || cell.dataset.short !== short + String(h.target || "") || cell.dataset.info !== infoJson) {
       cell.textContent = "";
-      cell.append(el("span", "score", String(score)), el("span", "hx-name", short), hostDetails(h.info || {}));
+      cell.append(el("span", "score", String(score)), hostName(short, h), hostDetails(h.info || {}));
       const tag = hostTag(h.info || {});
       if (tag) cell.append(tag);
-      cell.dataset.short = short;
+      cell.dataset.short = short + String(h.target || "");
     }
     cell.dataset.name = h.label;
     cell.dataset.score = score;
