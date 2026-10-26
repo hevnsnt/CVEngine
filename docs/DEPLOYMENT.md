@@ -1,6 +1,6 @@
 # Deployment
 
-cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). The [README quick start](../README.md#quick-start) covers the install steps. Size the server for your scans: 8 GB of RAM is recommended, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
+cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). The [README quick start](../README.md#quick-start) covers the install steps. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
 
 ## Ports
 
@@ -14,21 +14,27 @@ Firewall 443 and 8082 to the people who need them. The development stack publish
 
 ## Linux, Mac, and Windows
 
-`install.sh` asks nothing and checks the machine first (root, memory, disk, that ports 443 and 8082 are free, that Docker's registry and GitHub are reachable). On Debian and Ubuntu it installs what is missing (curl, make, python3, git, Docker, the Compose plugin); on any other Linux it names the missing tool, so install Docker (Compose 2.24 or newer) and make yourself and run it again, or follow the README steps. It prints the log lines of the failing service when a step fails.
+`install.sh` asks nothing. It checks that this is Linux, that it is root (it re-runs itself through `sudo`), the architecture, memory (it warns below about 3.5 GB), free disk on the checkout's filesystem (it warns below about 14 GiB), that ports 443 and 8082 are free (it stops if not), and whether Docker's registry and GitHub answer (it only warns). On Debian and Ubuntu it installs curl, make, python3, git, openssl, and the Compose plugin with `apt`. Docker comes from `get.docker.com` on any distribution that script supports. On other Linux it stops and names the missing tools, so install them and run it again, or follow the README steps. It needs Compose 2.24 or newer but does not check the version. When a step fails it prints the log lines of the failing service.
+
+Running it again keeps `.env`, the certificate (unless the address changed), and your data, then rebuilds and restarts from the code in your checkout. It does not fetch new code or wait for scans ([UPDATES.md](UPDATES.md)).
 
 On macOS or Windows, install Docker Desktop (with the WSL 2 backend on Windows), clone the repository, and run the README steps from a shell where `make` works, such as the macOS terminal or a WSL 2 distribution. Without `make`, the commands are plain Compose calls:
 
 ```bash
+./scripts/init-env.sh
 docker compose -f docker-compose.setup.yml run --rm certs
 docker compose up -d --build
-docker compose exec web python3 manage.py createsuperuser
+# wait until web has finished migrating (docker compose logs -f web), then:
+docker compose exec -T web python3 manage.py create_admin
 ```
+
+`.env` must exist first, because the database will not start with an empty password. A plain `docker compose up` does not record the installed commit for the updater, so the in-app update check shows it as unknown. `make up` records it.
 
 Give Docker Desktop at least the memory recommended above.
 
 ## HTTPS
 
-`make certs` (run by `install.sh`) creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. Run it before `make up`, and again after changing `DOMAIN_NAME`. The built-in proxy serves HTTPS on 443 and redirects HTTP; browsers warn until you trust `secrets/certs/ca.crt`.
+`make certs` creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. `install.sh` runs it only when the certificate is missing or does not match the address. Run it before `make up`, and again after changing `DOMAIN_NAME`. The built-in proxy serves HTTPS (TLS 1.2) on 443 and redirects plain HTTP on 8082 to it. Browsers warn until you trust `secrets/certs/ca.crt`, which you copy from the server.
 
 For a public site with a browser-trusted certificate (Let's Encrypt, Cloudflare), follow [HOSTING-ONLINE.md](HOSTING-ONLINE.md).
 
@@ -68,14 +74,18 @@ Automatic deployment takes its own backup before every update ([UPDATES.md](UPDA
 A single-machine stack on `http://localhost:8000` with Django's auto-reloading server:
 
 ```bash
+./scripts/init-env.sh
 docker compose -f docker-compose.dev.yml build web celery celery-beat
 docker compose -f docker-compose.dev.yml up -d db redis web celery celery-beat
+# wait until web has finished migrating, then:
 docker compose -f docker-compose.dev.yml exec web python3 manage.py createsuperuser
 ```
 
+`make admin` only targets the production file, so use `createsuperuser` here.
+
 ## Updating
 
-Three options, all of which keep the database and broker running and let active work finish: automatic deployment, approval in the app, or `scripts/update.sh` by hand. See [UPDATES.md](UPDATES.md). Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md).
+Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans. See [UPDATES.md](UPDATES.md). Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md).
 
 ## Factory reset
 
@@ -83,6 +93,6 @@ Three options, all of which keep the database and broker running and let active 
 
 ## Uninstall
 
-`sudo scripts/uninstall.sh` stops and deletes every Docker container, volume, network, and image whose name contains `rengine`, which is the default `COMPOSE_PROJECT_NAME`. That includes all scan results. If you renamed the project it removes nothing of yours, and it removes other reNgine installs on the same host. To remove only this stack, run `docker compose down -v` in the checkout.
+`scripts/uninstall.sh` lists the containers, volumes, and networks of this install's Compose project (named by `CVENGINE_COMPOSE_PROJECT`, then `COMPOSE_PROJECT_NAME`, then the checkout directory) and, once you type yes, deletes them and their locally built images. That includes all scan results. Other applications, including other reNgine installs, are not touched. `.env`, `secrets/`, `web/secret`, and `backups/` stay. It needs access to Docker, not necessarily `sudo`.
 
 See also: [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
