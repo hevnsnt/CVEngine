@@ -107,17 +107,18 @@ class AuthoringTests(TestCase):
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			detection_author.author_rules()
 		provider = self.provider(good_ai())
-		self.assertEqual(detection_author.author_with_ai(provider), 2)  # hot and bare; the cold one is not worth the budget
+		self.assertEqual(detection_author.author_with_ai(provider, per_run=2), 2)  # the hottest first: hot and bare
 		row = CVEDetection.objects.get(cve_entry=self.hot)
 		self.assertEqual(row.source, 'ai')
 		ids = [c['id'] for c in row.strategy['remote_checks']]
 		self.assertEqual(ids[0], 'version-nginx')  # the rules' check first
 		self.assertIn('ai-status-page', ids)
-		self.assertFalse(CVEDetection.objects.get(cve_entry=self.cold).ai_attempted_at)
+		self.assertFalse(CVEDetection.objects.get(cve_entry=self.cold).ai_attempted_at)  # the budget ran out before the cold one
 		prompt = provider.complete.call_args_list[0].args[1]
 		self.assertIn('untrusted data', prompt)
-		self.assertEqual(detection_author.author_with_ai(provider), 0)  # once per CVE
-		self.assertEqual(provider.complete.call_count, 2)
+		self.assertEqual(detection_author.author_with_ai(provider, per_run=5), 1)  # every tier is covered, coldest last
+		self.assertEqual(detection_author.author_with_ai(provider, per_run=5), 0)  # once per CVE
+		self.assertEqual(provider.complete.call_count, 3)
 
 	def test_the_daily_budget_stops_the_asking(self):
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):

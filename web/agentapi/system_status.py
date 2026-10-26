@@ -164,7 +164,13 @@ def _feeds():
     from cveFeed.models import CVEEntry
     last = PeriodicTask.objects.filter(task='sync_cve_now_feed').values_list('last_run_at', flat=True).first()
     newest = CVEEntry.objects.order_by('-published_at').values_list('published_at', flat=True).first()
-    return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last)}
+    try:
+        from cveFeed import detection_author
+        guidance = detection_author.progress()
+    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
+        guidance = None
+    return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
+            'cve_guidance': guidance}
 
 
 def _ai():

@@ -9,7 +9,8 @@ import json
 import re
 
 import yaml
-from django.http import JsonResponse
+from django.http import FileResponse, Http404, JsonResponse
+from django.http.response import HttpResponseBase
 
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import EngineType, Notification, Proxy, VulnerabilityReportSetting
@@ -50,6 +51,31 @@ def _text(data, key, current='', secret=False, max_len=500):
 
 # --- AI -----------------------------------------------------------------------
 
+def _guidance_progress():
+    from cveFeed import detection_author
+    try:
+        return detection_author.progress()
+    except Exception:  # noqa: BLE001 - a counting problem must not break the settings page
+        return None
+
+
+def cve_guidance_run(request):
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import write_cve_guidance_now
+    try:
+        count = int(_body(request).get('count', 200))
+    except (TypeError, ValueError):
+        raise SettingsError(400, 'count must be a number')
+    if not 1 <= count <= 5000:
+        raise SettingsError(400, 'count must be between 1 and 5000')
+    cfg = AIProviderSettings.objects.first()
+    if not cfg or not cfg.enabled:
+        raise SettingsError(409, 'turn on the AI model first (Settings > AI model)')
+    write_cve_guidance_now.delay(count)
+    audit(request.user, 'cve_guidance.write_now', str(count), count=count)
+    return {'queued': count}
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE
@@ -58,7 +84,8 @@ def ai_get(request):
             'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
             'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire, 'auto_fire_engine_id': cfg.auto_fire_engine_id,
             'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
-            'plan_daily_per_project': cfg.plan_daily_per_project, 'default_models': DEFAULT_MODELS,
+            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
+            'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
             'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
 
 
@@ -99,7 +126,7 @@ def ai_put(request):
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
-    for key in ('plan_daily_total', 'plan_daily_per_project'):
+    for key in ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily'):
         if key in data:
             try:
                 value = int(data[key])
@@ -110,6 +137,53 @@ def ai_put(request):
             setattr(cfg, key, value)
     cfg.save()
     return ai_get(request)
+
+
+# --- the CVE catalog seed (build here, publish as the cve-seed release) --------------------------
+
+SEED_NAME = 'cve-seed.jsonl.gz'
+SEED_BUILDING = 'cvengine:cve-seed-building'
+
+
+def seed_dir():
+    import os
+    from django.conf import settings
+    return os.path.join(getattr(settings, 'RENGINE_HOME', '/usr/src/app'), 'exports')
+
+
+def cve_seed_get(request):
+    """What the last build holds (count, tiers, how many carry a detection record, size, sha256) and whether one is running."""
+    import os
+    from django.core.cache import cache
+    path = os.path.join(seed_dir(), SEED_NAME)
+    manifest = None
+    try:
+        with open(path + '.manifest.json', encoding='utf-8') as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        pass
+    return {'built': manifest, 'building': bool(cache.get(SEED_BUILDING)), 'file': SEED_NAME if manifest and os.path.exists(path) else None}
+
+
+def cve_seed_build(request):
+    from django.core.cache import cache
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import build_cve_seed
+    if not cache.add(SEED_BUILDING, 1, 3600):
+        raise SettingsError(409, 'a seed is already being built')
+    build_cve_seed.delay()
+    audit(request.user, 'cve_seed.build', SEED_NAME)
+    return {'building': True}
+
+
+def cve_seed_download(request, which):
+    import os
+    path = os.path.join(seed_dir(), SEED_NAME)
+    path = path + '.manifest.json' if which == 'manifest' else path
+    if not os.path.isfile(path):
+        raise Http404('no seed has been built yet')
+    return FileResponse(open(path, 'rb'), as_attachment=True, filename=os.path.basename(path),
+                        content_type='application/json' if which == 'manifest' else 'application/gzip')
 
 
 def scan_policy_get(request):
@@ -579,6 +653,9 @@ ROUTES = [
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
+    ('POST', r'cve_guidance/run', lambda r, **k: cve_guidance_run(r)),
+    ('GET', r'cve_seed', lambda r, **k: cve_seed_get(r)), ('POST', r'cve_seed/build', lambda r, **k: cve_seed_build(r)),
+    ('GET', r'cve_seed/download/(?P<which>seed|manifest)', lambda r, which, **k: cve_seed_download(r, which)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),
     ('GET', r'resources', lambda r, **k: resources_get(r)),
@@ -616,6 +693,8 @@ def dispatch(request, path):
             result = fn(request, **match.groupdict())
         except SettingsError as exc:
             return JsonResponse({'error': exc.message}, status=exc.status)
+        if isinstance(result, HttpResponseBase):  # a download
+            return result
         data, status = result if isinstance(result, tuple) else (result, 200)
         return JsonResponse(data, status=status)
     if methods:
