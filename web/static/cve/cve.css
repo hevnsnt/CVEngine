@@ -767,7 +767,7 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
   .hero .graph-box{flex:1;min-height:300px;display:flex}
   .hero #d-graph{flex:1;height:auto;min-height:300px}
   .hero .agent{height:320px}
-  .panel{grid-template-columns:minmax(0,4fr) minmax(0,5fr) minmax(0,4fr)}
+  .panel{grid-template-columns:minmax(0,4fr) minmax(0,4fr) minmax(0,5fr)}
   .cell+.cell{border-top:0;border-left:1px solid var(--line)}
 }@media (min-width:1200px){.strip{grid-template-columns:repeat(7,minmax(0,1fr))}}@media (max-width:719px){.strip a:last-child:nth-child(odd){grid-column:span 2}}@media (min-width:1024px){
   :root{--gutter:32px}
@@ -1299,3 +1299,13 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointer-events:none;transition:opacity .3s}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
 .proj-wrap:has(.org-switch){gap:4px}.proj-wrap:has(.org-switch) .select+.select,.proj-wrap:has(.org-switch) .select+.proj-label+.select{margin-top:2px}
+
+/* Live: exposed hosts and the CVE feed temperatures stack in the first column; AI activity takes the third column, above the fold */
+.cell-stack{display:flex;flex-direction:column;min-width:0}
+.cell-stack>.cell{flex:none}
+.cell-stack>.cell+.cell{border-top:1px solid var(--line);border-left:0;padding-top:14px}
+.cell-stack>a.cell{flex:1}
+.ai-cell .agent{height:auto;flex:1;min-height:300px;max-height:420px}
+.ai-cell .see-all{margin-top:auto}
+@media (min-width:1000px){.cell-stack+.cell{border-left:1px solid var(--line);border-top:0}}
+@media (max-width:999px){.cell-stack+.cell{border-top:1px solid var(--line)}}
