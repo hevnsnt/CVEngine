@@ -176,3 +176,33 @@ def author_pending(provider=None):
     if provider is not None:
         out['ai'] = author_with_ai(provider)
     return out
+
+
+REFRESH_LOCK_SECONDS = 3 * 3600
+
+
+def hot_cves_without_template(days=2, cap=40):
+    """Hot CVEs (known exploited, public exploit, exploit probability, critical score) that arrived lately and have no installed
+    nuclei template yet. The newest templates for new CVEs are published within hours, so these are worth a refresh now."""
+    from cveFeed.templategen import find_existing_template
+    since = timezone.now() - datetime.timedelta(days=days)
+    missing = []
+    for cve in CVEEntry.objects.filter(hot_q(), created_at__gte=since).order_by('-created_at').only('cve_id')[:cap]:
+        if not find_existing_template(cve.cve_id):
+            missing.append(cve.cve_id)
+    return missing
+
+
+def refresh_templates_for_new_hot_cves(dispatch):
+    """Ask for a template refresh outside the schedule when hot new CVEs have no template; at most once per REFRESH_LOCK_SECONDS.
+    ``dispatch`` starts the refresh task. Returns the CVE ids that triggered it (empty when nothing was dispatched)."""
+    from django.core.cache import cache
+    try:
+        missing = hot_cves_without_template()
+    except Exception:  # noqa: BLE001 - coverage is a hint; a missing templates directory must not fail authoring
+        logger.warning('could not check template coverage of new CVEs', exc_info=True)
+        return []
+    if not missing or not cache.add('cvengine:nuclei-refresh-for-new-cves', 1, REFRESH_LOCK_SECONDS):
+        return []
+    dispatch()
+    return missing

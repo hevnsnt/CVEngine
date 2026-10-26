@@ -1208,7 +1208,9 @@ def author_cve_detections():
     except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
         logger.warning("could not build the AI provider for detection authoring", exc_info=True)
         provider = None
-    return detection_author.author_pending(provider)
+    out = detection_author.author_pending(provider)
+    out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
+    return out
 
 
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")

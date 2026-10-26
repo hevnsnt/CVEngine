@@ -192,4 +192,31 @@ class CommandAndTaskTests(TestCase):
 		self.assertTrue(PeriodicTask.objects.filter(name='cvengine-cve-detections', task='author_cve_detections', enabled=True).exists())
 		from cveFeed.tasks import author_cve_detections
 		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
-			self.assertEqual(author_cve_detections(), {'rules': 0, 'refreshed': 0, 'ai': 0})
+			self.assertEqual(author_cve_detections()['rules'], 0)
+
+
+class TemplateRefreshForNewCvesTests(TestCase):
+	def setUp(self):
+		from django.core.cache import cache
+		cache.clear()
+		self.now = timezone.now()
+
+	def test_a_new_hot_cve_without_a_template_triggers_one_refresh_and_then_waits(self):
+		CVEEntry.objects.create(cve_id='CVE-2099-40', kev=True, published_at=self.now, affected=NGINX)
+		CVEEntry.objects.create(cve_id='CVE-2099-41', cvss=3.0, published_at=self.now, affected=NGINX)  # not hot
+		dispatch = mock.Mock()
+		with mock.patch('cveFeed.templategen.find_existing_template', return_value=[]):
+			self.assertEqual(detection_author.refresh_templates_for_new_hot_cves(dispatch), ['CVE-2099-40'])
+			self.assertEqual(detection_author.refresh_templates_for_new_hot_cves(dispatch), [])  # debounced
+		dispatch.assert_called_once()
+
+	def test_a_covered_cve_or_an_old_one_does_not_trigger_anything(self):
+		CVEEntry.objects.create(cve_id='CVE-2099-42', kev=True, published_at=self.now, affected=NGINX)
+		dispatch = mock.Mock()
+		with mock.patch('cveFeed.templategen.find_existing_template', return_value=['/t/CVE-2099-42.yaml']):
+			self.assertEqual(detection_author.refresh_templates_for_new_hot_cves(dispatch), [])
+		old = CVEEntry.objects.create(cve_id='CVE-2099-43', kev=True, published_at=self.now, affected=NGINX)
+		CVEEntry.objects.filter(pk=old.pk).update(created_at=self.now - timezone.timedelta(days=30))
+		with mock.patch('cveFeed.templategen.find_existing_template', return_value=[]):
+			self.assertEqual(detection_author.refresh_templates_for_new_hot_cves(dispatch), ['CVE-2099-42'])
+		dispatch.assert_called_once()

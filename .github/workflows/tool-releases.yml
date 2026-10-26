@@ -1,0 +1,39 @@
+name: 🔭 Scanner tool releases
+
+# Weekly: compare the nmap, WPScan and nuclei versions this repository pins with their newest releases and keep one open issue
+# listing the ones that are behind. It changes nothing else.
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare pinned versions with the newest releases
+        id: check
+        run: |
+          python3 scripts/check_tool_versions.py --json > "$RUNNER_TEMP/tools.json"
+          python3 scripts/check_tool_versions.py | tee "$RUNNER_TEMP/tools.md"
+          if python3 -c "import json,sys; sys.exit(0 if any(r['behind'] for r in json.load(open('$RUNNER_TEMP/tools.json'))) else 1)"; then
+            echo "behind=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Keep one issue open while something is behind
+        if: steps.check.outputs.behind == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Scanner tools behind their newest release"
+          body="$(printf 'The weekly check found a pinned tool behind its newest release. Bump it in web/Dockerfile or the CI workflow, rebuild, and run the tests.\n\n'; cat "$RUNNER_TEMP/tools.md")"
+          number=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

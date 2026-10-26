@@ -6,6 +6,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Added
 
+- **Tool freshness is visible and checked.** `get_system_status` (App Admin) now reports when the nuclei templates were last refreshed and the nuclei, nmap and WPScan versions in use, and raises a problem when the templates are over 36 hours old. A new known-exploited, exploited-in-the-wild or critical CVE that has no nuclei template triggers a template refresh outside the schedule (at most every 3 hours). A weekly workflow (`tool-releases.yml`) keeps one open issue listing pinned scanner versions (nmap, WPScan, the CI nuclei) that are behind their newest release.
 - **A shared detection strategy for every CVE.** One record per CVE, the same for every organization, lists the remote checks (version ranges, HTTP markers, nuclei templates, reviewed nmap scripts, TLS properties, ports) and local checks (package versions, file contents, configuration settings, service state) that tell whether a product is affected. Checks are data from a fixed allowlist, read-only by construction, and validated; the rules author fills them from the CVE's own ranges for every CVE (new ones within the hour, the back catalogue behind them), and an AI author adds checks once for the CVEs attackers use, within a daily budget and from feed text only. Read them at `GET /api/v1/cves/{id}/detection` or with the MCP tool `get_cve_detection`. See [docs/PIPELINE.md](docs/PIPELINE.md#detection-strategies).
 
 ### Security
