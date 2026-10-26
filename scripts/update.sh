@@ -92,15 +92,37 @@ done
 # The Compose layout: every file, plus the env file and project name when the install uses them.
 compose_files=$(setting CVENGINE_COMPOSE_FILES)
 [[ -n $compose_files ]] || compose_files=$(setting CVENGINE_COMPOSE_FILE)
-[[ -n $compose_files ]] || compose_files=docker-compose.yml
 compose=(docker compose)
 compose_env_file=$(setting CVENGINE_COMPOSE_ENV_FILE)
+compose_project=$(setting CVENGINE_COMPOSE_PROJECT)
+# With no files named, the update recreates the stack the way the running one was started (an overlay that moves a published port, an env
+# file), the same as the in-app updater does; recreating it from docker-compose.yml alone can take a host with a proxy of its own down.
+if [[ -z $compose_files ]]; then
+    running_web=$(docker ps -a --filter "label=com.docker.compose.project.working_dir=$(pwd)" --filter "label=com.docker.compose.service=web" --format '{{.ID}}' 2>/dev/null | head -n1) || running_web=''
+    if [[ -n $running_web ]]; then
+        labels=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$running_web" 2>/dev/null) || labels=''
+        for path in ${labels//,/ }; do
+            file=$(basename "$path")
+            [[ $file =~ ^[A-Za-z0-9._-]+\.ya?ml$ && -f $file && $(dirname "$path") == "$(pwd)" ]] ||
+                die "The running stack was started with $path, which is not a Compose file in $(pwd). Set CVENGINE_COMPOSE_FILES (and CVENGINE_COMPOSE_ENV_FILE) in .env to the files it uses."
+            compose_files="${compose_files:+$compose_files,}$file"
+        done
+        if [[ -n $compose_files ]]; then
+            if [[ -z $compose_env_file ]]; then
+                compose_env_file=$(basename "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.environment_file"}}' "$running_web" 2>/dev/null)" 2>/dev/null || true)
+                [[ -f $compose_env_file ]] || compose_env_file=''
+            fi
+            [[ -n $compose_project ]] || compose_project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$running_web" 2>/dev/null || true)
+            echo "Using the Compose layout the running stack was started with: $compose_files${compose_env_file:+ (env file $compose_env_file)}."
+        fi
+    fi
+fi
+[[ -n $compose_files ]] || compose_files=docker-compose.yml
 if [[ -n $compose_env_file ]]; then
     [[ $compose_env_file =~ ^[A-Za-z0-9._-]+$ && -f $compose_env_file ]] ||
         die 'CVENGINE_COMPOSE_ENV_FILE must name an existing file in the repository root.'
     compose+=(--env-file "$compose_env_file")
 fi
-compose_project=$(setting CVENGINE_COMPOSE_PROJECT)
 if [[ -n $compose_project ]]; then
     [[ $compose_project =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die 'CVENGINE_COMPOSE_PROJECT must be a lowercase Compose project name.'
     compose+=(-p "$compose_project")

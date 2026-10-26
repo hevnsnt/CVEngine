@@ -91,7 +91,7 @@ CVENGINE_COMPOSE_ENV_FILE=.env.production
 CVENGINE_COMPOSE_PROJECT=cvengine
 ```
 
-For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. `update.sh` warns when the running containers were started with different files. `apply-update.sh` (the in-app updater) reads the same three settings, and without them it recreates the stack with the files, env file and project the running `web` container was started with, so a host with an overlay needs no setting. It refuses, keeps the approval and says what to set when the checkout holds an overlay (an untracked `docker-compose.*.yml`) that nothing says to use, or when the running stack came from files outside the checkout. A restart that leaves a service created but not running (a published port that is already taken) is a failed update, not a finished one.
+For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. `update.sh` and `apply-update.sh` both use the files, env file and project the running `web` container was started with when none of the three settings is given (an install that sets them uses what it set). `apply-update.sh` (the in-app updater) reads the same three settings, and without them it recreates the stack with the files, env file and project the running `web` container was started with, so a host with an overlay needs no setting. It refuses, keeps the approval and says what to set when the checkout holds an overlay (an untracked `docker-compose.*.yml`) that nothing says to use, or when the running stack came from files outside the checkout. A restart that leaves a service created but not running (a published port that is already taken) is a failed update, not a finished one.
 
 ## Branches and releases
 
