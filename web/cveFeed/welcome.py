@@ -59,7 +59,7 @@ def state(request):
     return {
         'org': {'name': org.name, 'slug': org.slug, 'named': org.name != 'Default'} if org else None,
         'project': {'name': project.name, 'slug': project.slug, 'named': project.name != 'Default'} if project else None,
-        'ai_ready': bool(cfg and cfg.enabled and (cfg.api_key or (cfg.provider in ('ollama', 'vllm') and cfg.base_url))),
+        'ai_ready': bool(cfg and cfg.enabled and (cfg.api_key or (cfg.provider in ('ollama', 'vllm', 'lmstudio') and cfg.base_url))),
         'targets': Domain.objects.count(),
         'onboarded': bool(UserProfile.objects.filter(user=request.user, onboarded=True).exists()),
     }

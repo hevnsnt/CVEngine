@@ -90,7 +90,7 @@ def ai_get(request):
 
 
 def ai_put(request):
-    from reNgine.ai_providers import DEFAULT_MODELS
+    from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     old_connection = (cfg.provider, cfg.model, cfg.base_url, cfg.api_key)
@@ -102,8 +102,8 @@ def ai_put(request):
     cfg.base_url = _text(data, 'base_url', cfg.base_url)
     if cfg.base_url and not re.match(r'^https?://', cfg.base_url.strip(), re.I):
         raise SettingsError(400, 'the server URL must start with http:// or https://')
-    if provider in ('ollama', 'vllm') and data.get('enabled') and not cfg.base_url.strip():
-        raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:11434 if it runs on this server)')
+    if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
+        raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
     if cfg.api_key == old_connection[3] and (cfg.provider, (cfg.base_url or '').strip()) != (old_connection[0], (old_connection[2] or '').strip()):
         cfg.api_key = ''  # a stored key is never sent to a different service or address: type it again for the new one

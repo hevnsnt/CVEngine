@@ -899,7 +899,7 @@ def api_onboarding_save(request):
         provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url)
         with usage_stage('connection_test'):
             if needs_model:
-                provider.list_models()  # OpenRouter/Ollama/vLLM: prove the connection, the user picks the model in Settings
+                provider.list_models()  # OpenRouter/Ollama/vLLM/LM Studio: prove the connection, the user picks the model in Settings
             else:
                 provider.complete('Reply with the single word: ok', 'ping')
     except AIProviderError as exc:
