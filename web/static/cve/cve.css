@@ -1430,3 +1430,9 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gn[data-k="ip"] circle:not(.ring){opacity:.8}
 .gn.has-pod .pod-n{fill:var(--ink)}
 @media (prefers-reduced-motion:reduce){.moon{animation:none}}
+
+/* tile names: the full address for an IP, and the domain a host belongs to under its first label */
+.hx .hx-target{display:none}
+.map[data-size="xl"] .hx .hx-target{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:10.5px;font-weight:500;margin-top:1px}
+.map[data-size="xl"] .hx .hx-name{line-height:1.25}
+.map[data-size="xl"] .hx .hx-name.ip{font-size:10.5px;letter-spacing:-.03em}
