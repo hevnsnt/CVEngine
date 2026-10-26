@@ -1023,6 +1023,13 @@ def deep_scan_apexes():
     return {"queued": len(scans), "due": len(due), "skipped": skipped}
 
 
+@app.task(name="work_conductor", bind=False, queue="cve_feed_queue")
+def work_conductor():
+    """Every minute: keep the discovery queue topped up with the most overdue targets (see cveFeed.conductor)."""
+    from cveFeed import conductor
+    return conductor.keep_work_queued()
+
+
 @app.task(name="host_pipeline", bind=True, queue="discovery_queue")
 def host_pipeline(self, domain_id, names):
     """New hosts of a target (found by certificate transparency or named by an agent) through nmap, the exposure check,

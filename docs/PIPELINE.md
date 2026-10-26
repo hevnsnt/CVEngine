@@ -160,6 +160,12 @@ A tenant of a multi-tenant provider owns only its own subdomain. For `acme.jfrog
 
 An organization can remove a host and exclude it (**Remove & exclude**, or the API). Exclusions match the exact host name, case-insensitively, and every stage skips an excluded host in every project of that organization. Adding it as a target is refused. **Delete host data** removes a host from one project only and leaves it free to be found again.
 
+## The work conductor
+
+Scans used to start only when someone asked or when a daily or weekly sweep ran, so for most of the day nothing was running even with a thousand hosts to look after. Now a watchdog runs every minute and keeps the discovery queue topped up: when fewer than `CVENGINE_WORK_DEPTH` scans (default 3) are running or queued, it starts discovery of the targets that have gone longest without one: never scanned first, then the stalest. It starts at most one per project per round so no project starves the others, and it never picks a target scanned within `CVENGINE_WORK_MIN_GAP_HOURS` (default 2), one that already has a scan going, one an organization excluded, a project whose bug bounty engagement has not confirmed that automated testing is allowed (or is paused or finished), or anything at all while scanning is paused (an update's pause included). Each start is logged in the target's project activity. Set `CVENGINE_WORK_DEPTH=0` to turn it off. The system status (`get_system_status`, App Admin) shows its depth, the scans running and queued, and its last round, and reports a problem when targets exist, scanning is not paused and nothing is running or queued.
+
+The other work that keeps the instance busy has its own schedule, below: validation of fire and smoke matches, re-tests of changed hosts, the paced full port scan and deep nuclei, triage, and the AI review every three hours.
+
 ## Schedules
 
 A superuser can change CVE sync, certificate watch, the hygiene hour, and both time limits on the Administration page. The rest are fixed.
@@ -172,6 +178,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Hygiene sweep | daily at 03:17 UTC |
 | Discovery time limit, per bbot run | 6 hours |
 | nuclei time limit, per run | 4 hours |
+| Work conductor (keeps the discovery queue fed) | every minute |
 | Fire and smoke validation, change re-tests | every 5 minutes |
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | AI review and capacity tuning | every 3 hours |
