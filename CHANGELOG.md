@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Changed
+
+- **Names that point at the same servers are one host.** `example.com` and `www.example.com` resolving to exactly the same addresses used to be two hosts on the map, the Hosts page and the counts, each with its own copy of every finding. They are now one host (the project's own target name is the one shown, otherwise the shortest) that lists its other names ("Also answers to"), and its CVE matches, findings and exposure are the host's, counted once. Names behind a CDN or other shared edge address, names with a different set of addresses, names that never resolved, and the same addresses in another project stay separate hosts. The dashboard, the Hosts page, the group overview and the history count the same way.
+
 ### Added
 
 - **Settings > Updates says what will happen and how long it takes.** After Approve it shows each step (approved, the host picks it up, scans pause and drain, files update, services rebuild, scanning resumes) with what it is waiting on, how long it usually takes and the time since approval, refreshing on its own. When no host updater is reporting it says so and shows the one command to run on the server, with a Copy button; the orange bar says the same after 20 seconds instead of waiting quietly. `scripts/install-updater.sh` now starts the watcher straight away, and `scripts/apply-update.sh` rebuilds when the files are already at the approved commit (after a manual `git pull`) but the running build is older, instead of declaring the update done.

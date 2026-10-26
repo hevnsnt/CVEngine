@@ -56,7 +56,7 @@ def compute_snapshot(project, date=None):
     domain_ids = list(Domain.objects.filter(project=project).values_list('id', flat=True))
     host_qs = counts.host_reps(domain_ids=domain_ids)
     hosts = host_qs.count()
-    exposed_hosts = host_qs.filter(counts.exposure_filter()).count()
+    exposed_hosts = counts.exposed_among(host_qs).count()
     open_findings, cve_matches = _open_findings_and_cve_matches(project)
     fixed, mean_days_to_fix = _fixed_stats(project)
     return {
