@@ -627,12 +627,14 @@ def fetch_whois_data_using_netlas(target):
 	logger.info(f'Fetching WHOIS data for {target} using Netlas...')
 	command = f'netlas host {target} -f json'
 	netlas_key = get_netlas_key()
+	secrets = ()
 	if netlas_key:
 		if netlas_key.key and netlas_key.key != "None":
 			command += f' -a {netlas_key}'
+			secrets = (str(netlas_key),)
 
 	try:
-		_, result = run_command(command, remove_ansi_sequence=True)
+		_, result = run_command(command, remove_ansi_sequence=True, redact=secrets)
 		
 		# catch errors
 		if 'Failed to parse response data' in result:
@@ -692,7 +694,8 @@ def run_command(
 		history_file=None, 
 		scan_id=None, 
 		activity_id=None,
-		remove_ansi_sequence=False
+		remove_ansi_sequence=False,
+		redact=()
 	):
 	"""Run a given command using subprocess module.
 
@@ -703,15 +706,20 @@ def run_command(
 		shell (bool): Run within separate shell if True.
 		history_file (str): Write command + output to history file.
 		remove_ansi_sequence (bool): Used to remove ANSI escape sequences from output such as color coding
+		redact (tuple): Secrets (API keys) on the command line; they run, but the log, the Command row and the history file show ***.
 	Returns:
 		tuple: Tuple with return_code, output.
 	"""
-	logger.info(cmd)
+	shown = cmd
+	for secret in redact:
+		if secret:
+			shown = shown.replace(secret, '***')
+	logger.info(shown)
 	logger.warning(activity_id)
 
 	# Create a command record in the database
 	command_obj = Command.objects.create(
-		command=cmd,
+		command=shown,
 		time=timezone.now(),
 		scan_history_id=scan_id,
 		activity_id=activity_id)
@@ -747,7 +755,7 @@ def run_command(
 		if not os.path.exists(history_file):
 			mode = 'w'
 		with open(history_file, mode) as f:
-			f.write(f'\n{cmd}\n{return_code}\n{output}\n------------------\n')
+			f.write(f'\n{shown}\n{return_code}\n{output}\n------------------\n')
 	if remove_ansi_sequence:
 		output = remove_ansi_escape_sequences(output)
 	monitor.raise_if_aborted()
