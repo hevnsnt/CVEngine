@@ -20,6 +20,22 @@ tools are documented to work. Every item marked **to verify** needs one run agai
 
 So the gap is not matching, it is that a firewall or VPN appliance usually arrives as a category with no product, and almost never with a version.
 
+## What the real data showed (checked through the MCP, 2026-10-26)
+
+Twelve hosts across the projects matched the search "waf". What they carry:
+
+- A technology literally named **`WAF`** on nine of them, and **`DNS WAF`** on three: the nuclei `waf-detect` and `dns-waf-detect` templates' own names. The
+  vendor that fired is the matcher name, and `tech_name_from` read the matcher only for `tech-detect`, so the vendor was thrown away. **Fixed.**
+- **`favicon-detection` with the version `307296554`**: the favicon template extracts the icon's hash, which was stored as a version. **Fixed** (the
+  hash is not a version; a favicon result names a product only when the template's matcher does).
+- **`AWS Service -`** (a dangling dash from "AWS Service - Detection"). **Fixed.**
+- **False "fire" matches from the bare `WAF` technology.** `www.digitalray.ai` carried four CVE matches (Progress LoadMaster / MOVEit WAF, F5 BIG-IP ASM)
+  whose only basis was the technology `WAF` with no version; CVE-2026-8037 is listed as exploited, so the host was heated "fire". The AI triage
+  itself called each one "uncertain: a generic WAF label cannot be tied to the affected build". The generic-label fix in correlation removes them at
+  the next match refresh.
+- Of 387 stored TLS certificates, **none** has an appliance vendor in its subject, issuer or names (issuers are DigiCert, Amazon, Let's Encrypt, GoDaddy,
+  Google Trust Services). Certificate vendor naming (option 5) would have named nothing on this data, so it was **not built**.
+
 ## Why this is hard
 
 A WAF or edge appliance is built to say as little as possible. The vendor is often visible (a block page, a cookie name, a header, the TLS
