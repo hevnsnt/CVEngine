@@ -10,6 +10,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone as dt_timezone
 from typing import Optional
 
 from django.utils import timezone
@@ -2349,7 +2350,7 @@ def list_findings(ctx, slug, params):
     merged = []
     for key, qs in sources.items():  # the top ``stop`` of each source holds the top ``stop`` of the merged order
         merged += [(key, obj) for obj in (qs[:stop] if stop > start else [])]
-    epoch = timezone.now().replace(year=1970)
+    epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)  # not now().replace(year=1970): that raises on 29 February
     merged.sort(key=lambda pair: (pair[1].heat_rank, pair[1].sev, pair[1].when or epoch, pair[1].id), reverse=True)
     everywhere = _is_all(project)
     results = []
