@@ -35,6 +35,7 @@ Fixes from an adversarial review of the whole code base.
 
 Also from the review.
 
+- **A lapsed claim can no longer be extended or deleted by its old holder.** The Redis claims that keep two scans off the same domain, IP or host now extend and release in one atomic step on the server, only while the caller still holds them; a holder whose claim was taken over stops refreshing it (and says so in the log) instead of extending the new holder's, and a claim that expired is taken again when nobody else has it.
 - **One row per IP address.** Two scans that first saw the same address at the same moment each saved a row, and every later scan that reached that address then failed. A migration merges existing duplicates (keeping subdomain links, ports and facts), the database now refuses a second row, and creating an address, technology or subdomain no longer raises when two workers race.
 - **An OpenSSL-style patch letter is no longer dropped from a version.** `1.1.1k` and `1.1.1n` compared equal, so a host on 1.1.1k looked fixed by every advisory that names 1.1.1n. One or two letters after a three-part version (`1.0.2k`, `0.9.8zh`) now order the version; `8.9p1` is unchanged.
 - **CVE List wildcards (`2.3.x`, `<= 3.1.x`) name a whole branch** instead of the bound `2.3`, which missed 2.3.5.
