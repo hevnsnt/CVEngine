@@ -41,6 +41,7 @@ LIGHT_FLAGS = {'-rl': '50', '-c': '10'}
 
 TECH_FLAGS = ['-tags', 'tech']
 TEMPLATE_POLICY_REV = 'readonly-2'
+ALL_TEMPLATES_REV = 'all-1'
 _APPROVED = {'root': None, 'at': 0, 'value': None}
 _APPROVED_LOCK = threading.Lock()
 
@@ -94,6 +95,12 @@ def _stderr_reason(stream):
     return ''.join(c for c in pick if c.isprintable())[:200]
 
 
+def policy_rev():
+    """The template policy in force: part of every coverage key, so changing the setting makes hosts due for the other set."""
+    from cveFeed import validation
+    return ALL_TEMPLATES_REV if validation.all_templates_allowed() else TEMPLATE_POLICY_REV
+
+
 def approved_templates():
     with _APPROVED_LOCK:
         return _approved_templates_locked()
@@ -103,13 +110,14 @@ def _approved_templates_locked():
     """Snapshot only installed templates passing the same destination/read-only gate as targeted checks."""
     from cveFeed import templategen, validation
     root = os.path.realpath(templategen.TEMPLATES_ROOT)
-    if (_APPROVED['root'] == root and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
+    rev, everything = policy_rev(), validation.all_templates_allowed()
+    if (_APPROVED['root'] == root and _APPROVED.get('rev') == rev and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
             and time.monotonic() - _APPROVED['at'] < 3600):
         return _APPROVED['value']
     if not os.path.isdir(root):
         raise RuntimeError('Nuclei template library is unavailable')
     dest = tempfile.mkdtemp(prefix='cvengine-approved-nuclei-')
-    digest = hashlib.sha256(TEMPLATE_POLICY_REV.encode())
+    digest = hashlib.sha256(rev.encode())
     count, skipped, essential_skipped = 0, {}, {}
     try:
         for base, dirs, files in os.walk(root):
@@ -127,7 +135,7 @@ def _approved_templates_locked():
                     continue
                 relative = os.path.relpath(path, root)
                 problem = ('larger than the template size limit' if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES
-                           else validation.readonly_problem(content.decode('utf-8', 'replace')))
+                           else '' if everything else validation.readonly_problem(content.decode('utf-8', 'replace')))
                 if problem:
                     reason = _policy_reason(problem)
                     skipped[reason] = skipped.get(reason, 0) + 1
@@ -142,7 +150,7 @@ def _approved_templates_locked():
                 digest.update(content)
                 count += 1
         if not count:
-            _report_policy(TEMPLATE_POLICY_REV, 0, skipped, essential_skipped)
+            _report_policy(rev, 0, skipped, essential_skipped)
             raise RuntimeError('No installed Nuclei templates passed the read-only policy')
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
@@ -162,7 +170,7 @@ def _approved_templates_locked():
         if time.monotonic() - created > 6 * 3600:
             shutil.rmtree(path, ignore_errors=True)
             retained.remove((path, created))
-    _APPROVED.update(root=root, at=time.monotonic(), value=(dest, revision, count))
+    _APPROVED.update(root=root, at=time.monotonic(), value=(dest, revision, count), rev=rev)
     return _APPROVED['value']
 
 
@@ -172,9 +180,9 @@ def cve_service(cve_id):
     template_path, _ = resolve_template(cve_id)
     try:
         with open(template_path, 'rb') as source:
-            revision = hashlib.sha256(TEMPLATE_POLICY_REV.encode() + source.read(200_001)).hexdigest()[:10]
+            revision = hashlib.sha256(policy_rev().encode() + source.read(200_001)).hexdigest()[:10]
     except OSError:
-        revision = hashlib.sha256(TEMPLATE_POLICY_REV.encode()).hexdigest()[:10]
+        revision = hashlib.sha256(policy_rev().encode()).hexdigest()[:10]
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 

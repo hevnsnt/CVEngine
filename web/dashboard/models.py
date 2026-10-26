@@ -240,6 +240,18 @@ class SystemTimings(models.Model):
 		return cls.objects.first() or cls()
 
 
+class ScanPolicy(models.Model):
+	"""Single-row App Admin setting for what the scanners may run (Settings > Scan engines)."""
+	id = models.AutoField(primary_key=True)
+	# Off: only Nuclei templates whose own text is a read-only check run. On: every template Nuclei ships may run
+	# (the AI-written ones always stay read-only).
+	nuclei_all_templates = models.BooleanField(default=False)
+
+	@classmethod
+	def current(cls):
+		return cls.objects.first() or cls()
+
+
 class IpAccessControl(models.Model):
 	"""Single-row App Admin toggle. When enabled, IpAllowlistMiddleware blocks every request (web UI,
 	admin, agent API, everything) whose connecting IP does not match an IpAllowlistEntry."""

@@ -697,6 +697,28 @@ const sections = {
   },
 
   async engines(m) {
+    const policy = await api("GET", "scan_policy");
+    const everything = check(
+      "Let scans run every Nuclei template that is installed, not only the read-only ones",
+      policy.nuclei_all_templates,
+    );
+    const policyCard = card(
+      "Nuclei templates",
+      el(
+        "p",
+        "note",
+        "By default only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host) run. Turn this on to run the whole template library Nuclei ships, including checks that send other requests. Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
+      ),
+      everything.wrap,
+      button("Save", async () => {
+        await api("PUT", "scan_policy", {
+          nuclei_all_templates: everything.box.checked,
+        });
+        toast("Saved");
+      }),
+    );
+    policyCard.style.maxWidth = "none";
+    m.append(policyCard);
     const list = el("div", "grid");
     m.append(list);
     const draw = async () => {

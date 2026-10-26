@@ -44,6 +44,65 @@ http:
 """
 
 
+class AllTemplatesSettingTests(TestCase):
+	"""Settings > Scan engines can let every installed Nuclei template run; off, only read-only ones do."""
+	def library(self, directory):
+		with open(os.path.join(directory, 'safe.yaml'), 'w') as output:
+			output.write(GET_TEMPLATE)
+		with open(os.path.join(directory, 'write.yaml'), 'w') as output:
+			output.write(GET_TEMPLATE.replace('method: GET', 'method: POST'))
+
+	def test_the_snapshot_follows_the_setting_without_waiting_for_the_cache(self):
+		import shutil
+		from dashboard.models import ScanPolicy
+		with tempfile.TemporaryDirectory() as directory:
+			self.library(directory)
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch.dict(nuclei_scan._APPROVED,
+				{'root': None, 'at': 0, 'value': None}), mock.patch.object(nuclei_scan, '_report_policy'):
+				snapshots = []
+				try:
+					snapshots.append(nuclei_scan.approved_templates())
+					self.assertEqual(snapshots[0][2], 1)
+					ScanPolicy.objects.create(nuclei_all_templates=True)
+					snapshots.append(nuclei_scan.approved_templates())
+					self.assertEqual(snapshots[1][2], 2)
+					self.assertTrue(os.path.isfile(os.path.join(snapshots[1][0], 'write.yaml')))
+					self.assertNotEqual(snapshots[0][1], snapshots[1][1])
+					ScanPolicy.objects.update(nuclei_all_templates=False)
+					self.assertEqual(nuclei_scan.approved_templates()[2], 1)
+				finally:
+					for snapshot in snapshots:
+						shutil.rmtree(snapshot[0], ignore_errors=True)
+					for path, _ in nuclei_scan._APPROVED.get('retained', []):
+						shutil.rmtree(path, ignore_errors=True)
+
+	def test_a_template_that_is_not_read_only_runs_for_validation_only_when_allowed(self):
+		from dashboard.models import ScanPolicy
+		with tempfile.TemporaryDirectory() as directory:
+			self.library(directory)
+			path = os.path.join(directory, 'write.yaml')
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory):
+				self.assertIn('not read-only', validation.approved_template(path)[1])
+				ScanPolicy.objects.create(nuclei_all_templates=True)
+				text, problem = validation.approved_template(path)
+				self.assertEqual(problem, '')
+				self.assertIn('POST', text)
+
+	def test_the_coverage_key_changes_with_the_setting(self):
+		from dashboard.models import ScanPolicy
+		with tempfile.TemporaryDirectory() as directory:
+			self.library(directory)
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch('cveFeed.validation.resolve_template',
+				return_value=(os.path.join(directory, 'safe.yaml'), '')):
+				before = nuclei_scan.cve_service('CVE-2099-1')
+				ScanPolicy.objects.create(nuclei_all_templates=True)
+				self.assertNotEqual(nuclei_scan.cve_service('CVE-2099-1'), before)
+
+	def test_a_database_error_leaves_the_read_only_policy_in_force(self):
+		with mock.patch('dashboard.models.ScanPolicy.current', side_effect=RuntimeError('db down')):
+			self.assertFalse(validation.all_templates_allowed())
+
+
 class ReadOnlyTemplateTests(unittest.TestCase):
 	def test_broad_pass_uses_snapshot_of_only_approved_templates(self):
 		import shutil

@@ -112,6 +112,27 @@ def ai_put(request):
     return ai_get(request)
 
 
+def scan_policy_get(request):
+    from dashboard.models import ScanPolicy
+    return {'nuclei_all_templates': ScanPolicy.current().nuclei_all_templates}
+
+
+def scan_policy_put(request):
+    from cveFeed.admin_api import audit
+    from dashboard.models import ScanPolicy
+    data = _body(request)
+    row = ScanPolicy.objects.first() or ScanPolicy()
+    if 'nuclei_all_templates' in data:
+        if not isinstance(data['nuclei_all_templates'], bool):
+            raise SettingsError(400, 'nuclei_all_templates must be true or false')
+        changed = row.nuclei_all_templates != data['nuclei_all_templates']
+        row.nuclei_all_templates = data['nuclei_all_templates']
+        row.save()
+        if changed:
+            audit(request.user, 'scan_policy.nuclei_all_templates', 'on' if row.nuclei_all_templates else 'off')
+    return scan_policy_get(request)
+
+
 def ai_models(request):
     """The models the chosen provider offers, for the model picker. Uses the key typed in the form, else the stored
     one (only when the provider is unchanged, so a stored key is never sent to a different service)."""
@@ -556,6 +577,7 @@ ROUTES = [
     ('GET', r'ai', lambda r, **k: ai_get(r)), ('PUT', r'ai', lambda r, **k: ai_put(r)),
     ('GET', r'ai/usage', lambda r, **k: ai_usage_get(r)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
+    ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),
