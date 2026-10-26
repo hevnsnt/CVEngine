@@ -1351,3 +1351,27 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (max-width:999px){#c-map .map{flex:none;height:clamp(200px,60vw,340px)}}
 .map[data-narrow="1"] .hx .hx-why{display:none!important}
 .map[data-lines="5"] .hx-d:nth-child(n+6){display:none!important}
+
+/* notebook tiles: a ruled page with a punched binding in the host's temperature color, a stamped tag and a dog-eared corner.
+   When the tiles get too small for that, the map falls back to plain colored squares (the chip and dot tiers). */
+.map[data-tier="rich"] .hx{--heat:var(--ok);position:relative;overflow:hidden;border:1px solid var(--line-2);border-radius:6px;padding:9px 10px 9px 30px;
+  background:var(--surface-2) repeating-linear-gradient(to bottom,transparent 0 17px,color-mix(in srgb,var(--line-2) 55%,transparent) 17px 18px) 0 34px/100% 100% no-repeat;
+  box-shadow:0 1px 0 var(--line-2),0 3px 10px color-mix(in srgb,var(--ink) 7%,transparent);transition:transform .15s,box-shadow .15s,border-color .15s}
+.map[data-tier="rich"] .hx.fire{--heat:var(--fire)}.map[data-tier="rich"] .hx.smoke{--heat:var(--smoke)}.map[data-tier="rich"] .hx.ice{--heat:var(--ice)}
+.map[data-tier="rich"] .hx.unscanned{--heat:var(--faint)}
+.map[data-tier="rich"] .hx::before{content:"";position:absolute;left:0;top:0;bottom:0;width:20px;border-right:1px solid color-mix(in srgb,var(--heat) 45%,var(--line-2));
+  background:radial-gradient(circle at 50% 50%,var(--surface) 0 3.2px,color-mix(in srgb,var(--ink) 30%,transparent) 3.4px 4.2px,transparent 4.6px) 0 3px/100% 24px repeat-y,color-mix(in srgb,var(--heat) 20%,var(--surface-2))}
+.map[data-tier="rich"] .hx::after{content:"";position:absolute;right:0;bottom:0;width:15px;height:15px;background:linear-gradient(135deg,transparent 50%,color-mix(in srgb,var(--heat) 35%,var(--sunk)) 50%);border-top-left-radius:5px;box-shadow:-1px -1px 2px color-mix(in srgb,var(--ink) 10%,transparent)}
+.map[data-tier="rich"] .hx.unscanned::before{background:repeating-linear-gradient(0deg,var(--line-2) 0 3px,transparent 3px 6px)}
+.map[data-tier="rich"][data-size="xl"] .hx .score{font:800 24px/1 var(--mono);letter-spacing:-.04em;color:var(--ink)}
+.map[data-tier="rich"] .hx .hx-tag{top:9px;right:9px;transform:rotate(-5deg);background:transparent;color:var(--heat);border:1.5px solid var(--heat);border-radius:3px;padding:2px 4px;letter-spacing:.08em;font-weight:800}
+.map[data-tier="rich"] .hx .hx-tag.fire,.map[data-tier="rich"] .hx .hx-tag.smoke,.map[data-tier="rich"] .hx .hx-tag.ice{background:transparent}
+.map[data-tier="rich"] .hx .hx-tag.fire{color:var(--fire);border-color:var(--fire)}.map[data-tier="rich"] .hx .hx-tag.smoke{color:var(--smoke-ink);border-color:var(--smoke)}.map[data-tier="rich"] .hx .hx-tag.ice{color:var(--ice-ink);border-color:var(--ice)}
+.map[data-tier="rich"] .hx .hx-details{color:var(--ink-2)}
+.map[data-tier="rich"] .hx .hx-cve{font-weight:700;color:var(--heat)}
+.map[data-tier="rich"][data-size="xl"] .hx .hx-name{align-self:flex-start;max-width:100%;padding-bottom:2px;border-bottom:2px solid var(--heat);font-weight:800;letter-spacing:-.01em}
+@media (hover:hover) and (pointer:fine){.map[data-tier="rich"] .hx:hover{transform:translateY(-2px) rotate(-.5deg);box-shadow:0 1px 0 var(--line-2),0 8px 18px color-mix(in srgb,var(--ink) 14%,transparent);border-color:var(--heat);outline:0}}
+.map[data-tier="rich"] .hx:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.map[data-tier="rich"][data-size="xl"] .hx::before,.map[data-tier="rich"][data-size="xl"] .hx.fire::before,.map[data-tier="rich"][data-size="xl"] .hx.smoke::before,.map[data-tier="rich"][data-size="xl"] .hx.ice::before{content:"";position:absolute;left:0;top:0;bottom:0;width:20px;border-right:1px solid color-mix(in srgb,var(--heat) 45%,var(--line-2));
+  background:radial-gradient(circle at 50% 50%,var(--surface) 0 3.2px,color-mix(in srgb,var(--ink) 30%,transparent) 3.4px 4.2px,transparent 4.6px) 0 3px/100% 24px repeat-y,color-mix(in srgb,var(--heat) 20%,var(--surface-2))}
+.map[data-tier="rich"][data-size="xl"] .hx.unscanned::before{background:repeating-linear-gradient(0deg,var(--line-2) 0 3px,transparent 3px 6px)}

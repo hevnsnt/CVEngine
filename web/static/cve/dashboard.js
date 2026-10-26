@@ -171,8 +171,7 @@ const MAP_GAP = 6;
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
-  { name: "rich", size: "xl", w: 96, h: 104 },
-  { name: "card", size: "xl", w: 92, h: 56 },
+  { name: "rich", size: "xl", w: 98, h: 108 },
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
 ];
