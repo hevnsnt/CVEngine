@@ -13,6 +13,50 @@ function projectHref(value, here) {
   return `/cve/${value}/${SECTIONS.includes(here) ? here : "hosts"}/`;
 }
 
+// --- organization switcher: shown when the caller's projects span two or more organizations -----------------------
+const readJson = (id) => {
+  const node = document.getElementById(id);
+  try {
+    return node ? JSON.parse(node.textContent) : [];
+  } catch (_) {
+    return [];
+  }
+};
+const SWITCH_PROJECTS = readJson("switch-projects");
+const SWITCH_ORGS = readJson("switch-orgs");
+const LAST_KEY = "cve.org.last.v1";
+const lastByOrg = () => {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_KEY) || "{}");
+  } catch (_) {
+    return {};
+  }
+};
+// The project to open when an organization is chosen: the one last used in it, else its first.
+const projectForOrg = (orgSlug) => {
+  const inOrg = SWITCH_PROJECTS.filter((p) => p.org_slug === orgSlug);
+  const last = lastByOrg()[orgSlug];
+  return (inOrg.find((p) => p.slug === last) || inOrg[0] || {}).slug;
+};
+const currentProject = document.getElementById("project");
+if (SWITCH_ORGS.length && currentProject && currentProject.value && currentProject.value !== "_all") {
+  const mine = SWITCH_PROJECTS.find((p) => p.slug === currentProject.value);
+  if (mine) {
+    try {
+      localStorage.setItem(LAST_KEY, JSON.stringify({ ...lastByOrg(), [mine.org_slug]: mine.slug }));
+    } catch (_) {
+      /* private window: the org switch just opens its first project */
+    }
+  }
+}
+$$("select.org-switch").forEach((sel) => {
+  sel.addEventListener("change", () => {
+    const slug = projectForOrg(sel.value);
+    // Only a project slug may become part of the address (the same rule as the project switcher below): the list comes from page data.
+    if (slug && /^[-\w]+$/.test(slug)) window.location.href = projectHref(slug, sel.dataset.section);
+  });
+});
+
 // --- project switcher (sidebar and sheet) -------------------------------------------------
 $$("select.proj").forEach((sel) => {
   sel.addEventListener("change", () => {
@@ -101,11 +145,24 @@ function collect() {
   const current = $("#project");
   if (current) {
     const here = current.dataset.section;
-    [...current.options].forEach((o) => {
-      if (o.value !== current.value) {
-        out.push({ label: `Switch to ${o.textContent}`, hint: "Project", href: projectHref(o.value, here), section: "Go to" });
-      }
-    });
+    const multi = SWITCH_ORGS.length > 0;
+    const orgName = (slug) => (SWITCH_ORGS.find((o) => o.slug === slug) || {}).name;
+    if (multi) {
+      const mine = SWITCH_PROJECTS.find((p) => p.slug === current.value);
+      SWITCH_ORGS.forEach((o) => {
+        const target = projectForOrg(o.slug);
+        if (target && (!mine || mine.org_slug !== o.slug))
+          out.push({ label: `Switch to ${o.name}`, hint: "Organization", href: projectHref(target, here), section: "Go to" });
+      });
+      SWITCH_PROJECTS.forEach((p) => {
+        if (p.slug !== current.value)
+          out.push({ label: `Switch to ${p.name}`, sub: orgName(p.org_slug), hint: "Project", href: projectHref(p.slug, here), section: "Go to" });
+      });
+    } else {
+      [...current.options].forEach((o) => {
+        if (o.value !== current.value) out.push({ label: `Switch to ${o.textContent}`, hint: "Project", href: projectHref(o.value, here), section: "Go to" });
+      });
+    }
   }
   return out;
 }
