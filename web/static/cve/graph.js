@@ -199,6 +199,44 @@ export function collapsePods(view, expanded) {
     .map((n) => (pods.has(n.id) ? { ...n, pod: pods.get(n.id), expanded: expanded.has(n.id) } : n));
   return { nodes, edges };
 }
+
+// Orbit. The CVEs of a host also circle it as little moons, each on its own dotted orbit and at its own speed, colored by temperature
+// (at most MOON_CAP of them, in proportion to fire, smoke and ice). A host whose pod is open shows its real CVE nodes instead.
+const MOON_CAP = 14;
+function decorateMoons(g, d, r) {
+  g.querySelector(".moons")?.remove();
+  if (!d.pod || !d.pod.total || d.expanded) return;
+  const moons = document.createElementNS(NS, "g");
+  moons.setAttribute("class", "moons");
+  const n = Math.min(MOON_CAP, d.pod.total);
+  const order = [];
+  TIER_KEYS.forEach((tier) => {
+    const share = Math.max(d.pod[tier] ? 1 : 0, Math.round((d.pod[tier] / d.pod.total) * n));
+    for (let i = 0; i < share; i += 1) order.push(tier);
+  });
+  [0, 1, 2].forEach((lane) => {
+    const path = document.createElementNS(NS, "circle");
+    path.setAttribute("class", "moon-orbit");
+    path.setAttribute("r", r + 9 + lane * 8);
+    path.setAttribute("fill", "none");
+    moons.append(path);
+  });
+  order.slice(0, n).forEach((tier, i) => {
+    const lane = i % 3;
+    const spin = document.createElementNS(NS, "g");
+    spin.setAttribute("class", "moon");
+    spin.style.animationDuration = `${6 + ((i * 7) % 11) * 1.6 + lane * 4}s`;
+    spin.style.animationDelay = `${-((i * 3.7) % 13)}s`;
+    if (i % 2) spin.style.animationDirection = "reverse";
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("cx", r + 9 + lane * 8);
+    dot.setAttribute("r", tier === "fire" ? 3.6 : 3);
+    dot.setAttribute("fill", CVE_COLORS[tier]);
+    spin.append(dot);
+    moons.append(spin);
+  });
+  g.append(moons);
+}
 const hostRadius = (d) => (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
 const arc = (r, len, offset, color) => {
   const c = document.createElementNS(NS, "circle");
@@ -255,6 +293,7 @@ function refreshHost(ui, d) {
   const title = ui.querySelector("title");
   if (title) title.textContent = d.pod && d.pod.total ? `${d.label}\n${d.pod.total} CVE${d.pod.total === 1 ? "" : "s"} (${d.pod.fire} fire, ${d.pod.smoke} smoke, ${d.pod.ice} ice). Double-click to ${d.expanded ? "fold them back" : "open the pod"}.` : d.label;
   decoratePod(ui, d, r);
+  decorateMoons(ui, d, r);
 }
 
 export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } = {}) {
@@ -372,6 +411,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       g.setAttribute("class", `gn gn-${d.kind}${isActive(node) ? " gn-live" : ""}`);
       g.setAttribute("role", "button");
       g.setAttribute("tabindex", "0");
+      g.dataset.heat = d.heat || d.tier || "";
+      g.dataset.k = d.kind;
       g.style.touchAction = "none";
       g.setAttribute(
         "aria-label",
