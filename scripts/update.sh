@@ -225,9 +225,14 @@ port_conflicts() {
     local config listeners
     config=$("${compose[@]}" config --format json 2>>"${diagnostic_log:-/dev/null}") || return 0
     listeners=$(ss -ltnpH 2>/dev/null) || listeners=''
-    printf '%s\0%s' "$config" "$listeners" | python3 -c '
+    # Run as an ordinary user (a member of the docker group), ss cannot name the process behind docker's own listeners: those say "an unknown
+    # process" and must not be taken for a stranger. The ports Docker itself publishes are known from docker, whoever runs this.
+    local docker_ports
+    docker_ports=$(docker ps --format '{{.Ports}}' 2>/dev/null) || docker_ports=''
+    printf '%s\0%s\0%s' "$config" "$listeners" "$docker_ports" | python3 -c '
 import json, re, sys
-config, listeners = sys.stdin.buffer.read().split(b"\0", 1)
+config, listeners, docker_ports = sys.stdin.buffer.read().split(b"\0", 2)
+docker_published = set(re.findall(r"(\d+)->\d+/", docker_ports.decode(errors="replace")))
 try:
     services = json.loads(config).get("services") or {}
 except ValueError:
@@ -246,6 +251,8 @@ for name, service in services.items():
         published, host_ip = str(mapping.get("published") or ""), str(mapping.get("host_ip") or "")
         for address, port, process, pid in held:
             if port != published or process == "docker-proxy":
+                continue
+            if not pid and port in docker_published:  # an owner ss could not name, on a port one of the Docker containers publishes
                 continue
             if address in wild or host_ip in wild or address == host_ip:
                 print(name + "|" + (host_ip or "0.0.0.0") + "|" + published + "|" + process + ((" (pid " + pid + ")") if pid else ""))
