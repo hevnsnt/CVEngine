@@ -260,6 +260,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 1)
         self.assertFalse(self.approved())
         self.assertEqual(self.head(), self.prev)
+        # the reason reaches Settings > Updates: the usual cause is an update branch that is not the one checked out on the server
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'failed')
+        self.assertIn('branch checked out on this server', phase.get('detail', ''))
 
     def test_local_changes_to_tracked_files_block_the_update_and_keep_the_approval(self):
         (self.work / 'web' / 'README').write_text('edited locally\n')

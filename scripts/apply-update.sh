@@ -162,6 +162,7 @@ if ! git fetch --quiet origin "$BRANCH" >>"$LOG" 2>&1; then
 fi
 if ! git merge-base --is-ancestor "$SHA" "origin/$BRANCH"; then
   log "refusing: $SHA is not on origin/$BRANCH"
+  phase failed "approved commit is not on $BRANCH, the branch checked out on this server. Set the update branch in Settings to $BRANCH, or git checkout the other one here"
   rm -f "$FLAG"
   exit 1
 fi
