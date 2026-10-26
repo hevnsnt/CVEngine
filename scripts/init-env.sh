@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { cp .env.example .env; echo "Created .env from .env.example."; }
+[ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; }
 
 # letters and digits only: a `$` or `#` in .env breaks Make and Compose parsing
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }

@@ -68,3 +68,49 @@ class PasswordChangeThrottleTests(TestCase):
 		for _ in range(account_api.PASSWORD_MAX_FAILURES):
 			self.assertEqual(self.change('wrong').status_code, 400)
 		self.assertEqual(self.change('right-pw-1').status_code, 429)
+
+
+class MfaSecretStorageTests(TestCase):
+	def test_the_totp_seed_is_encrypted_in_the_column_and_recovery_codes_are_keyed(self):
+		import hashlib
+
+		from django.db import connection
+
+		from dashboard.models import UserProfile
+		from tenancy import mfa
+		user = User.objects.create_user('seeded', password='x')
+		seed = mfa.new_secret()
+		plain, hashes = mfa.new_recovery_codes()
+		profile = UserProfile.objects.create(user=user, mfa_enabled=True, mfa_secret=seed, recovery_codes=hashes)
+		with connection.cursor() as cursor:
+			cursor.execute('SELECT mfa_secret FROM dashboard_userprofile WHERE id = %s', [profile.pk])
+			stored = cursor.fetchone()[0]
+		self.assertTrue(stored.startswith('enc:v1:'))
+		self.assertNotIn(seed, stored)
+		self.assertEqual(UserProfile.objects.get(pk=profile.pk).mfa_secret, seed)
+		self.assertTrue(all(h.startswith(mfa.KEYED_PREFIX) for h in hashes))
+		self.assertEqual(len(plain[0].replace('-', '')), 20)  # 80 bits
+		self.assertNotIn(hashlib.sha256(plain[0].replace('-', '').encode()).hexdigest(), hashes)
+
+	def test_a_code_stored_by_an_older_version_still_works_once(self):
+		import hashlib
+
+		from tenancy import mfa
+		legacy = [hashlib.sha256(b'abc123def456').hexdigest()]
+		rest = mfa.consume_recovery_code(legacy, 'ABC123-DEF456')
+		self.assertEqual(rest, [])
+		self.assertIsNone(mfa.consume_recovery_code(rest, 'abc123-def456'))
+
+
+class SecurityHeaderTests(TestCase):
+	def test_every_response_carries_a_content_security_policy(self):
+		response = Client().get('/login/')
+		policy = response['Content-Security-Policy']
+		for directive in ("base-uri 'self'", "object-src 'none'", "frame-ancestors 'none'", "form-action 'self'"):
+			self.assertIn(directive, policy)
+		self.assertEqual(response['X-Content-Type-Options'], 'nosniff')
+
+	def test_the_validate_deep_link_only_focuses_the_button(self):
+		import os
+		source = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'app.js'), encoding='utf-8').read()
+		self.assertNotIn('run.click()', source)

@@ -25,6 +25,7 @@ PGDB=$(env_value POSTGRES_DB); PGDB=${PGDB:-rengine}
 OLD_VOLUME="${PROJECT}_postgres_data"
 NEW_VOLUME="${PROJECT}_postgres18_data"
 OLD_IMAGE="postgres:12.3-alpine"
+umask 077  # the dump holds every stored secret and hash: readable by the owner only
 STAMP=$(date +%Y%m%d-%H%M%S)
 DUMP="backups/pg12-${STAMP}.dump"
 

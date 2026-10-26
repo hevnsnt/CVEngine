@@ -26,10 +26,15 @@ jobs:
           BRANCHES: ${{ github.event.inputs.branches }}
         run: |
           status=0
-          echo "$BRANCHES" | tr ',' '\n' | while read -r branch; do
+          while read -r branch; do
             branch=$(echo "$branch" | xargs)
             [ -n "$branch" ] || continue
+            # a plain branch name only (no "..", no leading "-"), and never one of the long-lived branches
+            if ! [[ $branch =~ ^[A-Za-z0-9._/-]+$ ]] || [[ $branch == -* || $branch == *..* ]]; then
+              echo "::error::Refusing '$branch': not a plain branch name"; status=1; continue
+            fi
+            case "$branch" in master|main|develop) echo "::error::Refusing to delete $branch"; status=1; continue ;; esac
             echo "Deleting $branch"
             gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$branch" || status=1
-          done
+          done < <(echo "$BRANCHES" | tr ',' '\n')
           exit "$status"

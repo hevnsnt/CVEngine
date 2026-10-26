@@ -17,6 +17,11 @@ Fixes from an adversarial review of the whole code base.
 - **Mail-hygiene checks have a budget.** An SPF include tree stops after 50 lookups, and the EPSS feed is refused if it expands past 512 MB.
 - **The SSRF filter covers more addresses.** IPv6 forms that carry an IPv4 address (NAT64, 6to4, IPv4-compatible) are judged by that address, and the Azure, Oracle, Alibaba and AWS IPv6 metadata addresses, Teredo, benchmarking and reserved ranges are always refused. Name checks now run in parallel with a per-name timeout and an overall budget.
 - **The Netlas key is no longer written to the log, the Command table or the history file.**
+- **The two-step sign-in seed is encrypted at rest**, and new recovery codes are 80 bits and keyed with the server secret (codes made before stay valid until you make new ones).
+- **A stored AI key is never sent to a changed address.** Saving a different provider or server address without typing the key again clears the stored one, and the model list uses the stored key only for the address it was saved for.
+- **Every response carries a Content-Security-Policy** (`base-uri`, `object-src`, `frame-ancestors`, `form-action`), and scan results served from `/protected_media/` are sandboxed and never sniffed. Opening a `#...&validate` link now focuses "Validate now" instead of clicking it.
+- **Deployment.** nginx accepts 4 MB bodies (was 800 MB), has header and body timeouts and speaks TLS 1.3; the proxy mounts scan results read-only; the celery entrypoint no longer downloads an unpinned third-party template on every start; the installer uses a private temp file, no longer passes the caller's environment through `sudo`, and reuses a certificate only when it really covers the address; `.env` and the PostgreSQL upgrade dump are created owner-only; the development web port listens on loopback; the workflows run read-only by default, release only from master, and the branch-delete tool refuses odd names and long-lived branches.
+- **Nuclei templates refresh every six hours** (04:41, 10:41, 16:41, 22:41 UTC) instead of once a day, unless you changed the schedule.
 
 ### Fixed
 
