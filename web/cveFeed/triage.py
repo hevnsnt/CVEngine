@@ -739,7 +739,7 @@ def _error_diagnostic(error, stage, group, provider=None, claim=None):
     now = timezone.now()
     category = getattr(error, 'category', 'internal_error')
     name = getattr(provider, 'name', '')
-    name = name if name in ('anthropic', 'openai', 'openrouter', 'ollama', 'vllm') else 'configured'
+    name = name if name in ('anthropic', 'openai', 'openrouter', 'ollama', 'vllm', 'lmstudio') else 'configured'
     model = getattr(provider, '_model', '') if provider else ''  # avoid a network-backed model property while reporting an error
     model = model if isinstance(model, str) and re.fullmatch(r'(?:claude|gpt|o[1-9]|gemini|llama)[A-Za-z0-9./:_-]{0,60}', model) else ''
     signature = group[0][0].signature

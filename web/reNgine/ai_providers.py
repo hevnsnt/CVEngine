@@ -1,5 +1,5 @@
 """Model-agnostic AI layer: one ``complete(system, user)`` interface over
-Anthropic, OpenAI, OpenRouter, Ollama and vLLM, plus CVE-match confirmation built on it.
+Anthropic, OpenAI, OpenRouter, Ollama, vLLM and LM Studio, plus CVE-match confirmation built on it.
 
 Plain HTTP via ``requests`` (no vendor SDKs) so providers are swappable and the
 module imports without Django. Keys are passed in by the caller (read from the
@@ -90,20 +90,21 @@ ANTHROPIC_VERSION = '2023-06-01'
 OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 # Models used when none is chosen. Anthropic and OpenAI get the newest cheapest model: resolved from the
 # provider's own model list (see pick_cheapest_newest), with these as the fallback when the list cannot be read.
-# OpenRouter, Ollama and vLLM serve whatever the operator picked or hosts, so there is no default for them.
+# OpenRouter, Ollama, vLLM and LM Studio serve whatever the operator picked or hosts, so there is no default for them.
 DEFAULT_MODELS = {
 	'anthropic': 'claude-haiku-5-5',
 	'openai': 'gpt-5.4-nano',
 	'openrouter': '',
 	'ollama': '',
 	'vllm': '',
+	'lmstudio': '',
 }
-SELECTABLE = ('openrouter', 'ollama', 'vllm')  # the user must choose the model
+SELECTABLE = ('openrouter', 'ollama', 'vllm', 'lmstudio')  # the user must choose the model
 OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 LOCAL_NAMES = ('localhost', '127.0.0.1', '::1', '[::1]')
 HOST_FROM_CONTAINER = 'host.docker.internal'  # compose maps this to the Docker host for the web and celery containers
-URL_HELP = ('the server address, for example http://100.64.0.5:11434 (a Tailscale or other remote machine) '
-			'or http://localhost:11434 if it runs on this same server')
+URL_HELP = ('the server address, for example http://100.64.0.5:{port} (a Tailscale or other remote machine) '
+			'or http://localhost:{port} if it runs on this same server')
 
 
 def reachable_url(url):
@@ -200,6 +201,7 @@ def _epoch(value):
 
 class AIProvider:
 	name = ''
+	timeout = REQUEST_TIMEOUT  # seconds a completion may take; a provider that loads models on demand overrides it
 
 	def __init__(self, model=None, api_key=None, base_url=None):
 		self._model = model or ''
@@ -245,7 +247,7 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+			resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
 			resp.raise_for_status()
 			data = resp.json()
 			if isinstance(data, dict):
@@ -388,6 +390,20 @@ class VLLMProvider(OpenAIProvider):
 	name = 'vllm'
 
 
+class LMStudioProvider(OpenAIProvider):
+	"""An LM Studio server's OpenAI-compatible API, e.g. http://100.64.0.5:1234/v1 (port 1234 by default).
+
+	The token is optional: LM Studio 0.4 and later can require one (Server Settings, Manage Tokens) and then expects it as a bearer
+	token, which is how the key is sent. With just-in-time loading on, /v1/models lists every downloaded model (embedding models
+	too) and the first request for one loads it, which can take a minute on a big model, so the request timeout is longer."""
+	name = 'lmstudio'
+	timeout = 300
+
+	def list_models(self):
+		# the server lists the embedding models it holds beside the chat ones; an embedding model cannot answer a prompt
+		return [m for m in super().list_models() if 'embed' not in m['id'].lower()]
+
+
 def _ollama_text(data):
 	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
 	try:
@@ -426,8 +442,10 @@ class OllamaProvider(AIProvider):
 		return _ollama_text(data)
 
 
-PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider)}
-KEYLESS = ('ollama', 'vllm')  # a key is optional (vLLM) or unused (Ollama)
+PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider, LMStudioProvider)}
+KEYLESS = ('ollama', 'vllm', 'lmstudio')  # a key is optional (vLLM, LM Studio) or unused (Ollama)
+SERVER_URL_PROVIDERS = ('ollama', 'vllm', 'lmstudio')  # you run the server, so there is no default address
+LOCAL_PORT = {'ollama': 11434, 'vllm': 8000, 'lmstudio': 1234}  # each server's usual port, for the address hints
 
 
 def get_provider(name, model=None, api_key=None, base_url=None):
@@ -437,8 +455,8 @@ def get_provider(name, model=None, api_key=None, base_url=None):
 		raise AIProviderError(f'unknown AI provider: {name!r}') from None
 	if name not in KEYLESS and not api_key:
 		raise AIProviderError(f'{name} requires an API key')
-	if name in ('ollama', 'vllm') and not (base_url or '').strip():
-		raise AIProviderError(f'{name} needs the server URL: {URL_HELP}')
+	if name in SERVER_URL_PROVIDERS and not (base_url or '').strip():
+		raise AIProviderError(f'{name} needs the server URL: {URL_HELP.format(port=LOCAL_PORT[name])}')
 	if base_url and not re.match(r'^https?://', base_url.strip(), re.I):
 		raise AIProviderError('the server URL must start with http:// or https://')
 	return cls(model=model, api_key=api_key, base_url=base_url)

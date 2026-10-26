@@ -17,7 +17,7 @@
 | Price | Free and open source (GPL-3.0), with no seat, asset, or usage limits beyond your hardware | A free tier with limits (one seat and a one-time allowance on Neo, a capped domain count on the cloud platform), $200 per seat per month pay as you go, and custom enterprise pricing | cvENGINE |
 | Hosting | Self-hosted only, on one Docker Compose stack | Managed cloud, dedicated VPC, or on-prem (enterprise) | ProjectDiscovery |
 | Your data | Stays on your server. Nothing is sent to the authors. | Managed service. It states SOC 2 Type II and zero data retention. | Different |
-| AI models | Bring your own: Anthropic, OpenAI, OpenRouter, or a local Ollama or vLLM, on every install | Standard and frontier models. Bring your own key is enterprise only. | cvENGINE |
+| AI models | Bring your own: Anthropic, OpenAI, OpenRouter, or a local Ollama, vLLM or LM Studio, on every install | Standard and frontier models. Bring your own key is enterprise only. | cvENGINE |
 | Support | Community, through GitHub | Vendor support | ProjectDiscovery |
 | Maturity | New: v1.1, written in days and tested far less | Years in production | ProjectDiscovery |
 

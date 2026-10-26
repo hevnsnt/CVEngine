@@ -109,6 +109,7 @@ const sections = {
       openrouter: "OpenRouter",
       ollama: "Ollama",
       vllm: "vLLM",
+      lmstudio: "LM Studio",
     };
     const provider = selectOf(
       s.providers.map((p) => [p, LABELS[p] || p]),
@@ -124,6 +125,7 @@ const sections = {
     const BASE_HINT = {
       ollama: "required, e.g. http://100.64.0.5:11434 (Tailscale or remote), or http://localhost:11434 if it runs on this server",
       vllm: "required, e.g. http://100.64.0.5:8000/v1, or http://localhost:8000/v1 if it runs on this server",
+      lmstudio: "required, e.g. http://100.64.0.5:1234/v1, or http://localhost:1234/v1 if it runs on this server (the API key is only needed when you turned on authentication in LM Studio)",
       openrouter: "optional, defaults to https://openrouter.ai/api/v1",
     };
     const sync = () => {

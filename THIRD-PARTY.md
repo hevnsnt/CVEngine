@@ -38,7 +38,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 
 ## AI back ends
 
-cvENGINE talks to [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), and [OpenRouter](https://openrouter.ai) over their APIs, and to self-hosted [Ollama](https://github.com/ollama/ollama) (MIT) and [vLLM](https://github.com/vllm-project/vllm) (Apache-2.0) servers. Agents connect through the [Model Context Protocol](https://modelcontextprotocol.io).
+cvENGINE talks to [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), and [OpenRouter](https://openrouter.ai) over their APIs, and to self-hosted [Ollama](https://github.com/ollama/ollama) (MIT) [vLLM](https://github.com/vllm-project/vllm) (Apache-2.0) and [LM Studio](https://lmstudio.ai) servers (cvENGINE only calls their HTTP APIs; no LM Studio code is included). Agents connect through the [Model Context Protocol](https://modelcontextprotocol.io).
 
 ## Front end
 

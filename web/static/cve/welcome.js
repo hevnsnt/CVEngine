@@ -134,7 +134,7 @@ const steps = {
 
   ai(node) {
     const key = el('input', '', null, { type: 'password', autocomplete: 'new-password', spellcheck: 'false', placeholder: 'sk-ant-...  or  sk-...' });
-    const hint = el('p', 'note', 'Paste an Anthropic, OpenAI or OpenRouter key and we will detect which one it is (Ollama and vLLM are set up in Settings). It is stored in your database and never shown again.', { style: 'margin:6px 0 0' });
+    const hint = el('p', 'note', 'Paste an Anthropic, OpenAI or OpenRouter key and we will detect which one it is (Ollama, vLLM and LM Studio are set up in Settings). It is stored in your database and never shown again.', { style: 'margin:6px 0 0' });
     let timer;
     key.addEventListener('input', () => {
       clearTimeout(timer);

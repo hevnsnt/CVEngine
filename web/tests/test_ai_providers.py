@@ -146,10 +146,11 @@ class ModelSelectionTests(unittest.TestCase):
 		with mock.patch('requests.get', return_value=FakeResp({'models': [{'name': 'a'}, {'name': 'b'}]})):
 			with self.assertRaises(ai.AIProviderError):
 				ai.get_provider('ollama', base_url='http://100.64.0.5:11434').model
-		for name in ('vllm', 'ollama'):
+		for name, port in (('vllm', 8000), ('ollama', 11434), ('lmstudio', 1234)):
 			with self.assertRaises(ai.AIProviderError) as ctx:
 				ai.get_provider(name)  # no URL: there is no default server
 			self.assertIn('Tailscale', str(ctx.exception))
+			self.assertIn(f':{port}', str(ctx.exception))  # each server's own usual port in the hint
 		with self.assertRaises(ai.AIProviderError):
 			ai.get_provider('ollama', base_url='ftp://x')
 
@@ -185,6 +186,50 @@ class ModelSelectionTests(unittest.TestCase):
 			ai.get_provider('vllm', model='m', base_url='http://v:8000/v1/').complete('s', 'u')
 		self.assertEqual(post.call_args[0][0], 'http://v:8000/v1/chat/completions')
 		self.assertEqual(post.call_args[1]['headers'], {})
+
+
+class LMStudioTests(unittest.TestCase):
+	def test_it_is_an_openai_compatible_keyless_server_you_must_give_the_address_of(self):
+		self.assertIn('lmstudio', ai.SELECTABLE)
+		self.assertIn('lmstudio', ai.KEYLESS)
+		self.assertIn('lmstudio', ai.DEFAULT_MODELS)
+		with self.assertRaises(ai.AIProviderError):
+			ai.get_provider('lmstudio')
+		with self.assertRaises(ai.AIProviderError):
+			ai.get_provider('lmstudio', base_url='ftp://x')
+
+	def test_it_posts_to_chat_completions_and_sends_a_token_only_when_one_is_set(self):
+		reply = FakeResp({'choices': [{'message': {'content': 'ok'}}]})
+		with mock.patch('os.path.exists', return_value=False), mock.patch('requests.post', return_value=reply) as post:
+			ai.get_provider('lmstudio', model='qwen3-8b', base_url='http://100.64.0.5:1234/v1/').complete('s', 'u')
+			self.assertEqual(post.call_args[0][0], 'http://100.64.0.5:1234/v1/chat/completions')
+			self.assertEqual(post.call_args[1]['headers'], {})
+			self.assertEqual(post.call_args[1]['json']['model'], 'qwen3-8b')
+			ai.get_provider('lmstudio', model='m', api_key='lm-token', base_url='http://100.64.0.5:1234/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['headers'], {'Authorization': 'Bearer lm-token'})
+
+	def test_a_model_may_take_minutes_to_load_so_the_timeout_is_longer_than_a_hosted_providers(self):
+		reply = FakeResp({'choices': [{'message': {'content': 'ok'}}]})
+		with mock.patch('requests.post', return_value=reply) as post:
+			ai.get_provider('lmstudio', model='m', base_url='http://h:1234/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['timeout'], 300)
+			ai.get_provider('vllm', model='m', base_url='http://h:8000/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['timeout'], ai.REQUEST_TIMEOUT)
+
+	def test_embedding_models_are_left_out_of_the_choice_and_one_chat_model_is_the_default(self):
+		listing = {'data': [{'id': 'text-embedding-nomic-embed-text-v1.5'}, {'id': 'qwen3-8b'}]}
+		with mock.patch('requests.get', return_value=FakeResp(listing)) as get:
+			provider = ai.get_provider('lmstudio', base_url='http://h:1234/v1')
+			self.assertEqual([m['id'] for m in provider.list_models()], ['qwen3-8b'])
+			self.assertEqual(provider.model, 'qwen3-8b')  # the one chat model it serves is the choice
+		self.assertEqual(get.call_args[0][0], 'http://h:1234/v1/models')
+
+	def test_a_screenshot_goes_as_an_image_url_like_any_openai_compatible_server(self):
+		reply = FakeResp({'choices': [{'message': {'content': 'a login screen'}}]})
+		with mock.patch('requests.post', return_value=reply) as post:
+			out = ai.get_provider('lmstudio', model='vl', base_url='http://h:1234/v1').complete_vision('s', 'u', b'\x89PNG')
+		self.assertEqual(out, 'a login screen')
+		self.assertEqual(post.call_args[1]['json']['messages'][1]['content'][1]['type'], 'image_url')
 
 
 class VerdictTests(unittest.TestCase):
