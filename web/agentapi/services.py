@@ -650,6 +650,7 @@ def rescan_hosts(ctx, slug, target_id, hosts):
         hosts = re.split(r'[\s,]+', hosts)
     if not isinstance(hosts, (list, tuple)) or not hosts:
         raise ApiError(400, 'hosts must be a non-empty list of host names')
+    hosts = hosts[:RESCAN_MAX_HOSTS * 10]  # what is read is bounded; the first RESCAN_MAX_HOSTS that qualify are queued
     suffix = domain.name.lower()
     names = list(dict.fromkeys(str(h).strip().lower().rstrip('.') for h in hosts if str(h).strip()))
     from cveFeed.exclusions import drop_excluded
@@ -2522,26 +2523,47 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
     return {'updated': updated, 'failed': failed}
 
 
-def asset_matches(host_names, ips, patterns):
-    """Whether a host (name and IPs) falls under any registered asset: name, parent domain, IP or CIDR."""
-    for pattern in patterns:
-        p = pattern.strip().lower()
-        if not p:
-            continue
-        for name in host_names:
-            if name == p or name.endswith('.' + p):
-                return True
-        try:
-            net = ipaddress.ip_network(p, strict=False)
-        except ValueError:
-            continue
-        for ip in ips:
+MAX_ASSET_PATTERNS = 500
+
+
+class AssetFilter:
+    """Registered assets (names, parent domains, IPs, CIDRs) read once, so each host is a few set lookups and one containment test per
+    network instead of re-parsing every pattern for every host (500 patterns over 2,000 matches took about 90 seconds)."""
+
+    def __init__(self, patterns):
+        self.names, self.networks = set(), []
+        for pattern in patterns:
+            p = pattern.strip().lower()
+            if not p:
+                continue
+            self.names.add(p)
             try:
-                if ipaddress.ip_address(ip) in net:
-                    return True
+                self.networks.append(ipaddress.ip_network(p, strict=False))
             except ValueError:
                 continue
-    return False
+
+    def __bool__(self):
+        return bool(self.names)
+
+    def matches(self, host_names, ips):
+        """Whether a host (name and IPs) falls under any registered asset: name, parent domain, IP or CIDR."""
+        for name in host_names:
+            labels = name.split('.')
+            if any('.'.join(labels[i:]) in self.names for i in range(len(labels))):
+                return True
+        if self.networks:
+            for ip in ips:
+                try:
+                    address = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if any(address.version == net.version and address in net for net in self.networks):
+                    return True
+        return False
+
+
+def asset_matches(host_names, ips, patterns):
+    return AssetFilter(patterns).matches(host_names, ips)
 
 
 def register_assets(ctx, assets):
@@ -2560,8 +2582,12 @@ def work_items(ctx, slug, params):
     agent's registered assets (or ?assets=a,b) and optionally to a tier."""
     from cveFeed.models import CVEMatch
     project, _ = get_one_project(ctx, slug)
-    patterns = [a for a in (params.get('assets') or '').split(',') if a.strip()] or \
-        (ctx.token.assets if ctx.token else [])
+    asked = [a.strip() for a in (params.get('assets') or '').split(',') if a.strip()]
+    if len(asked) > MAX_ASSET_PATTERNS:
+        raise ApiError(400, f'assets must list at most {MAX_ASSET_PATTERNS} hosts, IPs or CIDRs')
+    patterns = asked or (ctx.token.assets if ctx.token else [])
+    wanted = AssetFilter(patterns)
+    placed = {}  # subdomain id -> whether it is one of the assets; a host with many matches is tested once
     # Closed asset correlations do not belong in remediation work. An unresolved candidate with a low-confidence
     # triage classification remains reviewable unless the caller requests ?include_fp=0.
     from django.db.models import Q
@@ -2575,8 +2601,12 @@ def work_items(ctx, slug, params):
     for m in qs[:2000]:
         sub = m.subdomain
         ips = [ip.address for ip in sub.ip_addresses.all()] if sub else []
-        if patterns and not asset_matches([sub.name.lower()] if sub else [], ips, patterns):
-            continue
+        if wanted:
+            key = sub.pk if sub else None
+            if key not in placed:
+                placed[key] = wanted.matches([sub.name.lower()] if sub else [], ips)
+            if not placed[key]:
+                continue
         item = _match(m)
         if params.get('tier') and item['cve']['tier'] != params['tier']:
             continue
@@ -2841,15 +2871,15 @@ def _comment(c):
     return {'id': c.id, 'text': c.text, 'author': _user_brief(c.author), 'created': _iso(c.created_at)}
 
 
-def list_finding_comments(ctx, slug, kind, finding_id):
-    """Every comment on one finding, oldest first."""
+def list_finding_comments(ctx, slug, kind, finding_id, params=None):
+    """The comments on one finding, oldest first, a page at a time."""
     from cveFeed.models import FindingComment
     project, _ = get_one_project(ctx, slug)
     if kind not in STATUS_KINDS:
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
     _finding_obj(project, kind, finding_id)  # 404 for an unknown finding, or one in another project
-    rows = FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('author')
-    return {'results': [_comment(c) for c in rows]}
+    rows = FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('author').order_by('id')
+    return paginate(rows, params or {}, _comment)
 
 
 def add_finding_comment(ctx, slug, kind, finding_id, text):
@@ -2873,7 +2903,7 @@ def _audit_event(e):
     return {'id': e.id, 'event': e.event, 'actor': _user_brief(e.actor), 'before': e.before, 'after': e.after, 'created': _iso(e.created_at)}
 
 
-def finding_audit(ctx, slug, kind, finding_id):
+def finding_audit(ctx, slug, kind, finding_id, params=None):
     """One finding's audit trail, newest first: status changes, assignee changes, and comments, each with who, when,
     and (status/assignee) what changed from and to. A comment's own text is also in GET .../comments; it is repeated
     here as a short before/after so the trail reads as one timeline without a second request."""
@@ -2883,7 +2913,7 @@ def finding_audit(ctx, slug, kind, finding_id):
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
     _finding_obj(project, kind, finding_id)
     rows = FindingAuditEvent.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('actor')
-    return {'results': [_audit_event(e) for e in rows]}
+    return paginate(rows.order_by('-id'), params or {}, _audit_event)
 
 
 MAX_SLA_DAYS = 3650
@@ -2928,7 +2958,7 @@ def set_project_settings(ctx, slug, body):
     return _project_settings(project, ProjectSettings.sla_for(project))
 
 
-def list_members(ctx, slug):
+def list_members(ctx, slug, params=None):
     """Users who can act on this project, for an assignee picker: its direct members, plus an organization's members
     when the project belongs to one (an org role already grants project access, see tenancy.roles.effective_role). A
     superuser with no membership row of their own is not listed; assign to an actual team member instead."""
@@ -2939,7 +2969,7 @@ def list_members(ctx, slug):
     if project.org_id:
         members |= Q(org_memberships__org_id=project.org_id)
     users = User.objects.filter(members).distinct().order_by('username')
-    return {'results': [_user_brief(u) for u in users]}
+    return paginate(users, params or {}, _user_brief)
 
 
 def _triage_item(t):

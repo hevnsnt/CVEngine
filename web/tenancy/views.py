@@ -2,6 +2,7 @@
 import hashlib
 import math
 import time
+import unicodedata
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -17,7 +18,7 @@ from django.utils.crypto import constant_time_compare, salted_hmac
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from reNgine.client_ip import client_ip
-from tenancy import mfa, throttle
+from tenancy import audit, mfa, throttle
 
 PENDING_KEY = 'mfa_pending'
 SETUP_SECRET_KEY = 'mfa_setup_secret'
@@ -41,7 +42,10 @@ def locked(user):
 def fail(user):
     """Count one failed second factor. The counter lives in the shared Redis cache and is incremented atomically, so concurrent
     attempts (several web workers, several threads) cannot undercount; the lockout window starts at the first failure."""
-    throttle.count(f'mfa_fail:{user.pk}', LOCKOUT_SECONDS)
+    key = f'mfa_fail:{user.pk}'
+    throttle.count(key, LOCKOUT_SECONDS)
+    if cache.get(key, 0) == MAX_FAILURES:  # the attempt that closes the door, recorded once
+        audit.record_for_user_quietly(user, 'account.mfa_locked', user)
 
 
 def clear_failures(user):
@@ -97,8 +101,14 @@ class SignOutView(LogoutView):
         return render(request, 'tenancy/signout_confirm.html')
 
 
+def _login_name(username):
+    """The sign-in name as the login form reads it (Django's UsernameField applies NFKC), case-folded: 'ADMIN', 'admin' and the
+    full-width 'ａｄｍｉｎ' are one account and must share one counter, or each spelling would get its own five attempts."""
+    return unicodedata.normalize('NFKC', str(username or '')).strip().casefold()[:150]
+
+
 def _login_keys(request, username):
-    name = hashlib.sha256((username or '').strip().lower()[:150].encode()).hexdigest()[:32]
+    name = hashlib.sha256(_login_name(username).encode()).hexdigest()[:32]
     ip = client_ip(request) or 'unknown'
     return {'pair': f'login_fail:pair:{ip}:{name}', 'ip': f'login_fail:ip:{ip}', 'user': f'login_fail:user:{name}'}
 
@@ -127,6 +137,10 @@ class MFALoginView(LoginView):
         keys = _login_keys(self.request, self.request.POST.get('username'))
         for key in keys.values():
             throttle.count(key, LOCKOUT_SECONDS)
+        if cache.get(keys['pair'], 0) == dict(LOGIN_LIMITS)['pair']:  # the attempt that locks this address out of this name, recorded once
+            account = User.objects.filter(username__iexact=_login_name(self.request.POST.get('username'))).first()
+            if account:
+                audit.record_for_user_quietly(account, 'account.login_locked', account, ip=client_ip(self.request) or '')
         return super().form_invalid(form)
 
     def form_valid(self, form):

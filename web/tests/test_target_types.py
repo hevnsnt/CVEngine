@@ -67,15 +67,23 @@ class BoundedResolutionTests(SimpleTestCase):
 		with mock.patch.object(target_types, 'resolves_to_blocked', side_effect=lookup):
 			blocked = target_types.blocked_names(['bad1.example', 'ok.example'] + [f'hang{i}.example' for i in range(8)],
 												 workers=4, budget=1, timeout=0.3)
-		self.assertEqual(blocked, {'bad1.example'})
+		self.assertEqual(blocked, {'bad1.example'} | {f'hang{i}.example' for i in range(8)})  # unverified is not scannable
 		self.assertLess(time.monotonic() - started, 2.5)
 
-	def test_a_single_slow_lookup_gives_up(self):
+	def test_a_single_slow_lookup_gives_up_and_is_not_scannable(self):
 		import time
 		from unittest import mock
 
 		from targetApp import target_types
-		with mock.patch.object(target_types, '_lookup_blocked', lambda name: time.sleep(2) or True):
+		with mock.patch.object(target_types, '_lookup_blocked', lambda name: time.sleep(2) or False):
 			started = time.monotonic()
-			self.assertFalse(target_types.resolves_to_blocked('slow.example', timeout=0.2))
+			self.assertTrue(target_types.resolves_to_blocked('slow.example', timeout=0.2))
 			self.assertLess(time.monotonic() - started, 1)
+
+	def test_a_name_that_does_not_exist_is_not_blocked(self):
+		import socket
+		from unittest import mock
+
+		from targetApp import target_types
+		with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(-2, 'Name or service not known')):
+			self.assertFalse(target_types.resolves_to_blocked('nope.example'))

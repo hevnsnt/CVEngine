@@ -51,6 +51,35 @@ class LoginThrottleTests(TestCase):
 			self.attempt('wrong', username='VICTIM' if i % 2 else 'victim')
 		self.assertEqual(self.attempt('right-pw-1', username='Victim').status_code, 429)
 
+	def test_unicode_spellings_of_a_name_share_one_counter(self):
+		limit = dict(views.LOGIN_LIMITS)['pair']
+		spellings = ['victim', '\uff56\uff49\uff43\uff54\uff49\uff4d', ' VICTIM ', '\uff36ictim', 'victim\u200b'[:-1]]
+		for i in range(limit):
+			self.attempt('wrong', username=spellings[i % len(spellings)])
+		self.assertEqual(self.attempt('right-pw-1', username='\uff56ictim').status_code, 429)
+		self.assertEqual(views._login_name('\uff21\uff44\uff4d\uff49\uff4e '), 'admin')
+
+	def test_the_attempt_that_locks_an_account_is_audited_once_for_its_organization(self):
+		from dashboard.models import AuditLog, Org, OrgMembership
+		OrgMembership.objects.create(user=self.user, org=Org.objects.create(name='L', slug='l'), role='user')
+		limit = dict(views.LOGIN_LIMITS)['pair']
+		for _ in range(limit + 3):
+			self.attempt('wrong')
+		rows = AuditLog.objects.filter(action='account.login_locked')
+		self.assertEqual((rows.count(), rows.get().target, rows.get().org.slug), (1, 'victim', 'l'))
+		self.attempt('wrong', username='nobody-here')  # an unknown name has no account to record against
+		self.assertEqual(AuditLog.objects.filter(action='account.login_locked').count(), 1)
+
+	def test_a_failing_audit_write_never_stops_the_lockout(self):
+		from unittest import mock
+		with mock.patch('tenancy.audit.record', side_effect=RuntimeError('database went away')):
+			for _ in range(views.MAX_FAILURES):
+				views.fail(self.user)
+			for _ in range(dict(views.LOGIN_LIMITS)['pair']):
+				self.attempt('wrong')
+		self.assertTrue(views.locked(self.user))
+		self.assertEqual(self.attempt('right-pw-1').status_code, 429)
+
 
 class PasswordChangeThrottleTests(TestCase):
 	def setUp(self):

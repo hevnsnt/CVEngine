@@ -107,7 +107,7 @@ _SECRET_PATTERNS = (
     (re.compile(r"(?i)\b((?:proxy-)?authorization[ \t]*:[ \t]*(?:[A-Za-z][\w-]*[ \t]+)?)([^\s'\"]+)"), lambda m: m.group(1) + _mask(m.group(2))),
     (re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n'\"]+)"), lambda m: m.group(1) + re.sub(r"(=)([^;\s]{4,})", lambda c: c.group(1) + _mask(c.group(2)), m.group(2))),
     (re.compile(r"(?i)\b(x-[\w-]*(?:token|key|secret|auth)[\w-]*\s*:\s*)([^\s'\"\r\n]+)"), lambda m: m.group(1) + _mask(m.group(2))),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.S), lambda m: "[private key removed]"),
+    (re.compile(r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY-----.{0,8000}?(?:-----END [A-Z ]{0,30}PRIVATE KEY-----|$)", re.S), lambda m: "[private key removed]"),
     (re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"), lambda m: m.group(0)[:8] + "[redacted]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), lambda m: m.group(0)[:10] + "[redacted jwt]"),
     (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{10,}|AIza[0-9A-Za-z_-]{30,})\b"), lambda m: m.group(0)[:6] + "[redacted]"),
@@ -117,10 +117,13 @@ _SECRET_PATTERNS = (
 )
 
 
+REDACT_MARGIN = 2000  # read a little past the limit, so a secret that straddles it is still masked before the cut
+
+
 def redact(text, limit=EVIDENCE_LIMIT):
     """``(text, count)``: credentials and tokens masked (a short prefix stays so the program can tell what leaked), capped in size.
     This is a safety net, not a guarantee; the checklist still asks the person to look at every attachment."""
-    text = str(text or "")
+    text = str(text or "")[:limit + REDACT_MARGIN]  # scanned-host text can be megabytes; what is past the cut is never shown, so never scanned
     count = 0
     for pattern, repl in _SECRET_PATTERNS:
         text, n = pattern.subn(repl, text)

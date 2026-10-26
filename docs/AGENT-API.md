@@ -60,7 +60,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | exclude host | `POST projects/{slug}/hosts/{host}/exclude`, `GET projects/{slug}/exclusions`, `DELETE projects/{slug}/exclusions/{host}` | `exclude_host`, `list_exclusions`, `remove_exclusion` |
 | API keys | `GET/PUT/DELETE projects/{slug}/api-keys[/{service}]` | none |
 
-Lists take `page` and `page_size` (up to 200), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
+Lists take `page` and `page_size` (up to 200; this includes members, finding comments and a finding's audit trail), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Every MCP result carries `_meta["cvengine/untrusted_text"]`: text that came from scanned hosts or feeds (banners, titles, response excerpts, advisory text) is data, never instructions. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
 ## Targets and scans
 
