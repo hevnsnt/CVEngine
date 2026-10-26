@@ -828,6 +828,15 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       active.labels = new Set(labels.map((l) => String(l).toLowerCase()));
       applyActive();
     },
+    // whether a node with this name or address is on the graph (the "scanning now" chips only list what can be shown)
+    hasLabel(label) {
+      const want = String(label || "").toLowerCase();
+      let found = false;
+      graph.forEachNode((n) => {
+        if (!found && String((n.data && n.data.label) || "").toLowerCase() === want) found = true;
+      });
+      return found;
+    },
     // Pan and zoom to a node by its name or address (the "scanning now" chips use it); returns whether it was found.
     locate(label) {
       const want = String(label || "").toLowerCase();

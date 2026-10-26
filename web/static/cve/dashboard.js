@@ -799,7 +799,7 @@ async function pollScanning() {
     const box = $("d-scanning");
     const targets = new Map(); // name -> stage
     live.scans.forEach((s) => targets.set(s.domain.toLowerCase(), s.stage || ""));
-    labels.forEach((l) => { if (!targets.has(l)) targets.set(l, ""); });
+    labels.forEach((l) => { if (!targets.has(l) && graph.hasLabel(l)) targets.set(l, ""); });
     box.textContent = "";
     if (!targets.size) {
       box.hidden = true;
