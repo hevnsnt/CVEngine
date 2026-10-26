@@ -118,6 +118,24 @@ exploit probability, then score), so a new CVE from any feed gets one within the
 A `manual` record is never overwritten. When a CVE's affected data changes, the rules checks are rewritten and the AI checks kept.
 `manage.py author_cve_detections [--ai]` fills the whole catalogue at once.
 
+### Validating a match
+
+Each detection record also says how to decide a match, so nobody has to rediscover it per CVE:
+
+- `validation.remote_determinable` is `yes` (a nuclei template, an HTTP marker or a reviewed nmap script can decide it from outside), `partial` (only the reported version or the exposed service, which a backported fix can fool) or `no` (it needs the host, or the CVSS attack vector is local). `validation.max_remote_state` is the best a remote check can reach on the triage scale: `confirmed` (validated), `likely` or `needs_validation`.
+- `validation.validated_when`, `needs_validation_when`, `likely_false_positive_when` and `not_applicable_when` list what moves a match to each state, and `recommended_tools` names the tools (nuclei, nmap, curl, openssl, the package manager, grep, systemctl).
+- Every remote check has a `how`: the tool, the invocation with `<TARGET>` and `<PORT>` to fill in, and how to decide from the output. Every local check has `commands`: one read-only command per platform (Debian, Red Hat, Alpine, other Linux, Windows) with the shell, whether it needs elevated rights, an `explain` sentence for a person logged in to the host, and a structured `expect` (`version_lt`, `exit_code`, `output_equals`) that a future authenticated scan can evaluate without parsing prose.
+
+The commands are rendered by the application from the validated parameters of each check, with every value quoted; a model never writes one, and a record read from a seed or a model reply has its commands thrown away and rendered again.
+
+### Seeding the catalog
+
+Building the catalog from the cve.now feed takes one request per CVE, so a new install used to spend hours rebuilding what another instance already had. A **seed** is the whole catalog as one file: every CVE (fire, smoke and ice) with its scores, exploitation signals, affected ranges and references, plus its detection record. On first start (and on an older install that still has fewer than 5,000 CVEs, once a day) CVEngine downloads the published seed, checks it against its manifest (count, size, sha256), imports the CVEs it lacks and their detection records, runs the correlation if there are already hosts, and the incremental feed carries on from there. A CVE already present is never overwritten, nothing in the file is trusted (each field is typed and clipped, each strategy is validated again), and offline or a failed check only means the feed builds the catalog up gradually, as before.
+
+- Maintainer: on an instance with the full catalog, `make export-cve-seed` writes `web/cve-seed.jsonl.gz` and its manifest (it first writes any missing detection records), and `scripts/publish-cve-seed.sh` uploads both to the `cve-seed` release.
+- Anyone: `manage.py import_cve_seed [file | --url https://...]` imports a file or the published seed by hand.
+- `CVENGINE_CVE_SEED=off` turns the automatic load off; `CVENGINE_CVE_SEED_URL` points it at your own mirror (https, with the `.manifest.json` beside it).
+
 ## Keeping scans fast and polite
 
 - **One run per host.** A successful scanner run is reused inside its window: 168 hours for nmap, bbot, route checks, naabu, deep nuclei, and archived-URL lookups, 24 hours for nuclei, the certificate watch, hygiene, re-tests, WPScan, node2shell, and RDP screenshots. Failed or skipped work never counts as coverage, and a Redis claim keeps two pipelines off the same asset. Set the windows with `CVENGINE_TTL_*` ([CONFIGURATION.md](CONFIGURATION.md)).

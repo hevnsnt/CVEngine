@@ -14,17 +14,17 @@ class FirstRunBootstrapTests(TestCase):
 		cache.delete(BOOTSTRAP_LOCK)
 		self.addCleanup(cache.delete, BOOTSTRAP_LOCK)
 
-	def test_a_new_install_loads_feed_then_threat_intel_then_backfill(self):
+	def test_a_new_install_loads_the_seed_then_the_feed_then_threat_intel_then_backfill(self):
 		with mock.patch('celery.chain') as chain:
 			result = bootstrap_first_run.run()
 		self.assertEqual(result, {'started': True})
 		names = [sig.task for sig in chain.call_args.args]
-		self.assertEqual(names, ['sync_cve_now_feed', 'sync_threat_intel', 'backfill_cve_now_feed'])
+		self.assertEqual(names, ['load_cve_seed', 'sync_cve_now_feed', 'sync_threat_intel', 'backfill_cve_now_feed'])  # the published catalog first
 		chain.return_value.apply_async.assert_called_once_with()
 
 	def test_an_install_that_already_has_cves_never_repeats_it(self):
 		CVEEntry.objects.create(cve_id='CVE-2099-1', published_at=timezone.now())
-		with mock.patch('celery.chain') as chain:
+		with mock.patch('celery.chain') as chain, mock.patch('cveFeed.tasks.load_cve_seed.apply_async'):
 			result = bootstrap_first_run.run()
 		self.assertEqual(result, {'skipped': 'the CVE feed is already loaded'})
 		chain.assert_not_called()

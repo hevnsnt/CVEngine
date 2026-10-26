@@ -45,6 +45,9 @@ admin:		## Create the admin account; its password is generated and printed once 
 admin-password:	## Lost the admin password? Generate a new one and print it once.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py create_admin --reset
 
+export-cve-seed:	## Write this instance's whole CVE catalog to web/cve-seed.jsonl.gz (see docs/PIPELINE.md, Seeding the catalog).
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py export_cve_seed --out /usr/src/app/cve-seed.jsonl.gz
+
 rotate-field-key:	## Rotate the key that encrypts stored API keys and webhook URLs (see docs/CONFIGURATION.md).
 	./scripts/rotate-field-key.sh
 

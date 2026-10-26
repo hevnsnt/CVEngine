@@ -95,3 +95,12 @@ class FieldKeyDeliveryTests(SimpleTestCase):
 		self.assertIn('fill CVENGINE_FIELD_KEY', read('scripts', 'init-env.sh'))
 		self.assertIn('rotate-field-key:', read('Makefile'))
 		self.assertIn('rotate_field_key', read('scripts', 'rotate-field-key.sh'))
+
+
+class SeedDeliveryTests(SimpleTestCase):
+	def test_the_seed_is_never_committed_and_has_a_make_target_and_a_publisher(self):
+		self.assertIn('web/cve-seed*', read('.gitignore'))
+		self.assertIn('export-cve-seed:', read('Makefile'))
+		script = read('scripts', 'publish-cve-seed.sh')
+		self.assertIn('--clobber', script)
+		self.assertIn('manifest.json', script)

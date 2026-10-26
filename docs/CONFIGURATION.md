@@ -119,6 +119,8 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 | --- | --- | --- |
 | `NUCLEI_TEMPLATES_DIR` | `/root/nuclei-templates` | nuclei's installed templates. |
 | `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where validated AI-written templates live. It must sit outside `NUCLEI_TEMPLATES_DIR`, and the app says so at startup if it does not. In the shipped compose files it is the `generated_templates` volume, so validated templates survive an update, and a worker rewrites any validated template whose file is missing from the copy kept in the database when it starts. |
+| `CVENGINE_CVE_SEED` | `1` | Load the published CVE catalog on first start (`off` to skip). `CVENGINE_CVE_SEED_URL` points it at another https location. See [PIPELINE.md](PIPELINE.md#seeding-the-catalog). |
+| `CVENGINE_DETECTION_AI_PER_DAY` | `25` | How many CVEs the AI is asked to write detection checks for in 24 hours (rules-written checks have no limit). |
 | `CVENGINE_FIELD_KEY` | generated into `.env` | The key that encrypts stored secrets. `CVENGINE_FIELD_KEY_PREVIOUS` (comma separated) lists older keys that only decrypt, and `CVENGINE_FIELD_KEY_FILE` reads the key from a file. |
 | `RENGINE_SECRET_KEY` | the key in `web/secret` | Provide the Django secret key from the environment instead of the file. |
 
