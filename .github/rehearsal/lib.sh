@@ -17,3 +17,15 @@ wait_for_site() {
   echo "::error::The site does not answer on port $(port) (last status $code)"
   return 1
 }
+# A freshly installed stack is not ready when the site first answers: the Celery entrypoint can spend minutes before its workers reply. An
+# installed system that is being updated has had that time, so wait for it here, as a real install would have.
+wait_for_workers() {
+  local deadline=$((SECONDS + ${1:-900})) count=0
+  while (( SECONDS < deadline )); do
+    count=$(dc exec -T celery celery -A reNgine.tasks inspect ping -t 10 2>/dev/null | grep -c pong || true)
+    if (( count >= 3 )); then echo "$count Celery workers answer."; return 0; fi
+    sleep 10
+  done
+  echo "::error::Only $count Celery workers answer"
+  return 1
+}

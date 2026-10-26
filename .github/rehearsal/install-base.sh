@@ -26,5 +26,6 @@ else
   make up
 fi
 wait_for_site 900
+wait_for_workers 900
 dc exec -T web python3 manage.py create_admin >/dev/null
 dc ps
