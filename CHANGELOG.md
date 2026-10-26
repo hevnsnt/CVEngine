@@ -2,6 +2,15 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+Update with `git pull` and `scripts/update.sh` (or `make up`). An install made before this release has no update watcher, so this is the last update it needs by hand.
+
+- **Approve update works without a manual host step.** The host side of the in-app updater was a cron entry nothing installed, so on a normal install the Approve button recorded an approval that no one read and the orange bar waited for ever. `install.sh` now installs a watcher (`scripts/update-watch.sh`, started every minute by cron) that starts the update about two seconds after Approve, and `scripts/update.sh` installs it when it finishes, so the one manual update an existing install needs leaves it behind. The watcher reports every 15 seconds that it is alive, and Settings > Updates and the bar say when it is not and show the command to run.
+- **The update page says what happens and how long it takes.** Each step (approved, the host picks it up, scans pause and drain, files update, services rebuild, scanning resumes) with what it is waiting on, how long it usually takes, and the time since approval; the page refreshes on its own.
+- **An update that cannot start says why.** An approved commit that is not on the branch checked out on the server (the update branch in Settings differs from it) is reported in Settings > Updates instead of silently dropping the approval; a failed fetch, a dirty checkout or a stopped script are reported the same way, each reason once.
+- **A manual `git pull` followed by Approve rebuilds.** The updater compared files, found them current and declared the update done without rebuilding the containers; it now also checks the commit the running build was made from.
+
 ## v1.1.2 (2026-10-26)
 
 Update with `make up` or the in-app updater. Includes everything in v1.1.1 (the update bar, the organization switcher, release archives).

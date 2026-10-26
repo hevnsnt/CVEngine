@@ -26,6 +26,10 @@ FLAG=web/.update-approved
 [ -e "$FLAG" ] || [ -L "$FLAG" ] || exit 0
 STATE=$(python3 scripts/update-state.py directory)
 LOG="$STATE/update.log"
+# cron discards this script's output, so a command that fails under `set -e` used to end the run without a trace and the
+# banner waited for ever. Say which command stopped it; Settings > Updates shows the published log.
+set -E
+trap 'printf "%s the update script stopped at line %s: %s\n" "$(date -u +%FT%TZ)" "$LINENO" "$BASH_COMMAND" >>"$LOG"' ERR
 exec 9>"$STATE/update.lock"
 flock -n 9 || exit 0  # another run is in progress
 # Retain this safe publisher when rollback restores code without the helper.
@@ -41,7 +45,9 @@ cleanup() {
   local status=$?
   [ -z "$ENV_BACKUP" ] || rm -f "$ENV_BACKUP"
   if [ -f "$LOG" ]; then
-    python3 "$STATE_HELPER" log "$LOG" || {
+    local helper=$STATE_HELPER
+    [ -f "$helper" ] || helper=scripts/update-state.py  # the copy above is what failed
+    python3 "$helper" log "$LOG" || {
       echo "Could not publish UI update log; complete log retained at $LOG" >&2
       status=1
     }
@@ -70,6 +76,13 @@ restore_env() {
 }
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
+# The watcher (scripts/update-watch.sh) calls this script again every few seconds while an approval is waiting; say each reason once,
+# not on every call.
+log_once() {
+  [ "$(cat "$STATE/last-refusal" 2>/dev/null)" = "$*" ] && return 0
+  printf '%s' "$*" > "$STATE/last-refusal"
+  log "$*"
+}
 
 COMPOSE_FILE_OVERRIDE=${CVENGINE_COMPOSE_FILE:-}
 if [ -n "$COMPOSE_FILE_OVERRIDE" ] && ! [[ $COMPOSE_FILE_OVERRIDE =~ ^[A-Za-z0-9._-]+\.ya?ml$ && -f $COMPOSE_FILE_OVERRIDE ]]; then
@@ -142,14 +155,22 @@ if ! SHA=$(python3 "$STATE_HELPER" approval); then
 fi
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-git fetch --quiet origin "$BRANCH"
+if ! git fetch --quiet origin "$BRANCH" >>"$LOG" 2>&1; then
+  log_once "refusing: could not fetch origin/$BRANCH (network or credentials); approval kept, will retry"
+  phase draining "the host could not reach origin/$BRANCH; it keeps retrying (see the update log)"
+  exit 1
+fi
 if ! git merge-base --is-ancestor "$SHA" "origin/$BRANCH"; then
   log "refusing: $SHA is not on origin/$BRANCH"
+  phase failed "approved commit is not on $BRANCH, the branch checked out on this server. Set the update branch in Settings to $BRANCH, or git checkout the other one here"
   rm -f "$FLAG"
   exit 1
 fi
-if [ -n "$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?$' || true)" ]; then
-  log "refusing: the checkout has local changes to tracked files; commit or stash them (approval kept, will retry)"
+DIRTY=$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?$' || true)
+if [ -n "$DIRTY" ]; then
+  names=$(printf '%s\n' "$DIRTY" | sed 's/^...//' | head -n 5 | paste -sd, -)
+  log_once "refusing: the checkout has local changes to tracked files ($names); commit or stash them (approval kept, will retry)"
+  phase failed "the host checkout has local changes to tracked files ($names); commit or stash them, the update then retries by itself"
   exit 1
 fi
 
@@ -161,13 +182,20 @@ if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 if [[ $RUNNING =~ ^[1-9][0-9]*$ ]]; then
-  phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
-  log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
-  exit 0
+  if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
+    phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
+    log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
+    printf '%s' "$RUNNING" > "$STATE/last-wait"
+  fi
+  exit 3  # "still waiting": the watcher polls slowly for this; cron treats any status the same
 fi
+rm -f "$STATE/last-wait" "$STATE/last-refusal"
 
 PREV=$(git rev-parse HEAD)
-if [ "$PREV" = "$SHA" ]; then
+# The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
+# without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
+BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
+if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ]; then
   log "already at $SHA"
   python3 "$STATE_HELPER" commit "$SHA"
   rm -f "$FLAG"
@@ -176,17 +204,22 @@ if [ "$PREV" = "$SHA" ]; then
   exit 0
 fi
 
-log "updating $PREV -> $SHA"
-phase applying merging
-backup_env
-if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
+if [ "$PREV" = "$SHA" ]; then
+  log "the files are at $SHA but the running build is ${BUILT:-unknown}; rebuilding"
+  phase applying "files are current, rebuilding the services"
+else
+  log "updating $PREV -> $SHA"
+  phase applying merging
+  backup_env
+  if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
+    restore_env
+    resume_scanning
+    log "refusing: $SHA is not a fast-forward of the local branch"
+    rm -f "$FLAG"
+    exit 1
+  fi
   restore_env
-  resume_scanning
-  log "refusing: $SHA is not a fast-forward of the local branch"
-  rm -f "$FLAG"
-  exit 1
 fi
-restore_env
 
 if deploy >>"$LOG" 2>&1; then
   python3 "$STATE_HELPER" commit "$SHA"
