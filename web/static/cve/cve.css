@@ -893,11 +893,11 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 
 /* activity heatmap: weekday rows, week columns, a neutral ramp */
 .heat-read{font:600 12px var(--mono);align-self:center}
-.heat-grid{display:grid;grid-template-rows:repeat(7,1fr);grid-auto-flow:column;grid-auto-columns:1fr;gap:3px;margin-top:14px;width:100%;max-width:calc(var(--weeks) * 26px)}
-.heat-cell{display:block;border-radius:2px;background:var(--sunk);min-width:0;min-height:0}@media (hover:hover) and (pointer:fine){.heat-grid .heat-cell:hover{outline:2px solid var(--ink);outline-offset:1px}}
+.heat-grid{display:grid;grid-template-rows:repeat(7,auto);grid-auto-flow:column;grid-auto-columns:1fr;gap:3px;margin-top:14px;width:100%;max-width:calc(var(--weeks) * 26px)}
+.heat-cell{display:block;aspect-ratio:1;border-radius:2px;background:var(--sunk);min-width:0;min-height:0}@media (hover:hover) and (pointer:fine){.heat-grid .heat-cell:hover{outline:2px solid var(--ink);outline-offset:1px}}
 .heat-cell[data-level="1"]{background:var(--heat-1)}.heat-cell[data-level="2"]{background:var(--heat-2)}.heat-cell[data-level="3"]{background:var(--heat-3)}.heat-cell[data-level="4"]{background:var(--ink)}
 .heat-legend{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-top:10px;font:600 10.5px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-.heat-legend .heat-cell{width:12px;height:12px;margin:0 1px}
+.heat-legend .heat-cell{width:12px;height:12px;aspect-ratio:auto;margin:0 1px}
 .heat-legend span:first-child{margin-right:4px}.heat-legend span:last-child{margin-left:4px}@media (max-width:639px){.heat-grid{gap:2px}}
 
 /* AI activity as a timeline: a rail down the left, a node per event */
