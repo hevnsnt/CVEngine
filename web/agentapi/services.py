@@ -305,11 +305,14 @@ def _expand_target(value):
 
 def _create_domains(project, names, description='', excluded=None):
     """Create a Domain per name in bulk, in order. Returns (the rows created, the names that already existed). Domain
-    names are globally unique in reNgine, so a name another project holds counts as existing. A name the project's organization
+    names are unique within an organization, so a name another project of the same organization holds counts as existing (another
+    organization's record of the same name is a different, separate record). A name the project's organization
     excluded for good ("Remove & exclude") is never created; it is appended to ``excluded`` when a list is given."""
     from cveFeed.exclusions import excluded_names, normalize
-    from targetApp.models import Domain
+    from targetApp.models import Domain, org_domains
+    from startScan.ip_rows import org_id_of_project
     names = list(dict.fromkeys(names))
+    org_id = org_id_of_project(project.id)
     banned = excluded_names(project.id)
     if banned:
         skipped = [n for n in names if normalize(n) in banned]
@@ -318,14 +321,14 @@ def _create_domains(project, names, description='', excluded=None):
         names = [n for n in names if n not in set(skipped)]
     existing = set()
     for start in range(0, len(names), 1000):
-        existing.update(Domain._base_manager.filter(name__in=names[start:start + 1000]).values_list('name', flat=True))
+        existing.update(org_domains(project).filter(name__in=names[start:start + 1000]).values_list('name', flat=True))
     wanted = [n for n in names if n not in existing]
     now = timezone.now()
     created = []
     for start in range(0, len(wanted), 1000):
         part = wanted[start:start + 1000]
         # ignore_conflicts: a concurrent add of the same name must not fail the whole batch; the re-read says what we own
-        Domain.objects.bulk_create([Domain(name=n, project=project, description=description or None, insert_date=now) for n in part],
+        Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now) for n in part],
                                    ignore_conflicts=True)
         created += Domain.objects.filter(project=project, name__in=part).order_by('id')
     created.sort(key=lambda d: d.id)

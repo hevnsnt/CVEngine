@@ -12,6 +12,7 @@ from cveFeed.models import HostExclusion, HostState
 from dashboard.models import Org, OrgMembership, Project
 from startScan.models import Subdomain
 from targetApp.models import Domain
+from startScan.models import IpAddress
 from tests.test_fullscan import FullScanBase
 
 
@@ -27,7 +28,7 @@ class FullScanRevocationTests(FullScanBase):
     def _exclude(self):
         exclude_host(Ctx(self.actor), self.project.slug, self.host)
 
-    def _run_after_wait(self, transition, runner=fullscan._sweep_runner):
+    def _run_after_wait(self, transition, runner=fullscan._sweep_runner, org_id=None):
         @contextmanager
         def admission(*args, **kwargs):
             transition()  # Simulates a committed scope change while the job waited.
@@ -38,7 +39,7 @@ class FullScanRevocationTests(FullScanBase):
         with mock.patch('reNgine.resources.heavy_job', admission), \
                 mock.patch('cveFeed.nmap_scan.subprocess.Popen', return_value=process) as popen:
             try:
-                return runner([self.address], nmap_scan.FULL_PORT_FLAGS, '1m'), popen
+                return runner([self.address], nmap_scan.FULL_PORT_FLAGS, '1m', org_id=self.address_row.org_id if org_id is None else org_id), popen
             except Exception:
                 popen.assert_not_called()
                 raise
@@ -76,8 +77,9 @@ class FullScanRevocationTests(FullScanBase):
         project = Project.objects.create(name='Other', slug='other-scope', org=org, insert_date=timezone.now())
         domain = Domain.objects.create(name='other.test', project=project, insert_date=timezone.now())
         sub = Subdomain.objects.create(target_domain=domain, name='allowed.other.test')
-        sub.ip_addresses.add(self.address_row)
-        _, popen = self._run_after_wait(self._exclude)
+        other_row = IpAddress.objects.create(address=self.address, org=org)  # the other organization's own row for the same address
+        sub.ip_addresses.add(other_row)
+        _, popen = self._run_after_wait(self._exclude, org_id=org.id)  # excluding the host in the first organization does not touch it
         popen.assert_called_once()
 
     def test_exclusion_lookup_failure_prevents_process_start(self):

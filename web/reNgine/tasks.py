@@ -21,7 +21,7 @@ from reNgine.llm import *
 from reNgine.utilities import *
 from scanEngine.models import (EngineType, InstalledExternalTool, Notification)
 from startScan.models import *
-from startScan.ip_rows import get_or_create_first, get_or_create_ip
+from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 
@@ -42,7 +42,7 @@ def persist_bbot_result(result, ctx):
 	if ctx.get('scan_history_id'):  # the organization's excluded hosts, read once for the whole batch
 		from cveFeed.exclusions import excluded_names
 		project_id = ScanHistory.objects.filter(pk=ctx['scan_history_id']).values_list('domain__project_id', flat=True).first()
-		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id)}
+		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id)}
 	subdomains = {}
 	for name in result.subdomains:
 		subdomain, _ = save_subdomain(name, ctx=ctx)
@@ -50,7 +50,7 @@ def persist_bbot_result(result, ctx):
 			subdomains[name] = subdomain
 	for name, address in result.resolutions:
 		if name in subdomains:
-			save_ip_address(address, subdomain=subdomains[name])
+			save_ip_address(address, subdomain=subdomains[name], org_id=ctx.get('_org_id'))
 	banned = ctx.get('_excluded_hosts') or ()
 	for host, port_number in result.ports:
 		if banned and host.strip().lower().rstrip('.') in banned:
@@ -60,7 +60,7 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		ip = None
 		if validators.ipv4(host) or validators.ipv6(host):
-			ip, _ = save_ip_address(host, subdomain=None)
+			ip, _ = save_ip_address(host, subdomain=None, org_id=ctx.get('_org_id'))
 		elif subdomain:
 			ip = subdomain.ip_addresses.first()
 		if not ip:
@@ -925,7 +925,7 @@ def save_subdomain(subdomain_name, ctx={}):
 	return subdomain, created
 
 
-def save_ip_address(ip_address, subdomain=None, subscan=None, **kwargs):
+def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, **kwargs):
 	if not (validators.ipv4(ip_address) or validators.ipv6(ip_address)):
 		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
 		return None, False
@@ -934,7 +934,9 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, **kwargs):
 		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
 		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
 		return None, False
-	ip, created = get_or_create_ip(ip_address)
+	if org_id is None and subdomain is not None:  # the organization of the host the address was found for
+		org_id = org_id_of_subdomain(subdomain)
+	ip, created = get_or_create_ip(ip_address, org_id)
 	# if created:
 	# 	logger.warning(f'Found new IP {ip_address}')
 

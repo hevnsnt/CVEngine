@@ -164,7 +164,7 @@ Each probe is independent: one that fails or times out comes back as `{"error": 
 
 ## Limits
 
-Domain names are unique across the instance. A range or CIDR target is capped at 10,000 addresses per call, and a bulk request at 10,000 lines or expanded rows (`CVENGINE_MAX_TARGETS_PER_ADD`). Loopback and link-local addresses cannot be added, and private ranges need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
+A domain name is unique within an organization (two organizations may each track the same name, as separate records). A range or CIDR target is capped at 10,000 addresses per call, and a bulk request at 10,000 lines or expanded rows (`CVENGINE_MAX_TARGETS_PER_ADD`). Loopback and link-local addresses cannot be added, and private ranges need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
 
 The API does not expose instance settings, the AI key, bug bounty actions, or user management. It can set a project's own OSINT service keys (write-only) and read which services are configured.
 

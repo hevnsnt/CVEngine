@@ -1003,7 +1003,8 @@ def deep_scan_apexes():
             if (project_id, apex) not in forced and is_shared_apex(apex):  # belt and braces: a provider apex is never created
                 skipped += 1
                 continue
-            if Domain.objects.filter(name=apex).exists():  # names are unique across the instance: it belongs to another project
+            from targetApp.models import org_domains
+            if org_domains(project_id).filter(name=apex).exists():  # names are unique within an organization: another project of it holds this
                 skipped += 1
                 continue
             domain = Domain.objects.create(name=apex, project_id=project_id, insert_date=timezone.now(),

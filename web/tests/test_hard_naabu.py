@@ -145,7 +145,7 @@ class PipelineTests(TestCase):
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=1,
 			results_dir='/tmp')
 		self.sub = Subdomain.objects.create(scan_history=self.scan, target_domain=self.domain, name='www.nb.test')
-		self.ip = IpAddress.objects.create(address='198.51.100.50')
+		self.ip = IpAddress.objects.create(address='198.51.100.50', org=org)  # IP rows belong to the host's organization
 		self.sub.ip_addresses.add(self.ip)
 		self.calls = []
 

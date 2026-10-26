@@ -13,6 +13,7 @@ sweeps keep failing backs off (``full_scan_retry_at``: 6 hours after the first f
 behind the clean never-swept IPs, so a few dead addresses cannot hold the one sweep slot. Waiting too long for memory or a
 pause is not the address's failure and does not count.
 """
+import functools
 import logging
 import os
 
@@ -177,11 +178,11 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
     from cveFeed import nmap_scan
     address = ip.address
     project = _project_of(ip)
-    before = set(naabu_scan.known_open_ports([address]).get(address, []))
+    before = set(naabu_scan.known_open_ports([address], ip.org_id).get(address, []))
     seen = []
 
     def capture(targets, flags, host_timeout):
-        runner_ = runner or _sweep_runner
+        runner_ = runner or functools.partial(_sweep_runner, org_id=ip.org_id)
         xml = runner_(targets, flags, host_timeout)
         seen.append(xml)
         return xml
@@ -189,7 +190,7 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
     running = activity.log('run_check', f'Background full port scan of {address} (all 65,535 TCP ports; this can take a while)',
                            project=project, status='running')
     try:
-        nmap_scan.scan_in_chunks(capture, [address], nmap_scan.FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL, size=1)
+        nmap_scan.scan_in_chunks(capture, [address], nmap_scan.FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL, size=1, org_id=ip.org_id)
     except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease or the backoff
         from reNgine.resources import MemoryBusy, ScanAborted
         logger.warning('background full scan of %s failed', address, exc_info=True)
@@ -240,25 +241,26 @@ def _advance(ip, ports):
     IpAddress.objects.filter(pk=ip.pk).update(**fields)
 
 
-def _sweep_runner(targets, flags, host_timeout):
+def _sweep_runner(targets, flags, host_timeout, org_id=None):
     from cveFeed import nmap_scan
     return nmap_scan.run_nmap_xml(targets, flags, host_timeout, kind='nmap-full-bg', wait_timeout=WAIT_SECONDS,
-                                 before_launch=lambda: _require_current_scope(targets))
+                                 before_launch=lambda: _require_current_scope(targets, org_id))
 
 
-def _require_current_scope(targets):
-    """Re-read inventory and exclusions after a resource wait; never use the IP instance captured by pick()."""
+def _require_current_scope(targets, org_id=None):
+    """Re-read inventory and exclusions after a resource wait; never use the IP instance captured by pick(). ``org_id`` is the
+    organization of the row being swept: the same address in another organization is a different row."""
     from startScan.models import IpAddress
     for address in targets:
-        ip = IpAddress.objects.filter(address=address).first()
+        ip = IpAddress.objects.filter(address=address, org_id=org_id).first()
         if ip is None or not in_scope(ip, strict=True):
             raise ValueError('background scan target is no longer in scope')
 
 
-def _fingerprint_runner(targets, flags, host_timeout):
+def _fingerprint_runner(targets, flags, host_timeout, org_id=None):
     from cveFeed import nmap_scan
     return nmap_scan.run_nmap_xml(targets, flags, host_timeout,
-                                 before_launch=lambda: _require_current_scope(targets))
+                                 before_launch=lambda: _require_current_scope(targets, org_id))
 
 
 # ----------------------------------------------------------------------------- new ports
@@ -283,8 +285,8 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
     out = {'ports': ports, 'capped': len(set(new_ports)) > len(ports)}
     try:
         flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(ports)]
-        fingerprinted = nmap_scan.scan_in_chunks(runner or _fingerprint_runner, [ip.address], flags,
-                                                 nmap_scan.HOST_TIMEOUT_FAST, size=1)
+        fingerprinted = nmap_scan.scan_in_chunks(runner or functools.partial(_fingerprint_runner, org_id=ip.org_id), [ip.address], flags,
+                                                 nmap_scan.HOST_TIMEOUT_FAST, size=1, org_id=ip.org_id)
         out['fingerprinted'] = fingerprinted.get('ports', 0)
     except Exception as exc:  # noqa: BLE001 - the ports are recorded; their versions arrive with the next fingerprint
         logger.warning('could not fingerprint new ports %s on %s', ports, ip.address, exc_info=True)
