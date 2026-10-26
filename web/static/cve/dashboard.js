@@ -167,6 +167,7 @@ function hostsHref(name, project) {
 
 const MAP_POOL = 400; // tiles built; the layout below shows as many of the highest-scoring hosts as fill the card in whole rows
 const MAP_GAP = 6;
+const MAP_MIN_SCORE = 30; // hosts that score lower are left off the map (they are still on the Hosts page)
 // Tile tiers, richest first: the minimum size each needs. The layout picks the richest tier that holds every host, then stretches the
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
@@ -228,6 +229,8 @@ new ResizeObserver(() => requestAnimationFrame(layoutMap)).observe($("map"));
 // draws live hosts (they resolved, or answered over HTTP), the tile counts every host the Hosts page lists.
 let statsNow = null;
 let mapDrawn = null; // squares on the map right now
+let mapBelow = 0; // live hosts under the score threshold
+let mapEligible = 0; // live hosts that score high enough to be on the map
 function paintMapCount() {
   const n = $("map-count");
   paintMapEmpty($("map").querySelectorAll(".hx:not([hidden])").length);
@@ -237,9 +240,9 @@ function paintMapCount() {
     return;
   }
   const live = statsNow.hosts_live;
-  const shown = mapDrawn != null && mapDrawn < live ? `Top ${mapDrawn} of ${live} live hosts` : `${live} live host${live === 1 ? "" : "s"}`;
-  n.textContent = `${shown} · ${statsNow.hosts} in all`;
-  n.title = "One square per live host: a host that resolved to an address or answered over HTTP, highest score first. The total is every host the Hosts page lists, live or not.";
+  const shown = mapDrawn != null && mapDrawn < mapEligible ? `Top ${mapDrawn} of ${mapEligible} scoring ${MAP_MIN_SCORE}+` : `${mapEligible} scoring ${MAP_MIN_SCORE}+`;
+  n.textContent = `${shown} · ${live} live`;
+  n.title = `One square per live host that scores ${MAP_MIN_SCORE} or more (a live host resolved to an address or answered over HTTP), highest score first. ${live} hosts are live and ${statsNow.hosts} are in the inventory; the rest are on the Hosts page.`;
 }
 
 // An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
@@ -251,12 +254,18 @@ function paintMapEmpty(shown) {
     return;
   }
   const known = statsNow ? statsNow.hosts || 0 : 0;
-  const key = known ? `known:${known}` : "none";
+  const key = mapBelow ? `low:${mapBelow}` : known ? `known:${known}` : "none";
   if (box && box.dataset.key === key) return;
   if (box) box.remove();
   box = el("div", "map-empty");
   box.dataset.key = key;
-  if (known) {
+  if (mapBelow) {
+    box.append(
+      el("b", "", `No host scores ${MAP_MIN_SCORE} or more`),
+      el("p", "", `${mapBelow} live host${mapBelow === 1 ? " scores" : "s score"} lower and ${mapBelow === 1 ? "is" : "are"} left off the map. They are all on the Hosts page.`),
+    );
+    if (slug) box.append(el("a", "btn ghost sm", "Open hosts", { href: `/cve/${encodeURIComponent(slug)}/hosts/` }));
+  } else if (known) {
     box.append(
       el("b", "", "No live hosts yet"),
       el("p", "", `${known} host${known === 1 ? " is" : "s are"} in the inventory, but none has resolved to an address or answered over HTTP. Squares appear here as they do.`),
@@ -296,7 +305,10 @@ function hostTag(info) {
 }
 
 function drawMap(nodes) {
-  const hosts = nodes.filter((n) => n.kind === "subdomain");
+  const liveHosts = nodes.filter((n) => n.kind === "subdomain");
+  const hosts = liveHosts.filter((h) => (h.score || 0) >= MAP_MIN_SCORE);
+  mapEligible = hosts.length;
+  mapBelow = liveHosts.length - hosts.length;
   const map = $("map");
   const counts = {};
   const seen = new Set();
