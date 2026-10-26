@@ -314,7 +314,7 @@ const tileName = (h) => {
   return label.split(".")[0];
 };
 function hostName(short, h) {
-  const name = el("span", "hx-name", short);
+  const name = el("span", IP_LIKE.test(short) ? "hx-name ip" : "hx-name", short);
   const target = String(h.target || "");
   if (target && target.toLowerCase() !== String(h.label || "").toLowerCase() && !IP_LIKE.test(String(h.label || ""))) name.append(el("small", "hx-target", target));
   return name;
