@@ -259,6 +259,16 @@ const sections = {
         ),
       );
       if (s.last_error) kids.push(el("p", "msg err", s.last_error));
+      const hu = s.host_updater || {};
+      if (["available", "dismissed", "approved", "up_to_date"].includes(s.status)) {
+        if (hu.alive) {
+          kids.push(el("p", "note", `Host updater: listening (last seen ${hu.age_seconds} s ago). An approved update starts within seconds.`));
+        } else if (hu.seen) {
+          kids.push(el("p", "msg err", `The host updater stopped reporting ${Math.max(1, Math.round(hu.age_seconds / 60))} minutes ago, so an approved update will not start. On the server, check that cron is running and run scripts/install-updater.sh.`));
+        } else {
+          kids.push(el("p", "msg err", "The host updater has not reported in. The app cannot update itself (it has no Docker access on purpose); a small script on the server does. Install it once on the server with scripts/install-updater.sh (or run sudo ./install.sh again). An older updater that applies approvals every 5 minutes does not report, and still works."));
+        }
+      }
       if (["available", "dismissed", "approved"].includes(s.status)) {
         kids.push(
           el(
@@ -277,13 +287,16 @@ const sections = {
       }
       if (s.status === "approved") {
         kids.push(
-          el("p", "note", `Approved by ${s.approved_by} at ${when(s.approved_at)}. The host script scripts/apply-update.sh fast-forwards to ${s.latest} and rebuilds; the site restarts briefly. If nothing happens, install it with scripts/install-updater.sh.`, { style: "margin-top:10px" }),
+          el("p", "note", `Approved by ${s.approved_by} at ${when(s.approved_at)}. The host script (scripts/update-watch.sh) pauses scans, lets running ones finish, fast-forwards to ${s.latest} and rebuilds; the site restarts briefly. If nothing happens, install it with scripts/install-updater.sh.`, { style: "margin-top:10px" }),
           button("Cancel approval", async () => { draw(await api("POST", "updates/cancel")); toast("Approval cancelled"); }, "btn ghost"),
         );
       } else if (["available", "dismissed"].includes(s.status)) {
         kids.push(
           button("Approve update", async () => {
-            if (!(await ask(`The host will rebuild and restart the services.`, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
+            const note = hu.alive
+              ? "Scans are paused, running ones finish, then the host rebuilds and restarts the services."
+              : "The host updater is not reporting, so nothing will start until it is installed on the server (scripts/install-updater.sh).";
+            if (!(await ask(note, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
             draw(await api("POST", "updates/approve"));
             toast("Approved");
           }),

@@ -37,7 +37,7 @@ CVEngine checks its GitHub repository twice a day (05:23 and 17:23 UTC) and tell
 Install the host side once, as the user that owns the checkout and can run Docker:
 
 ```bash
-scripts/install-updater.sh            # cron entry, every 5 minutes; remove with --remove
+scripts/install-updater.sh            # a watcher the cron entry starts every minute; remove with --remove
 ```
 
 It refuses, and logs to `web/.update-log`, when the approved id is not a full commit id, is not reachable from `origin/<checked-out branch>`, is not a fast-forward, or the checkout has uncommitted changes to tracked files other than `.env` (it keeps the approval and retries in that case). Approvals and cancellations are in the audit log. Without the host script an approval simply waits. Set `CVENGINE_COMPOSE_FILE` before installing it to deploy with a different Compose file.
@@ -87,9 +87,11 @@ See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), 
 
 ## An approved update that never starts
 
-The host applies an approved update from a cron entry (`scripts/install-updater.sh`, every 5 minutes). The bar shows "Waiting for the host to start the rebuild" until it does. If that lasts more than about 12 minutes:
+The web app has no Docker or git access, on purpose. When you click **Approve update** it only records the approval; a small watcher on the server (`scripts/update-watch.sh`, started by cron every minute, installed by `./install.sh` and by `scripts/install-updater.sh`) sees it within about two seconds and runs the update: scans are paused, running ones finish, the files are updated, the containers are rebuilt and restarted, and scanning resumes. It also writes a heartbeat every 15 seconds, and Settings > Updates shows "Host updater: listening" or, when it does not report, says so and what to do. An older updater (a cron entry that runs `scripts/apply-update.sh` every 5 minutes) does not report but still works, with up to 5 minutes before an approval starts; run `scripts/install-updater.sh` again to switch it to the watcher.
 
-1. `crontab -l | grep cvengine` on the host: no line means the updater is not installed; run `scripts/install-updater.sh`.
-2. `tail -30 web/.update-log`: the script writes why it refused (local changes to tracked files, an unreachable origin, a commit that is not on the branch) or which command stopped it.
-3. `scripts/apply-update.sh` run by hand prints the same lines to the terminal; run it as the user that owns the checkout and may run Docker.
+If the bar says the host updater is not reporting, or an approval does not start:
+
+1. `crontab -l | grep cvengine` on the host: no line means the updater is not installed; run `scripts/install-updater.sh` (as the user that owns the checkout and may run Docker).
+2. `tail -30 web/.update-log`: the script writes why it refused (local changes to tracked files, an unreachable origin, a commit that is not on the branch) or which command stopped it. Each reason is written once, not on every check.
+3. `scripts/apply-update.sh` run by hand prints the same lines to the terminal, and applies a pending approval at once.
 4. `git status --short` in the checkout: a modified tracked file (other than `.env`) blocks the update until it is committed or stashed.

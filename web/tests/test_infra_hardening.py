@@ -132,6 +132,21 @@ class CertificateAuthorityTests(SimpleTestCase):
 		self.assertEqual(script.count('-passin env:AUTHORITY_PASSWORD'), 2)  # signing the leaf and creating the CA certificate
 
 
+class UpdateWatcherTests(SimpleTestCase):
+	def test_the_installer_and_the_updater_installer_set_up_the_watcher_not_a_five_minute_poll(self):
+		installer = read('scripts', 'install-updater.sh')
+		self.assertIn('* * * * *', installer)
+		self.assertIn('update-watch.sh', installer)
+		self.assertNotIn('*/5', installer)
+		self.assertIn('install-updater.sh', read('install.sh'))  # an install that forgets it makes Approve do nothing
+		self.assertIn('cvengine-auto-deploy', read('install.sh'))  # and stays out of the way of automatic deployment
+
+	def test_the_watcher_loops_backs_off_and_heartbeats(self):
+		watcher = read('scripts', 'update-watch.sh')
+		for needle in ('update-state.py heartbeat', 'flock -n 8', 'scripts/apply-update.sh', 'pause=15', 'pause=30'):
+			self.assertIn(needle, watcher)
+
+
 class SeedDeliveryTests(SimpleTestCase):
 	def test_the_seed_is_never_committed_and_has_a_make_target_and_a_publisher(self):
 		self.assertIn('web/cve-seed*', read('.gitignore'))
