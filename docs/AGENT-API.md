@@ -53,6 +53,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | assignee, comments, audit | `PATCH .../findings/{kind}/{id}` (`assignee`), `GET/POST .../findings/{kind}/{id}/comments`, `GET .../findings/{kind}/{id}/audit`, `GET projects/{slug}/members` | `set_finding_assignee`, `list_finding_comments`, `add_finding_comment`, `finding_audit`, `list_members` |
 | assess a host | `POST projects/{slug}/host-assessments` (`host_id`), `GET .../host-assessments?host_id=`, `GET .../host-assessments/{id}`, `POST .../host-assessments/{id}/stop` | `assess_host`, `get_host_assessment`, `stop_host_assessment` |
 | archive a host | `POST projects/{slug}/hosts/{host}/archive` (`reason`), `.../restore`, `.../pin` (`pinned`) | `archive_host`, `restore_host`, `pin_host` |
+| archive, restore, pin or unpin many hosts | `POST projects/{slug}/hosts/bulk` (`hosts`, up to 200, `action`: `archive`, `restore`, `pin`, `unpin`, `reason`) | `bulk_host_action` |
 | validate a match | `POST projects/{slug}/matches/{id}/validate`, `GET .../matches/{id}/validate/{request_id}` | `validate_cve_match`, `get_validation_request` |
 | remediation | `PUT assets`, `GET projects/{slug}/work` | `register_assets`, `get_remediation_work` |
 | host info | `POST` or `PATCH projects/{slug}/hosts/{host}/profile` (`owner`, `purpose`, `criticality`) | `set_host_profile` |

@@ -104,8 +104,6 @@ DEFAULT_SCAN_INTENSITY = 'normal'
 # Tools DEFAULTS
 ###############################################################################
 
-# amass
-
 # dorks
 DORKS_DEFAULT_NAMES = [
     'stackoverflow',

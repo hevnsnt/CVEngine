@@ -163,6 +163,32 @@ class ArchivedRediscoveryTests(TestCase):
         self.assertTrue(candidates().filter(pk=ip.pk).exists())
         self.assertEqual(call(self.token, 'POST', f'/api/v1/projects/archive-other/hosts/{name}/restore', {})[0], 404)
 
+    def test_bulk_pin_archive_restore_is_independent_per_host_and_gated(self):
+        names = [f'bulk{i}.archive.example' for i in range(3)]
+        for name in names:
+            Subdomain.objects.create(target_domain=self.domain, name=name)
+        url = '/api/v1/projects/archived/hosts/bulk'
+        self.assertEqual(call(self.audit_token, 'POST', url, {'hosts': names, 'action': 'archive'})[0], 403)
+        self.assertEqual(call(self.token, 'POST', url, {'hosts': names, 'action': 'delete'})[0], 400)
+        self.assertEqual(call(self.token, 'POST', url, {'hosts': [], 'action': 'pin'})[0], 400)
+        self.assertEqual(call(self.token, 'POST', url, {'hosts': ['x'] * 201, 'action': 'pin'})[0], 400)
+        status, out = call(self.token, 'POST', url, {'hosts': names[:1], 'action': 'pin'})
+        self.assertEqual((status, out['done']), (200, 1))
+        status, out = call(self.token, 'POST', url, {'hosts': [*names, names[0], 'missing.archive.example', 5], 'action': 'archive', 'reason': 'Owner review'})
+        self.assertEqual(status, 200)
+        self.assertEqual(out['hosts'], names[1:])  # the pinned host is kept, a repeated name is done once
+        errors = {f['host']: f['error'] for f in out['failed']}
+        self.assertIn('pinned', errors[names[0]])
+        self.assertIn('not found', errors['missing.archive.example'])
+        self.assertEqual(errors['5'], 'host names must be text')
+        self.assertEqual(HostState.objects.filter(project=self.project, archived_at__isnull=False).count(), 2)
+        status, out = call(self.token, 'POST', url, {'hosts': names, 'action': 'unpin'})
+        self.assertEqual(out['done'], 3)
+        status, out = call(self.token, 'POST', url, {'hosts': names, 'action': 'restore'})
+        self.assertEqual(out['done'], 3)
+        self.assertFalse(HostState.objects.filter(project=self.project, archived_at__isnull=False).exists())
+        self.assertEqual(call(self.token, 'POST', '/api/v1/projects/archive-other/hosts/bulk', {'hosts': names, 'action': 'pin'})[0], 404)
+
     def test_shared_ip_full_sweep_uses_only_active_projects(self):
         from cveFeed.fullscan import _project_of, active_attached, candidates
         archived = self.state('shared.archive.example')

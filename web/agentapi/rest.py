@@ -141,6 +141,8 @@ ROUTES = [
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical}, any subset',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
                                                              criticality=_body(r).get('criticality'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/bulk', 'Archive, restore, pin or unpin many hosts; body {hosts: [names], action: archive|restore|pin|unpin, reason}. Up to 200; each host is independent',
+     lambda r, c, slug, **k: hosts.host_bulk(c, slug, _body(r).get('hosts'), _body(r).get('action'), reason=_body(r).get('reason', ''))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/archive', 'Reversibly archive an inventoried host; body {reason}',
      lambda r, c, slug, host, **k: hosts.host_archive(c, slug, host, 'archive', reason=_body(r).get('reason', ''))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/restore', 'Restore an archived host to active scheduling',
