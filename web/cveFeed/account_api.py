@@ -9,8 +9,11 @@ from django.http import JsonResponse
 from django.db import transaction
 
 from dashboard.models import ApiToken, OrgMembership, ProjectMembership, UserProfile
-from tenancy import mfa, roles
+from tenancy import mfa, roles, throttle
 from tenancy.views import SETUP_SECRET_KEY, check_second_factor, clear_failures, fail, locked, profile_of
+
+PASSWORD_MAX_FAILURES = 5
+PASSWORD_LOCK_SECONDS = 600
 
 
 class AccountError(Exception):
@@ -65,8 +68,13 @@ def update_profile(request):
 
 def change_password(request):
     data, user = _body(request), request.user
+    key = f'pw-change-fail:{user.pk}'
+    if throttle.exceeded(key, PASSWORD_MAX_FAILURES):
+        raise AccountError(429, 'too many wrong passwords; try again in a few minutes')
     if not user.check_password(str(data.get('current', ''))):
+        throttle.count(key, PASSWORD_LOCK_SECONDS)
         raise AccountError(400, 'your current password is not correct')
+    throttle.clear(key)
     new = str(data.get('new', ''))
     if new == data.get('current'):
         raise AccountError(400, 'choose a different password')

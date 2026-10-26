@@ -159,13 +159,24 @@ class SystemStatusTests(TestCase):
 	def test_a_pause_and_a_running_update_are_notes_not_problems(self):
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'reason': 'maintenance window', 'actor': 'bill'})
 		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
-			_, data = self.get(self.t_member)
+			_, data = self.get(self.t_root)
 		self.assertTrue(data['scanning']['paused'])
 		self.assertEqual(data['scanning']['reason'], 'maintenance window')
 		self.assertEqual(data['update']['phase'], 'draining')
 		self.assertTrue(any('paused: maintenance window' in n for n in data['notes']))
 		self.assertTrue(any('update is in progress' in n for n in data['notes']))
-		self.assertEqual(data['problems'], [])
+
+	def test_a_member_learns_that_scanning_is_paused_but_not_who_or_why_or_instance_counts(self):
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'reason': 'maintenance window', 'actor': 'bill',
+														   'last_error': 'boom'})
+		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
+			_, data = self.get(self.t_member)
+		self.assertTrue(data['scanning']['paused'])
+		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update'})
+		self.assertEqual(data['update'], {'phase': 'draining'})
+		blob = str(data)
+		for secret in ('maintenance window', 'bill', 'boom', 'waiting'):
+			self.assertNotIn(secret, blob)
 
 	def test_a_read_only_token_may_read_it(self):
 		self.assertEqual(self.get(self.t_member_ro)[0], 200)

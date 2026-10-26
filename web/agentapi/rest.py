@@ -1,5 +1,6 @@
 """REST API /api/v1/: JSON over the shared service layer, tenancy-scoped, token or session auth."""
 import json
+import logging
 import re
 
 from django.http import JsonResponse
@@ -9,6 +10,8 @@ from agentapi import services as svc
 from agentapi import system_status
 from agentapi.auth import create_token
 from agentapi.services import ApiError, Ctx
+
+logger = logging.getLogger(__name__)
 
 
 def _body(request):
@@ -259,6 +262,9 @@ def dispatch(request, path):
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
             return JsonResponse({'error': e.message}, status=e.status)
+        except (KeyError, TypeError, ValueError, AttributeError):  # a field of the wrong type: the caller's mistake, not a crash
+            logger.warning('API request with invalid parameters: %s %s', request.method, path, exc_info=True)
+            return JsonResponse({'error': 'invalid request parameters'}, status=400)
         data, status = result if isinstance(result, tuple) else (result, 200)
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
