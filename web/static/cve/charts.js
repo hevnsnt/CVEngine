@@ -399,10 +399,12 @@ export function activityMatrix({ title, rows }) {
   grid.addEventListener("pointerleave", () => (readout.textContent = "Hover a day"));
   // month names under the strip, at the first day of each month
   const ticks = h("div", "mx-ticks");
+  const firsts = series[0].list.map((d, i) => (new Date(d.t).getDate() === 1 ? i : -1)).filter((i) => i >= 0);
   series[0].list.forEach((d, i) => {
     const dt = new Date(d.t);
-    if (dt.getDate() === 1 || i === 0) {
-      const t = h("span", "", dt.toLocaleDateString(undefined, { month: "short", ...(i === 0 && dt.getDate() > 20 ? { day: "numeric" } : {}) }));
+    const crowded = i === 0 && firsts.length && firsts[0] < 12; // the first month would collide with the next month's name
+    if ((dt.getDate() === 1 || i === 0) && !crowded) {
+      const t = h("span", "", dt.toLocaleDateString(undefined, i === 0 ? { month: "short", day: "numeric" } : { month: "short" }));
       t.style.gridColumn = String(i + 1);
       ticks.append(t);
     }
