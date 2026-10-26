@@ -510,10 +510,16 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
     keep = set()
     for f in found:
         keep.add((f.host or domain.name, f.check))
+        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
+                    'status': 'open', 'resolved_at': None}
+        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
+        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
+            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
+            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
+                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
+                            + 'Reopened: the check found this again after it was marked fixed.')
         HygieneFinding.objects.update_or_create(
-            domain=domain, host=f.host or domain.name, check_name=f.check,
-            defaults={'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
-                      'status': 'open', 'resolved_at': None})
+            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
     stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
              if (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
     for x in stale:

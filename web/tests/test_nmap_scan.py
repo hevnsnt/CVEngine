@@ -446,3 +446,19 @@ class ReviewedScriptsTests(TestCase):
 		ip = IpAddress.objects.get(address='192.0.2.30')
 		self.assertIn('smb-os-discovery', ip.fingerprint['scripts'])
 		self.assertNotIn('hnap-info', ip.fingerprint['scripts'])
+
+
+class OversizedBannerTests(TestCase):
+	def test_long_strings_from_the_target_are_clipped_and_do_not_cost_the_chunk(self):
+		huge = 'A' * 5000
+		inventory = [{'ip': '192.0.2.77', 'os_guess': huge, 'os_accuracy': 90, 'ports': [
+			{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 's' * 500, 'product': huge, 'version': huge,
+			 'service_extra': huge, 'cpe': huge, 'cpes': [], 'scripts': {}, 'banner': huge},
+			{'number': 80, 'protocol': 'tcp', 'state': 'open', 'service_name': 'http', 'product': 'nginx', 'version': '1.18.0',
+			 'service_extra': '', 'cpe': '', 'cpes': [], 'scripts': {}, 'banner': ''}]}]
+		result = nmap_scan.persist_inventory(inventory)
+		self.assertEqual(result['ports'], 2)
+		ip = IpAddress.objects.get(address='192.0.2.77')
+		self.assertEqual(len(ip.os_guess), 255)
+		self.assertEqual(len(ip.ports.get(number=22).product), 255)
+		self.assertEqual(ip.ports.get(number=80).product, 'nginx')

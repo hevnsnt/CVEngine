@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 
+from django.db import DatabaseError
 from django.utils import timezone
 
 from cveFeed import distro as distro_lib
@@ -203,6 +204,7 @@ def persist_inventory(inventory, source='nmap'):
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
             ip_obj.last_seen = now
+            fit_columns(ip_obj)
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
             hosts_with_os += 1
         host_scripts = _reviewed_scripts(host.get('hostscripts'))
@@ -240,11 +242,25 @@ def persist_inventory(inventory, source='nmap'):
             port.package_release, port.upstream_version = info['package_release'], info['upstream_version']
             port.source = source
             port.last_seen = now
-            port.save()
+            fit_columns(port)
+            try:
+                port.save()
+            except DatabaseError:  # one port must not cost the rest of the chunk
+                logger.warning('could not store port %s of %s', rec.get('number'), ip_addr, exc_info=True)
+                continue
             ip_obj.ports.add(port)
             ports_written += 1
         close_unreported_ports(ip_obj, host)
     return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
+
+
+def fit_columns(instance):
+    """Clip every text value to its column, so a banner or product string a scanned host controls cannot make a save fail."""
+    for field in instance._meta.concrete_fields:
+        limit = getattr(field, 'max_length', None)
+        value = getattr(instance, field.attname, None)
+        if limit and isinstance(value, str) and len(value) > limit:
+            setattr(instance, field.attname, value[:limit])
 
 
 def close_unreported_ports(ip_obj, host):

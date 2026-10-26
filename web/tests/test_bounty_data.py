@@ -235,3 +235,14 @@ class SyncTests(TestCase):
         old = BountyScopeChange.objects.create(program=p, kind='asset_added', detected_at=timezone.now() - timedelta(days=bd.CHANGE_RETENTION_DAYS + 5))
         self.sync(H1[:1] + [json.loads(json.dumps(H1[0])) | {'handle': 'n'}], etag='"v2"')
         self.assertFalse(BountyScopeChange.objects.filter(pk=old.pk).exists())
+
+
+class OverlongIdentifierTests(SimpleTestCase):
+    def test_a_host_or_url_longer_than_the_column_is_kept_as_text_not_cut_into_another_host(self):
+        long_path = 'https://www.example.com/' + 'a' * 900
+        rows = bd._asset('URL', long_path, True, None, '', '')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['kind'], 'other')
+        self.assertEqual(len(rows[0]['identifier']), 500)
+        rows = bd._asset('URL', 'https://www.example.com/short', True, None, '', '')
+        self.assertEqual((rows[0]['kind'], rows[0]['identifier']), ('url', 'www.example.com/short'))
