@@ -31,6 +31,7 @@ MODES = {
 }
 MODE_ARGS = {name: m['args'] for name, m in MODES.items()}  # kept for callers that read the extra args
 DEFAULT_MODE = 'standard'
+PRESET_FLAG = '--cvengine-preset'  # internal: marks the private preset file private_config passes to build_command
 HEAVY_KIND = {'deep': 'bbot-deep', 'passive': 'bbot-passive'}  # any other mode is the standard weight
 BBOT_SEVERITIES = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
 # Event types worth showing to a human in the live feed.
@@ -277,11 +278,15 @@ def build_command(targets, presets=None, mode=DEFAULT_MODE, extra_args=(), stric
     is owned. Not applied to an owned apex: there the subdomains ARE the point of the run."""
     cfg = MODES.get(mode, MODES['passive'])
     cmd = [BBOT_BIN, '-t', *targets]
-    for preset in (presets or cfg['presets']):
-        cmd += ['-p', preset]
+    args, names = list(extra_args), list(presets or cfg['presets'])
+    if PRESET_FLAG in args:  # private_config's key file travels as one more preset, after the named ones
+        at = args.index(PRESET_FLAG)
+        names.append(args[at + 1])
+        del args[at:at + 2]
+    cmd += ['-p', *names]  # one -p with every preset: bbot's -p takes the list and a second -p replaces the first
     if strict_scope:
         cmd.append('--strict-scope')
-    return cmd + cfg['args'] + ['--json', '-y', '--no-color', *extra_args]
+    return cmd + cfg['args'] + ['--json', '-y', '--no-color', *args]
 
 
 class BbotProcessError(RuntimeError):
@@ -290,6 +295,10 @@ class BbotProcessError(RuntimeError):
     returncode = None
 
 
+_CONFIG_REJECTED = re.compile(r'Error parsing command-line (?:config option|preset)|Could not find preset', re.I)
+# "Setup soft-failed for shodan_dns: Error with API (401 Unauthorized": a module that could not start (a rejected or missing key)
+# is skipped and the scan goes on, so this line is the only place a rejected key shows
+_SOFT_FAIL = re.compile(r'Setup soft-failed for (\w+): (.{1,200})')
 _ERROR_LINE = re.compile(r'(?:\b\w*(?:Error|Exception)\b|\bfailed\b|\bFailed\b|\bCRITICAL\b)')
 
 
@@ -324,12 +333,14 @@ def failure_message(returncode, stderr_lines):
 
 @contextlib.contextmanager
 def private_config(extra_args):
-    """Move the ``-c path=value`` flags (API keys) out of the command line and into a config file only this user can read.
+    """Move the ``-c path=value`` flags (API keys) out of the command line and into a preset file only this user can read.
 
     Arguments are visible to every process in the container through /proc/<pid>/cmdline and in process listings and crash dumps,
-    so a key never goes there. The file lives in a fresh 0700 directory, is created 0600, is passed to bbot as ``-c <file>``
-    (bbot accepts a config file there) and is deleted, with its directory, when the run ends, however it ends. Yields the
-    argument list to use instead; with no ``-c key=value`` flags nothing is written and the list is returned unchanged."""
+    so a key never goes there. bbot 3.x takes only ``key=value`` after ``-c`` (a file there is rejected and the scan does not
+    run), so the keys go in a preset file, ``{config: {modules: {...}}}``, which bbot merges with the named presets when its
+    absolute path is listed after them. The file lives in a fresh 0700 directory, is created 0600 and is deleted, with its
+    directory, when the run ends, however it ends. Yields the argument list to use instead (the file travels as PRESET_FLAG and
+    is placed by build_command); with no ``-c key=value`` flags nothing is written and the list is returned unchanged."""
     args = list(extra_args or ())
     config, rest, i = {}, [], 0
     while i < len(args):
@@ -350,23 +361,26 @@ def private_config(extra_args):
     import yaml
     directory = tempfile.mkdtemp(prefix='cvengine-bbot-')  # mkdtemp creates it 0700
     try:
-        path = os.path.join(directory, 'config.yml')
+        path = os.path.join(directory, 'keys.yml')
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as handle:
-            yaml.safe_dump(config, handle)
-        yield [*rest, '-c', path]
+            yaml.safe_dump({'config': config}, handle)
+        yield [*rest, PRESET_FLAG, path]
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False):
+def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False, problems=None):
     """Run bbot and yield decoded JSON events as they arrive; API keys in ``extra_args`` reach bbot through a private temporary
-    config file (see private_config), never through its command line. See _stream_events for the rest."""
+    config file (see private_config), never through its command line. ``problems``, when given, collects ``(module, reason)`` for every
+    module bbot skipped at start-up. See _stream_events for the rest."""
     with private_config(extra_args) as args:
-        yield from _stream_events(targets, presets, mode, timeout, args, secrets=config_secrets(extra_args), strict_scope=strict_scope)
+        yield from _stream_events(targets, presets, mode, timeout, args, secrets=config_secrets(extra_args), strict_scope=strict_scope,
+                                  problems=problems)
 
 
-def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), secrets=None, strict_scope=False):
+def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), secrets=None, strict_scope=False,
+                   problems=None):
     """Run bbot and yield decoded JSON events as they arrive (kills bbot after ``timeout`` seconds).
 
     A process that exits with a nonzero status and never produced a single event is a silent failure
@@ -393,7 +407,11 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
 
         def _drain_stderr():
             for line in proc.stderr:
-                stderr_tail.append(redact(line.rstrip('\n'), secrets))
+                line = redact(line.rstrip('\n'), secrets)
+                stderr_tail.append(line)
+                found = _SOFT_FAIL.search(line)
+                if found and problems is not None:
+                    problems.append((found.group(1), found.group(2).strip()))
 
         drain = threading.Thread(target=_drain_stderr, daemon=True)
         drain.start()
@@ -423,6 +441,11 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
             if not produced_any and not timed_out.is_set() and proc.returncode not in (0, None):
                 error = BbotProcessError(failure_message(proc.returncode, list(stderr_tail)))
                 error.returncode = proc.returncode
+                raise error
+            if not produced_any and not timed_out.is_set() and any(_CONFIG_REJECTED.search(ln) for ln in stderr_tail):
+                # bbot prints this, runs no scan and exits 0: that is a failed run, not a discovery that found nothing
+                error = BbotProcessError(failure_message(0, list(stderr_tail)).replace('before producing any results', 'without scanning'))
+                error.returncode = 0
                 raise error
 
 

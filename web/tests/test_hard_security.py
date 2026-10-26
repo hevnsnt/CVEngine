@@ -119,14 +119,14 @@ class PrivateConfigTests(unittest.TestCase):
 	def test_the_keys_are_written_to_a_0600_file_in_a_0700_directory_and_removed_afterwards(self):
 		import yaml
 		with bbot_lib.private_config(self.ARGS) as args:
-			self.assertEqual(args[0], '-c')
+			self.assertEqual(args[0], bbot_lib.PRESET_FLAG)
 			path = args[1]
 			self.assertNotIn('sk-live-secret', ' '.join(args))
 			self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 			self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode), 0o700)
 			with open(path) as handle:
-				self.assertEqual(yaml.safe_load(handle), {'modules': {'shodan_dns': {'api_key': 'sk-live-secret'},
-					'censys_dns': {'api_key': 'cid:csec'}}})
+				self.assertEqual(yaml.safe_load(handle), {'config': {'modules': {'shodan_dns': {'api_key': 'sk-live-secret'},
+					'censys_dns': {'api_key': 'cid:csec'}}}})  # a bbot preset file: bbot 3.x takes only key=value after -c
 		self.assertFalse(os.path.exists(path))
 		self.assertFalse(os.path.exists(os.path.dirname(path)))
 
@@ -151,7 +151,7 @@ class PrivateConfigTests(unittest.TestCase):
 
 			def __init__(self, cmd, **kwargs):
 				seen['cmd'] = cmd
-				seen['file_existed'] = os.path.exists(cmd[cmd.index('-c') + 1])
+				seen['file_existed'] = os.path.exists(cmd[cmd.index('-p') + 1:][2])
 
 			def poll(self):
 				return 0
@@ -180,8 +180,11 @@ class PrivateConfigTests(unittest.TestCase):
 		self.assertNotIn('sk-live-secret', ' '.join(seen['cmd']))
 		self.assertNotIn('csec', ' '.join(seen['cmd']))
 		self.assertTrue(seen['file_existed'])
-		path = seen['cmd'][seen['cmd'].index('-c') + 1]
-		self.assertFalse(os.path.exists(path))  # deleted once the run is over
+		presets = seen['cmd'][seen['cmd'].index('-p') + 1:][:3]
+		self.assertEqual(presets[:2], ['subdomain-enum', 'web'])  # one -p with every preset, the key file last, by absolute path
+		self.assertTrue(os.path.isabs(presets[2]))
+		self.assertNotIn('-c', seen['cmd'])
+		self.assertFalse(os.path.exists(presets[2]))  # deleted once the run is over
 
 
 class EncryptedFieldTests(TestCase):

@@ -146,6 +146,19 @@ What this protects: a database dump, a backup, or SQL injection reads only ciphe
 
 ## Settings in the app
 
+**API keys for outside services.** Add them under **API keys** (per organization; a project's own key wins, field by field, and a project that sets only part of a pair keeps the rest from its organization). A key is stored encrypted and never shown again. During discovery cvENGINE writes the keys of the project into a private preset file (mode 0600, deleted when the scan ends) that bbot merges with its own presets, so a key never appears on a command line. The services and what each key switches on:
+
+| Service | What uses the key | Notes |
+| --- | --- | --- |
+| Shodan | bbot `shodan_dns` | `shodan_idb` (InternetDB) needs no key and always runs. |
+| Censys | bbot `censys_dns` | bbot uses the legacy Search API, so enter the **API ID and secret** of a legacy account. A new account that has only a personal access token cannot be used by bbot. |
+| VirusTotal, SecurityTrails, FullHunt, LeakIX, Hunter.io, Chaos, AlienVault OTX, C99, BeVigil, BuiltWith, BufferOver.run | the bbot module of the same name | Chaos also accepts one install-wide key in Settings, API vault, used when no organization or project has its own. |
+| GitHub | bbot `github_codesearch` and `github_org` (and the other GitHub modules in a deep scan) | A personal access token. |
+| WPScan | cvENGINE itself, against WordPress hosts | See WPScan below. |
+| BinaryEdge, runZero | stored, not used yet | bbot has no module for them. |
+
+A module whose key the service refuses is skipped by bbot and the scan carries on. cvENGINE now reports it: an activity entry names the service ("VirusTotal: the key was not accepted") with the reason bbot gave. Settings, API vault holds only the keys of the older lookups: Netlas (WHOIS), Chaos (install-wide) and HackerOne (bounty submissions).
+
 **RDP screenshots.** When nmap shows an RDP server accepts a connection without Network Level Authentication (the same finding as "RDP does not require Network Level Authentication"), cvENGINE captures its pre-authentication login screen with no credentials sent, stores the image, and asks the configured AI model whether it shows an account already signed in and what it is called. A server that requires NLA is never attempted: there is nothing to see before authentication, and nothing is guessed. The username, when the screen shows one, is not a secret; anyone who can reach the port already sees it. Needs the configured AI model to support image input; without one, the screenshot is still taken and stored, just not read.
 
 **Database metadata.** nmap's own scripts read each database's pre-authentication greeting (MySQL, Microsoft SQL Server, MongoDB, Redis, Memcached, and CouchDB) and cvENGINE parses it into the version, role, and, for MySQL and Microsoft SQL Server, the Windows identity its NTLM negotiation discloses. This fills in `Port.version` and `Port.product` only when nmap's own probe came back empty, and is shown on the host page next to the port. It never sends a credential and answering says nothing about whether one is required. That question is answered separately: alongside the existing Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB checks, cvENGINE makes one read-only, no-credential attempt against MySQL (`root` with no password) and MongoDB (an unauthenticated `listDatabases`), and a server that lets it straight through is a critical finding, the same as the others.

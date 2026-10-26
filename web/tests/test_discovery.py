@@ -48,6 +48,23 @@ class DiscoveryTests(TestCase):
 		queued.assert_called_once_with(scan.id, 'standard')  # standard is the default
 		return scan
 
+	def test_a_rejected_key_becomes_an_activity_line_naming_the_service(self):
+		from cveFeed.models import AgentActivity
+		from dashboard.models import ApiCredential
+		ApiCredential.objects.create(project=self.project, service='virustotal', value={'api_key': 'vt-bad'})
+		scan = self._scan()
+
+		def stream(targets, problems=None, **k):
+			problems += [('virustotal', 'Error with API (401 Unauthorized'), ('crt', 'unrelated module without a key')]
+			return iter(EVENTS)
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=stream)
+		lines = list(AgentActivity.objects.filter(message__contains='key was not accepted').values_list('message', 'status'))
+		self.assertEqual(len(lines), 1)  # the module without a configured key is not blamed on a key
+		self.assertIn('VirusTotal', lines[0][0])
+		self.assertIn('401', lines[0][0])
+		self.assertEqual(lines[0][1], 'failed')
+
 	def test_streaming_discovery_persists_assets_events_and_activity(self):
 		scan = self._scan()
 		self.assertEqual(scan.scan_status, -1)  # queued until a worker starts it
