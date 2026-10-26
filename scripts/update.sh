@@ -751,7 +751,9 @@ while (( SECONDS < deadline )); do
         if command -v crontab >/dev/null 2>&1 && ! crontab -l 2>/dev/null | grep -q 'cvengine-auto-update' \
                 && ! crontab -l 2>/dev/null | grep -q 'cvengine-auto-deploy' && ! systemctl is-enabled cvengine-auto-deploy.timer >/dev/null 2>&1 \
                 && [[ -x $repo_root/scripts/install-updater.sh ]]; then
-            if "$repo_root/scripts/install-updater.sh" >/dev/null 2>&1; then
+            # the watcher deploys with the layout this update used, so it never recreates the stack without an overlay or env file
+            if CVENGINE_COMPOSE_FILES=$(IFS=,; echo "${file_names[*]}") CVENGINE_COMPOSE_ENV_FILE=$compose_env_file CVENGINE_COMPOSE_PROJECT=$compose_project \
+                    "$repo_root/scripts/install-updater.sh" >/dev/null 2>&1; then
                 echo "Installed the update watcher: from now on Approve in Settings > Updates applies an update within seconds."
             else
                 echo "Could not install the update watcher; run scripts/install-updater.sh to enable one-click updates." >&2

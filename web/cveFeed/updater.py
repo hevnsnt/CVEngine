@@ -191,10 +191,11 @@ def sync_applied(row):
 
 
 def _remove_flag():
-    try:
-        os.remove(_file('.update-approved'))
-    except OSError:
-        pass
+    for name in ('.update-approved', '.update-branch'):
+        try:
+            os.remove(_file(name))
+        except OSError:
+            pass
 
 
 def approve(row, user):
@@ -206,6 +207,11 @@ def approve(row, user):
     tmp = _file('.update-approved.tmp')
     with open(tmp, 'w') as f:
         f.write(row.latest_sha + '\n')
+    # the branch is written first: the host reads it when it sees the approval, and moves its checkout there when it differs
+    branch_tmp = _file('.update-branch.tmp')
+    with open(branch_tmp, 'w') as f:
+        f.write(row.branch + '\n')
+    os.replace(branch_tmp, _file('.update-branch'))
     os.replace(tmp, _file('.update-approved'))
     row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, user.username, timezone.now()
     row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
