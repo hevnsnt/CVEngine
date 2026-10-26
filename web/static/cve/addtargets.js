@@ -6,6 +6,17 @@ const ALL = slug === '_all';
 const csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');
 let dialog = null;
 
+// Where the targets go: an organization and a project, filled in with where the user is now. The page ships its project list
+// (with each project's organization) for the switchers; the dialog reuses it.
+const readJson = (id) => {
+  const node = document.getElementById(id);
+  try { return node ? JSON.parse(node.textContent) : []; } catch (_) { return []; }
+};
+const PROJECTS = readJson('switch-projects');
+const orgOf = (p) => p.org_slug || '';
+const ORGS = PROJECTS.reduce((list, p) => (list.some((o) => o.slug === orgOf(p)) ? list : list.concat({ slug: orgOf(p), name: p.org_name || 'No organization' })), []);
+const here = PROJECTS.find((p) => p.slug === slug);
+
 const el = (tag, cls, text, attrs = {}) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -51,6 +62,27 @@ function build() {
   const lead = el('p', 'note', ALL
     ? 'You are viewing all projects, so say which project each list belongs to: put #Project above each list of domains, IP addresses, CIDR blocks or ranges (optionally ##Organization first; if it does not exist your current organization is used). Missing projects are created if you are an admin of the organization.'
     : 'Paste domains, IP addresses, CIDR blocks or ranges, one per line or separated by commas. To fill several projects at once, put #Project above each list (optionally ##Organization first; if it does not exist your current organization is used). Missing projects are created if you are an admin of the organization.');
+  const orgSel = el('select', '', null, { id: 'dlg-org', 'aria-label': 'Organization' });
+  const projSel = el('select', '', null, { id: 'dlg-project', 'aria-label': 'Project' });
+  const fillProjects = (orgSlug, keep) => {
+    projSel.textContent = '';
+    if (ALL) projSel.append(Object.assign(el('option', '', 'Choose a project'), { value: '' }));
+    PROJECTS.filter((p) => orgOf(p) === orgSlug).forEach((p) => projSel.append(Object.assign(el('option', '', p.name), { value: p.slug })));
+    if (keep && [...projSel.options].some((o) => o.value === keep)) projSel.value = keep;
+  };
+  ORGS.forEach((o) => orgSel.append(Object.assign(el('option', '', o.name), { value: o.slug })));
+  orgSel.value = here ? orgOf(here) : (ORGS[0] ? ORGS[0].slug : '');
+  fillProjects(orgSel.value, slug);
+  orgSel.addEventListener('change', () => fillProjects(orgSel.value));
+  const dest = el('div', 'dlg-dest');
+  const orgField = el('label', 'dlg-dest-field', null, { for: 'dlg-org' });
+  orgField.append(el('span', 'eyebrow', 'Organization'));
+  const projField = el('label', 'dlg-dest-field', null, { for: 'dlg-project' });
+  projField.append(el('span', 'eyebrow', 'Add to project'));
+  const wrapSel = (sel) => { const w = el('div', 'select'); w.append(sel); const c = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); c.setAttribute('class', 'chev'); c.setAttribute('viewBox', '0 0 24 24'); c.setAttribute('aria-hidden', 'true'); c.innerHTML = '<use href="#i-chevron"/>'; w.append(c); return w; };
+  orgField.append(wrapSel(orgSel));
+  projField.append(wrapSel(projSel));
+  dest.append(orgField, projField);
   const area = el('textarea', 'dlg-area', null, { rows: '8', spellcheck: 'false', autocapitalize: 'none', 'aria-label': 'Targets',
     placeholder: 'example.com\n203.0.113.10\n10.0.0.0/28\n\nor, for several projects:\n##Acme\n#Web\nexample.com\n#Network\n10.0.0.0/28' });
   const tools = el('div', 'dlg-tools');
@@ -70,7 +102,7 @@ function build() {
   const cancel = el('button', 'btn ghost', 'Close', { type: 'button' });
   const go = el('button', 'btn', 'Add targets', { type: 'submit' });
   actions.append(el('span', 'grow'), cancel, go);
-  form.append(title, lead, area, tools, el('div', 'field', null, { style: 'margin-top:12px' }), authWrap, msg, out, actions);
+  form.append(title, dest, lead, area, tools, el('div', 'field', null, { style: 'margin-top:12px' }), authWrap, msg, out, actions);
   form.children[4].append(mode);
   d.append(form);
   document.body.append(d);
@@ -89,7 +121,7 @@ function build() {
     e.preventDefault();
     msg.style.display = 'none'; out.textContent = '';
     if (!countEntries(area.value)) { msg.className = 'msg err'; msg.textContent = 'Paste at least one target.'; msg.style.display = 'block'; return; }
-    if (ALL && !isOrgFormat(area.value)) { msg.className = 'msg err'; msg.textContent = 'Put #Project above each list, or switch to a project first.'; msg.style.display = 'block'; return; }
+    if (!projSel.value && !isOrgFormat(area.value)) { msg.className = 'msg err'; msg.textContent = 'Choose a project to add them to, or put #Project above each list.'; msg.style.display = 'block'; return; }
     if (mode.value !== 'none' && !auth.checked) { msg.className = 'msg err'; msg.textContent = 'Please confirm you are authorized to test these targets.'; msg.style.display = 'block'; return; }
     go.disabled = true;
     // Big pastes can take a while on a busy server: say what is happening and how long it has been going
@@ -107,16 +139,17 @@ function build() {
     area.readOnly = true;
     try {
       const orgMode = isOrgFormat(area.value);
-      const res = await fetch(orgMode ? '/api/v1/targets/bulk-org' : `/api/v1/projects/${encodeURIComponent(slug)}/targets/bulk`, {
+      const res = await fetch(orgMode ? '/api/v1/targets/bulk-org' : `/api/v1/projects/${encodeURIComponent(projSel.value)}/targets/bulk`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? undefined : mode.value, current_project: orgMode && !ALL ? slug : undefined }),
+        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? undefined : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined }),
       });
       const data = await res.json();
       clearInterval(ticker);
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
       const existed = orgMode ? data.projects.reduce((n, p) => n + p.already_exists.length, 0) : data.already_exists.length;
       const bad = orgMode ? data.invalid.concat(...data.projects.map((p) => p.invalid)) : data.invalid;
-      const parts = [`${data.created} added`];
+      const destName = (PROJECTS.find((p) => p.slug === projSel.value) || {}).name;
+      const parts = [`${data.created} added${!orgMode && destName ? ` to ${destName}` : ''}`];
       if (orgMode && data.projects_created) parts.push(`${data.projects_created} project${data.projects_created === 1 ? '' : 's'} created`);
       if (existed) parts.push(`${existed} already existed`);
       if (bad.length) parts.push(`${bad.length} not recognized`);
