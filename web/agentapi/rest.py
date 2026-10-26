@@ -6,6 +6,7 @@ from django.http import JsonResponse
 
 from agentapi import host_manage as hosts
 from agentapi import services as svc
+from agentapi import system_status
 from agentapi.auth import create_token
 from agentapi.services import ApiError, Ctx
 
@@ -69,6 +70,8 @@ def tokens_revoke(request, ctx, token_id, **_):
 
 ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
+    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed and AI budget',
+     lambda r, c, **k: system_status.system_status(c)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines', lambda r, c, **k: svc.list_engines(c)),
     ('GET', r'cves', 'CVE feed (tier, q filters)', lambda r, c, **k: svc.list_cve_feed(c, r.GET)),
