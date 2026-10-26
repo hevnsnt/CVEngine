@@ -414,6 +414,31 @@ def _next_branch(base):
     return ".".join(parts)
 
 
+_VER = r"v?(\d[0-9A-Za-z.+~-]*)"
+_TEXT_RANGES = (
+    (re.compile(rf"^{_VER}\s*(?:through|thru|to|-|\u2013|\u2014)\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
+    (re.compile(rf"^{_VER}\s*(?:and|or)\s*(?:earlier|prior|below|before|lower|older)$", re.I), lambda m: {"lastAffected": m.group(1)}),
+    (re.compile(rf"^{_VER}\s*(?:and|or)\s*(?:later|above|newer|higher|after)$|^{_VER}\+$", re.I),
+     lambda m: {"introduced": m.group(1) or m.group(2)}),
+    (re.compile(rf"^(?:before|prior to|earlier than|older than|<)\s*{_VER}$", re.I), lambda m: {"fixed": m.group(1)}),
+    (re.compile(rf"^(?:through|up to and including|<=)\s*{_VER}$", re.I), lambda m: {"lastAffected": m.group(1)}),
+    (re.compile(rf"^>=?\s*{_VER}\s*,?\s*(?:and\s*)?<\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "fixed": m.group(2)}),
+    (re.compile(rf"^>=?\s*{_VER}\s*,?\s*(?:and\s*)?<=\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
+)
+
+
+def _text_range(value):
+    """``{introduced?, fixed?, lastAffected?}`` for a version written as a range ("2.0 through 2.3", "before 1.5", "3.1 and earlier"), else
+    None. CVE List records often put the range in the ``version`` text; reading only its first number turns "2.0 through 2.3" into the
+    single version 2.0, which misses every host on 2.1 to 2.3."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    for pattern, build in _TEXT_RANGES:
+        found = pattern.match(text)
+        if found:
+            return {k: v for k, v in build(found).items() if v}
+    return None
+
+
 def _ranges(entry):
     """CVE 5 ``versions`` entries -> correlation ranges ({introduced, fixed | lastAffected}), split at ``changes``. An upper
     bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts."""
@@ -422,6 +447,10 @@ def _ranges(entry):
         if not isinstance(v, dict) or v.get("status") != "affected":
             continue
         kind = "GIT" if str(v.get("versionType") or "").lower() == "git" else "SEMVER"
+        textual = _text_range(v.get("version")) if not (v.get("lessThan") or v.get("lessThanOrEqual")) else None
+        if textual:  # the range is written in the version field itself
+            out.append({"type": kind, **textual})
+            continue
         branch = _wildcard_base(v.get("version"))  # "2.3.x": every release of 2.3 (a wildcard is not a version bound)
         start = branch or _bound(v.get("version"))[0]
         start = None if start in ("0", "0.0", "0.0.0") else start

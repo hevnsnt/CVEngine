@@ -95,7 +95,12 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     from cveFeed.models import MatchVerdict
     from django.utils import timezone
     from datetime import timedelta
-    due = CVEEntry.objects.filter(matches__isnull=False, synced_at__lt=timezone.now() - timedelta(hours=12)) \
+    from django.db.models import Q
+    now = timezone.now()
+    # a CVE with a match is kept current; so is a recent one the feed published with no affected data yet (the CNA's first record often
+    # names no version, and the enrichment that makes it matchable arrives days later: without this it would never be read again)
+    needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
+    due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
         .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
     for old in list(due):
         try:

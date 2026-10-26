@@ -54,6 +54,9 @@ _PRE_RE = re.compile(r"^[-_.~+ ]?(?:(alpha|beta|rc|cr|pre|dev|snapshot)|(a|b|m))
 # one or two letters straight after a three-part version, then the end or a separator: 1.0.2k, 1.1.1n-fips, 0.9.8zh. Not "8.9p1"
 # (OpenSSH portable's p is followed by a digit and the version has two parts).
 _PATCH_LETTER_RE = re.compile(r"^([a-z]{1,2})(?![a-z0-9])", re.IGNORECASE)
+_PORTABLE_PATCH_RE = re.compile(r"^[-_. ]?p(\d+)(?![A-Za-z0-9])", re.IGNORECASE)  # 8.9p1, 9.6p1
+_MARIADB_PREFIX_RE = re.compile(r"^5\.5\.5-(?=\d)")
+_DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
 
@@ -68,19 +71,25 @@ def parse_version(value, strict=False):
     text = _EPOCH_RE.sub("", str(value)).strip()
     if text[:1] in ("v", "V") and text[1:2].isdigit():
         text = text[1:]
+    text = _MARIADB_PREFIX_RE.sub("", text)  # MariaDB's handshake says "5.5.5-10.6.12-MariaDB": the real version follows the prefix
     if _HASH_RE.match(text) and not text.isdigit():
         return None
-    match = _VER_RE.match(text) if strict else _VER_RE.search(text)
-    if not match:
+    dated = _DATE_RE.match(text)  # 2024-01-15 is the date 2024, 1, 15, not the version 2024
+    match = None if dated else (_VER_RE.match(text) if strict else _VER_RE.search(text))
+    if not match and not dated:
         return None
     try:
-        parts = [int(part) for part in match.group(1).split(".")]
+        parts = [int(part) for part in dated.groups(default="0")[:3]] if dated else [int(part) for part in match.group(1).split(".")]
     except ValueError:
         return None
+    if dated:
+        return tuple(parts[:3 if dated.group(3) else 2])
     rest = text[match.end():]
     pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
+    elif _PORTABLE_PATCH_RE.match(rest):  # OpenSSH's 8.9p1 < 8.9p2 < 9.0: the patch level is a part after the release
+        parts += [0, int(_PORTABLE_PATCH_RE.match(rest).group(1))]
     elif len(parts) == 3:
         letters = _PATCH_LETTER_RE.match(rest)
         if letters:  # OpenSSL's 1.1.1k < 1.1.1n < 1.1.1zh: the letters are a fourth component, so a patch level is not dropped
@@ -166,10 +175,11 @@ def affected_product_tokens(affected_item):
 # Names scanners report that differ from the feed's product naming: normalized tech token -> product tokens naming the
 # same software. Dropping the vendor token must not create false negatives for these. Aliases are the only widening.
 PRODUCT_ALIASES = {
-    "apachehttpd": {"httpserver", "apache2"},
+    # "httpserver" is the NVD-style product ("http_server"); "apachehttpserver" is how the CNA's own record names it ("Apache HTTP Server")
+    "apachehttpd": {"httpserver", "apachehttpserver", "apache2"},
     "apachehttpserver": {"httpserver", "apache2"},
-    "httpd": {"httpserver", "apache2"},
-    "apache": {"httpserver", "apache2"},
+    "httpd": {"httpserver", "apachehttpserver", "apache2"},
+    "apache": {"httpserver", "apachehttpserver", "apache2"},
     "microsoftiishttpd": {"internetinformationservices", "iis"},
     "microsoftiis": {"internetinformationservices", "iis"},
     "iis": {"internetinformationservices"},
@@ -319,7 +329,12 @@ def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
     when the entry has one, must agree); otherwise fuzzy token containment, plus exact alias names."""
     own = {_norm(item.get(k)) for k in ("product", "package")} - {""}
     if cpe_product:
-        return cpe_product in own and _vendor_ok(item, cpe_vendor, cpe_vendor[:6])
+        if cpe_product in own:
+            return _vendor_ok(item, cpe_vendor, cpe_vendor[:6])
+        # an entry named some other way (the CNA's own "Apache HTTP Server" next to NVD's "http_server") still counts when it is the same
+        # vendor's: the CPE must not hide the records that do not use its spelling
+        if not _vendor_ok(item, cpe_vendor, cpe_vendor[:6]) or not item.get("vendor"):
+            return False
     tokens = affected_product_tokens(item)
     if any(name_matches_token(token, t) for t in tokens):
         return True
@@ -379,10 +394,10 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if not candidate_ids:
             cpe_product = None
     aliases = tuple(sorted(PRODUCT_ALIASES.get(token, ())))
-    if not cpe_product:
-        candidate_ids = set(_fuzzy_ids(token, product_index))
-        for alias in aliases:
-            candidate_ids |= product_index.get(alias, set())
+    # the name match is always added: a CPE names the product exactly, but CVEs whose own record spells it differently are still about it
+    candidate_ids |= set(_fuzzy_ids(token, product_index))
+    for alias in aliases:
+        candidate_ids |= product_index.get(alias, set())
 
     for cid in candidate_ids:
         cve = cve_by_id[cid]
@@ -689,9 +704,11 @@ def close_stale(current, covered):
         return set()
     stale_keep, hosts = [], set()
     for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).only(
-            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason"):
+            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "template_result"):
         if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
             continue
+        if m.template_result == 'vulnerable':
+            continue  # a template hit is evidence of the vulnerability itself: not seeing the product's banner again does not retire it
         if m.ai_verdict == 'not_affected' and (m.ai_reason or '').startswith('Closed automatically:'):
             continue
         stale_keep.append(m)

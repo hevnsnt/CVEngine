@@ -224,6 +224,10 @@ def persist_inventory(inventory, source='nmap', org_id=None):
                 port = Port(number=rec['number'], service_name=rec.get('service_name') or None)
             elif rec.get('service_name'):
                 port.service_name = rec['service_name']
+            if port.pk and rec.get('product') and rec['product'] != port.product:
+                # a different product answers on this port now: the version, CPE and banner belonged to the old one, and a scan that
+                # reports none for the new one must not leave them behind to be matched against its CVEs
+                port.version = port.service_extra = port.cpe = port.banner = ''
             for field in ('protocol', 'state', 'product', 'version', 'service_extra', 'cpe'):
                 if rec.get(field):
                     setattr(port, field, rec[field])

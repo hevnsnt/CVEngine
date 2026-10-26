@@ -39,6 +39,22 @@ class FeedSyncBatchingTests(TestCase):
 		self.assertEqual((out['refreshed'], out['changed']), (1, 1))
 		self.assertTrue(CVEEntry.objects.get(pk=cve.pk).needs_recorrelation)
 		queued.assert_called_once()
+	def test_a_recent_cve_published_without_affected_data_is_read_again_until_it_gains_some(self):
+		import datetime
+		now = timezone.now()
+		thin = CVEEntry.objects.create(cve_id='CVE-2099-9100', affected=[], published_at=now - datetime.timedelta(days=5))
+		old_thin = CVEEntry.objects.create(cve_id='CVE-2099-9101', affected=[], published_at=now - datetime.timedelta(days=400))
+		rich = CVEEntry.objects.create(cve_id='CVE-2099-9102', affected=[{'product': 'x'}], published_at=now - datetime.timedelta(days=5))
+		CVEEntry.objects.filter(pk__in=[thin.pk, old_thin.pk, rich.pk]).update(synced_at=now - datetime.timedelta(days=2))
+		client = mock.Mock()
+		client.iter_entries.return_value = iter([])
+		client.get_entry.side_effect = lambda cid: {'id': cid, 'affected': [{'product': 'nginx', 'ranges': [{'fixed': '1.20'}]}]}
+		with mock.patch('cveFeed.tasks.CVENowClient', return_value=client), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay'):
+			out = tasks.sync_cve_now_feed()
+		self.assertEqual([c.args[0] for c in client.get_entry.call_args_list], ['CVE-2099-9100'])  # not the old one, not the one with data
+		self.assertEqual((out['refreshed'], out['changed']), (1, 1))
+		self.assertTrue(CVEEntry.objects.get(pk=thin.pk).needs_recorrelation)
+
 	def test_known_ids_are_checked_in_batches(self):
 		for n in range(250):
 			CVEEntry.objects.create(cve_id=f'CVE-2099-{n}', affected=[])

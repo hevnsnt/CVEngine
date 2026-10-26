@@ -244,13 +244,13 @@ class TestParseVersion(unittest.TestCase):
 
     def test_matrix(self):
         from cveFeed.correlation import _vcmp
-        self.assertEqual(parse_version("1:8.9p1-3ubuntu0.6"), (8, 9))
+        self.assertEqual(parse_version("1:8.9p1-3ubuntu0.6"), (8, 9, 0, 1))  # the epoch is dropped; p1 is a patch level
         self.assertEqual(parse_version("v1.2.3"), (1, 2, 3))
         self.assertEqual(parse_version("2.4.52+deb11u2"), (2, 4, 52))
         self.assertEqual(parse_version("1.18.0-1ubuntu1"), (1, 18, 0))
         self.assertEqual(parse_version("8.5.0.1"), (8, 5, 0, 1))
         self.assertEqual(parse_version("2024.1"), (2024, 1))
-        self.assertEqual(parse_version("8.9p1 Ubuntu 3ubuntu0.6"), (8, 9))
+        self.assertEqual(parse_version("8.9p1 Ubuntu 3ubuntu0.6"), (8, 9, 0, 1))
         self.assertIsNone(parse_version("abc"))
         self.assertIsNone(parse_version("deadbeef"))
         self.assertIsNone(parse_version("3f2a1b9c0d4e5f60718293a4b5c6d7e8f9012345"))

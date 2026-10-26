@@ -462,3 +462,21 @@ class OversizedBannerTests(TestCase):
 		self.assertEqual(len(ip.os_guess), 255)
 		self.assertEqual(len(ip.ports.get(number=22).product), 255)
 		self.assertEqual(ip.ports.get(number=80).product, 'nginx')
+
+
+class ProductChangeTests(TestCase):
+	def rec(self, **kw):
+		base = {'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh', 'scripts': {}, 'cpes': [], 'banner': '',
+				'product': '', 'version': '', 'service_extra': '', 'cpe': ''}
+		return [{'ip': '192.0.2.88', 'ports': [{**base, **kw}]}]
+
+	def test_a_new_product_without_a_version_does_not_inherit_the_old_products_version_cpe_and_banner(self):
+		nmap_scan.persist_inventory(self.rec(product='OpenSSH', version='7.4', cpe='cpe:/a:openbsd:openssh:7.4', banner='SSH-2.0-OpenSSH_7.4'))
+		nmap_scan.persist_inventory(self.rec(product='Dropbear sshd'))  # the next scan found another server and no version
+		port = IpAddress.objects.get(address='192.0.2.88').ports.get(number=22)
+		self.assertEqual((port.product, port.version, port.cpe, port.banner), ('Dropbear sshd', '', '', ''))
+
+	def test_the_same_product_keeps_what_an_incomplete_scan_did_not_repeat(self):
+		nmap_scan.persist_inventory(self.rec(product='OpenSSH', version='7.4'))
+		nmap_scan.persist_inventory(self.rec(product='OpenSSH'))
+		self.assertEqual(IpAddress.objects.get(address='192.0.2.88').ports.get(number=22).version, '7.4')
