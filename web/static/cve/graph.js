@@ -169,9 +169,100 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
 }
 
 // pinKey(): localStorage key for where nodes were dropped (evaluated on every read and write, so it can follow the scan).
-export function mountGraph(container, { onSelect, pinKey } = {}) {
+// CVE pods. A host can carry dozens of CVEs, and drawing each as a dot turns a busy graph into a haze of specks. Instead the CVEs of a
+// host are folded into the host itself: its bubble grows with how many there are and wears a ring split by temperature (fire, smoke,
+// ice). Double-click a host to open its pod and see the individual CVEs; double-click again to fold them back.
+const TIER_KEYS = ["fire", "smoke", "ice"];
+export function collapsePods(view, expanded) {
+  const byId = new Map(view.nodes.map((n) => [n.id, n]));
+  const pods = new Map();
+  const keep = new Set();
+  const edges = [];
+  view.edges.forEach((e) => {
+    const from = byId.get(e.from);
+    const to = byId.get(e.to);
+    if (from && from.kind === "subdomain" && to && to.kind === "cve") {
+      const pod = pods.get(from.id) || { fire: 0, smoke: 0, ice: 0, total: 0 };
+      pod[TIER_KEYS.includes(to.tier) ? to.tier : "ice"] += 1;
+      pod.total += 1;
+      pods.set(from.id, pod);
+      if (expanded.has(from.id)) {
+        keep.add(to.id);
+        edges.push(e);
+      }
+      return;
+    }
+    edges.push(e);
+  });
+  const nodes = view.nodes
+    .filter((n) => n.kind !== "cve" || keep.has(n.id))
+    .map((n) => (pods.has(n.id) ? { ...n, pod: pods.get(n.id), expanded: expanded.has(n.id) } : n));
+  return { nodes, edges };
+}
+const hostRadius = (d) => (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
+const arc = (r, len, offset, color) => {
+  const c = document.createElementNS(NS, "circle");
+  const circumference = 2 * Math.PI * r;
+  c.setAttribute("r", r);
+  c.setAttribute("fill", "none");
+  c.setAttribute("stroke", color);
+  c.setAttribute("stroke-width", "4.5");
+  c.setAttribute("stroke-dasharray", `${Math.max(0, len * circumference - 1.2)} ${circumference}`);
+  c.setAttribute("stroke-dashoffset", String(-offset * circumference));
+  c.setAttribute("transform", "rotate(-90)");
+  return c;
+};
+// (Re)build the ring and the count of a host's bubble; safe to call again when the pod changes.
+function decoratePod(g, d, r) {
+  g.querySelector(".pod")?.remove();
+  g.classList.toggle("has-pod", Boolean(d.pod && d.pod.total));
+  if (!d.pod || !d.pod.total) return;
+  const pod = document.createElementNS(NS, "g");
+  pod.setAttribute("class", "pod");
+  const track = document.createElementNS(NS, "circle");
+  track.setAttribute("r", r + 4);
+  track.setAttribute("fill", "none");
+  track.setAttribute("stroke", css("--line-2"));
+  track.setAttribute("stroke-width", "4.5");
+  track.setAttribute("stroke-opacity", "0.55");
+  pod.append(track);
+  let offset = 0;
+  TIER_KEYS.forEach((tier) => {
+    if (!d.pod[tier]) return;
+    const share = d.pod[tier] / d.pod.total;
+    pod.append(arc(r + 4, share, offset, CVE_COLORS[tier]));
+    offset += share;
+  });
+  if (r >= 16) {
+    const n = document.createElementNS(NS, "text");
+    n.setAttribute("class", "pod-n");
+    n.setAttribute("text-anchor", "middle");
+    n.setAttribute("dy", "0.35em");
+    n.style.fontSize = `${Math.min(15, Math.max(10, r * 0.62))}px`;
+    n.textContent = String(d.pod.total);
+    pod.append(n);
+  }
+  g.append(pod);
+}
+function refreshHost(ui, d) {
+  const r = hostRadius(d);
+  const dot = ui.querySelector("circle:not(.ring):not(.pod circle)");
+  if (dot) dot.setAttribute("r", r);
+  const ring = ui.querySelector(".ring");
+  if (ring) ring.setAttribute("r", r + (d.pod && d.pod.total ? 9 : 5));
+  const text = ui.querySelector("text:not(.pod-n)");
+  if (text) text.setAttribute("x", r + (d.pod && d.pod.total ? 8 : 4));
+  const title = ui.querySelector("title");
+  if (title) title.textContent = d.pod && d.pod.total ? `${d.label}\n${d.pod.total} CVE${d.pod.total === 1 ? "" : "s"} (${d.pod.fire} fire, ${d.pod.smoke} smoke, ${d.pod.ice} ice). Double-click to ${d.expanded ? "fold them back" : "open the pod"}.` : d.label;
+  decoratePod(ui, d, r);
+}
+
+export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } = {}) {
   const graph = Viva.Graph.graph();
   let clustered = false;
+  let pods = podsOn;
+  const expanded = new Set(); // hosts whose pod is open
+  let lastData = null;
   const layout = Viva.Graph.Layout.forceDirected(graph, {
     springLength: 80,
     springCoeff: 0.0008,
@@ -288,7 +379,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
           ? `${d.label}, ${d.status || "unscanned"}`
           : `${d.kind} ${d.label}`,
       );
-      const r = SIZES[d.kind] || 6;
+      const r = d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
       const ring = document.createElementNS(NS, "circle");
       ring.setAttribute("class", "ring");
       ring.setAttribute("r", r + 5);
@@ -318,6 +409,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       const title = document.createElementNS(NS, "title");
       title.textContent = d.label;
       g.append(ring, c, t, title);
+      if (d.kind === "subdomain") refreshHost(g, d);
       attachPointer(g, node);
       g.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -336,6 +428,11 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       g.addEventListener("dblclick", (e) => {
         e.stopPropagation();
         unpin(node.id);
+        if (node.data && node.data.pod && node.data.pod.total) {
+          if (expanded.has(node.id)) expanded.delete(node.id);
+          else expanded.add(node.id);
+          resync();
+        }
       });
       uis.set(node.id, g);
       return g;
@@ -710,14 +807,35 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     if (auto) fit();
   }, 700);
 
-  return {
+  function resync() {
+    if (lastData) api.sync(lastData);
+    wake();
+  }
+
+  const api = {
     setClustered(value) { clustered = Boolean(value); },
+    // fold every host's CVEs into its bubble (the default), or draw each CVE as its own dot
+    setPods(on) {
+      pods = Boolean(on);
+      expanded.clear();
+      resync();
+    },
+    hasPods() { return pods; },
     // the domain ids and host names a scan is working on now; call again with what is true next poll
     setActive(domains = [], hosts = [], labels = []) {
       active.domains = new Set(domains.map(String));
       active.hosts = new Set(hosts.map((h) => String(h).toLowerCase()));
       active.labels = new Set(labels.map((l) => String(l).toLowerCase()));
       applyActive();
+    },
+    // whether a node with this name or address is on the graph (the "scanning now" chips only list what can be shown)
+    hasLabel(label) {
+      const want = String(label || "").toLowerCase();
+      let found = false;
+      graph.forEachNode((n) => {
+        if (!found && String((n.data && n.data.label) || "").toLowerCase() === want) found = true;
+      });
+      return found;
     },
     // Pan and zoom to a node by its name or address (the "scanning now" chips use it); returns whether it was found.
     locate(label) {
@@ -763,7 +881,9 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     sync(data) {
       const width = container.clientWidth;
       const columns = width < 600 ? 1 : width < 1000 ? 2 : undefined;
-      const view = clustered ? clusterGraph(data, {columns}) : data;
+      lastData = data;
+      const base = clustered ? clusterGraph(data, {columns}) : data;
+      const view = pods ? collapsePods(base, expanded) : base;
       const ids = new Set();
       view.nodes.forEach((n) => {
         ids.add(n.id);
@@ -771,15 +891,21 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
         if (!existing) {
           graph.addNode(n.id, n);
           if (pins[n.id]) pin(n.id, pins[n.id][0], pins[n.id][1]); // dropped here last time: stays here
-          else if (Number.isFinite(n.seed_x) && Number.isFinite(n.seed_y)) {
+          else if (n.kind === "cve" && expanded.size) {
+            // a pod just opened: its CVEs start on a ring around their host and fan out from there
+            const host = view.edges.find((e) => e.to === n.id && expanded.has(e.from));
+            const at = host && layout.getNodePosition(host.from);
+            if (at) layout.setNodePosition(n.id, at.x + Math.cos(stableAngle(n.id)) * 40, at.y + Math.sin(stableAngle(n.id)) * 40);
+          } else if (Number.isFinite(n.seed_x) && Number.isFinite(n.seed_y)) {
             layout.setNodePosition(n.id, n.seed_x, n.seed_y);
             if (n.anchored) layout.pinNode(graph.getNode(n.id), true);
           }
-        } else if (n.kind === "subdomain" && (existing.data.heat !== n.heat || existing.data.status !== n.status || existing.data.score !== n.score)) {
+        } else if (n.kind === "subdomain" && (existing.data.heat !== n.heat || existing.data.status !== n.status || existing.data.score !== n.score || JSON.stringify(existing.data.pod) !== JSON.stringify(n.pod) || existing.data.expanded !== n.expanded)) {
           existing.data = n; // a scan finished or found something: the host changes look without a reload
           const ui = uis.get(n.id);
-          const dot = ui && ui.querySelector("circle:not(.ring)");
+          const dot = ui && ui.querySelector("circle:not(.ring):not(.pod circle)");
           if (dot) styleHost(dot, n);
+          if (ui) refreshHost(ui, n);
         }
       });
       view.edges.forEach((e) => {
@@ -813,6 +939,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       return { nodes: data.nodes.length, edges: data.edges.length };
     },
   };
+  return api;
 }
 
 // Fetch and draw a node's details into `box` (DOM built with textContent only).

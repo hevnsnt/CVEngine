@@ -397,6 +397,7 @@ function drawMap(nodes) {
 // --- live discovery -----------------------------------------------------------------
 let followScan = dash.dataset.follow || "";
 const graph = mountGraph($("d-graph"), {
+  pods: true,
   onSelect: (d) => showNodeDetails($("d-detail"), d),
   pinKey: () => `cve.pins.${slug || "all"}`, // where nodes were dropped; the graph spans the project, so the key is the project
 });
@@ -798,7 +799,7 @@ async function pollScanning() {
     const box = $("d-scanning");
     const targets = new Map(); // name -> stage
     live.scans.forEach((s) => targets.set(s.domain.toLowerCase(), s.stage || ""));
-    labels.forEach((l) => { if (!targets.has(l)) targets.set(l, ""); });
+    labels.forEach((l) => { if (!targets.has(l) && graph.hasLabel(l)) targets.set(l, ""); });
     box.textContent = "";
     if (!targets.size) {
       box.hidden = true;
@@ -819,3 +820,14 @@ async function pollScanning() {
 }
 pollScanning();
 setInterval(pollScanning, 3000);
+
+// The "Group CVEs" toggle: fold each host's CVEs into its bubble (default), or draw every CVE as its own dot.
+{
+  const toggle = $("d-pods");
+  if (toggle)
+    toggle.addEventListener("click", () => {
+      const on = toggle.getAttribute("aria-pressed") !== "true";
+      toggle.setAttribute("aria-pressed", String(on));
+      graph.setPods(on);
+    });
+}

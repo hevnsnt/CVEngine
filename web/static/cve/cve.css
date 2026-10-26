@@ -1406,3 +1406,11 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .scan-chip small{font:500 11px var(--mono);color:var(--muted)}
 .legend-live::before{content:"";display:inline-block;width:10px;height:10px;margin-right:6px;border-radius:50%;border:2.5px solid var(--brand);vertical-align:-1px;box-sizing:border-box}
 @media (prefers-reduced-motion:reduce){.scanning-now .eyebrow::before{animation:none}}
+
+/* CVE pods: a host's CVEs folded into its bubble as a temperature ring and a count */
+.gn .pod{pointer-events:none}
+.gn .pod-n{font-family:var(--mono);font-weight:800;fill:var(--ink);paint-order:stroke;stroke:var(--surface);stroke-width:3px;stroke-linejoin:round}
+.gn.has-pod text:not(.pod-n){font-weight:700}
+.gn.has-pod circle:not(.ring):not(.pod circle){filter:drop-shadow(0 1px 4px color-mix(in srgb,var(--ink) 22%,transparent))}
+.card-tools{display:inline-flex;align-items:center;gap:8px}
+#d-pods[aria-pressed="true"],#pods-toggle[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
