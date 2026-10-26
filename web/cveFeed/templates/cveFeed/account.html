@@ -11,6 +11,26 @@
 <div id="acct">
   <div class="acct-grid" id="view"></div>
 </div>
+<section class="card prefs" aria-labelledby="prefs-h">
+  <h2 id="prefs-h">Display and alerts</h2>
+  <p class="note">These are saved in this browser only.</p>
+  <div class="pref-row">
+    <div><b>Theme</b><span class="note">Light is the default. Auto follows your system.</span></div>
+    <div class="theme-choice" role="group" aria-label="Theme">
+      <button type="button" data-theme-choice="light" aria-pressed="true">Light</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+      <button type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
+    </div>
+  </div>
+  <div class="pref-row">
+    <div><b>Times</b><span class="note">Show times in your own time zone or in UTC. The page reloads when you switch.</span></div>
+    <button class="btn ghost sm" type="button" data-tz-toggle aria-pressed="false"><span>Times: your time zone</span></button>
+  </div>
+  <div class="pref-row">
+    <div><b>Desktop notifications</b><span class="note">A notice when a scan finishes, fails or is stopped while this tab is in the background. Your browser asks for permission the first time.</span></div>
+    <button class="btn ghost sm" type="button" data-notify-toggle aria-pressed="false"><span>Desktop notifications: off</span></button>
+  </div>
+</section>
 {% endblock %}
 {% block scripts %}
 <script src="{% static 'mfa/qrcode.js' %}"></script>
