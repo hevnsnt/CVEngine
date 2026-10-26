@@ -106,7 +106,8 @@ def reset(actor, keep_session_key=None):
         User.objects.exclude(pk=actor.pk).delete()
         sessions = Session.objects.all()
         if keep_session_key:
-            sessions = sessions.exclude(session_key=keep_session_key)
+            from reNgine.hashed_sessions import db_key
+            sessions = sessions.exclude(session_key=db_key(keep_session_key))
         sessions.delete()
         PeriodicTask.objects.exclude(name__startswith='cvengine-').exclude(name='celery.backend_cleanup').delete()
         org = Org.objects.create(name='Default', slug='default')

@@ -31,6 +31,7 @@ RENGINE_RAISE_ON_ERROR = env.bool('RENGINE_RAISE_ON_ERROR', default=False)
 DEBUG = env.bool('DEBUG', default=False)
 # Production is served behind HTTPS. Cookies must not accompany a request to the HTTP redirect listener.
 SESSION_COOKIE_SECURE = not DEBUG
+SESSION_ENGINE = 'reNgine.hashed_sessions'  # the table stores a keyed hash of the cookie value, never the value
 CSRF_COOKIE_SECURE = not DEBUG
 # Start with a short HSTS lifetime. Operators can raise it after confirming
 # their public TLS path; never preload or include sibling subdomains implicitly.

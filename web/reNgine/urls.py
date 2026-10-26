@@ -4,6 +4,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from tenancy.views import MFALoginView, SignOutView, admin_login_redirect
+from reNgine.admin_masking import mask_secret_fields
 from django.urls import include, path
 from drf_yasg import openapi
 from drf_yasg.views import get_schema_view
@@ -20,6 +21,8 @@ schema_view = get_schema_view(
    public=True,
    permission_classes=[permissions.AllowAny],
 )
+
+mask_secret_fields()  # the admin never shows a stored secret
 
 urlpatterns = [
     path('', include('agentapi.urls')),

@@ -56,7 +56,7 @@ class OpenAiAPIKey(models.Model):
 	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
 
 	def __str__(self):
-		return self.key
+		return 'OpenAI API key (the value is never shown)'
 	
 
 class OllamaSettings(models.Model):
@@ -97,7 +97,7 @@ class NetlasAPIKey(models.Model):
 	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
 
 	def __str__(self):
-		return self.key
+		return 'Netlas API key (the value is never shown)'
 	
 
 class ChaosAPIKey(models.Model):
@@ -105,7 +105,7 @@ class ChaosAPIKey(models.Model):
 	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
 
 	def __str__(self):
-		return self.key
+		return 'Chaos API key (the value is never shown)'
 	
 
 class HackerOneAPIKey(models.Model):

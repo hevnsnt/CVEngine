@@ -631,8 +631,8 @@ def fetch_whois_data_using_netlas(target):
 	secrets = ()
 	if netlas_key:
 		if netlas_key.key and netlas_key.key != "None":
-			command += f' -a {netlas_key}'
-			secrets = (str(netlas_key),)
+			command += f' -a {netlas_key.key}'
+			secrets = (netlas_key.key,)
 
 	try:
 		_, result = run_command(command, remove_ansi_sequence=True, redact=secrets)

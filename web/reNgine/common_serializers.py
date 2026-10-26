@@ -1,32 +1,34 @@
 from rest_framework import serializers
+
+from reNgine.safe_serializers import SafeModelSerializer
 from targetApp.models import *
 
 
-class HistoricalIPSerializer(serializers.ModelSerializer):
+class HistoricalIPSerializer(SafeModelSerializer):
     class Meta:
         model = HistoricalIP
         fields = ['ip', 'location', 'owner', 'last_seen']
 
 
-class RelatedDomainSerializer(serializers.ModelSerializer):
+class RelatedDomainSerializer(SafeModelSerializer):
     class Meta:
         model = RelatedDomain
         fields = '__all__'
 
 
-class NameServersSerializer(serializers.ModelSerializer):
+class NameServersSerializer(SafeModelSerializer):
     class Meta:
         model = NameServer
         fields = ['name']
 
 
-class DomainRegistrarSerializer(serializers.ModelSerializer):
+class DomainRegistrarSerializer(SafeModelSerializer):
     class Meta:
         model = Registrar
         fields = ['name', 'phone', 'email', 'url']
 
 
-class DomainRegistrationSerializer(serializers.ModelSerializer):
+class DomainRegistrationSerializer(SafeModelSerializer):
     class Meta:
         model = DomainRegistration
         fields = [
@@ -42,13 +44,13 @@ class DomainRegistrationSerializer(serializers.ModelSerializer):
             'fax'
         ]
 
-class DomainWhoisStatusSerializer(serializers.ModelSerializer):
+class DomainWhoisStatusSerializer(SafeModelSerializer):
     class Meta:
         model = WhoisStatus
         fields = ['name']
 
 
-class DomainDNSRecordSerializer(serializers.ModelSerializer):
+class DomainDNSRecordSerializer(SafeModelSerializer):
     class Meta:
         model = DNSRecord
         fields = ['name', 'type']
