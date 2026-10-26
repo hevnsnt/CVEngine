@@ -60,8 +60,10 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "$TAG" -m "CVEngine $TAG"
-            git push origin HEAD
+            git push origin "refs/tags/$TAG"
           fi
+          # a tag that did not reach the remote must stop the run here, not later at "gh release create"
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null
 
       - name: 📝 Release notes from the changelog
         env:
