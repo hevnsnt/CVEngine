@@ -4,7 +4,7 @@ import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { fmtTime } from "/staticfiles/cve/prefs.js";
-import { areaChart, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
+import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -721,6 +721,7 @@ every(pollFeed, 6000);
 // and when; an "exposed over time" and a "time to fix" line need history the server does not keep yet (requested).
 (async () => {
   if (!slug) return;
+  const TIERS = ["fire", "smoke", "ice"];
   const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
   const PAGES = 5;
   const collect = async (path) => {
@@ -735,12 +736,22 @@ every(pollFeed, 6000);
     return rows;
   };
   try {
-    const [findings, changes] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
+    const [findings, changes] = await Promise.all([collect("findings?status=all"), collect("changes?since=365d")]);
     const section = $("trends");
     if (!findings.length && !changes.length) return;
+    const tierOf = (f) => {
+      if (TIERS.includes(f.heat)) return f.heat;
+      const sev = String(f.severity || "").toLowerCase();
+      return sev === "critical" || sev === "high" ? "fire" : sev === "medium" ? "smoke" : "ice";
+    };
     section.append(
-      areaChart({ title: "New findings per day", unit: "findings", ranges: [["7D", 7], ["30D", 30], ["90D", 90]], dates: findings.map((f) => f.detected) }),
-      areaChart({ title: "Inventory changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30], ["90D", 90]], dates: changes.map((c) => c.detected) }),
+      activityMatrix({
+        title: "Activity",
+        rows: [
+          { key: "findings", label: "New findings", unit: "findings", tiered: true, items: findings.map((f) => ({ date: f.detected, tier: tierOf(f) })) },
+          { key: "changes", label: "Inventory changes", unit: "changes", items: changes.map((c) => ({ date: c.detected })) },
+        ],
+      }),
     );
     section.hidden = false;
     const spark = (anchorId, dates, label) => {

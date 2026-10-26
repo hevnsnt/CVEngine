@@ -302,3 +302,111 @@ export function sparkline(values) {
   }
   return svg;
 }
+
+/**
+ * A two-row activity matrix: one cell per day, a week per column, as wide as the card allows. A "tiered" row colors each day by its
+ * worst temperature (fire, smoke, ice) and shades it by how many arrived; a plain row shades by count. Beside each grid sit the
+ * totals, split by temperature, and the busiest day.
+ * @param {{title:string, rows:Array<{key:string,label:string,unit:string,tiered?:boolean,items:Array<{date:string,tier?:string}>}>}} spec
+ */
+const TIER_NAMES = ["fire", "smoke", "ice"];
+const MATRIX_CELL = 16;
+const MATRIX_GAP = 4;
+const MATRIX_MAX_WEEKS = 30;
+const plural = (n, unit) => `${n} ${unit}`;
+
+export function activityMatrix({ title, rows }) {
+  const root = h("section", "card chart matrix");
+  const head = h("div", "mx-head");
+  head.append(h("span", "eyebrow", title));
+  const readout = h("span", "mx-read note", "Hover a day");
+  readout.setAttribute("aria-live", "polite");
+  const legend = h("div", "mx-legend");
+  legend.setAttribute("aria-hidden", "true");
+  TIER_NAMES.forEach((t) => {
+    const k = h("span", "");
+    k.append(h("i", `mx-key ${t}`), document.createTextNode(t[0].toUpperCase() + t.slice(1)));
+    legend.append(k);
+  });
+  legend.append(h("span", "mx-scale", "Less"));
+  [1, 2, 3, 4].forEach((l) => {
+    const i = h("i", "mx-key level");
+    i.dataset.level = l;
+    legend.append(i);
+  });
+  legend.append(h("span", "mx-scale", "More"));
+  head.append(readout, legend);
+  root.append(head);
+
+  const views = rows.map((row) => {
+    const box = h("div", "mx-row");
+    const lead = h("div", "mx-lead");
+    const total = h("b", "mx-total");
+    lead.append(h("span", "eyebrow", row.label), total);
+    const gridWrap = h("div", "mx-grid-wrap");
+    const side = h("div", "mx-side");
+    box.append(lead, gridWrap, side);
+    root.append(box);
+    // bucket the items per local day, with the count per temperature
+    const days = new Map();
+    row.items.forEach((it) => {
+      const d = new Date(it.date);
+      if (Number.isNaN(d.getTime())) return;
+      const k = dayKey(d);
+      const e = days.get(k) || { n: 0, fire: 0, smoke: 0, ice: 0 };
+      e.n += 1;
+      if (row.tiered && TIER_NAMES.includes(it.tier)) e[it.tier] += 1;
+      days.set(k, e);
+    });
+    return { row, gridWrap, total, side, days };
+  });
+
+  const paint = () => {
+    const today = dayKey(new Date());
+    const dow = (new Date(today).getDay() + 6) % 7; // Monday = 0
+    views.forEach(({ row, gridWrap, total, side, days }) => {
+      const avail = Math.max(gridWrap.clientWidth, 200);
+      const weeks = Math.max(8, Math.min(MATRIX_MAX_WEEKS, Math.floor((avail + MATRIX_GAP) / (MATRIX_CELL + MATRIX_GAP))));
+      const start = today - (dow + (weeks - 1) * 7) * DAY;
+      const list = [];
+      for (let t = start; t <= today; t += DAY) list.push({ t, e: days.get(t) || { n: 0, fire: 0, smoke: 0, ice: 0 } });
+      const peak = Math.max(1, ...list.map((d) => d.e.n));
+      const sum = list.reduce((n, d) => n + d.e.n, 0);
+      const byTier = TIER_NAMES.map((t) => list.reduce((n, d) => n + d.e[t], 0));
+      const busiest = list.reduce((b, d) => (d.e.n > b.e.n ? d : b), list[0]);
+      total.textContent = sum.toLocaleString();
+
+      const grid = h("div", "mx-grid");
+      grid.style.setProperty("--weeks", weeks);
+      grid.setAttribute("role", "img");
+      grid.setAttribute("aria-label", `${row.label}: ${sum} ${row.unit} over the last ${weeks} weeks${sum ? `, busiest day ${peak}` : ""}.`);
+      list.forEach((d) => {
+        const c = h("i", "mx-cell");
+        const level = d.e.n === 0 ? 0 : Math.min(4, Math.ceil((d.e.n / peak) * 4));
+        c.dataset.level = level;
+        if (row.tiered && d.e.n) c.dataset.tier = d.e.fire ? "fire" : d.e.smoke ? "smoke" : "ice";
+        const day = new Date(d.t).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+        const split = row.tiered && d.e.n ? ` (${TIER_NAMES.filter((t) => d.e[t]).map((t) => `${d.e[t]} ${t}`).join(", ")})` : "";
+        c.title = `${day}: ${plural(d.e.n, row.unit)}${split}`;
+        c.addEventListener("pointerenter", () => (readout.textContent = `${row.label}, ${day}: ${plural(d.e.n, row.unit)}${split}`));
+        grid.append(c);
+      });
+      grid.addEventListener("pointerleave", () => (readout.textContent = "Hover a day"));
+      gridWrap.replaceChildren(grid);
+
+      side.replaceChildren();
+      if (row.tiered) {
+        TIER_NAMES.forEach((t, i) => {
+          const line = h("span", "mx-stat");
+          line.append(h("i", `mx-key ${t}`), h("b", "", String(byTier[i])), document.createTextNode(` ${t}`));
+          side.append(line);
+        });
+      }
+      const busy = h("span", "mx-busy note", busiest.e.n ? `Busiest: ${fmtDay(busiest.t)}, ${busiest.e.n}` : "Nothing in this window");
+      side.append(busy);
+    });
+  };
+  new ResizeObserver(() => requestAnimationFrame(paint)).observe(root);
+  requestAnimationFrame(paint);
+  return root;
+}
