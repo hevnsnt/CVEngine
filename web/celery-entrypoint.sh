@@ -71,11 +71,9 @@ then
   rm -rf /root/nuclei-templates/geeknik_nuclei_templates
 fi
 
-if [ ! -f ~/nuclei-templates/ssrf_nagli.yaml ];
-then
-  echo "Downloading ssrf_nagli for Nuclei"
-  wget https://raw.githubusercontent.com/NagliNagli/BountyTricks/main/ssrf.yaml -O ~/nuclei-templates/ssrf_nagli.yaml
-fi
+# a third-party template that used to be fetched from a branch on every start is no longer downloaded: unreviewed, unpinned
+# content must not enter the template set. A copy left by an older install is removed.
+rm -f ~/nuclei-templates/ssrf_nagli.yaml
 
 # TEMPORARY FIX, httpcore is causing issues with celery, removing it as temp fix
 #python3 -m pip uninstall -y httpcore
