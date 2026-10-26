@@ -1309,3 +1309,15 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .ai-cell .see-all{margin-top:auto}
 @media (min-width:1000px){.cell-stack+.cell{border-left:1px solid var(--line);border-top:0}}
 @media (max-width:999px){.cell-stack+.cell{border-top:1px solid var(--line)}}
+
+/* Organization and project switchers live in the top bar on wide screens (the sheet carries them on phones and tablets) */
+.proj-wrap.top{display:none}
+@media (min-width:1000px){
+  .proj-wrap.top{display:flex;flex-direction:row;align-items:center;gap:8px;margin:0 0 0 auto}
+  .proj-wrap.top .select{width:clamp(150px,15vw,220px)}
+  .proj-wrap.top .select select{height:40px;min-height:40px;padding-top:0;padding-bottom:0}
+  .proj-wrap.top .select+.select{margin-top:0}
+}
+.proj-wrap.top:has(.org-switch){gap:8px}
+.proj-wrap.top:has(.org-switch) .select{margin-top:0}
+.proj-wrap.top:has(.org-switch) .select+.proj-label+.select{margin-top:0}
