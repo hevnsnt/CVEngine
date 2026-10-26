@@ -1322,3 +1322,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .proj-wrap.top:has(.org-switch) .select{margin-top:0}
 .proj-wrap.top:has(.org-switch) .select+.proj-label+.select{margin-top:0}
 .page-head.compact{margin-bottom:12px;align-items:center}.page-head.compact .sub{margin:0}
+.page-head.compact:not(:has(.btn)){margin-bottom:0}.page-head.compact:has(.btn){justify-content:flex-end}
