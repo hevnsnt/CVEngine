@@ -13,6 +13,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'update.sh'
 DOCKER = '''#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls"
 case " $* " in
+  *" ps --format "*) cat "$STUB_DIR/docker_ps_ports" 2>/dev/null; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
   *" inspect -f "*) case "$*" in
       *config_files*) cat "$STUB_DIR/running_config_files" 2>/dev/null;;
@@ -540,6 +541,23 @@ class UpdateLayoutAndScanTests(UpdateScriptCase):
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn('https://127.0.0.1:18443/', (self.stub / 'curl_urls').read_text())
+
+    def test_the_stacks_own_ports_are_not_mistaken_for_a_stranger_when_ss_cannot_name_the_owner(self):
+        # an ordinary user (a member of the docker group) sees no process names for docker's own listeners
+        (self.stub / 'config.json').write_text(PROXY_CONFIG % ('443', ''))
+        (self.stub / 'ss_out').write_text('LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*\n')
+        (self.stub / 'docker_ps_ports').write_text('0.0.0.0:443->443/tcp, [::]:443->443/tcp\n')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_a_port_nobody_can_name_and_docker_does_not_publish_still_stops_the_update(self):
+        (self.stub / 'config.json').write_text(PROXY_CONFIG % ('443', ''))
+        (self.stub / 'ss_out').write_text('LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*\n')
+        (self.stub / 'docker_ps_ports').write_text('127.0.0.1:5432->5432/tcp\n')
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('an unknown process already holds it', result.stderr)
+        self.assertFalse(any(' build ' in c for c in self.calls()))
 
     def test_check_reports_and_changes_nothing(self):
         (self.stub / 'web_up').touch()
