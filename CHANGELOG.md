@@ -36,6 +36,8 @@ Fixes from an adversarial review of the whole code base.
 
 ### Fixed
 
+- **Approve update starts the update within seconds.** The host side was a cron job that ran every 5 minutes, was never installed by `install.sh`, and said nothing when it was missing, so on such a machine the button recorded an approval that nothing read and the orange bar waited for ever. Now `scripts/update-watch.sh` (started by cron every minute, installed by `install.sh` and `scripts/install-updater.sh`) listens for the whole minute and starts the update about two seconds after the approval: scans are paused, running ones finish, the files are updated, the containers restart and scanning resumes. While it waits for scans it checks every 15 seconds and writes each reason once, instead of every call. It reports a heartbeat every 15 seconds, and Settings > Updates and the banner say when the host updater is not reporting and what to run. Existing installs run `scripts/install-updater.sh` once to switch from the 5-minute entry.
+
 - **An approved update that the host cannot start now says why, instead of waiting for ever.** The host script ran from cron with its output discarded, so a checkout with local changes, an unreachable origin, or any command that failed early ended the run without a word and the orange bar said "Waiting for the host to start the rebuild" indefinitely. Now a dirty checkout shows "The update did not finish" with the files named, an unreachable origin shows its reason, any other stop writes the failing line to the update log, and after 12 minutes without a start the bar tells you to check the cron entry and run `scripts/apply-update.sh` by hand.
 
 Also from the review.
