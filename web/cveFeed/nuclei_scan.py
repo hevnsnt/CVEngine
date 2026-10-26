@@ -473,14 +473,26 @@ def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severitie
 LIGHT_SERVICE = 'nuclei-light'
 
 
+# Templates that name the product in the matcher, not in the template: the template's own name ("WAF Detection", "Favicon Detection") says what
+# kind of fact it is, and the vendor or product is the matcher that fired. Their extracted value is not a version (a favicon template extracts
+# the icon's hash), so none is appended.
+MATCHER_NAMED = re.compile(r'(^|-)(waf-detect|waf-detection|favicon-detect|favicon-detection)$')
+
+
 def tech_name_from(line):
     """The technology a ``http/technologies`` result names. The tech-detect template reports it as the matcher; the others
-    are named for it ("Nginx version", "Apache detect"), with an extracted version appended as ``Name:1.2``."""
+    are named for it ("Nginx version", "Apache detect"), with an extracted version appended as ``Name:1.2``. The WAF and favicon
+    templates name the product by matcher (a result without one names nothing: "WAF" alone says that something blocks, not what)."""
     info = line.get('info') or {}
-    if line.get('template-id') == 'tech-detect' and line.get('matcher-name'):
-        name = line['matcher-name']
+    template = str(line.get('template-id') or '')
+    matcher = str(line.get('matcher-name') or '').strip()
+    if MATCHER_NAMED.search(template):
+        return matcher[:100]
+    if template == 'tech-detect' and matcher:
+        name = matcher
     else:
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
+        name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
     name = (name or '').strip()[:100]
     version = next((str(v) for v in line.get('extracted-results') or [] if v and str(v)[0].isdigit()), '')
     return f'{name}:{version[:30]}' if name and version else name

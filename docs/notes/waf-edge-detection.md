@@ -7,13 +7,34 @@ tools are documented to work. Every item marked **to verify** needs one run agai
 
 ## What the pipeline knows today
 
-- bbot's `WAF Detection` finding becomes a host label `WAF` (`reNgine/bbot.py`, `label_for`). The label keeps no vendor, product or version.
-  Whether bbot's event text names the vendor is **to verify** (capture one raw event from a host behind a known WAF).
-- Technology names come from bbot's httpx run and from nuclei's `tech-detect` template (`nuclei_scan.py`), stored as `Name` or `Name:version`.
+- A `WAF Detection` finding becomes a host label `WAF` (`reNgine/bbot.py`, `label_for`). The label keeps no vendor, product or version.
+- bbot's `wafw00f` module (read from the bbot source) emits a separate `WAF` event whose data is `{host, url, waf}`, `waf` being wafw00f's own name
+  for the product ("FortiWeb (Fortinet)"), or "generic detection" with a reason when it only sees that something blocks. **That event was not
+  parsed at all**, so the product name was thrown away. **Done:** it is now stored as a technology of the host (without the vendor suffix), which
+  makes it searchable, lets CVE correlation consider the product (no version, so a lower-confidence match), and lets the AI and the targeted nuclei
+  pass see it. "generic detection" names no product and is not stored.
+- Technology names come from bbot's httpx run and from nuclei's technology templates (`nuclei_scan.py`, `tech_name_from`), stored as `Name` or
+  `Name:version`. For the non-`tech-detect` templates the extracted version is already appended, so option 3 below is mostly in place.
 - nmap `-sV` service banners, and nuclei CVE templates, are the only other sources of product and version.
 - Correlation matches CVEs to a product name and a version. A bare category word ("WAF") must not match a product (fixed in this change).
 
 So the gap is not matching, it is that a firewall or VPN appliance usually arrives as a category with no product, and almost never with a version.
+
+## What the real data showed (checked through the MCP, 2026-10-26)
+
+Twelve hosts across the projects matched the search "waf". What they carry:
+
+- A technology literally named **`WAF`** on nine of them, and **`DNS WAF`** on three: the nuclei `waf-detect` and `dns-waf-detect` templates' own names. The
+  vendor that fired is the matcher name, and `tech_name_from` read the matcher only for `tech-detect`, so the vendor was thrown away. **Fixed.**
+- **`favicon-detection` with the version `307296554`**: the favicon template extracts the icon's hash, which was stored as a version. **Fixed** (the
+  hash is not a version; a favicon result names a product only when the template's matcher does).
+- **`AWS Service -`** (a dangling dash from "AWS Service - Detection"). **Fixed.**
+- **False "fire" matches from the bare `WAF` technology.** `www.digitalray.ai` carried four CVE matches (Progress LoadMaster / MOVEit WAF, F5 BIG-IP ASM)
+  whose only basis was the technology `WAF` with no version; CVE-2026-8037 is listed as exploited, so the host was heated "fire". The AI triage
+  itself called each one "uncertain: a generic WAF label cannot be tied to the affected build". The generic-label fix in correlation removes them at
+  the next match refresh.
+- Of 387 stored TLS certificates, **none** has an appliance vendor in its subject, issuer or names (issuers are DigiCert, Amazon, Let's Encrypt, GoDaddy,
+  Google Trust Services). Certificate vendor naming (option 5) would have named nothing on this data, so it was **not built**.
 
 ## Why this is hard
 
@@ -23,15 +44,14 @@ case useful, instead of chasing versions that are not exposed.
 
 ## Options, cheapest first
 
-1. **Keep what bbot already says.** If the event text names the product, store it as the technology (`Cloudflare`, `F5 BIG-IP ASM`) next to
-   the `WAF` label. No new scan. **To verify** what the text contains.
+1. **Keep what bbot already says.** **Done** (see above). Needs a real host to confirm wafw00f's names read well in the UI.
 2. **wafw00f in the pipeline.** It fingerprints the vendor and product from response behaviour (headers, cookies, block pages, how it reacts
    to a benign-looking probe). It does not report versions. The web app already calls it (`api/views.py`), so it is installed. It sends a few
    extra requests that look like attacks to the WAF, so it belongs in the same opt-in tier as other active checks. **To verify** its output format.
 3. **nuclei technology and fingerprint templates, with their version extractors.** Nuclei ships `http/technologies` (including a WAF detection
-   template) and many product-panel templates that extract a version from a login page, a JS file name or a response header. The existing
-   `tech-detect` pass reads only the matcher name. Reading the extractor output as well would turn "Fortinet panel" into "Fortinet panel 7.2.4"
-   where the page leaks it. Smallest change, uses what is installed. **To verify** how many installed templates carry an extractor.
+   template) and many product-panel templates that extract a version from a login page, a JS file name or a response header. The pass already
+   appends an extracted version for every template except `tech-detect` itself (which names the product by matcher). What remains is to count how
+   many installed templates carry an extractor, and which edge products have none. **To verify.**
 4. **httpx fingerprints: favicon hash and JARM.** A favicon hash identifies a product family when the appliance serves its default icon (VPN
    gateways, firewalls and mail gateways usually do); JARM fingerprints the TLS stack and separates products that look alike over HTTP. Both are
    one request each. They give a product, and sometimes a major version band, never an exact version. **To verify** that the httpx bbot runs
@@ -46,7 +66,8 @@ case useful, instead of chasing versions that are not exposed.
 
 ## Recommendation
 
-1. Do options 1, 3 and 5 first. They add no scanning and no new tool; they only stop discarding what is already collected.
+1. Do options 1, 3 and 5 first. They add no scanning and no new tool; they only stop discarding what is already collected. Option 1 is done and
+   option 3 was already in place; option 5 (certificate vendor names) needs a vendor map and a real certificate sample, so it is next.
 2. Add option 4 (favicon and JARM) as a second pass for hosts that carry the `WAF` label or an appliance-looking technology.
 3. Treat options 2 and 6 as opt-in and only for authorized targets, because they send attack-looking probes.
 4. Leave exact versions to option 7, and say "version unknown" in the UI instead of guessing. A product with no version should produce a
