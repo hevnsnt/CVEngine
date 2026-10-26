@@ -13,6 +13,12 @@ SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'update.sh'
 DOCKER = '''#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls"
 case " $* " in
+  *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
+  *" inspect -f "*) case "$*" in
+      *config_files*) cat "$STUB_DIR/running_config_files" 2>/dev/null;;
+      *environment_file*) cat "$STUB_DIR/running_env_file" 2>/dev/null;;
+      *'.compose.project"'*) cat "$STUB_DIR/running_project" 2>/dev/null;;
+    esac; echo; exit 0;;
   *" ps -q --status running web "*) if [ -e "$STUB_DIR/web_up" ]; then echo web-container; fi; exit 0;;
   *" web python3 manage.py shell "*) case "$*" in
       *_abort_scan*) cat "$STUB_DIR/stop_json" 2>/dev/null;;
@@ -503,6 +509,32 @@ class UpdateLayoutAndScanTests(UpdateScriptCase):
         prefix = 'docker compose --env-file .env.production -p cvengine -f docker-compose.yml -f docker-compose.host.yml'
         self.assertIn(prefix + ' up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
         self.assertFalse(any(c.startswith('docker compose -f docker-compose.yml ') for c in self.calls()))
+
+    def test_with_no_layout_named_the_running_stacks_files_env_file_and_project_are_used(self):
+        (self.stub / 'running_config_files').write_text(f'{self.work}/docker-compose.yml,{self.work}/docker-compose.host.yml\n')
+        (self.stub / 'running_env_file').write_text(f'{self.work}/.env.production\n')
+        (self.stub / 'running_project').write_text('cvengine\n')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('Using the Compose layout the running stack was started with', result.stdout)
+        prefix = 'docker compose --env-file .env.production -p cvengine -f docker-compose.yml -f docker-compose.host.yml'
+        self.assertIn(prefix + ' up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
+        self.assertFalse(any(c.startswith('docker compose -f docker-compose.yml ') for c in self.calls()))
+
+    def test_a_layout_named_in_env_wins_over_the_running_stack(self):
+        (self.stub / 'running_config_files').write_text(f'{self.work}/docker-compose.yml,{self.work}/docker-compose.host.yml\n')
+        (self.work / '.env').write_text('CVENGINE_COMPOSE_FILES=docker-compose.yml\n')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn('Using the Compose layout the running stack', result.stdout)
+        self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
+
+    def test_a_running_stack_started_from_files_elsewhere_stops_the_update_before_anything_changes(self):
+        (self.stub / 'running_config_files').write_text('/srv/elsewhere/docker-compose.yml\n')
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('CVENGINE_COMPOSE_FILES', result.stderr)
+        self.assertFalse(any(' build ' in c for c in self.calls()))
 
     def test_unknown_compose_file_is_refused_before_anything_changes(self):
         result = self.run_update(CVENGINE_COMPOSE_FILES='docker-compose.yml,../etc/x.yml')
