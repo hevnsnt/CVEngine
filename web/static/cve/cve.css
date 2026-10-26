@@ -1321,3 +1321,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .proj-wrap.top:has(.org-switch){gap:8px}
 .proj-wrap.top:has(.org-switch) .select{margin-top:0}
 .proj-wrap.top:has(.org-switch) .select+.proj-label+.select{margin-top:0}
+.page-head.compact{margin-bottom:12px;align-items:center}.page-head.compact .sub{margin:0}
