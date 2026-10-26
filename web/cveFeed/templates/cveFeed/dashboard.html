@@ -2,10 +2,10 @@
 {% load static assets %}
 {% block title %}CVEngine{% endblock %}
 {% block content %}
-<div class="page-head">
+<div class="page-head compact">
   <div>
-    <h1>Live</h1>
-    <p class="sub">Discovery, the AI engine and your exposure, as it happens. <span class="live" id="live">live</span></p>
+    <h1 class="sr">Live</h1>
+    <span class="live" id="live" style="display:none">live</span>
   </div>
   {% if not ai_ready %}<a class="btn sm" href="{% url 'cve_welcome' %}">Connect your AI model</a>{% endif %}
 </div>
@@ -13,19 +13,13 @@
 <a class="since-strip" id="since-strip" href="#" hidden></a>
 
 <section class="panel ticks" aria-label="Exposure">
+  <div class="cell-stack">
   <a class="cell" id="c-exposed" title="Exposed hosts, out of every host the Hosts page lists. The same name in two targets of one project is one host." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}"{% endif %}>
     <div class="cell-head"><span class="eyebrow">Exposed hosts</span><span class="go">Hosts</span></div>
     <div class="big"><b id="s-exposed_hosts">-</b><small>of <span id="s-hosts">-</span> hosts</small></div>
     <div class="meter" role="img" aria-label="Share of hosts that are exposed"><i id="m-exposed"></i></div>
     <p>A host is exposed when a CVE matches it (one the AI has not ruled out), or an open finding is medium or worse.</p>
   </a>
-
-  <div class="cell" id="c-map">
-    <div class="cell-head"><span class="eyebrow">Attack surface</span><span class="eyebrow" id="map-count"></span></div>
-    <div class="map" id="map" role="list" aria-label="One square per host, coloured by its worst threat"></div>
-    <div class="legend" id="map-legend" aria-hidden="true"></div>
-  </div>
-
   <div class="cell" id="c-temps">
     <div class="cell-head"><span class="eyebrow">CVE intelligence feed</span><span class="eyebrow" id="temp-hint">Filter</span></div>
     <p class="note">These are catalog advisories, not findings on your assets. Asset candidates are listed under CVE matches.</p>
@@ -34,6 +28,23 @@
       <button class="temp smoke" type="button" data-tier="smoke" aria-pressed="false"><span class="nm">Smoke</span><span class="bar"><i id="b-smoke"></i></span><b id="s-smoke">-</b></button>
       <button class="temp ice" type="button" data-tier="ice" aria-pressed="false"><span class="nm">Ice</span><span class="bar"><i id="b-ice"></i></span><b id="s-ice">-</b></button>
     </div>
+  </div>
+  </div>
+
+  <div class="cell" id="c-map">
+    <div class="cell-head"><span class="eyebrow">Attack surface</span><span class="eyebrow" id="map-count"></span></div>
+    <div class="map" id="map" role="list" aria-label="One square per host, coloured by its worst threat"></div>
+    <div class="legend" id="map-legend" aria-hidden="true"></div>
+  </div>
+
+  <div class="cell ai-cell" id="c-ai">
+    <div class="card-head">
+      <h2>AI activity</h2>
+      <span class="live" id="ai-live">working</span>
+    </div>
+    <ul class="agent" id="agent" aria-live="polite" tabindex="0" aria-label="AI activity, newest first. Scroll for earlier lines."></ul>
+    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'activity' %}">See all activity</a>{% endif %}
+    <p class="empty" id="agent-empty">The engine is idle. Connect a model and add a target to put it to work.</p>
   </div>
 </section>
 
@@ -71,15 +82,6 @@
 
   <section class="trends" id="trends" aria-label="Trends" hidden></section>
 
-  <div class="card ai">
-    <div class="card-head">
-      <h2>AI activity</h2>
-      <span class="live" id="ai-live">working</span>
-    </div>
-    <ul class="agent" id="agent" aria-live="polite" tabindex="0" aria-label="AI activity, newest first. Scroll for earlier lines."></ul>
-    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'activity' %}">See all activity</a>{% endif %}
-    <p class="empty" id="agent-empty">The engine is idle. Connect a model and add a target to put it to work.</p>
-  </div>
 </section>
 
 <section class="card feed-card" style="margin-top:14px">
