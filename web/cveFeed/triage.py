@@ -224,6 +224,7 @@ def affected_brief(affected, names=()):
 
 def describe_cve_match(m):
     """The facts, prompt payload and signature fields of one CVEMatch (``m.cve_entry`` and ``m.subdomain`` loaded)."""
+    from cveFeed import detection
     cve, sub = m.cve_entry, getattr(m, 'subdomain', None)
     domain = getattr(sub, 'target_domain', None)
     names = _names(getattr(sub, 'name', ''), getattr(domain, 'name', ''))
@@ -241,6 +242,9 @@ def describe_cve_match(m):
                 'kev': bool(getattr(cve, 'kev', False)), 'epss_reached': bool(getattr(cve, 'epss_reached', False)),
                 'exploit_db': bool(getattr(cve, 'exploit_db', False)),
                 'affected': affected_brief(cve.affected, names)}}
+    guidance = detection.prompt_guidance(cve)  # earlier notes on what makes this CVE apply or not: a hint, the evidence above decides
+    if guidance:
+        payload['cve']['guidance'] = guidance
     floor, _ = hard_evidence('cve_match', facts)
     fields = {'cve': getattr(m, 'cve_entry_id', None), 'product': m.matched_product, 'version': m.matched_version, 'in_range': m.version_in_range,
               'source': m.source, 'distro': facts['distro_status'], 'template_vulnerable': facts['template_result'] == 'vulnerable',

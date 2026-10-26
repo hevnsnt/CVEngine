@@ -119,6 +119,8 @@ exploit probability, then score), so a new CVE from any feed gets one within the
 A `manual` record is never overwritten. When a CVE's affected data changes, the rules checks are rewritten and the AI checks kept.
 `manage.py author_cve_detections [--ai]` fills the whole catalogue at once.
 
+The policy the AI follows for each new CVE (scope first: `external`, `local_only`, `unclear`; then the record), when a record is revised, and how an administrator adds facts are in [CVE-INTAKE.md](CVE-INTAKE.md). A CVE only usable from the host itself (`local_only`) is never matched to a host.
+
 ### Validating a match
 
 Each detection record also says how to decide a match, so nobody has to rediscover it per CVE:

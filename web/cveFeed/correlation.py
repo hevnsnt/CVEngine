@@ -552,6 +552,9 @@ def invalid_identity_reason(match):
     produced the match is compared with the advisory's named products, using the same aliases as
     candidate generation. Conflicting positive evidence prevents automatic closure.
     """
+    if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
+        from cveFeed.locality import reason_text
+        return reason_text()
     if (match.template_result == 'vulnerable' or match.distro_status == 'vulnerable'
             or match.version_in_range is True):
         return ''
@@ -583,7 +586,8 @@ def close_invalid_correlation(match, reason=None):
     reason = reason or invalid_identity_reason(match)
     if not reason:
         return False
-    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith('Closed automatically: invalid product correlation'):
+    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(('Closed automatically: invalid product correlation',
+                                                                               'Closed automatically: local-only')):
         return False
     pairs = triage.track([match])
     if not pairs:
@@ -617,7 +621,8 @@ def _seedable(verdict, row):
         if row["version_in_range"] is True and row["distro_status"] != distro_lib.PATCHED:
             return None
         if (row["version_in_range"] is not False and row["distro_status"] != distro_lib.PATCHED
-                and not (verdict.ai_reason or '').startswith('Closed automatically: invalid product correlation')):
+                and not (verdict.ai_reason or '').startswith(('Closed automatically: invalid product correlation',
+                                                              'Closed automatically: local-only'))):
             return None
     return verdict
 
@@ -857,15 +862,16 @@ _CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", 
 
 def cve_pool(cve_limit=None):
     """(cve_by_id, product_index) for the stored CVEs, cached per process. Never loads ``raw`` or the prose columns."""
-    from django.db.models import Count, Max
+    from django.db.models import Count, Max, Q
 
     from cveFeed.models import CVEEntry
 
-    stamp = CVEEntry.objects.aggregate(n=Count("id"), latest=Max("synced_at"))
-    key = (cve_limit, stamp["n"], stamp["latest"])
+    stamp = CVEEntry.objects.aggregate(n=Count("id"), latest=Max("synced_at"), local=Count("id", filter=Q(local_only=True)))
+    key = (cve_limit, stamp["n"], stamp["latest"], stamp["local"])
     if _INDEX_CACHE["key"] == key:
         return _INDEX_CACHE["value"]
-    qs = CVEEntry.objects.exclude(status__icontains="reject").only(*_CVE_FIELDS).order_by("-published_at")  # a rejected CVE matches nothing
+    # a rejected CVE matches nothing, and neither does one only usable from the host itself (cveFeed.locality)
+    qs = CVEEntry.objects.exclude(status__icontains="reject").exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
     if cve_limit:
         qs = qs[:cve_limit]
     cve_by_id = {c.id: c for c in qs}

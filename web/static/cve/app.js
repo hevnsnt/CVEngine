@@ -807,7 +807,7 @@ const excerpt = (label, text) => {
   box.append(el("div", "note", label), el("pre", "banner", text));
   return box;
 };
-const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows" };
+const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows", debian: "Debian / Ubuntu", rhel: "RHEL / Fedora", alpine: "Alpine" };
 // When no external check can settle a finding, the model suggests short, read-only local commands a host owner
 // can run themselves (cveFeed.triage.suggest_local_checks). Unverified by this tool: shown as a suggestion, not evidence.
 const localChecksBox = (local) => {
@@ -830,6 +830,78 @@ const localChecksBox = (local) => {
   return box;
 };
 
+// What a person needs to confirm one CVE, from the shared per-CVE record (cveFeed.detection): the same for every match of that CVE.
+const GUIDE_SOURCE = { rules: "Written by rules from the CVE record", ai: "Written by AI", manual: "Written by a person" };
+const guidanceBox = (det, cveId) => {
+  const strategy = det && det.strategy;
+  if (!strategy) return null;
+  const box = el("div", "cve-guidance");
+  const head = el("div", "tools");
+  head.append(el("h4", "sub", `How to confirm ${cveId}`));
+  const note = `${GUIDE_SOURCE[det.source] || "Written automatically"}${det.ai_model ? ` (${det.ai_model})` : ""}${det.updated ? `, ${shortDate(det.updated)}` : ""}`;
+  head.append(badge(note, det.source === "ai" ? "queued" : "ice"));
+  box.append(head);
+  if (det.source === "ai") box.append(el("p", "note", "AI-written guidance: confirm it against the vendor advisory before acting on it."));
+  if (strategy.summary) box.append(el("p", "", strategy.summary));
+  if (strategy.identify) box.append(el("p", "note", `How to tell it applies: ${strategy.identify}`));
+  const list = (title, items, tone) => {
+    if (!items || !items.length) return;
+    box.append(el("div", "note guide-h", title));
+    const ul = el("ul", `guide-list${tone ? " " + tone : ""}`);
+    items.forEach((t) => ul.append(el("li", "", t)));
+    box.append(ul);
+  };
+  const profile = strategy.validation || {};
+  if (profile.remote_determinable) {
+    const text = { yes: "cvENGINE can decide this from outside.", partial: "From outside cvENGINE can only see the reported version or the exposed service; a backported fix can fool it.", no: "This cannot be decided from outside; it needs a check on the host." }[profile.remote_determinable];
+    box.append(el("p", "note", `${text}${profile.recommended_tools?.length ? ` Tools: ${profile.recommended_tools.join(", ")}.` : ""}`));
+  }
+  const remote = strategy.remote_checks || [];
+  if (remote.length) {
+    box.append(el("div", "note guide-h", "From outside (what cvENGINE runs)"));
+    remote.forEach((c) => {
+      const row = el("div", "local-check");
+      const h = el("div", "tools");
+      h.append(badge(c.how?.tool || c.kind, "queued"), el("span", "note", c.description));
+      row.append(h);
+      if (c.how?.invocation) {
+        const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
+        copy.onclick = () => navigator.clipboard.writeText(c.how.invocation);
+        h.append(copy);
+        row.append(el("pre", "banner", c.how.invocation));
+      }
+      if (c.how?.decide) row.append(el("p", "note", c.how.decide));
+      box.append(row);
+    });
+  }
+  list("Steps to confirm it", strategy.confirm_steps);
+  const local = (strategy.local_checks || []).filter((c) => (c.commands || []).length);
+  if (local.length) {
+    box.append(el("div", "note guide-h", "On the host (read-only commands)"));
+    local.forEach((c) => {
+      box.append(el("p", "note", c.description));
+      c.commands.forEach((cmd) => {
+        const row = el("div", "local-check");
+        const h = el("div", "tools");
+        h.append(badge(OS_LABEL[cmd.platform] || cmd.platform, "queued"));
+        if (cmd.needs_root) h.append(badge("needs admin rights", "smoke"));
+        const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
+        copy.onclick = () => navigator.clipboard.writeText(cmd.command);
+        h.append(copy);
+        row.append(h, el("pre", "banner", cmd.command));
+        if (cmd.explain) row.append(el("p", "note", cmd.explain));
+        box.append(row);
+      });
+    });
+  }
+  list("Likely a true positive when", [...(strategy.true_positive_signs || []), ...(profile.validated_when || [])]);
+  list("Likely a false positive when", [...(strategy.false_positive_signs || []), ...(strategy.false_positive_notes ? [strategy.false_positive_notes] : [])]);
+  list("Not applicable when", profile.not_applicable_when);
+  if (strategy.prerequisites?.length) list("Only affects hosts where", strategy.prerequisites);
+  if (strategy.remediation) box.append(el("p", "", `Fix: ${strategy.remediation}`));
+  return box;
+};
+
 function renderFinding(d, cfg, row) {
   const out = [];
   const project = projectOf(row); // the finding's own project: its host, history and screenshots live there
@@ -837,7 +909,7 @@ function renderFinding(d, cfg, row) {
   head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
   const detailAge = agingOf(row || {});
   if (d.severity) head.append(badge(d.severity, d.severity));
-  if (d.assessment_status === "closed_not_applicable") head.append(badge("Closed: invalid product match", "ice"));
+  if (d.assessment_status === "closed_not_applicable") head.append(badge(/local-only/.test(d.assessment_reason || "") ? "Closed: local-only vulnerability" : "Closed: invalid product match", "ice"));
   head.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
   const vb = validationBadge({ validation_status: d.validation.status });
   if (vb) head.append(vb);
@@ -1041,6 +1113,8 @@ function renderFinding(d, cfg, row) {
     controls.append(run, state);
     check.append(controls);
   }
+  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, d.cve_id || (d.title || "").split(" ")[0]) : null;
+  if (guide) check.append(guide);
   const v = d.validation;
   const none = {
     no_check: "No validated check exists for this finding yet.",
@@ -1049,7 +1123,7 @@ function renderFinding(d, cfg, row) {
     skipped_blocked: "The checks were not run: the host is outside this project or resolves to an address that must not be scanned.",
   };
   if (!v.steps.length) check.append(el("p", "note", none[v.status] || none.none));
-  if (v.status === "no_check") check.append(localChecksBox(d.remediation.local_checks));
+  if (v.status === "no_check" && !(guide && (d.cve?.detection?.strategy?.local_checks || []).some((c) => (c.commands || []).length))) check.append(localChecksBox(d.remediation.local_checks));
   v.steps.forEach((step) => {
     const card = el("div", "svc");
     if (step.display) card.append(el("pre", "banner mono", step.display));

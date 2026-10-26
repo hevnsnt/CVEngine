@@ -176,6 +176,11 @@ TOOLS = [
     ('get_cve_detection', 'How to tell whether a product is affected by a CVE: the shared detection strategy, remote and local checks '
      'as read-only data (version ranges, HTTP markers, package and config checks, nuclei template). The same for every organization.',
      _schema({'cve_id': {'type': 'string'}}, ['cve_id']), lambda c, a: svc.get_cve_detection(c, a.get('cve_id', '')), False),
+    ('update_cve_detection', 'App Admin only. Change the shared detection record of one CVE (identify, confirm steps, true and false positive '
+     'signs, checks, scope). Give guidance (plain text with new facts; the onboard AI revises the record with it) OR strategy (a whole '
+     'record you wrote; it is validated and never overwritten by the model afterwards). Commands are rendered by the app, never taken from input.',
+     _schema({'cve_id': {'type': 'string'}, 'guidance': {'type': 'string'}, 'strategy': {'type': 'object'}}, ['cve_id']),
+     lambda c, a: svc.update_cve_detection(c, a.get('cve_id', ''), guidance=a.get('guidance'), strategy=a.get('strategy')), True),
     ('list_cve_matches', 'CVEs matched to hosts, with AI verdicts and remediation status.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string'}, 'verdict': {'type': 'string'}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_matches(c, a.get('project'), a), False),

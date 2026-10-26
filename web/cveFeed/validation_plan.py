@@ -102,7 +102,8 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
     if claim is None:
         return {**fallback, 'reason': why + '; generic external checks deferred.'}, provider
     try:
-        context = {'cve': templategen.cve_info_for(cve),
+        from cveFeed import detection
+        context = {'cve': {**templategen.cve_info_for(cve), 'guidance': detection.prompt_guidance(cve)},
                    'asset_evidence': {k: subject.get(k) for k in ('source', 'product', 'matched_version', 'range', 'port')},
                    'approved_checks': [{'kind': c['kind'], 'label': c['label']} for c in checks],
                    'completed_observations': (observations or [])[:6],

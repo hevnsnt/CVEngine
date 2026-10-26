@@ -169,3 +169,5 @@ A domain name is unique within an organization (two organizations may each track
 The API does not expose instance settings, the AI key, bug bounty actions, or user management. It can set a project's own OSINT service keys (write-only) and read which services are configured.
 
 See also: [TENANCY.md](TENANCY.md) for roles, [PIPELINE.md](PIPELINE.md) for what a scan does, [documentation index](README.md).
+
+`get_cve_detection` returns the shared record of a CVE (summary, identify, confirm steps, true and false-positive signs, remote and local checks with rendered commands, scope). `update_cve_detection` (App Admin; `PUT cves/{id}/detection`) changes it with `guidance` (text the onboard AI folds in) or a whole `strategy`. CVEs only usable from the host itself carry `local_only: true` in `list_cves` and are never matched to a host. See [CVE-INTAKE.md](CVE-INTAKE.md).
