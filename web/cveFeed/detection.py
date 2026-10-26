@@ -233,6 +233,10 @@ def validate_strategy(obj):
     problems = []
     if not isinstance(obj, dict):
         return None, ['the strategy is not an object']
+    obj = {k: v for k, v in obj.items() if k != 'validation'}  # computed by finalize(), never taken from the input
+    for key in ('remote_checks', 'local_checks'):
+        if isinstance(obj.get(key), list):
+            obj[key] = [{k: v for k, v in c.items() if k not in ('how', 'commands')} if isinstance(c, dict) else c for c in obj[key]]
     allowed = {'summary', 'remote_checks', 'local_checks', 'prerequisites', 'false_positive_notes', 'remediation', 'safety'}
     for key in set(obj) - allowed:
         problems.append(f'unknown key {str(key)[:40]!r} dropped')
@@ -332,3 +336,99 @@ def merge_strategies(base, extra):
         merged[key] = base[key] or extra[key]
     merged['prerequisites'] = base['prerequisites'] or extra['prerequisites']
     return merged
+
+
+# --- what the strategy means: rendering and the validation profile -----------------------------------------------------------
+
+ATTACK_VECTORS = {'N': 'network', 'A': 'adjacent', 'L': 'local', 'P': 'physical'}
+_AV = re.compile(r'(?:^|/)AV:([NALP])(?:/|$)')
+RENDERED_KEYS = ('how', 'commands')
+
+
+def attack_vector(cvss_vector):
+    found = _AV.search(cvss_vector or '')
+    return ATTACK_VECTORS[found.group(1)] if found else None
+
+
+def validation_profile(strategy, cvss_vector=''):
+    """What a person (or a scanner) needs to know to decide a match for this CVE: whether it can be decided from outside, with which
+    tools, and what makes a match validated, in need of validation, likely false, or not applicable. Computed from the checks and the
+    CVSS attack vector, never written by a model. ``max_remote_state`` uses the triage states: confirmed (validated), likely,
+    needs_validation."""
+    remote, local = strategy.get('remote_checks', []), strategy.get('local_checks', [])
+    vector = attack_vector(cvss_vector)
+    decisive = [c for c in remote if c['kind'] in ('nuclei_template', 'http_probe', 'nse_script') and c['confidence'] in ('high', 'medium')]
+    if vector in ('local', 'physical') and not decisive:
+        determinable = 'no'
+    elif decisive:
+        determinable = 'yes'
+    elif remote:
+        determinable = 'partial'
+    else:
+        determinable = 'no'
+    max_state = {'yes': 'confirmed', 'partial': 'likely', 'no': 'needs_validation'}[determinable]
+    tools = []
+    kinds = {c['kind'] for c in remote}
+    for kind, tool in (('nuclei_template', 'nuclei'), ('version_banner', 'nmap'), ('nse_script', 'nmap'), ('port_service', 'nmap'),
+                       ('http_probe', 'curl'), ('tls_check', 'openssl')):
+        if kind in kinds and tool not in tools:
+            tools.append(tool)
+    for check in local:
+        for tool in {'package_version': 'package manager', 'file_version': 'grep', 'config_setting': 'grep', 'service_state': 'systemctl'}.get(check['kind'], '').split(','):
+            if tool and tool not in tools:
+                tools.append(tool)
+    validated, needs, false_positive = [], [], []
+    for check in remote:
+        p = check['params']
+        if check['kind'] == 'nuclei_template':
+            validated.append(f"the nuclei template {p['template_id']} matches")
+        elif check['kind'] == 'http_probe':
+            validated.append(f"{p['method']} {p['path']} answers as described in the check")
+        elif check['kind'] == 'nse_script':
+            validated.append(f"the nmap script {p['script']} output matches")
+        elif check['kind'] == 'version_banner':
+            needs.append(f"only the reported {p['product']} version is in an affected range (a banner can hide a backported fix)")
+        elif check['kind'] in ('tls_check', 'port_service'):
+            needs.append('the exposed service looks like the affected one, but nothing proves the vulnerable code path')
+    for check in local:
+        p = check['params']
+        if check['kind'] == 'package_version':
+            validated.append(f"on the host, the installed {p['package']} is older than {p.get('affected_below') or p.get('fixed_version')}")
+        elif check['kind'] in ('file_version', 'config_setting', 'service_state'):
+            validated.append(f"on the host, the {check['kind'].replace('_', ' ')} check matches")
+    if not validated and not needs:
+        needs.append('the record names no check: read the advisory')
+    needs.append('a check could not run (host unreachable, port filtered, login unavailable)')
+    false_positive += ['the version is at or above the fixed release', "the distribution lists the package as patched (a backported fix)"]
+    return {
+        'attack_vector': vector,
+        'remote_determinable': determinable,
+        'max_remote_state': max_state,
+        'host_validation': bool(local),
+        'recommended_tools': tools,
+        'validated_when': validated[:8],
+        'needs_validation_when': needs[:8],
+        'likely_false_positive_when': false_positive,
+        'not_applicable_when': ['the affected component is not installed or not exposed on the host'] + (
+            ['the host cannot be reached by a local attacker'] if vector in ('local', 'physical') else []),
+    }
+
+
+def finalize(strategy, cvss_vector=''):
+    """The strategy with every rendered part recomputed: the remote ``how``, the local ``commands`` and the ``validation`` profile. Run
+    after every write that changes the checks; whatever those fields held before (a model cannot supply them) is discarded."""
+    from cveFeed.detection_commands import render_local, render_remote
+    if not strategy:
+        return strategy
+    out = {k: v for k, v in strategy.items() if k != 'validation'}
+    for key, renderer, field in (('remote_checks', render_remote, 'how'), ('local_checks', render_local, 'commands')):
+        checks = []
+        for check in out.get(key, []):
+            check = {k: v for k, v in check.items() if k not in RENDERED_KEYS}
+            rendered = renderer(check)
+            if rendered:
+                check[field] = rendered
+            checks.append(check)
+        out[key] = checks
+    out['validation'] = validation_profile(out, cvss_vector)
+    return out

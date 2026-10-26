@@ -39,7 +39,7 @@ def _priority(qs):
 
 
 def _rules_for(cve):
-    return detection.rules_strategy(cve, detection.installed_template_ids(cve))
+    return detection.finalize(detection.rules_strategy(cve, detection.installed_template_ids(cve)), cve.cvss_vector)
 
 
 def author_rules(batch=None):
@@ -47,7 +47,7 @@ def author_rules(batch=None):
     batch = limit('DETECTION_RULES_BATCH') if batch is None else batch
     now = timezone.now()
     rows = []
-    for cve in _priority(CVEEntry.objects.filter(detection__isnull=True).only('id', 'cve_id', 'title', 'affected'))[:batch]:
+    for cve in _priority(CVEEntry.objects.filter(detection__isnull=True).only('id', 'cve_id', 'title', 'affected', 'cvss_vector'))[:batch]:
         rows.append(CVEDetection(cve_entry_id=cve.id, source='rules', strategy=_rules_for(cve) or {}, rules_at=now,
                                  schema_version=detection.SCHEMA_VERSION))
     CVEDetection.objects.bulk_create(rows, ignore_conflicts=True)  # another worker may have written the same CVE
@@ -67,6 +67,7 @@ def refresh_rules(batch=None):
         kept = {**old, 'remote_checks': [c for c in old.get('remote_checks', []) if c['id'].startswith(AI_ID_PREFIX)],
                 'local_checks': [c for c in old.get('local_checks', []) if c['id'].startswith(AI_ID_PREFIX)]} if old else None
         merged = detection.merge_strategies(fresh, kept) if kept and (kept['remote_checks'] or kept['local_checks']) else fresh
+        merged = detection.finalize(merged, row.cve_entry.cvss_vector)
         CVEDetection.objects.filter(pk=row.pk).update(strategy=merged or {}, rules_at=now, updated_at=now)
         done += 1
     return done
@@ -145,7 +146,7 @@ def enrich_with_ai(row, provider):
     if strategy is None:
         CVEDetection.objects.filter(pk=row.pk).update(ai_problems=problems[:10], ai_model=f'{provider.name}:{provider.model}'[:128])
         return False
-    merged = detection.merge_strategies(row.strategy or None, _prefix_ids(strategy))
+    merged = detection.finalize(detection.merge_strategies(row.strategy or None, _prefix_ids(strategy)), cve.cvss_vector)
     CVEDetection.objects.filter(pk=row.pk).exclude(source='manual').update(
         strategy=merged, source='ai', ai_model=f'{provider.name}:{provider.model}'[:128], ai_problems=problems[:10], updated_at=timezone.now())
     return True
