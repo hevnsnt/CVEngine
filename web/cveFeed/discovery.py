@@ -193,6 +193,23 @@ def persist_screenshots(scan, screenshots, bbot_scan_name):
         subdomain.save(update_fields=['screenshot_path', 'screenshot_hash'])
 
 
+def _report_key_problems(problems, extra_args, scan):
+    """One activity line per service whose key bbot rejected (or never received). bbot skips such a module and carries on, so without
+    this a stored key that is wrong looks like a service that found nothing."""
+    from cveFeed import activity
+    from cveFeed.api_credentials import service_for_module
+    configured = {a.split('=', 1)[0].split('.')[1] for prev, a in zip(extra_args, extra_args[1:])
+                  if prev == '-c' and a.startswith('modules.') and '=' in a}
+    said = set()
+    for module, reason in problems:
+        service = service_for_module(module)
+        if module not in configured or not service or service[0] in said:
+            continue
+        said.add(service[0])
+        activity.log('discovery', f'{service[1]}: the key was not accepted ({reason[:120]}); {module} did not run on {scan.domain.name}',
+                     project=scan.domain.project_id, status='failed', scan_id=scan.id)
+
+
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
     """Body of the celery task; ``stream`` is injectable so tests need no bbot binary."""
     from cveFeed.api_credentials import bbot_config_args
@@ -217,6 +234,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     # lighter: deep as standard, standard as passive. What the heavier run already found is kept.
     modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
+    problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
@@ -227,7 +245,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         for attempt, run_mode in enumerate(modes):
             try:
                 for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,
-                               strict_scope=strict_scope):
+                               strict_scope=strict_scope, problems=problems):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
                     seen = bbot_lib.parse_event(event, batch, hosts)
@@ -249,6 +267,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                     continue
                 raise
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
+        _report_key_problems(problems, extra_args, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}

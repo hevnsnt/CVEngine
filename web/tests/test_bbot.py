@@ -84,7 +84,9 @@ class BbotParseTests(unittest.TestCase):
 		cmd = build_command(['example.com'])
 		self.assertEqual(cmd[:3], ['bbot', '-t', 'example.com'])
 		self.assertIn('--json', cmd)
-		self.assertEqual([cmd[i + 1] for i, c in enumerate(cmd) if c == '-p'], ['subdomain-enum', 'web'])
+		# one -p with both presets: bbot's -p takes a list and a repeated -p replaces the earlier one, which dropped subdomain-enum
+		self.assertEqual(cmd.count('-p'), 1)
+		self.assertEqual(cmd[cmd.index('-p') + 1:cmd.index('-p') + 3], ['subdomain-enum', 'web'])
 		self.assertEqual(cmd[cmd.index('-rf') + 1], 'safe')
 		self.assertIn('--force', cmd)
 		self.assertNotIn('kitchen-sink', cmd)
@@ -136,6 +138,28 @@ class StreamEventsProcessTests(unittest.TestCase):
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
 			events = list(stream_events(['example.com']))
 		self.assertEqual(events, [{'type': 'DNS_NAME', 'data': 'a.com', 'host': 'a.com'}])
+
+	def test_a_config_bbot_rejects_is_a_failed_run_even_with_exit_status_zero(self):
+		# bbot 3.x prints this for a bad -c, runs no scan and exits 0: it used to look like a discovery that found nothing
+		script = ('import sys; print(\'[WARN] Error parsing command-line config option: "/x/config.yml": Expected "key=value"\', '
+		          'file=sys.stderr)')
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
+			with self.assertRaises(BbotProcessError) as cm:
+				list(stream_events(['example.com']))
+		self.assertIn('without scanning', str(cm.exception))
+		self.assertIn('Expected "key=value"', str(cm.exception))
+
+	def test_modules_bbot_skipped_are_collected_with_the_reason(self):
+		script = ('import sys; print("[WARN] Setup soft-failed for shodan_dns: Error with API (401 Unauthorized", file=sys.stderr); '
+		          'print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\')')
+		problems = []
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
+			list(stream_events(['example.com'], problems=problems))
+		self.assertEqual(problems, [('shodan_dns', 'Error with API (401 Unauthorized')])
+
+	def test_a_clean_empty_scan_is_still_not_an_error(self):
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', 'pass']):
+			self.assertEqual(list(stream_events(['example.com'])), [])
 
 	def test_a_crash_after_at_least_one_event_is_not_treated_as_a_total_failure(self):
 		script = ('print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\'); '

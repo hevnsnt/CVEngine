@@ -11,8 +11,10 @@ per the "Setup soft-failed: No API key set" lines bbot already logs).
 SERVICES = {
     'shodan': ('Shodan', [('api_key', 'API key', True)],
                [('modules.shodan_dns.api_key', 'api_key')]),  # shodan_idb is the free InternetDB: it has no key option
-    'censys': ('Censys', [('api_id', 'API ID', False), ('api_secret', 'API secret', True)],
-               [('modules.censys_dns.api_key', ('api_id', 'api_secret')), ('modules.censys_ip.api_key', ('api_id', 'api_secret'))]),
+    # bbot's Censys module talks to the legacy Search API (search.censys.io) with the API ID and secret. censys_ip is not mapped:
+    # none of the scan modes enables it, so a key for it would be stored and never used.
+    'censys': ('Censys (legacy Search API: API ID and secret)', [('api_id', 'API ID', False), ('api_secret', 'API secret', True)],
+               [('modules.censys_dns.api_key', ('api_id', 'api_secret'))]),
     'virustotal': ('VirusTotal', [('api_key', 'API key', True)], [('modules.virustotal.api_key', 'api_key')]),
     'securitytrails': ('SecurityTrails', [('api_key', 'API key', True)], [('modules.securitytrails.api_key', 'api_key')]),
     'fullhunt': ('FullHunt', [('api_key', 'API key', True)], [('modules.fullhunt.api_key', 'api_key')]),
@@ -51,14 +53,34 @@ def resolve_for_project(project):
         for cred in ApiCredential.objects.filter(org_id=project.org_id):
             merged[cred.service] = dict(cred.value)
     for cred in ApiCredential.objects.filter(project=project):
-        merged[cred.service] = dict(cred.value)  # the project's own key wins over its org's
+        # the project's own key wins over its org's, field by field: a project row holding only part of a pair (Censys's ID without
+        # its secret) must not blank what the organization set
+        merged[cred.service] = {**merged.get(cred.service, {}), **{k: v for k, v in cred.value.items() if v}}
     return merged
+
+
+def _global_chaos_key():
+    """The Chaos key saved once for the whole install (Settings > API vault), used where no organization or project has its own."""
+    from dashboard.models import ChaosAPIKey
+    row = ChaosAPIKey.objects.exclude(key='').first()
+    return (row.key or '').strip() if row else ''
+
+
+def service_for_module(module):
+    """The service whose key feeds a bbot module, for naming a rejected key: ``('virustotal', 'VirusTotal')`` or ``None``."""
+    for service, (label, _fields, mapping) in SERVICES.items():
+        if any(path.split('.')[1] == module for path, _ in mapping):
+            return service, label
+    return None
 
 
 def bbot_config_args(project):
     """``-c path=value`` flags for every configured service, ready to append to a bbot command line."""
     args = []
-    for service, fields in resolve_for_project(project).items():
+    resolved = resolve_for_project(project)
+    if not any(resolved.get('chaos', {}).values()) and _global_chaos_key():
+        resolved['chaos'] = {'api_key': _global_chaos_key()}
+    for service, fields in resolved.items():
         _, _, mapping = SERVICES.get(service, (None, None, []))
         for path, field in mapping:
             names = field if isinstance(field, tuple) else (field,)

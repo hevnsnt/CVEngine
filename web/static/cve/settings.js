@@ -625,10 +625,9 @@ const sections = {
     const rows = {};
     const kit = [];
     [
-      ["openai", "OpenAI API key"],
-      ["netlas", "Netlas API key"],
-      ["chaos", "Chaos API key"],
-      ["hackerone", "HackerOne API key"],
+      ["netlas", "Netlas API key (WHOIS lookups)"],
+      ["chaos", "Chaos API key (used when no organization or project has its own)"],
+      ["hackerone", "HackerOne API key (bounty submissions)"],
     ].forEach(([name, label]) => {
       const input = secret(s[name].has_key);
       rows[name] = input;
@@ -647,7 +646,7 @@ const sections = {
         ...kit,
         button("Save", async () => {
           const body = {};
-          ["openai", "netlas", "chaos"].forEach((n) => {
+          ["netlas", "chaos"].forEach((n) => {
             if (rows[n].value) body[n] = { key: rows[n].value };
           });
           if (rows.hackerone.value || rows.h1user.value)
