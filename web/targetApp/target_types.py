@@ -247,22 +247,23 @@ def _lookup_blocked(hostname):
 
 
 def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT):
-    """True if ``hostname`` currently resolves to any address a scanner must not touch. A name that does not
-    resolve, or does not answer within ``timeout`` seconds, is not blocked: the scanners cannot reach it either. (Resolution can
-    change between this check and the scan, so this narrows the DNS-rebinding window rather than closing it; the IPs are
-    re-filtered when stored.)"""
+    """True if ``hostname`` currently resolves to any address a scanner must not touch. A name that does not exist is not blocked:
+    the scanners cannot reach it either. A name whose nameserver does not answer within ``timeout`` seconds is treated as blocked,
+    because a nameserver that stalls the check and then answers the scanner with an internal address would otherwise get through;
+    the host is checked again on the next pass. (Resolution can change between this check and the scan, so this narrows the
+    DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.)"""
     import threading
     answer = []
     worker = threading.Thread(target=lambda: answer.append(_lookup_blocked(hostname)), daemon=True)
     worker.start()
     worker.join(timeout)
-    return bool(answer and answer[0])
+    return not answer or bool(answer[0])
 
 
 def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, timeout=RESOLVE_TIMEOUT):
     """The subset of ``names`` that resolves to something a scanner must not touch. Names are looked up in parallel, each bounded
     by ``timeout`` and the whole list by ``budget`` seconds, so thousands of names with dead nameservers cannot hold a worker for
-    hours; a name still unanswered at the deadline counts as not blocked, as in resolves_to_blocked."""
+    hours; a name still unanswered at the deadline counts as blocked, as in resolves_to_blocked."""
     import time
     from concurrent.futures import ThreadPoolExecutor
     names = list(dict.fromkeys(names))
@@ -276,8 +277,8 @@ def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, 
         try:
             if future.result(timeout=max(0.0, min(timeout * (1 + len(names) // max(1, workers)), deadline - time.monotonic()))):
                 blocked.add(name)
-        except Exception:  # noqa: BLE001 - a lookup that fails or runs out of time is "not blocked", like resolves_to_blocked
-            continue
+        except Exception:  # noqa: BLE001 - a lookup that runs out of time is "blocked" (not verified), like resolves_to_blocked
+            blocked.add(name)
     pool.shutdown(wait=False, cancel_futures=True)
     return blocked
 

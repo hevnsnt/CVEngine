@@ -210,6 +210,18 @@ class HygieneRunnerTests(TestCase):
 		self.assertEqual((row.status, row.remediation_status), ('open', 'open'))
 		self.assertIn('Reopened', row.remediation_note)
 
+	def test_a_hostile_certificate_cannot_abort_the_domains_tls_review(self):
+		def hostile(host, port):
+			if host != 'www.example.test':
+				return None
+			return cert(host=host, port=port, sans=[f'n{i}.example.test' for i in range(5000)], subject='C' * 5000, issuer='I' * 5000,
+						chain_error='E' * 5000)
+		counts = self.run_with(hostile, lambda name: ([], False))
+		self.assertEqual(counts['tls_hosts'], 2)
+		row = TlsCertificate.objects.get(host='www.example.test', port=443)
+		self.assertEqual((len(row.subject), len(row.issuer), len(row.chain_error)), (500, 500, 300))
+		self.assertEqual(len(row.sans), hy.MAX_CERT_SANS)
+
 	def test_ip_targets_skip_email_checks(self):
 		ip_domain = Domain.objects.create(name='203.0.113.9', project=self.project, insert_date=timezone.now())
 		self.assertEqual(hy.email_domains(ip_domain, lambda n, t: True), [])

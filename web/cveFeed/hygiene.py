@@ -333,6 +333,22 @@ def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None):
         return False
 
 
+CERT_TEXT_LIMITS = {'subject': 500, 'issuer': 500, 'signature_algorithm': 100, 'key_description': 100, 'protocol': 20, 'cipher': 100,
+                    'chain_error': 300}
+MAX_CERT_SANS = 200
+MAX_CERT_SAN_LENGTH = 255
+
+
+def clip_certificate(info):
+    """A copy of a probed certificate whose text fits the TlsCertificate columns and whose name list is bounded. A server can present
+    a certificate with a 10 KB subject or 50,000 names; storing it as is would raise and drop the rest of the domain's TLS review."""
+    out = dict(info)
+    for key, limit in CERT_TEXT_LIMITS.items():
+        out[key] = str(out.get(key) or '')[:limit]
+    out['sans'] = [str(name)[:MAX_CERT_SAN_LENGTH] for name in (out.get('sans') or [])[:MAX_CERT_SANS]]
+    return out
+
+
 def probe_tls(host, port):
     try:
         addresses = pinned_transport.resolve(host, port)
@@ -480,6 +496,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             if not info:
                 continue
             probed += 1
+            info = clip_certificate(info)  # the certificate is the scanned server's own text: fit it to the columns
             prev = existing.get((info['host'], info['port']))
             TlsCertificate.objects.update_or_create(
                 domain=domain, host=info['host'], port=info['port'],

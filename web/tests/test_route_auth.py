@@ -426,3 +426,22 @@ class ProbeTimeBudgetTests(SimpleTestCase):
 			stop.set()
 			listener.close()
 		self.assertLess(time.monotonic() - started, 5)
+
+
+class PageTitleTests(SimpleTestCase):
+	def test_the_title_is_found_and_tidied(self):
+		self.assertEqual(ra.page_title('<html><head><TITLE lang="en">\n  Sign   in\n</TITLE></head>'), 'Sign in')
+		self.assertEqual(ra.page_title('<title>A</title><title>B</title>'), 'A')
+		self.assertEqual(ra.page_title('<titles>no</titles><title>yes</title>'), 'yes')
+		self.assertEqual(ra.page_title('<title>' + 'x' * 1000 + '</title>'), 'x' * 300)
+
+	def test_no_title_and_unfinished_titles_give_nothing(self):
+		for text in ('', '<html></html>', '<title>never closed', '<title no end', '<titl>x</titl>'):
+			self.assertEqual(ra.page_title(text), '', text)
+
+	def test_a_body_built_to_make_a_regex_quadratic_is_read_at_once(self):
+		import time
+		started = time.monotonic()
+		for text in ('<title ' * 40000, '<title>' * 40000, '<title>a' * 40000):
+			self.assertEqual(ra.page_title(text), '')
+		self.assertLess(time.monotonic() - started, 1)

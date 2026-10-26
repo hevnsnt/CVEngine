@@ -54,6 +54,10 @@ Also from the review.
 - **Rejected CVEs are closed** and never matched again, the CVSS score is taken from the best-preferred metric instead of whichever was listed last, and a remediation state (fixed, accepted risk) carries from one scan's finding to the next instead of reopening.
 - **A slow AI answer cannot overwrite newer data.** Triage re-reads each row after the provider replies; a finding whose evidence changed meanwhile waits for its next review, and a validation hit that landed meanwhile keeps the finding confirmed.
 - **Auto-fire retries a CVE whose run failed** (a provider outage, say) for 48 hours instead of marking it done forever.
+- **A host whose DNS check times out is not scanned this pass.** The check that keeps scanners off internal addresses treated a nameserver that stalled as "fine", so a hostile nameserver could delay its answer past the check and then hand the scanner an internal address. A name that does not exist is still simply skipped; a name that does not answer in time is left for the next pass.
+- **A hostile certificate cannot abort a domain's TLS review.** The subject, issuer and names of a certificate are the scanned server's own text; they are now clipped to their columns (and the name list to 200) before storing, instead of raising and dropping every later host of the domain.
+- **A crafted page cannot stall a route check.** The page title is found with plain string searches instead of a backtracking pattern, so a body of repeated `<title` cannot cost quadratic time.
+- **The Elasticsearch and CouchDB exposure checks read at most 64 KB within 10 seconds** from the scanned server, instead of whatever it sends for as long as it takes.
 
 ### Changed
 
