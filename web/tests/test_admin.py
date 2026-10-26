@@ -195,6 +195,33 @@ class AdminMatrixTests(TestCase):
 		self.assertFalse(User.objects.filter(username='intruder').exists())
 		self.assertEqual(Org.objects.get(pk=self.org_b.pk).name, 'Beta')
 
+	def test_an_org_admin_cannot_take_over_a_bug_bounty_account_by_resetting_it(self):
+		UserProfile.objects.filter(user=self.member_a).update(bugbounty_enabled=True)
+		c = client_for(self.admin_a)
+		before = User.objects.get(pk=self.member_a.pk).password
+		for path in ('reset-password', 'reset-mfa'):
+			self.assertEqual(api(c, 'POST', f'users/{self.member_a.id}/{path}')[0], 403, path)
+		self.assertEqual(api(c, 'PATCH', f'users/{self.member_a.id}', {'is_active': False})[0], 403)
+		self.assertEqual(User.objects.get(pk=self.member_a.pk).password, before)
+		self.assertEqual(api(client_for(self.root), 'POST', f'users/{self.member_a.id}/reset-password')[0], 200)  # an App Admin still can
+		self.assertEqual(api(c, 'PATCH', f'users/{self.member_a.id}', {'first_name': 'Fine'})[0], 200)  # ordinary edits are unaffected
+
+	def test_an_org_admin_adopts_only_unused_accounts_that_belong_nowhere(self):
+		from django.utils import timezone as tz
+		fresh = User.objects.create_user('fresh', password='pw-Secret-1')  # created by an App Admin, never signed in
+		used = User.objects.create_user('used', password='pw-Secret-1')  # signed in once, then removed from its organization
+		User.objects.filter(pk=used.pk).update(last_login=tz.now())
+		bounty = User.objects.create_user('bountyhunter', password='pw-Secret-1')
+		UserProfile.objects.create(user=bounty, bugbounty_enabled=True)
+		c = client_for(self.admin_a)
+		grant = lambda user: api(c, 'POST', 'memberships', {'user_id': user.id, 'scope': 'org', 'scope_id': self.org_a.id, 'role': 'user'})[0]
+		self.assertEqual(grant(used), 404)
+		self.assertEqual(grant(bounty), 404)
+		self.assertEqual(grant(fresh), 200)
+		self.assertFalse(OrgMembership.objects.filter(user__in=[used, bounty]).exists())
+		self.assertEqual(api(client_for(self.root), 'POST', 'memberships',
+							{'user_id': used.id, 'scope': 'org', 'scope_id': self.org_a.id, 'role': 'user'})[0], 200)  # an App Admin can place it
+
 	def test_org_admin_cannot_do_app_admin_things(self):
 		c = client_for(self.admin_a)
 		self.assertEqual(api(c, 'POST', 'orgs', {'name': 'New'})[0], 403)

@@ -59,7 +59,7 @@ def _need_user(actor, user_id, credentials=False):
     if not user or not roles.can_manage_user(actor, user):
         raise AdminError(404, 'user not found')
     if credentials and not roles.can_manage_credentials(actor, user):
-        raise AdminError(403, 'this user also belongs to an organization you do not administer; ask an App Admin')
+        raise AdminError(403, 'this account is out of your reach (it belongs to an organization you do not administer, or holds bug bounty access); ask an App Admin')
     return user
 
 

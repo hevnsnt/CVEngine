@@ -63,6 +63,8 @@ Also from the review.
 - **Redaction of scanned-host text is bounded.** The bug bounty redactor ran all its patterns over a request or response of any size before cutting it; it now reads the limit plus a margin, and its private-key pattern is bounded.
 - **`get_remediation_work` no longer takes a minute and a half with 500 registered assets.** The asset list is read once per call (names as a set, networks parsed once) instead of re-parsing every pattern for every match, and an `assets` argument over 500 entries is a 400.
 - **Member, comment and audit-trail lists are paged** (`page`, `page_size`) like the others, and a rescan request reads at most ten times the queue limit of host names.
+- **The system-wide activity feed no longer names a tenant's host.** The memory gate's "waiting for memory" and "out of memory" lines, which every tenant can read, carried the label of the job (a domain or host); they now say only which kind of run it was.
+- **An Org Admin cannot take over an account by resetting it.** Resetting the password or two-step sign-in (or deactivating) of an account that holds bug bounty access, which only an App Admin can authorize, is refused for Org Admins; and an account that belongs to no organization can be adopted by an Org Admin only while it has never signed in (the onboarding case), so a person removed from another tenant can no longer be adopted and reset.
 - **MCP tells the agent what is data.** The server instructions and every successful tool result carry a notice that banners, titles, response excerpts and feed text come from scanned hosts and third parties, and must never be followed as instructions or used as a reason to call a tool that changes or deletes anything.
 
 ### Changed

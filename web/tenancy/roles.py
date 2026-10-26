@@ -199,7 +199,14 @@ def can_manage_credentials(actor, target):
         return True
     if not can_manage_user(actor, target):
         return False
+    if _has_bugbounty(target):
+        return False  # bug bounty access is authorized by an App Admin; resetting the sign-in would hand it to whoever resets
     return user_org_ids(target) <= managed_org_ids(actor)
+
+
+def _has_bugbounty(user):
+    profile = getattr(user, 'tenancy_profile', None)
+    return bool(profile and profile.bugbounty_enabled)
 
 
 def can_grant_membership_to(actor, target):
@@ -219,4 +226,9 @@ def can_grant_membership_to(actor, target):
     managed = managed_org_ids(actor)
     existing_org_ids = (set(OrgMembership.objects.filter(user=target).values_list('org_id', flat=True)) |
                         set(ProjectMembership.objects.filter(user=target).values_list('project__org_id', flat=True)))
+    if not existing_org_ids:
+        # An account in no organization is adoptable only while it is unused (it has never signed in): that is onboarding. One that has
+        # signed in and now belongs nowhere (a person removed from another tenant, with their sessions and tokens) is an App Admin's to
+        # place; otherwise any Org Admin could take it over by granting a membership and then resetting its password.
+        return target.last_login is None and not _has_bugbounty(target)
     return existing_org_ids <= managed
