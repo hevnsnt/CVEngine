@@ -68,6 +68,28 @@ class StateTests(TestCase):
 		with open(os.path.join(self.dir, '.commit'), 'w') as f:
 			f.write(sha + '\n')
 
+	def heartbeat(self, age, raw=None):
+		import time
+		with open(os.path.join(self.dir, '.updater-heartbeat'), 'w') as f:
+			f.write(raw if raw is not None else json.dumps({'at': time.time() - age}))
+
+	def test_the_host_updater_is_reported_alive_stale_or_never_seen(self):
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		self.assertEqual(updater.state(row)['host_updater'], {'seen': False, 'alive': False, 'age_seconds': None})  # no file: never reported
+		self.heartbeat(5)
+		hu = updater.state(row)['host_updater']
+		self.assertEqual((hu['seen'], hu['alive']), (True, True))
+		self.assertLess(hu['age_seconds'], 30)
+		self.heartbeat(updater.HEARTBEAT_ALIVE_SECONDS + 120)
+		hu = updater.state(row)['host_updater']
+		self.assertEqual((hu['seen'], hu['alive']), (True, False))  # it was there and stopped
+
+	def test_a_heartbeat_file_that_is_not_the_expected_shape_counts_as_never_seen(self):
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		for raw in ('not json', '{}', '{"at": "soon"}', '{"at": 1e999}', '{"at": ' + str(10 ** 12) + '}', '[]'):
+			self.heartbeat(0, raw=raw)
+			self.assertFalse(updater.state(row)['host_updater']['seen'], raw)  # includes a time in the future
+
 	def test_check_approve_apply_cycle(self):
 		self.install(OLD)
 		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))

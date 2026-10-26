@@ -12,8 +12,10 @@ Pure helpers take their HTTP function as a parameter so they are testable withou
 """
 import json
 import logging
+import math
 import os
 import re
+import time
 from datetime import datetime, timezone as dt_timezone
 
 import requests
@@ -28,6 +30,7 @@ BRANCH_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$')
 SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 MAX_COMMITS = 20
 PHASE_VALUES = ('idle', 'draining', 'applying', 'done', 'failed')
+HEARTBEAT_ALIVE_SECONDS = 180  # scripts/update-watch.sh reports every 15 seconds; this is a few missed minutes
 
 
 class UpdateError(Exception):
@@ -57,6 +60,22 @@ def installed_sha():
         return first
     env = os.environ.get('CVENGINE_COMMIT', '').strip().lower()
     return env if SHA_RE.match(env) else ''
+
+
+def host_updater():
+    """Whether the host-side watcher (scripts/update-watch.sh) is listening: it writes ``.updater-heartbeat`` every 15 seconds. The web
+    container cannot act on an approval itself, so an admin needs to know when nothing on the host will. ``seen`` is False when the
+    file has never been written (not installed, or an older updater that does not report)."""
+    try:
+        with open(_file('.updater-heartbeat')) as f:
+            at = float(json.load(f)['at'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return {'seen': False, 'alive': False, 'age_seconds': None}
+    age = time.time() - at
+    if not math.isfinite(age) or age < -60:
+        return {'seen': False, 'alive': False, 'age_seconds': None}
+    age = int(max(0, age))
+    return {'seen': True, 'alive': age <= HEARTBEAT_ALIVE_SECONDS, 'age_seconds': age}
 
 
 def read_phase():
@@ -238,4 +257,5 @@ def state(row):
         'phase': phase['phase'], 'phase_detail': phase['detail'], 'phase_scans_running': phase['scans_running'],
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
+        'host_updater': host_updater(),
     }

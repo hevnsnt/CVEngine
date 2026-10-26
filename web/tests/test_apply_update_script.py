@@ -1,6 +1,7 @@
 """scripts/apply-update.sh against a throwaway git origin with stub `docker` and `make`, so the real script runs
 without touching Docker. Skipped where the scripts directory is not available (inside the web container only
 ./web is mounted); run it on the host: ``cd web && python3 -m unittest tests.test_apply_update_script``."""
+import json
 import os
 import shutil
 import subprocess
@@ -219,11 +220,33 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 3)  # "still waiting": cron ignores it, the watcher polls slowly on it
         self.assertEqual(self.head(), self.prev)
         self.assertTrue(self.approved())
         self.assertFalse([c for c in self.calls() if ' up ' in c or 'restart' in c or c.startswith('make')])
         self.assertIn('scan(s) running', (self.work / 'web' / '.update-log').read_text())
+
+    def test_files_pulled_by_hand_but_an_older_build_still_running_are_rebuilt(self):
+        # a host without the updater is first brought up to date with `git pull`; the approval must still rebuild the services
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.prev + '\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('docker compose -f docker-compose.dev.yml build web celery celery-beat', self.calls())
+        self.assertIn('docker compose -f docker-compose.dev.yml up -d --no-deps --force-recreate web celery celery-beat', self.calls())
+        self.assertIn('running build is', (self.work / 'web' / '.update-log').read_text())
+        self.assertFalse(self.approved())
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
+
+    def test_files_and_build_already_at_the_approved_commit_rebuild_nothing(self):
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.calls() if ' build ' in c])
+        self.assertFalse(self.approved())
 
     def test_a_bad_compose_file_value_is_refused_before_anything_runs(self):
         self.approve()
@@ -238,6 +261,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 1)
         self.assertFalse(self.approved())
         self.assertEqual(self.head(), self.prev)
+        # the reason reaches Settings > Updates: the usual cause is an update branch that is not the one checked out on the server
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'failed')
+        self.assertIn('branch checked out on this server', phase.get('detail', ''))
 
     def test_local_changes_to_tracked_files_block_the_update_and_keep_the_approval(self):
         (self.work / 'web' / 'README').write_text('edited locally\n')
@@ -245,6 +272,108 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 1)
         self.assertTrue(self.approved())
         self.assertEqual(self.head(), self.prev)
+
+    def phase_file(self):
+        import json
+        path = self.work / 'web' / '.update-phase.json'
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def test_a_dirty_checkout_is_reported_in_the_ui_not_just_refused(self):
+        (self.work / 'web' / 'README').write_text('edited locally\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'failed')
+        self.assertIn('web/README', phase.get('detail', ''))
+        self.assertTrue(self.approved())  # kept: it retries once the checkout is clean
+
+    def test_an_unreachable_origin_is_reported_and_the_approval_kept(self):
+        self.git('remote', 'set-url', 'origin', str(self.tmp / 'does-not-exist.git'), cwd=self.work)
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        phase = self.phase_file()
+        self.assertEqual(phase.get('phase'), 'draining')
+        self.assertIn('could not reach origin', phase.get('detail', ''))
+        self.assertTrue(self.approved())
+        self.assertEqual(self.head(), self.prev)
+
+    def test_an_unexpected_failure_leaves_a_line_in_the_log_instead_of_nothing(self):
+        state = self.work / '.git' / 'cvengine-update'
+        (state / 'update-state.py').mkdir(parents=True)  # the helper copy lands inside it and cannot be run
+        self.approve()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        log = (state / 'update.log').read_text()
+        self.assertIn('the update script stopped at line', log)
+        self.assertIn('migrate-log', log)  # the command that stopped it
+        self.assertTrue(self.approved())
+
+    def install_watcher(self):
+        shutil.copy(SCRIPTS / 'update-watch.sh', self.work / 'scripts' / 'update-watch.sh')
+        (self.work / 'scripts' / 'update-watch.sh').chmod(0o755)
+        (self.work / 'scripts' / 'apply-update.sh').chmod(0o755)
+
+    def run_watch(self, seconds=6):
+        return subprocess.run(['bash', 'scripts/update-watch.sh', str(seconds)], cwd=self.work, env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_the_watcher_applies_an_approval_within_seconds_and_reports_that_it_is_alive(self):
+        import time
+        self.install_watcher()
+        self.approve()
+        started = time.monotonic()
+        result = self.run_watch(8)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)  # updated
+        self.assertFalse(self.approved())
+        self.assertTrue(any(c.endswith('build web celery celery-beat') for c in self.calls()))
+        heartbeat = (self.work / 'web' / '.updater-heartbeat')
+        self.assertTrue(heartbeat.exists())
+        self.assertLess(time.time() - float(__import__('json').loads(heartbeat.read_text())['at']), 30)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_the_watcher_with_nothing_approved_only_heartbeats(self):
+        self.install_watcher()
+        result = self.run_watch(4)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / 'web' / '.updater-heartbeat').exists())
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.head(), self.prev)
+
+    def test_two_watchers_do_not_run_at_once(self):
+        self.install_watcher()
+        first = subprocess.Popen(['bash', 'scripts/update-watch.sh', '6'], cwd=self.work, env=self.env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(first.kill)
+        import time
+        time.sleep(1)
+        started = time.monotonic()
+        second = self.run_watch(6)
+        self.assertEqual(second.returncode, 0)
+        self.assertLess(time.monotonic() - started, 3)  # it found the lock taken and left at once
+        first.wait(timeout=30)
+
+    def test_waiting_for_scans_exits_with_3_reports_once_and_keeps_the_approval(self):
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        first = self.run_script()
+        second = self.run_script()
+        self.assertEqual((first.returncode, second.returncode), (3, 3))
+        self.assertTrue(self.approved())
+        log = (self.work / '.git' / 'cvengine-update' / 'update.log').read_text()
+        self.assertEqual(log.count('waiting: 2 scan(s) running'), 1)  # once, not on every call
+        self.assertEqual(self.phase_file().get('phase'), 'draining')
+        self.assertEqual(self.head(), self.prev)
+
+    def test_a_refusal_is_logged_once_however_often_the_watcher_calls(self):
+        (self.work / 'web' / 'README').write_text('edited locally\n')
+        self.approve()
+        for _ in range(3):
+            self.assertEqual(self.run_script().returncode, 1)
+        log = (self.work / '.git' / 'cvengine-update' / 'update.log').read_text()
+        self.assertEqual(log.count('refusing: the checkout has local changes'), 1)
 
     def test_a_failed_build_returns_to_the_previous_commit_and_redeploys_it(self):
         (self.stub / 'fail_up').write_text('')
@@ -298,7 +427,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.stub / 'running_count').write_text('3\n')
         self.approve()
         result = self.run_script()
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 3)
         self.assertEqual(self.head(), self.prev)
         self.assertTrue(self.approved())
 
@@ -451,3 +580,22 @@ class UpgradePostgresScriptTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HostUpdaterInstallTests(unittest.TestCase):
+    """An install that never had the update watcher gets it from the install and from the one manual update it needs."""
+
+    def read(self, *parts):
+        return Path(SCRIPTS.parent, *parts).read_text()
+
+    def test_install_sh_installs_the_watcher_unless_automatic_deployment_does(self):
+        installer = self.read('install.sh')
+        self.assertIn('scripts/install-updater.sh', installer)
+        self.assertIn('cvengine-auto-deploy', installer)
+
+    def test_update_sh_leaves_the_watcher_behind_on_success_and_never_fails_the_update_for_it(self):
+        update = self.read('scripts', 'update.sh')
+        self.assertIn('install-updater.sh', update)
+        self.assertIn('cvengine-auto-update', update)  # not twice
+        self.assertLess(update.index('install-updater.sh'), update.index('exit 0\n    fi\n    sleep 5'))
+        self.assertIn('Could not install the update watcher', update)

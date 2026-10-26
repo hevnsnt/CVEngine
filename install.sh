@@ -183,6 +183,20 @@ admin_output=$(make admin 2>&1) || { echo "$admin_output" >&2; show_logs; die "C
 admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
 [ -n "$admin_banner" ] || admin_banner=$admin_output
 
+# The app cannot update itself (it has no Docker access on purpose): a small watcher on this machine applies an update an admin approves in
+# Settings > Updates, within seconds. Without it the Approve button does nothing, so it is part of the install. Skipped when automatic
+# deployment already looks after updates.
+step "Installing the update watcher"
+if ! command -v crontab >/dev/null 2>&1; then
+  warn "crontab is not available: approving an update in Settings > Updates will not start it. Install cron, then run scripts/install-updater.sh"
+elif crontab -l 2>/dev/null | grep -q 'cvengine-auto-deploy' || systemctl is-enabled cvengine-auto-deploy >/dev/null 2>&1; then
+  ok "automatic deployment is installed and applies updates; the watcher is not needed"
+elif ./scripts/install-updater.sh >/dev/null 2>&1; then
+  ok "an update approved in Settings > Updates starts within seconds"
+else
+  warn "could not install the update watcher: run scripts/install-updater.sh to enable one-click updates"
+fi
+
 ca=$(pwd)/secrets/certs/ca.crt
 printf '\n%s\n' "$GREEN$BOLD#########################################################################$RESET"
 printf '%s\n' "$GREEN$BOLD  CVEngine is installed and running.$RESET"

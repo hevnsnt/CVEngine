@@ -8,6 +8,10 @@ const el = (tag, cls, text) => {
 };
 
 const POLL_MS = 4000;
+const elapsed = (ms) => {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  return `${sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, "0")} s`} since approval.`;
+};
 const STEPS = ["Pause", "Drain scans", "Rebuild", "Resume"];
 
 // After approval an orange bar sits at the top of every page and says what the update is doing. The page is greyed out only while
@@ -67,7 +71,7 @@ function watchUpdate(first) {
       unreachable += 1;
       sawDown = true;
       grey(true);
-      paint(2, "Rebuilding CVEngine", "The page is paused and returns when the services are back. Usually a minute or two.");
+      paint(2, "Rebuilding CVEngine", "The page is paused and returns when the services are back. Usually 2 to 5 minutes.");
       return setTimeout(tick, POLL_MS);
     }
     unreachable = 0;
@@ -93,8 +97,26 @@ function watchUpdate(first) {
     } else {
       grey(false);
       const n = now.scans_running != null ? now.scans_running : await scansNow();
-      if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start meanwhile.");
-      else paint(1, `Updating to ${now.latest}`, "Waiting for the host to start the rebuild.");
+      if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start meanwhile. The rebuild starts when the last one ends (minutes, or hours for a deep scan).");
+      else {
+        const waited = now.approved_at ? Date.now() - Date.parse(now.approved_at) : 0;
+        const hu = now.host_updater || {};
+        if (now.phase_detail) paint(1, `Updating to ${now.latest}`, `${now.phase_detail}. ${elapsed(waited)}`);
+        else if (hu.alive) paint(1, `Updating to ${now.latest}`, `The host updater is listening and starts within seconds. ${elapsed(waited)}`);
+        else if (hu.seen)
+          paint(
+            1,
+            `Updating to ${now.latest}`,
+            `Nothing will start: the host updater stopped reporting ${Math.max(1, Math.round((hu.age_seconds || 0) / 60))} min ago. Open Details for the command to run on the server. ${elapsed(waited)}`
+          );
+        else if (waited > 20000)
+          paint(
+            1,
+            `Updating to ${now.latest}`,
+            `Nothing will start by itself: the host updater is not installed on the server. Open Details for the one command to run. ${elapsed(waited)}`
+          );
+        else paint(1, `Updating to ${now.latest}`, "Waiting for the host to pick it up.");
+      }
     }
     setTimeout(tick, POLL_MS);
   };

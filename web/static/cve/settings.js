@@ -238,9 +238,74 @@ const sections = {
 
   async updates(m) {
     const host = el("div");
-    m.append(host);
+    const sourceHost = el("div");
+    m.append(host, sourceHost);
     const when = (iso) => (iso ? new Date(iso).toLocaleString() : "never");
+    const ago = (ms) => {
+      const sec = Math.max(0, Math.round(ms / 1000));
+      return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, "0")} s`;
+    };
+    // What happens after Approve, in order, with what to expect. `at` is the step the host is on now (1 = waiting for the host).
+    const UPDATE_STEPS = [
+      ["Approved", "Done."],
+      ["The host picks it up", "Within a few seconds once the host updater is installed. Nothing happens until it is."],
+      ["New scans pause, running scans finish", "As long as the longest running scan: minutes for most, up to a few hours for a deep scan."],
+      ["The files are updated", "About 10 seconds."],
+      ["The services rebuild and restart", "2 to 5 minutes. The page greys out and comes back on its own."],
+      ["Scanning resumes", "Immediately; the page reloads."],
+    ];
+    const SETUP_COMMAND = "cd /opt/cvengine && git pull --ff-only && sudo scripts/install-updater.sh";
+    const stepAt = (s, hu) => {
+      if (s.phase === "resuming" || s.phase === "done") return 5;
+      if (s.phase === "applying") return /^merging/.test(s.phase_detail || "") ? 3 : 4;
+      if (s.phase === "draining" && !/could not reach|local changes/.test(s.phase_detail || "")) return 2;
+      return 1;
+    };
+    const copyButton = (value) =>
+      button("Copy command", async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          toast("Copied");
+        } catch (_) {
+          toast("Select the command and copy it");
+        }
+      }, "btn ghost");
+    // Shown while no host updater is listening: say what is missing and give the one command that fixes it.
+    const setupBox = (s) => {
+      const box = el("div", "", null, { style: "border:1px solid var(--border,#ccc);border-radius:8px;padding:12px 14px;margin:12px 0" });
+      box.append(
+        el("p", "", "One-time setup on the server", { style: "font-weight:600;margin:0 0 6px" }),
+        el("p", "note", "CVEngine cannot restart itself: the web app has no Docker access on purpose. A small script on the server does the update, and it is not installed or not running there, so Approve has nothing to wake. Run this once on the server, as the user that owns the CVEngine folder (adjust the folder if it is not /opt/cvengine):"),
+        el("pre", "", SETUP_COMMAND, { style: "margin:8px 0;padding:8px 10px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all;font-size:13px;background:var(--surface-2,#f4f4f4);border-radius:6px" }),
+        el("p", "note", s.status === "approved" ? "It pulls this version, starts the watcher, and applies the update you approved straight away. From then on every update starts within seconds of Approve and nothing more is needed on the server." : "It pulls this version and starts the watcher. After that, Approve starts an update within seconds and nothing more is needed on the server."),
+        copyButton(SETUP_COMMAND),
+      );
+      return box;
+    };
+    const timeline = (s, hu) => {
+      const at = stepAt(s, hu);
+      const wrap = el("div", "", null, { style: "margin:12px 0" });
+      const waited = s.approved_at ? Date.now() - Date.parse(s.approved_at) : 0;
+      wrap.append(el("p", "", `Approved ${ago(waited)} ago. Typical total once the host is listening and no scan is running: about 3 to 6 minutes.`, { style: "margin:0 0 8px;font-weight:500" }));
+      const list = el("ol", "", null, { style: "list-style:none;margin:0;padding:0" });
+      UPDATE_STEPS.forEach(([title, expect], i) => {
+        const blocked = i === 1 && at === 1 && !hu.alive;
+        const mark = i < at ? "\u2713" : i === at ? (blocked ? "!" : "\u25CF") : "\u25CB";
+        const live = i === at ? (s.phase_detail && !blocked ? ` ${s.phase_detail}.` : blocked ? " Not happening: no host updater is listening." : "") : "";
+        const row = el("li", "", null, { style: `display:flex;gap:10px;padding:4px 0;${i > at ? "opacity:.55" : ""}` });
+        row.append(
+          el("span", "", mark, { style: "width:1.2em;flex:none;text-align:center", "aria-hidden": "true" }),
+          el("span", "", null),
+        );
+        row.lastChild.append(el("strong", "", title), el("span", "note", ` ${i < at ? "Done." : expect}${live}`));
+        list.append(row);
+      });
+      wrap.append(list);
+      return wrap;
+    };
+    let timer = 0;
     const draw = (s) => {
+      clearTimeout(timer);
       host.textContent = "";
       const head = {
         up_to_date: "CVEngine is up to date.",
@@ -259,6 +324,18 @@ const sections = {
         ),
       );
       if (s.last_error) kids.push(el("p", "msg err", s.last_error));
+      const hu = s.host_updater || {};
+      if (["available", "dismissed", "approved", "up_to_date"].includes(s.status)) {
+        if (hu.alive) {
+          kids.push(el("p", "note", `Host updater: listening (last seen ${hu.age_seconds} s ago). An approved update starts within seconds.`));
+        } else if (hu.seen) {
+          kids.push(el("p", "msg err", `The host updater stopped reporting ${Math.max(1, Math.round(hu.age_seconds / 60))} minutes ago, so an approved update will not start. On the server, check that cron is running and run scripts/install-updater.sh.`));
+        } else if (s.status !== "up_to_date") {
+          kids.push(el("p", "msg err", "The host updater has not reported in, so Approve will not start anything yet."));
+        }
+        if (!hu.alive && s.status !== "up_to_date") kids.push(setupBox(s));
+      }
+      if (s.status === "approved") kids.push(timeline(s, hu));
       if (["available", "dismissed", "approved"].includes(s.status)) {
         kids.push(
           el(
@@ -277,13 +354,16 @@ const sections = {
       }
       if (s.status === "approved") {
         kids.push(
-          el("p", "note", `Approved by ${s.approved_by} at ${when(s.approved_at)}. The host script scripts/apply-update.sh fast-forwards to ${s.latest} and rebuilds; the site restarts briefly. If nothing happens, install it with scripts/install-updater.sh.`, { style: "margin-top:10px" }),
+          el("p", "note", `Approved by ${s.approved_by} at ${when(s.approved_at)}.`, { style: "margin-top:10px" }),
           button("Cancel approval", async () => { draw(await api("POST", "updates/cancel")); toast("Approval cancelled"); }, "btn ghost"),
         );
       } else if (["available", "dismissed"].includes(s.status)) {
         kids.push(
           button("Approve update", async () => {
-            if (!(await ask(`The host will rebuild and restart the services.`, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
+            const note = hu.alive
+              ? "Scans are paused, running ones finish, then the host rebuilds and restarts the services."
+              : "The host updater is not reporting, so nothing will start until it is installed on the server (scripts/install-updater.sh).";
+            if (!(await ask(note, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
             draw(await api("POST", "updates/approve"));
             toast("Approved");
           }),
@@ -293,11 +373,22 @@ const sections = {
       }
       kids.push(document.createTextNode(" "), button("Check now", async () => { draw(await api("POST", "updates/check")); toast("Checked"); }, "btn ghost"));
       host.append(card("Updates", ...kids));
+      if (s.status === "approved")
+        timer = setTimeout(async () => {
+          if (!host.isConnected) return;
+          try {
+            draw(await api("GET", "updates"));
+          } catch (_) {
+            timer = setTimeout(() => draw(s), 4000); // the services restart during an update: keep trying
+          }
+        }, 4000);
+    };
+    const drawSource = (s) => {
       const enabled = check("Check GitHub for updates twice a day", s.enabled);
       const repo = text(s.repo);
       const branch = text(s.branch);
       const token = secret(s.has_token, "only for a private repository");
-      host.append(
+      sourceHost.append(
         el("div", "", null, { style: "height:16px" }),
         card(
           "Update source",
@@ -312,7 +403,9 @@ const sections = {
         ),
       );
     };
-    draw(await api("GET", "updates"));
+    const first = await api("GET", "updates");
+    drawSource(first);
+    draw(first);
   },
 
   async reset(m) {
