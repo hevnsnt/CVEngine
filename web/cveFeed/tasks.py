@@ -376,6 +376,9 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     from cveFeed import activity
 
     close_rejected()  # a CVE rejected since the last run stops being a finding
+    from cveFeed import locality
+    locality.refresh()  # new or changed CVEs: which are only usable from the host itself
+    locality.close_local_matches()  # ...never a finding, so any open match on one is closed
     cve_by_id, index = cve_pool(cve_limit)
     scan = None
     if scan_history_id:
@@ -1228,6 +1231,9 @@ def author_cve_detections():
         logger.warning("could not build the AI provider for detection authoring", exc_info=True)
         provider = None
     out = detection_author.author_pending(provider)
+    from cveFeed import locality
+    locality.refresh()
+    out['local_closed'] = locality.close_local_matches()  # a CVE the model just judged local-only is never a finding
     out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
     return out
 

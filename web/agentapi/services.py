@@ -2186,7 +2186,7 @@ def _cve(c, brief=False):
     tier = classify_threat_tier(kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss)
     out = {'cve_id': c.cve_id, 'title': c.title, 'short_description': _cve_description(c, 180),
            'cvss': c.cvss, 'tier': tier, 'kev': c.kev,
-           'exploit_db': c.exploit_db, 'published': _iso(c.published_at)}
+           'exploit_db': c.exploit_db, 'published': _iso(c.published_at), 'local_only': bool(c.local_only)}
     if not brief:
         out.update(_cve_context(c))
     return out
@@ -2238,6 +2238,53 @@ def get_cve_detection(ctx, cve_id):
     """The detection strategy alone: remote and local checks, as data an agent or scanner can act on with its own primitives."""
     return get_cve(ctx, cve_id)['detection'] or {'source': None, 'strategy': None,
                                                   'note': 'no detection strategy has been written for this CVE yet'}
+
+
+def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
+    """Change the shared detection record of one CVE (App Admin only: the record is the same for every organization). Give ``guidance``
+    (plain text with new facts: the onboard AI revises the record with it, validated like any model answer) or ``strategy`` (a whole record
+    written by a person, validated, never overwritten by the model afterwards). Returns the stored record."""
+    from cveFeed import detection, detection_author
+    from cveFeed.models import CVEDetection, CVEEntry
+    if not ctx.user.is_superuser:
+        raise ApiError(403, 'only an App Admin can change the shared CVE detection records')
+    if (guidance is None) == (strategy is None):
+        raise ApiError(400, 'give either guidance (text) or strategy (an object)')
+    cve = CVEEntry.objects.filter(cve_id=str(cve_id).upper()).first()
+    if not cve:
+        raise ApiError(404, 'CVE not found')
+    row = CVEDetection.objects.filter(cve_entry=cve).select_related('cve_entry').first() or CVEDetection(cve_entry=cve)
+    problems = []
+    if strategy is not None:
+        clean, problems = detection.validate_strategy(strategy)
+        if clean is None:
+            raise ApiError(400, 'the strategy is not usable: ' + '; '.join(problems[:5]))
+        from cveFeed import locality
+        final = detection.finalize(clean, cve.cvss_vector)
+        CVEDetection.objects.update_or_create(cve_entry=cve, defaults={
+            'strategy': final, 'source': 'manual', 'schema_version': detection.SCHEMA_VERSION, 'ai_problems': problems[:10]})
+        locality.apply_scope(cve, final.get('scope', ''))
+    else:
+        if not isinstance(guidance, str) or not 10 <= len(guidance.strip()) <= 3000:
+            raise ApiError(400, 'guidance must be text of 10 to 3000 characters')
+        from reNgine.ai_settings import get_configured_provider
+        provider = get_configured_provider()
+        if provider is None:
+            raise ApiError(409, 'no AI provider is configured: add one in Settings > AI model, or send a strategy yourself')
+        if row.pk is None:
+            row.strategy, row.source, row.rules_at = detection.finalize(detection.rules_strategy(cve), cve.cvss_vector) or {}, 'rules', timezone.now()
+            row.save()
+        if row.source == 'manual':
+            raise ApiError(409, 'a person wrote this record: send a strategy to change it')
+        stored, problems = detection_author.revise_with_guidance(row, provider, guidance.strip())
+        if stored is None:
+            raise ApiError(422, 'the model did not return a usable record: ' + '; '.join(problems[:5]))
+    from cveFeed.admin_api import audit
+    audit(ctx.user, 'cve.detection.update', cve.cve_id, None, cve=cve.cve_id, via='strategy' if strategy is not None else 'guidance')
+    cve.refresh_from_db()
+    out = _detection(CVEEntry.objects.select_related('detection').get(pk=cve.pk))
+    out['problems'] = problems[:10]
+    return out
 
 
 def _match(m):
@@ -2922,7 +2969,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
         'assignee': _user_brief(obj.assignee) if kind in STATUS_KINDS else None,
         'comment_count': obj.comment_count if kind in STATUS_KINDS else 0,
-        'cve': _cve_context(obj.cve_entry) if kind == 'match' else None,
+        'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},

@@ -501,7 +501,8 @@ TRIAGE_SYSTEM_PROMPT = (
 	'Use at most five validation_steps and an integer severity_adjust. Omit a field only when unavailable; do not add extra keys. '
 	'Use "confirmed" only when the evidence itself shows the problem is present; your own reasoning is not evidence. Use '
 	'"needs_validation" when you cannot tell. Use "likely_false_positive" only when the evidence points away from the '
-	'finding. validation_steps are advice for a person: never write commands. ' + UNTRUSTED_NOTICE)
+	'finding. validation_steps are advice for a person: never write commands. The CVE may carry "guidance": earlier notes about what '
+	'makes it apply or what makes a match false. Treat it as a hint that may be wrong; the evidence in this finding decides. ' + UNTRUSTED_NOTICE)
 
 
 def _triage_text(value, limit):

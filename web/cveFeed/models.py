@@ -54,6 +54,11 @@ class CVEEntry(models.Model):
     raw = models.JSONField(default=dict, blank=True)  # full entry, for fields not yet modelled
     intel = models.JSONField(default=dict, blank=True)  # per-source exploitation detail (cveFeed.intel): kev, epss, exploits
     needs_recorrelation = models.BooleanField(default=False)
+    # A flaw an attacker can only use from the host itself (CVSS attack vector local or physical, or a kernel or operating-system
+    # elevation of privilege): an external scan cannot see the software or patch level that decides it, so it is never matched to a
+    # host (cveFeed.locality). Computed from the record; ``locality_at`` is when it was last worked out.
+    local_only = models.BooleanField(default=False, db_index=True)
+    locality_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     synced_at = models.DateTimeField(auto_now=True)
 
@@ -1380,6 +1385,7 @@ class CVEDetection(models.Model):
     ai_model = models.CharField(max_length=128, blank=True, default="")
     ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
     ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
+    ai_input_hash = models.CharField(max_length=16, blank=True, default="")  # what the CVE said when the model last read it: a change re-asks
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
