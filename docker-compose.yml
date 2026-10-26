@@ -20,6 +20,11 @@ services:
     restart: always
     image: "redis:alpine"
     hostname: redis
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    # With a password in .env (new installs get one; scripts/enable-redis-auth.sh adds it to an older install) the broker refuses anyone
+    # on the Docker network who does not have it. Without one it is open, as it always was.
+    command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then exec redis-server --requirepass \"$$REDIS_PASSWORD\"; else exec redis-server; fi"]
     networks:
       - rengine_network
 
@@ -48,9 +53,9 @@ services:
       - DEBUG=0
       - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
       - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-172.16.0.0/12}
-      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-3}
-      - CELERY_BACKEND=redis://redis:6379/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -76,9 +81,9 @@ services:
         required: false
     environment:
       - DEBUG=0
-      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-3}
-      - CELERY_BACKEND=redis://redis:6379/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -117,9 +122,9 @@ services:
       - DEBUG=0
       - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
       - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-172.16.0.0/12}
-      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-3}
-      - CELERY_BACKEND=redis://redis:6379/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - GUNICORN_WORKERS=2
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}

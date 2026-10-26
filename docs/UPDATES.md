@@ -21,7 +21,7 @@ scripts/install-auto-deploy.sh --remove   # turn it off
 
 When `origin/master` moves ahead of the checkout, `scripts/auto-deploy.sh`:
 
-1. backs up the database and the secret key (the last 7 are kept in `.git/cvengine-auto-deploy/backups`);
+1. backs up the database and the secret key (the last 7 are kept in `.git/cvengine-auto-deploy/backups`, mode 0700, for rolling back on this machine; do not copy that folder off the machine as one unit, because the dump and the key that opens its older secrets sit together there);
 2. runs `scripts/update.sh --stop-scans`, which stops running scans cleanly, applies and verifies the update, and queues the stopped scans again.
 
 With backups turned on (the default) it never deploys without one. It waits while another update holds the lock and retries a failed commit at most once an hour. The installer runs `scripts/update.sh --check` first and refuses an install that is not ready. Logs: `journalctl -u cvengine-auto-deploy`. Tuning variables are in [CONFIGURATION.md](CONFIGURATION.md#updates). Use this or the approval updater, not both.

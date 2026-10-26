@@ -97,6 +97,32 @@ class FieldKeyDeliveryTests(SimpleTestCase):
 		self.assertIn('rotate_field_key', read('scripts', 'rotate-field-key.sh'))
 
 
+class RedisPasswordTests(SimpleTestCase):
+	def test_every_service_reaches_redis_with_the_password_and_redis_requires_it(self):
+		for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
+			text = read(name)
+			self.assertNotIn('redis://redis:6379', text, name)  # no client left on the open URL
+			self.assertGreaterEqual(text.count('redis://:${REDIS_PASSWORD:-}@redis:6379/0'), 6, name)
+			self.assertIn('--requirepass', text, name)
+			self.assertIn('REDIS_PASSWORD=${REDIS_PASSWORD:-}', text, name)  # reaches the redis container
+
+	def test_new_installs_get_a_password_and_old_ones_have_a_deliberate_switch(self):
+		self.assertIn('REDIS_PASSWORD=', read('.env.example'))
+		self.assertIn('fill REDIS_PASSWORD', read('scripts', 'init-env.sh'))
+		self.assertIn('redis-auth:', read('Makefile'))
+		script = read('scripts', 'enable-redis-auth.sh')
+		self.assertIn('--force-recreate', script)
+		self.assertIn('REDIS_PASSWORD', script)
+		# the updater must never recreate the broker, so the switch cannot happen half way through an update
+		for name in ('update.sh', 'apply-update.sh'):
+			self.assertIn('--no-recreate db redis', read('scripts', name))
+
+	def test_the_backup_docs_keep_the_keys_apart_from_the_dumps(self):
+		text = read('docs', 'DEPLOYMENT.md')
+		self.assertNotIn('Back up the database, `.env` and the secret file together', text)
+		self.assertIn('keep the keys apart from the dump', text)
+
+
 class SeedDeliveryTests(SimpleTestCase):
 	def test_the_seed_is_never_committed_and_has_a_make_target_and_a_publisher(self):
 		self.assertIn('web/cve-seed*', read('.gitignore'))
