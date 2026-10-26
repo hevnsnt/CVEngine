@@ -24,6 +24,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | Area | REST | MCP tool |
 | --- | --- | --- |
 | identity | `GET me`, `projects`, `engines` | `whoami`, `list_projects`, `list_engines` |
+| instance status | `GET system/status` | `get_system_status` |
 | targets | `GET/POST projects/{slug}/targets`, `GET .../targets/{id}` | `list_targets`, `add_target` |
 | bulk add | `POST projects/{slug}/targets/bulk`, `POST targets/bulk-org` | `add_targets`, `add_targets_by_org` |
 | delete | `POST projects/{slug}/targets/delete` (`ids`, or `all_matching` and `q`) | `delete_targets` |
@@ -151,6 +152,15 @@ Every match, scanner, and hygiene response (detail and `findings` rows alike) al
 **Project settings and SLA days.** `GET projects/{slug}/settings` answers `{sla_days: {critical, high, medium, low}, sla_defaults}`: how many days a finding of each severity has to be fixed, the same for everyone in the project so "overdue" reads the same on every screen (defaults 7, 30, 90, 180; informational findings have no SLA). `PUT` changes it, `{sla_days: {...}}` as a partial update: send only the severities to change, each a whole number of days from 1 to 3,650, or `null` to go back to that severity's default. Anyone with a write role may change it, as with the project's API keys (a read-only token or the audit role gets `403`; the audit role can read). A finding is overdue when `first_seen` plus its severity's days has passed and its `remediation_status` is not `fixed` or `accepted_risk`. Single-project only: `_all` is a `400`.
 
 **Stats history.** `GET projects/{slug}/stats/history` (`stats_history`) answers a bare JSON array, oldest first, of one point-in-time snapshot per day: `{date, hosts, exposed_hosts, open_findings: {critical, high, medium, low, info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}`. `?days=` bounds the window (default 90, capped at 365) to a number of calendar days ending today. Snapshots are written once a day by a beat task (`cveFeed.tasks.snapshot_daily_stats`, `cveFeed.stats_history`); a day before the feature existed, or one the task missed, is simply absent rather than backfilled. `_all` sums every visible project's rows per date; its `mean_days_to_fix` is the unweighted mean of the projects that have one that day, since the per-finding durations themselves are not stored.
+
+**Instance status.** `GET system/status` (`get_system_status`) answers one read-only snapshot, so an agent can tell "idle" from "broken" without guessing:
+
+- `overall` (`ok` or `degraded`), `problems` (what is wrong: a late schedule, workers not consuming a queue, a probe that failed, low memory or disk, a stalled scan, a stale CVE feed) and `notes` (state worth knowing that is not a fault: scanning paused, an update in progress, messages waiting in the queues).
+- `scanning` (paused, reason, who, since when, and whether an update's drain paused it), `update` (the update `phase`) and `version`.
+- `projects`: for every project the caller can see, `targets`, `hosts`, `exposed_hosts`, `scans` (`running`, `queued`, `stalled`), `open_findings` by severity and `cve_matches` by heat; `totals` adds them up.
+- `system`, for an App Admin only (anyone else gets `null` and a `system_note`): `database` and `broker` (reachable, latency), `queues` (messages waiting per Celery queue, and taken but not acknowledged), `workers` (which worker answers and whether it consumes its queue), `jobs` (pending validation, retest, scan and host-assessment work), `schedules` (how many are enabled and which are past due), `memory` per scanner container (total, used, available, the job budget, jobs running and waiting, memory kills in 24 hours, how old the report is), `disk` for the scan results volume, `feeds` (CVE count and last feed dispatch) and `ai` (whether a provider is on and today's validation attempts).
+
+Each probe is independent: one that fails or times out comes back as `{"error": "<exception name>"}` and a line in `problems`, never as a failure of the whole call. It returns no address, credential or task argument. Asking the workers takes up to ten seconds when none respond. A read-only token may call it.
 
 ## Limits
 
