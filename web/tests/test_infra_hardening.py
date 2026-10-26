@@ -123,6 +123,15 @@ class RedisPasswordTests(SimpleTestCase):
 		self.assertIn('keep the keys apart from the dump', text)
 
 
+class CertificateAuthorityTests(SimpleTestCase):
+	def test_a_new_ca_key_is_encrypted_private_and_the_password_stays_off_command_lines(self):
+		script = read('certs', 'entrypoint.sh')
+		self.assertIn('openssl genrsa -aes256 -passout env:AUTHORITY_PASSWORD -out ca.key', script)
+		self.assertIn('umask 077', script)
+		self.assertNotIn('pass:${AUTHORITY_PASSWORD}', script)
+		self.assertEqual(script.count('-passin env:AUTHORITY_PASSWORD'), 2)  # signing the leaf and creating the CA certificate
+
+
 class SeedDeliveryTests(SimpleTestCase):
 	def test_the_seed_is_never_committed_and_has_a_make_target_and_a_publisher(self):
 		self.assertIn('web/cve-seed*', read('.gitignore'))
