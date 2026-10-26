@@ -4,6 +4,7 @@ import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { fmtTime } from "/staticfiles/cve/prefs.js";
+import { mountOrb } from "/staticfiles/cve/orb.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 
 const dash = document.getElementById("dash");
@@ -830,4 +831,22 @@ setInterval(pollScanning, 3000);
       toggle.setAttribute("aria-pressed", String(on));
       graph.setPods(on);
     });
+}
+
+// --- the engine orb -------------------------------------------------------------------------------
+// A particle orb beside "AI activity": it stirs while the engine has something running, breathes while it waits, and rests when the
+// page cannot reach the server. The text next to it says the same in words.
+{
+  const host = $("ai-orb");
+  if (host) {
+    const orb = mountOrb(host, { size: 34, state: "breathing" });
+    const sync = () => {
+      const busy = online && running.size > 0;
+      orb.setState(!online ? "idle" : busy ? "working" : "breathing");
+      const pill = $("ai-live");
+      pill.textContent = !online ? "offline" : busy ? "working" : "idle";
+    };
+    sync();
+    setInterval(sync, 1500);
+  }
 }

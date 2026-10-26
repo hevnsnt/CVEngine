@@ -40,7 +40,7 @@
   <div class="cell ai-cell" id="c-ai">
     <div class="card-head">
       <h2>AI activity</h2>
-      <span class="live" id="ai-live">working</span>
+      <span class="ai-state"><span class="orb" id="ai-orb" aria-hidden="true"></span><span class="live" id="ai-live">working</span></span>
     </div>
     <ul class="agent" id="agent" aria-live="polite" tabindex="0" aria-label="AI activity, newest first. Scroll for earlier lines."></ul>
     {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'activity' %}">See all activity</a>{% endif %}

@@ -1414,3 +1414,9 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gn.has-pod circle:not(.ring):not(.pod circle){filter:drop-shadow(0 1px 4px color-mix(in srgb,var(--ink) 22%,transparent))}
 .card-tools{display:inline-flex;align-items:center;gap:8px}
 #d-pods[aria-pressed="true"],#pods-toggle[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
+
+.ai-state{display:inline-flex;align-items:center;gap:8px}
+.orb{display:inline-flex;color:var(--ink);line-height:0}
+.gn-live .ring{stroke-dasharray:7 6;transform-box:fill-box;transform-origin:center;animation:gn-pulse 1.2s ease-in-out infinite,gn-spin 6s linear infinite}
+@keyframes gn-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.gn-live .ring{animation:none}}
