@@ -94,6 +94,7 @@ class UpdateScriptCase(unittest.TestCase):
             ('discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker')) + '}')
         self.env = {**os.environ, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'STUB_DIR': str(self.stub),
                     'CVENGINE_UPDATE_READY_SECONDS': '1', 'CVENGINE_UPDATE_DRAIN_SECONDS': '1',
+                    'CVENGINE_UPDATE_POLL_SECONDS': '0.2',  # the script's real pause is 5 seconds per check; the stubs answer at once
                     'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
                     'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t',
                     'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull}
@@ -180,7 +181,7 @@ class ManualUpdateTests(UpdateScriptCase):
         (self.stub / 'finish_after_one').touch()
         # The script compares whole seconds (bash SECONDS) with the deadline after its first poll, so a one second deadline fails
         # whenever the first poll lands across a second boundary on a loaded runner. Five is far from that edge, and the work
-        # still finishes after one poll (the next one runs after the script's own five second pause).
+        # still finishes after one poll (the next one runs after the poll pause).
         result = self.run_update(CVENGINE_UPDATE_DRAIN_SECONDS='5')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         calls = self.calls()
@@ -323,6 +324,22 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertIn('CVENGINE_UPDATE_READY_SECONDS must be from 1 to 900', result.stderr)
         self.assertFalse(any(' stop -t 30 celery-beat' in c or ' migrate --noinput' in c for c in self.calls()))
         self.assertEqual(self.readme(), 'v1\n')
+
+    def test_a_bad_poll_seconds_value_stops_before_anything_is_paused(self):
+        for bad in ('soon', '-1', '1s', ''.join(['1', '.'])):
+            result = self.run_update(CVENGINE_UPDATE_POLL_SECONDS=bad)
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertIn('CVENGINE_UPDATE_POLL_SECONDS must be a number of seconds', result.stderr)
+            self.assertFalse(any(' stop -t 30 celery-beat' in c or ' migrate --noinput' in c for c in self.calls()))
+        self.assertEqual(self.readme(), 'v1\n')
+
+    def test_a_zero_poll_pause_falls_back_to_five_seconds_instead_of_busy_looping(self):
+        text = SCRIPT.read_text()
+        self.assertIn('sleep "$poll_seconds"', text)
+        self.assertNotIn('sleep 5', text)  # every pause goes through the setting
+        self.assertIn('poll_seconds=${CVENGINE_UPDATE_POLL_SECONDS:-5}', text)
+        result = self.run_update(CVENGINE_UPDATE_POLL_SECONDS='0')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_beat_is_ready_only_once_celery_beat_runs_not_while_its_entrypoint_waits(self):
         import re

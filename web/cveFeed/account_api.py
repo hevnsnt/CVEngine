@@ -9,8 +9,11 @@ from django.http import JsonResponse
 from django.db import transaction
 
 from dashboard.models import ApiToken, OrgMembership, ProjectMembership, UserProfile
-from tenancy import mfa, roles
+from tenancy import audit, mfa, roles, throttle
 from tenancy.views import SETUP_SECRET_KEY, check_second_factor, clear_failures, fail, locked, profile_of
+
+PASSWORD_MAX_FAILURES = 5
+PASSWORD_LOCK_SECONDS = 600
 
 
 class AccountError(Exception):
@@ -65,8 +68,13 @@ def update_profile(request):
 
 def change_password(request):
     data, user = _body(request), request.user
+    key = f'pw-change-fail:{user.pk}'
+    if throttle.exceeded(key, PASSWORD_MAX_FAILURES):
+        raise AccountError(429, 'too many wrong passwords; try again in a few minutes')
     if not user.check_password(str(data.get('current', ''))):
+        throttle.count(key, PASSWORD_LOCK_SECONDS)
         raise AccountError(400, 'your current password is not correct')
+    throttle.clear(key)
     new = str(data.get('new', ''))
     if new == data.get('current'):
         raise AccountError(400, 'choose a different password')
@@ -83,6 +91,7 @@ def change_password(request):
     profile, _ = UserProfile.objects.get_or_create(user=user)
     profile.must_change_password = False
     profile.save(update_fields=['must_change_password'])
+    audit.record_for_user(user, 'account.password_change', user)
     return account_payload(user)
 
 
@@ -112,6 +121,7 @@ def mfa_enable(request):
     profile.recovery_codes, profile.mfa_last_step = hashes, step
     profile.save(update_fields=['mfa_secret', 'mfa_enabled', 'recovery_codes', 'mfa_last_step'])
     request.session.pop(SETUP_SECRET_KEY, None)
+    audit.record_for_user(user, 'account.mfa_enable', user)
     return {**account_payload(user), 'recovery_codes': plain}
 
 
@@ -132,6 +142,7 @@ def mfa_disable(request):
     clear_failures(user)
     profile.mfa_enabled, profile.mfa_secret, profile.recovery_codes = False, '', []
     profile.save(update_fields=['mfa_enabled', 'mfa_secret', 'recovery_codes'])
+    audit.record_for_user(user, 'account.mfa_disable', user)
     return account_payload(user)
 
 

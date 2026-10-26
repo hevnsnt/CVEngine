@@ -95,7 +95,12 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     from cveFeed.models import MatchVerdict
     from django.utils import timezone
     from datetime import timedelta
-    due = CVEEntry.objects.filter(matches__isnull=False, synced_at__lt=timezone.now() - timedelta(hours=12)) \
+    from django.db.models import Q
+    now = timezone.now()
+    # a CVE with a match is kept current; so is a recent one the feed published with no affected data yet (the CNA's first record often
+    # names no version, and the enrichment that makes it matchable arrives days later: without this it would never be read again)
+    needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
+    due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
         .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
     for old in list(due):
         try:
@@ -366,10 +371,11 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     project (project_slug), or everything. `cve_limit` caps the CVE pool to the
     most recently published N (useful for a fresh-CVE focused pass).
     """
-    from cveFeed.correlation import candidate_subdomains, correlate_subdomains, cve_pool
+    from cveFeed.correlation import candidate_subdomains, close_rejected, correlate_subdomains, cve_pool
     from startScan.models import Subdomain, ScanHistory
     from cveFeed import activity
 
+    close_rejected()  # a CVE rejected since the last run stops being a finding
     cve_by_id, index = cve_pool(cve_limit)
     scan = None
     if scan_history_id:
@@ -1003,7 +1009,8 @@ def deep_scan_apexes():
             if (project_id, apex) not in forced and is_shared_apex(apex):  # belt and braces: a provider apex is never created
                 skipped += 1
                 continue
-            if Domain.objects.filter(name=apex).exists():  # names are unique across the instance: it belongs to another project
+            from targetApp.models import org_domains
+            if org_domains(project_id).filter(name=apex).exists():  # names are unique within an organization: another project of it holds this
                 skipped += 1
                 continue
             domain = Domain.objects.create(name=apex, project_id=project_id, insert_date=timezone.now(),
@@ -1014,6 +1021,13 @@ def deep_scan_apexes():
         count = sum(1 for d in domains if d.project_id == project_id)
         activity.log("discovery", f"Weekly deep discovery: queued {count} apex domain{'s' if count != 1 else ''}", project=project_id)
     return {"queued": len(scans), "due": len(due), "skipped": skipped}
+
+
+@app.task(name="work_conductor", bind=False, queue="cve_feed_queue")
+def work_conductor():
+    """Every minute: keep the discovery queue topped up with the most overdue targets (see cveFeed.conductor)."""
+    from cveFeed import conductor
+    return conductor.keep_work_queued()
 
 
 @app.task(name="host_pipeline", bind=True, queue="discovery_queue")
@@ -1201,6 +1215,23 @@ def update_nuclei_templates():
     return {"updated": proc.returncode == 0, "returncode": proc.returncode}
 
 
+@app.task(name="author_cve_detections", bind=False, queue="cve_feed_queue")
+def author_cve_detections():
+    """Every 30 minutes: write the shared detection record of every CVE that has none (hottest first, so new CVEs and the back
+    catalogue are covered the same way), refresh rules-written checks whose CVE changed, and spend the daily AI budget on the
+    CVEs attackers use. See cveFeed.detection and cveFeed.detection_author."""
+    from cveFeed import detection_author
+    from reNgine.ai_settings import get_configured_provider
+    try:
+        provider = get_configured_provider()
+    except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
+        logger.warning("could not build the AI provider for detection authoring", exc_info=True)
+        provider = None
+    out = detection_author.author_pending(provider)
+    out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
+    return out
+
+
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")
 def report_resources():
     """Every 30 seconds: publish this container's memory and budget so Settings > Resources (served by another
@@ -1250,6 +1281,33 @@ def reap_stuck_jobs():
 BOOTSTRAP_LOCK = "cvengine:first-run-bootstrap"
 
 
+SEED_BELOW = 5000  # an instance with fewer CVEs than this is offered the published seed (once a day at most)
+
+
+@app.task(name="load_cve_seed", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def load_cve_seed():
+    """Import the published CVE catalog (cveFeed.seed) so a new install starts with every CVE and its detection record instead of
+    hydrating them one request at a time. Never fails the caller: offline, a bad checksum or a missing release is logged and the
+    incremental feed carries on as before."""
+    from cveFeed import activity, seed
+    if not seed.seed_enabled():
+        return {"skipped": "CVENGINE_CVE_SEED is off"}
+    note = activity.log("feed", "Loading the published CVE catalog (all fire, smoke and ice CVEs with their detection records)", status="running")
+    try:
+        counts = seed.load_published_seed()
+    except Exception as exc:  # noqa: BLE001 - the feed sync that follows still works without the seed
+        logger.warning("could not load the published CVE seed: %s", exc)
+        activity.settle(note, "failed", message="The published CVE catalog could not be loaded; the feed will build it up gradually")
+        return {"loaded": False, "error": str(exc)[:200]}
+    counts.pop("manifest", None)
+    activity.settle(note, "done", message=f"Loaded {counts['created']} CVEs and {counts['detections']} detection records from the published catalog")
+    if counts["created"]:
+        from startScan.models import Subdomain
+        if Subdomain.objects.exists():  # an instance with hosts needs the new CVEs checked against them
+            correlate_cves.delay()
+    return {"loaded": True, **counts}
+
+
 @app.task(name="bootstrap_first_run", bind=False, queue="cve_feed_queue")
 def bootstrap_first_run():
     """Once, when a brand-new install's workers come up: load the CVE feed and the threat intelligence now, instead of waiting for
@@ -1262,11 +1320,13 @@ def bootstrap_first_run():
 
     from cveFeed import activity
     if CVEEntry.objects.exists():
+        if CVEEntry.objects.count() < SEED_BELOW and cache.add("cvengine:seed-offer", 1, timeout=24 * 3600):
+            load_cve_seed.apply_async()  # an install that predates the seed and has only a few CVEs gets the catalog too
         return {"skipped": "the CVE feed is already loaded"}
     if not cache.add(BOOTSTRAP_LOCK, 1, timeout=1800):
         return {"skipped": "a first-run load is already under way"}
     activity.log("feed", "First start: loading the CVE feed and threat intelligence now, instead of waiting for the schedule")
-    chain(sync_cve_now_feed.si(), sync_threat_intel.si(), backfill_cve_now_feed.si()).apply_async()
+    chain(load_cve_seed.si(), sync_cve_now_feed.si(), sync_threat_intel.si(), backfill_cve_now_feed.si()).apply_async()
     return {"started": True}
 
 
@@ -1312,18 +1372,17 @@ def rescore_all_hosts():
     """Daily: recompute every host's score (the latest finished scan's hosts and the certificate watch's), per project, 500 at a
     time and at most MAX_RESCORE_HOSTS a project, least recently scored first, so "new this week" decays and CVE feed updates
     land on the score."""
-    from django.db.models import F, Max, Q
+    from django.db.models import F
 
     from cveFeed import ledger, scoring
+    from cveFeed.correlation import latest_scan_q
     from dashboard.models import Project
-    from startScan.models import ScanHistory, Subdomain
+    from startScan.models import Subdomain
     if not ledger.sweep_claim("rescore", 3600):
         return {"hosts": 0, "skipped": "another rescore is running"}
-    latest = ScanHistory.objects.filter(scan_status=2).values("domain_id").annotate(last=Max("id")).values("last")
     total = 0
     for project_id in Project.objects.values_list("id", flat=True):
-        names = Subdomain.objects.filter(target_domain__project_id=project_id).filter(
-            Q(scan_history_id__in=latest) | Q(scan_history__isnull=True)).order_by(
+        names = Subdomain.objects.filter(target_domain__project_id=project_id).filter(latest_scan_q()).order_by(
             F("scored_at").asc(nulls_first=True), "id").values_list("name", flat=True)[:scoring.MAX_RESCORE_HOSTS]
         try:
             total += scoring.rescore_hosts(project_id, list(dict.fromkeys(names)))

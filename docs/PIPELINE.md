@@ -14,8 +14,9 @@ A target is a domain, an IP address, a CIDR range (`10.0.0.0/24`), a dashed rang
 4. **Exposure checks.** One connection with no credentials to Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, and CouchDB ports (an empty password for the default `postgres` and `root` accounts, never a password list). A server that answers is reported as a critical finding.
 5. **nuclei, technology pass.** [nuclei](https://github.com/projectdiscovery/nuclei) HTTP and technology templates fingerprint each host.
 6. **Web route checks.** For each web host, cvENGINE sends one plain anonymous GET to a handful of common routes (`/`, `/login`, `/admin`, `/api`, and paths bbot found) and labels each `open`, `login`, `session_required`, `sso`, or `redirect`. The response is scanned in memory for sensitive data such as cloud keys, personal data, and internal identifiers. Only the type, a count, and a masked sample are stored. The page's headers, generator tag, and script names, plus the comment banners of up to four scripts the host serves itself, name the technologies and libraries it runs (jQuery, Bootstrap, AngularJS, and others) with versions, so an old library is correlated like any other technology.
+7. **WAF fingerprint.** On by default (`CVENGINE_WAFW00F=0` turns it off). [wafw00f](https://github.com/EnableSecurity/wafw00f) names the web application firewall in front of each web host with a few requests, and the product is stored as a technology of the host (a product, never a version). A generic block that names no product, and a host with nothing in front of it, store nothing.
 7. **WPScan.** Hosts the earlier stages fingerprinted as WordPress are scanned with [WPScan](https://wpscan.com/) (see [Configuration](CONFIGURATION.md#settings-in-the-app)).
-8. **node2shell.** Off by default (`CVENGINE_NODE2SHELL=1` turns it on). Hosts fingerprinted as Node.js or Express are checked for CVE-2026-111497 with [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) (see [Configuration](CONFIGURATION.md#settings-in-the-app)).
+8. **node2shell.** Off by default (`CVENGINE_NODE2SHELL=1` turns it on). Hosts fingerprinted as Node.js (or a framework on it), Bun or Envoy are checked for CVE-2026-111497 (`CVENGINE_NODE2SHELL_SCOPE=all` checks every web host) with [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) (see [Configuration](CONFIGURATION.md#settings-in-the-app)).
 9. **CVE correlation.** The inventory is matched against the CVE store.
 10. **nuclei, AI-targeted pass.** Your AI model sees the technology names found on each host and picks nuclei tags from those the installed templates use. A built-in technology map always adds its tags. Hosts with the same choice are scanned together, and each host's fire and smoke CVE matches get a template test.
 11. **Triage, validation, and changes.** See below.
@@ -93,6 +94,49 @@ Every host has a score from 0 to 100 and the reasons behind it, shown as "Why th
 
 CVE matches appear under **CVE matches** and in **Findings** with a remediation status (open, in progress, fixed, accepted risk). Agents read and update it through the [API](AGENT-API.md).
 
+## Detection strategies
+
+Every CVE has one detection record, shared by all organizations, that says how to tell whether a product is affected: **remote
+checks** (a version in an affected range, an HTTP marker, an installed nuclei template, a reviewed nmap script, a TLS property, a
+service on a port) and **local checks** on the host itself (a package older than the fixed release, a file that contains a version, a
+configuration setting, a service state). Read it with `GET /api/v1/cves/{id}/detection`, the MCP tool `get_cve_detection`, or the
+`detection` field of `get_cve`.
+
+A strategy is data, never a program. Every check is one of the kinds above with parameters from an allowlist (HTTP `GET` and `HEAD`
+only, nmap scripts from the reviewed list, plain package and file names with no `..`), so whatever runs a check does it with its own
+primitive for that kind; nothing in a strategy is a shell command. Each record carries `safety: read_only`.
+
+Records are written by a task every 30 minutes (`author_cve_detections`), hottest first (known exploited, public exploit, high
+exploit probability, then score), so a new CVE from any feed gets one within the hour and the back catalogue fills in behind it:
+
+1. The **rules author** reads the CVE's own affected products and ranges, and any installed nuclei template. No AI, no cost.
+2. The **AI author** is asked once per CVE, for the hot ones only (known exploited, exploit probability or public exploit, or a
+   critical score), and only within `CVENGINE_DETECTION_AI_PER_DAY` (default 25; 5 per run). It sees feed text only, never a project
+   or an asset, and its answer is parsed against the schema: a check that does not validate is dropped on its own, and the reason is
+   kept on the record. Its checks are added after the rules' checks with an `ai-` id and never replace them. A failed ask is retried
+   after a week.
+
+A `manual` record is never overwritten. When a CVE's affected data changes, the rules checks are rewritten and the AI checks kept.
+`manage.py author_cve_detections [--ai]` fills the whole catalogue at once.
+
+### Validating a match
+
+Each detection record also says how to decide a match, so nobody has to rediscover it per CVE:
+
+- `validation.remote_determinable` is `yes` (a nuclei template, an HTTP marker or a reviewed nmap script can decide it from outside), `partial` (only the reported version or the exposed service, which a backported fix can fool) or `no` (it needs the host, or the CVSS attack vector is local). `validation.max_remote_state` is the best a remote check can reach on the triage scale: `confirmed` (validated), `likely` or `needs_validation`.
+- `validation.validated_when`, `needs_validation_when`, `likely_false_positive_when` and `not_applicable_when` list what moves a match to each state, and `recommended_tools` names the tools (nuclei, nmap, curl, openssl, the package manager, grep, systemctl).
+- Every remote check has a `how`: the tool, the invocation with `<TARGET>` and `<PORT>` to fill in, and how to decide from the output. Every local check has `commands`: one read-only command per platform (Debian, Red Hat, Alpine, other Linux, Windows) with the shell, whether it needs elevated rights, an `explain` sentence for a person logged in to the host, and a structured `expect` (`version_lt`, `exit_code`, `output_equals`) that a future authenticated scan can evaluate without parsing prose.
+
+The commands are rendered by the application from the validated parameters of each check, with every value quoted; a model never writes one, and a record read from a seed or a model reply has its commands thrown away and rendered again.
+
+### Seeding the catalog
+
+Building the catalog from the cve.now feed takes one request per CVE, so a new install used to spend hours rebuilding what another instance already had. A **seed** is the whole catalog as one file: every CVE (fire, smoke and ice) with its scores, exploitation signals, affected ranges and references, plus its detection record. On first start (and on an older install that still has fewer than 5,000 CVEs, once a day) CVEngine downloads the published seed, checks it against its manifest (count, size, sha256), imports the CVEs it lacks and their detection records, runs the correlation if there are already hosts, and the incremental feed carries on from there. A CVE already present is never overwritten, nothing in the file is trusted (each field is typed and clipped, each strategy is validated again), and offline or a failed check only means the feed builds the catalog up gradually, as before.
+
+- Maintainer: on an instance with the full catalog, `make export-cve-seed` writes `web/cve-seed.jsonl.gz` and its manifest (it first writes any missing detection records), and `scripts/publish-cve-seed.sh` uploads both to the `cve-seed` release.
+- Anyone: `manage.py import_cve_seed [file | --url https://...]` imports a file or the published seed by hand.
+- `CVENGINE_CVE_SEED=off` turns the automatic load off; `CVENGINE_CVE_SEED_URL` points it at your own mirror (https, with the `.manifest.json` beside it).
+
 ## Keeping scans fast and polite
 
 - **One run per host.** A successful scanner run is reused inside its window: 168 hours for nmap, bbot, route checks, naabu, deep nuclei, and archived-URL lookups, 24 hours for nuclei, the certificate watch, hygiene, re-tests, WPScan, node2shell, and RDP screenshots. Failed or skipped work never counts as coverage, and a Redis claim keeps two pipelines off the same asset. Set the windows with `CVENGINE_TTL_*` ([CONFIGURATION.md](CONFIGURATION.md)).
@@ -117,6 +161,12 @@ A tenant of a multi-tenant provider owns only its own subdomain. For `acme.jfrog
 
 An organization can remove a host and exclude it (**Remove & exclude**, or the API). Exclusions match the exact host name, case-insensitively, and every stage skips an excluded host in every project of that organization. Adding it as a target is refused. **Delete host data** removes a host from one project only and leaves it free to be found again.
 
+## The work conductor
+
+Scans used to start only when someone asked or when a daily or weekly sweep ran, so for most of the day nothing was running even with a thousand hosts to look after. Now a watchdog runs every minute and keeps the discovery queue topped up: when fewer than `CVENGINE_WORK_DEPTH` scans (default 3) are running or queued, it starts discovery of the targets that have gone longest without one: never scanned first, then the stalest. It starts at most one per project per round so no project starves the others, and it never picks a target scanned within `CVENGINE_WORK_MIN_GAP_HOURS` (default 2), one that already has a scan going, one an organization excluded, a project whose bug bounty engagement has not confirmed that automated testing is allowed (or is paused or finished), or anything at all while scanning is paused (an update's pause included). Each start is logged in the target's project activity. Set `CVENGINE_WORK_DEPTH=0` to turn it off. The system status (`get_system_status`, App Admin) shows its depth, the scans running and queued, and its last round, and reports a problem when targets exist, scanning is not paused and nothing is running or queued.
+
+The other work that keeps the instance busy has its own schedule, below: validation of fire and smoke matches, re-tests of changed hosts, the paced full port scan and deep nuclei, triage, and the AI review every three hours.
+
 ## Schedules
 
 A superuser can change CVE sync, certificate watch, the hygiene hour, and both time limits on the Administration page. The rest are fixed.
@@ -129,6 +179,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Hygiene sweep | daily at 03:17 UTC |
 | Discovery time limit, per bbot run | 6 hours |
 | nuclei time limit, per run | 4 hours |
+| Work conductor (keeps the discovery queue fed) | every minute |
 | Fire and smoke validation, change re-tests | every 5 minutes |
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | AI review and capacity tuning | every 3 hours |

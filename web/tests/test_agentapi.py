@@ -98,7 +98,7 @@ class AgentApiTests(TestCase):
 
 	def test_csrf_enforced_for_sessions_but_not_tokens(self):
 		from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
-		from django.contrib.sessions.backends.db import SessionStore
+		from reNgine.hashed_sessions import SessionStore
 		from django.conf import settings
 		ss = SessionStore()
 		ss[SESSION_KEY], ss[HASH_SESSION_KEY] = str(self.alice.pk), self.alice.get_session_auth_hash()
@@ -624,6 +624,14 @@ class AgentApiTests(TestCase):
 		content = data['result']['content'][0]['text']
 		return data['result']['isError'], (json.loads(content) if not data['result']['isError'] else content)
 
+	def test_mcp_tells_the_agent_which_text_is_untrusted(self):
+		from agentapi.mcp import UNTRUSTED_NOTICE
+		status, data = rpc(self.t_alice, 'initialize', {})
+		self.assertIn(UNTRUSTED_NOTICE, data['result']['instructions'])
+		status, data = rpc(self.t_alice, 'tools/call', {'name': 'list_projects', 'arguments': {}})
+		self.assertEqual(data['result']['_meta']['cvengine/untrusted_text'], UNTRUSTED_NOTICE)
+		self.assertNotIn('_meta', rpc(self.t_alice, 'tools/call', {'name': 'list_hosts', 'arguments': {'project': 'proj-b'}})[1]['result'])
+
 	def test_mcp_tools_are_tenancy_scoped(self):
 		err, data = self._tool(self.t_alice, 'list_projects')
 		self.assertEqual([p['slug'] for p in data['results']], ['proj-a'])
@@ -634,6 +642,11 @@ class AgentApiTests(TestCase):
 		err, msg = self._tool(self.t_ro, 'add_target', {'project': 'proj-a', 'value': 'x.example'})
 		self.assertEqual((err, msg), (True, 'this token is read only'))
 		err, msg = self._tool(self.t_alice, 'no_such_tool')
+		self.assertTrue(err)
+
+	def test_an_over_long_assets_argument_is_refused_not_ground_through(self):
+		err, data = self._tool(self.t_alice, 'get_remediation_work',
+							   {'project': 'proj-a', 'assets': ','.join(f'h{n}.example' for n in range(501))})
 		self.assertTrue(err)
 
 	def test_mcp_agent_remediation_loop(self):
@@ -758,6 +771,18 @@ class FindingStatusTests(TestCase):
 		self.assertEqual(status, 200)
 		self.assertEqual([m['username'] for m in data['results']], ['fsalice', 'fscarol', 'fsorg'])
 		self.assertEqual(call(self.t_alice, 'GET', '/api/v1/projects/fs-other/members')[0], 404)
+
+	def test_members_comments_and_audit_trail_come_a_page_at_a_time(self):
+		base = f'{self._base()}/findings/vulnerability/{self.vuln.id}'
+		for n in range(3):
+			call(self.t_alice, 'POST', f'{base}/comments', {'text': f'note {n}'})
+		status, page = call(self.t_alice, 'GET', f'{base}/comments?page_size=2')
+		self.assertEqual((status, page['count'], page['page_size'], [c['text'] for c in page['results']]), (200, 3, 2, ['note 0', 'note 1']))
+		self.assertEqual([c['text'] for c in call(self.t_alice, 'GET', f'{base}/comments?page_size=2&page=2')[1]['results']], ['note 2'])
+		audit = call(self.t_alice, 'GET', f'{base}/audit?page_size=1')[1]
+		self.assertEqual((audit['count'], len(audit['results'])), (3, 1))
+		self.assertEqual(call(self.t_alice, 'GET', f'{self._base()}/members?page_size=1')[1]['page_size'], 1)
+		self.assertEqual(call(self.t_alice, 'GET', f'{base}/comments?page=x')[0], 400)
 
 	def test_detail_carries_status_assignee_and_comment_count_for_every_kind(self):
 		base = self._base()
@@ -1989,3 +2014,11 @@ class TriageApiTests(TestCase):
 		self.assertEqual(created, 6)
 		self.assertEqual(Triage.objects.filter(project=self.pb).count(), 0)
 		self.assertEqual(triage.backfill(self.pa.id), 0)
+
+
+class LeapDayFindingsTests(FindingStatusTests):
+	def test_the_findings_list_works_on_29_february(self):
+		from datetime import datetime, timezone as tz
+		with mock.patch('django.utils.timezone.now', return_value=datetime(2028, 2, 29, 12, tzinfo=tz.utc)):
+			status, data = call(self.t_alice, 'GET', '/api/v1/projects/fs-proj/findings')
+		self.assertEqual(status, 200, data)

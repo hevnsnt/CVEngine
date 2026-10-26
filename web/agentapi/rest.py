@@ -1,5 +1,6 @@
 """REST API /api/v1/: JSON over the shared service layer, tenancy-scoped, token or session auth."""
 import json
+import logging
 import re
 
 from django.http import JsonResponse
@@ -8,7 +9,10 @@ from agentapi import host_manage as hosts
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi.auth import create_token
+from tenancy import audit
 from agentapi.services import ApiError, Ctx
+
+logger = logging.getLogger(__name__)
 
 
 def _body(request):
@@ -53,6 +57,7 @@ def tokens_create(request, ctx, **_):
     data = _body(request)
     (name,) = _need(data, 'name')
     token, raw = create_token(ctx.user, str(name), read_only=bool(data.get('read_only')))
+    audit.record_for_user(ctx.user, 'token.create', ctx.user, token=token.prefix, read_only=token.read_only)
     return {'id': token.id, 'name': token.name, 'read_only': token.read_only,
             'token': raw, 'note': 'Store this now. It is not shown again.'}, 201
 
@@ -62,6 +67,7 @@ def tokens_revoke(request, ctx, token_id, **_):
     updated = ctx.user.api_tokens.filter(id=token_id).update(revoked=True)
     if not updated:
         raise ApiError(404, 'token not found')
+    audit.record_for_user(ctx.user, 'token.revoke', ctx.user, token_id=int(token_id))
     return {'revoked': True}
 
 
@@ -75,6 +81,8 @@ ROUTES = [
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines', lambda r, c, **k: svc.list_engines(c)),
     ('GET', r'cves', 'CVE feed (tier, q filters)', lambda r, c, **k: svc.list_cve_feed(c, r.GET)),
+    ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)/detection', 'The shared detection strategy of one CVE',
+     lambda r, c, cve_id, **k: svc.get_cve_detection(c, cve_id)),
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)', 'One CVE with affected ranges',
      lambda r, c, cve_id, **k: svc.get_cve(c, cve_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets', 'List targets', lambda r, c, slug, **k: svc.list_targets(c, slug, r.GET)),
@@ -202,7 +210,7 @@ ROUTES = [
      lambda r, c, slug, kind, finding_id, **k: (svc.retriage_finding(c, slug, kind, int(finding_id)), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/comments',
      'Every comment on one finding, oldest first',
-     lambda r, c, slug, kind, finding_id, **k: svc.list_finding_comments(c, slug, kind, int(finding_id))),
+     lambda r, c, slug, kind, finding_id, **k: svc.list_finding_comments(c, slug, kind, int(finding_id), r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/comments',
      'Add a comment to one finding; body {text}',
      # text's own validation happens inside add_finding_comment, after its project gate: a body-shaped _need() here would
@@ -210,13 +218,13 @@ ROUTES = [
      lambda r, c, slug, kind, finding_id, **k: (svc.add_finding_comment(c, slug, kind, int(finding_id), _body(r).get('text')), 201)),
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/audit',
      "One finding's audit trail (status, assignee and comment events, newest first), each with who, when, and before/after",
-     lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id))),
+     lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id), r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/settings', "The project's settings: sla_days (days to fix per severity: critical, high, medium, low) and the defaults",
      lambda r, c, slug, **k: svc.get_project_settings(c, slug)),
     ('PUT', r'projects/(?P<slug>[-\w]+)/settings', "Change the project's settings; sla_days is a partial update, a severity set to null goes back to its default",
      lambda r, c, slug, **k: svc.set_project_settings(c, slug, _body(r))),
     ('GET', r'projects/(?P<slug>[-\w]+)/members', "The project's members, for an assignee picker",
-     lambda r, c, slug, **k: svc.list_members(c, slug)),
+     lambda r, c, slug, **k: svc.list_members(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/work', 'Remediation work for your registered assets',
      lambda r, c, slug, **k: svc.work_items(c, slug, r.GET)),
     ('GET', r'assets', 'Assets registered on this token', lambda r, c, **k: {'assets': c.token.assets if c.token else []}),
@@ -259,6 +267,9 @@ def dispatch(request, path):
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
             return JsonResponse({'error': e.message}, status=e.status)
+        except (KeyError, TypeError, ValueError, AttributeError):  # a field of the wrong type: the caller's mistake, not a crash
+            logger.warning('API request with invalid parameters: %s %s', request.method, path, exc_info=True)
+            return JsonResponse({'error': 'invalid request parameters'}, status=400)
         data, status = result if isinstance(result, tuple) else (result, 200)
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:

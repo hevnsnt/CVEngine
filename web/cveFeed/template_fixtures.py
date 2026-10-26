@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from cveFeed.safeyaml import load_template
+
 ROOT = Path(__file__).with_name('reviewed_fixtures')
 MAX_FILE = 20_000
 MAX_BODY = 4_096
@@ -73,7 +75,7 @@ def load(cve_id):
 def supported_template(yaml_text):
     """Only one read-only HTTP response detector is supported by this fixture harness."""
     try:
-        doc = yaml.safe_load(yaml_text)
+        doc = load_template(yaml_text)
     except yaml.YAMLError:
         return False
     if not isinstance(doc, dict) or set(doc) - {'id', 'info', 'http'}:
@@ -146,7 +148,7 @@ def verify(path, yaml_text, fixture):
     """Require a positive hit and a negative miss from separate loopback responses."""
     if not supported_template(yaml_text):
         return False, 'functional fixture unsupported for this template type'
-    expected_path = yaml.safe_load(yaml_text)['http'][0]['path'][0].removeprefix('{{BaseURL}}')
+    expected_path = load_template(yaml_text)['http'][0]['path'][0].removeprefix('{{BaseURL}}')
     positive, error = _case(path, fixture['positive'], expected_path)
     if error:
         return False, error

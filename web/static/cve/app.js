@@ -1407,8 +1407,7 @@ function findingPage(mount, cfg) {
         const run = pane.querySelector("[data-validate]");
         if (run && !run.disabled) {
           run.scrollIntoView({ block: "center" });
-          run.focus();
-          run.click();
+          run.focus(); // never click for the visitor: a link or a pasted URL must not start a validation run by itself
         } else if (run == null) pane.append(el("p", "note", "Validate now is not available for this finding."));
       }
     } catch (err) {
@@ -2132,6 +2131,7 @@ const pages = {
         const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => p.number)))];
         const columns = [
           { label: "Host", value: (h) => h.host },
+          { label: "Also answers to", value: (h) => (h.aliases || []).join(" ") },
           ...(ALL ? [{ label: "Project", value: (h) => projectOf(h) || "" }] : []),
           { label: "Temperature", value: (h) => h.heat || "unscanned" },
           { label: "Score", value: (h) => h.score || 0 },
@@ -2363,6 +2363,7 @@ const pages = {
       head.append(badge(`Score ${h.score || 0}`));
       const chip = projChip(h);
       if (chip) head.append(chip);
+      if ((h.aliases || []).length) head.append(el("span", "note", `Also answers to ${h.aliases.join(", ")}`, { title: "Names that resolve to the same addresses are one host" }));
       if (h.zombie) head.append(badge("Zombie: DNS gone, still answering", "smoke"));
       if (h.excluded) head.append(badge("Excluded: never scanned", "smoke"));
       if (h.archived) head.append(badge("Archived: history retained", "queued"));

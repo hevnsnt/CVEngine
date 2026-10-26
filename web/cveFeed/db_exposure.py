@@ -10,6 +10,8 @@ import socket
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 3
+MAX_BODY_BYTES = 65536  # a status page or a list of database names; a server that sends more is not answering this question
+TOTAL_SECONDS = 10  # the whole request, so a server that drips one byte at a time cannot hold the worker
 # What the server said when it let the attempt through, kept as the finding's evidence: (host, port) -> short text. A checker notes
 # it just before returning True and run_db_exposure_checks takes it; runs are sequential, so one table is enough.
 EVIDENCE = {}
@@ -88,14 +90,31 @@ def check_postgres(host, port):
             conn.close()
 
 
+def _bounded_json(url):
+    """GET ``url`` (no redirects) and parse its JSON body, reading at most MAX_BODY_BYTES within TOTAL_SECONDS. None unless the answer
+    is a 200 with JSON inside those bounds. The scanned server controls how much it sends and how slowly, so neither is trusted."""
+    import json
+    import time
+
+    import requests
+    deadline = time.monotonic() + TOTAL_SECONDS
+    with requests.get(url, timeout=CONNECT_TIMEOUT, allow_redirects=False, stream=True) as resp:
+        if resp.status_code != 200:
+            return None
+        body = b''
+        for chunk in resp.iter_content(4096):
+            body += chunk
+            if len(body) > MAX_BODY_BYTES or time.monotonic() > deadline:
+                return None
+        return json.loads(body) if body else None
+
+
 def check_elasticsearch(host, port):
     """A plain GET /: Elasticsearch with no security plugin configured answers with cluster info and no
     auth challenge at all."""
-    import requests
     try:
-        resp = requests.get(f'http://{host}:{port}/', timeout=CONNECT_TIMEOUT, allow_redirects=False)
-        info = resp.json() if resp.status_code == 200 and resp.content else {}
-        if 'cluster_name' not in info:
+        info = _bounded_json(f'http://{host}:{port}/')
+        if not isinstance(info, dict) or 'cluster_name' not in info:
             return False
         _note(host, port, f'cluster {info.get("cluster_name")}, version {(info.get("version") or {}).get("number", "?")}')
         return True
@@ -106,10 +125,8 @@ def check_elasticsearch(host, port):
 def check_couchdb(host, port):
     """GET /_all_dbs: lists database NAMES only, never document content. CouchDB's "admin party" mode
     (no admin user ever configured) answers this with no credential at all."""
-    import requests
     try:
-        resp = requests.get(f'http://{host}:{port}/_all_dbs', timeout=CONNECT_TIMEOUT, allow_redirects=False)
-        names = resp.json() if resp.status_code == 200 else None
+        names = _bounded_json(f'http://{host}:{port}/_all_dbs')
         if not isinstance(names, list):
             return False
         _note(host, port, f'/_all_dbs answered with {len(names)} database name(s)')  # a count, never the names

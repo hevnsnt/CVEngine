@@ -56,14 +56,34 @@ SSO_PROVIDERS = (
 SSO_PATH_RE = re.compile(r'/(adfs/ls|saml2?|sso|oauth2?/authorize|openid-connect/auth|auth/realms/|connect/authorize)', re.I)
 LOGIN_PATH_RE = re.compile(r'(?:^|[/_-])(login|log-in|signin|sign-in|logon|session/new|wp-login\.php|account/login|user/login|auth)'
                            r'(/|\.|\?|$)', re.I)
-PASSWORD_INPUT_RE = re.compile(r'<input[^>]+type=["\']?password', re.I)
+# '[^<>]' stops each scan at the next tag, so a body of repeated '<input ' / '<meta ' with no '>' is read in linear time
+PASSWORD_INPUT_RE = re.compile(r'<input\b[^<>]{0,1000}?type=["\']?password', re.I)
 LOGIN_TITLE_RE = re.compile(r'\b(sign in|log in|login|logon|anmelden|connexion)\b', re.I)
 SSO_BODY_RE = re.compile(r'(okta-sign-in|auth0|keycloak|SAMLRequest|microsoftonline|Sign in with (Microsoft|Google|Okta)|'
                          r'login\.microsoftonline)', re.I)
 SSO_BODY_PROVIDER = (('okta', 'Okta'), ('auth0', 'Auth0'), ('keycloak', 'Keycloak'), ('samlrequest', 'SAML'),
                      ('microsoft', 'Entra ID'), ('google', 'Google'))
-META_REFRESH_RE = re.compile(r'<meta[^>]+http-equiv=["\']?refresh[^>]*content=["\'][^"\']*?url=([^"\'>\s]+)', re.I)
-TITLE_RE = re.compile(r'<title[^>]*>(.*?)</title>', re.I | re.S)
+META_REFRESH_RE = re.compile(r'<meta\b[^<>]{0,1000}?http-equiv=["\']?refresh[^<>]{0,1000}?content=["\'][^"\'<>]{0,1000}?url=([^"\'<>\s]+)', re.I)
+
+
+def page_title(text):
+    """The first <title> of ``text``, whitespace collapsed and clipped. Found with plain string searches (one pass, no backtracking):
+    a body of repeated '<title' with no '>' or '</title>' cost a regex quadratic time."""
+    lowered = text.lower()
+    start = lowered.find('<title')
+    while start != -1:
+        after = start + len('<title')
+        if after < len(lowered) and lowered[after] not in '> \t\r\n/':  # <titles>, not <title>
+            start = lowered.find('<title', after)
+            continue
+        open_end = lowered.find('>', after)
+        if open_end == -1:
+            return ''
+        close = lowered.find('</title', open_end + 1)
+        if close == -1:
+            return ''
+        return re.sub(r'\s+', ' ', text[open_end + 1:close]).strip()[:300]
+    return ''
 
 
 # ----------------------------------------------------------------------------- planning (pure)
@@ -341,8 +361,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
             text = raw.decode(encoding, errors='replace')
         except LookupError:
             text = raw.decode('utf-8', errors='replace')
-        found = TITLE_RE.search(text)
-        title = re.sub(r'\s+', ' ', found.group(1)).strip()[:300] if found else ''
+        title = page_title(text)
         cookies = SimpleCookie()
         for value in response.headers.get_all('Set-Cookie', []):
             try:

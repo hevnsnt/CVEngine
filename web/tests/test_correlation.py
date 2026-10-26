@@ -232,6 +232,20 @@ class TestKnownVulnerableMatches(unittest.TestCase):
         cve = FakeCVE(11022, [{"vendor": "jquery", "product": "jquery", "ranges": [{"introduced": "1.2", "fixed": "3.5.0"}]}])
         self.assertEqual(_hits([cve], "jQuery:1.12.4"), [(11022, True, 0.85)])
 
+    def test_a_wrapper_package_named_like_the_product_does_not_decide_the_match(self):
+        # CVE-2020-11023 lists jquery (fixed 3.5.0) next to the Ruby gem jquery-rails (fixed 4.4.0) and repackagings of jQuery. The
+        # gem's version numbers are its own: jQuery 3.5.1, already patched, is not "before 4.4.0".
+        cve = FakeCVE(11023, [
+            {"vendor": "jquery", "product": "jquery", "ranges": [{"introduced": "1.0.3", "fixed": "3.5.0"}]},
+            {"package": "jquery-rails", "ranges": [{"introduced": "0", "fixed": "4.4.0"}]},
+            {"package": "org.webjars.npm:jquery", "ranges": [{"introduced": "1.0.3", "fixed": "3.5.0"}]},
+            {"package": "components/jquery", "ranges": [{"introduced": "1.0.3", "fixed": "3.5.0"}]}])
+        self.assertEqual(_hits([cve], "jQuery:3.5.1"), [(11023, False, 0.0)])
+        self.assertEqual(_hits([cve], "jQuery:3.4.1"), [(11023, True, 0.85)])
+        # the evidence names the product that decided it, not the wrapper
+        found = list(_match_candidates("jQuery", (3, 4, 1), "jquery", build_product_index([cve]), {11023: cve}))
+        self.assertEqual([(c.id, product, ok) for c, product, ok in found], [(11023, "jquery", True)])
+
     def test_fixed_is_exclusive_and_last_affected_inclusive(self):
         fixed = FakeCVE(31, [{"product": "nginx", "ranges": [{"introduced": "1.0", "fixed": "1.20.0"}]}])
         last = FakeCVE(32, [{"product": "nginx", "ranges": [{"introduced": "1.0", "lastAffected": "1.20.0"}]}])
@@ -244,13 +258,13 @@ class TestParseVersion(unittest.TestCase):
 
     def test_matrix(self):
         from cveFeed.correlation import _vcmp
-        self.assertEqual(parse_version("1:8.9p1-3ubuntu0.6"), (8, 9))
+        self.assertEqual(parse_version("1:8.9p1-3ubuntu0.6"), (8, 9, 0, 1))  # the epoch is dropped; p1 is a patch level
         self.assertEqual(parse_version("v1.2.3"), (1, 2, 3))
         self.assertEqual(parse_version("2.4.52+deb11u2"), (2, 4, 52))
         self.assertEqual(parse_version("1.18.0-1ubuntu1"), (1, 18, 0))
         self.assertEqual(parse_version("8.5.0.1"), (8, 5, 0, 1))
         self.assertEqual(parse_version("2024.1"), (2024, 1))
-        self.assertEqual(parse_version("8.9p1 Ubuntu 3ubuntu0.6"), (8, 9))
+        self.assertEqual(parse_version("8.9p1 Ubuntu 3ubuntu0.6"), (8, 9, 0, 1))
         self.assertIsNone(parse_version("abc"))
         self.assertIsNone(parse_version("deadbeef"))
         self.assertIsNone(parse_version("3f2a1b9c0d4e5f60718293a4b5c6d7e8f9012345"))
@@ -265,7 +279,8 @@ class TestParseVersion(unittest.TestCase):
         self.assertEqual(_vcmp(parse_version("1.18"), parse_version("1.18.0")), 0)
 
     def test_an_openssl_patch_letter_or_a_distro_word_is_not_a_pre_release(self):
-        self.assertEqual(parse_version("1.0.2k"), (1, 0, 2))
+        from cveFeed.correlation import _vcmp
+        self.assertGreater(_vcmp(parse_version("1.0.2k"), parse_version("1.0.2")), 0)  # a patch letter is later, never a pre-release
         self.assertEqual(parse_version("2.4.52-alpine"), (2, 4, 52))
         self.assertEqual(parse_version("1.2.3-RELEASE"), (1, 2, 3))
 
@@ -313,6 +328,26 @@ CRAFT = FakeCVE(70, [{"vendor": "craftcms", "product": "cms", "package": "craftc
 PHP_RANGES = [{"introduced": "8.2.*", "fixed": "8.2.35"}, {"introduced": "8.3.*", "fixed": "8.3.36"},
               {"introduced": "8.4.*", "fixed": "8.4.27"}, {"introduced": "8.5.*", "fixed": "8.5.12"}]
 PHP2SHELL = FakeCVE(71, [{"vendor": "PHP Group", "product": "PHP", "package": "php-src", "ranges": PHP_RANGES}], kev=True)
+
+
+MOVEIT_WAF = FakeCVE(72, [{"vendor": "progress", "product": "MOVEit WAF", "ranges": [{"introduced": "1.0", "fixed": "9.9"}]}], kev=False)
+
+
+class TestCategoryLabelsAreNotProducts(unittest.TestCase):
+    """bbot labels a host "WAF" when it sees any web application firewall. That says a firewall answered, not which one, so it must
+    not stand for a product whose name merely contains the word (found on a host matched to the MOVEit WAF advisories)."""
+
+    def test_a_generic_waf_label_does_not_match_a_named_waf_product(self):
+        for label in ("WAF", "waf", "Web Application Firewall"):
+            self.assertEqual(_hits([MOVEIT_WAF], label, "1.0"), [], label)
+
+    def test_a_host_that_is_the_named_product_still_matches(self):
+        for label in ("MOVEit WAF", "moveitwaf"):
+            self.assertEqual([row[0] for row in _hits([MOVEIT_WAF], label, "1.0")], [72], label)
+
+    def test_a_cve_whose_product_is_just_waf_names_nothing_to_match(self):
+        bare = FakeCVE(73, [{"vendor": "acme", "product": "WAF", "ranges": [{"introduced": "1.0", "fixed": "9.9"}]}], kev=False)
+        self.assertEqual(_hits([bare], "WAF", "1.0"), [])
 
 
 class TestWordBoundaryMatching(unittest.TestCase):

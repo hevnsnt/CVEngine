@@ -162,6 +162,7 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
 
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
+    from startScan.ip_rows import get_or_create_first
     from startScan.models import Subdomain
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
@@ -181,8 +182,8 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
         return {'checked': len(found), 'new': 0}
     created = []
     for name in new_names:
-        sub, was_created = Subdomain.objects.get_or_create(
-            target_domain=domain, name=name,
+        sub, was_created = get_or_create_first(
+            Subdomain, target_domain=domain, name=name,
             defaults={'is_imported_subdomain': True, 'discovered_date': timezone.now()})
         if was_created:
             created.append(sub)

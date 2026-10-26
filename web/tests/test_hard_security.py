@@ -79,7 +79,7 @@ class ScannerTargetFilterTests(TestCase):
 		cve = self._cve()
 		for name in ('good.sec.test', 'bad.sec.test'):
 			sub = Subdomain.objects.create(name=name, target_domain=self.domain)
-			ip = IpAddress.objects.create(address='198.51.100.9')
+			ip, _ = IpAddress.objects.get_or_create(address='198.51.100.9')
 			sub.ip_addresses.add(ip)
 			CVEMatch.objects.create(cve_entry=cve, subdomain=sub, matched_product='nginx', confidence=0.9, version_in_range=True)
 		calls = []
@@ -211,7 +211,7 @@ class EncryptedFieldTests(TestCase):
 		again = Notification.objects.get(pk=note.pk)
 		self.assertEqual((again.slack_hook_url, again.telegram_bot_token, again.discord_hook_url, again.lark_hook_url),
 			('https://hooks.slack.test/T/B/xyz', '123:abc', 'https://discord.test/api/webhooks/1/tok', 'https://lark.test/hook/abc'))
-		self.assertNotIn('xyz', self.raw('scanEngine_notification', 'slack_hook_url', note.pk))
+		self.assertNotIn('hooks.slack.test', self.raw('scanEngine_notification', 'slack_hook_url', note.pk))  # a short marker could appear in random ciphertext
 		update = UpdateSettings.objects.create(token='ghp_secretsecret')
 		self.assertEqual(UpdateSettings.objects.get(pk=update.pk).token, 'ghp_secretsecret')
 		self.assertNotIn('secretsecret', self.raw('cveFeed_updatesettings', 'token', update.pk))

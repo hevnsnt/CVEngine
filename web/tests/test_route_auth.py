@@ -221,15 +221,16 @@ class RouteFixture:
 		self.asked = []
 		self.answers = {}
 
-	def scan(self, names=('www.rt.test',), ports=((443, 'https'),)):
+	def scan(self, names=('www.rt.test',), ports=((443, 'https'),), ip='203.0.113.5'):
 		scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=1, tasks=[],
 			results_dir='x')
 		for name in names:
 			sub = Subdomain.objects.create(name=name, target_domain=self.domain, scan_history=scan)
-			ip = IpAddress.objects.create(address='203.0.113.5')
+			ip, _ = IpAddress.objects.get_or_create(address=ip)  # one row per address, shared by every host that resolves there
 			sub.ip_addresses.add(ip)
 			for number, service in ports:
-				ip.ports.add(Port.objects.create(number=number, service_name=service, state='open'))
+				if not ip.ports.filter(number=number).exists():
+					ip.ports.add(Port.objects.create(number=number, service_name=service, state='open'))
 		return scan
 
 	def probe(self, url):
@@ -425,3 +426,22 @@ class ProbeTimeBudgetTests(SimpleTestCase):
 			stop.set()
 			listener.close()
 		self.assertLess(time.monotonic() - started, 5)
+
+
+class PageTitleTests(SimpleTestCase):
+	def test_the_title_is_found_and_tidied(self):
+		self.assertEqual(ra.page_title('<html><head><TITLE lang="en">\n  Sign   in\n</TITLE></head>'), 'Sign in')
+		self.assertEqual(ra.page_title('<title>A</title><title>B</title>'), 'A')
+		self.assertEqual(ra.page_title('<titles>no</titles><title>yes</title>'), 'yes')
+		self.assertEqual(ra.page_title('<title>' + 'x' * 1000 + '</title>'), 'x' * 300)
+
+	def test_no_title_and_unfinished_titles_give_nothing(self):
+		for text in ('', '<html></html>', '<title>never closed', '<title no end', '<titl>x</titl>'):
+			self.assertEqual(ra.page_title(text), '', text)
+
+	def test_a_body_built_to_make_a_regex_quadratic_is_read_at_once(self):
+		import time
+		started = time.monotonic()
+		for text in ('<title ' * 40000, '<title>' * 40000, '<title>a' * 40000):
+			self.assertEqual(ra.page_title(text), '')
+		self.assertLess(time.monotonic() - started, 1)

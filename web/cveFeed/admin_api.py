@@ -21,7 +21,7 @@ from django.utils.text import slugify
 
 from dashboard.models import (ApiCredential, AuditLog, Org, OrgMembership, Project, ProjectMembership, SystemTimings,
                               UserProfile)
-from tenancy import roles
+from tenancy import audit as audit_trail, roles
 
 
 class AdminError(Exception):
@@ -59,7 +59,7 @@ def _need_user(actor, user_id, credentials=False):
     if not user or not roles.can_manage_user(actor, user):
         raise AdminError(404, 'user not found')
     if credentials and not roles.can_manage_credentials(actor, user):
-        raise AdminError(403, 'this user also belongs to an organization you do not administer; ask an App Admin')
+        raise AdminError(403, 'this account is out of your reach (it belongs to an organization you do not administer, or holds bug bounty access); ask an App Admin')
     return user
 
 
@@ -169,7 +169,7 @@ def users_update(request, actor, user_id):
         if field in data:
             setattr(user, field, str(data[field]).strip()[:limit])
     user.save()
-    audit(actor, 'user.update', user.username, fields=sorted(data))
+    audit_trail.record_for_user(actor, 'user.update', user, fields=sorted(data))
     return user_dict(actor, user)
 
 
@@ -190,7 +190,7 @@ def users_bug_bounty(request, actor, user_id):
     before = bool(profile.bugbounty_enabled)
     profile.bugbounty_enabled = data['enabled']
     profile.save(update_fields=['bugbounty_enabled'])
-    audit(actor, 'user.bugbounty_grant' if data['enabled'] else 'user.bugbounty_revoke', user.username, before=before, after=data['enabled'])
+    audit_trail.record_for_user(actor, 'user.bugbounty_grant' if data['enabled'] else 'user.bugbounty_revoke', user, before=before, after=data['enabled'])
     return user_dict(actor, user)
 
 
@@ -203,7 +203,7 @@ def users_reset_password(request, actor, user_id):
     profile.must_change_password = True
     profile.save(update_fields=['must_change_password'])
     _revoke_tokens(user)
-    audit(actor, 'user.reset_password', user.username)
+    audit_trail.record_for_user(actor, 'user.reset_password', user)
     return {'username': user.username, 'temporary_password': password}
 
 
@@ -213,7 +213,7 @@ def users_reset_mfa(request, actor, user_id):
     profile.mfa_enabled, profile.mfa_secret, profile.recovery_codes, profile.mfa_last_step = False, '', [], 0
     profile.save()
     _revoke_tokens(user)
-    audit(actor, 'user.reset_mfa', user.username)
+    audit_trail.record_for_user(actor, 'user.reset_mfa', user)
     return user_dict(actor, user)
 
 
@@ -227,9 +227,10 @@ def users_delete(request, actor, user_id):
         raise AdminError(409, 'you cannot delete your own account')
     if user.is_superuser and User.objects.filter(is_superuser=True, is_active=True).count() <= 1:
         raise AdminError(409, 'this is the last App Admin')
-    name = user.username
+    name, org_ids = user.username, sorted(roles.user_org_ids(user)) or [None]  # read before the memberships go with the account
     user.delete()
-    audit(actor, 'user.delete', name)
+    for org_id in org_ids:
+        audit(actor, 'user.delete', name, org=org_id)
     return {'deleted': True}
 
 
@@ -685,13 +686,17 @@ def scan_control_set(request, actor):
     if action not in ('pause', 'resume') or body.get('confirm') != {'pause': 'Pause all scanning', 'resume': 'Resume scanning'}.get(action):
         raise AdminError(400, 'confirm the exact global scanning action')
     if action == 'resume':
+        from cveFeed import updater
+        if updater.update_in_progress():  # the host script's own lock is outside this container; its phase file is what we can see
+            raise AdminError(409, 'An update is running; scanning cannot resume until it finishes')
         try:
             with updater_idle(), transaction.atomic():
                 row = ScanControl.current()
                 row = ScanControl.objects.select_for_update().get(pk=row.pk)
                 if row.paused:
-                    row.paused, row.reason, row.actor, row.changed_at, row.last_error = False, '', actor.username, timezone.now(), ''
-                    row.save(update_fields=['paused', 'reason', 'actor', 'changed_at', 'last_error'])
+                    row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
+                        False, False, '', actor.username, timezone.now(), ''
+                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
                     audit(actor, 'scanning.resume', 'all projects')
         except (OSError, RuntimeError) as exc:
             raise AdminError(409, 'An update is running or its lock is unavailable; scanning cannot resume yet') from exc
@@ -699,9 +704,10 @@ def scan_control_set(request, actor):
         with transaction.atomic():
             row = ScanControl.current()
             row = ScanControl.objects.select_for_update().get(pk=row.pk)
-            if not row.paused:
-                row.paused, row.reason, row.actor, row.changed_at, row.last_error = True, 'Paused by App Admin', actor.username, timezone.now(), ''
-                row.save(update_fields=['paused', 'reason', 'actor', 'changed_at', 'last_error'])
+            if not row.paused or row.paused_by_update:  # an operator's pause is theirs to lift, never the update's
+                row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
+                    True, False, 'Paused by App Admin', actor.username, timezone.now(), ''
+                row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
                 audit(actor, 'scanning.pause', 'all projects')
             elif row.last_error:
                 row.last_error = ''

@@ -32,3 +32,58 @@ class ClassifyTargetTests(SimpleTestCase):
 		self.assertIsNone(tt.classify_target(''))
 		self.assertIsNone(tt.classify_target('   '))
 		self.assertIsNone(tt.classify_target(None))
+
+
+class EmbeddedAndMetadataAddressTests(SimpleTestCase):
+	def test_embedded_ipv4_forms_are_judged_by_the_address_they_reach(self):
+		from targetApp.target_types import is_scannable_ip
+		for blocked in ('64:ff9b::7f00:1', '64:ff9b::a9fe:a9fe', '2002:7f00:1::', '2002:a9fe:a9fe::1', '::127.0.0.1', '::ffff:7f00:1',
+						'2001::1', 'fec0::1', '64:ff9b:1::1'):
+			self.assertFalse(is_scannable_ip(blocked), blocked)
+		self.assertTrue(is_scannable_ip('64:ff9b::808:808'))
+		self.assertTrue(is_scannable_ip('2002:808:808::1'))
+
+	def test_cloud_metadata_and_reserved_ranges_are_blocked_even_when_private_targets_are_allowed(self):
+		from targetApp.target_types import is_scannable_ip
+		for blocked in ('168.63.129.16', '192.0.0.192', '198.18.0.1', '240.0.0.1', '255.255.255.255', '100.100.100.200', 'fd00:ec2::254'):
+			self.assertFalse(is_scannable_ip(blocked, allow_private=True), blocked)
+		self.assertTrue(is_scannable_ip('10.1.2.3', allow_private=True))
+		self.assertTrue(is_scannable_ip('8.8.8.8'))
+
+
+class BoundedResolutionTests(SimpleTestCase):
+	def test_names_are_checked_in_parallel_and_a_hung_lookup_does_not_stall_the_batch(self):
+		import time
+		from unittest import mock
+
+		from targetApp import target_types
+
+		def lookup(name):
+			if name.startswith('hang'):
+				time.sleep(3)
+			return name.startswith('bad')
+
+		started = time.monotonic()
+		with mock.patch.object(target_types, 'resolves_to_blocked', side_effect=lookup):
+			blocked = target_types.blocked_names(['bad1.example', 'ok.example'] + [f'hang{i}.example' for i in range(8)],
+												 workers=4, budget=1, timeout=0.3)
+		self.assertEqual(blocked, {'bad1.example'} | {f'hang{i}.example' for i in range(8)})  # unverified is not scannable
+		self.assertLess(time.monotonic() - started, 2.5)
+
+	def test_a_single_slow_lookup_gives_up_and_is_not_scannable(self):
+		import time
+		from unittest import mock
+
+		from targetApp import target_types
+		with mock.patch.object(target_types, '_lookup_blocked', lambda name: time.sleep(2) or False):
+			started = time.monotonic()
+			self.assertTrue(target_types.resolves_to_blocked('slow.example', timeout=0.2))
+			self.assertLess(time.monotonic() - started, 1)
+
+	def test_a_name_that_does_not_exist_is_not_blocked(self):
+		import socket
+		from unittest import mock
+
+		from targetApp import target_types
+		with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(-2, 'Name or service not known')):
+			self.assertFalse(target_types.resolves_to_blocked('nope.example'))

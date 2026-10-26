@@ -158,31 +158,57 @@ class CheckMongodbTests(SimpleTestCase):
 			self.assertIsNone(dbx.check_mongodb('h', 27017))
 
 
+def _streamed(status, body=b'', chunks=None):
+	"""A requests response as a context manager that yields its body in chunks, like requests.get(..., stream=True)."""
+	resp = mock.MagicMock(status_code=status)
+	resp.__enter__.return_value = resp
+	resp.iter_content.return_value = iter(chunks if chunks is not None else ([body] if body else []))
+	return resp
+
+
 class CheckHttpBackedServicesTests(SimpleTestCase):
 	def test_elasticsearch_open_root_endpoint(self):
-		resp = mock.Mock(status_code=200, content=b'{"cluster_name": "x"}')
-		resp.json.return_value = {'cluster_name': 'x'}
-		with mock.patch('requests.get', return_value=resp):
+		with mock.patch('requests.get', return_value=_streamed(200, b'{"cluster_name": "x"}')):
 			self.assertTrue(dbx.check_elasticsearch('h', 9200))
 
 	def test_elasticsearch_401_means_not_open(self):
-		resp = mock.Mock(status_code=401, content=b'')
-		with mock.patch('requests.get', return_value=resp):
+		with mock.patch('requests.get', return_value=_streamed(401)):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 
 	def test_couchdb_admin_party_all_dbs_listable(self):
-		resp = mock.Mock(status_code=200)
-		resp.json.return_value = ['_users', 'secrets']
-		with mock.patch('requests.get', return_value=resp):
+		with mock.patch('requests.get', return_value=_streamed(200, b'["_users", "secrets"]')):
 			self.assertTrue(dbx.check_couchdb('h', 5984))
 
 	def test_couchdb_401_means_not_open(self):
-		resp = mock.Mock(status_code=401)
-		with mock.patch('requests.get', return_value=resp):
+		with mock.patch('requests.get', return_value=_streamed(401)):
 			self.assertFalse(dbx.check_couchdb('h', 5984))
 
 	def test_network_errors_mean_not_open_not_a_crash(self):
 		with mock.patch('requests.get', side_effect=OSError('refused')):
+			self.assertFalse(dbx.check_elasticsearch('h', 9200))
+			self.assertFalse(dbx.check_couchdb('h', 5984))
+
+	def test_an_endless_body_is_cut_off_at_the_cap(self):
+		read = []
+
+		def endless():
+			while True:
+				read.append(1)
+				yield b'x' * 4096
+		with mock.patch('requests.get', return_value=_streamed(200, chunks=endless())):
+			self.assertFalse(dbx.check_elasticsearch('h', 9200))
+		self.assertLessEqual(len(read), dbx.MAX_BODY_BYTES // 4096 + 1)
+
+	def test_a_body_that_drips_past_the_deadline_is_dropped(self):
+		def slow():
+			yield b'{"cluster_name": '
+			yield b'"x"}'
+		with mock.patch('requests.get', return_value=_streamed(200, chunks=slow())), \
+				mock.patch.object(dbx, 'TOTAL_SECONDS', -1):
+			self.assertFalse(dbx.check_elasticsearch('h', 9200))
+
+	def test_a_non_json_body_is_not_an_open_server(self):
+		with mock.patch('requests.get', return_value=_streamed(200, b'<html>welcome</html>')):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 			self.assertFalse(dbx.check_couchdb('h', 5984))
 

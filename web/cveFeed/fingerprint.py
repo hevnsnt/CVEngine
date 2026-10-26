@@ -25,8 +25,23 @@ POWERED_BY_PRODUCTS = {
     "seomatic": "SEOmatic", "wp engine": "WP Engine", "phusion passenger": "Phusion Passenger", "servd": "Servd",
     "laravel": "Laravel", "drupal": "Drupal", "plesk": "Plesk", "nuxt": "Nuxt.js", "django": "Django",
 }
-GENERATOR_RE = re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]*content=[\"']([^\"']{1,120})[\"']"
-                          r"|<meta[^>]+content=[\"']([^\"']{1,120})[\"'][^>]*name=[\"']generator[\"']", re.IGNORECASE)
+# Tags are found first with a pattern that cannot run past the next '<' and then read attribute by attribute: a page full of
+# '<meta ' with no '>' used to make the one-pattern forms quadratic, and the scanned host controls the page.
+_META_TAG_RE = re.compile(r"<meta\b[^<>]{0,2000}>", re.IGNORECASE)
+_GENERATOR_NAME_RE = re.compile(r"""\bname=["']generator["']""", re.IGNORECASE)
+_CONTENT_ATTR_RE = re.compile(r"""\bcontent=["']([^"']{1,120})["']""", re.IGNORECASE)
+
+
+def generator_content(text):
+    """The ``content`` of the first ``<meta name="generator">`` tag, or ""."""
+    for tag in _META_TAG_RE.findall(text or ""):
+        if _GENERATOR_NAME_RE.search(tag):
+            content = _CONTENT_ATTR_RE.search(tag)
+            if content:
+                return content.group(1)
+    return ""
+
+
 # page markers: (regex, name, source)
 BODY_MARKERS = (
     (re.compile(r"__NEXT_DATA__|/_next/static/"), "Next.js", "page:_next"),
@@ -76,9 +91,8 @@ def from_response(server="", powered_by="", body="", content_type="", scripts=()
     found += _parse_products(powered_by, POWERED_BY_PRODUCTS, "header:x-powered-by")
     text = body or ""
     if text and (not content_type or "html" in content_type):
-        match = GENERATOR_RE.search(text)
-        if match:
-            value = (match.group(1) or match.group(2) or "").strip()
+        value = generator_content(text).strip()
+        if value:
             product = re.match(r"([A-Za-z][A-Za-z0-9 .!+_-]*?)(?:[ /]+(\d[\w.+-]*))?(?:\s|$|[-(,])", value + " ")
             if product:
                 found.append((_versioned(product.group(1).rstrip(" .!-"), product.group(2) or ""), "meta:generator"))
@@ -107,7 +121,18 @@ def from_response(server="", powered_by="", body="", content_type="", scripts=()
 LIB_NAMES = {"jquery": "jQuery", "bootstrap": "Bootstrap", "angular": "AngularJS", "angularjs": "AngularJS", "react": "React",
              "react-dom": "React", "vue": "Vue.js", "lodash": "Lodash", "moment": "Moment.js", "underscore": "Underscore.js",
              "swiper": "Swiper", "datatables": "DataTables"}
-SCRIPT_SRC_RE = re.compile(r"<script[^>]+src=[\"']([^\"'>\s]{1,300})[\"']", re.IGNORECASE)
+_SCRIPT_TAG_RE = re.compile(r"<script\b[^<>]{0,2000}>", re.IGNORECASE)
+_SRC_ATTR_RE = re.compile(r"""\bsrc=["']([^"'>\s]{1,300})["']""", re.IGNORECASE)
+
+
+def script_srcs(body):
+    """The ``src`` of every ``<script>`` tag that has one, in page order."""
+    found = []
+    for tag in _SCRIPT_TAG_RE.findall(body or ""):
+        src = _SRC_ATTR_RE.search(tag)
+        if src:
+            found.append(src.group(1))
+    return found
 _LIB_FILE = re.compile(r"(?:^|[/@._-])(jquery|bootstrap|angular(?:js)?|react(?:-dom)?|vue|lodash|moment|underscore|swiper|datatables)"
                        r"(?:[.-]min|[.-]slim|[.-]bundle)*?[-@./ ]v?(\d+\.\d+(?:\.\d+)?)", re.IGNORECASE)
 _LIB_QUERY = re.compile(r"/(jquery|bootstrap|angular(?:js)?|react|vue|lodash|moment|underscore)[^/?]*\.js\?(?:[^#]*&)?(?:ver|v|version)=(\d+\.\d+(?:\.\d+)?)",
@@ -131,7 +156,7 @@ def script_sources(body, page_url, limit=4):
     from urllib.parse import urljoin, urlsplit
     page = urlsplit(page_url or "")
     every, local = [], []
-    for src in SCRIPT_SRC_RE.findall(body or ""):
+    for src in script_srcs(body):
         try:
             absolute = urljoin(page_url, src.strip())
             parts = urlsplit(absolute)

@@ -55,7 +55,7 @@ step "Checking this machine"
 if [ "$(id -u)" -ne 0 ]; then
   if have sudo; then
     echo "Needs root to install Docker and bind port 443: running again through sudo."
-    exec sudo -E "$0" "${original_args[@]}"
+    exec sudo "$0" "${original_args[@]}"  # not -E: the caller's environment does not come along
   fi
   die "Run this as root:  su -c './install.sh'"
 fi
@@ -99,9 +99,10 @@ if have docker; then
   ok "docker $(docker --version 2>/dev/null | sed 's/Docker version //; s/,.*//')"
 else
   echo "Installing Docker (the official convenience script)..."
-  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || die "Could not download Docker's installer. Is this machine online (https://get.docker.com)?"
-  sh /tmp/get-docker.sh || die "Docker's installer failed. See https://docs.docker.com/engine/install/ and run this again."
-  rm -f /tmp/get-docker.sh
+  docker_installer=$(mktemp) || die "Could not create a temporary file."
+  curl -fsSL https://get.docker.com -o "$docker_installer" || die "Could not download Docker's installer. Is this machine online (https://get.docker.com)?"
+  sh "$docker_installer" || die "Docker's installer failed. See https://docs.docker.com/engine/install/ and run this again."
+  rm -f "$docker_installer"
   ok "docker installed"
 fi
 
@@ -152,7 +153,8 @@ cert_file=secrets/certs/rengine.pem
 needs_cert=1
 if [ -s "$cert_file" ] && have openssl; then
   host=${address%%:*}
-  if openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null | grep -qF "$host"; then needs_cert=0; fi
+  if [[ $host =~ ^[0-9.]+$ || $host == *:* ]]; then check=-checkip; else check=-checkhost; fi
+  if openssl x509 -in "$cert_file" -noout "$check" "$host" 2>/dev/null | grep -q "does match certificate"; then needs_cert=0; fi
 fi
 if [ "$needs_cert" -eq 1 ]; then
   step "Creating the HTTPS certificate"

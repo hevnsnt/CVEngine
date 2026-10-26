@@ -171,6 +171,18 @@ class QueueTests(unittest.TestCase):
             pass
         self.assertEqual(len(waits), 2)  # needs 1000 + headroom, so it waited while only 500 was free
 
+    def test_the_system_wide_waiting_line_never_names_the_hosts_being_scanned(self):
+        store = res.MemoryStore()
+        store.reserve('other', 100, 'other', 10 ** 6, time.time())
+        states = iter([fake_state(500)(), fake_state(3500)()])
+        lines = []
+        with mock.patch.object(res, '_log_activity', side_effect=lambda message, status='done': lines.append(message)):
+            with res.heavy_job('nuclei', label='secret-tenant.example.com', store=store,
+                               state_fn=lambda: next(states, fake_state(3500)()), sleep=lambda s: None):
+                pass
+        self.assertTrue(lines)
+        self.assertFalse([m for m in lines if 'secret-tenant' in m], lines)
+
     def test_waiting_too_long_raises_instead_of_hanging(self):
         store = res.MemoryStore()
         store.reserve('hog', 3000, 'hog', 3500, time.time())

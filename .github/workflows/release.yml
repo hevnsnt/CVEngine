@@ -39,6 +39,10 @@ jobs:
         run: |
           version="v$(tr -d '[:space:]' < web/.version | sed 's/^v//')"
           if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ "$REF_NAME" != "master" ]; then
+              echo "::error::Releases are cut from master; this run is on '$REF_NAME'."
+              exit 1
+            fi
             tag="${INPUT_TAG:-$version}"
           else
             tag="$REF_NAME"

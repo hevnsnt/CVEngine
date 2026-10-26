@@ -83,3 +83,34 @@ class NoRedisTests(TestCase):
 				self.assertTrue(ok)
 			with ledger.claim_many('nmap-fast', ['a.test', 'b.test']) as won:
 				self.assertEqual(won, ['a.test', 'b.test'])
+
+
+class AtomicClaimTests(TestCase):
+	def setUp(self):
+		from reNgine import resources
+		client = getattr(resources.get_store(), 'r', None)
+		if client is None:
+			self.skipTest('no Redis to hold claims in this environment')
+		self.client, self.resources = client, resources
+		self.key = f'cvengine:test-claim:{os.getpid()}:{timezone.now().timestamp()}'
+		self.addCleanup(lambda: self.client.delete(self.key))
+
+	def test_a_holder_extends_and_releases_only_its_own_claim(self):
+		self.client.set(self.key, 'mine', ex=100)
+		self.assertEqual(self.resources.claim_refresh(self.client, self.key, 'mine', 500), 'ok')
+		self.assertGreater(self.client.ttl(self.key), 200)
+		self.assertFalse(self.resources.claim_release(self.client, self.key, 'someone-else'))
+		self.assertEqual(self.client.get(self.key), 'mine')
+		self.assertTrue(self.resources.claim_release(self.client, self.key, 'mine'))
+		self.assertIsNone(self.client.get(self.key))
+
+	def test_a_lapsed_claim_taken_by_another_job_is_never_extended_or_deleted_by_the_old_holder(self):
+		self.client.set(self.key, 'new-holder', ex=30)
+		self.assertEqual(self.resources.claim_refresh(self.client, self.key, 'old-holder', 9999), 'lost')
+		self.assertLessEqual(self.client.ttl(self.key), 30)  # the new holder's expiry is untouched
+		self.assertFalse(self.resources.claim_release(self.client, self.key, 'old-holder'))
+		self.assertEqual(self.client.get(self.key), 'new-holder')
+
+	def test_a_claim_that_expired_is_taken_again_when_nobody_else_has_it(self):
+		self.assertEqual(self.resources.claim_refresh(self.client, self.key, 'me', 60), 'regained')
+		self.assertEqual(self.client.get(self.key), 'me')

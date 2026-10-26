@@ -34,7 +34,7 @@ DEFAULT_MODE = 'standard'
 HEAVY_KIND = {'deep': 'bbot-deep', 'passive': 'bbot-passive'}  # any other mode is the standard weight
 BBOT_SEVERITIES = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
 # Event types worth showing to a human in the live feed.
-INTERESTING = {'DNS_NAME', 'IP_ADDRESS', 'OPEN_TCP_PORT', 'URL', 'TECHNOLOGY', 'FINDING', 'VULNERABILITY',
+INTERESTING = {'DNS_NAME', 'IP_ADDRESS', 'OPEN_TCP_PORT', 'URL', 'TECHNOLOGY', 'WAF', 'FINDING', 'VULNERABILITY',
                'STORAGE_BUCKET', 'EMAIL_ADDRESS', 'ASN', 'SOCIAL', 'CODE_REPOSITORY', 'WEBSCREENSHOT', 'PROTOCOL'}
 
 
@@ -144,12 +144,22 @@ def _label(etype, payload, host):
     if isinstance(payload, dict):
         if etype == 'TECHNOLOGY':
             return f"{payload.get('technology', '?')} on {payload.get('host') or host or '?'}"
+        if etype == 'WAF':
+            return f"WAF {str(payload.get('waf') or '?')[:80]} on {payload.get('host') or host or '?'}"
         if etype in ('FINDING', 'VULNERABILITY'):
             return str(payload.get('description') or payload.get('name') or 'finding')[:200]
         if etype == 'ASN':
             return f"AS{payload.get('asn', '?')} {payload.get('name', '')}".strip()
         return str(payload.get('url') or payload.get('host') or next(iter(payload.values()), ''))[:200]
     return host or ''
+
+
+def waf_product(name):
+    """The product a bbot ``WAF`` event names (wafw00f's list gives "FortiWeb (Fortinet)", "BIG-IP AppSec Manager (F5 Networks)"): the part
+    before the vendor in brackets, so it reads like any other technology name. "generic detection" says a firewall answered and not which
+    one, so it names nothing. Pure."""
+    text = re.sub(r'\s*\([^)]*\)\s*$', '', str(name or '')).strip()[:80]
+    return '' if not text or text.lower() in ('generic detection', 'unknown', 'none') else text
 
 
 def parse_event(event, result, hosts=None):
@@ -181,6 +191,10 @@ def parse_event(event, result, hosts=None):
         result.urls.add((payload, _status_from_tags(event.get('tags'))))
     elif etype == 'TECHNOLOGY' and isinstance(payload, dict):
         result.technologies.add((payload.get('host') or host, payload.get('technology')))
+    elif etype == 'WAF' and isinstance(payload, dict):
+        product = waf_product(payload.get('waf'))
+        if product:  # the firewall's own name is a technology of the host, like any other fingerprint
+            result.technologies.add((payload.get('host') or host, product))
     elif etype == 'HTTP_RESPONSE' and isinstance(payload, dict):
         record = http_response_record(payload, host)
         if record and len(result.http) < MAX_HTTP_RESPONSES:

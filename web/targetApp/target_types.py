@@ -165,8 +165,18 @@ def expand_target(value):
 # there): loopback, link-local (cloud metadata 169.254.169.254), multicast and "this host". Internal ranges
 # (RFC1918, CGNAT, unique-local) are refused too unless the operator opts in, because on a shared instance
 # they are the server's own network. Documentation ranges are harmless and stay allowed.
-_ALWAYS_BLOCKED = [ipaddress.ip_network(n) for n in ("127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "0.0.0.0/8",
-                                                      "::1/128", "fe80::/10", "ff00::/8", "::/128")]
+_ALWAYS_BLOCKED = [ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "0.0.0.0/8",
+    "192.0.0.0/24",        # IETF protocol assignments (Oracle Cloud metadata 192.0.0.192)
+    "198.18.0.0/15",       # benchmarking
+    "240.0.0.0/4",         # reserved, and 255.255.255.255
+    "168.63.129.16/32",    # Azure wire server and DNS
+    "100.100.100.200/32",  # Alibaba Cloud metadata (inside CGNAT, so also blocked when private targets are allowed)
+    "::1/128", "fe80::/10", "fec0::/10", "ff00::/8", "::/96",  # ::/96 holds "::" and the old IPv4-compatible form
+    "2001::/32",           # Teredo tunnels
+    "64:ff9b:1::/48",      # local-use NAT64
+    "fd00:ec2::/32",       # AWS IPv6 metadata (inside fc00::/7, so also blocked when private targets are allowed)
+)]
 _INTERNAL = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
                                                 "fc00::/7")]
 
@@ -185,6 +195,25 @@ def _extra_blocked():
     return nets
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_SIX_TO_FOUR = ipaddress.ip_network("2002::/16")
+
+
+def _embedded_v4(ip):
+    """The IPv4 address an IPv6 one carries (IPv4-mapped ::ffff:a.b.c.d, NAT64 64:ff9b::a.b.c.d, 6to4 2002:aabb:ccdd::), so the
+    address a packet really reaches is the one judged; ``ip`` itself otherwise."""
+    if ip.version != 6:
+        return ip
+    mapped = ip.ipv4_mapped
+    if mapped is not None:
+        return mapped
+    if ip in _NAT64:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    if ip in _SIX_TO_FOUR:
+        return ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
+    return ip
+
+
 def is_scannable_ip(value, allow_private=None):
     """True if it is safe to point a scanner at this IP address. Any text that is not an IP is False."""
     try:
@@ -193,9 +222,7 @@ def is_scannable_ip(value, allow_private=None):
         return False
     if getattr(ip, "scope_id", None) is not None:
         return False
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
+    ip = _embedded_v4(ip)
     if any(ip.version == n.version and ip in n for n in _ALWAYS_BLOCKED + _extra_blocked()):
         return False
     if allow_private is None:
@@ -205,16 +232,55 @@ def is_scannable_ip(value, allow_private=None):
     return True
 
 
-def resolves_to_blocked(hostname):
-    """True if ``hostname`` currently resolves to any address a scanner must not touch. A name that does not
-    resolve is not blocked: the scanners cannot reach it either. (Resolution can change between this check and
-    the scan, so this narrows the DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.)"""
+RESOLVE_TIMEOUT = 5  # seconds one name may take to answer; names come from DNS the target owner controls
+RESOLVE_WORKERS = 16
+RESOLVE_BATCH_SECONDS = 120  # the most a whole list of names may take
+
+
+def _lookup_blocked(hostname):
     import socket
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError, OSError):
         return False
     return any(not is_scannable_ip(info[4][0]) for info in infos)
+
+
+def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT):
+    """True if ``hostname`` currently resolves to any address a scanner must not touch. A name that does not exist is not blocked:
+    the scanners cannot reach it either. A name whose nameserver does not answer within ``timeout`` seconds is treated as blocked,
+    because a nameserver that stalls the check and then answers the scanner with an internal address would otherwise get through;
+    the host is checked again on the next pass. (Resolution can change between this check and the scan, so this narrows the
+    DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.)"""
+    import threading
+    answer = []
+    worker = threading.Thread(target=lambda: answer.append(_lookup_blocked(hostname)), daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return not answer or bool(answer[0])
+
+
+def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, timeout=RESOLVE_TIMEOUT):
+    """The subset of ``names`` that resolves to something a scanner must not touch. Names are looked up in parallel, each bounded
+    by ``timeout`` and the whole list by ``budget`` seconds, so thousands of names with dead nameservers cannot hold a worker for
+    hours; a name still unanswered at the deadline counts as blocked, as in resolves_to_blocked."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    names = list(dict.fromkeys(names))
+    if not names:
+        return set()
+    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(names))), thread_name_prefix='dnscheck')
+    futures = {name: pool.submit(resolves_to_blocked, name) for name in names}  # each bounded by RESOLVE_TIMEOUT itself
+    deadline = time.monotonic() + budget
+    blocked = set()
+    for name, future in futures.items():
+        try:
+            if future.result(timeout=max(0.0, min(timeout * (1 + len(names) // max(1, workers)), deadline - time.monotonic()))):
+                blocked.add(name)
+        except Exception:  # noqa: BLE001 - a lookup that runs out of time is "blocked" (not verified), like resolves_to_blocked
+            blocked.add(name)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return blocked
 
 
 def bare_host(value):
@@ -231,7 +297,12 @@ def scannable_hosts(names, resolver=None, project=None):
     aims a scanner at a stored host list (auto-fire, CVE re-tests, TLS checks) goes through this, because a name a tenant controls
     can be pointed at 169.254.169.254 or an internal range after it was stored. ``resolver`` replaces the DNS check in tests.
     ``project`` (an id) also drops every host its organization excluded for good (cveFeed.exclusions: the exact name only)."""
-    check = resolver or resolves_to_blocked
+    names = list(names)
+    if resolver:
+        check = resolver
+    else:  # one parallel, bounded pass over the distinct names, then a lookup in the result
+        blocked = blocked_names([bare_host(n) for n in names if bare_host(n) and classify_target(bare_host(n)) != IP])
+        check = blocked.__contains__
     banned = frozenset()
     if project:
         from cveFeed.exclusions import excluded_names

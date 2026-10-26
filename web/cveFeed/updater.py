@@ -132,6 +132,18 @@ def read_phase():
     }
 
 
+def update_in_progress(max_age_seconds=2 * 3600):
+    """True while the host script reports it is draining or applying an update. A phase not refreshed for ``max_age_seconds`` is a
+    script that died, not an update in progress, so it never blocks an operator for good."""
+    phase = read_phase()
+    if phase['phase'] not in ('draining', 'applying'):
+        return False
+    changed = phase['changed_at']
+    if not changed:
+        return True
+    return (datetime.now(dt_timezone.utc) - datetime.fromisoformat(changed)).total_seconds() <= max_age_seconds
+
+
 def _headers(token):
     headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'CVEngine-updater'}
     if token:

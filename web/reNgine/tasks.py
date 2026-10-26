@@ -21,6 +21,7 @@ from reNgine.llm import *
 from reNgine.utilities import *
 from scanEngine.models import (EngineType, InstalledExternalTool, Notification)
 from startScan.models import *
+from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 
@@ -41,7 +42,7 @@ def persist_bbot_result(result, ctx):
 	if ctx.get('scan_history_id'):  # the organization's excluded hosts, read once for the whole batch
 		from cveFeed.exclusions import excluded_names
 		project_id = ScanHistory.objects.filter(pk=ctx['scan_history_id']).values_list('domain__project_id', flat=True).first()
-		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id)}
+		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id)}
 	subdomains = {}
 	for name in result.subdomains:
 		subdomain, _ = save_subdomain(name, ctx=ctx)
@@ -49,7 +50,7 @@ def persist_bbot_result(result, ctx):
 			subdomains[name] = subdomain
 	for name, address in result.resolutions:
 		if name in subdomains:
-			save_ip_address(address, subdomain=subdomains[name])
+			save_ip_address(address, subdomain=subdomains[name], org_id=ctx.get('_org_id'))
 	banned = ctx.get('_excluded_hosts') or ()
 	for host, port_number in result.ports:
 		if banned and host.strip().lower().rstrip('.') in banned:
@@ -59,7 +60,7 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		ip = None
 		if validators.ipv4(host) or validators.ipv6(host):
-			ip, _ = save_ip_address(host, subdomain=None)
+			ip, _ = save_ip_address(host, subdomain=None, org_id=ctx.get('_org_id'))
 		elif subdomain:
 			ip = subdomain.ip_addresses.first()
 		if not ip:
@@ -82,7 +83,7 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		if not subdomain:
 			continue
-		tech, _ = Technology.objects.get_or_create(name=tech_name[:500])
+		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
 		subdomain.technologies.add(tech)
 	_persist_bbot_findings(result, ctx, subdomains)
 	_persist_bbot_urls(result, ctx, subdomains)
@@ -627,12 +628,14 @@ def fetch_whois_data_using_netlas(target):
 	logger.info(f'Fetching WHOIS data for {target} using Netlas...')
 	command = f'netlas host {target} -f json'
 	netlas_key = get_netlas_key()
+	secrets = ()
 	if netlas_key:
 		if netlas_key.key and netlas_key.key != "None":
-			command += f' -a {netlas_key}'
+			command += f' -a {netlas_key.key}'
+			secrets = (netlas_key.key,)
 
 	try:
-		_, result = run_command(command, remove_ansi_sequence=True)
+		_, result = run_command(command, remove_ansi_sequence=True, redact=secrets)
 		
 		# catch errors
 		if 'Failed to parse response data' in result:
@@ -692,7 +695,8 @@ def run_command(
 		history_file=None, 
 		scan_id=None, 
 		activity_id=None,
-		remove_ansi_sequence=False
+		remove_ansi_sequence=False,
+		redact=()
 	):
 	"""Run a given command using subprocess module.
 
@@ -703,15 +707,20 @@ def run_command(
 		shell (bool): Run within separate shell if True.
 		history_file (str): Write command + output to history file.
 		remove_ansi_sequence (bool): Used to remove ANSI escape sequences from output such as color coding
+		redact (tuple): Secrets (API keys) on the command line; they run, but the log, the Command row and the history file show ***.
 	Returns:
 		tuple: Tuple with return_code, output.
 	"""
-	logger.info(cmd)
+	shown = cmd
+	for secret in redact:
+		if secret:
+			shown = shown.replace(secret, '***')
+	logger.info(shown)
 	logger.warning(activity_id)
 
 	# Create a command record in the database
 	command_obj = Command.objects.create(
-		command=cmd,
+		command=shown,
 		time=timezone.now(),
 		scan_history_id=scan_id,
 		activity_id=activity_id)
@@ -747,7 +756,7 @@ def run_command(
 		if not os.path.exists(history_file):
 			mode = 'w'
 		with open(history_file, mode) as f:
-			f.write(f'\n{cmd}\n{return_code}\n{output}\n------------------\n')
+			f.write(f'\n{shown}\n{return_code}\n{output}\n------------------\n')
 	if remove_ansi_sequence:
 		output = remove_ansi_escape_sequences(output)
 	monitor.raise_if_aborted()
@@ -787,6 +796,21 @@ VULNERABILITY_KEY = ('target_domain', 'scan_history', 'subdomain', 'endpoint', '
 					 'matcher_name')
 
 
+def _carry_finding_state(vuln, lookup):
+	"""A finding seen again on a later scan is a new row (rows are per scan); give it the remediation state a person set on the same
+	finding (same host, template, name, URL and matcher) in an earlier scan, so what was marked fixed or accepted does not reopen."""
+	subdomain, domain = lookup.get('subdomain'), lookup.get('target_domain')
+	if subdomain is None or domain is None:
+		return
+	same = {k: lookup[k] for k in ('source', 'template_id', 'name', 'http_url', 'matcher_name') if k in lookup}
+	earlier = (Vulnerability._base_manager.filter(target_domain=domain, subdomain__name=subdomain.name, **same)
+			   .exclude(pk=vuln.pk).exclude(remediation_status='open').order_by('-id').first())
+	if earlier is not None:
+		vuln.remediation_status, vuln.remediation_note = earlier.remediation_status, earlier.remediation_note
+		vuln.remediation_updated_at, vuln.remediation_by_id, vuln.assignee_id = (
+			earlier.remediation_updated_at, earlier.remediation_by_id, earlier.assignee_id)
+
+
 def save_vulnerability(**vuln_data):
 	references = vuln_data.pop('references', [])
 	cve_ids = vuln_data.pop('cve_ids', [])
@@ -810,6 +834,7 @@ def save_vulnerability(**vuln_data):
 	if created:
 		vuln.discovered_date = timezone.now()
 		vuln.open_status = True
+		_carry_finding_state(vuln, lookup)
 		vuln.save()
 	else:
 		# seen again: keep the newest evidence, and it is evidently still there
@@ -902,7 +927,8 @@ def save_subdomain(subdomain_name, ctx={}):
 		if normalize(subdomain_name) in banned:  # the organization excluded this exact host for good
 			logger.info(f'{subdomain_name} is excluded for this organization. Skipping.')
 			return None, False
-	subdomain, created = Subdomain.objects.get_or_create(
+	subdomain, created = get_or_create_first(
+		Subdomain,
 		scan_history=scan,
 		target_domain=domain,
 		name=subdomain_name)
@@ -915,7 +941,7 @@ def save_subdomain(subdomain_name, ctx={}):
 	return subdomain, created
 
 
-def save_ip_address(ip_address, subdomain=None, subscan=None, **kwargs):
+def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, **kwargs):
 	if not (validators.ipv4(ip_address) or validators.ipv6(ip_address)):
 		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
 		return None, False
@@ -924,7 +950,9 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, **kwargs):
 		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
 		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
 		return None, False
-	ip, created = IpAddress.objects.get_or_create(address=ip_address)
+	if org_id is None and subdomain is not None:  # the organization of the host the address was found for
+		org_id = org_id_of_subdomain(subdomain)
+	ip, created = get_or_create_ip(ip_address, org_id)
 	# if created:
 	# 	logger.warning(f'Found new IP {ip_address}')
 

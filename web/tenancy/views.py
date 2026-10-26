@@ -1,6 +1,8 @@
 """MFA views: the two-step login. Enrolling and turning it off live on My account (cveFeed/account_api.py)."""
+import hashlib
 import math
 import time
+import unicodedata
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -15,13 +17,17 @@ from django.urls import reverse
 from django.utils.crypto import constant_time_compare, salted_hmac
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from tenancy import mfa
+from reNgine.client_ip import client_ip
+from tenancy import audit, mfa, throttle
 
 PENDING_KEY = 'mfa_pending'
 SETUP_SECRET_KEY = 'mfa_setup_secret'
 PENDING_TTL = 300
 MAX_FAILURES = 5
 LOCKOUT_SECONDS = 300
+# password step: failed attempts per window, per (address, name), per address and per name. The pair limit is tight; the name
+# limit is loose so one stranger cannot lock the real owner out, and the address limit stops spraying many names from one place.
+LOGIN_LIMITS = (('pair', 5), ('ip', 30), ('user', 50))
 
 
 def profile_of(user):
@@ -37,11 +43,9 @@ def fail(user):
     """Count one failed second factor. The counter lives in the shared Redis cache and is incremented atomically, so concurrent
     attempts (several web workers, several threads) cannot undercount; the lockout window starts at the first failure."""
     key = f'mfa_fail:{user.pk}'
-    cache.add(key, 0, LOCKOUT_SECONDS)  # only when absent: sets the window, never extends it
-    try:
-        cache.incr(key)
-    except ValueError:  # the key expired between the add and the incr
-        cache.set(key, 1, LOCKOUT_SECONDS)
+    throttle.count(key, LOCKOUT_SECONDS)
+    if cache.get(key, 0) == MAX_FAILURES:  # the attempt that closes the door, recorded once
+        audit.record_for_user_quietly(user, 'account.mfa_locked', user)
 
 
 def clear_failures(user):
@@ -97,11 +101,51 @@ class SignOutView(LogoutView):
         return render(request, 'tenancy/signout_confirm.html')
 
 
+def _login_name(username):
+    """The sign-in name as the login form reads it (Django's UsernameField applies NFKC), case-folded: 'ADMIN', 'admin' and the
+    full-width 'ａｄｍｉｎ' are one account and must share one counter, or each spelling would get its own five attempts."""
+    return unicodedata.normalize('NFKC', str(username or '')).strip().casefold()[:150]
+
+
+def _login_keys(request, username):
+    name = hashlib.sha256(_login_name(username).encode()).hexdigest()[:32]
+    ip = client_ip(request) or 'unknown'
+    return {'pair': f'login_fail:pair:{ip}:{name}', 'ip': f'login_fail:ip:{ip}', 'user': f'login_fail:user:{name}'}
+
+
+def login_throttled(request, username):
+    keys = _login_keys(request, username)
+    return any(throttle.exceeded(keys[kind], limit) for kind, limit in LOGIN_LIMITS)
+
+
 class MFALoginView(LoginView):
-    """Password step; users with MFA are not logged in until /mfa/verify/ succeeds."""
+    """Password step; users with MFA are not logged in until /mfa/verify/ succeeds. Wrong passwords are counted and, past a limit,
+    refused before the password is even checked, so the login form cannot be used to guess passwords."""
+
+    def post(self, request, *args, **kwargs):
+        if login_throttled(request, request.POST.get('username')):
+            form = self.get_form()
+            form.is_valid()
+            form.errors.pop('__all__', None)
+            form.add_error(None, 'Too many failed sign-in attempts. Try again in a few minutes.')
+            response = self.render_to_response(self.get_context_data(form=form))
+            response.status_code = 429
+            return response
+        return super().post(request, *args, **kwargs)
+
+    def form_invalid(self, form):
+        keys = _login_keys(self.request, self.request.POST.get('username'))
+        for key in keys.values():
+            throttle.count(key, LOCKOUT_SECONDS)
+        if cache.get(keys['pair'], 0) == dict(LOGIN_LIMITS)['pair']:  # the attempt that locks this address out of this name, recorded once
+            account = User.objects.filter(username__iexact=_login_name(self.request.POST.get('username'))).first()
+            if account:
+                audit.record_for_user_quietly(account, 'account.login_locked', account, ip=client_ip(self.request) or '')
+        return super().form_invalid(form)
 
     def form_valid(self, form):
         user = form.get_user()
+        cache.delete(_login_keys(self.request, self.request.POST.get('username'))['pair'])
         profile = getattr(user, 'tenancy_profile', None)
         self.request.session.pop(PENDING_KEY, None)
         if not (profile and profile.mfa_enabled):

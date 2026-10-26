@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
 from django.contrib.auth.models import User
-from django.contrib.sessions.backends.db import SessionStore
+from reNgine.hashed_sessions import SessionStore
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 

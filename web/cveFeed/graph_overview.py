@@ -26,7 +26,7 @@ def groups(project_slug=None):
 
     A host is counted once however many targets of its group (or project) hold it, exactly as the Hosts page and the dashboard
     count it: the same name in two targets of one project is one host (see ``cveFeed.counts``). Per-target numbers are summed
-    nowhere; every group and project total is a count of distinct names."""
+    nowhere; every group and project total is a count of distinct hosts."""
     from cveFeed.correlation import latest_scan_q
     from cveFeed.counts import RULED_OUT
     from startScan.models import Subdomain
@@ -37,10 +37,30 @@ def groups(project_slug=None):
     ids = [d.pk for d in domains]
     current = Subdomain.objects.filter(target_domain_id__in=ids).filter(latest_scan_q())
 
+    # One host is one machine behind however many names (cveFeed.counts.with_host_key): hosts are told apart by that key, and a name
+    # whose copies carry different keys joins them (union-find), so a name is never two hosts.
+    from cveFeed.counts import with_host_key
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    first_key = {}
+    for name, project_id, key in with_host_key(current).values_list('name', 'target_domain__project_id', 'host_key').distinct():
+        first = first_key.setdefault((project_id, name), key)
+        parent[find(key)] = find(first)
+
     def names_by_domain(qs, field='name'):
         found = {}
-        for domain_id, name in qs.values_list('target_domain_id', field).distinct():
-            found.setdefault(domain_id, set()).add(name)
+        if field != 'name':
+            for domain_id, name in qs.values_list('target_domain_id', field).distinct():
+                found.setdefault(domain_id, set()).add(name)
+            return found
+        for domain_id, key in with_host_key(qs).values_list('target_domain_id', 'host_key').distinct():
+            found.setdefault(domain_id, set()).add(find(key))
         return found
 
     hosts_of = names_by_domain(current)

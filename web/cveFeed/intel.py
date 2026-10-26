@@ -23,7 +23,7 @@ CNA's affected products and version ranges and CISA's ADP enrichment), most impo
 weaponized, then likely (EPSS), then any public exploit. Each run imports a bounded number, so a fresh install fills in over a
 few hours, and the new CVEs are correlated against the inventory and announced like any new fire-tier CVE.
 """
-import gzip
+import zlib
 import io
 import json
 import logging
@@ -41,6 +41,7 @@ CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
 CVE_IN_TEXT = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
 USER_AGENT = "CVEngine threat intelligence (+https://github.com/hevnsnt/CVEngine)"
 MAX_BYTES = 64 * 1024 * 1024
+MAX_DECOMPRESSED = 512 * 1024 * 1024  # what a feed file may expand to (the real EPSS file is about 20 MB)
 EPSS_THRESHOLD = 0.1  # the CVEEntry.epss_reached meaning
 CVE5_URL = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/{year}/{bucket}xxx/{cve}.json"
 
@@ -187,9 +188,18 @@ def parse_vulncheck(items):
     return out
 
 
+def _gunzip(raw, limit):
+    """Decompress a gzip body, refusing one that expands past ``limit`` bytes (a few KB can claim many GB)."""
+    stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = stream.decompress(raw, limit + 1)
+    if len(out) > limit or stream.unconsumed_tail:
+        raise SourceError("the feed expands past the size limit")
+    return out
+
+
 def parse_epss(raw):
     out = {}
-    text = gzip.decompress(raw).decode("utf-8", "replace")
+    text = _gunzip(raw, MAX_DECOMPRESSED).decode("utf-8", "replace")
     for line in text.splitlines():
         if not line.startswith("CVE-"):
             continue  # the model-version comment and the header
@@ -388,6 +398,47 @@ def _bound(value):
     return (found.group(1), False) if found else (None, False)
 
 
+_WILDCARD = re.compile(r"^(?:version|ver\.?|v)?\s*(\d+(?:\.\d+)*)\.(?:x|\*)$", re.I)
+
+
+def _wildcard_base(value):
+    """"2.3.x" or "2.3.*" -> "2.3" (the branch a wildcard names), else None."""
+    found = _WILDCARD.match(str(value or "").strip())
+    return found.group(1) if found else None
+
+
+def _next_branch(base):
+    """"2.3" -> "2.4": the first version after every release of branch ``base``."""
+    parts = base.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
+_VER = r"v?(\d[0-9A-Za-z.+~-]*)"
+_TEXT_RANGES = (
+    (re.compile(rf"^{_VER}\s*(?:through|thru|to|-|\u2013|\u2014)\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
+    (re.compile(rf"^{_VER}\s*(?:and|or)\s*(?:earlier|prior|below|before|lower|older)$", re.I), lambda m: {"lastAffected": m.group(1)}),
+    (re.compile(rf"^{_VER}\s*(?:and|or)\s*(?:later|above|newer|higher|after)$|^{_VER}\+$", re.I),
+     lambda m: {"introduced": m.group(1) or m.group(2)}),
+    (re.compile(rf"^(?:before|prior to|earlier than|older than|<)\s*{_VER}$", re.I), lambda m: {"fixed": m.group(1)}),
+    (re.compile(rf"^(?:through|up to and including|<=)\s*{_VER}$", re.I), lambda m: {"lastAffected": m.group(1)}),
+    (re.compile(rf"^>=?\s*{_VER}\s*,?\s*(?:and\s*)?<\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "fixed": m.group(2)}),
+    (re.compile(rf"^>=?\s*{_VER}\s*,?\s*(?:and\s*)?<=\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
+)
+
+
+def _text_range(value):
+    """``{introduced?, fixed?, lastAffected?}`` for a version written as a range ("2.0 through 2.3", "before 1.5", "3.1 and earlier"), else
+    None. CVE List records often put the range in the ``version`` text; reading only its first number turns "2.0 through 2.3" into the
+    single version 2.0, which misses every host on 2.1 to 2.3."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    for pattern, build in _TEXT_RANGES:
+        found = pattern.match(text)
+        if found:
+            return {k: v for k, v in build(found).items() if v}
+    return None
+
+
 def _ranges(entry):
     """CVE 5 ``versions`` entries -> correlation ranges ({introduced, fixed | lastAffected}), split at ``changes``. An upper
     bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts."""
@@ -396,19 +447,30 @@ def _ranges(entry):
         if not isinstance(v, dict) or v.get("status") != "affected":
             continue
         kind = "GIT" if str(v.get("versionType") or "").lower() == "git" else "SEMVER"
-        start = _bound(v.get("version"))[0]
+        textual = _text_range(v.get("version")) if not (v.get("lessThan") or v.get("lessThanOrEqual")) else None
+        if textual:  # the range is written in the version field itself
+            out.append({"type": kind, **textual})
+            continue
+        branch = _wildcard_base(v.get("version"))  # "2.3.x": every release of 2.3 (a wildcard is not a version bound)
+        start = branch or _bound(v.get("version"))[0]
         start = None if start in ("0", "0.0", "0.0.0") else start
         upper = {}
         if v.get("lessThan"):
-            bound, exact = _bound(v.get("lessThan"))
+            below = _wildcard_base(v.get("lessThan"))
+            bound, exact = (below, True) if below else _bound(v.get("lessThan"))
             if bound:
                 upper = {"fixed": bound} if exact else {"lastAffected": bound}
         elif v.get("lessThanOrEqual"):
+            through = _wildcard_base(v.get("lessThanOrEqual"))
             bound, _exact = _bound(v.get("lessThanOrEqual"))
-            if bound:
+            if through:  # "<= 2.3.x" ends after the last 2.3 release
+                upper = {"fixed": _next_branch(through)}
+            elif bound:
                 upper = {"lastAffected": bound}
         if not v.get("lessThan") and not v.get("lessThanOrEqual"):
-            if start:  # one exact version
+            if branch:
+                out.append({"type": kind, "introduced": branch, "fixed": _next_branch(branch)})
+            elif start:  # one exact version
                 out.append({"type": kind, "introduced": start, "lastAffected": start})
             continue
         affected, seg_start = True, start
@@ -444,10 +506,15 @@ def convert_affected(entries):
     return out[:50]
 
 
+CVSS_PREFERENCE = ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0")
+
+
 def _metric(containers):
-    for container in containers:
-        for metric in container.get("metrics") or []:
-            for key in ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0"):
+    """The best score any container carries: the newest scoring system first (3.1, 3.0, 4.0, then the obsolete 2.0), and within one system
+    the CNA's before the ADPs'. A CNA that only published a CVSS 2.0 score does not outrank an ADP's 3.1 score."""
+    for key in CVSS_PREFERENCE:
+        for container in containers:
+            for metric in container.get("metrics") or []:
                 m = metric.get(key) if isinstance(metric, dict) else None
                 if isinstance(m, dict) and isinstance(m.get("baseScore"), (int, float)):
                     return float(m["baseScore"]), _clean(m.get("vectorString"), 128), _clean(m.get("baseSeverity"), 32)

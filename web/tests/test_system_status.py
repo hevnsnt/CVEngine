@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -119,8 +120,31 @@ class SystemStatusTests(TestCase):
 
 	def test_a_healthy_instance_says_ok(self):
 		healthy = dict(HEALTH, schedules=[{'name': 'x', 'next_due_state': 'estimated'}])
-		_, data = self.run_status(self.t_root, health=healthy)
+		usage = type('Usage', (), {'total': 100 << 30, 'used': 40 << 30, 'free': 60 << 30})()  # not this machine's real disk
+		with mock.patch.object(system_status.shutil, 'disk_usage', lambda path: usage):
+			_, data = self.run_status(self.t_root, health=healthy)
 		self.assertEqual((data['overall'], data['problems']), ('ok', []))
+
+	def test_stale_nuclei_templates_are_a_problem_and_fresh_ones_report_their_age(self):
+		import os
+		import tempfile
+		with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {'NUCLEI_TEMPLATES_DIR': root}), \
+				mock.patch.object(system_status, '_tool_version', lambda argv: 'v-test'):
+			marker = os.path.join(root, '.checksum')
+			open(marker, 'w').close()
+			_, data = self.run_status(self.t_root)
+			tools = data['system']['tools']
+			self.assertLess(tools['nuclei_templates']['age_hours'], 1)
+			self.assertEqual(tools['versions']['nuclei'], 'v-test')
+			self.assertFalse(any(p.startswith('nuclei templates') for p in data['problems']))
+			old = timezone.now().timestamp() - 3 * 24 * 3600
+			os.utime(marker, (old, old))
+			_, data = self.run_status(self.t_root)
+			self.assertTrue(any(p.startswith('nuclei templates: not refreshed for') for p in data['problems']))
+
+	def test_members_do_not_see_the_tool_versions(self):
+		_, data = self.get(self.t_member)
+		self.assertNotIn('tools', json.dumps(data))
 
 	def test_a_probe_that_fails_is_reported_and_does_not_fail_the_answer(self):
 		class Down(FakeBroker):
@@ -159,13 +183,24 @@ class SystemStatusTests(TestCase):
 	def test_a_pause_and_a_running_update_are_notes_not_problems(self):
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'reason': 'maintenance window', 'actor': 'bill'})
 		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
-			_, data = self.get(self.t_member)
+			_, data = self.get(self.t_root)
 		self.assertTrue(data['scanning']['paused'])
 		self.assertEqual(data['scanning']['reason'], 'maintenance window')
 		self.assertEqual(data['update']['phase'], 'draining')
 		self.assertTrue(any('paused: maintenance window' in n for n in data['notes']))
 		self.assertTrue(any('update is in progress' in n for n in data['notes']))
-		self.assertEqual(data['problems'], [])
+
+	def test_a_member_learns_that_scanning_is_paused_but_not_who_or_why_or_instance_counts(self):
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'reason': 'maintenance window', 'actor': 'bill',
+														   'last_error': 'boom'})
+		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
+			_, data = self.get(self.t_member)
+		self.assertTrue(data['scanning']['paused'])
+		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update'})
+		self.assertEqual(data['update'], {'phase': 'draining'})
+		blob = str(data)
+		for secret in ('maintenance window', 'bill', 'boom', 'waiting'):
+			self.assertNotIn(secret, blob)
 
 	def test_a_read_only_token_may_read_it(self):
 		self.assertEqual(self.get(self.t_member_ro)[0], 200)
@@ -188,3 +223,31 @@ class SystemStatusTests(TestCase):
 		text = str(data).lower()
 		for word in ('redis://', 'postgres://', 'password', 'secret', 'api_key'):
 			self.assertNotIn(word, text)
+
+
+class WorkConductorStatusTests(TestCase):
+	def setUp(self):
+		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		org = Org.objects.create(name='W', slug='w')
+		self.project = Project.objects.create(name='W', slug='ws', insert_date=NOW, org=org)
+		self.domain = Domain.objects.create(name='w.test', project=self.project, insert_date=NOW)
+		self.user = User.objects.create_superuser('wroot', 'w@x.test', 'x')
+
+	def problems(self):
+		problems, notes = [], []
+		with mock.patch.dict('os.environ', {'CVENGINE_WORK_DEPTH': '3'}):
+			out = system_status._system(self.user, problems, notes)
+		return out, problems
+
+	def test_no_work_with_targets_is_a_problem_and_a_queued_scan_clears_it(self):
+		out, problems = self.problems()
+		self.assertEqual((out['work']['running'], out['work']['queued'], out['work']['targets']), (0, 0, True))
+		self.assertTrue([p for p in problems if p.startswith('work: nothing is running or queued')])
+		ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, scan_status=-1, start_scan_date=NOW, results_dir='/x')
+		_, problems = self.problems()
+		self.assertFalse([p for p in problems if p.startswith('work:')])
+
+	def test_a_paused_instance_is_not_a_work_problem(self):
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+		_, problems = self.problems()
+		self.assertFalse([p for p in problems if p.startswith('work:')])

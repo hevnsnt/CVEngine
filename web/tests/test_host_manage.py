@@ -62,7 +62,7 @@ class Base(TestCase):
 	def sub(self, project, name, ip=None, scan=True):
 		sub = Subdomain.objects.create(target_domain=self.targets[project.slug], scan_history=self.scans[project.slug] if scan else None, name=name)
 		if ip:
-			sub.ip_addresses.add(IpAddress.objects.create(address=ip))
+			sub.ip_addresses.add(IpAddress.objects.get_or_create(address=ip)[0])  # one row per address
 		return sub
 
 	def populate(self, project, host=HOST):

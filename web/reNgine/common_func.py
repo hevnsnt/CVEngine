@@ -36,6 +36,28 @@ from reNgine.utilities import is_valid_url
 logger = get_task_logger(__name__)
 DISCORD_WEBHOOKS_CACHE = redis.Redis.from_url(CELERY_BROKER_URL)
 
+
+def _seal(obj):
+    """Pickle ``obj`` for the Discord cache with a signature: the cache lives in Redis, and unpickling whatever is found there would
+    run code for anyone who can write to it. Only blobs signed with this installation's secret are read back."""
+    from django.utils.crypto import salted_hmac
+    blob = pickle.dumps(obj)
+    return salted_hmac('reNgine.discord-cache', blob).digest() + blob
+
+
+def _unseal(sealed):
+    """The object ``_seal`` stored, or None for anything that is missing, altered or not signed by this installation."""
+    from django.utils.crypto import constant_time_compare, salted_hmac
+    if not isinstance(sealed, (bytes, bytearray)) or len(sealed) <= 20:
+        return None
+    mac, blob = bytes(sealed[:20]), bytes(sealed[20:])
+    if not constant_time_compare(mac, salted_hmac('reNgine.discord-cache', blob).digest()):
+        return None
+    try:
+        return pickle.loads(blob)
+    except Exception:  # noqa: BLE001 - a blob of an older shape is a cache miss
+        return None
+
 #------------------#
 # EngineType utils #
 #------------------#
@@ -663,27 +685,20 @@ def send_discord_message(
 		message = '' # no need for message in embeds
 
 	# Check for cached response in cache, using title as key
-	cached_response = DISCORD_WEBHOOKS_CACHE.get(title) if title else None
-	if cached_response:
-		cached_response = pickle.loads(cached_response)
+	cached_response = _unseal(DISCORD_WEBHOOKS_CACHE.get(title)) if title else None
 
-	# Get existing webhook if found in cache
-	cached_webhook = DISCORD_WEBHOOKS_CACHE.get(title + '_webhook') if title else None
-	if cached_webhook:
-		webhook = pickle.loads(cached_webhook)
-		webhook.remove_embeds()
-	else:
-		webhook = DiscordWebhook(
-			url=notif.discord_hook_url,
-			rate_limit_retry=False,
-			timeout=30,
-			content=message)
+	# The webhook is built from the stored setting every time: its URL is a secret and is never kept in the cache.
+	webhook = DiscordWebhook(
+		url=notif.discord_hook_url,
+		rate_limit_retry=False,
+		timeout=30,
+		content=message)
 
 	# Get existing embed if found in cache
 	embed = None
-	cached_embed = DISCORD_WEBHOOKS_CACHE.get(title + '_embed') if title else None
+	cached_embed = _unseal(DISCORD_WEBHOOKS_CACHE.get(title + '_embed')) if title else None
 	if cached_embed:
-		embed = pickle.loads(cached_embed)
+		embed = cached_embed
 	elif use_discord_embed:
 		embed = DiscordEmbed(title=title)
 
@@ -726,9 +741,8 @@ def send_discord_message(
 
 		webhook.add_embed(embed)
 
-		# Add webhook and embed objects to cache, so we can pick them up later
-		DISCORD_WEBHOOKS_CACHE.set(title + '_webhook', pickle.dumps(webhook))
-		DISCORD_WEBHOOKS_CACHE.set(title + '_embed', pickle.dumps(embed))
+		# Add the embed to the cache, so we can pick it up later
+		DISCORD_WEBHOOKS_CACHE.set(title + '_embed', _seal(embed))
 
 	# Add files to webhook
 	if files:
@@ -743,7 +757,7 @@ def send_discord_message(
 	else:
 		response = webhook.execute()
 		if use_discord_embed and response.status_code == 200:
-			DISCORD_WEBHOOKS_CACHE.set(title, pickle.dumps(response))
+			DISCORD_WEBHOOKS_CACHE.set(title, _seal(response))
 
 	# Get status code
 	if response.status_code == 429 and _attempt < 2:  # rate limited: wait and retry, but only twice
@@ -1247,14 +1261,14 @@ def get_domain_info_from_db(target):
 		Returns:
 			Domain: The Domain object if found, otherwise None.
 	"""
-	try:
-		domain = Domain.objects.get(name=target)
-		if not domain.insert_date:
-			domain.insert_date = timezone.now()
-			domain.save()
-		return extract_domain_info(domain)
-	except Domain.DoesNotExist:
+	# WHOIS data describes the public name, not a tenant, so any organization's record of it will do (the oldest)
+	domain = Domain.objects.filter(name=target).order_by('id').first()
+	if domain is None:
 		return None
+	if not domain.insert_date:
+		domain.insert_date = timezone.now()
+		domain.save()
+	return extract_domain_info(domain)
 	
 def extract_domain_info(domain):
 	"""
@@ -1475,8 +1489,8 @@ def parse_dns_records(domain_info, dns):
 
 def save_domain_info_to_db(target, domain_info):
 	"""Save domain info to the database."""
-	if Domain.objects.filter(name=target).exists():
-		domain, _ = Domain.objects.get_or_create(name=target)
+	domain = Domain.objects.filter(name=target).order_by('id').first()
+	if domain is not None:
 		
 		# Create or update DomainInfo
 		domain_info_obj, created = DomainInfo.objects.get_or_create(domain=domain)

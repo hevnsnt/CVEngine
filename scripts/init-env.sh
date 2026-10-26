@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { cp .env.example .env; echo "Created .env from .env.example."; }
+[ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; }
 
 # letters and digits only: a `$` or `#` in .env breaks Make and Compose parsing
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
@@ -34,6 +34,19 @@ fill() {
     echo "Generated ${key}."
   fi
 }
+
+# The key that encrypts the stored API keys, webhook URLs and TOTP seeds, apart from Django's secret. A value already set is
+# never changed (that is what rotation is for: manage.py rotate_field_key); values stored before it existed still read.
+grep -q '^CVENGINE_FIELD_KEY=' .env || echo 'CVENGINE_FIELD_KEY=' >> .env
+fill CVENGINE_FIELD_KEY
+
+# The password of the Redis broker (queues, caches and counters). A first start gets one. An installation that already has containers
+# keeps its open broker until ./scripts/enable-redis-auth.sh is run, which also recreates the services: the broker and its clients
+# must change together, and the updater never recreates Redis.
+grep -q '^REDIS_PASSWORD=' .env || echo 'REDIS_PASSWORD=' >> .env
+if ! { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q 'redis'; }; then
+  fill REDIS_PASSWORD
+fi
 
 # The address other machines reach this one on: the source of the default route, else the first non-loopback address, else localhost.
 detect_host() {

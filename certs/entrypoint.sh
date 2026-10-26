@@ -38,7 +38,7 @@ cert() {
   echo "subjectAltName=$(san_list "${COMMON_NAME}")" > client-ext.cnf
 
   # Create a new certificate using our own CA
-  openssl x509 -req -sha256 -passin pass:${AUTHORITY_PASSWORD} -days 3650 \
+  openssl x509 -req -sha256 -passin env:AUTHORITY_PASSWORD -days 3650 \
     -in ${FILENAME}.csr -CA ca.crt -CAkey ca.key \
     -out ${FILENAME}.crt \
     -extfile client-ext.cnf
@@ -58,10 +58,12 @@ cd /certs
 # Create a new CA if it does not exist
 if (! test -f ca.key) || (! test -f ca.crt); then
   echo "Creating new CA..."
-  openssl genrsa -out ca.key 4096
+  # The CA key is encrypted with AUTHORITY_PASSWORD (it was written in the clear before, whatever the password said) and readable by
+  # root only; the password is read from the environment, never put on a command line. A CA created by an older version keeps its
+  # key as it is: delete ca.key and ca.crt in the certs volume and run this again to replace it (browsers then need the new CA).
+  (umask 077; openssl genrsa -aes256 -passout env:AUTHORITY_PASSWORD -out ca.key 4096)
   openssl req -new -x509 -sha256 \
-   -passin pass:${AUTHORITY_PASSWORD} \
-   -passout pass:${AUTHORITY_PASSWORD} \
+   -passin env:AUTHORITY_PASSWORD \
    -extensions v3_ca -key ca.key -out ca.crt -days 3650 \
    -subj "/C=${COUNTRY_CODE}/O=${COMPANY}/CN=${AUTHORITY_NAME}"
 

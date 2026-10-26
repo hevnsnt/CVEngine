@@ -28,6 +28,8 @@ HTTP_TIMEOUT = 5
 MAX_POLICY_BYTES = 64 * 1024
 MAX_TAKEOVER_DOMAINS = 15
 MAX_REPORT_DOMAINS = 10
+SPF_MAX_TERMS = 200  # terms read from one SPF record
+SPF_MAX_DOMAINS = 30  # include:/redirect= names taken from one record
 MAX_DANE_MX = 5
 # More DKIM selectors seen in the wild (on top of hygiene.DKIM_SELECTORS), and the ARC sealing selectors of the large
 # mail platforms. Bounded on purpose: MailFail tries ~900 names, which is too many lookups for a server-side sweep.
@@ -83,13 +85,13 @@ def spf_referenced_domains(txt_records):
     """The domains an SPF record's include: and redirect= terms name (macros left out)."""
     spf = _first(_values(txt_records), 'v=spf1')
     out = []
-    for term in spf.split()[1:]:
+    for term in spf.split()[1:SPF_MAX_TERMS]:
         t = term.lstrip('+-~?')
         if t.lower().startswith(('include:', 'redirect=')):
             name = re.split('[:=]', t, 1)[1].strip().rstrip('.').lower()
-            if name and '%' not in name:
+            if name and '%' not in name and name not in out:
                 out.append(name)
-    return out
+    return out[:SPF_MAX_DOMAINS]
 
 
 # ----------------------------------------------------------------------------- DMARC

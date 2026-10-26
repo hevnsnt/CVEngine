@@ -6,15 +6,19 @@ a role above audit, and a read-only token can never write. Queries are filtered
 to the project explicitly, in addition to the request-wide data scope.
 """
 import ipaddress
+import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone as dt_timezone
 from typing import Optional
 
 from django.utils import timezone
 
 from cveFeed.counts import RUNNING_WINDOW
 from tenancy import roles
+
+logger = logging.getLogger(__name__)
 
 PAGE_SIZE_DEFAULT = 50
 PAGE_SIZE_MAX = 200
@@ -301,11 +305,14 @@ def _expand_target(value):
 
 def _create_domains(project, names, description='', excluded=None):
     """Create a Domain per name in bulk, in order. Returns (the rows created, the names that already existed). Domain
-    names are globally unique in reNgine, so a name another project holds counts as existing. A name the project's organization
+    names are unique within an organization, so a name another project of the same organization holds counts as existing (another
+    organization's record of the same name is a different, separate record). A name the project's organization
     excluded for good ("Remove & exclude") is never created; it is appended to ``excluded`` when a list is given."""
     from cveFeed.exclusions import excluded_names, normalize
-    from targetApp.models import Domain
+    from targetApp.models import Domain, org_domains
+    from startScan.ip_rows import org_id_of_project
     names = list(dict.fromkeys(names))
+    org_id = org_id_of_project(project.id)
     banned = excluded_names(project.id)
     if banned:
         skipped = [n for n in names if normalize(n) in banned]
@@ -314,14 +321,14 @@ def _create_domains(project, names, description='', excluded=None):
         names = [n for n in names if n not in set(skipped)]
     existing = set()
     for start in range(0, len(names), 1000):
-        existing.update(Domain._base_manager.filter(name__in=names[start:start + 1000]).values_list('name', flat=True))
+        existing.update(org_domains(project).filter(name__in=names[start:start + 1000]).values_list('name', flat=True))
     wanted = [n for n in names if n not in existing]
     now = timezone.now()
     created = []
     for start in range(0, len(wanted), 1000):
         part = wanted[start:start + 1000]
         # ignore_conflicts: a concurrent add of the same name must not fail the whole batch; the re-read says what we own
-        Domain.objects.bulk_create([Domain(name=n, project=project, description=description or None, insert_date=now) for n in part],
+        Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now) for n in part],
                                    ignore_conflicts=True)
         created += Domain.objects.filter(project=project, name__in=part).order_by('id')
     created.sort(key=lambda d: d.id)
@@ -643,6 +650,7 @@ def rescan_hosts(ctx, slug, target_id, hosts):
         hosts = re.split(r'[\s,]+', hosts)
     if not isinstance(hosts, (list, tuple)) or not hosts:
         raise ApiError(400, 'hosts must be a non-empty list of host names')
+    hosts = hosts[:RESCAN_MAX_HOSTS * 10]  # what is read is bounded; the first RESCAN_MAX_HOSTS that qualify are queued
     suffix = domain.name.lower()
     names = list(dict.fromkeys(str(h).strip().lower().rstrip('.') for h in hosts if str(h).strip()))
     from cveFeed.exclusions import drop_excluded
@@ -732,7 +740,11 @@ def _start_discoveries(domains, mode, project_id):
 
 
 _SCHEME_RE = re.compile(r'^[a-z][a-z0-9+.\-]*://', re.I)
-_MD_LINK_RE = re.compile(r'\[[^\]]*\]\(([^)\s]*)\)')
+# Both parts are bounded and cannot contain another '[' or '(': a long run of '[' with no ']' then costs one short scan per '[',
+# not a scan to the end of the line for each (the unbounded form was quadratic, and it runs before any authorization).
+_MD_LINK_RE = re.compile(r'\[[^\[\]]{0,500}\]\(([^()\s]{0,2048})\)')
+MAX_TARGET_TEXT = 2_000_000  # characters of pasted text one request may carry
+MAX_TARGET_TOKEN = 2048  # a longer token is never a domain, IP, CIDR or range
 _CIDR_LIKE_RE = re.compile(r'^[0-9a-fA-F:.]+/\d{1,3}$')
 _HOST_PORT_RE = re.compile(r'^(.+):(\d{1,5})$')
 
@@ -767,9 +779,11 @@ def normalize_target(token):
 def parse_target_list(text):
     """Split pasted text (newlines, commas, spaces, # comments, markdown links, URLs) into unique targets, in order."""
     seen, out = set(), []
-    for line in (text or '').splitlines():
+    for line in (text or '')[:MAX_TARGET_TEXT].splitlines():
         line = _MD_LINK_RE.sub(r'\1', line.split('#', 1)[0])  # a comment, then [text](url) -> url
         for token in re.split(r'[,\s;]+', line):
+            if len(token) > MAX_TARGET_TOKEN:
+                continue
             token = normalize_target(token)
             if token and token not in seen:
                 seen.add(token)
@@ -956,12 +970,15 @@ def _add_targets(ctx, slug, values, discover, mode):
         except ApiError as exc:
             invalid.append({'value': entry, 'error': exc.message})
             continue
-        for name in expanded:
-            if name not in seen:
-                seen.add(name)
-                names.append(name)
-                if kind == DOMAIN:
-                    domain_names.append(name)
+        fresh = [n for n in dict.fromkeys(expanded) if n not in seen]
+        if len(names) + len(fresh) > BULK_MAX_EXPANDED:  # the cap counts what is added, so the last range cannot overshoot it
+            invalid.append({'value': entry, 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
+            continue
+        for name in fresh:
+            seen.add(name)
+            names.append(name)
+            if kind == DOMAIN:
+                domain_names.append(name)
     excluded = []
     created, existing = _create_domains(project, names, excluded=excluded)
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in excluded]
@@ -1095,6 +1112,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'http': http,
             'hosting': hosting_info,
             'names': _host_names(sub),
+            # the other names that point at this host's addresses: one host, several domain names
+            'aliases': sorted({o.name for o in others if o.name.lower() != sub.name.lower()}, key=str.lower),
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
@@ -1236,38 +1255,47 @@ def _host_heat_merged(sub, others, reasons):
 
 
 def _name_siblings(project, subs):
-    """``{sub.id: [other current rows of the same name in the same project]}`` for a page of hosts: one query for the whole page.
-    A name in another project is a different host: copies are grouped by (project, name), never by name alone."""
-    from cveFeed.correlation import latest_scan_q
+    """``{sub.id: [other current rows of the same host]}`` for a page of hosts: a few queries for the whole page. The same host is
+    the same name in the same project (other targets and scans) and every other name that resolves to exactly the same addresses
+    (see ``cveFeed.counts.with_host_key``); a name in another project is a different host."""
+    from cveFeed.counts import host_siblings
     from startScan.models import Subdomain
     subs = list(subs)
     if not subs:
         return {}
-    rows = Subdomain.objects.filter(target_domain__project_id__in=_pids_of(project, subs), name__in={s.name for s in subs}).filter(latest_scan_q()) \
-        .exclude(id__in=[s.id for s in subs]).select_related('target_domain') \
-        .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')
-    by_name = {}
-    for row in rows:
-        by_name.setdefault((row.target_domain.project_id, row.name), []).append(row)
-    return {s.id: by_name.get((_pid_of(project, s), s.name), []) for s in subs}
+    ids = host_siblings([s.id for s in subs])
+    wanted = {i for rows in ids.values() for i, _ in rows}
+    rows = {r.id: r for r in Subdomain.objects.filter(id__in=wanted).select_related('target_domain').prefetch_related(
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')}
+    return {s.id: [rows[i] for i, _ in ids.get(s.id, []) if i in rows] for s in subs}
 
 
 def _one_per_host(qs, per_project=False):
-    """Collapse a Subdomain queryset to one row per hostname: the one with the most open ports, then the most IPs, then the newest
-    scan (a scan-less row last). A single Postgres DISTINCT ON over the filtered ids, then a plain ``id__in`` so ordering and paging
-    stay ordinary. Richness comes from subqueries on a fresh queryset, so search joins cannot inflate the counts. ``per_project``
-    (the all-projects view) keeps one row per (project, hostname): the same name in two projects is two hosts."""
-    from django.db.models import Count, F, OuterRef, Subquery, Value
-    from django.db.models.functions import Coalesce
+    """Collapse a Subdomain queryset to one row per host. First one row per hostname: the one with the most open ports, then the most
+    IPs, then the newest scan (a scan-less row last). Then names that resolve to exactly the same addresses (``example.com`` and
+    ``www.example.com``) become one host: the project's own target name first, else the shortest name (see
+    ``cveFeed.counts.with_host_key``; a name behind a CDN, or without an address, stays alone). Two Postgres DISTINCT ON passes over
+    the filtered ids, then a plain ``id__in`` so ordering and paging stay ordinary. Richness comes from subqueries on a fresh
+    queryset, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row per (project,
+    hostname): the same name in two projects is two hosts."""
+    from django.db.models import Case, Count, F, IntegerField, OuterRef, Subquery, Value, Window, When
+    from django.db.models.functions import Coalesce, Length, RowNumber
+    from cveFeed.counts import with_host_key
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
     ports = Port.objects.filter(state__in=OPEN_PORT_STATES, ports__ip_addresses=OuterRef('pk')).order_by() \
         .values('ports__ip_addresses').annotate(c=Count('id', distinct=True)).values('c')
     ips = Subdomain.ip_addresses.through.objects.filter(subdomain_id=OuterRef('pk')).order_by() \
         .values('subdomain_id').annotate(c=Count('id')).values('c')
     keys = ('target_domain__project_id', 'name') if per_project else ('name',)
-    rep = Subdomain.objects.filter(id__in=qs.order_by().values('id')).order_by(
+    by_name = Subdomain.objects.filter(id__in=qs.order_by().values('id')).order_by(
         *keys, Coalesce(Subquery(ports), Value(0)).desc(), Coalesce(Subquery(ips), Value(0)).desc(),
         F('scan_history_id').desc(nulls_last=True), '-id').distinct(*keys).values('id')
+    own_target = Case(When(name=F('target_domain__name'), then=Value(0)), default=Value(1), output_field=IntegerField())
+    # a window rather than DISTINCT ON: the key is an annotation, which DISTINCT ON cannot keep once the query is cut to ids
+    rep = with_host_key(Subdomain.objects.filter(id__in=by_name)).annotate(_rank=Window(
+        RowNumber(), partition_by=[F('host_key')],
+        order_by=[own_target.asc(), Length('name').asc(), F('name').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
+    ).filter(_rank=1).values('id')
     return Subdomain.objects.filter(id__in=rep)
 
 
@@ -1361,6 +1389,7 @@ def list_hosts(ctx, slug, params):
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
                   'sensitive', 'zombie', 'country')
+MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
@@ -1368,15 +1397,24 @@ def parse_search(query):
     """Split a search into terms: ``[(negated, field or None, value, quoted)]``. A bare word has no field; ``field:value``
     filters one field; ``-term`` negates; a quoted value (``"apache tomcat"``, ``tech:"apache tomcat"``) is a phrase, and
     never split on comma even if it contains one (``quoted`` says so, for the comma-OR a field value otherwise gets)."""
+    query = query or ''
+    if not isinstance(query, str):
+        raise ApiError(400, 'q must be text')
+    if len(query) > MAX_SEARCH_QUERY:
+        raise ApiError(400, f'the search is longer than {MAX_SEARCH_QUERY} characters')
     terms = []
-    for m in _SEARCH_TERM.finditer(query or ''):
+    for m in _SEARCH_TERM.finditer(query):
         neg, field, quoted, bare = m.group(1), m.group(2) or '', m.group(3), m.group(4) or ''
         is_quoted = quoted is not None
         value = (quoted if is_quoted else bare).strip()
         if field and field.lower() not in SEARCH_FIELDS:
             value, field, is_quoted = f'{field}:{value}', '', False  # "http://x" or "foo:bar": not a field, just text
         if value:
+            if len(value) > MAX_SEARCH_VALUE:
+                raise ApiError(400, f'a search term is longer than {MAX_SEARCH_VALUE} characters')
             terms.append((bool(neg), field.lower() or None, value, is_quoted))
+    if len(terms) > MAX_SEARCH_TERMS:
+        raise ApiError(400, f'a search may have at most {MAX_SEARCH_TERMS} terms')
     return terms
 
 
@@ -1700,7 +1738,7 @@ def search_hosts(ctx, slug, params):
     for neg, field, value, quoted in terms:
         if field and not quoted and ',' in value:
             q = Q()
-            for part in (p.strip() for p in value.split(',') if p.strip()):
+            for part in [p.strip() for p in value.split(',') if p.strip()][:MAX_SEARCH_TERMS]:
                 q |= _term_filter(field, part, project)
         else:
             q = _term_filter(field, value, project)
@@ -2146,13 +2184,31 @@ def list_cve_feed(ctx, params):
     return paginate(qs, params, lambda c: _cve(c, brief=True))
 
 
+def _detection(c):
+    """The shared detection strategy of a CVE (cveFeed.detection), or None before one is written. It is data about the CVE, the
+    same for every organization."""
+    row = getattr(c, 'detection', None) if c.pk else None
+    if row is None:
+        return None
+    return {'source': row.source, 'schema_version': row.schema_version, 'strategy': row.strategy or None,
+            'ai_model': row.ai_model or None, 'updated': _iso(row.updated_at)}
+
+
 def get_cve(ctx, cve_id):
     from cveFeed.models import CVEEntry
     _require_member(ctx)
-    c = CVEEntry.objects.filter(cve_id=cve_id.upper()).first()
+    c = CVEEntry.objects.filter(cve_id=cve_id.upper()).select_related('detection').first()
     if not c:
         raise ApiError(404, 'CVE not found')
-    return _cve(c)
+    out = _cve(c)
+    out['detection'] = _detection(c)
+    return out
+
+
+def get_cve_detection(ctx, cve_id):
+    """The detection strategy alone: remote and local checks, as data an agent or scanner can act on with its own primitives."""
+    return get_cve(ctx, cve_id)['detection'] or {'source': None, 'strategy': None,
+                                                  'note': 'no detection strategy has been written for this CVE yet'}
 
 
 def _match(m):
@@ -2327,7 +2383,7 @@ def list_findings(ctx, slug, params):
     merged = []
     for key, qs in sources.items():  # the top ``stop`` of each source holds the top ``stop`` of the merged order
         merged += [(key, obj) for obj in (qs[:stop] if stop > start else [])]
-    epoch = timezone.now().replace(year=1970)
+    epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)  # not now().replace(year=1970): that raises on 29 February
     merged.sort(key=lambda pair: (pair[1].heat_rank, pair[1].sev, pair[1].when or epoch, pair[1].id), reverse=True)
     everywhere = _is_all(project)
     results = []
@@ -2471,32 +2527,54 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             updated += 1
         except ApiError as e:
             failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
-        except Exception as e:  # noqa: BLE001 - one bad row must never fail the rest of the batch
-            failed.append({'kind': kind, 'id': finding_id, 'error': str(e)})
+        except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
+            logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
+            failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
     activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
     return {'updated': updated, 'failed': failed}
 
 
-def asset_matches(host_names, ips, patterns):
-    """Whether a host (name and IPs) falls under any registered asset: name, parent domain, IP or CIDR."""
-    for pattern in patterns:
-        p = pattern.strip().lower()
-        if not p:
-            continue
-        for name in host_names:
-            if name == p or name.endswith('.' + p):
-                return True
-        try:
-            net = ipaddress.ip_network(p, strict=False)
-        except ValueError:
-            continue
-        for ip in ips:
+MAX_ASSET_PATTERNS = 500
+
+
+class AssetFilter:
+    """Registered assets (names, parent domains, IPs, CIDRs) read once, so each host is a few set lookups and one containment test per
+    network instead of re-parsing every pattern for every host (500 patterns over 2,000 matches took about 90 seconds)."""
+
+    def __init__(self, patterns):
+        self.names, self.networks = set(), []
+        for pattern in patterns:
+            p = pattern.strip().lower()
+            if not p:
+                continue
+            self.names.add(p)
             try:
-                if ipaddress.ip_address(ip) in net:
-                    return True
+                self.networks.append(ipaddress.ip_network(p, strict=False))
             except ValueError:
                 continue
-    return False
+
+    def __bool__(self):
+        return bool(self.names)
+
+    def matches(self, host_names, ips):
+        """Whether a host (name and IPs) falls under any registered asset: name, parent domain, IP or CIDR."""
+        for name in host_names:
+            labels = name.split('.')
+            if any('.'.join(labels[i:]) in self.names for i in range(len(labels))):
+                return True
+        if self.networks:
+            for ip in ips:
+                try:
+                    address = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if any(address.version == net.version and address in net for net in self.networks):
+                    return True
+        return False
+
+
+def asset_matches(host_names, ips, patterns):
+    return AssetFilter(patterns).matches(host_names, ips)
 
 
 def register_assets(ctx, assets):
@@ -2515,8 +2593,12 @@ def work_items(ctx, slug, params):
     agent's registered assets (or ?assets=a,b) and optionally to a tier."""
     from cveFeed.models import CVEMatch
     project, _ = get_one_project(ctx, slug)
-    patterns = [a for a in (params.get('assets') or '').split(',') if a.strip()] or \
-        (ctx.token.assets if ctx.token else [])
+    asked = [a.strip() for a in (params.get('assets') or '').split(',') if a.strip()]
+    if len(asked) > MAX_ASSET_PATTERNS:
+        raise ApiError(400, f'assets must list at most {MAX_ASSET_PATTERNS} hosts, IPs or CIDRs')
+    patterns = asked or (ctx.token.assets if ctx.token else [])
+    wanted = AssetFilter(patterns)
+    placed = {}  # subdomain id -> whether it is one of the assets; a host with many matches is tested once
     # Closed asset correlations do not belong in remediation work. An unresolved candidate with a low-confidence
     # triage classification remains reviewable unless the caller requests ?include_fp=0.
     from django.db.models import Q
@@ -2530,8 +2612,12 @@ def work_items(ctx, slug, params):
     for m in qs[:2000]:
         sub = m.subdomain
         ips = [ip.address for ip in sub.ip_addresses.all()] if sub else []
-        if patterns and not asset_matches([sub.name.lower()] if sub else [], ips, patterns):
-            continue
+        if wanted:
+            key = sub.pk if sub else None
+            if key not in placed:
+                placed[key] = wanted.matches([sub.name.lower()] if sub else [], ips)
+            if not placed[key]:
+                continue
         item = _match(m)
         if params.get('tier') and item['cve']['tier'] != params['tier']:
             continue
@@ -2796,15 +2882,15 @@ def _comment(c):
     return {'id': c.id, 'text': c.text, 'author': _user_brief(c.author), 'created': _iso(c.created_at)}
 
 
-def list_finding_comments(ctx, slug, kind, finding_id):
-    """Every comment on one finding, oldest first."""
+def list_finding_comments(ctx, slug, kind, finding_id, params=None):
+    """The comments on one finding, oldest first, a page at a time."""
     from cveFeed.models import FindingComment
     project, _ = get_one_project(ctx, slug)
     if kind not in STATUS_KINDS:
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
     _finding_obj(project, kind, finding_id)  # 404 for an unknown finding, or one in another project
-    rows = FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('author')
-    return {'results': [_comment(c) for c in rows]}
+    rows = FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('author').order_by('id')
+    return paginate(rows, params or {}, _comment)
 
 
 def add_finding_comment(ctx, slug, kind, finding_id, text):
@@ -2828,7 +2914,7 @@ def _audit_event(e):
     return {'id': e.id, 'event': e.event, 'actor': _user_brief(e.actor), 'before': e.before, 'after': e.after, 'created': _iso(e.created_at)}
 
 
-def finding_audit(ctx, slug, kind, finding_id):
+def finding_audit(ctx, slug, kind, finding_id, params=None):
     """One finding's audit trail, newest first: status changes, assignee changes, and comments, each with who, when,
     and (status/assignee) what changed from and to. A comment's own text is also in GET .../comments; it is repeated
     here as a short before/after so the trail reads as one timeline without a second request."""
@@ -2838,7 +2924,7 @@ def finding_audit(ctx, slug, kind, finding_id):
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
     _finding_obj(project, kind, finding_id)
     rows = FindingAuditEvent.objects.filter(project=project, finding_kind=kind, finding_id=finding_id).select_related('actor')
-    return {'results': [_audit_event(e) for e in rows]}
+    return paginate(rows.order_by('-id'), params or {}, _audit_event)
 
 
 MAX_SLA_DAYS = 3650
@@ -2883,7 +2969,7 @@ def set_project_settings(ctx, slug, body):
     return _project_settings(project, ProjectSettings.sla_for(project))
 
 
-def list_members(ctx, slug):
+def list_members(ctx, slug, params=None):
     """Users who can act on this project, for an assignee picker: its direct members, plus an organization's members
     when the project belongs to one (an org role already grants project access, see tenancy.roles.effective_role). A
     superuser with no membership row of their own is not listed; assign to an actual team member instead."""
@@ -2894,7 +2980,7 @@ def list_members(ctx, slug):
     if project.org_id:
         members |= Q(org_memberships__org_id=project.org_id)
     users = User.objects.filter(members).distinct().order_by('username')
-    return {'results': [_user_brief(u) for u in users]}
+    return paginate(users, params or {}, _user_brief)
 
 
 def _triage_item(t):

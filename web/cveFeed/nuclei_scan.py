@@ -41,6 +41,7 @@ LIGHT_FLAGS = {'-rl': '50', '-c': '10'}
 
 TECH_FLAGS = ['-tags', 'tech']
 TEMPLATE_POLICY_REV = 'readonly-2'
+ALL_TEMPLATES_REV = 'all-1'
 _APPROVED = {'root': None, 'at': 0, 'value': None}
 _APPROVED_LOCK = threading.Lock()
 
@@ -94,6 +95,12 @@ def _stderr_reason(stream):
     return ''.join(c for c in pick if c.isprintable())[:200]
 
 
+def policy_rev():
+    """The template policy in force: part of every coverage key, so changing the setting makes hosts due for the other set."""
+    from cveFeed import validation
+    return ALL_TEMPLATES_REV if validation.all_templates_allowed() else TEMPLATE_POLICY_REV
+
+
 def approved_templates():
     with _APPROVED_LOCK:
         return _approved_templates_locked()
@@ -103,13 +110,14 @@ def _approved_templates_locked():
     """Snapshot only installed templates passing the same destination/read-only gate as targeted checks."""
     from cveFeed import templategen, validation
     root = os.path.realpath(templategen.TEMPLATES_ROOT)
-    if (_APPROVED['root'] == root and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
+    rev, everything = policy_rev(), validation.all_templates_allowed()
+    if (_APPROVED['root'] == root and _APPROVED.get('rev') == rev and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
             and time.monotonic() - _APPROVED['at'] < 3600):
         return _APPROVED['value']
     if not os.path.isdir(root):
         raise RuntimeError('Nuclei template library is unavailable')
     dest = tempfile.mkdtemp(prefix='cvengine-approved-nuclei-')
-    digest = hashlib.sha256(TEMPLATE_POLICY_REV.encode())
+    digest = hashlib.sha256(rev.encode())
     count, skipped, essential_skipped = 0, {}, {}
     try:
         for base, dirs, files in os.walk(root):
@@ -127,7 +135,7 @@ def _approved_templates_locked():
                     continue
                 relative = os.path.relpath(path, root)
                 problem = ('larger than the template size limit' if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES
-                           else validation.readonly_problem(content.decode('utf-8', 'replace')))
+                           else '' if everything else validation.readonly_problem(content.decode('utf-8', 'replace')))
                 if problem:
                     reason = _policy_reason(problem)
                     skipped[reason] = skipped.get(reason, 0) + 1
@@ -142,7 +150,7 @@ def _approved_templates_locked():
                 digest.update(content)
                 count += 1
         if not count:
-            _report_policy(TEMPLATE_POLICY_REV, 0, skipped, essential_skipped)
+            _report_policy(rev, 0, skipped, essential_skipped)
             raise RuntimeError('No installed Nuclei templates passed the read-only policy')
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
@@ -162,7 +170,7 @@ def _approved_templates_locked():
         if time.monotonic() - created > 6 * 3600:
             shutil.rmtree(path, ignore_errors=True)
             retained.remove((path, created))
-    _APPROVED.update(root=root, at=time.monotonic(), value=(dest, revision, count))
+    _APPROVED.update(root=root, at=time.monotonic(), value=(dest, revision, count), rev=rev)
     return _APPROVED['value']
 
 
@@ -172,9 +180,9 @@ def cve_service(cve_id):
     template_path, _ = resolve_template(cve_id)
     try:
         with open(template_path, 'rb') as source:
-            revision = hashlib.sha256(TEMPLATE_POLICY_REV.encode() + source.read(200_001)).hexdigest()[:10]
+            revision = hashlib.sha256(policy_rev().encode() + source.read(200_001)).hexdigest()[:10]
     except OSError:
-        revision = hashlib.sha256(TEMPLATE_POLICY_REV.encode()).hexdigest()[:10]
+        revision = hashlib.sha256(policy_rev().encode()).hexdigest()[:10]
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
@@ -289,17 +297,18 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
 def scan_targets(scan):
     """Hostnames, IPs and (host, port) pairs discovered for ``scan``."""
     from startScan.models import Subdomain, open_ports
-    from targetApp.target_types import is_scannable_ip, resolves_to_blocked
+    from targetApp.target_types import blocked_names, is_scannable_ip
     from cveFeed.exclusions import excluded_names, normalize
     hostnames, ips, ports = set(), set(), set()
     banned = excluded_names(scan.domain.project_id)  # hosts the organization excluded for good: never a target
     from cveFeed.archive_rediscovery import archived_names
     banned = banned | archived_names(scan.domain.project_id)
-    for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
-        if banned and normalize(sub.name) in banned:
-            continue
-        # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside
-        if resolves_to_blocked(sub.name):
+    subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
+            if not (banned and normalize(s.name) in banned)]
+    # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
+    pointing_inside = blocked_names([s.name for s in subs])
+    for sub in subs:
+        if sub.name in pointing_inside:
             continue
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():
@@ -464,14 +473,26 @@ def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severitie
 LIGHT_SERVICE = 'nuclei-light'
 
 
+# Templates that name the product in the matcher, not in the template: the template's own name ("WAF Detection", "Favicon Detection") says what
+# kind of fact it is, and the vendor or product is the matcher that fired. Their extracted value is not a version (a favicon template extracts
+# the icon's hash), so none is appended.
+MATCHER_NAMED = re.compile(r'(^|-)(waf-detect|waf-detection|favicon-detect|favicon-detection)$')
+
+
 def tech_name_from(line):
     """The technology a ``http/technologies`` result names. The tech-detect template reports it as the matcher; the others
-    are named for it ("Nginx version", "Apache detect"), with an extracted version appended as ``Name:1.2``."""
+    are named for it ("Nginx version", "Apache detect"), with an extracted version appended as ``Name:1.2``. The WAF and favicon
+    templates name the product by matcher (a result without one names nothing: "WAF" alone says that something blocks, not what)."""
     info = line.get('info') or {}
-    if line.get('template-id') == 'tech-detect' and line.get('matcher-name'):
-        name = line['matcher-name']
+    template = str(line.get('template-id') or '')
+    matcher = str(line.get('matcher-name') or '').strip()
+    if MATCHER_NAMED.search(template):
+        return matcher[:100]
+    if template == 'tech-detect' and matcher:
+        name = matcher
     else:
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
+        name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
     name = (name or '').strip()[:100]
     version = next((str(v) for v in line.get('extracted-results') or [] if v and str(v)[0].isdigit()), '')
     return f'{name}:{version[:30]}' if name and version else name

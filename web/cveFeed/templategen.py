@@ -21,6 +21,7 @@ import tempfile
 
 import yaml
 
+from cveFeed.safeyaml import load_template
 from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text, untrusted_block
 
 logger = logging.getLogger(__name__)
@@ -272,7 +273,7 @@ def static_check(yaml_text, expected_cve_id=None):
     if not yaml_text or len(yaml_text.encode()) > MAX_TEMPLATE_BYTES:
         return False, "empty or too large"
     try:
-        doc = yaml.safe_load(yaml_text)
+        doc = load_template(yaml_text)
     except yaml.YAMLError as e:
         return False, f"invalid YAML: {e}"
     if not isinstance(doc, dict):
@@ -689,7 +690,7 @@ def _generate_template(cve, provider, project):
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
     tmpl = GeneratedTemplate(
         cve_entry=cve, yaml=text, ai_model=f"{provider.name}:{provider.model}",
-        template_id=(yaml.safe_load(text) or {}).get("id", "") if ok else "")
+        template_id=(load_template(text) or {}).get("id", "") if ok else "")
     if not ok:
         tmpl.status, tmpl.validation_output = GeneratedTemplate.STATUS_INVALID, f"static check: {reason}"
         tmpl.save()

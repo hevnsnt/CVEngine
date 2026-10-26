@@ -57,7 +57,8 @@ def ai_get(request):
             'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
             'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
             'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire, 'auto_fire_engine_id': cfg.auto_fire_engine_id,
-            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'default_models': DEFAULT_MODELS,
+            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
+            'plan_daily_per_project': cfg.plan_daily_per_project, 'default_models': DEFAULT_MODELS,
             'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
 
 
@@ -77,6 +78,8 @@ def ai_put(request):
     if provider in ('ollama', 'vllm') and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:11434 if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
+    if cfg.api_key == old_connection[3] and (cfg.provider, (cfg.base_url or '').strip()) != (old_connection[0], (old_connection[2] or '').strip()):
+        cfg.api_key = ''  # a stored key is never sent to a different service or address: type it again for the new one
     if (cfg.provider, cfg.model, cfg.base_url, cfg.api_key) != old_connection:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
     if 'enabled' in data:
@@ -96,8 +99,38 @@ def ai_put(request):
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
+    for key in ('plan_daily_total', 'plan_daily_per_project'):
+        if key in data:
+            try:
+                value = int(data[key])
+            except (TypeError, ValueError):
+                raise SettingsError(400, f'{key} must be a number')
+            if not 0 <= value <= 100000:
+                raise SettingsError(400, f'{key} must be between 0 and 100000')
+            setattr(cfg, key, value)
     cfg.save()
     return ai_get(request)
+
+
+def scan_policy_get(request):
+    from dashboard.models import ScanPolicy
+    return {'nuclei_all_templates': ScanPolicy.current().nuclei_all_templates}
+
+
+def scan_policy_put(request):
+    from cveFeed.admin_api import audit
+    from dashboard.models import ScanPolicy
+    data = _body(request)
+    row = ScanPolicy.objects.first() or ScanPolicy()
+    if 'nuclei_all_templates' in data:
+        if not isinstance(data['nuclei_all_templates'], bool):
+            raise SettingsError(400, 'nuclei_all_templates must be true or false')
+        changed = row.nuclei_all_templates != data['nuclei_all_templates']
+        row.nuclei_all_templates = data['nuclei_all_templates']
+        row.save()
+        if changed:
+            audit(request.user, 'scan_policy.nuclei_all_templates', 'on' if row.nuclei_all_templates else 'off')
+    return scan_policy_get(request)
 
 
 def ai_models(request):
@@ -107,8 +140,9 @@ def ai_models(request):
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
-    key = str(data.get('api_key') or '').strip() or (cfg.api_key if provider == cfg.provider else '')
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    same_service = provider == cfg.provider and base_url.strip() == (cfg.base_url or '').strip()
+    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service else '')  # the stored key goes only where it was saved for
     try:
         listed = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
     except AIProviderError as exc:
@@ -519,16 +553,16 @@ def factory_reset_get(request):
 def factory_reset_post(request):
     """Wipe the instance back to a new install. Needs the exact phrase and the administrator's password (a few wrong
     passwords lock the button for ten minutes), and refuses while scans are running unless told to go ahead."""
-    from django.core.cache import cache
     from cveFeed import factory_reset
+    from tenancy import throttle
     data = _body(request)
     if data.get('confirm') != factory_reset.CONFIRM_PHRASE:
         raise SettingsError(400, f'type {factory_reset.CONFIRM_PHRASE} exactly to confirm')
     key = f'factory-reset-fail:{request.user.pk}'
-    if cache.get(key, 0) >= RESET_MAX_FAILURES:
+    if throttle.exceeded(key, RESET_MAX_FAILURES):
         raise SettingsError(429, 'too many wrong passwords; try again in a few minutes')
     if not request.user.check_password(str(data.get('password') or '')):
-        cache.set(key, cache.get(key, 0) + 1, RESET_LOCK_SECONDS)
+        throttle.count(key, RESET_LOCK_SECONDS)
         raise SettingsError(403, 'that is not your password')
     running = factory_reset.running_scans()
     if running and not data.get('force'):
@@ -543,6 +577,7 @@ ROUTES = [
     ('GET', r'ai', lambda r, **k: ai_get(r)), ('PUT', r'ai', lambda r, **k: ai_put(r)),
     ('GET', r'ai/usage', lambda r, **k: ai_usage_get(r)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
+    ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),

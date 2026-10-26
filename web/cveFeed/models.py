@@ -11,6 +11,11 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 
+def _clean_affected(value):
+    from cveFeed.correlation import clean_affected
+    return clean_affected(value)
+
+
 def _feed_time(value):
     """A feed timestamp, or None when it is missing or not a real date: one malformed entry must not stop the sync."""
     try:
@@ -89,8 +94,10 @@ class CVEEntry(models.Model):
         summary = entry.get("summary") or {}
         if not isinstance(summary, dict):
             summary = {}
-        severity = entry.get("severity") or {}
-        exploitation = entry.get("exploitation") or {}
+        severity = entry.get("severity")
+        severity = severity if isinstance(severity, dict) else {}
+        exploitation = entry.get("exploitation")
+        exploitation = exploitation if isinstance(exploitation, dict) else {}
         exploit_db = exploitation.get("exploitDb")
         defaults = {
             "title": entry.get("title") or "",
@@ -104,9 +111,9 @@ class CVEEntry(models.Model):
             "kev": exploitation.get("kev"),
             "epss_reached": exploitation.get("epssReached"),
             "exploit_db": None if exploit_db is None else bool(exploit_db),
-            "affected": entry.get("affected") or [],
-            "references": entry.get("references") or [],
-            "sources": entry.get("sources") or [],
+            "affected": _clean_affected(entry.get("affected")),
+            "references": entry.get("references") if isinstance(entry.get("references"), list) else [],
+            "sources": entry.get("sources") if isinstance(entry.get("sources"), list) else [],
             "status": entry.get("status") or "",
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
@@ -1355,3 +1362,29 @@ class ProjectSettings(models.Model):
         """The effective {severity: days} of ``project``: the defaults with its own overrides on top."""
         row = cls.objects.filter(project=project).first()
         return {**DEFAULT_SLA_DAYS, **{k: v for k, v in ((row.sla_days if row else None) or {}).items() if k in DEFAULT_SLA_DAYS}}
+
+
+class CVEDetection(models.Model):
+    """How to tell whether a product is affected by one CVE: remote checks and checks on the host itself, as data
+    (cveFeed.detection). One row per CVE, shared by every organization: it describes the CVE, never a project's assets."""
+
+    SOURCES = ("rules", "ai", "manual")
+
+    cve_entry = models.OneToOneField(CVEEntry, on_delete=models.CASCADE, related_name="detection")
+    schema_version = models.PositiveSmallIntegerField(default=1)
+    source = models.CharField(max_length=8, default="rules")  # who wrote the newest checks: rules | ai | manual
+    strategy = models.JSONField(default=dict, blank=True)  # {} until the record supports a check
+    rules_at = models.DateTimeField(null=True, blank=True)  # when the rules author last read the CVE's affected data
+    ai_model = models.CharField(max_length=128, blank=True, default="")
+    ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
+    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "CVE detection"
+        verbose_name_plural = "CVE detections"
+        indexes = [models.Index(fields=["ai_attempted_at"], name="cvedetect_ai_idx")]
+
+    def __str__(self):
+        return f"detection for {self.cve_entry_id}"

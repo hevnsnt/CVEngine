@@ -755,5 +755,7 @@ class HostUpdaterInstallTests(unittest.TestCase):
         update = self.read('scripts', 'update.sh')
         self.assertIn('install-updater.sh', update)
         self.assertIn('cvengine-auto-update', update)  # not twice
-        self.assertLess(update.index('install-updater.sh'), update.index('exit 0\n    fi\n    sleep 5'))
+        import re
+        # the watcher is installed before the success exit of the readiness loop, which polls with `sleep 5` or `sleep "$poll_seconds"`
+        self.assertLess(update.index('install-updater.sh'), re.search(r'exit 0\n    fi\n    sleep (5|"\$poll_seconds")', update).start())
         self.assertIn('Could not install the update watcher', update)

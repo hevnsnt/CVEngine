@@ -40,7 +40,7 @@ class FullScanBase(TestCase):
 		os.environ.pop('CVENGINE_ALLOW_PRIVATE_TARGETS', None)
 
 	def ip(self, address, name=None, scanned=None, ports=(), cdn=False, scan=None, **kw):
-		ip = IpAddress.objects.create(address=address, full_scanned_at=scanned, is_cdn=cdn, **kw)
+		ip = IpAddress.objects.create(address=address, org=self.domain.org, full_scanned_at=scanned, is_cdn=cdn, **kw)
 		for n in ports:
 			ip.ports.add(Port.objects.create(number=n, protocol='tcp', state='open'))
 		if name is not False:

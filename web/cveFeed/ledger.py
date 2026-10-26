@@ -19,7 +19,7 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TTL_HOURS = {'nmap-fast': 7 * 24, 'nmap-full': 14 * 24, 'naabu': 7 * 24, 'nuclei': 24,
+DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 24, 'naabu': 7 * 24, 'nuclei': 24,
                      'nuclei-deep-target': 7 * 24, 'nuclei-deep-host': 7 * 24, 'bbot': 7 * 24,
                      'ct-watch': 24, 'hygiene': 24, 'bbot-deep': 7 * 24, 'route-auth': 7 * 24, 'retest': 24, 'validate': 24, 'archive-urls': 7 * 24}
 CLAIM_TTL = 180  # seconds; refreshed while held, so a crashed worker frees its assets within minutes
@@ -180,10 +180,10 @@ def claim_many(service, assets):
     def keep_alive():
         while not stop.wait(CLAIM_TTL / 6):
             try:
-                pipe = client.pipeline()
-                for a in won:
-                    pipe.expire(_key(service, a), CLAIM_TTL)
-                pipe.execute()
+                for a in list(won):
+                    if resources.claim_refresh(client, _key(service, a), owner, CLAIM_TTL) == 'lost':
+                        logger.warning('ledger: the %s claim on %s was taken over by another job', service, a)
+                        won.remove(a)  # not ours any more: neither refreshed nor deleted on exit
             except Exception:  # noqa: BLE001
                 pass
     if won:
@@ -193,8 +193,7 @@ def claim_many(service, assets):
     finally:
         stop.set()
         try:
-            for a in won:
-                if client.get(_key(service, a)) == owner:
-                    client.delete(_key(service, a))
+            for a in list(won):
+                resources.claim_release(client, _key(service, a), owner)
         except Exception:  # noqa: BLE001
             pass

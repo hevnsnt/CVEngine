@@ -195,6 +195,33 @@ class AdminMatrixTests(TestCase):
 		self.assertFalse(User.objects.filter(username='intruder').exists())
 		self.assertEqual(Org.objects.get(pk=self.org_b.pk).name, 'Beta')
 
+	def test_an_org_admin_cannot_take_over_a_bug_bounty_account_by_resetting_it(self):
+		UserProfile.objects.filter(user=self.member_a).update(bugbounty_enabled=True)
+		c = client_for(self.admin_a)
+		before = User.objects.get(pk=self.member_a.pk).password
+		for path in ('reset-password', 'reset-mfa'):
+			self.assertEqual(api(c, 'POST', f'users/{self.member_a.id}/{path}')[0], 403, path)
+		self.assertEqual(api(c, 'PATCH', f'users/{self.member_a.id}', {'is_active': False})[0], 403)
+		self.assertEqual(User.objects.get(pk=self.member_a.pk).password, before)
+		self.assertEqual(api(client_for(self.root), 'POST', f'users/{self.member_a.id}/reset-password')[0], 200)  # an App Admin still can
+		self.assertEqual(api(c, 'PATCH', f'users/{self.member_a.id}', {'first_name': 'Fine'})[0], 200)  # ordinary edits are unaffected
+
+	def test_an_org_admin_adopts_only_unused_accounts_that_belong_nowhere(self):
+		from django.utils import timezone as tz
+		fresh = User.objects.create_user('fresh', password='pw-Secret-1')  # created by an App Admin, never signed in
+		used = User.objects.create_user('used', password='pw-Secret-1')  # signed in once, then removed from its organization
+		User.objects.filter(pk=used.pk).update(last_login=tz.now())
+		bounty = User.objects.create_user('bountyhunter', password='pw-Secret-1')
+		UserProfile.objects.create(user=bounty, bugbounty_enabled=True)
+		c = client_for(self.admin_a)
+		grant = lambda user: api(c, 'POST', 'memberships', {'user_id': user.id, 'scope': 'org', 'scope_id': self.org_a.id, 'role': 'user'})[0]
+		self.assertEqual(grant(used), 404)
+		self.assertEqual(grant(bounty), 404)
+		self.assertEqual(grant(fresh), 200)
+		self.assertFalse(OrgMembership.objects.filter(user__in=[used, bounty]).exists())
+		self.assertEqual(api(client_for(self.root), 'POST', 'memberships',
+							{'user_id': used.id, 'scope': 'org', 'scope_id': self.org_a.id, 'role': 'user'})[0], 200)  # an App Admin can place it
+
 	def test_org_admin_cannot_do_app_admin_things(self):
 		c = client_for(self.admin_a)
 		self.assertEqual(api(c, 'POST', 'orgs', {'name': 'New'})[0], 403)
@@ -305,10 +332,28 @@ class AdminMatrixTests(TestCase):
 		api(client_for(self.admin_a), 'POST', 'users', {'username': 'audited', 'scope': 'org', 'scope_id': self.org_a.id, 'role': 'user'})
 		api(client_for(self.admin_b), 'PATCH', f'orgs/{self.org_b.id}', {'name': 'Beta 2'})
 		a = {r['action'] for r in api(client_for(self.admin_a), 'GET', 'audit')[1]['results']}
-		self.assertEqual(a, {'user.create'})  # reset_mfa has no org attached; adminB's change is not visible to adminA
+		self.assertEqual(a, {'user.create', 'user.reset_mfa'})  # the reset is tagged with the user's organization; adminB's change is not visible to adminA
 		root_actions = {r['action'] for r in api(client_for(self.root), 'GET', 'audit')[1]['results']}
 		self.assertTrue({'user.create', 'user.reset_mfa', 'org.update'} <= root_actions)
 		self.assertTrue(AuditLog.objects.filter(action='user.create', actor_name='adminA').exists())
+
+	def test_credential_events_reach_the_admins_of_every_organization_of_the_user(self):
+		both = User.objects.create_user('both', password='pw-Secret-1')
+		OrgMembership.objects.create(user=both, org=self.org_a, role='user')
+		OrgMembership.objects.create(user=both, org=self.org_b, role='user')
+		api(client_for(self.root), 'POST', f'users/{both.id}/reset-password')
+		api(client_for(self.root), 'PATCH', f'users/{both.id}', {'is_active': False})
+		for admin in (self.admin_a, self.admin_b):
+			actions = {r['action'] for r in api(client_for(admin), 'GET', 'audit')[1]['results']}
+			self.assertTrue({'user.reset_password', 'user.update'} <= actions, admin.username)
+		loner = User.objects.create_user('loner', password='pw-Secret-1')  # in no organization: App Admins only
+		api(client_for(self.root), 'POST', f'users/{loner.id}/reset-password')
+		self.assertTrue(AuditLog.objects.filter(action='user.reset_password', target='loner', org__isnull=True).exists())
+		self.assertNotIn('loner', {r['target'] for r in api(client_for(self.admin_a), 'GET', 'audit')[1]['results']})
+
+	def test_deleting_an_account_is_visible_to_its_organizations_admins(self):
+		api(client_for(self.root), 'DELETE', f'users/{self.member_a.id}')
+		self.assertIn('user.delete', {r['action'] for r in api(client_for(self.admin_a), 'GET', 'audit')[1]['results']})
 
 
 class AccountAndPasswordTests(TestCase):
@@ -357,6 +402,21 @@ class AccountAndPasswordTests(TestCase):
 
 	def test_anonymous_cannot_use_account_api(self):
 		self.assertEqual(Client().get('/cve/api/account/me').status_code, 302)  # login required
+	def test_a_users_own_credential_changes_are_in_the_organizations_audit_log(self):
+		from tenancy import mfa
+		admin = User.objects.create_user('orgadmin', password='pw-Secret-1')
+		OrgMembership.objects.create(user=admin, org=self.org, role='admin')
+		c = client_for(self.user)
+		self.assertEqual(self.post(c, 'password', {'current': 'pw-Secret-1', 'new': 'Another-Pass-9'}).status_code, 200)
+		secret = self.post(c, 'mfa/start', {}).json()['secret']
+		self.assertEqual(self.post(c, 'mfa/enable', {'code': mfa.totp(secret)}).status_code, 200)
+		made = c.post('/api/v1/tokens', json.dumps({'name': 'zz-token-name'}), content_type='application/json')
+		self.assertEqual(c.delete('/api/v1/tokens/%d' % made.json()['id']).status_code, 200)
+		seen = {r['action'] for r in api(client_for(admin), 'GET', 'audit')[1]['results']}
+		self.assertTrue({'account.password_change', 'account.mfa_enable', 'token.create', 'token.revoke'} <= seen, seen)
+		self.assertTrue(all(r.actor_name == 'jane' for r in AuditLog.objects.filter(action__startswith='token.')))
+		self.assertNotIn('zz-token-name', json.dumps(list(AuditLog.objects.values_list('detail', 'target'))))  # no token name or secret
+
 
 
 class ClassicRetiredTests(TestCase):

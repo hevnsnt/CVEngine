@@ -1,0 +1,99 @@
+name: 🔁 Upgrade rehearsal
+
+# Installs the version that is released (master), puts data in it, then updates it to the version that is about to be released with the real
+# update scripts, and checks the site, the workers and the data. It runs on every pull request into master (the release), and by hand for any
+# two refs. A release that would crash an existing install should fail here first.
+#
+#   plain   an install with docker-compose.yml only, updated with scripts/update.sh
+#   overlay an install like one behind a host proxy that owns port 443 (an overlay compose file and settings in .env), updated through the
+#           in-app path (scripts/apply-update.sh), then through make redis-auth
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'The installed version (a branch, tag or commit)'
+        default: master
+      candidate:
+        description: 'The version it is updated to'
+        default: develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_REF: ${{ inputs.base || github.event.pull_request.base.sha }}
+  CANDIDATE_REF: ${{ inputs.candidate || github.event.pull_request.head.sha }}
+
+jobs:
+  plain:
+    name: 🔁 Update a running install (docker-compose.yml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release candidate (the installed version plus what is being released)
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/prepare.sh"
+      - name: Install the released version
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/install-base.sh plain"
+      - name: Put data in it
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/seed.sh"
+      - name: Update with scripts/update.sh
+        run: |
+          cd "$HOME/cvengine"
+          git --git-dir="$HOME/origin.git" update-ref refs/heads/master "$(cat "$HOME/candidate.sha")"
+          scripts/update.sh
+      - name: The updated install works and keeps its data
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh plain"
+      - name: Logs
+        if: failure()
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"
+
+  overlay:
+    name: 🔁 Update an install behind a host proxy (overlay, env file, port 443 taken)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release candidate (the installed version plus what is being released)
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/prepare.sh"
+      - name: A host service owns port 443
+        run: |
+          sudo nohup python3 -m http.server 443 --bind 0.0.0.0 --directory /tmp >/dev/null 2>&1 &
+          disown
+          sleep 3
+          sudo ss -ltn 'sport = :443' | grep -q LISTEN
+      - name: Install the released version with the overlay
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/install-base.sh overlay"
+      - name: Put data in it
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/seed.sh"
+      - name: Approve and apply with scripts/apply-update.sh (the in-app path)
+        run: |
+          cd "$HOME/cvengine"
+          git --git-dir="$HOME/origin.git" update-ref refs/heads/master "$(cat "$HOME/candidate.sha")"
+          cp "$HOME/candidate.sha" web/.update-approved
+          printf 'master\n' > web/.update-branch
+          scripts/apply-update.sh
+      - name: The updated install works, keeps its data and still uses the overlay
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh overlay"
+      - name: Turn on Redis authentication (make redis-auth) and check again
+        run: |
+          cd "$HOME/cvengine"
+          make redis-auth
+          "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
+      - name: Logs
+        if: failure()
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"

@@ -1,7 +1,8 @@
 """One read-only snapshot of the instance for the REST API and MCP: is it healthy, what is queued and running, how much memory
 and disk is left, and how big the inventory is.
 
-Anyone may read the inventory part (their own projects' targets, hosts, scans and open findings). The infrastructure part
+Anyone may read the inventory part (their own projects' targets, hosts, scans and open findings) and whether scanning is paused
+or an update is running. The infrastructure part
 (database and broker, queue depths, workers, schedules, memory, disk, feeds, AI budget) belongs to an App Admin: it describes the
 whole server, not a project, so for anyone else it is left out and ``system_note`` says so.
 
@@ -9,7 +10,7 @@ Every probe is wrapped, so one that fails or times out turns into ``{"error": ..
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
@@ -175,6 +176,56 @@ def _ai():
             'validation_attempts_today': today}
 
 
+TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without one means it is failing
+_VERSION_CACHE = {}
+
+
+def _tool_version(argv):
+    """First line of ``<tool> -version`` output, cached for ten minutes; None when the tool is missing or slow."""
+    import subprocess
+    now = time.monotonic()
+    cached = _VERSION_CACHE.get(argv)
+    if cached and now - cached[0] < 600:
+        return cached[1]
+    try:
+        proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
+        text = ((proc.stdout or '') + (proc.stderr or '')).strip().splitlines()
+        value = next((line.strip()[:120] for line in text if line.strip()), None)
+    except (OSError, subprocess.SubprocessError):
+        value = None
+    _VERSION_CACHE[argv] = (now, value)
+    return value
+
+
+def _tools():
+    """How current the detection tools are: the nuclei templates (when they were last refreshed) and the scanner versions."""
+    import os
+    from django_celery_beat.models import PeriodicTask
+    root = os.environ.get('NUCLEI_TEMPLATES_DIR', '/root/nuclei-templates')
+    marker = os.path.join(root, '.checksum')
+    try:
+        updated = datetime.fromtimestamp(os.stat(marker).st_mtime, tz=dt_timezone.utc)
+    except OSError:
+        updated = None
+    last_run = PeriodicTask.objects.filter(task='update_nuclei_templates').values_list('last_run_at', flat=True).first()
+    return {'nuclei_templates': {'updated_at': _iso(updated),
+                                 'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
+                                 'last_refresh_dispatch': _iso(last_run)},
+            'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
+
+
+def _work():
+    """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
+    from cveFeed import conductor
+    from cveFeed.scan_control import pause_requested
+    from targetApp.models import Domain
+    out = conductor.status()
+    out['paused'] = pause_requested(fail_closed=False)
+    out['targets'] = Domain.objects.exclude(project=None).exists()
+    return out
+
+
 def _system(user, problems, notes):
     out = {}
     out['database'] = _probe(problems, 'database', _database)
@@ -193,6 +244,13 @@ def _system(user, problems, notes):
             problems.append(f"workers: {health.get('worker_note')}")
         if out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
+    out['work'] = _probe(problems, 'work', _work)
+    work = out['work']
+    if isinstance(work, dict) and 'error' not in work and work.get('wanted_depth') and not work.get('paused') \
+            and work.get('targets') and not work.get('running') and not work.get('queued'):
+        problems.append('work: nothing is running or queued although there are targets to scan; the work conductor '
+                        + ('has not run yet' if not work.get('last_round') else f"last ran at {work['last_round'].get('at')}")
+                        + ' (is celery beat running?)')
     out['memory'] = _probe(problems, 'memory', _memory)
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:
@@ -210,6 +268,10 @@ def _system(user, problems, notes):
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['ai'] = _probe(problems, 'ai', _ai)
+    out['tools'] = _probe(problems, 'tools', _tools)
+    age = ((out['tools'] or {}).get('nuclei_templates') or {}).get('age_hours')
+    if age is not None and age > TEMPLATE_STALE_HOURS:
+        problems.append(f'nuclei templates: not refreshed for {int(age)} hours')
     queues = out['queues']
     if isinstance(queues, dict) and queues.get('waiting_total'):
         notes.append(f"{queues['waiting_total']} message(s) waiting in the work queues")
@@ -218,19 +280,23 @@ def _system(user, problems, notes):
 
 def system_status(ctx):
     problems, notes = [], []
+    admin = ctx.user.is_superuser
     scanning = _probe(problems, 'scan control', _scanning)
     if scanning.get('paused'):
-        notes.append('scanning is paused' + (f": {scanning['reason']}" if scanning.get('reason') else ''))
+        notes.append('scanning is paused' + (f": {scanning['reason']}" if admin and scanning.get('reason') else ''))
     update = _probe(problems, 'update', _update)
     if update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
+    if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
+        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error') if k in scanning}
+        update = {k: update.get(k) for k in ('phase', 'error') if k in update}
     projects = _probe(problems, 'inventory', lambda: _projects(ctx))
     totals = _totals(projects) if isinstance(projects, list) else None
     if totals and totals['scans_stalled']:
         problems.append(f"{totals['scans_stalled']} scan(s) marked running for too long (stalled)")
     out = {'at': timezone.now().isoformat(), 'version': _version(), 'scanning': scanning, 'update': update,
            'totals': totals, 'projects': projects if isinstance(projects, list) else []}
-    if ctx.user.is_superuser:
+    if admin:
         out['system'] = _system(ctx.user, problems, notes)
         out['scope'] = 'instance'
     else:

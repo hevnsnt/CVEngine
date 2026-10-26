@@ -181,8 +181,20 @@ const sections = {
       min: "1",
       max: "5000",
     });
+    const planTotal = text(s.plan_daily_total, {
+      type: "number",
+      min: "0",
+      max: "100000",
+    });
+    const planProject = text(s.plan_daily_per_project, {
+      type: "number",
+      min: "0",
+      max: "100000",
+    });
     const save = async () => {
       await api("PUT", "ai", {
+        plan_daily_total: planTotal.value,
+        plan_daily_per_project: planProject.value,
         provider: provider.value,
         model: model.value,
         api_key: key.value,
@@ -206,6 +218,8 @@ const sections = {
         keyField,
         baseField,
         enabled.wrap,
+        field("Validation planning requests per day, all projects", planTotal),
+        field("Validation planning requests per day, one project", planProject),
         button("Save", async () => {
           await save();
           toast("Saved");
@@ -683,6 +697,28 @@ const sections = {
   },
 
   async engines(m) {
+    const policy = await api("GET", "scan_policy");
+    const everything = check(
+      "Let scans run every Nuclei template that is installed, not only the read-only ones",
+      policy.nuclei_all_templates,
+    );
+    const policyCard = card(
+      "Nuclei templates",
+      el(
+        "p",
+        "note",
+        "By default only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host) run. Turn this on to run the whole template library Nuclei ships, including checks that send other requests. Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
+      ),
+      everything.wrap,
+      button("Save", async () => {
+        await api("PUT", "scan_policy", {
+          nuclei_all_templates: everything.box.checked,
+        });
+        toast("Saved");
+      }),
+    );
+    policyCard.style.maxWidth = "none";
+    m.append(policyCard);
     const list = el("div", "grid");
     m.append(list);
     const draw = async () => {

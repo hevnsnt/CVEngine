@@ -106,11 +106,11 @@ def run_naabu(ips, binary=None):
             pass
 
 
-def known_open_ports(ips):
-    """``{ip: [ports]}`` the inventory already holds as open for these addresses."""
+def known_open_ports(ips, org_id=None):
+    """``{ip: [ports]}`` the organization's inventory already holds as open for these addresses."""
     from startScan.models import IpAddress
     out = {}
-    for ip in IpAddress.objects.filter(address__in=list(ips)).prefetch_related('ports'):
+    for ip in IpAddress.objects.filter(address__in=list(ips), org_id=org_id).prefetch_related('ports'):
         out[ip.address] = sorted({p.number for p in ip.ports.all() if p.state in ('', 'open') and p.protocol in ('', 'tcp')})
     return out
 
@@ -129,24 +129,27 @@ def discover(ips, scan=None, runner=None):
     if not ips:
         return None
     runner = runner or run_naabu
+    from startScan.ip_rows import org_id_of_project
+    project = scan.domain.project_id if scan is not None else None
+    org_id = org_id_of_project(project)
     try:
-        fresh = set(ledger.fresh(SERVICE, ips))
+        fresh = set(ledger.fresh(SERVICE, ips, project))
         todo = [i for i in ips if i not in fresh]
         found, lost = {}, []
         if todo:
-            with ledger.claim_many(SERVICE, todo) as won:
+            with ledger.claim_many(f'{SERVICE}@{project}', todo) as won:
                 won = [i for i in todo if i in set(won)]
                 if won:
                     try:
                         found = runner(won)
                     except Exception:  # noqa: BLE001 - an optional stage: nmap's own flags are the fallback
                         logger.warning('naabu failed; nmap keeps its default ports', exc_info=True)
-                        ledger.record(SERVICE, won, None, scan, 'failed')
+                        ledger.record(SERVICE, won, project, scan, 'failed')
                         return None
-                    ledger.record(SERVICE, won, None, scan)
-                    persist_open_ports(found)
+                    ledger.record(SERVICE, won, project, scan)
+                    persist_open_ports(found, org_id)
                 lost = [i for i in todo if i not in won]  # another pipeline holds these: its result lands in the inventory
-        before = known_open_ports(ips)
+        before = known_open_ports(ips, org_id)
     except Exception:  # noqa: BLE001
         logger.warning('naabu stage failed; nmap keeps its default ports', exc_info=True)
         return None
@@ -155,13 +158,13 @@ def discover(ips, scan=None, runner=None):
     return {ip: sorted(set(found.get(ip, [])) | set(before.get(ip, []))) for ip in ips if ip not in lost or before.get(ip)}
 
 
-def persist_open_ports(found):
+def persist_open_ports(found, org_id=None):
     """Write naabu's open ports as open Port rows (source 'naabu'); nmap enriches them next."""
     from cveFeed.nmap_scan import persist_inventory
     inventory = [{'ip': ip, 'os_guess': '', 'ports': [{'number': n, 'state': 'open', 'protocol': 'tcp'} for n in ports]}
                  for ip, ports in found.items()]
     if inventory:
-        persist_inventory(inventory, source='naabu')
+        persist_inventory(inventory, source='naabu', org_id=org_id)
 
 
 def port_argument(ports):

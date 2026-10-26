@@ -338,6 +338,30 @@ class SignatureCacheTests(TriageDbBase):
 		provider = self.provider()
 		self.assertEqual(self.run_all(provider=provider)['asked'], 2)
 
+	def test_a_row_whose_evidence_changed_during_the_call_is_not_overwritten(self, _log):
+		self.match('a.tr.test', version='1.18.0')
+		provider = self.provider()
+
+		def slow_answer(*args):
+			Triage.objects.update(signature='f' * 40, status='pending', classification='')  # re-signed by a concurrent track()
+			return reply('likely')
+		provider.complete.side_effect = slow_answer
+		self.run_all(provider=provider)
+		row = Triage.objects.get()
+		self.assertEqual((row.signature, row.status, row.classification), ('f' * 40, 'pending', ''))
+
+	def test_a_validation_hit_that_lands_during_the_call_stays_confirmed(self, _log):
+		self.match('a.tr.test', version='1.18.0')
+		provider = self.provider()
+
+		def slow_answer(*args):
+			Triage.objects.update(validation_status='hit', reason='template confirmed it')
+			return reply('needs_validation')
+		provider.complete.side_effect = slow_answer
+		self.run_all(provider=provider)
+		row = Triage.objects.get()
+		self.assertEqual((row.classification, row.validation_status), ('confirmed', 'hit'))
+
 	def test_the_verdict_is_stored_for_correlation_but_never_clears_hard_evidence(self, _log):
 		from cveFeed.correlation import _seedable
 		self.match('a.tr.test', version='', in_range=None)

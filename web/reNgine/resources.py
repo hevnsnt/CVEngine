@@ -477,6 +477,27 @@ def reset_store():
         _store.update(obj=None, kind=None)
 
 
+_EXPIRE_IF_OWNER = ("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end")
+_DELETE_IF_OWNER = ("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end")
+
+
+def claim_refresh(client, key, owner, ttl):
+    """Extend a claim only while ``owner`` still holds it (one atomic step on the server), so a holder whose claim lapsed and was taken
+    by another job can never extend the new holder's. When the key is gone, take it again if nobody has. Returns 'ok', 'regained' or
+    'lost'."""
+    owner = str(owner)
+    if client.eval(_EXPIRE_IF_OWNER, 1, key, owner, int(ttl)):
+        return 'ok'
+    if client.set(key, owner, nx=True, ex=int(ttl)):
+        return 'regained'
+    return 'lost'
+
+
+def claim_release(client, key, owner):
+    """Delete a claim only if ``owner`` still holds it, in one atomic step: a lock that lapsed and was taken by another job is not deleted."""
+    return bool(client.eval(_DELETE_IF_OWNER, 1, key, str(owner)))
+
+
 @contextmanager
 def redis_claim(key, owner, ttl):
     """Hold ``key`` in Redis for ``owner`` (SET NX EX), refreshing it while the block runs. Yields True when this
@@ -501,7 +522,9 @@ def redis_claim(key, owner, ttl):
     def keep_alive():
         while not stop.wait(ttl / 6):
             try:
-                client.expire(key, ttl)
+                if claim_refresh(client, key, owner, ttl) == 'lost':
+                    logger.warning('claim %s was taken over by another job while this one still runs; no longer refreshing it', key)
+                    return
             except Exception:  # noqa: BLE001
                 pass
     threading.Thread(target=keep_alive, name='redis-claim', daemon=True).start()
@@ -510,8 +533,7 @@ def redis_claim(key, owner, ttl):
     finally:
         stop.set()
         try:
-            if client.get(key) == owner:
-                client.delete(key)
+            claim_release(client, key, owner)
         except Exception:  # noqa: BLE001
             pass
 
@@ -622,8 +644,8 @@ class Job:
         self.killed_for_memory = True
         logger.warning('memory critical (%s MB free): stopping %s [%s] using %s MB', state['available_mb'], self.kind, self.label, rss)
         self.store.event({'t': now, 'kind': self.kind, 'label': self.label, 'rss_mb': rss, 'available_mb': state['available_mb']})
-        _log_activity(f'Out of memory ({state["available_mb"]} MB free): stopped {self.kind} on {self.label} to protect the other work; '
-                      'it will be retried lighter', status='failed')
+        _log_activity(f'Out of memory ({state["available_mb"]} MB free): stopped a {self.kind} run to protect the other work; '
+                      'it will be retried lighter', status='failed')  # system-wide line: never the label, which names a tenant's host
         terminate_group(self.proc)
         return True
 
@@ -688,8 +710,8 @@ def heavy_job(kind, label='', cost=None, wait_timeout=None, store=None, state_fn
         store.wait(job.token, cost, f'{kind}: {label}'[:120], now)
         if announced is None or now - announced > 300:
             announced = now
-            _log_activity(f'Waiting for memory to start {kind} on {label} (needs about {cost} MB, {state["available_mb"]} MB free); '
-                          'other work is running', status='running')
+            _log_activity(f'Waiting for memory to start a {kind} run (needs about {cost} MB, {state["available_mb"]} MB free); '
+                          'other work is running', status='running')  # system-wide line: never the label, which names a tenant's host
         if now >= deadline:
             store.release(job.token)
             raise MemoryBusy(f'{kind} on {label} waited too long for memory ({state["available_mb"]} MB free, needs {cost} MB)')
