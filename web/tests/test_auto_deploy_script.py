@@ -49,8 +49,10 @@ class AutoDeployTests(unittest.TestCase):
         updater = self.work / 'scripts' / 'update.sh'
         updater.write_text(UPDATER)
         updater.chmod(0o755)
+        shutil.copy(ROOT / 'scripts' / 'update-state.py', self.work / 'scripts' / 'update-state.py')
         (self.work / 'web').mkdir()
         (self.work / 'web' / 'README').write_text('v1\n')
+        (self.work / 'web' / '.update-mode').write_text('auto\n')  # the administrator chose Automatic in Settings > Updates
         self.git('add', '-A', cwd=self.work)
         self.git('commit', '-m', 'v1', cwd=self.work)
         self.git('push', 'origin', 'master', cwd=self.work)
@@ -96,6 +98,33 @@ class AutoDeployTests(unittest.TestCase):
         self.assertEqual(oct(backups[0].stat().st_mode & 0o777), '0o600')
         self.assertEqual((self.state() / 'backups' / 'secret').read_text(), 'key\n')
         self.assertIn('Deployed', result.stdout)
+
+    def test_nothing_is_deployed_unless_the_administrator_chose_automatic(self):
+        self.push_new_commit()
+        for mode in (None, 'manual\n', 'AUTO\n', 'garbage'):
+            mode_file = self.work / 'web' / '.update-mode'
+            mode_file.unlink(missing_ok=True)
+            if mode is not None:
+                mode_file.write_text(mode)
+            result = self.run_deploy()
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(self.calls(), [], mode)  # no backup, no update
+        self.assertEqual((self.state() / 'mode-note').read_text(), 'manual')
+
+    def test_the_manual_notice_is_logged_once_not_every_run(self):
+        (self.work / 'web' / '.update-mode').write_text('manual\n')
+        first, second = self.run_deploy(), self.run_deploy()
+        self.assertIn('Settings > Updates', first.stdout)
+        self.assertEqual(second.stdout.strip(), '')
+
+    def test_switching_to_automatic_deploys_on_the_next_run(self):
+        self.push_new_commit()
+        (self.work / 'web' / '.update-mode').write_text('manual\n')
+        self.run_deploy()
+        self.assertEqual(self.calls(), [])
+        (self.work / 'web' / '.update-mode').write_text('auto\n')
+        self.assertEqual(self.run_deploy().returncode, 0)
+        self.assertIn('update --stop-scans drain=1800', self.calls())
 
     def test_failed_backup_never_updates(self):
         self.push_new_commit()
