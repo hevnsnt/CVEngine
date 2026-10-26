@@ -80,7 +80,7 @@ The reserved slug `_all` means every project you can see. The list endpoints and
 
 `delete` removes one host's data from this project only: its findings, CVE matches, routes, changes, triage, certificates, and asset information. A later scan can find the host again.
 
-`exclude` is organization wide: it deletes the host's data from every project of the organization you can write to, and no stage touches it again in any of them. It needs an organization-level role, and organization admins lift it with `DELETE exclusions/{host}`. Names match whole and case-insensitively: excluding `provider.example` leaves `www.provider.example` alone, and wildcards are a `400`. Removals are audit logged.
+`exclude` is organization wide: it deletes the host's data from every project of the organization you can write to, and no stage touches it again in any of them. It needs an organization-level role, and organization admins lift it with `DELETE exclusions/{host}`. Names match whole and case-insensitively: excluding `provider.example` leaves `www.provider.example` alone, and wildcards are a `400`. Send `"with_aliases": true` to take the other names the project shows as the same host (same addresses) with it, and `"include_subdomains": true` to exclude a whole domain (`provider.example`, every name under it and the targets named like them; scans of those targets are stopped; `co.uk`-style suffixes and addresses are a `400`). `delete` takes `with_aliases` too. In `add_targets` a line starting with `-` (`-provider.example`) does the whole-domain exclusion and the response lists it under `excluded`. Removals are audit logged.
 
 ## Hosts and search
 

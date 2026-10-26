@@ -1,8 +1,9 @@
 """Hosts an organization has excluded for good ("Remove & exclude"), and the checks every discovery and scan path shares.
 
 A host is excluded for a project when its organization holds a HostExclusion with the SAME name. The match is the whole
-name, lowercase, and nothing else: no suffix, no substring, no parent domain. Excluding ``provider.example`` does
-not touch ``notprovider.example`` or ``www.provider.example`` (that one needs its own exclusion).
+name, lowercase: excluding ``provider.example`` does not touch ``notprovider.example`` (never a substring or a bare suffix).
+An exclusion made with ``include_subdomains`` (``-provider.example`` in Add targets) also covers every name under it, on a dot
+boundary: ``www.provider.example`` and ``a.b.provider.example``, still never ``notprovider.example``.
 
 Everything here is read through the project's own org, so one org's list never reaches another's scans. A project without
 an org has no exclusions. All the checks are non-fatal: if the lookup fails, nothing is excluded (the owner's explicit
@@ -21,16 +22,55 @@ def normalize(value):
     return bare_host(value).strip().rstrip('.')[:MAX_HOST_LENGTH]
 
 
-def excluded_names(project_id):
-    """The frozenset of lowercase names excluded for ``project_id`` (its org's list). Empty for no project or no org."""
+class ExclusionSet(frozenset):
+    """The names an organization excluded: ``name in excluded`` is true for an excluded name and for any name under an excluded
+    domain (one made with ``include_subdomains``). A frozenset of the exact names, so every existing ``in`` check keeps working;
+    ``|`` keeps the subdomain rules."""
+
+    def __new__(cls, names=(), subtrees=()):
+        self = super().__new__(cls, names)
+        self.subtrees = frozenset(subtrees)
+        return self
+
+    def __contains__(self, name):
+        if super().__contains__(name):
+            return True
+        if not self.subtrees or not isinstance(name, str):
+            return False
+        name = name.strip().lower().rstrip('.')
+        while '.' in name:
+            name = name.split('.', 1)[1]
+            if name in self.subtrees:
+                return True
+        return False
+
+    def __or__(self, other):
+        return ExclusionSet(frozenset(self) | frozenset(other), self.subtrees | getattr(other, 'subtrees', frozenset()))
+
+    def __ror__(self, other):
+        return self.__or__(other)
+
+
+def excluded_names(project_id, strict=False):
+    """The ExclusionSet of lowercase names excluded for ``project_id`` (its org's list). Empty for no project or no org. ``strict``
+    lets a failed lookup raise (an authorization check must stop, not carry on with nothing excluded)."""
     if not project_id:
-        return frozenset()
+        return ExclusionSet()
     from cveFeed.models import HostExclusion
     try:
-        return frozenset(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', flat=True))
+        rows = list(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
     except Exception:  # noqa: BLE001 - never let a lookup problem stop discovery
+        if strict:
+            raise
         logger.warning('could not read the host exclusions for project %s', project_id, exc_info=True)
-        return frozenset()
+        return ExclusionSet()
+    return ExclusionSet((host for host, _ in rows), (host for host, subtree in rows if subtree))
+
+
+def covers(pattern, name, subtree):
+    """Whether the exclusion ``pattern`` (made with or without ``include_subdomains``) covers ``name``."""
+    name = normalize(name)
+    return name == pattern or bool(subtree and name.endswith('.' + pattern))
 
 
 def is_excluded(project_id, host):

@@ -586,8 +586,9 @@ class HostProfile(models.Model):
 
 class HostExclusion(models.Model):
     """A host an organization never wants scanned again ("Remove & exclude"). Org-wide: it applies to every project of the org
-    and to nothing outside it. The match is the whole host name, lowercase and case-insensitive; never a suffix or substring,
-    so excluding ``provider.example`` leaves ``notprovider.example`` and ``www.provider.example`` alone.
+    and to nothing outside it. The match is the whole host name, lowercase and case-insensitive; never a bare suffix or substring,
+    so excluding ``provider.example`` leaves ``notprovider.example`` and ``www.provider.example`` alone, unless the exclusion was
+    made with ``include_subdomains``, which also covers every name under the domain (on a dot boundary).
 
     Not in tenancy.scope.SCOPES (that maps a model to a project id): it is read and written only through cveFeed.exclusions
     and the agentapi services, which always filter by the caller's own org, so it cannot leak across orgs. Scanners read it
@@ -595,6 +596,7 @@ class HostExclusion(models.Model):
 
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="host_exclusions")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
+    include_subdomains = models.BooleanField(default=False)  # a whole domain: the name and every name under it ("-example.com")
     reason = models.CharField(max_length=300, blank=True, default="")
     created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(default=timezone.now)

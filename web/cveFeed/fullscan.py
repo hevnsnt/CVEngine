@@ -114,11 +114,10 @@ def in_scope(ip, *, strict=False):
         if project not in banned:
             if strict:
                 # Admission is an authorization boundary: a failed lookup must prevent process creation.
-                from cveFeed.models import HostExclusion
-                banned[project] = set(HostExclusion.objects.filter(org__projects__id=project).values_list('host', flat=True))
+                banned[project] = excluded_names(project, strict=True)
             else:
                 banned[project] = excluded_names(project)
-            banned[project] |= archived_names(project)
+            banned[project] = banned[project] | archived_names(project)
     names = [name for name, project in rows if name.lower().rstrip('.') not in banned[project]]
     return any(not target_types.resolves_to_blocked(name) for name in names)
 

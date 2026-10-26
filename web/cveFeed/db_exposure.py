@@ -209,10 +209,8 @@ def checker_for(port, table=None):
 
 def _excluded_names(project):
     """Authorization checks fail closed, unlike best-effort discovery filtering."""
-    from cveFeed.models import HostExclusion
-    if not project:
-        return frozenset()
-    return frozenset(HostExclusion.objects.filter(org__projects__id=project).values_list('host', flat=True))
+    from cveFeed.exclusions import excluded_names
+    return excluded_names(project, strict=True)
 
 
 def run_db_exposure_checks(scan_id, checks=None):

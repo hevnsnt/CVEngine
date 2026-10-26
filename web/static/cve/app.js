@@ -2284,19 +2284,20 @@ const pages = {
       const box = el("div", "host-danger");
       box.append(
         el("h3", "sec", "Remove this host"),
-        el("p", "note", "Delete host data removes it from this project only; a later scan can find it again. Remove & exclude removes it from every project in this organization and never scans it again."),
+        el("p", "note", "Delete host data removes it from this project only; a later scan can find it again. Remove & exclude removes it from every project in this organization and never scans it again. To drop a whole domain at once, put -example.com in Add targets."),
       );
       const row = el("div", "host-danger-actions");
       const del = el("button", "btn danger-ghost sm", "Delete host data", { type: "button" });
       del.onclick = async () => {
-        const sure = await ask(`Remove ${h.host} and its findings from this project? It can be rediscovered by a future scan.`, {
-          title: "Delete host data?",
-          ok: "Delete host data",
-        });
+        const others = (h.aliases || []).length;
+        const sure = await ask(
+          `Remove ${h.host}${others ? ` and the ${others} other name${others === 1 ? "" : "s"} on the same addresses` : ""} and ${others ? "their" : "its"} findings from this project? ${others ? "They" : "It"} can be rediscovered by a future scan.`,
+          { title: "Delete host data?", ok: "Delete host data" },
+        );
         if (!sure) return;
         del.disabled = true;
         try {
-          const r = await api("POST", hostPath(h, "delete"), {});
+          const r = await api("POST", hostPath(h, "delete"), { with_aliases: others > 0 });
           toast(`Deleted ${h.host}: ${r.findings} finding${r.findings === 1 ? "" : "s"} removed from this project`);
           afterRemoval();
         } catch (err) {
@@ -2307,24 +2308,53 @@ const pages = {
       const exclude = el("button", "btn danger sm", "Remove & exclude", { type: "button" });
       exclude.onclick = () =>
         dialog("Remove & exclude?", (body, close) => {
+          const others = h.aliases || [];
+          // The Hosts page shows names on the same addresses as ONE host: excluding only the name on display would let the next one take its place.
           body.append(
             el("p", "note", `Remove ${h.host} everywhere in this organization and never scan it again? This deletes its findings across all your projects.`, { style: "font-size:14px" }),
           );
+          let withAliases = null;
+          if (others.length) {
+            withAliases = el("input", "", null, { type: "checkbox", checked: "checked", id: "ex-aliases" });
+            const label = el("label", "check", null, { for: "ex-aliases" });
+            label.append(withAliases, document.createTextNode(` Also remove and exclude the ${others.length} other name${others.length === 1 ? "" : "s"} on the same addresses, so this host does not come back under another name: ${others.slice(0, 6).join(", ")}${others.length > 6 ? `, and ${others.length - 6} more` : ""}`));
+            body.append(label);
+          }
+          // a whole domain: the host's target (or its parent domain) and everything under it, targets included
+          const root = h.target && (h.host === h.target || h.host.endsWith("." + h.target)) && h.target.split(".").length >= 2 && !/^[0-9.]+$/.test(h.target) ? h.target : "";
+          let wholeDomain = null;
+          if (root) {
+            wholeDomain = el("input", "", null, { type: "checkbox", id: "ex-domain" });
+            const label = el("label", "check", null, { for: "ex-domain" });
+            label.append(wholeDomain, document.createTextNode(` Exclude everything under ${root} instead: every host and target of ${root} in this organization is removed and never scanned again`));
+            body.append(label);
+          }
           const reason = uiText("", { maxlength: "300", placeholder: "Why (optional)" });
           body.append(field("Reason", reason));
+          const failure = el("p", "msg err", "", { role: "alert", style: "display:none" });
+          body.append(failure);
           const actions = el("div", "actions");
           const no = el("button", "btn ghost", "Cancel", { type: "button" });
           no.onclick = close;
           const yes = el("button", "btn danger", "Remove & exclude", { type: "button" });
           yes.onclick = async () => {
             yes.disabled = true;
+            failure.style.display = "none";
             try {
-              const r = await api("POST", hostPath(h, "exclude"), { reason: reason.value });
+              const domain = !!(wholeDomain && wholeDomain.checked);
+              const target = domain ? { ...h, host: root } : h;
+              const r = await api("POST", hostPath(target, "exclude"), {
+                reason: reason.value,
+                include_subdomains: domain,
+                with_aliases: !domain && !!(withAliases && withAliases.checked),
+              });
               close();
-              toast(`Excluded ${h.host}: removed from ${r.projects_affected} project${r.projects_affected === 1 ? "" : "s"}, ${r.findings_removed} finding${r.findings_removed === 1 ? "" : "s"}`);
+              const names = (r.names || []).length;
+              toast(`Excluded ${domain ? `${r.host} and everything under it` : names > 1 ? `${h.host} and ${names - 1} other name${names === 2 ? "" : "s"}` : h.host}: removed from ${r.projects_affected} project${r.projects_affected === 1 ? "" : "s"}, ${r.hosts_removed} host${r.hosts_removed === 1 ? "" : "s"}, ${r.findings_removed} finding${r.findings_removed === 1 ? "" : "s"}`);
               afterRemoval();
             } catch (err) {
-              toast(err.message, true);
+              failure.textContent = err.message; // in the dialog until the next try: a toast is gone in seconds
+              failure.style.display = "block";
               yes.disabled = false;
             }
           };
