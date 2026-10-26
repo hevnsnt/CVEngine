@@ -21,7 +21,8 @@ if [ "$(git rev-parse HEAD)" != "$(cat "$HOME/candidate.sha")" ]; then bad "the 
 pending=$(dc exec -T web python3 manage.py showmigrations --plan | grep -c '^\[ \]' || true)
 [ "$pending" = 0 ] || bad "$pending migrations are not applied"
 dc exec -T web python3 manage.py check || bad "manage.py check failed"
-dc exec -T celery celery -A reNgine.tasks inspect ping -t 15 | grep -q pong || bad "no Celery worker answers"
+# The workers were restarted by the update and take as long to come up as after any restart.
+wait_for_workers 600 || bad "the Celery workers do not answer after the update"
 
 dc exec -T web python3 manage.py shell <<'PY' || bad "the data check failed"
 from django.db.models import Count
