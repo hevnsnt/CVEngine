@@ -3,7 +3,7 @@
 #   ./scripts/rotate-field-key.sh
 # It puts a new CVENGINE_FIELD_KEY in .env (the old one moves to CVENGINE_FIELD_KEY_PREVIOUS, which only decrypts), recreates the
 # services so they all use it, and re-encrypts every stored secret. Keep CVENGINE_FIELD_KEY_PREVIOUS until you have a database backup
-# taken after this; then it can be removed. Back up .env together with the database.
+# taken after this; then it can be removed. Back up .env apart from the database dumps.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo ".env not found: run this from the CVEngine directory of a running installation." >&2; exit 1; }
@@ -38,4 +38,4 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 compose exec -T web python3 manage.py rotate_field_key
-echo "Done. Back up .env and the database now; CVENGINE_FIELD_KEY_PREVIOUS can be removed once that backup exists."
+echo "Done. Back up .env (apart from the database dump) and the database now; CVENGINE_FIELD_KEY_PREVIOUS can be removed once that backup exists."

@@ -40,6 +40,14 @@ fill() {
 grep -q '^CVENGINE_FIELD_KEY=' .env || echo 'CVENGINE_FIELD_KEY=' >> .env
 fill CVENGINE_FIELD_KEY
 
+# The password of the Redis broker (queues, caches and counters). A first start gets one. An installation that already has containers
+# keeps its open broker until ./scripts/enable-redis-auth.sh is run, which also recreates the services: the broker and its clients
+# must change together, and the updater never recreates Redis.
+grep -q '^REDIS_PASSWORD=' .env || echo 'REDIS_PASSWORD=' >> .env
+if ! { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q 'redis'; }; then
+  fill REDIS_PASSWORD
+fi
+
 # The address other machines reach this one on: the source of the default route, else the first non-loopback address, else localhost.
 detect_host() {
   local ip=''

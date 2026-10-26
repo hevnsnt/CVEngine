@@ -48,6 +48,9 @@ admin-password:	## Lost the admin password? Generate a new one and print it once
 export-cve-seed:	## Write this instance's whole CVE catalog to web/cve-seed.jsonl.gz (see docs/PIPELINE.md, Seeding the catalog).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py export_cve_seed --out /usr/src/app/cve-seed.jsonl.gz
 
+redis-auth:	## Put a password on the Redis broker of an older installation (see docs/CONFIGURATION.md).
+	./scripts/enable-redis-auth.sh
+
 rotate-field-key:	## Rotate the key that encrypts stored API keys and webhook URLs (see docs/CONFIGURATION.md).
 	./scripts/rotate-field-key.sh
 

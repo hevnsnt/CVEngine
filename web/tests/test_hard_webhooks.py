@@ -1,4 +1,5 @@
 import traceback
+from types import SimpleNamespace
 from unittest import mock
 
 import requests
@@ -84,3 +85,58 @@ class WebhookErrorTests(TestCase):
 			notify.template_hits([('CVE-2099-1', 'a.example.test')])
 		for secret in SECRETS:
 			self.assertNotIn(secret, '\n'.join(logs.output))
+
+
+RAN = []
+
+
+def _ran():
+	RAN.append('code ran')
+
+
+class _Forged:
+	def __reduce__(self):
+		return (_ran, ())
+
+
+class DiscordCacheTests(TestCase):
+	"""The Discord cache sits in Redis: nothing in it is trusted unless this installation signed it, and the hook URL is not in it."""
+
+	def setUp(self):
+		Notification.objects.create(send_to_discord=True, discord_hook_url=DISCORD)
+		self.store = {}
+		fake = mock.Mock()
+		fake.get.side_effect = self.store.get
+		fake.set.side_effect = self.store.__setitem__
+		patcher = mock.patch.object(common_func, 'DISCORD_WEBHOOKS_CACHE', fake)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_a_signed_object_round_trips_and_anything_else_is_a_miss(self):
+		sealed = common_func._seal({'a': 1})
+		self.assertEqual(common_func._unseal(sealed), {'a': 1})
+		self.assertIsNone(common_func._unseal(sealed[:-1] + b'x'))  # altered
+		self.assertIsNone(common_func._unseal(b'\x80\x04' + b'plain pickle'))  # not signed
+		self.assertIsNone(common_func._unseal(None))
+		self.assertIsNone(common_func._unseal(b'short'))
+
+	def test_a_forged_pickle_in_redis_is_never_run(self):
+		import pickle
+		forged = pickle.dumps(_Forged())
+		RAN.clear()
+		self.store['Scan finished'] = forged
+		self.store['Scan finished_embed'] = forged
+		with mock.patch.object(common_func.DiscordWebhook, 'execute', return_value=SimpleNamespace(status_code=200, content=b'{}')):
+			common_func.send_discord_message('hi', title='Scan finished', fields={'k': 'v'})
+		self.assertEqual(RAN, [])
+
+	def test_the_hook_url_is_not_stored_and_an_update_edits_the_first_message(self):
+		first = SimpleNamespace(status_code=200, content=b'{}')
+		with mock.patch.object(common_func.DiscordWebhook, 'execute', return_value=first):
+			common_func.send_discord_message('x', title='Scan finished', fields={'host': 'a.example'})
+		self.assertTrue(self.store)
+		self.assertFalse([k for k, v in self.store.items() if b'DISCORDSECRET' in v])
+		with mock.patch.object(common_func.DiscordWebhook, 'edit', return_value=mock.Mock(status_code=200, content=b'{}')) as edit, \
+				mock.patch.object(common_func.DiscordWebhook, 'execute', side_effect=AssertionError('must edit, not send again')):
+			common_func.send_discord_message('x', title='Scan finished', fields={'host': 'b.example'})
+		self.assertEqual(edit.call_count, 1)
