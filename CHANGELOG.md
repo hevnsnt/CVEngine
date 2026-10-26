@@ -4,13 +4,16 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Changed
+
+- **A triage answer the validator rejects is sent back to the AI, with why.** "AI review failed (schema_invalid)" meant the model's reply broke the strict answer schema (an extra key, `severity_adjust` as text, a step kind outside nuclei, nmap, curl and manual, two JSON objects ...) and the finding was left unreviewed until the next sweep. The rejected reply and the exact reason now go back to the model once, and its second answer is used; if that is also rejected the failure is recorded as before, now with the reason (`reason`, `attempts` in the diagnostic, never any reply text). The retry is a separate step in AI usage (`finding_triage_repair`).
+
 ## v1.2.0 (2026-10-26)
 
 Update with the in-app updater (Settings > Updates) or `make up`. A release is only cut after an upgrade rehearsal: CI installs the previous version, seeds it with data (duplicate IP addresses included), updates it with the real update scripts, plain and behind a host proxy, and checks the site, the workers, the migrations and the data. This release adds database migrations; the update applies them and rolls back if one fails.
 
 ### Changed
 
-- **A triage answer the validator rejects is sent back to the AI, with why.** "AI review failed (schema_invalid)" meant the model's reply broke the strict answer schema (an extra key, `severity_adjust` as text, a step kind outside nuclei, nmap, curl and manual, two JSON objects ...) and the finding was left unreviewed until the next sweep. The rejected reply and the exact reason now go back to the model once, and its second answer is used; if that is also rejected the failure is recorded as before, now with the reason (`reason`, `attempts` in the diagnostic, never any reply text). The retry is a separate step in AI usage (`finding_triage_repair`).
 - **Scans can run every Nuclei template.** Settings > Scan engines has a new "Nuclei templates" switch. Off (the default), only templates that make plain GET, HEAD or OPTIONS requests run, as before. On, every template Nuclei ships runs, in the broad scans and when a CVE match is validated; the AI-written templates stay read-only and Nuclei's denial-of-service templates stay excluded. Changing it is recorded in the audit log and makes hosts due for a fresh pass with the new set.
 - **The AI planning budget is a setting.** "AI planning daily budget reached; generic external checks deferred" came from a fixed limit of 20 planning requests a day per project and 200 in total. Both are now fields under Settings > AI model (the same defaults; 0 turns AI planning off), and the message says where to change them.
 - **Names that point at the same servers are one host.** `example.com` and `www.example.com` resolving to exactly the same addresses used to be two hosts on the map, the Hosts page and the counts, each with its own copy of every finding. They are now one host (the project's own target name is the one shown, otherwise the shortest) that lists its other names ("Also answers to"), and its CVE matches, findings and exposure are the host's, counted once. Names behind a CDN or other shared edge address, names with a different set of addresses, names that never resolved, and the same addresses in another project stay separate hosts. The dashboard, the Hosts page, the group overview and the history count the same way.
