@@ -56,3 +56,24 @@ class WrongTypeArgumentTests(SimpleTestCase):
 		self.assertEqual(ctx.exception.status, 400)
 		self.assertNotIn('secret-internal-detail', ctx.exception.message)
 
+
+
+class AssetFilterTests(SimpleTestCase):
+	def test_names_parent_domains_ips_and_networks_match_as_before(self):
+		f = services.AssetFilter(['www.a.example', 'corp.example', '10.1.0.0/16', '203.0.113.7', '2001:db8::/32', ' '])
+		self.assertTrue(f.matches(['www.a.example'], []))
+		self.assertTrue(f.matches(['deep.er.corp.example'], []))
+		self.assertTrue(f.matches(['x.test'], ['10.1.200.3']))
+		self.assertTrue(f.matches(['x.test'], ['203.0.113.7']))
+		self.assertTrue(f.matches([], ['2001:db8::5']))
+		self.assertFalse(f.matches(['notcorp.example', 'a.example'], ['10.2.0.1', '198.51.100.1', 'not-an-ip']))
+		self.assertFalse(services.AssetFilter([' ', '']))
+		self.assertTrue(services.asset_matches(['a.corp.example'], [], ['corp.example']))
+
+	def test_five_hundred_assets_over_two_thousand_hosts_is_fast(self):
+		patterns = [f'10.{n // 250}.{n % 250}.0/24' for n in range(250)] + [f'asset{n}.example' for n in range(250)]
+		f = services.AssetFilter(patterns)
+		started = time.monotonic()
+		hits = sum(f.matches([f'h{n}.other.test'], [f'192.0.2.{n % 250}']) for n in range(2000))
+		self.assertEqual(hits, 0)
+		self.assertLess(time.monotonic() - started, 2)

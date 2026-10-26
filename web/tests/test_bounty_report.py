@@ -297,3 +297,19 @@ class PlaybookTests(SimpleTestCase):
         self.assertIn('-5', table['Not Applicable'])
         self.assertIn('-10', table['Spam'])
         self.assertIn('30 days', table['Needs More Info'])
+
+
+class RedactionBoundsTests(SimpleTestCase):
+    def test_megabytes_of_private_key_openers_are_cut_before_they_are_scanned(self):
+        import time
+        started = time.monotonic()
+        text, _ = br.redact('-----BEGIN RSA PRIVATE KEY----- ' * 200_000, 4000)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertLessEqual(len(text), 4000 + len('\n[truncated]'))
+
+    def test_a_secret_just_past_the_limit_never_appears_in_the_output(self):
+        body = 'x' * 3990 + ' password=hunter2hunter2 and AKIAABCDEFGHIJKLMNOP'
+        text, count = br.redact(body, 4000)
+        self.assertNotIn('hunter2hunter2', text)
+        self.assertNotIn('AKIAABCDEFGHIJKLMNOP', text)
+        self.assertGreaterEqual(count, 1)

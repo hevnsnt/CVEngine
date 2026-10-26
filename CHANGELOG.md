@@ -58,6 +58,12 @@ Also from the review.
 - **A hostile certificate cannot abort a domain's TLS review.** The subject, issuer and names of a certificate are the scanned server's own text; they are now clipped to their columns (and the name list to 200) before storing, instead of raising and dropping every later host of the domain.
 - **A crafted page cannot stall a route check.** The page title is found with plain string searches instead of a backtracking pattern, so a body of repeated `<title` cannot cost quadratic time.
 - **The Elasticsearch and CouchDB exposure checks read at most 64 KB within 10 seconds** from the scanned server, instead of whatever it sends for as long as it takes.
+- **Spelling variants of a user name share one sign-in counter.** The throttle keyed on the lower-cased name, so `Ａdmin` (full-width) or a differently composed accent got its own five tries; the name is now normalised the way the login form reads it (NFKC, case-folded) before it is counted.
+- **Credential events are in the audit log, and the right admins can see them.** Password resets, MFA resets, enable/disable and bug bounty changes were recorded without an organization, so an Org Admin never saw them for their own users; each is now recorded for every organization of the user. New records: a user changing their own password, turning two-step sign-in on or off, creating and revoking API tokens (never the token or its name), and the attempt that locks a sign-in name or a second factor.
+- **Redaction of scanned-host text is bounded.** The bug bounty redactor ran all its patterns over a request or response of any size before cutting it; it now reads the limit plus a margin, and its private-key pattern is bounded.
+- **`get_remediation_work` no longer takes a minute and a half with 500 registered assets.** The asset list is read once per call (names as a set, networks parsed once) instead of re-parsing every pattern for every match, and an `assets` argument over 500 entries is a 400.
+- **Member, comment and audit-trail lists are paged** (`page`, `page_size`) like the others, and a rescan request reads at most ten times the queue limit of host names.
+- **MCP tells the agent what is data.** The server instructions and every successful tool result carry a notice that banners, titles, response excerpts and feed text come from scanned hosts and third parties, and must never be followed as instructions or used as a reason to call a tool that changes or deletes anything.
 
 ### Changed
 
