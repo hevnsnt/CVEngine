@@ -4,6 +4,7 @@
 #   1. CVENGINE_COMPOSE_FILES (or CVENGINE_COMPOSE_FILE), CVENGINE_COMPOSE_ENV_FILE and CVENGINE_COMPOSE_PROJECT, from the environment or .env;
 #   2. otherwise what the running web container was started with;
 #   3. otherwise docker-compose.yml.
+# It also sets COMPOSE_ENV_FILE to the env file Compose reads for ${VARIABLES} in the Compose files (empty when that is the default .env).
 # Call from the repository root. Returns 1, after saying why on stderr, when the layout cannot be worked out safely.
 cvengine_compose_layout() {
   local files env_file project id labels path name
@@ -41,7 +42,9 @@ cvengine_compose_layout() {
     fi
   fi
   [ -n "$files" ] || files=docker-compose.yml
+  COMPOSE_ENV_FILE=''
   if [ -n "$env_file" ]; then
+    COMPOSE_ENV_FILE=$env_file
     [[ $env_file =~ ^[A-Za-z0-9._-]+$ && -f $env_file ]] || { echo "CVENGINE_COMPOSE_ENV_FILE must name a file in $(pwd) (got '$env_file')." >&2; return 1; }
     COMPOSE+=(--env-file "$env_file")
   fi

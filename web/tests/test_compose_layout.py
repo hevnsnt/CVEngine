@@ -65,6 +65,21 @@ class ComposeLayoutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recreates(), ['docker compose --env-file .env.vps -p cvengine -f docker-compose.yml -f docker-compose.vps.yml up -d --force-recreate redis web celery celery-beat proxy'])
 
+    def test_the_redis_password_goes_into_the_env_file_compose_reads(self):
+        # Compose fills ${REDIS_PASSWORD} from the env file it is given (.env.vps), not from .env: a password only in .env left Redis open
+        (self.stub / 'running_config_files').write_text(f'{self.work}/docker-compose.yml,{self.work}/docker-compose.vps.yml\n')
+        (self.stub / 'running_env_file').write_text(f'{self.work}/.env.vps\n')
+        result = self.run_script('enable-redis-auth.sh')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = {name: [l for l in (self.work / name).read_text().splitlines() if l.startswith('REDIS_PASSWORD=')] for name in ('.env', '.env.vps')}
+        self.assertEqual(len(values['.env']), 1)
+        self.assertRegex(values['.env'][0], r'^REDIS_PASSWORD=[A-Za-z0-9]{32}$')
+        self.assertEqual(values['.env.vps'], values['.env'])
+        again = self.run_script('enable-redis-auth.sh')  # a second run keeps the same password in both
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual((self.work / '.env.vps').read_text().count('REDIS_PASSWORD='), 1)
+        self.assertEqual({l for l in (self.work / '.env.vps').read_text().splitlines() if l.startswith('REDIS_PASSWORD=')}, set(values['.env']))
+
     def test_settings_in_env_say_the_layout(self):
         (self.work / '.env').write_text('CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.vps.yml\nCVENGINE_COMPOSE_ENV_FILE=.env.vps\n')
         result = self.run_script('rotate-field-key.sh')
