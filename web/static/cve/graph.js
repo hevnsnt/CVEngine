@@ -483,6 +483,30 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     true,
   );
 
+  // Mouse-wheel zoom, around the pointer. VivaGraph's own wheel zoom does not fire in Chromium browsers (Edge, Chrome), so the
+  // graph handles the wheel itself in every browser. It is registered before the renderer so it runs first and keeps Viva's own
+  // handler from zooming a second time (Firefox). The page does not scroll while the pointer is over the graph.
+  const MIN_ZOOM = 0.04;
+  const MAX_ZOOM = 6;
+  container.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const svg = container.querySelector("svg");
+      const root = svg && svg.querySelector("g");
+      const m = root && /matrix\(([^)]+)\)/.exec(root.getAttribute("transform") || "");
+      const k = m ? Number(m[1].split(/[ ,]+/)[0]) || 1 : 1;
+      const lines = e.deltaMode === 1 ? 0.05 : e.deltaMode === 2 ? 1 : 0.0015;
+      const factor = Math.min(Math.max(Math.exp(-e.deltaY * lines), 0.5), 2);
+      const next = Math.min(Math.max(k * factor, MIN_ZOOM), MAX_ZOOM);
+      if (next === k) return;
+      const box = container.getBoundingClientRect();
+      graphics.scale(next / k, { x: e.clientX - box.left, y: e.clientY - box.top });
+      auto = false; // the user is in control of the view now (the Fit button or a double-click hands it back)
+    },
+    { passive: false },
+  );
   renderer = Viva.Graph.View.renderer(graph, {
     container,
     graphics,
