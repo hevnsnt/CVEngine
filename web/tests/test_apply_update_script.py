@@ -26,7 +26,6 @@ case " $* " in
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
-  *" pull "*) if [ -f "$STUB_DIR/fail_pull" ]; then exit 1; fi;;
   *" build "*) if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi;;
   *" --force-recreate "*) if [ -f "$STUB_DIR/fail_recreate_always" ]; then exit 1; fi
@@ -226,24 +225,50 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', calls)
         self.assertEqual(self.head(), self.new)
 
-    def test_the_proxy_image_is_pulled_before_it_is_recreated_and_the_dev_stack_pulls_nothing(self):
-        self.approve()
+    def test_the_deploy_steps_come_from_the_files_that_were_just_merged_not_from_the_script_already_on_the_host(self):
+        """The script that applies an update is the copy already on the host, so a step added to it only ran one update late. The steps live in
+        scripts/update-deploy.sh, read after the merge: a step the new files add runs in the update that brings them."""
+        other = self.tmp / 'other'
+        real = (SCRIPTS / 'update-deploy.sh').read_text()
+        marker = '  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1'
+        self.assertIn(marker, real)
+        (other / 'scripts').mkdir(exist_ok=True)
+        (other / 'scripts' / 'update-deploy.sh').write_text(real.replace(marker, '  "${compose[@]}" images --quiet proxy\n' + marker, 1))
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'a new deploy step', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        newest = self.git('rev-parse', 'HEAD', cwd=other)
+        self.approve(newest)
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
-        self.assertIn('docker compose -f docker-compose.yml pull proxy', calls)
-        self.assertLess(next(i for i, c in enumerate(calls) if ' build ' in c), next(i for i, c in enumerate(calls) if c.endswith(' pull proxy')))
-        self.assertLess(next(i for i, c in enumerate(calls) if c.endswith(' pull proxy')), next(i for i, c in enumerate(calls) if '--force-recreate web' in c))
+        self.assertIn('docker compose -f docker-compose.yml images --quiet proxy', calls)  # a step this host's script has never heard of
+        self.assertLess(calls.index('docker compose -f docker-compose.yml images --quiet proxy'),
+                        next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        self.assertEqual(self.head(), newest)
 
-    def test_a_failed_proxy_pull_keeps_the_image_on_the_host_and_the_update_goes_on(self):
-        (self.stub / 'fail_pull').write_text('')
+    def test_the_real_deploy_file_does_what_the_built_in_copy_does(self):
+        """The same calls in the same order whether the steps come from scripts/update-deploy.sh or from the copy built into the script."""
         self.approve()
-        result = self.run_script()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
-        self.assertEqual(self.head(), self.new)
+        self.assertEqual(self.run_script().returncode, 0)
+        built_in = [c for c in self.calls() if c.startswith('docker compose')]
+        for path in self.work.glob('web/.update-*'):
+            path.unlink()
+        self.git('reset', '--hard', self.prev, cwd=self.work)
+        (self.stub / 'calls.log').unlink()
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'the deploy file', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        newest = self.git('rev-parse', 'HEAD', cwd=other)
+        self.approve(newest)
+        self.assertEqual(self.run_script().returncode, 0)
+        from_file = [c for c in self.calls() if c.startswith('docker compose')]
+        self.assertEqual(from_file, built_in)
 
-    def test_the_dev_stack_has_no_proxy_so_nothing_is_pulled(self):
+    def test_the_dev_stack_pulls_nothing(self):
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

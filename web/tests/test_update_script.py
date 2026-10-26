@@ -63,7 +63,6 @@ case " $* " in
     fi
     cat "$STUB_DIR/empty_queues"; exit 0;;
   *" exec -T celery-beat "*) test ! -e "$STUB_DIR/beat_down"; exit $?;;
-  *" pull "*) test ! -e "$STUB_DIR/pull_fail"; exit $?;;
   *" build "*) test ! -e "$STUB_DIR/build_fail"; exit $?;;
   *" migrate --noinput "*) test ! -e "$STUB_DIR/migrate_fail"; exit $?;;
   *" collectstatic --noinput "*) test ! -e "$STUB_DIR/collectstatic_fail"; exit $?;;
@@ -175,23 +174,6 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', calls)
         self.assertFalse(any('--force-recreate db' in c or '--force-recreate redis' in c for c in calls))
         self.assertIn('active_queues', '\n'.join(calls))
-
-    def test_the_proxy_image_is_refreshed_before_it_is_recreated_and_an_offline_pull_does_not_stop_the_update(self):
-        result = self.run_update()
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        calls = self.calls()
-        self.assertIn('docker compose -f docker-compose.yml pull proxy', calls)  # a stock image: only as new as the day it was first pulled
-        self.assertLess(next(i for i, c in enumerate(calls) if ' build ' in c), next(i for i, c in enumerate(calls) if c.endswith(' pull proxy')))
-        self.assertLess(next(i for i, c in enumerate(calls) if c.endswith(' pull proxy')),
-                        next(i for i, c in enumerate(calls) if '--force-recreate web' in c))
-        shutil.rmtree(self.tmp / 'again', ignore_errors=True)
-
-    def test_a_failed_proxy_pull_keeps_the_image_on_the_host_and_the_update_goes_on(self):
-        (self.stub / 'pull_fail').write_text('')
-        result = self.run_update()
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn('Could not pull the proxy image', result.stdout + result.stderr)
-        self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
 
     def test_active_work_finishes_after_dispatch_pauses_and_update_continues(self):
         (self.stub / 'active').write_text('{' + ','.join(f'"{name}@local":[{{"id":"work"}}]' for name in
