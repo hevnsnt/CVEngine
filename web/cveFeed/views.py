@@ -74,7 +74,7 @@ _SEV_NAME = {4: 'critical', 3: 'high', 2: 'medium', 1: 'low', 0: 'info'}
 TIER_RANK = {FIRE: 3, SMOKE: 2, ICE: 1}
 
 
-def _host_tip(sub, live_matches, severities):
+def _host_tip(sub, live_matches, severities, aliases=()):
     """A compact summary for the attack-surface hover card: no extra queries, only the prefetched matches/ips and the
     host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
     worst = None
@@ -95,6 +95,7 @@ def _host_tip(sub, live_matches, severities):
         'max_sev': _SEV_NAME.get(max(severities), '') if severities else '',
         'reasons': [r for r in reasons if r],
         'score_parts': score_parts,
+        'aliases': list(aliases)[:12],
     }
 
 
@@ -141,6 +142,25 @@ def graph_payload(domain_id=None, scan_id=None):
     for sub_id, severity in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).values_list('subdomain_id', 'severity'):
         severities.setdefault(sub_id, []).append(severity)
 
+    # one host, several names: the evidence of the other names on the same addresses counts for the host drawn
+    from cveFeed.counts import host_siblings
+    siblings = host_siblings(sub_ids)
+    sibling_ids = {i for rows in siblings.values() for i, _ in rows}
+    sibling_matches, sibling_findings, sibling_seen = {}, {}, set()
+    if sibling_ids:
+        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').only(
+                'subdomain_id', 'ai_verdict', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
+                'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry'):
+            sibling_matches.setdefault(m.subdomain_id, []).append(m)
+        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1) \
+                .values_list('subdomain_id', 'severity', 'name'):
+            sibling_findings.setdefault(sid, []).append((severity, name))
+    own_findings = {}
+    if sibling_ids:
+        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1) \
+                .values_list('subdomain_id', 'severity', 'name'):
+            own_findings.setdefault(sid, set()).add((severity, name))
+
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
                                                   name__in=('nuclei_scan', 'nuclei_targeted_scan'), status=2).values_list('scan_of_id', flat=True))
@@ -148,11 +168,26 @@ def graph_payload(domain_id=None, scan_id=None):
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
         live = [m for m in sub.cve_matches.all() if m.ai_verdict != 'not_affected']
+        sev = list(severities.get(sub.pk, []))
+        sibs = siblings.get(sub.pk, [])
+        have = {m.cve_entry.cve_id for m in live}
+        seen_findings = set(own_findings.get(sub.pk, ()))
+        for other_id, _ in sibs:
+            for m in sibling_matches.get(other_id, []):
+                if m.cve_entry.cve_id not in have:
+                    have.add(m.cve_entry.cve_id)
+                    live.append(m)
+            for severity, name in sibling_findings.get(other_id, []):
+                if (severity, name) not in seen_findings:
+                    seen_findings.add((severity, name))
+                    sev.append(severity)
+        if status != 'vulnerable' and (live or sev):
+            status = 'vulnerable'
         tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status) for m in live]
-        heat = host_heat(status, tiers, severities.get(sub.pk, []))
+        heat = host_heat(status, tiers, sev)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
-                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, severities.get(sub.pk, []))):
+                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()])):
             break
         by_name[sub.name.lower()] = sid
         if sub.target_domain_id and node(f'dom:{sub.target_domain_id}', 'domain', sub.target_domain.name,

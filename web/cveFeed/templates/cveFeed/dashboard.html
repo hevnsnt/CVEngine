@@ -14,7 +14,7 @@
 
 <section class="panel ticks" aria-label="Exposure">
   <div class="cell-stack">
-  <a class="cell" id="c-exposed" title="Exposed hosts, out of every host the Hosts page lists. The same name in two targets of one project is one host." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}"{% endif %}>
+  <a class="cell" id="c-exposed" title="Exposed hosts, out of every host the Hosts page lists. The same name in two targets of one project is one host, and so are names that resolve to the same addresses (example.com and www.example.com)." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}"{% endif %}>
     <div class="cell-head"><span class="eyebrow">Exposed hosts</span><span class="go">Hosts</span></div>
     <div class="big"><b id="s-exposed_hosts">-</b><small>of <span id="s-hosts">-</span> hosts</small></div>
     <div class="meter" role="img" aria-label="Share of hosts that are exposed"><i id="m-exposed"></i></div>
