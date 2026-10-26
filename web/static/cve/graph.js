@@ -188,6 +188,9 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     },
   });
   const graphics = Viva.Graph.View.svgGraphics();
+  // Use the room: a force layout comes out roughly round but these cards are wide, so what is drawn is stretched along the short side
+  // (per axis, at draw time; the layout and the saved positions stay in their own round coordinates). fit() sets it.
+  const spread = { x: 1, y: 1 };
   let selected = null; // the node whose card is open
   const group = new Set(); // ids of the nodes in the multi-selection
   let hovered = null;
@@ -338,7 +341,13 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       return g;
     })
     .placeNode((ui, pos) => {
-      ui.setAttribute("transform", `translate(${pos.x},${pos.y})`);
+      ui.setAttribute("transform", `translate(${pos.x * spread.x},${pos.y * spread.y})`);
+    })
+    .placeLink((ui, from, to) => {
+      ui.setAttribute("x1", from.x * spread.x);
+      ui.setAttribute("y1", from.y * spread.y);
+      ui.setAttribute("x2", to.x * spread.x);
+      ui.setAttribute("y2", to.y * spread.y);
     });
   graphics.link((link) => {
     const l = Viva.Graph.svg("line");
@@ -360,7 +369,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     const m = root && /matrix\(([^)]+)\)/.exec(root.getAttribute("transform") || "");
     const [k, , , , tx, ty] = m ? m[1].split(/[ ,]+/).map(Number) : [1, 0, 0, 1, 0, 0];
     const box = svg.getBoundingClientRect();
-    return { x: (cx - box.left - tx) / k, y: (cy - box.top - ty) / k };
+    return { x: (cx - box.left - tx) / k / spread.x, y: (cy - box.top - ty) / k / spread.y };
   }
   function attachPointer(g, node) {
     const stopViva = (e) => e.stopPropagation(); // the renderer pans the canvas on mousedown/touchstart; a node press is not a pan
@@ -484,45 +493,6 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     true,
   );
 
-  // Use the room: a force layout comes out roughly round, but these cards are wide. Every few steps the whole layout is stretched a
-  // hair along the short side of its bounding box until its shape roughly matches the card's, so the nodes spread out instead of
-  // huddling in the middle of a wide canvas. The springs pull back, so it settles at a mild elongation instead of running away.
-  let stepCount = 0;
-  const baseStep = layout.step.bind(layout);
-  layout.step = () => {
-    const stable = baseStep();
-    stepCount += 1;
-    const w = container.clientWidth;
-    const h = container.clientHeight;
-    if (stepCount % 4 === 0 && w && h && graph.getNodesCount() > 8) {
-      let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
-      graph.forEachNode((n) => {
-        const b = layout.getBody(n.id);
-        if (!b) return;
-        x1 = Math.min(x1, b.pos.x); x2 = Math.max(x2, b.pos.x);
-        y1 = Math.min(y1, b.pos.y); y2 = Math.max(y2, b.pos.y);
-      });
-      const bw = x2 - x1;
-      const bh = y2 - y1;
-      if (bw > 1 && bh > 1) {
-        const want = (w / h) * 0.85; // a little rounder than the card, so labels have room
-        const have = bw / bh;
-        const gap = Math.log(want / have);
-        if (Math.abs(gap) > 0.12) {
-          const grow = 1 + Math.min(0.02, Math.abs(gap) * 0.02);
-          const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
-          graph.forEachNode((n) => {
-            const b = layout.getBody(n.id);
-            if (!b || b.isPinned) return;
-            if (gap > 0) b.pos.x = cx + (b.pos.x - cx) * grow;
-            else b.pos.y = cy + (b.pos.y - cy) * grow;
-          });
-        }
-      }
-    }
-    return stable;
-  };
-
   renderer = Viva.Graph.View.renderer(graph, {
     container,
     graphics,
@@ -639,14 +609,25 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     // graph also needs space for each root's host bubbles and labels around it
     const margin = 26;
     const room = clustered ? 150 : 14; // graph units around the outermost node centers (node radius, label)
-    const bw = Math.max(x2 - x1, 1) + room * 2,
-      bh = Math.max(y2 - y1, 1) + room * 2;
+    // spread the short side so the picture matches the card's shape (a little rounder than the card, for the labels)
+    const ratio = Math.max((w - margin * 2) / Math.max(h - margin * 2, 1), 0.2);
+    const have = Math.max(x2 - x1, 1) / Math.max(y2 - y1, 1);
+    const want = ratio * 0.9;
+    const sx = have < want ? Math.min(want / have, 4) : 1;
+    const sy = have > want ? Math.min(have / want, 4) : 1;
+    if (Math.abs(sx - spread.x) > 0.04 || Math.abs(sy - spread.y) > 0.04) {
+      spread.x = sx;
+      spread.y = sy;
+      renderer.rerender();
+    }
+    const bw = Math.max(x2 - x1, 1) * spread.x + room * 2,
+      bh = Math.max(y2 - y1, 1) * spread.y + room * 2;
     const k = Math.min((w - margin * 2) / bw, (h - margin * 2) / bh, 3);
-    const key = [x1, y1, x2, y2, w, h].map((v) => Math.round(v / 6)).join();
+    const key = [x1, y1, x2, y2, w, h, spread.x, spread.y].map((v) => Math.round(v / 6)).join();
     if (key === lastBox) return;
     lastBox = key;
     graphics.resetScale();
-    renderer.moveTo((x1 + x2) / 2, (y1 + y2) / 2);
+    renderer.moveTo(((x1 + x2) / 2) * spread.x, ((y1 + y2) / 2) * spread.y);
     graphics.scale(k, { x: w / 2, y: h / 2 });
   }
   const stop = () => {
@@ -686,7 +667,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       const h = container.clientHeight;
       auto = false;
       graphics.resetScale();
-      renderer.moveTo(p.x, p.y);
+      renderer.moveTo(p.x * spread.x, p.y * spread.y);
       graphics.scale(1.4, { x: w / 2, y: h / 2 });
       return true;
     },
