@@ -1414,3 +1414,15 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gn.has-pod circle:not(.ring):not(.pod circle){filter:drop-shadow(0 1px 4px color-mix(in srgb,var(--ink) 22%,transparent))}
 .card-tools{display:inline-flex;align-items:center;gap:8px}
 #d-pods[aria-pressed="true"],#pods-toggle[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
+
+/* Orbit: a host is a planet in its heat color; its CVEs are moons on dotted orbits around it. Theme colors only. */
+@keyframes moon-spin{to{transform:rotate(360deg)}}
+.gn .pod circle{display:none}
+.moon-orbit{stroke:var(--line-2);stroke-width:1;stroke-dasharray:2 5}
+.moon{animation:moon-spin linear infinite;transform-origin:0 0}
+.gn{--planet:var(--ice)}
+.gn[data-heat="fire"]{--planet:var(--fire)}.gn[data-heat="smoke"]{--planet:var(--smoke)}.gn[data-heat="clean"]{--planet:var(--ok)}
+.gn[data-k="subdomain"] circle:not(.ring):not(.pod circle):not(.moons circle){fill:color-mix(in srgb,var(--planet) 24%,var(--surface))!important;stroke:var(--planet)!important;stroke-width:2.5!important;filter:drop-shadow(0 2px 7px color-mix(in srgb,var(--planet) 45%,transparent))}
+.gn[data-k="ip"] circle:not(.ring){opacity:.8}
+.gn.has-pod .pod-n{fill:var(--ink)}
+@media (prefers-reduced-motion:reduce){.moon{animation:none}}
