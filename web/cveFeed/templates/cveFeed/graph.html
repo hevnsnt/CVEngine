@@ -17,6 +17,7 @@
     </select>
   </div>
   <button class="btn ghost sm" id="graph-fit" type="button">Fit graph</button>
+  <button class="btn ghost sm" id="pods-toggle" type="button" aria-pressed="true" title="Fold each host's CVEs into its bubble. Double-click a host to open its pod.">Group CVEs</button>
   <button class="btn sm" id="graph-soc" type="button" aria-pressed="false" title="Full-screen wall display: the graph, live counts, and the scans running now">SOC mode</button>
 </div>
 <div class="card graph-card">
@@ -59,6 +60,7 @@
   import { mountGraph, showNodeDetails } from '/staticfiles/cve/graph.js';
   const box = document.getElementById('detail');
   const graph = mountGraph(document.getElementById('graph'), { onSelect: d => showNodeDetails(box, d) });
+  document.getElementById('pods-toggle').addEventListener('click', (e) => { const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', String(on)); graph.setPods(on); });
   showNodeDetails(box, null);
   const live = document.getElementById('live'), count = document.getElementById('count'),
     select = document.getElementById('domain');
