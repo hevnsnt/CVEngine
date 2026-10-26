@@ -135,7 +135,7 @@ See [Pipeline](docs/PIPELINE.md) for each stage and [Architecture](docs/ARCHITEC
 
 ## Quick start
 
-On a Linux server (Debian or Ubuntu is easiest; 4 GB of RAM and 20 GB of disk or more), one command does everything:
+On a Linux server (Debian or Ubuntu is easiest; 4 GB of RAM at the least and 8 GB for comfort, and 20 GB of free disk), one command does everything:
 
 ```bash
 git clone https://github.com/hevnsnt/CVEngine.git
@@ -143,20 +143,21 @@ cd CVEngine
 sudo ./install.sh
 ```
 
-It asks nothing. It checks the machine, installs Docker and the other tools it needs, generates every secret, detects the address to use, creates the HTTPS certificate, builds and starts CVEngine (the first build takes several minutes), waits until it answers, and prints the address, your username, and a generated password. Copy the password from the terminal: it is shown once, and you choose your own at your first sign-in. Lost it: `make admin-password` prints a new one. To use a name instead of the detected address, run `sudo ./install.sh --domain scanner.example.com`. Running it again is safe and updates in place.
+It asks nothing. It checks the machine, installs what is missing (on Debian and Ubuntu: curl, make, python3, git, openssl, Docker, and the Compose plugin; on other Linux it installs Docker and names the rest), generates every secret, detects the address to use, creates the HTTPS certificate, builds and starts CVEngine (the first build takes several minutes), waits until it answers, and prints the address, your username, and a generated password. Copy the password from the terminal: it is shown once, and you choose your own at your first sign-in. Lost it: `make admin-password` prints a new one for the `admin` account (use `sudo` if the installer ran as root). To use a name instead of the detected address, run `sudo ./install.sh --domain scanner.example.com`. Running it again is safe: it keeps your settings, certificate, and data, and rebuilds and restarts CVEngine from the code you already have checked out. It does not fetch new code or wait for running scans, so use `scripts/update.sh` to update.
 
-Open the printed address. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt`. The setup wizard creates your organization and project, offers an optional AI model, adds your first target (discovery starts the moment you add it), and offers optional search-engine keys. The CVE feed starts loading as soon as the services are up.
+Open the printed address. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt` (copy it from the server to the computer whose browser you use). After you choose your own password, the setup wizard (superusers only) creates your organization and project, offers an optional AI model (paste an Anthropic, OpenAI, or OpenRouter key; set up Ollama or vLLM later in Settings), adds your first target if you confirm you are authorized to test it (discovery starts the moment you add it), and offers optional Shodan, VirusTotal, and SecurityTrails keys. The CVE feed starts loading about a minute after the workers come up.
 
-Prefer to run the steps yourself (any Linux with [Docker Engine](https://docs.docker.com/engine/install/), the Compose plugin, `git`, `make`, and `python3`)?
+Prefer to run the steps yourself (any Linux with [Docker Engine](https://docs.docker.com/engine/install/), the Compose plugin, `git`, `make`, and `python3`, in a `git clone`, not a release archive)?
 
 ```bash
 ./scripts/init-env.sh    # creates .env: generates its passwords and sets DOMAIN_NAME to this machine's address
 make certs               # HTTPS certificate for the built-in proxy
 make up                  # build and start
+# wait until https://<your address>/ answers (follow it with: make logs), then:
 make admin               # create your admin account: its password is generated and printed once
 ```
 
-To choose the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` first, or run `make username`.
+To choose the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` before `make up`, or run `make username`.
 
 Update with `scripts/update.sh`, or deploy every new commit automatically ([updates](docs/UPDATES.md)). To serve it on the Internet under a real name with a trusted certificate, see [Hosting online](docs/HOSTING-ONLINE.md). Reverse proxies, backups, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
 
@@ -190,6 +191,7 @@ Only scan systems you own or are authorized to test.
 | Doc | What it covers |
 | --- | --- |
 | [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why |
+| [Compare](docs/COMPARISON.md) | cvENGINE and ProjectDiscovery, feature by feature, including where they are ahead |
 | [Search](docs/SEARCH.md) | Shodan-style search over your inventory, with examples |
 | [Pipeline](docs/PIPELINE.md) | How a target becomes findings |
 | [Architecture](docs/ARCHITECTURE.md) | Services, data, and where AI is used |

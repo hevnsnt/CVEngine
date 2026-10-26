@@ -115,6 +115,14 @@ def main():
             if not re.fullmatch(rb'[0-9a-f]{40}', value):
                 raise ValueError('approval must contain exactly one commit id')
             print(value.decode('ascii'))
+        elif action == 'mode':
+            # "auto" only when the administrator chose Automatic in Settings > Updates; a missing, unreadable or odd file is Manual
+            try:
+                with os.fdopen(regular_fd('.update-mode', dir_fd=web_fd), 'rb') as source:
+                    value = source.read(16).strip()
+            except (FileNotFoundError, OSError, ValueError):
+                value = b''
+            print('auto' if value == b'auto' else 'manual')
         elif action == 'approval-branch':
             # the branch the administrator chose in Settings, or nothing when the file is missing or not a plain branch name
             try:

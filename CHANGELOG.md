@@ -100,6 +100,20 @@ Also from the review.
 - **CI runs the test suite in parallel.** `manage.py test --parallel` now works: a test runner (`reNgine/test_runner.py`, the project's `TEST_RUNNER`) gives every worker two Redis databases of its own, so one worker's `cache.clear()` or held lock can no longer break a test in another (up to 7 workers). On a 4-core machine the suite went from 543 seconds to 213 seconds. CI uses `--parallel auto` and installs `tblib` so a failure in a worker shows its real traceback. A normal one-process run is unchanged.
 - **`scripts/update.sh` has a setting for its polling pause.** `CVENGINE_UPDATE_POLL_SECONDS` (default 5, unchanged) is the pause between checks while it waits for workers and readiness; the update script tests set it to 0.2, which cut that module from about 100 seconds to about 34.
 
+### Updater (already released on master as hotfixes)
+
+- **Switching branch works when the branches have diverged, and a past failure is no longer shown for a new approval.** Moving a server from `master` to `develop` was refused as a downgrade because master's hotfix commits are not ancestors of develop (which carries its own copies). A branch is now accepted when it contains the installed commit or, if the history differs, has every database migration the installed code has; otherwise it is refused with the reason, and nothing moves. Settings > Updates showed the failure left by the previous update (for example "not on master") under a fresh approval; a result older than the approval is now ignored. Saving a different repository or branch checks the new source at once.
+
+- **Automatic or manual updates is a setting, and manual is the default.** Settings > Updates has a new *How updates are installed* choice. Manual: CVEngine tells you a new version exists and installs nothing until you approve it. Automatic: the twice-daily check approves what it finds, and the host updater installs it (scans pause and finish first). Automatic deployment (`scripts/install-auto-deploy.sh`) used to deploy every new master commit regardless; its timer now does nothing unless the setting is Automatic, so an install that had it must choose Automatic to keep deploying on its own. The choice is audited, and switching back to Manual withdraws an approval the app gave itself (one a person gave stays).
+
+- **Approve update works without a manual host step.** The host side of the in-app updater was a cron entry nothing installed, so on a normal install the Approve button recorded an approval that no one read and the orange bar waited for ever. `install.sh` now installs a watcher (`scripts/update-watch.sh`, started every minute by cron) that starts the update about two seconds after Approve, and `scripts/update.sh` installs it when it finishes, so the one manual update an existing install needs leaves it behind. The watcher reports every 15 seconds that it is alive, and Settings > Updates and the bar say when it is not and show the command to run.
+
+- **The update page says what happens and how long it takes.** Each step (approved, the host picks it up, scans pause and drain, files update, services rebuild, scanning resumes) with what it is waiting on, how long it usually takes, and the time since approval; the page refreshes on its own.
+
+- **An update that cannot start says why.** An approved commit that is not on the branch checked out on the server (the update branch in Settings differs from it) is reported in Settings > Updates instead of silently dropping the approval; a failed fetch, a dirty checkout or a stopped script are reported the same way, each reason once.
+
+- **A manual `git pull` followed by Approve rebuilds.** The updater compared files, found them current and declared the update done without rebuilding the containers; it now also checks the commit the running build was made from.
+
 ## v1.1.2 (2026-10-26)
 
 Update with `make up` or the in-app updater. Includes everything in v1.1.1 (the update bar, the organization switcher, release archives).

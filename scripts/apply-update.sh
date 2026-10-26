@@ -270,11 +270,18 @@ if [ "$WANT" != "$BRANCH" ]; then
     clear_approval
     exit 1
   fi
+  # Moving to another branch is an upgrade when it contains the installed commit, or, when the two have diverged (a hotfix on one that the
+  # other carries as its own commit), when it still has every database migration the installed code has: migrations are never rolled back.
   if ! git merge-base --is-ancestor HEAD "origin/$WANT"; then
-    log "refusing: moving from $BRANCH to $WANT would go to code that does not contain what is installed (a downgrade); database migrations are not rolled back"
-    phase failed "moving this server from $BRANCH to $WANT would be a downgrade, which an update never does. Choose a branch that contains $BRANCH, or switch by hand"
-    clear_approval
-    exit 1
+    migration_files='^web/[^/]+/migrations/[^/]+\.py$'
+    missing=$(comm -23 <(git ls-files | grep -E "$migration_files" | sort) <(git ls-tree -r --name-only "origin/$WANT" | grep -E "$migration_files" | sort) | head -n 3 | paste -sd, -)
+    if [ -n "$missing" ]; then
+      log "refusing: moving from $BRANCH to $WANT would go to code without migrations the installed code has ($missing); database migrations are not rolled back"
+      phase failed "moving this server from $BRANCH to $WANT would be a downgrade: $WANT lacks database migrations that are installed. Choose a branch that has them, or switch by hand"
+      clear_approval
+      exit 1
+    fi
+    log "$BRANCH and $WANT have diverged, but $WANT has every installed database migration; switching"
   fi
   if git rev-parse --verify --quiet "refs/heads/$WANT" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$WANT" "origin/$WANT"; then
     log "refusing: the local branch $WANT has commits that are not on origin/$WANT, so it is not switched to"

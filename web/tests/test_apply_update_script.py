@@ -1,6 +1,7 @@
 """scripts/apply-update.sh against a throwaway git origin with stub `docker` and `make`, so the real script runs
 without touching Docker. Skipped where the scripts directory is not available (inside the web container only
 ./web is mounted); run it on the host: ``cd web && python3 -m unittest tests.test_apply_update_script``."""
+import json
 import os
 import shutil
 import subprocess
@@ -66,6 +67,8 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.work / 'scripts' / 'upgrade-postgres.sh').chmod(0o755)
         (self.work / 'web').mkdir()
         (self.work / 'web' / 'README').write_text('v1\n')
+        (self.work / 'web' / 'app' / 'migrations').mkdir(parents=True)
+        (self.work / 'web' / 'app' / 'migrations' / '0001_initial.py').write_text('# schema\n')
         for compose in ('docker-compose.yml', 'docker-compose.dev.yml'):
             (self.work / compose).write_text('services: {}\n')
         self.git('add', '-A', cwd=self.work)
@@ -356,6 +359,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
     def test_moving_to_a_branch_that_does_not_contain_what_is_installed_is_a_downgrade_and_refused(self):
         other = self.tmp / 'other'
         self.git('checkout', '--orphan', 'old-line', cwd=other)  # a line of history that does not contain the installed commit
+        self.git('rm', '-q', '-r', '-f', 'web/app', cwd=other)  # ... and lacks a migration the installed code has
         self.git('commit', '-m', 'old line', cwd=other)
         self.git('push', 'origin', 'old-line', cwd=other)
         tip = self.git('rev-parse', 'HEAD', cwd=other)
@@ -366,6 +370,23 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse(self.approved())
         self.assertIn('downgrade', self.phase_file().get('detail', ''))
         self.assertFalse([c for c in self.calls() if ' build ' in c])
+
+    def test_a_diverged_branch_that_has_every_installed_migration_is_switched_to(self):
+        # master carries a hotfix commit that develop only has as its own copy, so develop does not contain master; it has the same migrations
+        other = self.tmp / 'other'
+        self.git('checkout', '--orphan', 'develop', cwd=other)
+        (other / 'web' / 'app' / 'migrations' / '0002_more.py').write_text('# more schema\n')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'develop, diverged', cwd=other)
+        self.git('push', 'origin', 'develop', cwd=other)
+        tip = self.git('rev-parse', 'HEAD', cwd=other)
+        self.approve(tip)
+        self.choose_branch('develop')
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'develop')
+        self.assertEqual(self.head(), tip)
+        self.assertIn('have diverged', (self.work / 'web' / '.update-log').read_text())
 
     def test_a_failed_build_after_switching_returns_to_the_previous_branch_and_commit(self):
         tip = self.develop_ahead()
@@ -717,3 +738,22 @@ class UpgradePostgresScriptTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HostUpdaterInstallTests(unittest.TestCase):
+    """An install that never had the update watcher gets it from the install and from the one manual update it needs."""
+
+    def read(self, *parts):
+        return Path(SCRIPTS.parent, *parts).read_text()
+
+    def test_install_sh_installs_the_watcher_unless_automatic_deployment_does(self):
+        installer = self.read('install.sh')
+        self.assertIn('scripts/install-updater.sh', installer)
+        self.assertIn('cvengine-auto-deploy', installer)
+
+    def test_update_sh_leaves_the_watcher_behind_on_success_and_never_fails_the_update_for_it(self):
+        update = self.read('scripts', 'update.sh')
+        self.assertIn('install-updater.sh', update)
+        self.assertIn('cvengine-auto-update', update)  # not twice
+        self.assertLess(update.index('install-updater.sh'), update.index('exit 0\n    fi\n    sleep 5'))
+        self.assertIn('Could not install the update watcher', update)
