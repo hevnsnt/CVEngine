@@ -14,7 +14,7 @@ Create a DNS `A` record (and `AAAA` if the server has IPv6) for the name, such a
 ./scripts/init-env.sh scanner.example.com   # sets DOMAIN_NAME in .env
 ```
 
-(or run `sudo ./install.sh --domain scanner.example.com` on a fresh install). `DOMAIN_NAME` is the host Django accepts, the name in notification links, and the name on the certificate. Any other name or IP address gets **400 Bad Request** unless it is listed in `CVENGINE_ALLOWED_HOSTS` ([CONFIGURATION.md](CONFIGURATION.md)).
+(or run `sudo ./install.sh --domain scanner.example.com`, which also works on a re-run; the old name then gets 400). `DOMAIN_NAME` is the host Django accepts, the name in notification links, and the name on the certificate. Any other name or IP address gets **400 Bad Request** unless it is listed in `CVENGINE_ALLOWED_HOSTS` ([CONFIGURATION.md](CONFIGURATION.md)).
 
 Keep `DOMAIN_NAME` a bare name. The bundled proxy already makes `https://scanner.example.com` pass Django's CSRF check; `CVENGINE_CSRF_TRUSTED_ORIGINS` is only for a second public address or a proxy of your own.
 
