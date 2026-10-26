@@ -18,7 +18,7 @@
 ---
 
 <p align="center">
-  <img src="docs/images/cvengine-tour.gif" alt="A tour of cvENGINE: the live dashboard, hosts ranked by score, a validated CVE match, the change timeline with screenshot diffs, and the asset graph" width="900">
+  <img src="docs/images/cvengine-tour.gif" alt="A 30-second tour of cvENGINE: add a domain name, watch it discover every host, port and service, see today's exploited CVEs matched and AI-validated against what you run, hosts ranked with their evidence, and a timeline of every change" width="900">
 </p>
 
 ## Why cvENGINE
