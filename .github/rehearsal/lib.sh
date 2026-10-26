@@ -4,7 +4,7 @@ port() { if [ "$(mode)" = overlay ]; then echo 18443; else echo 443; fi; }
 # docker compose with the layout the rehearsal install runs with
 dc() {
   ( cd "$HOME/cvengine"
-    if [ "$(mode)" = overlay ]; then docker compose --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml "$@"
+    if [ "$(mode)" = overlay ]; then docker compose --env-file .env.vps -p cvengine -f docker-compose.yml -f docker-compose.vps.yml "$@"
     else docker compose "$@"; fi )
 }
 wait_for_site() {
