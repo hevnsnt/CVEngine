@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Added
+
+- **A shared detection strategy for every CVE.** One record per CVE, the same for every organization, lists the remote checks (version ranges, HTTP markers, nuclei templates, reviewed nmap scripts, TLS properties, ports) and local checks (package versions, file contents, configuration settings, service state) that tell whether a product is affected. Checks are data from a fixed allowlist, read-only by construction, and validated; the rules author fills them from the CVE's own ranges for every CVE (new ones within the hour, the back catalogue behind them), and an AI author adds checks once for the CVEs attackers use, within a daily budget and from feed text only. Read them at `GET /api/v1/cves/{id}/detection` or with the MCP tool `get_cve_detection`. See [docs/PIPELINE.md](docs/PIPELINE.md#detection-strategies).
+
 ### Security
 
 Fixes from an adversarial review of the whole code base.

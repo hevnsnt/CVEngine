@@ -93,6 +93,31 @@ Every host has a score from 0 to 100 and the reasons behind it, shown as "Why th
 
 CVE matches appear under **CVE matches** and in **Findings** with a remediation status (open, in progress, fixed, accepted risk). Agents read and update it through the [API](AGENT-API.md).
 
+## Detection strategies
+
+Every CVE has one detection record, shared by all organizations, that says how to tell whether a product is affected: **remote
+checks** (a version in an affected range, an HTTP marker, an installed nuclei template, a reviewed nmap script, a TLS property, a
+service on a port) and **local checks** on the host itself (a package older than the fixed release, a file that contains a version, a
+configuration setting, a service state). Read it with `GET /api/v1/cves/{id}/detection`, the MCP tool `get_cve_detection`, or the
+`detection` field of `get_cve`.
+
+A strategy is data, never a program. Every check is one of the kinds above with parameters from an allowlist (HTTP `GET` and `HEAD`
+only, nmap scripts from the reviewed list, plain package and file names with no `..`), so whatever runs a check does it with its own
+primitive for that kind; nothing in a strategy is a shell command. Each record carries `safety: read_only`.
+
+Records are written by a task every 30 minutes (`author_cve_detections`), hottest first (known exploited, public exploit, high
+exploit probability, then score), so a new CVE from any feed gets one within the hour and the back catalogue fills in behind it:
+
+1. The **rules author** reads the CVE's own affected products and ranges, and any installed nuclei template. No AI, no cost.
+2. The **AI author** is asked once per CVE, for the hot ones only (known exploited, exploit probability or public exploit, or a
+   critical score), and only within `CVENGINE_DETECTION_AI_PER_DAY` (default 25; 5 per run). It sees feed text only, never a project
+   or an asset, and its answer is parsed against the schema: a check that does not validate is dropped on its own, and the reason is
+   kept on the record. Its checks are added after the rules' checks with an `ai-` id and never replace them. A failed ask is retried
+   after a week.
+
+A `manual` record is never overwritten. When a CVE's affected data changes, the rules checks are rewritten and the AI checks kept.
+`manage.py author_cve_detections [--ai]` fills the whole catalogue at once.
+
 ## Keeping scans fast and polite
 
 - **One run per host.** A successful scanner run is reused inside its window: 168 hours for nmap, bbot, route checks, naabu, deep nuclei, and archived-URL lookups, 24 hours for nuclei, the certificate watch, hygiene, re-tests, WPScan, node2shell, and RDP screenshots. Failed or skipped work never counts as coverage, and a Redis claim keeps two pipelines off the same asset. Set the windows with `CVENGINE_TTL_*` ([CONFIGURATION.md](CONFIGURATION.md)).

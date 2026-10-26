@@ -2169,13 +2169,31 @@ def list_cve_feed(ctx, params):
     return paginate(qs, params, lambda c: _cve(c, brief=True))
 
 
+def _detection(c):
+    """The shared detection strategy of a CVE (cveFeed.detection), or None before one is written. It is data about the CVE, the
+    same for every organization."""
+    row = getattr(c, 'detection', None) if c.pk else None
+    if row is None:
+        return None
+    return {'source': row.source, 'schema_version': row.schema_version, 'strategy': row.strategy or None,
+            'ai_model': row.ai_model or None, 'updated': _iso(row.updated_at)}
+
+
 def get_cve(ctx, cve_id):
     from cveFeed.models import CVEEntry
     _require_member(ctx)
-    c = CVEEntry.objects.filter(cve_id=cve_id.upper()).first()
+    c = CVEEntry.objects.filter(cve_id=cve_id.upper()).select_related('detection').first()
     if not c:
         raise ApiError(404, 'CVE not found')
-    return _cve(c)
+    out = _cve(c)
+    out['detection'] = _detection(c)
+    return out
+
+
+def get_cve_detection(ctx, cve_id):
+    """The detection strategy alone: remote and local checks, as data an agent or scanner can act on with its own primitives."""
+    return get_cve(ctx, cve_id)['detection'] or {'source': None, 'strategy': None,
+                                                  'note': 'no detection strategy has been written for this CVE yet'}
 
 
 def _match(m):

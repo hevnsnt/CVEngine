@@ -1196,6 +1196,21 @@ def update_nuclei_templates():
     return {"updated": proc.returncode == 0, "returncode": proc.returncode}
 
 
+@app.task(name="author_cve_detections", bind=False, queue="cve_feed_queue")
+def author_cve_detections():
+    """Every 30 minutes: write the shared detection record of every CVE that has none (hottest first, so new CVEs and the back
+    catalogue are covered the same way), refresh rules-written checks whose CVE changed, and spend the daily AI budget on the
+    CVEs attackers use. See cveFeed.detection and cveFeed.detection_author."""
+    from cveFeed import detection_author
+    from reNgine.ai_settings import get_configured_provider
+    try:
+        provider = get_configured_provider()
+    except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
+        logger.warning("could not build the AI provider for detection authoring", exc_info=True)
+        provider = None
+    return detection_author.author_pending(provider)
+
+
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")
 def report_resources():
     """Every 30 seconds: publish this container's memory and budget so Settings > Resources (served by another
