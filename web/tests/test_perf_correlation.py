@@ -102,3 +102,43 @@ class CorrelationPerfTests(TestCase):
 		match = CVEMatch.objects.get()
 		self.assertEqual(match.ai_verdict, 'affected')
 		self.assertEqual(match.updated_at, stamp)
+
+
+class PartialScanInventoryTests(CorrelationPerfTests):
+	def test_a_host_pipeline_scan_of_one_host_does_not_hide_the_rest_of_the_inventory(self):
+		from cveFeed.discovery import HOST_PIPELINE_TASK
+		full = self._scan()
+		a_old = self._host('a.perf.test', full, tech='nginx')
+		b = self._host('b.perf.test', full, tech='nginx')
+		partial = self._scan()
+		ScanHistory.objects.filter(pk=partial.pk).update(tasks=[HOST_PIPELINE_TASK])
+		a_new = self._host('a.perf.test', partial, tech='nginx')
+		_, index = correlation.cve_pool()
+		ids = set(correlation.candidate_subdomains(index).values_list('id', flat=True))
+		self.assertEqual(ids, {b.id, a_new.id})  # b stays; a's newest row wins over the older copy
+		self.assertNotIn(a_old.id, ids)
+		self.assertEqual(correlate_cves()['subdomains'], 2)
+
+
+class PatchLetterVersionTests(TestCase):
+	def test_openssl_patch_letters_order_versions(self):
+		from cveFeed.correlation import parse_version, version_in_range
+		rng = {'introduced': '1.1.1', 'fixed': '1.1.1n'}
+		self.assertTrue(parse_version('1.1.1k') < parse_version('1.1.1n') < parse_version('1.1.1za'))
+		self.assertTrue(version_in_range(parse_version('1.1.1k'), rng))
+		self.assertFalse(version_in_range(parse_version('1.1.1n'), rng))
+		self.assertFalse(version_in_range(parse_version('1.1.1w'), rng))
+		self.assertTrue(version_in_range(parse_version('1.1.1'), rng))
+		self.assertFalse(version_in_range(parse_version('1.0.2zh'), {'introduced': '1.0.2', 'fixed': '1.0.2zf'}))
+		self.assertEqual(parse_version('8.9p1'), (8, 9))  # OpenSSH's p is not a patch letter
+
+	def test_cve_list_wildcards_name_a_whole_branch(self):
+		from cveFeed import intel
+		ranges = intel._ranges({'versions': [
+			{'version': '2.3.x', 'status': 'affected'},
+			{'version': '0', 'lessThanOrEqual': '3.1.x', 'status': 'affected'},
+			{'version': '1.0', 'lessThan': '1.5.x', 'status': 'affected'}]})
+		self.assertEqual([(r.get('introduced'), r.get('fixed')) for r in ranges], [('2.3', '2.4'), (None, '3.2'), ('1.0', '1.5')])
+		from cveFeed.correlation import parse_version, version_in_range
+		self.assertTrue(version_in_range(parse_version('2.3.9'), ranges[0]))
+		self.assertFalse(version_in_range(parse_version('2.4.0'), ranges[0]))

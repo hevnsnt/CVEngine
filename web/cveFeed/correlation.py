@@ -51,6 +51,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)  # a git commit, not a
 # becomes a negative component (2.0-beta9 -> (2, 0, -3, 9) < (2, 0)). The bare letters a/b/m need a number after them: "1.0.2a"
 # is OpenSSL's patch letter, not an alpha.
 _PRE_RE = re.compile(r"^[-_.~+ ]?(?:(alpha|beta|rc|cr|pre|dev|snapshot)|(a|b|m))[-_. ]?(\d+)?", re.IGNORECASE)
+# one or two letters straight after a three-part version, then the end or a separator: 1.0.2k, 1.1.1n-fips, 0.9.8zh. Not "8.9p1"
+# (OpenSSH portable's p is followed by a digit and the version has two parts).
+_PATCH_LETTER_RE = re.compile(r"^([a-z]{1,2})(?![a-z0-9])", re.IGNORECASE)
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
 
@@ -74,9 +77,14 @@ def parse_version(value, strict=False):
         parts = [int(part) for part in match.group(1).split(".")]
     except ValueError:
         return None
-    pre = _PRE_RE.match(text[match.end():])
+    rest = text[match.end():]
+    pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
+    elif len(parts) == 3:
+        letters = _PATCH_LETTER_RE.match(rest)
+        if letters:  # OpenSSL's 1.1.1k < 1.1.1n < 1.1.1zh: the letters are a fourth component, so a patch level is not dropped
+            parts.append(sum(ord(c) - 96 for c in letters.group(1).lower()))
     return tuple(parts)
 
 
@@ -796,12 +804,13 @@ def latest_scan_q(prefix=""):
 
 def candidate_subdomains(product_index, base=None):
     """Subdomains worth correlating against ``product_index``: hosts carrying a technology or an nmap product that
-    matches one of its tokens, from each domain's latest successful scan plus the scan-less rows certificate
-    transparency created. Older scans' copies of the same host are skipped. Returns a queryset."""
-    from django.db.models import Max, Q
+    matches one of its tokens, from each domain's current inventory (latest_scan_q: the latest full scan, the host-pipeline scans after
+    it, and the scan-less rows certificate transparency created). A partial scan of one host is not the whole inventory, and older
+    scans' copies of the same host are skipped. Returns a queryset."""
+    from django.db.models import Q
 
     from cveFeed.models import CVEMatch
-    from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
+    from startScan.models import IpAddress, Port, Subdomain, Technology
 
     tech_ids, tokens = [], {}
     for tech_id, tech_name in Technology.objects.values_list("id", "name").iterator():
@@ -821,10 +830,8 @@ def candidate_subdomains(product_index, base=None):
     by_tech = Subdomain.technologies.through.objects.filter(technology_id__in=tech_ids).values("subdomain_id")
     ips = IpAddress.ports.through.objects.filter(port__product__in=products).values("ipaddress_id")
     by_port = Subdomain.ip_addresses.through.objects.filter(ipaddress_id__in=ips).values("subdomain_id")
-    latest = ScanHistory.objects.filter(scan_status=2).values("domain_id").annotate(last=Max("id")).values("last")
     matched = CVEMatch.objects.filter(source__in=_CORRELATED_SOURCES).values("subdomain_id")  # re-checked so a stale match closes
-    qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(
-        Q(scan_history_id__in=latest) | Q(scan_history__isnull=True))
+    qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")
 
 
