@@ -13,6 +13,7 @@ import logging
 import re
 
 from cveFeed import distro as distro_lib
+from cveFeed import runzero
 
 logger = logging.getLogger(__name__)
 
@@ -501,7 +502,8 @@ def port_distro(port):
 
 
 def _record_matches(subdomain, name, version, token, source, product_index,
-                    cve_by_id, min_confidence, scan_history, rows=None, cpe="", distro=None, fix_lookup=None, evidence=None):
+                    cve_by_id, min_confidence, scan_history, rows=None, cpe="", distro=None, fix_lookup=None, evidence=None,
+                    corroborated=()):
     """Work out the CVEMatch rows for one discovered product on a subdomain and append them to ``rows``
     (written in a batch by ``save_matches``). Returns the number of matches found."""
     if not version and cpe:  # nmap sometimes names the version only in the CPE
@@ -527,13 +529,16 @@ def _record_matches(subdomain, name, version, token, source, product_index,
                 confidence = 0.2
             elif status == distro_lib.VULNERABLE:
                 confidence = 0.95  # the distro's own tracker lists this package release as affected: the strongest evidence there is
+        reported = bool(corroborated) and getattr(cve, "cve_id", "") in corroborated and status != distro_lib.PATCHED
+        if reported:  # runZero's own scan reports it too (cveFeed.runzero_sync): more evidence, never a verdict and never a new match
+            confidence = runzero.boosted(confidence)
         rows.append({
             "cve_entry_id": cve.id, "subdomain_id": subdomain.id, "source": source,
             "matched_product": matched_product[:255], "matched_version": version[:100],
             "version_in_range": in_range, "confidence": confidence,
             "scan_history_id": scan_history.id if scan_history else subdomain.scan_history_id,
             "distro_status": status, "distro_fixed_version": fixed[:64],
-            "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}),
+            "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}), **({"runzero": True} if reported else {}),
                          **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {})},
         })
         found += 1
@@ -823,7 +828,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
             _record_matches(
                 subdomain, name, version, token, "port",
                 product_index, cve_by_id, min_confidence, scan_history, rows, cpe=port.cpe or "",
-                distro=port_distro(port), fix_lookup=fix_lookup,
+                distro=port_distro(port), fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
                 evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number,
                           "service_extra": (port.service_extra or "")[:255], "cpe": (port.cpe or "")[:255],
                           "method": ((port.extra or {}).get("method") or "")})

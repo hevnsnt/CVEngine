@@ -973,7 +973,6 @@ def _add_targets(ctx, slug, values, discover, mode):
     """Add many targets at once. ``values`` is a list or pasted text. Each entry is validated on its own, so one
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
     queued for discovery, first in, first out."""
-    from targetApp.target_types import DOMAIN
     project, _ = get_project(ctx, slug, write=True)
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
     if not entries:
@@ -984,6 +983,14 @@ def _add_targets(ctx, slug, values, discover, mode):
     if not entries:
         return {'received': len(patterns), 'created': 0, 'created_names': [], 'domains': [], 'already_exists': [], 'invalid': refused,
                 'excluded': excluded, 'discovery_started': 0, 'scan_ids': [], 'mode': mode, 'mode_note': None}
+    return add_entries(project, entries, discover, mode, excluded, refused)
+
+
+def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=()):
+    """Add already-normalized targets to ``project``: the part of Add targets that does not depend on who is asking, so an automated
+    source (the runZero import) goes through the same expansion, private-range policy, organization exclusions, organization-wide
+    uniqueness and discovery queueing. The caller has already checked that it may write to ``project``."""
+    from targetApp.target_types import DOMAIN
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
     names, domain_names, invalid, seen = [], [], [], set()
@@ -1147,6 +1154,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
                      'facts': (e['ip'].fingerprint or {}).get('facts') or {},
+                     'runzero': (e['ip'].fingerprint or {}).get('runzero') or None,  # runZero's view of the address (cveFeed.runzero_sync)
                      'full_scanned_at': e['ip'].full_scanned_at.isoformat() if e['ip'].full_scanned_at else None,
                      'full_scan_ports': e['ip'].full_scan_ports, 'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
@@ -2095,7 +2103,7 @@ def run_hygiene_checks(ctx, slug, target_id=None):
 def list_api_credentials(ctx, slug):
     """What services are configured for this project (and inherited from its org), never the secrets
     themselves. Readable by anyone who can see the project; only a write-role may change them."""
-    from cveFeed.api_credentials import SERVICES, credential_summary, used_in_scans
+    from cveFeed.api_credentials import SERVICES, service_entry
     from dashboard.models import ApiCredential
     project, role = get_one_project(ctx, slug)  # secrets belong to one project
     org_rows = {c.service: c for c in ApiCredential.objects.filter(org_id=project.org_id)} if project.org_id else {}
@@ -2103,22 +2111,20 @@ def list_api_credentials(ctx, slug):
     results = []
     for service, (label, fields, _) in SERVICES.items():
         cred = project_rows.get(service) or org_rows.get(service)
-        results.append({
-            'service': service, 'label': label, 'fields': [{'name': n, 'label': d, 'secret': s} for n, d, s in fields],
-            'configured': bool(cred), 'scope': ('project' if service in project_rows else 'org' if cred else None),
-            'used_in_scans': used_in_scans(service),
-            'set': credential_summary(cred) if cred else {},
-        })
+        results.append({**service_entry(service, label, fields, cred),
+                        'scope': ('project' if service in project_rows else 'org' if cred else None)})
     return {'results': results, 'can_edit': role != roles.AUDIT}
 
 
 def set_api_credential(ctx, slug, service, values):
     """Save a project's own key for ``service``. A blank field keeps whatever was stored for that field."""
-    from cveFeed.api_credentials import SERVICES
+    from cveFeed.api_credentials import RETIRED, SERVICES
     from dashboard.models import ApiCredential
     project, _ = get_project(ctx, slug, write=True)
     if service not in SERVICES:
         raise ApiError(404, f'unknown service {service!r}')
+    if service in RETIRED:
+        raise ApiError(410, RETIRED[service])
     _, fields, _ = SERVICES[service]
     values = values if isinstance(values, dict) else {}
     cred = ApiCredential.objects.filter(project=project, service=service).first() or ApiCredential(project=project, service=service)
@@ -2144,6 +2150,66 @@ def delete_api_credential(ctx, slug, service):
         from cveFeed.admin_api import audit
         audit(ctx.user, 'project.api_key.remove', f'{project.slug}:{service}', org=project.org_id)
     return {'deleted': True}
+
+
+# --- runZero asset inventory (cveFeed.runzero_sync) -----------------------------
+
+def _runzero_project(ctx, slug, write=False):
+    """The project, for a runZero operation: it reaches an outside service with the project's token and can add targets, so it is
+    for an App Admin or the project's organization admin, never for a plain member."""
+    project, role = get_one_project(ctx, slug, write=write)
+    if role != roles.ADMIN:
+        raise ApiError(403, 'the runZero sync is managed by an organization admin or an App Admin')
+    return project
+
+
+def get_runzero(ctx, slug):
+    """The runZero sync of this project: whether a token is saved, whether importing new targets is on and with which search,
+    when it last ran, how it went (counts or the last error) and how often it runs. Never the token."""
+    from cveFeed import runzero_sync
+    return runzero_sync.status(_runzero_project(ctx, slug))
+
+
+def set_runzero(ctx, slug, body):
+    """Change this project's runZero settings: ``import_enabled`` (add the addresses runZero knows and cvENGINE does not as
+    targets; off by default) and ``search`` (the runZero inventory search that limits what is imported; blank means alive:true)."""
+    from cveFeed import runzero_sync
+    project = _runzero_project(ctx, slug, write=True)
+    body = body if isinstance(body, dict) else {}
+    if 'import_enabled' not in body and 'search' not in body:
+        raise ApiError(400, 'send import_enabled and/or search')
+    if 'import_enabled' in body and not isinstance(body['import_enabled'], bool):
+        raise ApiError(400, 'import_enabled must be true or false')
+    if 'search' in body and not isinstance(body['search'], str):
+        raise ApiError(400, 'search must be text')
+    row = runzero_sync.settings_for(project)
+    if 'import_enabled' in body:
+        row.import_enabled = body['import_enabled']
+    if 'search' in body:
+        row.search = runzero_sync.clean_search(body['search'])
+    row.save(update_fields=['import_enabled', 'search', 'updated_at'])
+    from cveFeed.admin_api import audit
+    audit(ctx.user, 'project.runzero.settings', project.slug, org=project.org_id, import_enabled=row.import_enabled)
+    return runzero_sync.status(project)
+
+
+def run_runzero_sync(ctx, slug):
+    """Queue a runZero sync of this project now (it also runs on its own schedule). One at a time, and not more than once a minute."""
+    from cveFeed import runzero_sync
+    from cveFeed.tasks import runzero_sync_project
+    project = _runzero_project(ctx, slug, write=True)
+    if not runzero_sync.token_for(project):
+        raise ApiError(400, 'save a runZero token for this project or its organization first (API keys)')
+    current = runzero_sync.status(project)
+    if current['state'] == 'running':
+        raise ApiError(409, 'a runZero sync of this project is already running')
+    row = runzero_sync.settings_for(project)
+    if row.started_at and timezone.now() - row.started_at < runzero_sync.MIN_GAP:
+        raise ApiError(429, 'a runZero sync started less than a minute ago; wait a moment')
+    runzero_sync_project.delay(project.id)
+    from cveFeed.admin_api import audit
+    audit(ctx.user, 'project.runzero.sync', project.slug, org=project.org_id)
+    return {'queued': True}
 
 
 # --- CVEs, matches and remediation ---------------------------------------------

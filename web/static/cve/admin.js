@@ -449,14 +449,16 @@ function openOrgApiKeys(o) {
     async function draw() {
       list.textContent = "";
       const data = await api("GET", `${A}/orgs/${o.id}/api-keys`);
-      data.results.forEach((svc) => {
+      data.results.filter((svc) => !(svc.retired && !svc.configured)).forEach((svc) => {
         const row = el("div", "access-row");
         row.append(el("span", "", svc.label));
         if (svc.configured) row.append(badge("configured", "success"));
-        if (!svc.used_in_scans) row.append(el("span", "note", "not used by scans yet"));
+        if (svc.retired) row.append(badge("retired", "queued"), el("span", "note", svc.retired));
+        else if (svc.used_by_sync) row.append(el("span", "note", "read by the scheduled sync"));
+        else if (!svc.used_in_scans) row.append(el("span", "note", "not used by scans yet"));
         row.append(
           button(
-            svc.configured ? "Edit" : "Configure",
+            svc.retired ? "Remove" : svc.configured ? "Edit" : "Configure",
             () => openOrgApiKeyEditor(o, svc, draw),
             "btn ghost sm",
           ),
@@ -476,7 +478,8 @@ function openOrgApiKeys(o) {
 
 function openOrgApiKeyEditor(o, svc, onSaved) {
   dialog(`${o.name}: ${svc.label}`, (body, close) => {
-    const inputs = svc.fields.map((f) => {
+    if (svc.retired) body.append(el("p", "note", svc.retired));
+    const inputs = (svc.retired ? [] : svc.fields).map((f) => {
       const input = text("", {
         type: f.secret ? "password" : "text",
         autocomplete: "off",
@@ -505,7 +508,7 @@ function openOrgApiKeyEditor(o, svc, onSaved) {
       remove,
       el("span", "grow"),
       cancel,
-      button("Save", async () => {
+      ...(svc.retired ? [] : [button("Save", async () => {
         const values = Object.fromEntries(
           inputs.map((i) => [i.name, i.input.value]).filter(([, v]) => v),
         );
@@ -513,7 +516,7 @@ function openOrgApiKeyEditor(o, svc, onSaved) {
         toast(`${svc.label} key saved`);
         close();
         onSaved();
-      }),
+      })]),
     );
     body.append(actions);
   });

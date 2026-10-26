@@ -27,6 +27,10 @@ The daily hygiene task also asks the Internet Archive, once a week per target, f
 
 Every nuclei run uses a snapshot of the installed templates that passed read-only and destination checks: plain GET, HEAD or OPTIONS requests to the scanned host only, no payloads, bodies, code or out-of-band (interactsh) checks. A template may follow redirects on the same host, up to three (nuclei's `host-redirects`, which the technology detection template uses); one that follows redirects to other hosts is left out. The AI-written templates may not follow redirects at all.
 
+### runZero between scans
+
+A project with a runZero token is also synced from [runZero](CONFIGURATION.md#runzero), outside any scan. The sync stores runZero's OS, hardware, tags and CVE reports on the addresses cvENGINE already holds and, if the project turned import on, adds runZero addresses it does not know as targets through the Add targets path (exclusions, private-range policy and organization uniqueness included). runZero's CVE reports only raise the confidence of a match this pipeline already made; they never create or confirm one.
+
 ### Inventory details
 
 - **Port discovery.** By default [naabu](https://github.com/projectdiscovery/naabu) sweeps all 65,535 TCP ports of each address (SYN, 1,000 packets a second) and nmap fingerprints only the open ports it found plus ports already known open. If naabu is off (`CVENGINE_NAABU=0`), missing, fails, or sees more than 500 open ports on one address, nmap falls back to the top 1,000 ports plus 37 high-risk ones.
@@ -186,6 +190,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | AI review and capacity tuning | every 3 hours |
 | Stuck job cleanup | every 15 minutes |
+| runZero sync (projects with a token) | checked hourly, each project every 6 hours (`CVENGINE_RUNZERO_SYNC_HOURS`) |
 | CVE feed coverage, bounty catalogue | hourly |
 | Archived host rediscovery, inactive host review | daily |
 | Deep discovery of apex domains | daily at 02:43 UTC |

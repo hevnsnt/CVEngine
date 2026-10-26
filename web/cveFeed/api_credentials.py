@@ -30,12 +30,18 @@ SERVICES = {
     'bufferoverrun': ('BufferOver.run', [('api_key', 'API key', True)], [('modules.bufferoverrun.api_key', 'api_key')]),
     # WPScan is run by CVEngine itself against WordPress sites it found (see cveFeed.wpscan_scan), not through bbot.
     'wpscan': ('WPScan (WordPress vulnerability data)', [('api_key', 'API token from wpscan.com', True)], []),
-    # bbot has no BinaryEdge module (3.x), so like runZero this key is storable but has nothing to feed yet.
+    # Retired, see RETIRED: kept only so a key someone already saved stays visible and removable.
     'binaryedge': ('BinaryEdge', [('api_key', 'API key', True)], []),
-    # runZero is an asset-inventory platform, not a bbot module: there is nothing to feed it into during a
-    # scan. The key is still storable here so it is ready for a future "pull runZero's own inventory in as
-    # a source of hosts" integration; it has no bbot_config_args mapping until that import job exists.
+    # runZero is an asset-inventory platform, not a bbot module: its key is used by cveFeed.runzero_sync, which reads the
+    # inventory on a schedule (see SYNC_SERVICES), so it has no bbot mapping.
     'runzero': ('runZero', [('api_key', 'Export API token', True)], []),
+}
+
+# Services that no longer exist. Their rows are kept (a stored key is user data and removing it is the user's call) but no new key is
+# accepted, nothing reads them, and the pages say why.
+RETIRED = {
+    'binaryedge': 'BinaryEdge was shut down as a standalone service on 31 March 2025 (Coalition retired the platform, its accounts and '
+                  'its API), so there is nothing to connect to. Remove the key; it is not used.',
 }
 
 
@@ -91,8 +97,16 @@ def bbot_config_args(project):
 
 
 SCAN_STAGES = frozenset({'wpscan'})  # keys a pipeline stage uses directly rather than through a bbot module
+SYNC_SERVICES = frozenset({'runzero'})  # keys a scheduled job uses to read the service (not during a scan)
 
 
 def used_in_scans(service):
     """Whether a scan can actually use this service's key (it maps to a bbot module or a pipeline stage)."""
-    return bool(SERVICES[service][2]) or service in SCAN_STAGES
+    return service not in RETIRED and (bool(SERVICES[service][2]) or service in SCAN_STAGES)
+
+
+def service_entry(service, label, fields, cred=None):
+    """The part of a service's API payload that is the same for a project and an organization listing."""
+    return {'service': service, 'label': label, 'fields': [{'name': n, 'label': d, 'secret': s} for n, d, s in fields],
+            'configured': bool(cred), 'used_in_scans': used_in_scans(service), 'used_by_sync': service in SYNC_SERVICES,
+            'retired': RETIRED.get(service), 'set': credential_summary(cred) if cred else {}}

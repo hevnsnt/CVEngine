@@ -1218,6 +1218,25 @@ def update_nuclei_templates():
     return {"updated": proc.returncode == 0, "returncode": proc.returncode}
 
 
+@app.task(name='runzero_sync_due', bind=False, queue='cve_feed_queue')
+def runzero_sync_due():
+    """Queue a runZero sync for every project with a token that is due one (CVENGINE_RUNZERO_SYNC_HOURS, default 6). Starts are
+    spread a few seconds apart: runZero limits how fast one source address may call it."""
+    from cveFeed import runzero_sync
+    ids = runzero_sync.due_project_ids()
+    for i, project_id in enumerate(ids):
+        runzero_sync_project.apply_async(args=[project_id], countdown=i * 5)
+    return {'queued': len(ids)}
+
+
+@app.task(name='runzero_sync_project', bind=False, queue='cve_feed_queue')
+def runzero_sync_project(project_id):
+    from cveFeed import runzero_sync
+    from dashboard.models import Project
+    project = Project.objects.filter(pk=project_id).first()
+    return runzero_sync.sync_project(project) if project else {'state': 'error', 'error': 'project not found', 'counts': {}}
+
+
 @app.task(name="author_cve_detections", bind=False, queue="cve_feed_queue")
 def author_cve_detections():
     """Every 30 minutes: write the shared detection record of every CVE that has none (hottest first, so new CVEs and the back

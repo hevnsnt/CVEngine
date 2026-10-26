@@ -221,6 +221,20 @@ def _tools():
                          'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
 
 
+def _runzero(problems):
+    """Each project that has a runZero token: when it last synced and how it went. A failing sync is a problem worth seeing here."""
+    from cveFeed import runzero_sync
+    from dashboard.models import Project
+    rows = []
+    for project in Project.objects.filter(pk__in=runzero_sync.configured_project_ids()).order_by('slug')[:MAX_PROJECTS]:
+        s = runzero_sync.status(project)
+        rows.append({'project': project.slug, 'state': s['state'], 'last_sync_at': s['last_sync_at'], 'last_error': s['last_error'],
+                     'import_enabled': s['import_enabled'], 'assets': (s['counts'] or {}).get('assets')})
+        if s['state'] == 'error':
+            problems.append(f"runZero: the sync of {project.slug} is failing: {s['last_error']}")
+    return {'interval_hours': runzero_sync.interval_hours(), 'projects': rows}
+
+
 def _work():
     """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
     from cveFeed import conductor
@@ -274,6 +288,7 @@ def _system(user, problems, notes):
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['ai'] = _probe(problems, 'ai', _ai)
+    out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['tools'] = _probe(problems, 'tools', _tools)
     age = ((out['tools'] or {}).get('nuclei_templates') or {}).get('age_hours')
     if age is not None and age > TEMPLATE_STALE_HOURS:
