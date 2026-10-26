@@ -215,6 +215,17 @@ def _tools():
                          'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
 
 
+def _work():
+    """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
+    from cveFeed import conductor
+    from cveFeed.scan_control import pause_requested
+    from targetApp.models import Domain
+    out = conductor.status()
+    out['paused'] = pause_requested(fail_closed=False)
+    out['targets'] = Domain.objects.exclude(project=None).exists()
+    return out
+
+
 def _system(user, problems, notes):
     out = {}
     out['database'] = _probe(problems, 'database', _database)
@@ -233,6 +244,13 @@ def _system(user, problems, notes):
             problems.append(f"workers: {health.get('worker_note')}")
         if out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
+    out['work'] = _probe(problems, 'work', _work)
+    work = out['work']
+    if isinstance(work, dict) and 'error' not in work and work.get('wanted_depth') and not work.get('paused') \
+            and work.get('targets') and not work.get('running') and not work.get('queued'):
+        problems.append('work: nothing is running or queued although there are targets to scan; the work conductor '
+                        + ('has not run yet' if not work.get('last_round') else f"last ran at {work['last_round'].get('at')}")
+                        + ' (is celery beat running?)')
     out['memory'] = _probe(problems, 'memory', _memory)
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:

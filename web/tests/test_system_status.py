@@ -223,3 +223,31 @@ class SystemStatusTests(TestCase):
 		text = str(data).lower()
 		for word in ('redis://', 'postgres://', 'password', 'secret', 'api_key'):
 			self.assertNotIn(word, text)
+
+
+class WorkConductorStatusTests(TestCase):
+	def setUp(self):
+		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		org = Org.objects.create(name='W', slug='w')
+		self.project = Project.objects.create(name='W', slug='ws', insert_date=NOW, org=org)
+		self.domain = Domain.objects.create(name='w.test', project=self.project, insert_date=NOW)
+		self.user = User.objects.create_superuser('wroot', 'w@x.test', 'x')
+
+	def problems(self):
+		problems, notes = [], []
+		with mock.patch.dict('os.environ', {'CVENGINE_WORK_DEPTH': '3'}):
+			out = system_status._system(self.user, problems, notes)
+		return out, problems
+
+	def test_no_work_with_targets_is_a_problem_and_a_queued_scan_clears_it(self):
+		out, problems = self.problems()
+		self.assertEqual((out['work']['running'], out['work']['queued'], out['work']['targets']), (0, 0, True))
+		self.assertTrue([p for p in problems if p.startswith('work: nothing is running or queued')])
+		ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, scan_status=-1, start_scan_date=NOW, results_dir='/x')
+		_, problems = self.problems()
+		self.assertFalse([p for p in problems if p.startswith('work:')])
+
+	def test_a_paused_instance_is_not_a_work_problem(self):
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+		_, problems = self.problems()
+		self.assertFalse([p for p in problems if p.startswith('work:')])
