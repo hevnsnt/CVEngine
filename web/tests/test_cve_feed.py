@@ -124,3 +124,41 @@ class ActivityCollapseTests(TestCase):
 			from_api.return_value = (mock.Mock(threat_tier='ice'), True)
 			tasks.sync_cve_now_feed()
 		self.assertTrue(AgentActivity.objects.filter(kind='feed', message__startswith='cve.now: 1 new CVEs').exists())
+
+
+class RejectedAndScoringTests(TestCase):
+	def test_the_best_cvss_wins_not_the_first_container(self):
+		from cveFeed import intel
+		doc = {'cveMetadata': {'state': 'PUBLISHED', 'datePublished': '2024-01-01T00:00:00Z'},
+			   'containers': {'cna': {'metrics': [{'cvssV2_0': {'baseScore': 4.3, 'vectorString': 'AV:N/AC:M/Au:N/C:P/I:N/A:N'}}], 'descriptions': []},
+							  'adp': [{'metrics': [{'cvssV3_1': {'baseScore': 9.8, 'vectorString': 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+																'baseSeverity': 'CRITICAL'}}]}]}}
+		entry = intel.entry_from_cve5(doc, {})
+		self.assertEqual((entry['cvss'], entry['stated_severity']), (9.8, 'CRITICAL'))
+		self.assertTrue(entry['cvss_vector'].startswith('CVSS:3.1'))
+
+	def test_a_rejected_cve_leaves_the_pool_and_its_open_matches_are_closed(self):
+		from django.utils import timezone
+
+		from cveFeed import correlation
+		from cveFeed.models import CVEEntry, CVEMatch
+		from dashboard.models import Org, Project
+		from startScan.models import Subdomain
+		from targetApp.models import Domain
+		project = Project.objects.create(name='Rj', slug='rj', insert_date=timezone.now(), org=Org.objects.create(name='Rj', slug='rjo'))
+		domain = Domain.objects.create(name='rj.test', project=project, insert_date=timezone.now())
+		sub = Subdomain.objects.create(name='www.rj.test', target_domain=domain)
+		rejected = CVEEntry.objects.create(cve_id='CVE-2099-8000', status='REJECTED', affected=[{'product': 'nginx'}], published_at=timezone.now())
+		live = CVEEntry.objects.create(cve_id='CVE-2099-8001', status='PUBLISHED', affected=[{'product': 'nginx'}], published_at=timezone.now())
+		m1 = CVEMatch.objects.create(cve_entry=rejected, subdomain=sub, source='tech')
+		m2 = CVEMatch.objects.create(cve_entry=live, subdomain=sub, source='tech')
+		correlation._INDEX_CACHE.update(key=None, value=None)
+		pool, _ = correlation.cve_pool()
+		self.assertEqual(set(pool), {live.id})
+		self.assertEqual(correlation.close_rejected(), 1)
+		m1.refresh_from_db()
+		m2.refresh_from_db()
+		self.assertEqual(m1.ai_verdict, 'not_affected')
+		self.assertIn('rejected', m1.ai_reason)
+		self.assertNotEqual(m2.ai_verdict, 'not_affected')
+		self.assertEqual(correlation.close_rejected(), 0)  # already closed

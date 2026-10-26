@@ -617,6 +617,33 @@ def _row_strength(row):
             row.get("version_in_range") is True, row.get("version_in_range") is None)
 
 
+def _carry_remediation(fresh):
+    """Give each new match the remediation state of the same finding on the host's earlier scan. Hosts are stored once per scan, so
+    the next scan's host row starts with no matches of its own; without this, everything a person marked fixed, in progress or accepted
+    risk would reappear as open after the next scan."""
+    from cveFeed.models import CVEMatch
+    from startScan.models import Subdomain
+    hosts = {sid: (domain_id, name) for sid, domain_id, name in
+             Subdomain.objects.filter(pk__in={m.subdomain_id for m in fresh}).values_list("id", "target_domain_id", "name")}
+    domains = {d for d, _n in hosts.values()}
+    names = {n for _d, n in hosts.values()}
+    earlier = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
+                                       subdomain__name__in=names).exclude(remediation_status="open")
+               .exclude(subdomain_id__in=list(hosts)).select_related("subdomain").order_by("id"))
+    latest = {}
+    for m in earlier:  # oldest first, so the newest decision wins
+        latest[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product)] = m
+    if not latest:
+        return
+    for match in fresh:
+        domain_id, name = hosts.get(match.subdomain_id, (None, None))
+        before = latest.get((match.cve_entry_id, domain_id, name, match.source, match.matched_product))
+        if before is not None:
+            match.remediation_status, match.remediation_note = before.remediation_status, before.remediation_note
+            match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
+                before.remediation_updated_at, before.remediation_by_id, before.assignee_id)
+
+
 def save_matches(rows, covered=None):
     """Upsert CVEMatch rows in two statements: bulk_create(ignore_conflicts) for the new ones, bulk_update for the
     existing ones whose evidence changed. Remediation fields are never touched. When the version or its range result
@@ -679,6 +706,7 @@ def save_matches(rows, covered=None):
             match.updated_at = now
             changed.append(match)
     if fresh:
+        _carry_remediation(fresh)
         CVEMatch.objects.bulk_create(fresh, ignore_conflicts=True, batch_size=1000)
     if changed:
         CVEMatch.objects.bulk_update(changed, [*_MATCH_FIELDS, "ai_verdict", "ai_reason", "ai_model", "updated_at"], batch_size=1000)
@@ -690,6 +718,18 @@ def save_matches(rows, covered=None):
 
 
 _CORRELATED_SOURCES = ("tech", "port")
+
+
+def close_rejected():
+    """Close every open match of a CVE its CNA has rejected: a rejected CVE is not a vulnerability, and its old matches would otherwise
+    stay in the findings for good. Matches a person already worked keep their remediation state. Returns how many were closed."""
+    from django.utils import timezone
+
+    from cveFeed.models import CVEMatch
+    open_matches = CVEMatch.objects.filter(cve_entry__status__icontains="reject").exclude(
+        ai_verdict="not_affected", ai_reason__startswith="Closed automatically:")
+    return open_matches.update(ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
+                               ai_reason="Closed automatically: the CVE was rejected by its CNA.")
 
 
 def close_stale(current, covered):
@@ -809,7 +849,7 @@ def cve_pool(cve_limit=None):
     key = (cve_limit, stamp["n"], stamp["latest"])
     if _INDEX_CACHE["key"] == key:
         return _INDEX_CACHE["value"]
-    qs = CVEEntry.objects.only(*_CVE_FIELDS).order_by("-published_at")
+    qs = CVEEntry.objects.exclude(status__icontains="reject").only(*_CVE_FIELDS).order_by("-published_at")  # a rejected CVE matches nothing
     if cve_limit:
         qs = qs[:cve_limit]
     cve_by_id = {c.id: c for c in qs}

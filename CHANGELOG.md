@@ -50,6 +50,10 @@ Also from the review.
 - **A hygiene finding marked fixed that comes back is reopened**, with a note, instead of staying hidden.
 - **A bounty scope entry longer than the column is shown as text** instead of aborting the sync.
 - **The findings list no longer fails on 29 February.**
+- **Detection accuracy.** CVEs that arrive with no affected-product data are refreshed again for 90 days instead of staying blank; version ranges the CVE List gives only as text are read; CPE and product-name spellings (`Apache httpd`, `OpenSSH_9.6`) resolve to the same product; a match a template or validation already confirmed stays open when a later scan sees a different version; a changed product on a port resets the stored version; portable patch levels (`8.9p1`, `8.9p2`), date versions and MariaDB's `5.5.5-` banner prefix compare correctly.
+- **Rejected CVEs are closed** and never matched again, the CVSS score is taken from the best-preferred metric instead of whichever was listed last, and a remediation state (fixed, accepted risk) carries from one scan's finding to the next instead of reopening.
+- **A slow AI answer cannot overwrite newer data.** Triage re-reads each row after the provider replies; a finding whose evidence changed meanwhile waits for its next review, and a validation hit that landed meanwhile keeps the finding confirmed.
+- **Auto-fire retries a CVE whose run failed** (a provider outage, say) for 48 hours instead of marking it done forever.
 
 ### Changed
 

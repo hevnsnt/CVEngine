@@ -371,10 +371,11 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     project (project_slug), or everything. `cve_limit` caps the CVE pool to the
     most recently published N (useful for a fresh-CVE focused pass).
     """
-    from cveFeed.correlation import candidate_subdomains, correlate_subdomains, cve_pool
+    from cveFeed.correlation import candidate_subdomains, close_rejected, correlate_subdomains, cve_pool
     from startScan.models import Subdomain, ScanHistory
     from cveFeed import activity
 
+    close_rejected()  # a CVE rejected since the last run stops being a finding
     cve_by_id, index = cve_pool(cve_limit)
     scan = None
     if scan_history_id:

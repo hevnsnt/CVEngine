@@ -506,10 +506,15 @@ def convert_affected(entries):
     return out[:50]
 
 
+CVSS_PREFERENCE = ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0")
+
+
 def _metric(containers):
-    for container in containers:
-        for metric in container.get("metrics") or []:
-            for key in ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0"):
+    """The best score any container carries: the newest scoring system first (3.1, 3.0, 4.0, then the obsolete 2.0), and within one system
+    the CNA's before the ADPs'. A CNA that only published a CVSS 2.0 score does not outrank an ADP's 3.1 score."""
+    for key in CVSS_PREFERENCE:
+        for container in containers:
+            for metric in container.get("metrics") or []:
                 m = metric.get(key) if isinstance(metric, dict) else None
                 if isinstance(m, dict) and isinstance(m.get("baseScore"), (int, float)):
                     return float(m["baseScore"]), _clean(m.get("vectorString"), 128), _clean(m.get("baseSeverity"), 32)

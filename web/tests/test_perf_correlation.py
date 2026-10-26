@@ -238,3 +238,42 @@ class VersionSpellingTests(TestCase):
 		self.assertTrue(version_in_range(parse_version('2024-01-15'), {'fixed': '2024-02-10'}))
 		self.assertEqual(parse_version('5.5.5-10.6.12-MariaDB'), (10, 6, 12))
 		self.assertEqual(parse_version('5.7.38'), (5, 7, 38))
+
+
+class RemediationCarriesToTheNextScanTests(CorrelationPerfTests):
+	def test_what_a_person_decided_follows_the_host_to_its_next_scan(self):
+		old_scan, new_scan = self._scan(), self._scan()
+		old = self._host('web.perf.test', old_scan, tech='nginx')
+		CVEMatch.objects.create(cve_entry=self.cve, subdomain=old, source='tech', matched_product='nginx', matched_version='1.18.0',
+								remediation_status='accepted_risk', remediation_note='vendor says no', remediation_updated_at=timezone.now())
+		new = self._host('web.perf.test', new_scan, tech='nginx')
+		base = dict(cve_entry_id=self.cve.id, source='tech', matched_product='nginx', matched_version='1.18.0', version_in_range=True,
+					confidence=0.9, scan_history_id=new_scan.id, distro_status='', distro_fixed_version='', evidence={})
+		correlation.save_matches([{**base, 'subdomain_id': new.id}])
+		row = CVEMatch.objects.get(subdomain=new)
+		self.assertEqual((row.remediation_status, row.remediation_note), ('accepted_risk', 'vendor says no'))
+
+	def test_a_host_with_no_earlier_decision_starts_open(self):
+		scan = self._scan()
+		sub = self._host('fresh.perf.test', scan, tech='nginx')
+		base = dict(cve_entry_id=self.cve.id, source='tech', matched_product='nginx', matched_version='1.18.0', version_in_range=True,
+					confidence=0.9, scan_history_id=scan.id, distro_status='', distro_fixed_version='', evidence={})
+		correlation.save_matches([{**base, 'subdomain_id': sub.id}])
+		self.assertEqual(CVEMatch.objects.get(subdomain=sub).remediation_status, 'open')
+
+
+class FindingStateCarriesTests(CorrelationPerfTests):
+	def test_a_nuclei_finding_seen_again_on_the_next_scan_keeps_its_remediation_state(self):
+		from reNgine.tasks import save_vulnerability
+		from startScan.models import Vulnerability
+		old_scan, new_scan = self._scan(), self._scan()
+		old_sub = self._host('web.perf.test', old_scan)
+		first = Vulnerability.objects.create(name='Exposed panel', severity=3, subdomain=old_sub, target_domain=self.domain, scan_history=old_scan,
+											 source='nuclei', template_id='panel', http_url='https://web.perf.test/admin', matcher_name='',
+											 remediation_status='fixed', remediation_note='patched', discovered_date=timezone.now())
+		new_sub = self._host('web.perf.test', new_scan)
+		save_vulnerability(name='Exposed panel', severity=3, subdomain=new_sub, target_domain=self.domain, scan_history=new_scan, source='nuclei',
+						   template_id='panel', http_url='https://web.perf.test/admin', matcher_name='')
+		again = Vulnerability.objects.get(scan_history=new_scan)
+		self.assertNotEqual(again.pk, first.pk)
+		self.assertEqual((again.remediation_status, again.remediation_note), ('fixed', 'patched'))
