@@ -10,6 +10,7 @@ from django.core.exceptions import RequestDataTooBig
 
 from agentapi import host_manage as hosts
 from agentapi import services as svc
+from agentapi import system_status
 from agentapi.services import ApiError, Ctx
 
 SUPPORTED_VERSIONS = ('2025-06-18', '2025-03-26', '2024-11-05')
@@ -35,6 +36,7 @@ def _page_props(extra=None):
 TOOLS = [
     ('whoami', 'Current user, projects with roles, and token info.', _schema(), lambda c, a: svc.me(c), False),
     ('list_projects', 'Projects you can access, with your role in each.', _schema(), lambda c, a: svc.list_projects(c), False),
+    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness and today's AI validation budget. Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
     ('list_engines', 'Available scan engines.', _schema(), lambda c, a: svc.list_engines(c), False),
     ('list_targets', 'Targets (domains, IPs) in a project.', _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_targets(c, a.get('project'), a), False),
