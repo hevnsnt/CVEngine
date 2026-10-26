@@ -89,6 +89,16 @@ See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), 
 
 The web app has no Docker or git access, on purpose. When you click **Approve update** it only records the approval; a small watcher on the server (`scripts/update-watch.sh`, started by cron every minute, installed by `./install.sh` and by `scripts/install-updater.sh`) sees it within about two seconds and runs the update: scans are paused, running ones finish, the files are updated, the containers are rebuilt and restarted, and scanning resumes. It also writes a heartbeat every 15 seconds, and Settings > Updates shows "Host updater: listening" or, when it does not report, says so and what to do. An older updater (a cron entry that runs `scripts/apply-update.sh` every 5 minutes) does not report but still works, with up to 5 minutes before an approval starts; run `scripts/install-updater.sh` again to switch it to the watcher.
 
+### First time, or a server that has never had the updater
+
+A server that was installed before the watcher existed has no `scripts/install-updater.sh` and nothing that reads the approval, so Approve does nothing there. Bring it up to date by hand once, from the CVEngine folder on the server:
+
+```
+cd /opt/cvengine && git pull --ff-only && sudo scripts/install-updater.sh
+```
+
+That pulls the current code, installs the watcher and starts it at once. A pending approval is then applied straight away: the script sees that the files are current but the running build is older (`web/.commit`) and rebuilds the services. Settings > Updates shows this command with a Copy button whenever no host updater is reporting, plus the steps an update goes through, what each one is waiting on and about how long it takes (about 3 to 6 minutes once nothing is scanning; a running scan is waited for).
+
 If the bar says the host updater is not reporting, or an approval does not start:
 
 1. `crontab -l | grep cvengine` on the host: no line means the updater is not installed; run `scripts/install-updater.sh` (as the user that owns the checkout and may run Docker).

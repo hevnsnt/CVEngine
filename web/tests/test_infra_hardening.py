@@ -138,6 +138,7 @@ class UpdateWatcherTests(SimpleTestCase):
 		self.assertIn('* * * * *', installer)
 		self.assertIn('update-watch.sh', installer)
 		self.assertNotIn('*/5', installer)
+		self.assertIn('CVENGINE_NO_START', installer)  # listens at once, so a waiting approval is applied and the heartbeat appears
 		self.assertIn('install-updater.sh', read('install.sh'))  # an install that forgets it makes Approve do nothing
 		self.assertIn('cvengine-auto-deploy', read('install.sh'))  # and stays out of the way of automatic deployment
 

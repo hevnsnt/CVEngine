@@ -225,6 +225,28 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if ' up ' in c or 'restart' in c or c.startswith('make')])
         self.assertIn('scan(s) running', (self.work / 'web' / '.update-log').read_text())
 
+    def test_files_pulled_by_hand_but_an_older_build_still_running_are_rebuilt(self):
+        # a host without the updater is first brought up to date with `git pull`; the approval must still rebuild the services
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.prev + '\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('docker compose -f docker-compose.dev.yml build web celery celery-beat', self.calls())
+        self.assertIn('docker compose -f docker-compose.dev.yml up -d --no-deps --force-recreate web celery celery-beat', self.calls())
+        self.assertIn('running build is', (self.work / 'web' / '.update-log').read_text())
+        self.assertFalse(self.approved())
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
+
+    def test_files_and_build_already_at_the_approved_commit_rebuild_nothing(self):
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.calls() if ' build ' in c])
+        self.assertFalse(self.approved())
+
     def test_a_bad_compose_file_value_is_refused_before_anything_runs(self):
         self.approve()
         for bad in ('../docker-compose.dev.yml', 'x; touch /tmp/pwned', 'missing.yml', 'docker-compose.dev.txt'):
