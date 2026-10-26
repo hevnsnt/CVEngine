@@ -164,7 +164,7 @@ resolve_layout() {
 
 # How far the last deploy got; "migrated" means the database already has the new schema.
 DEPLOY_STAGE=
-deploy() {
+deploy_builtin() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
   local services=(web celery celery-beat) listed
@@ -177,11 +177,6 @@ deploy() {
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" build web celery celery-beat || return 1
-  # The proxy is a stock image, not built here: its copy on this host is only as new as the day it was first pulled, so an nginx security
-  # release never arrived. Pull it now (best effort: offline keeps the image already here); it is recreated below.
-  if printf '%s\n' "${services[@]}" | grep -qx proxy; then
-    "${compose[@]}" pull proxy >/dev/null 2>&1 || log 'could not pull the proxy image; keeping the one on this host'
-  fi
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1
@@ -207,6 +202,18 @@ verify_running() {
   done
   log "after the restart these services are not running:$missing (see docker compose ps and docker compose logs)"
   return 1
+}
+
+# What an update does to the services is read from scripts/update-deploy.sh, AFTER the new files are merged: this script is the copy already
+# on the host, so anything added to it would only run on the update after the one that delivers it (a new image to refresh, say). The
+# copy above is the fallback for a checkout without that file (a rollback to a version older than this one).
+deploy() {
+  if [ -f scripts/update-deploy.sh ]; then
+    # shellcheck source=update-deploy.sh
+    . scripts/update-deploy.sh && deploy_current
+  else
+    deploy_builtin
+  fi
 }
 
 RUNNING_QUERY="from django.apps import apps; from startScan.models import ScanHistory; n=ScanHistory.objects.filter(scan_status=1).count(); n+=sum(m.objects.filter(status='running').count() for m in apps.get_models() if m.__name__ in ('OnDemandValidation','DeferredRetest','TriageCall')); print(n)"

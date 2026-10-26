@@ -432,12 +432,6 @@ fi
 # Only then pause dispatch and perform a bounded drain before migration/recreation.
 step 'Building application images while everything keeps running'
 "${compose[@]}" build web celery celery-beat
-# The proxy is a stock image, not built here: its copy on this host is only as new as the day it was first pulled, so an nginx security
-# release never arrived. Pull it now (best effort: offline keeps the image already here); it is recreated below.
-if "${compose[@]}" config --services | grep -qx proxy; then
-    step 'Refreshing the proxy image'
-    "${compose[@]}" pull proxy >/dev/null 2>>"${diagnostic_log:-/dev/null}" || echo 'Could not pull the proxy image; keeping the one on this host.'
-fi
 
 # Freeze consumers, not producers: requests arriving during maintenance stay in Redis for
 # the restarted workers. Each worker's original queues are captured so a failed update can

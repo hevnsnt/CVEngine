@@ -1230,9 +1230,11 @@ def author_cve_detections():
     except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
         logger.warning("could not build the AI provider for detection authoring", exc_info=True)
         provider = None
+    rules_first = detection_author.author_all_rules()  # the whole back catalogue by itself after an update, not a small batch per run
     out = detection_author.author_pending(provider)
+    out['rules_first'] = rules_first
     from cveFeed import locality
-    locality.refresh()
+    locality.refresh(limit=100000)
     out['local_closed'] = locality.close_local_matches()  # a CVE the model just judged local-only is never a finding
     out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
     return out

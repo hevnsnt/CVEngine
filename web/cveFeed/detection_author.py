@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULTS = {'DETECTION_RULES_BATCH': 500, 'DETECTION_AI_PER_DAY': 25}
 AI_RETRY_AFTER = datetime.timedelta(days=7)
+RULES_LOOP_BATCH = 5000  # rules records are free and instant: a run writes them in rounds this size until none are left or time is up
+RULES_LOOP_SECONDS = 240
 AI_ID_PREFIX = 'ai-'
 
 
@@ -52,6 +54,20 @@ def author_rules(batch=None):
                                  schema_version=detection.SCHEMA_VERSION))
     CVEDetection.objects.bulk_create(rows, ignore_conflicts=True)  # another worker may have written the same CVE
     return len(rows)
+
+
+def author_all_rules(seconds=None):
+    """Write the rules record of every CVE that has none, in rounds, until none are left or ``seconds`` have passed. The back catalogue
+    (tens of thousands of CVEs) is covered by the first run after an update instead of crawling in at one small batch per run."""
+    import time
+    deadline = time.monotonic() + (RULES_LOOP_SECONDS if seconds is None else seconds)
+    written = 0
+    while time.monotonic() < deadline:
+        batch = author_rules(batch=RULES_LOOP_BATCH)
+        if not batch:
+            break
+        written += batch
+    return written
 
 
 def refresh_rules(batch=None):

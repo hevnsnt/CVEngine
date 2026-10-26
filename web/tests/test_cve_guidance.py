@@ -363,3 +363,24 @@ class SeedAdminTests(TestCase):
 		self.assertTrue(back.strategy['local_checks'][0]['commands'])  # re-rendered here, never taken from the file
 		from cveFeed import locality
 		self.assertEqual(locality.refresh(), 1)  # a CVE with no classification yet is classified after an import
+
+
+class AfterAnUpdateTests(TestCase):
+	def test_the_first_run_writes_the_whole_back_catalogue_and_classifies_it_with_no_one_asking(self):
+		from unittest import mock
+		from cveFeed import locality
+		from cveFeed.tasks import author_cve_detections
+		now = timezone.now()
+		for n in range(11):
+			CVEEntry.objects.create(cve_id=f'CVE-2099-76{n:02d}', title='t', affected=NGINX, published_at=now, original_description='A remote flaw.',
+									cvss_vector='CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')
+		CVEEntry.objects.create(cve_id='CVE-2099-7699', title='Windows kernel', affected=[{'product': 'Windows'}], published_at=now,
+								original_description='The Windows kernel allows an elevation of privilege.')
+		with mock.patch.object(detection_author, 'RULES_LOOP_BATCH', 4), mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None), \
+				mock.patch('cveFeed.tasks.update_nuclei_templates.delay'):
+			out = author_cve_detections()
+		self.assertEqual(out['rules_first'], 12)  # three rounds of four, not one small batch per half hour
+		self.assertEqual(CVEDetection.objects.count(), 12)
+		self.assertEqual(CVEEntry.objects.filter(local_only=True).count(), 1)  # classified in the same run
+		self.assertEqual(CVEEntry.objects.filter(locality_at__isnull=True).count(), 0)
+		self.assertEqual(locality.refresh(), 0)

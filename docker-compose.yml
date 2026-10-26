@@ -155,6 +155,9 @@ services:
   proxy:
     restart: always
     image: nginx:alpine
+    # A stock image is only as new as the day it was first pulled: pull on every up, so an update brings nginx's security releases
+    # whichever version of the update script is running (the one that applies an update is the one already on the host).
+    pull_policy: always
     ports:
       - 8082:8082/tcp
       - 443:443/tcp
