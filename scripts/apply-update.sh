@@ -177,6 +177,11 @@ deploy() {
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" build web celery celery-beat || return 1
+  # The proxy is a stock image, not built here: its copy on this host is only as new as the day it was first pulled, so an nginx security
+  # release never arrived. Pull it now (best effort: offline keeps the image already here); it is recreated below.
+  if printf '%s\n' "${services[@]}" | grep -qx proxy; then
+    "${compose[@]}" pull proxy >/dev/null 2>&1 || log 'could not pull the proxy image; keeping the one on this host'
+  fi
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1

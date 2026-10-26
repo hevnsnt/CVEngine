@@ -26,6 +26,7 @@ case " $* " in
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
+  *" pull "*) if [ -f "$STUB_DIR/fail_pull" ]; then exit 1; fi;;
   *" build "*) if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi;;
   *" --force-recreate "*) if [ -f "$STUB_DIR/fail_recreate_always" ]; then exit 1; fi
@@ -224,6 +225,29 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertTrue(any('-f docker-compose.yml exec' in c for c in calls))  # the scan check
         self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', calls)
         self.assertEqual(self.head(), self.new)
+
+    def test_the_proxy_image_is_pulled_before_it_is_recreated_and_the_dev_stack_pulls_nothing(self):
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn('docker compose -f docker-compose.yml pull proxy', calls)
+        self.assertLess(next(i for i, c in enumerate(calls) if ' build ' in c), next(i for i, c in enumerate(calls) if c.endswith(' pull proxy')))
+        self.assertLess(next(i for i, c in enumerate(calls) if c.endswith(' pull proxy')), next(i for i, c in enumerate(calls) if '--force-recreate web' in c))
+
+    def test_a_failed_proxy_pull_keeps_the_image_on_the_host_and_the_update_goes_on(self):
+        (self.stub / 'fail_pull').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
+        self.assertEqual(self.head(), self.new)
+
+    def test_the_dev_stack_has_no_proxy_so_nothing_is_pulled(self):
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.calls() if ' pull ' in c])
 
     def test_waits_while_scans_are_running_and_keeps_the_approval(self):
         (self.stub / 'running_count').write_text('2\n')
