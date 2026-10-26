@@ -176,7 +176,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     springLength: 80,
     springCoeff: 0.0008,
     gravity: -2.6,
-    dragCoeff: 0.05,
+    dragCoeff: 0.12, // more damping: with a few hundred nodes the old 0.05 never stopped jittering
     // leaves that share an IP get extra room, and a hub's links are long, so clusters fan out instead of stacking
     springTransform(link, spring) {
       if (link.fromId.startsWith('__project:')) { spring.length = 190; return; }
@@ -489,6 +489,42 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     layout,
   });
   renderer.run();
+
+  // Let the layout rest. A force layout with hundreds of nodes keeps a small jitter forever; once the nodes have barely moved for a
+  // moment (or ten seconds have passed since the graph last changed) the animation is paused, and any change to the graph, or a
+  // press on the canvas, wakes it again.
+  let lastChange = Date.now();
+  let resting = false;
+  const wake = () => {
+    lastChange = Date.now();
+    if (resting) {
+      resting = false;
+      renderer.resume();
+    }
+  };
+  graph.on("changed", wake);
+  container.addEventListener("pointerdown", wake);
+  const lastPos = new Map();
+  const settleTimer = setInterval(() => {
+    if (resting) return;
+    let moved = 0;
+    let counted = 0;
+    graph.forEachNode((node) => {
+      const p = layout.getNodePosition(node.id);
+      const q = lastPos.get(node.id);
+      if (q) {
+        moved += Math.hypot(p.x - q.x, p.y - q.y);
+        counted += 1;
+      }
+      lastPos.set(node.id, { x: p.x, y: p.y });
+    });
+    const quiet = Date.now() - lastChange;
+    const still = counted > 0 && moved / counted < 1.2;
+    if ((still && quiet > 2500) || quiet > 10000) {
+      renderer.pause();
+      resting = true;
+    }
+  }, 500);
   container.addEventListener("click", () => {
     if (justDragged) return;
     clearGroup();
@@ -636,6 +672,7 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     destroy() {
       clearInterval(timer);
       clearInterval(labelTimer);
+      clearInterval(settleTimer);
       document.removeEventListener("keydown", onKey);
     },
     clear() {
