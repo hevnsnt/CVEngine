@@ -159,7 +159,7 @@ A tenant of a multi-tenant provider owns only its own subdomain. For `acme.jfrog
 
 ### Excluded hosts
 
-An organization can remove a host and exclude it (**Remove & exclude**, or the API). Exclusions match the exact host name, case-insensitively, and every stage skips an excluded host in every project of that organization. Adding it as a target is refused. **Delete host data** removes a host from one project only and leaves it free to be found again.
+An organization can remove a host and exclude it (**Remove & exclude**, or the API). An exclusion matches the exact host name, case-insensitively, and every stage skips an excluded host in every project of that organization. Adding it as a target is refused. The Hosts page shows names that point at the same addresses as one host, so **Remove & exclude** offers to take those other names with it (otherwise the next name would simply take its place on the page). To drop a whole domain, put `-example.com` on a line in **Add targets** (or call `exclude_host` with `include_subdomains`): the name, every name under it (`www.example.com`, `a.b.example.com`, never `notexample.com`) and every target named like them are removed in every project of the organization you can write to, their running scans are stopped, and nothing under that domain is discovered, scanned or added again. A line such as `-com` or `-co.uk` is refused. **Delete host data** removes a host from one project only and leaves it free to be found again.
 
 ## The work conductor
 

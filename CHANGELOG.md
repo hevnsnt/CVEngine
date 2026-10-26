@@ -6,7 +6,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **"Remove & exclude" now removes the host you see.** The Hosts page shows names that point at the same addresses as one host, so excluding only the name on display removed that one name and the next name took its place: the host seemed not to go however often you clicked. The dialog now offers to remove and exclude those other names too (on by default, with the names listed), the same for **Delete host data**, and a failure shows inside the dialog instead of a toast that is gone in seconds. `exclude_host` and `delete_host` take `with_aliases`.
 - **A finding marked fixed (or an accepted risk) no longer keeps its host hot.** The host's colour, score, "why this host is fire" list, the exposed counts and the graph only skipped CVE matches the AI had ruled out; a match or scanner finding someone had closed still counted, so a host with every finding closed stayed "fire". Closed findings now drop out of all of them, and marking a finding fixed, accepted, reopened or in progress rescores its host at once (a bulk update rescores each host once) instead of at the next daily pass. A host closed before this change is corrected by the next rescore.
+
+### Added
+
+- **Exclude a whole domain: `-example.com` in Add targets.** A line starting with `-` excludes the domain and every name under it (`www.example.com`, `a.b.example.com`, never `notexample.com`) for the whole organization, removes their hosts and targets from every project you can write to (stopping the scans of those targets first) and keeps them out of every later discovery. A wildcard (`-*.example.com`) means the same. The result says what each line removed; a line that cannot be applied (no organization-level role, `-com`, an address) is listed and the rest of the paste still runs. The same is available as `include_subdomains` on `exclude_host` / `POST .../hosts/{host}/exclude`, and the dialog offers "Exclude everything under <target>" on any host. An existing exact exclusion is widened when you exclude the same name this way. Needs migration 0082.
 
 ## v1.2.1 (2026-10-26)
 

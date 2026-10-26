@@ -37,6 +37,7 @@ const projectCount = (text) => new Set(text.split('\n').map((l) => l.trim()).fil
 const normalizeTarget = (token) => {
   let t = (token || '').trim().replace(/^["'<>`,;]+|["'<>`,;]+$/g, '');
   if (!t) return '';
+  if (t.length > 1 && t.startsWith('-')) { const rest = normalizeTarget(t.slice(1)); return rest && !rest.startsWith('-') ? `-${rest}` : ''; }
   t = t.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
   if (!/^[0-9a-fA-F:.]+\/\d{1,3}$/.test(t)) {
     t = t.split(/[/?#]/)[0];
@@ -48,7 +49,14 @@ const normalizeTarget = (token) => {
   return t.replace(/^(\d{1,3}(\.\d{1,3}){3})\/32$/, '$1');
 };
 const stripLinks = (line) => line.replace(/\[[^\]]*\]\(([^)\s]*)\)/g, '$1');
-const countTokens = (lines) => new Set(lines.map((l) => stripLinks(l.split('#')[0])).join(' ').split(/[,\s;]+/).map(normalizeTarget).filter(Boolean)).size;
+const tokensOf = (lines) => new Set(lines.map((l) => stripLinks(l.split('#')[0])).join(' ').split(/[,\s;]+/).map(normalizeTarget).filter(Boolean));
+const countTokens = (lines) => [...tokensOf(lines)].filter((t) => !t.startsWith('-')).length;
+// "-example.com" lines exclude a domain (and everything under it) instead of adding a target
+const countExclusions = (text) => [...tokensOf(text.split('\n').filter((l) => !isOrgFormat(text) || !l.trim().startsWith('#')))].filter((t) => t.startsWith('-')).length;
+const countLabel = (text) => {
+  const n = countEntries(text), x = countExclusions(text);
+  return `${n} target${n === 1 ? '' : 's'}${x ? `, ${x} exclusion${x === 1 ? '' : 's'}` : ''}${isOrgFormat(text) ? ` across ${projectCount(text)} project${projectCount(text) === 1 ? '' : 's'}` : ''}`;
+};
 
 function csrf() {
   const fromCookie = document.cookie.split('; ').find((c) => c.startsWith('csrftoken='));
@@ -60,8 +68,8 @@ function build() {
   const form = el('form', 'dlg-body', null, { method: 'dialog' });
   const title = el('h2', '', 'Add targets', { id: 'dlg-title' });
   const lead = el('p', 'note', ALL
-    ? 'You are viewing all projects, so say which project each list belongs to: put #Project above each list of domains, IP addresses, CIDR blocks or ranges (optionally ##Organization first; if it does not exist your current organization is used). Missing projects are created if you are an admin of the organization.'
-    : 'Paste domains, IP addresses, CIDR blocks or ranges, one per line or separated by commas. To fill several projects at once, put #Project above each list (optionally ##Organization first; if it does not exist your current organization is used). Missing projects are created if you are an admin of the organization.');
+    ? 'You are viewing all projects, so say which project each list belongs to: put #Project above each list of domains, IP addresses, CIDR blocks or ranges (optionally ##Organization first; if it does not exist your current organization is used). Missing projects are created if you are an admin of the organization. Start a line with - to exclude a domain and everything under it for the whole organization (for example -example.com): its hosts and targets are removed and never scanned again.'
+    : 'Paste domains, IP addresses, CIDR blocks or ranges, one per line or separated by commas. To fill several projects at once, put #Project above each list (optionally ##Organization first; if it does not exist your current organization is used). Missing projects are created if you are an admin of the organization. Start a line with - to exclude a domain and everything under it for the whole organization (for example -example.com): its hosts and targets are removed and never scanned again.');
   const orgSel = el('select', '', null, { id: 'dlg-org', 'aria-label': 'Organization' });
   const projSel = el('select', '', null, { id: 'dlg-project', 'aria-label': 'Project' });
   const fillProjects = (orgSlug, keep) => {
@@ -84,7 +92,7 @@ function build() {
   projField.append(wrapSel(projSel));
   dest.append(orgField, projField);
   const area = el('textarea', 'dlg-area', null, { rows: '8', spellcheck: 'false', autocapitalize: 'none', 'aria-label': 'Targets',
-    placeholder: 'example.com\n203.0.113.10\n10.0.0.0/28\n\nor, for several projects:\n##Acme\n#Web\nexample.com\n#Network\n10.0.0.0/28' });
+    placeholder: 'example.com\n203.0.113.10\n10.0.0.0/28\n-not-ours.example.com   (exclude and remove)\n\nor, for several projects:\n##Acme\n#Web\nexample.com\n#Network\n10.0.0.0/28' });
   const tools = el('div', 'dlg-tools');
   const count = el('span', 'note', '0 targets');
   const file = el('input', '', null, { type: 'file', accept: '.txt,.csv,.list,text/plain', id: 'dlg-file', style: 'display:none' });
@@ -107,7 +115,7 @@ function build() {
   d.append(form);
   document.body.append(d);
 
-  area.addEventListener('input', () => { const n = countEntries(area.value); count.textContent = `${n} target${n === 1 ? '' : 's'}${isOrgFormat(area.value) ? ` across ${projectCount(area.value)} project${projectCount(area.value) === 1 ? '' : 's'}` : ''}`; });
+  area.addEventListener('input', () => { count.textContent = countLabel(area.value); });
   file.addEventListener('change', () => {
     const f = file.files[0];
     if (!f) return;
@@ -120,9 +128,9 @@ function build() {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     msg.style.display = 'none'; out.textContent = '';
-    if (!countEntries(area.value)) { msg.className = 'msg err'; msg.textContent = 'Paste at least one target.'; msg.style.display = 'block'; return; }
+    if (!countEntries(area.value) && !countExclusions(area.value)) { msg.className = 'msg err'; msg.textContent = 'Paste at least one target.'; msg.style.display = 'block'; return; }
     if (!projSel.value && !isOrgFormat(area.value)) { msg.className = 'msg err'; msg.textContent = 'Choose a project to add them to, or put #Project above each list.'; msg.style.display = 'block'; return; }
-    if (mode.value !== 'none' && !auth.checked) { msg.className = 'msg err'; msg.textContent = 'Please confirm you are authorized to test these targets.'; msg.style.display = 'block'; return; }
+    if (countEntries(area.value) && mode.value !== 'none' && !auth.checked) { msg.className = 'msg err'; msg.textContent = 'Please confirm you are authorized to test these targets.'; msg.style.display = 'block'; return; }
     go.disabled = true;
     // Big pastes can take a while on a busy server: say what is happening and how long it has been going
     const n = countEntries(area.value);
@@ -149,15 +157,18 @@ function build() {
       const existed = orgMode ? data.projects.reduce((n, p) => n + p.already_exists.length, 0) : data.already_exists.length;
       const bad = orgMode ? data.invalid.concat(...data.projects.map((p) => p.invalid)) : data.invalid;
       const destName = (PROJECTS.find((p) => p.slug === projSel.value) || {}).name;
-      const parts = [`${data.created} added${!orgMode && destName ? ` to ${destName}` : ''}`];
+      const excluded = orgMode ? [].concat(...data.projects.map((p) => p.excluded || [])) : (data.excluded || []);
+      const parts = [];
+      if (data.created || !excluded.length) parts.push(`${data.created} added${!orgMode && destName ? ` to ${destName}` : ''}`);
+      excluded.forEach((e) => parts.push(`${e.pattern} excluded (${e.hosts_removed} host${e.hosts_removed === 1 ? '' : 's'} and ${e.targets_removed} target${e.targets_removed === 1 ? '' : 's'} removed)`));
       if (orgMode && data.projects_created) parts.push(`${data.projects_created} project${data.projects_created === 1 ? '' : 's'} created`);
       if (existed) parts.push(`${existed} already existed`);
-      if (bad.length) parts.push(`${bad.length} not recognized`);
+      if (bad.length) parts.push(`${bad.length} not applied`);
       if (data.discovery_started) parts.push(`${data.discovery_started} queued for discovery, in order`);
       if (data.mode_note) parts.push(data.mode_note);
       const failed = orgMode ? data.projects.filter((p) => p.error) : [];
       if (orgMode && data.organization_note) parts.push(data.organization_note);
-      msg.className = `msg ${data.created && !failed.length ? 'ok' : 'err'}`;
+      msg.className = `msg ${(data.created || excluded.length) && !failed.length ? 'ok' : 'err'}`;
       msg.textContent = parts.join(', ') + '.';
       msg.style.display = 'block';
       if (failed.length) {
@@ -168,13 +179,13 @@ function build() {
       if (bad.length) {
         const list = el('ul', 'dlg-invalid');
         bad.slice(0, 20).forEach((i) => list.append(el('li', '', `${i.value}: ${i.error}`)));
-        out.append(el('p', 'note', 'Not recognized:'), list);
+        out.append(el('p', 'note', 'Not applied:'), list);
       }
-      if (data.scan_ids.length) {
+      if ((data.scan_ids || []).length) {
         const watch = el('a', 'btn sm', 'Watch it live', { href: `/cve/?follow=${data.scan_ids[0]}`, style: 'display:inline-flex;align-items:center;text-decoration:none;margin-top:10px' });
         out.append(watch);
       }
-      if (data.created) { area.value = ''; area.dispatchEvent(new Event('input')); document.dispatchEvent(new CustomEvent('cve:targets-added', { detail: data })); }
+      if (data.created || excluded.length) { area.value = ''; area.dispatchEvent(new Event('input')); document.dispatchEvent(new CustomEvent('cve:targets-added', { detail: data })); }
     } catch (err) {
       msg.className = 'msg err'; msg.textContent = err.message; msg.style.display = 'block';
     }

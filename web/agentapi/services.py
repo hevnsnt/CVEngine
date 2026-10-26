@@ -756,6 +756,9 @@ def normalize_target(token):
     t = (token or '').strip().strip('"\'<>`,;')
     if not t:
         return ''
+    if t.startswith('-') and len(t) > 1:  # "-example.com": exclude it (see _add_targets)
+        rest = normalize_target(t[1:])
+        return '-' + rest if rest and not rest.startswith('-') else ''
     if _SCHEME_RE.match(t):
         t = _SCHEME_RE.sub('', t, count=1)
     elif not _CIDR_LIKE_RE.match(t) and '/' in t:
@@ -911,7 +914,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     scan_ids = []
     for pname, entries in groups:
         res = {'project': pname, 'slug': None, 'project_created': False, 'received': len(entries), 'created': 0,
-               'already_exists': [], 'invalid': [], 'error': None}
+               'already_exists': [], 'invalid': [], 'excluded': [], 'error': None}
         results.append(res)
         try:
             project = Project.objects.filter(org=org, name__iexact=pname).first()
@@ -933,7 +936,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             if not entries:
                 continue
             added = _add_targets(ctx, project.slug, entries, False, None)
-            res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'])
+            res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
             if discover and added['domains']:
                 scan_ids += [scan.id for scan in _start_discoveries(added['domains'], used, project.id)]
         except ApiError as exc:
@@ -949,6 +952,23 @@ def add_targets(ctx, slug, values, discover=True, mode=None):
     return out
 
 
+def _exclude_patterns(ctx, slug, patterns):
+    """Apply the ``-example.com`` lines of an Add targets paste: each excludes the domain and everything under it for the whole
+    organization and removes its hosts and targets. ``(done, refused)``: what each removed, and the lines that could not be applied
+    (no organization-level role, not a domain name ...)."""
+    from agentapi import host_manage
+    done, refused = [], []
+    for pattern in dict.fromkeys(patterns):
+        try:
+            r = host_manage.exclude_host(ctx, slug, pattern, reason='Excluded from Add targets', include_subdomains=True)
+        except ApiError as exc:
+            refused.append({'value': '-' + pattern, 'error': exc.message})
+            continue
+        done.append({'pattern': r['host'], 'hosts_removed': r['hosts_removed'], 'targets_removed': r['targets_removed'],
+                     'findings_removed': r['findings_removed'], 'projects_affected': r['projects_affected']})
+    return done, refused
+
+
 def _add_targets(ctx, slug, values, discover, mode):
     """Add many targets at once. ``values`` is a list or pasted text. Each entry is validated on its own, so one
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
@@ -958,6 +978,12 @@ def _add_targets(ctx, slug, values, discover, mode):
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
     if not entries:
         raise ApiError(400, 'no targets found in the input')
+    patterns = [e[1:] for e in entries if e.startswith('-')]  # "-example.com": exclude that domain and everything under it
+    entries = [e for e in entries if not e.startswith('-')]
+    excluded, refused = _exclude_patterns(ctx, slug, patterns)  # first, so nothing added below can land inside what was just excluded
+    if not entries:
+        return {'received': len(patterns), 'created': 0, 'created_names': [], 'domains': [], 'already_exists': [], 'invalid': refused,
+                'excluded': excluded, 'discovery_started': 0, 'scan_ids': [], 'mode': mode, 'mode_note': None}
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
     names, domain_names, invalid, seen = [], [], [], set()
@@ -979,9 +1005,10 @@ def _add_targets(ctx, slug, values, discover, mode):
             names.append(name)
             if kind == DOMAIN:
                 domain_names.append(name)
-    excluded = []
-    created, existing = _create_domains(project, names, excluded=excluded)
-    invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in excluded]
+    skipped = []
+    created, existing = _create_domains(project, names, excluded=skipped)
+    invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
+    invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
         from cveFeed.tasks import watch_certificate_transparency
         names_wanted = set(domain_names)
@@ -992,7 +1019,7 @@ def _add_targets(ctx, slug, values, discover, mode):
     if discover and created:
         scan_ids = [scan.id for scan in _start_discoveries(created, used, project.id)]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
-            'domains': created, 'already_exists': existing, 'invalid': invalid,
+            'domains': created, 'already_exists': existing, 'invalid': invalid, 'excluded': excluded,
             'discovery_started': len(scan_ids), 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
 
 

@@ -53,7 +53,7 @@ TOOLS = [
         {'project': SLUG, 'value': {'type': 'string'}, 'description': {'type': 'string'},
          'discover': {'type': 'boolean', 'description': 'also start live bbot discovery'}}, ['project', 'value']),
      lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover'))), True),
-    ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive.', _schema(
+    ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive. A line starting with - (for example -example.com) EXCLUDES that domain and every name under it for the whole organization and removes its hosts and targets (needs an organization-level role).', _schema(
         {'project': SLUG, 'targets': {'type': 'array', 'items': {'type': 'string'}}, 'discover': {'type': 'boolean'},
          'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']}}, ['project', 'targets']),
      lambda c, a: svc.add_targets(c, a.get('project'), a.get('targets'), bool(a.get('discover', True)), a.get('mode')), True),
@@ -125,12 +125,14 @@ TOOLS = [
     ('pin_host', 'Pin or unpin one stored host against future automatic archival.',
      _schema({'project': SLUG, 'host': {'type': 'string'}, 'pinned': {'type': 'boolean'}}, ['project', 'host', 'pinned']),
      lambda c, a: hosts.host_archive(c, a.get('project'), a['host'], 'pin', pinned=a['pinned']), True),
-    ('delete_host', 'Delete one host\'s data (findings, CVE matches, endpoints, state, asset information) from THIS project only. The host can be rediscovered by a later scan. Exact name, irreversible.', _schema(
-        {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}}, ['project', 'host']),
-     lambda c, a: hosts.delete_host(c, a.get('project'), a['host']), True),
-    ('exclude_host', 'Remove a host from EVERY project of the organization and never scan it again anywhere in the organization. Exact name only (never a suffix or subdomain). Needs an organization-level role. Irreversible without an org admin lifting the exclusion.', _schema(
-        {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'reason': {'type': 'string'}}, ['project', 'host']),
-     lambda c, a: hosts.exclude_host(c, a.get('project'), a['host'], a.get('reason', '')), True),
+    ('delete_host', 'Delete one host\'s data (findings, CVE matches, endpoints, state, asset information) from THIS project only. The host can be rediscovered by a later scan. Exact name, irreversible. with_aliases also deletes the other names on the same addresses (the Hosts page shows them as one host).', _schema(
+        {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'with_aliases': {'type': 'boolean'}}, ['project', 'host']),
+     lambda c, a: hosts.delete_host(c, a.get('project'), a['host'], with_aliases=bool(a.get('with_aliases'))), True),
+    ('exclude_host', 'Remove a host from EVERY project of the organization and never scan it again anywhere in the organization. Exact name unless include_subdomains is true (then the domain, every name under it and the targets named like them are removed). with_aliases also takes the other names on the same addresses (the Hosts page shows them as one host, so excluding only the name on display makes the next one appear). Needs an organization-level role. Irreversible without an org admin lifting the exclusion.', _schema(
+        {'project': SLUG, 'host': {'type': 'string', 'description': 'host name, or a domain like example.com with include_subdomains'}, 'reason': {'type': 'string'},
+         'include_subdomains': {'type': 'boolean'}, 'with_aliases': {'type': 'boolean'}}, ['project', 'host']),
+     lambda c, a: hosts.exclude_host(c, a.get('project'), a['host'], a.get('reason', ''), include_subdomains=bool(a.get('include_subdomains')),
+                                     with_aliases=bool(a.get('with_aliases'))), True),
     ('list_exclusions', 'Hosts excluded for the project\'s organization (never scanned again).', _schema({'project': SLUG}, ['project']),
      lambda c, a: hosts.list_exclusions(c, a.get('project')), False),
     ('remove_exclusion', 'Lift an exclusion so the organization can scan the host again (organization admin only).', _schema(
