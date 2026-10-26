@@ -4,6 +4,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Fixed
+
+- **Changing the update branch moves the server to it.** Choosing another branch in Settings > Updates and approving used to fail with "not on the branch checked out on this server". The host script now fetches that branch and checks it out (an upgrade only: the branch must contain the installed commit, the local branch must not hold unpushed commits, the checkout must be clean and on a branch), rebuilds, and returns to the previous branch and commit if the build fails before the migration. When it cannot, nothing moves and Settings > Updates says why.
+
+- **The in-app updater keeps the Compose layout the stack runs with.** It recreated the containers from `docker-compose.yml` alone, so on a host with an overlay (a host proxy on port 443, memory limits) and its own env file the proxy could not bind its port and the site went down. It now reads `CVENGINE_COMPOSE_FILES`, `CVENGINE_COMPOSE_ENV_FILE` and `CVENGINE_COMPOSE_PROJECT` (environment or `.env`, as `update.sh` does), otherwise uses the files, env file and project the running `web` container was started with, and stops with the reason (approval kept) when the checkout holds an overlay nothing says to use. After the restart it checks that every service is running and reports a failed update when one is not. `scripts/update.sh` passes its layout on when it installs the watcher.
+
 ### Added
 
 - **Settings > Updates says what will happen and how long it takes.** After Approve it shows each step (approved, the host picks it up, scans pause and drain, files update, services rebuild, scanning resumes) with what it is waiting on, how long it usually takes and the time since approval, refreshing on its own. When no host updater is reporting it says so and shows the one command to run on the server, with a Copy button; the orange bar says the same after 20 seconds instead of waiting quietly. `scripts/install-updater.sh` now starts the watcher straight away, and `scripts/apply-update.sh` rebuilds when the files are already at the approved commit (after a manual `git pull`) but the running build is older, instead of declaring the update done.

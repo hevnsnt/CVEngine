@@ -75,13 +75,13 @@ CVENGINE_COMPOSE_ENV_FILE=.env.production
 CVENGINE_COMPOSE_PROJECT=cvengine
 ```
 
-For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. The updater warns when the running containers were started with different files.
+For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. `update.sh` warns when the running containers were started with different files. `apply-update.sh` (the in-app updater) reads the same three settings, and without them it recreates the stack with the files, env file and project the running `web` container was started with, so a host with an overlay needs no setting. It refuses, keeps the approval and says what to set when the checkout holds an overlay (an untracked `docker-compose.*.yml`) that nothing says to use, or when the running stack came from files outside the checkout. A restart that leaves a service created but not running (a published port that is already taken) is a failed update, not a finished one.
 
 ## Branches and releases
 
 - `master` holds released versions only. Each release is tagged (`v1.0`, `v1.1`, ...); pushing the tag, or running the Release workflow by hand, publishes the GitHub release with that version's section of the [changelog](../CHANGELOG.md) as its notes (`.github/workflows/release.yml`). A patch such as `v1.0.1` keeps the notes of `v1.0` and adds its own short section at the end. The tag must match `web/.version`.
 - `develop` is the next version in progress (`web/.version` reads the next version with a `-dev` suffix, such as `v1.2-dev` once `v1.1` is released). Changes go to `develop` by pull request, and `develop` is merged into `master` for a release.
-- Keep an installation on `master` (the default update source). Point it at `develop` under Settings, Updates, Update source only on a test server.
+- Keep an installation on `master` (the default update source); `update.sh` and automatic deployment only work on `master`. Use `develop` only on a test server. Approving an update from another branch than the one checked out on the server (the branch set under Settings, Updates, Update source) makes the host script move its checkout to that branch first, as long as it is an upgrade: the branch must contain the installed commit and the local branch must not hold commits that are not on `origin`. A branch that does not exist, a detached checkout, a dirty checkout and a would-be downgrade are refused with the reason shown in Settings, Updates, and nothing moves. Migrations are never rolled back, which is why going back to an older branch is not done for you.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
 
