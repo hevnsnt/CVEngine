@@ -142,3 +142,33 @@ class PatchLetterVersionTests(TestCase):
 		from cveFeed.correlation import parse_version, version_in_range
 		self.assertTrue(version_in_range(parse_version('2.3.9'), ranges[0]))
 		self.assertFalse(version_in_range(parse_version('2.4.0'), ranges[0]))
+
+
+class MalformedAffectedTests(CorrelationPerfTests):
+	def test_a_malformed_affected_entry_does_not_stop_correlation_of_the_rest(self):
+		self._host('web.perf.test', self._scan(), tech='nginx')
+		CVEEntry.objects.create(cve_id='CVE-2099-2', published_at=timezone.now(),
+			affected=['junk', None, {'product': 'nginx', 'ranges': 'not-a-list'}, {'product': 'nginx', 'ranges': [None, 5, {'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
+		correlation._INDEX_CACHE.update(key=None, value=None)
+		out = correlate_cves()
+		self.assertEqual(out['subdomains'], 1)
+		self.assertTrue(CVEMatch.objects.filter(cve_entry__cve_id='CVE-2099-1').exists())
+
+	def test_from_api_stores_clean_shapes(self):
+		obj, _ = CVEEntry.from_api({'id': 'CVE-2099-3', 'severity': [], 'exploitation': 'x', 'affected': 'nope', 'references': {}, 'sources': 3})
+		self.assertEqual((obj.affected, obj.references, obj.sources), ([], [], []))
+		obj, _ = CVEEntry.from_api({'id': 'CVE-2099-4', 'affected': [{'product': 'p', 'ranges': [1, {'fixed': '2'}]}, 'x']})
+		self.assertEqual(obj.affected, [{'product': 'p', 'ranges': [{'fixed': '2'}]}])
+
+
+class StrongestSightingTests(CorrelationPerfTests):
+	def test_the_strongest_of_two_sightings_is_kept_not_the_last(self):
+		sub = self._host('web.perf.test', self._scan(), tech='nginx')
+		base = dict(cve_entry_id=self.cve.id, subdomain_id=sub.id, source='correlation', matched_product='nginx',
+					confidence=0.5, scan_history_id=sub.scan_history_id, distro_status='', distro_fixed_version='', evidence={})
+		rows = [{**base, 'matched_version': '1.18.0', 'version_in_range': True},
+				{**base, 'matched_version': '1.25.0', 'version_in_range': False}]
+		for ordered in (rows, rows[::-1]):
+			CVEMatch.objects.all().delete()
+			correlation.save_matches(ordered)
+			self.assertTrue(CVEMatch.objects.get().version_in_range)

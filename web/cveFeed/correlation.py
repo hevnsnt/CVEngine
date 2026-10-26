@@ -257,6 +257,26 @@ class ProductIndex(dict):
         self.memo = {}
 
 
+MAX_AFFECTED_ITEMS = 500
+MAX_RANGES_PER_ITEM = 100
+
+
+def clean_affected(value):
+    """The dict entries of a CVE's ``affected`` list, each with a list of dict ranges. A third-party feed decides this shape, and one
+    malformed entry (a string, a null, ranges that are not a list) must not stop correlation for every CVE after it."""
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value[:MAX_AFFECTED_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        ranges = item.get("ranges")
+        if ranges is not None:
+            item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
+        out.append(item)
+    return out
+
+
 def build_product_index(cves):
     """Map a normalized product token -> set of CVEEntry ids, for fast lookup.
 
@@ -504,7 +524,7 @@ def invalid_identity_reason(match):
     if (match.template_result == 'vulnerable' or match.distro_status == 'vulnerable'
             or match.version_in_range is True):
         return ''
-    affected = match.cve_entry.affected or []
+    affected = clean_affected(match.cve_entry.affected)
     if not any(isinstance(item, dict) and affected_product_tokens(item) for item in affected):
         return ''
     token = _norm(match.matched_product)
@@ -575,6 +595,13 @@ _MATCH_FIELDS = ("matched_version", "version_in_range", "confidence", "scan_hist
                  "evidence")
 
 
+def _row_strength(row):
+    """Orders sightings of one match: hard evidence (a template hit, a distribution tracker), then a version inside the range, then an
+    unknown range, then outside it."""
+    return (row.get("template_result") == "vulnerable" or row.get("distro_status") == "vulnerable",
+            row.get("version_in_range") is True, row.get("version_in_range") is None)
+
+
 def save_matches(rows, covered=None):
     """Upsert CVEMatch rows in two statements: bulk_create(ignore_conflicts) for the new ones, bulk_update for the
     existing ones whose evidence changed. Remediation fields are never touched. When the version or its range result
@@ -589,7 +616,11 @@ def save_matches(rows, covered=None):
 
     from cveFeed.models import CVEMatch, MatchVerdict
 
-    unique = {(r["cve_entry_id"], r["subdomain_id"], r["source"], r["matched_product"]): r for r in rows}
+    unique = {}
+    for r in rows:  # two sightings of one product on one host (two ports, two banners): keep the strongest evidence, not the last
+        key = (r["cve_entry_id"], r["subdomain_id"], r["source"], r["matched_product"])
+        if key not in unique or _row_strength(r) >= _row_strength(unique[key]):
+            unique[key] = r
     touched = set()  # hosts whose verdict was reset or whose match was closed: their score must follow
     if covered:
         touched |= close_stale(unique, covered)
@@ -765,6 +796,8 @@ def cve_pool(cve_limit=None):
     if cve_limit:
         qs = qs[:cve_limit]
     cve_by_id = {c.id: c for c in qs}
+    for c in cve_by_id.values():
+        c.affected = clean_affected(c.affected)
     value = (cve_by_id, build_product_index(cve_by_id.values()))
     _INDEX_CACHE.update(key=key, value=value)
     return value
