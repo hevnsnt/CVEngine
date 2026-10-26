@@ -2,6 +2,8 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
 ## v1.2.0 (2026-10-26)
 
 Update with the in-app updater (Settings > Updates) or `make up`. A release is only cut after an upgrade rehearsal: CI installs the previous version, seeds it with data (duplicate IP addresses included), updates it with the real update scripts, plain and behind a host proxy, and checks the site, the workers, the migrations and the data. This release adds database migrations; the update applies them and rolls back if one fails.
