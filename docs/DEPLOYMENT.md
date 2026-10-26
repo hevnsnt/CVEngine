@@ -48,7 +48,7 @@ cvENGINE runs no model itself. In **Settings, AI model**, choose Anthropic, Open
 
 ## Backups
 
-Back up the database and the secret file together. Stored secrets are encrypted with a key derived from `web/secret`, so a restored database needs the same file. Keep both private (mode 0600).
+Back up the database, `.env` and the secret file together. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same files. Keep both private (mode 0600).
 
 ```bash
 docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > cvengine-$(date +%F).sql.gz

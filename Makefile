@@ -45,6 +45,9 @@ admin:		## Create the admin account; its password is generated and printed once 
 admin-password:	## Lost the admin password? Generate a new one and print it once.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py create_admin --reset
 
+rotate-field-key:	## Rotate the key that encrypts stored API keys and webhook URLs (see docs/CONFIGURATION.md).
+	./scripts/rotate-field-key.sh
+
 username: check-secrets	## Create an admin account of your own choosing (asks for the password; use after make up).
 ifeq ($(isNonInteractive), true)
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py createsuperuser --username ${DJANGO_SUPERUSER_USERNAME} --email ${DJANGO_SUPERUSER_EMAIL} --noinput
