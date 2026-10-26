@@ -1351,3 +1351,12 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (max-width:999px){#c-map .map{flex:none;height:clamp(200px,60vw,340px)}}
 .map[data-narrow="1"] .hx .hx-why{display:none!important}
 .map[data-lines="5"] .hx-d:nth-child(n+6){display:none!important}
+/* My account: display and alert preferences */
+.prefs{margin-top:14px}
+.prefs h2{margin-bottom:2px}
+.pref-row{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 0;border-top:1px solid var(--line)}
+.prefs .note+.pref-row{margin-top:10px}
+.pref-row>div:first-child{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 280px}
+.pref-row .note{font-size:13px}
+.pref-row .theme-choice{padding:0}
+.prefs .btn[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}

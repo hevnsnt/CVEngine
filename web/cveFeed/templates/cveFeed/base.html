@@ -76,14 +76,6 @@
       {% if is_admin %}<a data-nav="Administration" href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
       {% if request.user.is_superuser %}<a data-nav="{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}" href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
       <a data-nav="Settings" href="{% url 'cve_settings' %}"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
-      <button type="button" data-notify-toggle aria-pressed="false"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg><span>Desktop notifications: off</span></button>
-      <div class="theme-choice" role="group" aria-label="Theme">
-        <span>Theme</span>
-        <button type="button" data-theme-choice="light" aria-pressed="true">Light</button>
-        <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
-        <button type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
-      </div>
-      <button type="button" data-tz-toggle aria-pressed="false"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg><span>Times: your time zone</span></button>
       <button type="button" data-keys-help><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>Keyboard shortcuts</button>
       <a data-nav="About" href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>About</a>
       <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
