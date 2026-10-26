@@ -84,3 +84,12 @@ For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. T
 - Keep an installation on `master` (the default update source). Point it at `develop` under Settings, Updates, Update source only on a test server.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
+
+## An approved update that never starts
+
+The host applies an approved update from a cron entry (`scripts/install-updater.sh`, every 5 minutes). The bar shows "Waiting for the host to start the rebuild" until it does. If that lasts more than about 12 minutes:
+
+1. `crontab -l | grep cvengine` on the host: no line means the updater is not installed; run `scripts/install-updater.sh`.
+2. `tail -30 web/.update-log`: the script writes why it refused (local changes to tracked files, an unreachable origin, a commit that is not on the branch) or which command stopped it.
+3. `scripts/apply-update.sh` run by hand prints the same lines to the terminal; run it as the user that owns the checkout and may run Docker.
+4. `git status --short` in the checkout: a modified tracked file (other than `.env`) blocks the update until it is committed or stashed.

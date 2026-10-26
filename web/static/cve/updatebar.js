@@ -8,6 +8,7 @@ const el = (tag, cls, text) => {
 };
 
 const POLL_MS = 4000;
+const HOST_PATIENCE_MS = 12 * 60 * 1000; // cron runs every 5 minutes: two missed runs and a bit more
 const STEPS = ["Pause", "Drain scans", "Rebuild", "Resume"];
 
 // After approval an orange bar sits at the top of every page and says what the update is doing. The page is greyed out only while
@@ -94,7 +95,17 @@ function watchUpdate(first) {
       grey(false);
       const n = now.scans_running != null ? now.scans_running : await scansNow();
       if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start meanwhile.");
-      else paint(1, `Updating to ${now.latest}`, "Waiting for the host to start the rebuild.");
+      else {
+        const waited = now.approved_at ? Date.now() - Date.parse(now.approved_at) : 0;
+        if (now.phase_detail) paint(1, `Updating to ${now.latest}`, now.phase_detail);
+        else if (waited > HOST_PATIENCE_MS)
+          paint(
+            1,
+            `Updating to ${now.latest}`,
+            "The host has not started the rebuild yet. It checks every 5 minutes from cron (scripts/install-updater.sh); if this stays, open Details, or run scripts/apply-update.sh on the host and read what it prints."
+          );
+        else paint(1, `Updating to ${now.latest}`, "Waiting for the host to start the rebuild.");
+      }
     }
     setTimeout(tick, POLL_MS);
   };

@@ -36,6 +36,8 @@ Fixes from an adversarial review of the whole code base.
 
 ### Fixed
 
+- **An approved update that the host cannot start now says why, instead of waiting for ever.** The host script ran from cron with its output discarded, so a checkout with local changes, an unreachable origin, or any command that failed early ended the run without a word and the orange bar said "Waiting for the host to start the rebuild" indefinitely. Now a dirty checkout shows "The update did not finish" with the files named, an unreachable origin shows its reason, any other stop writes the failing line to the update log, and after 12 minutes without a start the bar tells you to check the cron entry and run `scripts/apply-update.sh` by hand.
+
 Also from the review.
 
 - **Targets and IP data belong to an organization.** A domain name was unique across the whole instance, so one organization could find out which names another tracks (by being told "already exists") or block them by adding the name first, and an IP address was one shared row, so the banners and service data one organization's scans found were readable through another's hosts. Now the same name can be tracked by several organizations, each with its own separate record; within one organization a name is still held once across its projects. IP rows and their ports are kept per organization, and nmap's freshness and claims are per project. A migration gives each existing row to its organization and, where two organizations shared an address, splits it into a copy for each (with copies of the ports).
