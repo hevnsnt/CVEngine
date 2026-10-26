@@ -44,7 +44,7 @@
 {% if projects %}{{ projects|json_script:"switch-projects" }}{{ orgs|json_script:"switch-orgs" }}{% endif %}
 <div class="app">
 <aside class="rail" id="rail" aria-label="Primary">
-  <a class="brand" href="https://fieldcraftcyber.com/" target="_blank" rel="noopener noreferrer" aria-label="CVEngine, by FieldCraft Cyber (opens fieldcraftcyber.com in a new tab)"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+  <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
   <nav class="rail-nav" aria-label="Sections">
     <p class="rail-h">Monitor</p>
     <a data-nav="Live" href="{% url 'cve_dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Live</a>
