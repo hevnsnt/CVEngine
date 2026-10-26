@@ -60,6 +60,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_WAFW00F` | `1` | Set to `0` to stop naming the firewall in front of each web host with [wafw00f](https://github.com/EnableSecurity/wafw00f) (a few requests per host, some with an attack-looking string, so a WAF may log them). The product it names is stored as a technology of the host. |
 | `CVENGINE_WAFW00F_TIMEOUT`, `CVENGINE_WAFW00F_MAX_HOSTS`, `CVENGINE_TTL_WAFW00F` | `60`, `25`, `168` | Seconds allowed per host, hosts fingerprinted per scan, and hours before a host is fingerprinted again. |
 | `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts fingerprinted as Node.js or Express for CVE-2026-111497. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
+| `CVENGINE_NODE2SHELL_SCOPE` | `runtimes` | `runtimes` checks hosts a fingerprint names as Node.js (and its frameworks), Bun or Envoy. `all` checks every web host the scan found, for what a name cannot show: a Python service using Brotli, a container base image, a sidecar that hides what it is. Still limited by `CVENGINE_NODE2SHELL_MAX_HOSTS`. |
 | `CVENGINE_NODE2SHELL_TIMEOUT`, `CVENGINE_NODE2SHELL_MAX_HOSTS`, `CVENGINE_TTL_NODE2SHELL` | `90`, `5`, `24` | Seconds allowed per host, hosts checked per scan, and hours before a host is checked again. |
 
 ## AI limits

@@ -1,7 +1,8 @@
-"""Detection for CVE-2026-111497 ("node2shell"), a Node.js HTTP request-handling vulnerability. Uses Assetnote's
-own read-only detector (``cveFeed.vendor.node2shell``, MIT licensed, vendored with its own provenance header,
-https://github.com/assetnote/node2shell-scanner), run only against a host a technology row or a route fingerprint
-already names Node.js or Express.
+"""Detection for CVE-2026-111497 ("node2shell", also "HTTP2Shell"), a flaw in the Brotli decoder that Node.js, Bun and Envoy compile into
+their runtimes. Uses Assetnote's own read-only detector (``cveFeed.vendor.node2shell``, MIT licensed, vendored with its own provenance header,
+https://github.com/assetnote/node2shell-scanner). By default it runs against hosts a technology row or a route fingerprint already names as one of
+those runtimes (Node.js and its frameworks, Bun, Envoy); ``CVENGINE_NODE2SHELL_SCOPE=all`` runs it against every web host, for the cases a name
+cannot show (a Python service using Brotli, a container base image, a sidecar that hides what it is).
 
 This check's network footprint is much larger than every other check in the pipeline: alongside a few small
 requests it uploads one Brotli-encoded body, about 23 MB on the wire, to see whether the target's HTTP handling
@@ -21,7 +22,9 @@ SERVICE = 'node2shell'
 CVE_ID = 'CVE-2026-111497'
 DEFAULT_TIMEOUT = 90
 DEFAULT_MAX_HOSTS = 5
-NODE_NAME_RE = re.compile(r'^(express|node\.?js)', re.I)
+# The decoder is compiled into the runtime, so the host is a candidate when anything names a runtime that carries it: Node.js and what runs on it,
+# Bun, and Envoy (which also fronts Istio and other service-mesh sidecars). Node almost never discloses its version, so the name is all there is.
+NODE_NAME_RE = re.compile(r'^(express|node\.?js|bun|envoy|istio|next\.?js|nuxt|nest\.?js|fastify|koa|hapi|sails|meteor|remix|svelte-?kit|strapi)\b', re.I)
 
 
 def enabled():
@@ -35,6 +38,13 @@ def check_timeout():
         return DEFAULT_TIMEOUT
 
 
+def scope():
+    """``runtimes`` (the default): only hosts a technology or route fingerprint names as a runtime that carries the decoder. ``all``: every web host
+    this scan found, for the cases a fingerprint cannot see (a Python service using Brotli, a container base image, a sidecar that hides its name).
+    Bounded by ``CVENGINE_NODE2SHELL_MAX_HOSTS`` either way."""
+    return 'all' if os.environ.get('CVENGINE_NODE2SHELL_SCOPE', 'runtimes').strip().lower() == 'all' else 'runtimes'
+
+
 def max_hosts():
     try:
         return max(1, int(os.environ.get('CVENGINE_NODE2SHELL_MAX_HOSTS', DEFAULT_MAX_HOSTS)))
@@ -43,8 +53,8 @@ def max_hosts():
 
 
 def node_sites(scan):
-    """``[(Subdomain, base URL)]`` for this scan's hosts a technology row or a route fingerprint already names
-    Node.js or Express, excluded and blocked names already removed (the same target list every stage uses)."""
+    """``[(Subdomain, base URL)]`` for this scan's hosts a technology row or a route fingerprint already names as a runtime that carries
+    the Brotli decoder (or every web host, in the ``all`` scope), excluded and blocked names already removed (the same target list every stage uses)."""
     from cveFeed.models import RouteAuth
     from cveFeed.nuclei_scan import scan_targets
     from startScan.models import Subdomain
@@ -52,9 +62,12 @@ def node_sites(scan):
     subs = {s.name: s for s in Subdomain.objects.filter(scan_history=scan, name__in=allowed)}
     if not subs:
         return []
-    names = {n for n, s in subs.items() if any(NODE_NAME_RE.match(t.name or '') for t in s.technologies.all())}
+    if scope() == 'all':
+        names = {n for n, s in subs.items() if s.http_status}
+    else:
+        names = {n for n, s in subs.items() if any(NODE_NAME_RE.match(t.name or '') for t in s.technologies.all())}
     routes = RouteAuth.objects.filter(project_id=scan.domain.project_id, host__in=list(subs), retired_at__isnull=True)
-    for host, evidence in routes.values_list('host', 'evidence'):
+    for host, evidence in routes.values_list('host', 'evidence') if scope() == 'runtimes' else ():
         found = [str(n) for n in (evidence or {}).get('fingerprint_names') or []]
         if any(NODE_NAME_RE.match(n) for n in found):
             names.add(host)
@@ -95,7 +108,7 @@ def run_for_scan(scan_id, checker=run_check, force=False):
     todo = [(s, u) for s, u in sites if s.name not in covered][:max_hosts()]
     if not todo:
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered)}
-    running = activity.log('run_check', f'Checking {len(todo)} Node.js host(s) of {domain.name} for {CVE_ID} '
+    running = activity.log('run_check', f'Checking {len(todo)} host(s) of {domain.name} for {CVE_ID} '
                            '(about 23 MB uploaded per host; read-only, no credential sent)',
                            project=project, status='running', scan_id=scan.id)
     vulnerable = errors = 0
