@@ -744,7 +744,7 @@ def _error_diagnostic(error, stage, group, provider=None, claim=None):
             'finding_ids': [row.pk for row, _ in group][:20], 'provider': name, 'model': model,
             'attempt_id': getattr(claim, 'pk', None), 'outcome': 'retry_scheduled',
             'action': 'Check AI provider settings and retry; share this diagnostic without credentials.'}
-    for key in ('http_status', 'stop_reason', 'output_length', 'digest'):
+    for key in ('http_status', 'stop_reason', 'output_length', 'digest', 'reason', 'attempts'):
         value = getattr(error, key, None)
         if value is not None:
             data[key] = value
