@@ -155,8 +155,10 @@ CONFIRM_SYSTEM_PROMPT = (
 
 class AIProviderError(Exception):
 	def __init__(self, message, *, category='provider_error', http_status=None, stop_reason=None,
-				 output_length=None, digest=None):
+				 output_length=None, digest=None, reason=None, attempts=None):
 		super().__init__(message)
+		self.reason = reason  # why a reply failed validation: fixed wording and sanitized key names, never reply text
+		self.attempts = attempts
 		self.category = category
 		self.http_status = http_status
 		self.stop_reason = stop_reason
@@ -506,10 +508,15 @@ def _triage_text(value, limit):
 	return clean_text(value, limit) if isinstance(value, str) else None
 
 
-def parse_triage(text):
-	"""Extract and validate a triage answer from a model reply: the dict of TRIAGE_KEYS, or None when it is unusable (not JSON,
-	an unknown classification, a severity step outside -1..1, an unknown key, a malformed step). Pure: no Django. The caller
-	stores None as needs_validation, so a bad answer never confirms and never clears a finding."""
+def _key_names(keys):
+	"""Key names a reply used, for a reason: letters, digits and underscores only, a few of them, so a reply cannot smuggle text through."""
+	names = sorted({re.sub(r'[^A-Za-z0-9_]', '', str(k))[:30] for k in keys})
+	return ', '.join(n for n in names if n)[:120] or 'unnamed'
+
+
+def validate_triage(text):
+	"""Validate a triage answer from a model reply. Returns (parsed, reason): the dict of TRIAGE_KEYS and '', or None and why the reply is
+	unusable, in words that can be told back to the model (the reason is fixed wording plus sanitized key names, never reply text). Pure."""
 	decoder = json.JSONDecoder()
 	objects = []
 	for match in re.finditer(r'\{', text or ''):
@@ -519,36 +526,49 @@ def parse_triage(text):
 			continue
 		if isinstance(candidate, dict) and 'classification' in candidate:
 			objects.append(candidate)
+	if not objects:
+		return None, 'the reply has no JSON object with a "classification" key'
 	if len(objects) != 1:
-		return None
+		return None, 'the reply has more than one JSON object with a "classification" key; reply with exactly one'
 	obj = objects[0]
-	if not isinstance(obj, dict) or set(obj) - TRIAGE_KEYS:
-		return None
+	extra = set(obj) - TRIAGE_KEYS
+	if extra:
+		return None, f'unknown key(s): {_key_names(extra)}; the only keys allowed are {", ".join(sorted(TRIAGE_KEYS))}'
 	classification = str(obj.get('classification', '')).strip().lower()
 	if classification not in TRIAGE_CLASSIFICATIONS:
-		return None
+		return None, f'"classification" must be exactly one of: {", ".join(TRIAGE_CLASSIFICATIONS)}'
 	adjust = obj.get('severity_adjust', 0)
 	if isinstance(adjust, bool) or not isinstance(adjust, int) or not -1 <= adjust <= 1:
-		return None
+		return None, '"severity_adjust" must be the integer -1, 0 or 1 (a number, not text)'
 	out = {'classification': classification, 'severity_adjust': adjust}
 	for key, cap in TRIAGE_CAPS.items():
 		value = obj.get(key, '')
 		value = _triage_text(value, cap) if value is not None else ''
 		if value is None:
-			return None
+			return None, f'"{key}" must be a string of at most {cap} characters'
 		out[key] = value
 	steps = obj.get('validation_steps', [])
 	if not isinstance(steps, list) or len(steps) > 5:
-		return None
+		return None, '"validation_steps" must be a list of at most 5 objects'
 	out['validation_steps'] = []
-	for step in steps:
-		if not isinstance(step, dict) or set(step) - {'kind', 'note'} or str(step.get('kind', '')).lower() not in TRIAGE_STEP_KINDS:
-			return None
+	for index, step in enumerate(steps, 1):
+		if not isinstance(step, dict):
+			return None, f'validation_steps item {index} must be an object with "kind" and "note"'
+		if set(step) - {'kind', 'note'}:
+			return None, f'validation_steps item {index} has unknown key(s): {_key_names(set(step) - {"kind", "note"})}; only "kind" and "note" are allowed'
+		if str(step.get('kind', '')).lower() not in TRIAGE_STEP_KINDS:
+			return None, f'validation_steps item {index}: "kind" must be one of: {", ".join(TRIAGE_STEP_KINDS)}'
 		note = _triage_text(step.get('note', ''), 200)
 		if note is None:
-			return None
+			return None, f'validation_steps item {index}: "note" must be a string of at most 200 characters'
 		out['validation_steps'].append({'kind': str(step['kind']).lower(), 'note': note})
-	return out
+	return out, ''
+
+
+def parse_triage(text):
+	"""The parsed triage answer, or None when the reply is unusable (see validate_triage for why). Pure: no Django. The caller stores None
+	as needs_validation, so a bad answer never confirms and never clears a finding."""
+	return validate_triage(text)[0]
 
 
 def _triage_clean(value, depth=0):
@@ -572,18 +592,38 @@ def build_triage_prompt(kind, payload):
 	return f'Finding kind: {clean_text(kind, 20, strict=True)}\n' + untrusted_block('FINDING', _triage_clean(payload))
 
 
+def build_repair_prompt(kind, payload, reply, reason):
+	"""The original request again, with the model's rejected reply and exactly why it was rejected, so it can answer correctly. The earlier
+	reply goes back as untrusted text (it was written from untrusted evidence), cleaned and capped."""
+	return (build_triage_prompt(kind, payload) + '\n\nYour previous reply was REJECTED by the validator: ' + reason + '.\n'
+			'Answer the original request again. Reply with ONLY one JSON object that has exactly the keys in the schema you were given, '
+			'with the types the schema gives. No other text, no markdown fence, no extra keys.\n'
+			+ untrusted_block('REJECTED_REPLY', clean_text(str(reply), 2500)))
+
+
 def triage_finding(provider, kind, payload):
-	"""Ask ``provider`` to triage one finding. Returns {'parsed': dict or None, 'model': 'provider:model'}; the raw reply is
-	dropped. Raises AIProviderError when the provider cannot be reached."""
+	"""Ask ``provider`` to triage one finding. Returns {'parsed': dict, 'model': 'provider:model'} (plus 'repaired': True when the first
+	reply was rejected and the second was fine); the raw reply is dropped. A reply that fails validation is sent back to the model once,
+	with why it failed, and the second answer is the one that counts. Raises AIProviderError when the provider cannot be reached or the
+	second reply is also unusable (category schema_invalid, with the reason)."""
+	import hashlib
 	with usage_stage('finding_triage'):
 		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload))
-	parsed = parse_triage(reply)
+	parsed, reason = validate_triage(reply)
+	repaired = False
 	if parsed is None:
-		import hashlib
-		digest = hashlib.sha256(str(reply).encode()).hexdigest()[:12]
-		raise AIProviderError('AI triage response failed schema validation', category='schema_invalid',
-				output_length=len(str(reply)), digest=digest)
-	return {'parsed': parsed, 'model': f'{provider.name}:{provider.model}'}
+		with usage_stage('finding_triage_repair'):
+			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason))
+		parsed, second = validate_triage(reply)
+		if parsed is None:
+			digest = hashlib.sha256(str(reply).encode()).hexdigest()[:12]
+			raise AIProviderError('AI triage response failed schema validation', category='schema_invalid',
+					output_length=len(str(reply)), digest=digest, reason=second, attempts=2)
+		repaired = True
+	out = {'parsed': parsed, 'model': f'{provider.name}:{provider.model}'}
+	if repaired:
+		out['repaired'] = True
+	return out
 
 
 LOCAL_CHECK_KEYS = {'commands', 'caveat'}

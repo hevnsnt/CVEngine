@@ -396,6 +396,8 @@ class SignatureCacheTests(TriageDbBase):
 		self.assertEqual((diagnostic['stage'], diagnostic['category'], diagnostic['provider']),
 					 ('ai_triage', 'schema_invalid', 'anthropic'))
 		self.assertIn('output_length', diagnostic)
+		self.assertEqual(diagnostic['attempts'], 2)  # the rejected reply was sent back once before giving up
+		self.assertIn('no JSON object', diagnostic['reason'])  # and the diagnostic says why
 		self.assertNotIn('SHOULD-NOT-LEAK', row.reason)
 		self.assertEqual(TriageVerdict.objects.count(), 0)
 		self.assertEqual(triage.sweep(self.project.id, provider=self.provider(reply('likely')))['asked'], 1)

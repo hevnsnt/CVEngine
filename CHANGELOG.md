@@ -2,6 +2,20 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+## v1.2.1 (2026-10-26)
+
+Update with the in-app updater (Settings > Updates) or `make up`. Includes everything in v1.2.0. No database migrations.
+
+### Changed
+
+- **A triage answer the validator rejects is sent back to the AI, with why.** "AI review failed (schema_invalid)" meant the model's reply broke the strict answer schema (an extra key, `severity_adjust` as text, a step kind outside nuclei, nmap, curl and manual, two JSON objects ...) and the finding was left unreviewed until the next sweep. The rejected reply and the exact reason now go back to the model once, and its second answer is used; if that is also rejected the failure is recorded as before, now with the reason (`reason`, `attempts` in the diagnostic, never any reply text). The retry is a separate step in AI usage (`finding_triage_repair`).
+
+### Fixed
+
+- **Mouse-wheel zoom works on the Live discovery graph and the asset graph in Edge and Chrome.** The wheel zoom the graph library provides did not fire in Chromium browsers (it worked in Firefox). The graph now handles the wheel itself in every browser: it zooms around the pointer, keeps the zoom between 0.04x and 6x, stops the page scrolling while the pointer is over the graph, and hands the view over from auto-fit to you, as before (double-click or the Fit button refits).
+
 ## v1.2.0 (2026-10-26)
 
 Update with the in-app updater (Settings > Updates) or `make up`. A release is only cut after an upgrade rehearsal: CI installs the previous version, seeds it with data (duplicate IP addresses included), updates it with the real update scripts, plain and behind a host proxy, and checks the site, the workers, the migrations and the data. This release adds database migrations; the update applies them and rolls back if one fails.
