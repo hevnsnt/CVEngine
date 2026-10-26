@@ -47,7 +47,6 @@
   <a id="n-ai" {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %} title="AI-authored Nuclei templates that passed syntax checks; this is not a count of reviewed or validated findings"><b id="s-templates">-</b><span>AI templates syntax-valid</span></a>
 </nav>
 
-<section class="trends" id="trends" aria-label="Trends" hidden></section>
 
 <section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}">
   {% csrf_token %}
@@ -69,6 +68,8 @@
     <ul class="ticker" id="d-ticker" aria-live="polite" tabindex="0" aria-label="Discovery findings, newest first. Scroll up for earlier lines."></ul>
     {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'vulns' %}?type=scanner">See scanner findings</a>{% endif %}
   </div>
+
+  <section class="trends" id="trends" aria-label="Trends" hidden></section>
 
   <div class="card ai">
     <div class="card-head">

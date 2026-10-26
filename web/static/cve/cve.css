@@ -762,11 +762,11 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
   .split{grid-template-columns:minmax(300px,380px) minmax(0,1fr)}
   .split-list{position:sticky;top:calc(var(--bar) + 16px);height:calc(100dvh - var(--bar) - 130px)}
   .host-rows{max-height:none;flex:1}
-  .hero{grid-template-columns:minmax(0,3fr) minmax(0,2fr)}
-  .hero>.card{height:clamp(540px,calc(100dvh - 300px),760px)}
+  .hero{grid-template-columns:minmax(0,1fr)}
+  .hero>.card.discovery{height:clamp(520px,calc(100dvh - 260px),700px)}
   .hero .graph-box{flex:1;min-height:300px;display:flex}
   .hero #d-graph{flex:1;height:auto;min-height:300px}
-  .hero .agent{flex:1;height:auto;min-height:260px}
+  .hero .agent{height:320px}
   .panel{grid-template-columns:minmax(0,4fr) minmax(0,5fr) minmax(0,4fr)}
   .cell+.cell{border-top:0;border-left:1px solid var(--line)}
 }@media (min-width:1200px){.strip{grid-template-columns:repeat(7,minmax(0,1fr))}}@media (max-width:719px){.strip a:last-child:nth-child(odd){grid-column:span 2}}@media (min-width:1024px){
@@ -1266,7 +1266,7 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 .shot-meta .note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 
 /* Live: trends under the counters, and a trend line inside a counter */
-.trends{display:grid;gap:14px;grid-template-columns:minmax(0,1fr);margin:0 0 14px}
+.trends{display:grid;gap:14px;grid-template-columns:minmax(0,1fr);margin:0}
 @media (min-width:1000px){.trends{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .trends[hidden]{display:none}
 .trends .chart-stage{height:150px}
