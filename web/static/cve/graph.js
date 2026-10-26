@@ -246,12 +246,13 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
 
   // Live scan highlighting (SOC mode and the plain page alike): the domains and hosts a scan is working on right now carry a
   // pulsing ring. Domains are matched by id, hosts by lower-cased name, so it holds in the clustered view too.
-  const active = { domains: new Set(), hosts: new Set() };
+  const active = { domains: new Set(), hosts: new Set(), labels: new Set() };
   const isActive = (node) => {
     const d = node.data || {};
     if (d.kind === "domain") return active.domains.has(String(d.detail_id || node.id).replace(/^dom:/, ""));
-    if (d.kind === "subdomain") return active.hosts.has(String(d.label || "").toLowerCase());
-    return false;
+    if (d.kind === "subdomain" && active.hosts.has(String(d.label || "").toLowerCase())) return true;
+    // an address or name a running job names (for example "Background full port scan of 198.51.100.34")
+    return active.labels.size > 0 && ["ip", "subdomain", "domain"].includes(d.kind) && active.labels.has(String(d.label || "").toLowerCase());
   };
   function applyActive() {
     let any = false;
@@ -483,6 +484,45 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     true,
   );
 
+  // Use the room: a force layout comes out roughly round, but these cards are wide. Every few steps the whole layout is stretched a
+  // hair along the short side of its bounding box until its shape roughly matches the card's, so the nodes spread out instead of
+  // huddling in the middle of a wide canvas. The springs pull back, so it settles at a mild elongation instead of running away.
+  let stepCount = 0;
+  const baseStep = layout.step.bind(layout);
+  layout.step = () => {
+    const stable = baseStep();
+    stepCount += 1;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    if (stepCount % 4 === 0 && w && h && graph.getNodesCount() > 8) {
+      let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+      graph.forEachNode((n) => {
+        const b = layout.getBody(n.id);
+        if (!b) return;
+        x1 = Math.min(x1, b.pos.x); x2 = Math.max(x2, b.pos.x);
+        y1 = Math.min(y1, b.pos.y); y2 = Math.max(y2, b.pos.y);
+      });
+      const bw = x2 - x1;
+      const bh = y2 - y1;
+      if (bw > 1 && bh > 1) {
+        const want = (w / h) * 0.85; // a little rounder than the card, so labels have room
+        const have = bw / bh;
+        const gap = Math.log(want / have);
+        if (Math.abs(gap) > 0.12) {
+          const grow = 1 + Math.min(0.02, Math.abs(gap) * 0.02);
+          const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+          graph.forEachNode((n) => {
+            const b = layout.getBody(n.id);
+            if (!b || b.isPinned) return;
+            if (gap > 0) b.pos.x = cx + (b.pos.x - cx) * grow;
+            else b.pos.y = cy + (b.pos.y - cy) * grow;
+          });
+        }
+      }
+    }
+    return stable;
+  };
+
   renderer = Viva.Graph.View.renderer(graph, {
     container,
     graphics,
@@ -561,11 +601,12 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
       for (let cx = left; cx <= right; cx++) for (let cy = top; cy <= bottom; cy++) cells.push(`${cx}:${cy}`);
       const free = cells.every(cell => !taken.has(cell));
       const kind = n.data?.kind;
-      const show = clustered ?
+      const live = ui.classList.contains("gn-live");
+      const show = live || (clustered ?
         rank === 0 || (kind === 'project' && free) ||
         (kind === 'root' && scale >= 0.16 && free) ||
         ((!zoomedOut || picked) && rank >= 3 && free) :
-        rank === 0 || rank === 3 || ((!zoomedOut || picked) && free);
+        rank === 0 || rank === 3 || ((!zoomedOut || picked) && free));
       if (show) cells.forEach(cell => taken.add(cell));
       text.setAttribute("display", show ? "" : "none");
     });
@@ -594,10 +635,13 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
     const w = container.clientWidth,
       h = container.clientHeight;
     if (!w || !h) return;
-    const pad = clustered ? 440 : 70; // room for each root's host bubbles and labels
-    const bw = Math.max(x2 - x1, 1) + pad * 2,
-      bh = Math.max(y2 - y1, 1) + pad;
-    const k = Math.min(w / bw, h / bh, 1.4);
+    // fit by screen margin instead of a fixed padding in graph units, so the picture uses the room it is given; a clustered
+    // graph also needs space for each root's host bubbles and labels around it
+    const margin = 26;
+    const room = clustered ? 150 : 14; // graph units around the outermost node centers (node radius, label)
+    const bw = Math.max(x2 - x1, 1) + room * 2,
+      bh = Math.max(y2 - y1, 1) + room * 2;
+    const k = Math.min((w - margin * 2) / bw, (h - margin * 2) / bh, 3);
     const key = [x1, y1, x2, y2, w, h].map((v) => Math.round(v / 6)).join();
     if (key === lastBox) return;
     lastBox = key;
@@ -623,10 +667,28 @@ export function mountGraph(container, { onSelect, pinKey } = {}) {
   return {
     setClustered(value) { clustered = Boolean(value); },
     // the domain ids and host names a scan is working on now; call again with what is true next poll
-    setActive(domains = [], hosts = []) {
+    setActive(domains = [], hosts = [], labels = []) {
       active.domains = new Set(domains.map(String));
       active.hosts = new Set(hosts.map((h) => String(h).toLowerCase()));
+      active.labels = new Set(labels.map((l) => String(l).toLowerCase()));
       applyActive();
+    },
+    // Pan and zoom to a node by its name or address (the "scanning now" chips use it); returns whether it was found.
+    locate(label) {
+      const want = String(label || "").toLowerCase();
+      let found = null;
+      graph.forEachNode((n) => {
+        if (!found && String((n.data && n.data.label) || "").toLowerCase() === want) found = n;
+      });
+      if (!found) return false;
+      const p = layout.getNodePosition(found.id);
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      auto = false;
+      graphics.resetScale();
+      renderer.moveTo(p.x, p.y);
+      graphics.scale(1.4, { x: w / 2, y: h / 2 });
+      return true;
     },
     fit() {
       auto = true;
