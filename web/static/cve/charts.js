@@ -402,7 +402,7 @@ export function activityMatrix({ title, rows }) {
           side.append(line);
         });
       }
-      const busy = h("span", "mx-busy note", busiest.e.n ? `Busiest: ${fmtDay(busiest.t)}, ${busiest.e.n}` : "Nothing in this window");
+      const busy = h("span", "mx-busy note", busiest.e.n ? `Busiest day: ${fmtDay(busiest.t)} (${busiest.e.n})` : "Nothing in this window");
       side.append(busy);
     });
   };
