@@ -57,7 +57,8 @@ def ai_get(request):
             'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
             'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
             'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire, 'auto_fire_engine_id': cfg.auto_fire_engine_id,
-            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'default_models': DEFAULT_MODELS,
+            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
+            'plan_daily_per_project': cfg.plan_daily_per_project, 'default_models': DEFAULT_MODELS,
             'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
 
 
@@ -98,8 +99,38 @@ def ai_put(request):
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
+    for key in ('plan_daily_total', 'plan_daily_per_project'):
+        if key in data:
+            try:
+                value = int(data[key])
+            except (TypeError, ValueError):
+                raise SettingsError(400, f'{key} must be a number')
+            if not 0 <= value <= 100000:
+                raise SettingsError(400, f'{key} must be between 0 and 100000')
+            setattr(cfg, key, value)
     cfg.save()
     return ai_get(request)
+
+
+def scan_policy_get(request):
+    from dashboard.models import ScanPolicy
+    return {'nuclei_all_templates': ScanPolicy.current().nuclei_all_templates}
+
+
+def scan_policy_put(request):
+    from cveFeed.admin_api import audit
+    from dashboard.models import ScanPolicy
+    data = _body(request)
+    row = ScanPolicy.objects.first() or ScanPolicy()
+    if 'nuclei_all_templates' in data:
+        if not isinstance(data['nuclei_all_templates'], bool):
+            raise SettingsError(400, 'nuclei_all_templates must be true or false')
+        changed = row.nuclei_all_templates != data['nuclei_all_templates']
+        row.nuclei_all_templates = data['nuclei_all_templates']
+        row.save()
+        if changed:
+            audit(request.user, 'scan_policy.nuclei_all_templates', 'on' if row.nuclei_all_templates else 'off')
+    return scan_policy_get(request)
 
 
 def ai_models(request):
@@ -453,6 +484,16 @@ def updates_put(request):
         row.behind_by, row.commits, row.latest_date = None, [], None
         updater.cancel_approval(row)
     row.repo, row.branch = repo, branch
+    if 'mode' in data:
+        from cveFeed.admin_api import audit
+        mode = str(data['mode'])
+        if mode not in updater.MODES:
+            raise SettingsError(400, 'updates are installed manually or automatically')
+        if mode != updater.read_mode():
+            updater.set_mode(mode)
+            audit(request.user, 'update.mode_changed', mode)
+            if mode == 'manual' and row.approved_by == 'automatic':
+                updater.cancel_approval(row)  # an approval nobody gave is withdrawn when the administrator takes control back
     row.token = _text(data, 'token', row.token, secret=True)
     if 'enabled' in data:
         row.enabled = bool(data['enabled'])
@@ -464,6 +505,9 @@ def updates_check(request):
     from cveFeed import updater
     row = _update_row()
     updater.check(row)
+    if updater.auto_approve(row):
+        from cveFeed.admin_api import audit
+        audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by, mode='automatic')
     return updater.state(row)
 
 
@@ -533,6 +577,7 @@ ROUTES = [
     ('GET', r'ai', lambda r, **k: ai_get(r)), ('PUT', r'ai', lambda r, **k: ai_put(r)),
     ('GET', r'ai/usage', lambda r, **k: ai_usage_get(r)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
+    ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),

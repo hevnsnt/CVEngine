@@ -181,8 +181,20 @@ const sections = {
       min: "1",
       max: "5000",
     });
+    const planTotal = text(s.plan_daily_total, {
+      type: "number",
+      min: "0",
+      max: "100000",
+    });
+    const planProject = text(s.plan_daily_per_project, {
+      type: "number",
+      min: "0",
+      max: "100000",
+    });
     const save = async () => {
       await api("PUT", "ai", {
+        plan_daily_total: planTotal.value,
+        plan_daily_per_project: planProject.value,
         provider: provider.value,
         model: model.value,
         api_key: key.value,
@@ -206,6 +218,8 @@ const sections = {
         keyField,
         baseField,
         enabled.wrap,
+        field("Validation planning requests per day, all projects", planTotal),
+        field("Validation planning requests per day, one project", planProject),
         button("Save", async () => {
           await save();
           toast("Saved");
@@ -325,6 +339,33 @@ const sections = {
       );
       if (s.last_error) kids.push(el("p", "msg err", s.last_error));
       const hu = s.host_updater || {};
+      // How updates are installed. Manual is the default: the code of this server never changes unless an administrator chose Automatic.
+      const modeBox = el("fieldset", "", null, { style: "border:0;padding:0;margin:12px 0" });
+      modeBox.append(el("legend", "", "How updates are installed", { style: "font-weight:600;padding:0;margin-bottom:6px" }));
+      [
+        ["manual", "Manual", "CVEngine tells you when a new version exists. Nothing is installed until you click Approve."],
+        ["auto", "Automatic", "When the twice-daily check finds a new version, CVEngine approves it and the server installs it shortly after: scans pause and finish first, then the services restart. The code on this server changes without you being asked."],
+      ].forEach(([value, label, help]) => {
+        const row = el("label", "", null, { style: "display:flex;gap:10px;align-items:flex-start;margin:6px 0;cursor:pointer" });
+        const radio = el("input", "", null, { type: "radio", name: "update-mode", value });
+        radio.checked = (s.mode || "manual") === value;
+        radio.onchange = async () => {
+          try {
+            draw(await api("PUT", "updates", { mode: value }));
+            toast(value === "auto" ? "Updates are now installed automatically" : "Updates are now manual");
+          } catch (err) {
+            toast(err.message);
+            draw(s);
+          }
+        };
+        const text = el("span", "");
+        text.append(el("strong", "", label), el("span", "note", ` ${help}`));
+        row.append(radio, text);
+        modeBox.append(row);
+      });
+      kids.push(modeBox);
+      if (s.mode === "auto" && !hu.alive)
+        kids.push(el("p", "msg err", "Automatic needs something on the server to install the update: the host updater (below), or automatic deployment (scripts/install-auto-deploy.sh). The host updater is not reporting; if this server uses automatic deployment you can ignore this."));
       if (["available", "dismissed", "approved", "up_to_date"].includes(s.status)) {
         if (hu.alive) {
           kids.push(el("p", "note", `Host updater: listening (last seen ${hu.age_seconds} s ago). An approved update starts within seconds.`));
@@ -354,7 +395,7 @@ const sections = {
       }
       if (s.status === "approved") {
         kids.push(
-          el("p", "note", `Approved by ${s.approved_by} at ${when(s.approved_at)}.`, { style: "margin-top:10px" }),
+          el("p", "note", s.approved_by === "automatic" ? `Approved automatically at ${when(s.approved_at)} because updates are set to Automatic.` : `Approved by ${s.approved_by} at ${when(s.approved_at)}.`, { style: "margin-top:10px" }),
           button("Cancel approval", async () => { draw(await api("POST", "updates/cancel")); toast("Approval cancelled"); }, "btn ghost"),
         );
       } else if (["available", "dismissed"].includes(s.status)) {
@@ -394,11 +435,14 @@ const sections = {
           "Update source",
           enabled.wrap,
           field("GitHub repository (owner/name)", repo),
-          field("Branch", branch),
+          field("Branch", branch, "Changing it makes the next approved update move this server to that branch, when that is safe (it must keep every database migration that is installed). If it is not, Settings says why and nothing moves."),
           field("Access token", token, "A fine-grained token with read-only Contents access. Stored write-only."),
           button("Save", async () => {
-            draw(await api("PUT", "updates", { enabled: enabled.box.checked, repo: repo.value, branch: branch.value, token: token.value }));
-            toast("Saved");
+            const changed = repo.value !== s.repo || branch.value !== s.branch;
+            let next = await api("PUT", "updates", { enabled: enabled.box.checked, repo: repo.value, branch: branch.value, token: token.value });
+            if (changed) next = await api("POST", "updates/check"); // a different source: look at it straight away
+            draw(next);
+            toast(changed ? "Saved, and checked the new source" : "Saved");
           }),
         ),
       );
@@ -653,6 +697,28 @@ const sections = {
   },
 
   async engines(m) {
+    const policy = await api("GET", "scan_policy");
+    const everything = check(
+      "Let scans run every Nuclei template that is installed, not only the read-only ones",
+      policy.nuclei_all_templates,
+    );
+    const policyCard = card(
+      "Nuclei templates",
+      el(
+        "p",
+        "note",
+        "By default only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host) run. Turn this on to run the whole template library Nuclei ships, including checks that send other requests. Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
+      ),
+      everything.wrap,
+      button("Save", async () => {
+        await api("PUT", "scan_policy", {
+          nuclei_all_templates: everything.box.checked,
+        });
+        toast("Saved");
+      }),
+    );
+    policyCard.style.maxWidth = "none";
+    m.append(policyCard);
     const list = el("div", "grid");
     m.append(list);
     const draw = async () => {

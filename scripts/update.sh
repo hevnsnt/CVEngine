@@ -98,15 +98,37 @@ done
 # The Compose layout: every file, plus the env file and project name when the install uses them.
 compose_files=$(setting CVENGINE_COMPOSE_FILES)
 [[ -n $compose_files ]] || compose_files=$(setting CVENGINE_COMPOSE_FILE)
-[[ -n $compose_files ]] || compose_files=docker-compose.yml
 compose=(docker compose)
 compose_env_file=$(setting CVENGINE_COMPOSE_ENV_FILE)
+compose_project=$(setting CVENGINE_COMPOSE_PROJECT)
+# With no files named, the update recreates the stack the way the running one was started (an overlay that moves a published port, an env
+# file), the same as the in-app updater does; recreating it from docker-compose.yml alone can take a host with a proxy of its own down.
+if [[ -z $compose_files ]]; then
+    running_web=$(docker ps -a --filter "label=com.docker.compose.project.working_dir=$(pwd)" --filter "label=com.docker.compose.service=web" --format '{{.ID}}' 2>/dev/null | head -n1) || running_web=''
+    if [[ -n $running_web ]]; then
+        labels=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$running_web" 2>/dev/null) || labels=''
+        for path in ${labels//,/ }; do
+            file=$(basename "$path")
+            [[ $file =~ ^[A-Za-z0-9._-]+\.ya?ml$ && -f $file && $(dirname "$path") == "$(pwd)" ]] ||
+                die "The running stack was started with $path, which is not a Compose file in $(pwd). Set CVENGINE_COMPOSE_FILES (and CVENGINE_COMPOSE_ENV_FILE) in .env to the files it uses."
+            compose_files="${compose_files:+$compose_files,}$file"
+        done
+        if [[ -n $compose_files ]]; then
+            if [[ -z $compose_env_file ]]; then
+                compose_env_file=$(basename "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.environment_file"}}' "$running_web" 2>/dev/null)" 2>/dev/null || true)
+                [[ -f $compose_env_file ]] || compose_env_file=''
+            fi
+            [[ -n $compose_project ]] || compose_project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$running_web" 2>/dev/null || true)
+            echo "Using the Compose layout the running stack was started with: $compose_files${compose_env_file:+ (env file $compose_env_file)}."
+        fi
+    fi
+fi
+[[ -n $compose_files ]] || compose_files=docker-compose.yml
 if [[ -n $compose_env_file ]]; then
     [[ $compose_env_file =~ ^[A-Za-z0-9._-]+$ && -f $compose_env_file ]] ||
         die 'CVENGINE_COMPOSE_ENV_FILE must name an existing file in the repository root.'
     compose+=(--env-file "$compose_env_file")
 fi
-compose_project=$(setting CVENGINE_COMPOSE_PROJECT)
 if [[ -n $compose_project ]]; then
     [[ $compose_project =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die 'CVENGINE_COMPOSE_PROJECT must be a lowercase Compose project name.'
     compose+=(-p "$compose_project")
@@ -209,9 +231,14 @@ port_conflicts() {
     local config listeners
     config=$("${compose[@]}" config --format json 2>>"${diagnostic_log:-/dev/null}") || return 0
     listeners=$(ss -ltnpH 2>/dev/null) || listeners=''
-    printf '%s\0%s' "$config" "$listeners" | python3 -c '
+    # Run as an ordinary user (a member of the docker group), ss cannot name the process behind docker's own listeners: those say "an unknown
+    # process" and must not be taken for a stranger. The ports Docker itself publishes are known from docker, whoever runs this.
+    local docker_ports
+    docker_ports=$(docker ps --format '{{.Ports}}' 2>/dev/null) || docker_ports=''
+    printf '%s\0%s\0%s' "$config" "$listeners" "$docker_ports" | python3 -c '
 import json, re, sys
-config, listeners = sys.stdin.buffer.read().split(b"\0", 1)
+config, listeners, docker_ports = sys.stdin.buffer.read().split(b"\0", 2)
+docker_published = set(re.findall(r"(\d+)->\d+/", docker_ports.decode(errors="replace")))
 try:
     services = json.loads(config).get("services") or {}
 except ValueError:
@@ -230,6 +257,8 @@ for name, service in services.items():
         published, host_ip = str(mapping.get("published") or ""), str(mapping.get("host_ip") or "")
         for address, port, process, pid in held:
             if port != published or process == "docker-proxy":
+                continue
+            if not pid and port in docker_published:  # an owner ss could not name, on a port one of the Docker containers publishes
                 continue
             if address in wild or host_ip in wild or address == host_ip:
                 print(name + "|" + (host_ip or "0.0.0.0") + "|" + published + "|" + process + ((" (pid " + pid + ")") if pid else ""))

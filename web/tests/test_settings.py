@@ -53,6 +53,24 @@ class SettingsApiTests(TestCase):
 		self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': 'bogus'})[0], 400)
 		self.assertEqual(send(self.c, 'PUT', 'ai', {'auto_fire_engine_id': 99999})[0], 400)
 
+	def test_the_ai_planning_budget_is_a_setting(self):
+		data = send(self.c, 'GET', 'ai')[1]
+		self.assertEqual((data['plan_daily_total'], data['plan_daily_per_project']), (200, 20))
+		status, data = send(self.c, 'PUT', 'ai', {'plan_daily_total': 500, 'plan_daily_per_project': '40'})
+		self.assertEqual((status, data['plan_daily_total'], data['plan_daily_per_project']), (200, 500, 40))
+		for bad in ({'plan_daily_total': -1}, {'plan_daily_per_project': 'lots'}, {'plan_daily_total': 100001}):
+			self.assertEqual(send(self.c, 'PUT', 'ai', bad)[0], 400, bad)
+		self.assertEqual(AIProviderSettings.objects.get().plan_daily_total, 500)
+
+	def test_all_nuclei_templates_is_off_until_a_superuser_turns_it_on(self):
+		self.assertFalse(send(self.c, 'GET', 'scan_policy')[1]['nuclei_all_templates'])
+		self.assertEqual(send(client_for(self.admin), 'PUT', 'scan_policy', {'nuclei_all_templates': True})[0], 403)
+		self.assertEqual(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': 'yes'})[0], 400)
+		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
+		from dashboard.models import AuditLog
+		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='on').exists())
+		self.assertFalse(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': False})[1]['nuclei_all_templates'])
+
 	def test_a_stored_ai_key_is_never_kept_for_a_different_address_or_provider(self):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})
 		send(self.c, 'PUT', 'ai', {'model': 'm2'})  # nothing about the connection changed: the key stays

@@ -10,12 +10,12 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | `CVENGINE_ALLOWED_HOSTS` | Extra hostnames Django accepts, comma separated. Any other name or IP gets 400 ([UPGRADE.md](UPGRADE.md#accepted-host-names)). Never use `*` on an Internet-facing install. |
 | `CVENGINE_HSTS_SECONDS` | HTTPS policy lifetime in seconds (3600 in production, 0 in development). Raise it only once every public route reliably uses HTTPS. |
 | `POSTGRES_PASSWORD` | Database password. Set it before the first start, because changing it later does not update the existing database. |
-| `AUTHORITY_PASSWORD` | Passed to the certificate authority step of `make certs`. The key is stored in `secrets/certs/`, so protect that directory. |
-| `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make admin` and `sudo ./install.sh`. Leave the password empty and `make admin` generates one and prints it once (you choose your own at first sign-in); set it to choose the first one yourself. `make admin-password` generates a new one for a lost password. A plain `make username` asks instead. |
+| `AUTHORITY_PASSWORD` | Passed to the certificate step of `make certs`. `secrets/certs/ca.key` is not encrypted with it, so protect the directory. |
+| `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make admin` and `sudo ./install.sh`. Leave the password empty and `make admin` generates one and prints it once (you choose your own at first sign-in); set it to choose the first one yourself. `make admin-password` resets only the account named by `DJANGO_SUPERUSER_USERNAME` (`admin` by default), ignores `DJANGO_SUPERUSER_PASSWORD`, and always makes that account choose a new password at its next sign-in. For another user run `docker compose exec -T web python3 manage.py create_admin --reset --username NAME` or `make changepassword`. A plain `make username` asks instead. |
 | `COMPOSE_PROJECT_NAME`, `POSTGRES_DB`, `POSTGRES_USER` | Name the Docker volumes and the database. Change them only before the first start. Leave `POSTGRES_HOST=db` and `POSTGRES_PORT=5432` as they are. |
 | `AUTHORITY_NAME`, `COMPANY`, `COUNTRY_CODE`, `STATE`, `CITY` | Subject of the certificates `make certs` creates. |
 
-`make certs` and `install.sh` refuse to run while the database or certificate password still says `change-me`; `./scripts/init-env.sh` (which both run for you) fills them with random values and never touches one that is already set.
+`make certs` and `make username` refuse to run while the database or certificate password still says `change-me`. `./scripts/init-env.sh` (which `install.sh` and `make` run for you when `.env` is missing) fills those two with random values and leaves any other value alone. `STATE` and `CITY` stay `change-me`, which only affects the certificate subject. **Do not run `init-env.sh` or `install.sh` on an install made from an older `.env.example` that still has `change-me` as the database password:** it would replace that password, and PostgreSQL reads it only when the database is first created. Set the password you actually use in `.env` first.
 
 ## Memory and workers
 
@@ -57,7 +57,10 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_RDP_SHOT` | `1` | Set to `0` to turn off RDP login-screen screenshots entirely. |
 | `CVENGINE_TTL_RDP_SHOT` | `24` | Hours before a host's RDP screenshot is captured again. |
 | `CVENGINE_RDP_SHOT_MAX_HOSTS` | `10` | RDP servers screenshotted per scan; a live RDP session plus an AI call costs more than most checks. |
+| `CVENGINE_WAFW00F` | `1` | Set to `0` to stop naming the firewall in front of each web host with [wafw00f](https://github.com/EnableSecurity/wafw00f) (a few requests per host, some with an attack-looking string, so a WAF may log them). The product it names is stored as a technology of the host. |
+| `CVENGINE_WAFW00F_TIMEOUT`, `CVENGINE_WAFW00F_MAX_HOSTS`, `CVENGINE_TTL_WAFW00F` | `60`, `25`, `168` | Seconds allowed per host, hosts fingerprinted per scan, and hours before a host is fingerprinted again. |
 | `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts fingerprinted as Node.js or Express for CVE-2026-111497. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
+| `CVENGINE_NODE2SHELL_SCOPE` | `runtimes` | `runtimes` checks hosts a fingerprint names as Node.js (and its frameworks), Bun or Envoy. `all` checks every web host the scan found, for what a name cannot show: a Python service using Brotli, a container base image, a sidecar that hides what it is. Still limited by `CVENGINE_NODE2SHELL_MAX_HOSTS`. |
 | `CVENGINE_NODE2SHELL_TIMEOUT`, `CVENGINE_NODE2SHELL_MAX_HOSTS`, `CVENGINE_TTL_NODE2SHELL` | `90`, `5`, `24` | Seconds allowed per host, hosts checked per scan, and hours before a host is checked again. |
 
 ## AI limits
@@ -97,12 +100,12 @@ To fill the CVE store faster on a fresh install or after a factory reset: `docke
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_COMPOSE_FILES`, `_COMPOSE_ENV_FILE`, `_COMPOSE_PROJECT` | `docker-compose.yml`, none, none | The Compose layout `scripts/update.sh` and automatic deployment use ([UPDATES.md](UPDATES.md#custom-compose-layouts)). |
+| `CVENGINE_COMPOSE_FILES`, `_COMPOSE_ENV_FILE`, `_COMPOSE_PROJECT` | `docker-compose.yml`, none, none | The Compose layout `scripts/update.sh` and automatic deployment use (the approval updater reads only `CVENGINE_COMPOSE_FILE`) ([UPDATES.md](UPDATES.md#custom-compose-layouts)). |
 | `CVENGINE_UPDATE_DRAIN_SECONDS` | `10800` | Longest wait for active tasks, 1 to 10800. |
 | `CVENGINE_UPDATE_READY_SECONDS` | `600` | Longest wait for the site, workers, and scheduler after an update, 1 to 900. |
 | `CVENGINE_UPDATE_MISSING_POLLS` | `12` | Drain checks in a row a worker may miss before it counts as gone. |
-| `CVENGINE_UPDATE_STOP_SCANS` | `0` | `1` makes every update stop scans and queue them again. |
-| `CVENGINE_AUTO_DEPLOY_BACKUPS`, `_RETRY_SECONDS`, `_DRAIN_SECONDS` | `7`, `3600`, `1800` | Backups kept (`0` skips the backup), wait before retrying a failed commit, and the drain limit during automatic deployment. Whole numbers only. |
+| `CVENGINE_UPDATE_STOP_SCANS` | `0` | `1` makes `scripts/update.sh` behave as if `--stop-scans` was given. The approval updater never stops scans. |
+| `CVENGINE_AUTO_DEPLOY_BACKUPS`, `_RETRY_SECONDS`, `_DRAIN_SECONDS` | `7`, `3600`, `1800` | Backups kept (`0` skips the backup), wait before retrying a failed commit, and the drain limit during automatic deployment. Use whole numbers: anything else silently falls back to the default. |
 | `CVENGINE_AUTO_DEPLOY_INTERVAL` | `3min` | How often the timer checks `master`, such as `90s`, `3min`, or `1h`. Set when running `scripts/install-auto-deploy.sh`. |
 
 ## Web server

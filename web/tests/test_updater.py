@@ -73,6 +73,63 @@ class StateTests(TestCase):
 		with open(os.path.join(self.dir, '.updater-heartbeat'), 'w') as f:
 			f.write(raw if raw is not None else json.dumps({'at': time.time() - age}))
 
+	def mode_file(self, text):
+		with open(os.path.join(self.dir, '.update-mode'), 'w') as f:
+			f.write(text)
+
+	def test_updates_are_manual_unless_the_administrator_chose_automatic(self):
+		self.assertEqual(updater.read_mode(), 'manual')  # no file: the default
+		for odd in ('', 'AUTO', 'auto please', 'yes', 'manual', '1'):
+			self.mode_file(odd)
+			self.assertEqual(updater.read_mode(), 'manual', odd)
+		updater.set_mode('auto')
+		self.assertEqual(updater.read_mode(), 'auto')
+		updater.set_mode('manual')
+		self.assertEqual(updater.read_mode(), 'manual')
+		with self.assertRaises(updater.UpdateError):
+			updater.set_mode('whenever')
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		self.assertEqual(updater.state(row)['mode'], 'manual')
+
+	def test_a_failure_left_by_an_earlier_update_is_not_shown_for_a_new_approval(self):
+		import time
+		self.install(OLD)
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
+			json.dump({'phase': 'failed', 'detail': 'approved commit is not on master', 'scans_running': None, 'changed_at': time.time() - 600}, f)
+		self.assertEqual(updater.state(row)['phase'], 'failed')  # nothing approved since: the last result stands
+		updater.approve(row, self.admin)
+		state = updater.state(row)
+		self.assertEqual((state['phase'], state['phase_detail']), ('idle', ''))  # this approval has not been acted on yet
+		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
+			json.dump({'phase': 'draining', 'detail': 'waiting', 'scans_running': 1, 'changed_at': time.time() + 1}, f)
+		self.assertEqual(updater.state(row)['phase'], 'draining')  # the host has since reported on it
+
+	def test_a_found_update_is_never_approved_in_manual_mode(self):
+		self.install(OLD)
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		self.assertFalse(updater.auto_approve(row))
+		self.assertEqual(updater.state(row)['status'], 'available')
+		self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-approved')))
+
+	def test_a_found_update_is_approved_for_them_in_automatic_mode(self):
+		self.install(OLD)
+		updater.set_mode('auto')
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		self.assertTrue(updater.auto_approve(row))
+		state = updater.state(row)
+		self.assertEqual((state['status'], row.approved_by), ('approved', 'automatic'))
+		with open(os.path.join(self.dir, '.update-approved')) as f:
+			self.assertEqual(f.read().strip(), NEW)
+		self.assertFalse(updater.auto_approve(row))  # already approved: nothing more to do
+
+	def test_a_dismissed_update_is_not_approved_even_in_automatic_mode(self):
+		self.install(OLD)
+		updater.set_mode('auto')
+		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		updater.dismiss(row)
+		self.assertFalse(updater.auto_approve(row))
+
 	def test_the_host_updater_is_reported_alive_stale_or_never_seen(self):
 		row = updater.check(get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
 		self.assertEqual(updater.state(row)['host_updater'], {'seen': False, 'alive': False, 'age_seconds': None})  # no file: never reported
@@ -195,6 +252,50 @@ class UpdatesApiTests(TestCase):
 		self.assertEqual(UpdateSettings.current().token, 'ghp_secret')
 		bad = admin.put('/cve/api/settings/updates', json.dumps({'repo': 'not a repo'}), content_type='application/json')
 		self.assertEqual(bad.status_code, 400)
+
+	def put(self, client, **body):
+		return client.put('/cve/api/settings/updates', json.dumps(body), content_type='application/json')
+
+	def test_the_mode_is_set_in_settings_audited_and_defaults_to_manual(self):
+		from dashboard.models import AuditLog
+		admin = client_for(self.admin)
+		self.assertEqual(admin.get('/cve/api/settings/updates').json()['mode'], 'manual')
+		self.assertEqual(self.put(admin, mode='auto').json()['mode'], 'auto')
+		self.assertEqual(updater.read_mode(), 'auto')
+		self.assertTrue(AuditLog.objects.filter(action='update.mode_changed', target='auto').exists())
+		self.assertEqual(self.put(admin, mode='sometimes').status_code, 400)
+		self.assertEqual(updater.read_mode(), 'auto')  # a bad value changes nothing
+		self.assertEqual(self.put(client_for(self.member), mode='auto').status_code, 403)
+		self.assertEqual(self.put(admin, mode='manual').json()['mode'], 'manual')
+
+	def test_taking_control_back_withdraws_an_approval_nobody_gave(self):
+		self.install = lambda sha: open(os.path.join(self.dir, '.commit'), 'w').write(sha + '\n')
+		self.install(OLD)
+		admin = client_for(self.admin)
+		self.put(admin, mode='auto')
+		row = UpdateSettings.current()
+		updater.check(row, get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		self.assertTrue(updater.auto_approve(row))
+		self.assertTrue(os.path.exists(os.path.join(self.dir, '.update-approved')))
+		self.assertEqual(self.put(admin, mode='manual').json()['status'], 'available')
+		self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-approved')))
+		# an approval a person gave stays when they switch the mode
+		updater.approve(UpdateSettings.current(), self.admin)
+		self.put(admin, mode='auto')
+		self.put(admin, mode='manual')
+		self.assertTrue(os.path.exists(os.path.join(self.dir, '.update-approved')))
+
+	def test_the_scheduled_check_approves_only_in_automatic_mode(self):
+		from unittest import mock
+		from cveFeed import tasks
+		open(os.path.join(self.dir, '.commit'), 'w').write(OLD + '\n')
+		compare = {'status': 'ahead', 'ahead_by': 1, 'commits': []}
+		with mock.patch.object(updater.requests, 'get', fake_github(compare=compare)):
+			self.assertEqual(tasks.check_for_updates()['status'], 'available')
+			self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-approved')))
+			updater.set_mode('auto')
+			self.assertEqual(tasks.check_for_updates()['status'], 'approved')
+			self.assertTrue(os.path.exists(os.path.join(self.dir, '.update-approved')))
 
 	def test_approve_without_an_update_is_refused(self):
 		admin = client_for(self.admin)

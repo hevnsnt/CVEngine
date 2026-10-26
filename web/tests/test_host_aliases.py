@@ -118,14 +118,14 @@ class AliasedExposureTests(AliasFixture):
 		self.assertEqual([v['id'] for v in host['vulns']], [finding.id])
 		self.assertEqual(self.stats('hp1')['exposed_hosts'], 1)
 		self.assertEqual(stats_history.compute_snapshot(self.p1)['exposed_hosts'], 1)
-		node = next(n for n in views.graph_payload()['nodes'] if n['label'] == 'example.test')
+		node = next(n for n in views.graph_payload()['nodes'] if n['kind'] == 'subdomain' and n['label'] == 'example.test')
 		self.assertEqual(node['status'], 'vulnerable')
 		self.assertEqual(node['info']['findings'], 1)
 
 	def test_the_same_finding_on_both_names_is_counted_once_on_the_map(self):
 		for sub in (self.apex, self.www):
 			Vulnerability.objects.create(subdomain=sub, target_domain=self.d1, scan_history=sub.scan_history, name='admin panel', severity=3)
-		node = next(n for n in views.graph_payload()['nodes'] if n['label'] == 'example.test')
+		node = next(n for n in views.graph_payload()['nodes'] if n['kind'] == 'subdomain' and n['label'] == 'example.test')
 		self.assertEqual(node['info']['findings'], 1)
 		self.assertEqual(self.stats('hp1')['exposed_hosts'], 1)
 
@@ -134,7 +134,7 @@ class AliasedExposureTests(AliasFixture):
 		for sub in (self.apex, self.www):
 			CVEMatch.objects.create(cve_entry=cve, subdomain=sub, matched_product='nginx', confidence=.8)
 		self.assertEqual(self.hosts()['example.test']['cve_matches'], 1)
-		node = next(n for n in views.graph_payload()['nodes'] if n['label'] == 'example.test')
+		node = next(n for n in views.graph_payload()['nodes'] if n['kind'] == 'subdomain' and n['label'] == 'example.test')
 		self.assertEqual(node['info']['cves'], 1)
 		self.assertEqual(self.stats('hp1')['exposed_hosts'], 1)
 

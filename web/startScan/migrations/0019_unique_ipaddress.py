@@ -48,6 +48,10 @@ def merge_duplicates(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    # Not atomic: the merge above rewrites rows that foreign keys point at, and PostgreSQL refuses to build the index in the same
+    # transaction ("cannot CREATE INDEX ... because it has pending trigger events"). Each statement commits on its own; the merge is
+    # safe to run again if the migration is interrupted.
+    atomic = False
     dependencies = [('startScan', '0018_vulnerability_assignee')]
     operations = [
         migrations.RunPython(merge_duplicates, migrations.RunPython.noop),

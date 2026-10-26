@@ -20,7 +20,24 @@ SHOT = {'type': 'WEBSCREENSHOT', 'id': 'WS:1', 'data': None, 'host': 'www.exampl
         'parent': 'DNS_NAME:bbb'}
 
 
+WAF = {'type': 'WAF', 'id': 'WAF:1', 'data': None, 'host': 'www.example.com', 'module': 'wafw00f',
+       'data_json': {'host': 'www.example.com', 'url': 'https://www.example.com/', 'waf': 'FortiWeb (Fortinet)'}, 'parent': 'DNS_NAME:bbb'}
+
+
 class BbotParseTests(unittest.TestCase):
+	def test_a_named_waf_is_a_technology_of_the_host_without_its_vendor_suffix(self):
+		result = BbotResult()
+		seen = parse_event(WAF, result, {})
+		self.assertEqual(result.technologies, {('www.example.com', 'FortiWeb')})
+		self.assertEqual((seen.type, seen.label), ('WAF', 'WAF FortiWeb (Fortinet) on www.example.com'))
+
+	def test_a_generic_waf_detection_names_no_product(self):
+		result = BbotResult()
+		parse_event({**WAF, 'data_json': {**WAF['data_json'], 'waf': 'generic detection', 'info': 'Blocked on a probe'}}, result, {})
+		self.assertEqual(result.technologies, set())
+		parse_event({**WAF, 'data_json': {'host': 'www.example.com', 'waf': ''}}, result, {})
+		self.assertEqual(result.technologies, set())
+
 	def test_parse_events_with_parent_ids_and_data_json(self):
 		lines = ['not json', '{broken'] + [json.dumps(e) for e in (SEED, CHILD, PORT, TECH, FINDING)]
 		r = parse_output(lines)

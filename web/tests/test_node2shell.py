@@ -51,6 +51,28 @@ class NodeSitesTests(RouteFixture, TestCase):
 		sub.technologies.add(Technology.objects.create(name='nginx'))
 		self.assertEqual(node2shell_scan.node_sites(scan), [])
 
+	def test_the_other_runtimes_that_carry_the_decoder_are_candidates(self):
+		# the same bug is in Bun and in Envoy (and so in the sidecars built on it), and in the frameworks that run on Node
+		for name in ('envoy', 'Envoy', 'Bun:1.1.0', 'Next.js', 'NestJS', 'fastify', 'koa'):
+			scan = self.scan(names=(f'h{abs(hash(name)) % 10000}.rt.test',), ports=((443, 'https'),))
+			Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name=name))
+			self.assertEqual(len(node2shell_scan.node_sites(scan)), 1, name)
+
+	def test_names_that_only_start_like_a_runtime_are_not(self):
+		for name in ('bunny-cdn', 'envoyer', 'kotlin', 'nodemailer'):
+			scan = self.scan(names=(f'x{abs(hash(name)) % 10000}.rt.test',), ports=((443, 'https'),))
+			Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name=name))
+			self.assertEqual(node2shell_scan.node_sites(scan), [], name)
+
+	def test_the_all_scope_takes_every_web_host_and_the_default_does_not(self):
+		scan = self.scan(names=('www.rt.test', 'dark.rt.test'), ports=((443, 'https'),))
+		Subdomain.objects.filter(scan_history=scan, name='www.rt.test').update(http_status=200)  # answered over HTTP, nothing fingerprinted
+		self.assertEqual(node2shell_scan.node_sites(scan), [])
+		with mock.patch.dict('os.environ', {'CVENGINE_NODE2SHELL_SCOPE': 'all'}):
+			self.assertEqual([s.name for s, _u in node2shell_scan.node_sites(scan)], ['www.rt.test'])  # the host that never answered stays out
+		with mock.patch.dict('os.environ', {'CVENGINE_NODE2SHELL_SCOPE': 'nonsense'}):
+			self.assertEqual(node2shell_scan.scope(), 'runtimes')
+
 	def test_no_hosts_at_all_is_a_no_op(self):
 		scan = self.scan(names=(), ports=())
 		self.assertEqual(node2shell_scan.node_sites(scan), [])

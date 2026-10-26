@@ -79,6 +79,15 @@ def cap(name):
 
 # ----------------------------------------------------------------------------- templates (read-only by their own text)
 
+def all_templates_allowed():
+    """True when Settings > Scan engines lets every installed Nuclei template run. Fails closed: any doubt is the read-only policy."""
+    try:
+        from dashboard.models import ScanPolicy
+        return bool(ScanPolicy.current().nuclei_all_templates)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def readonly_problem(yaml_text):
     """Why a template may not be run by validation, or "" when its text is read-only: plain GET, HEAD or OPTIONS requests (a ``method``
     or the first line of each ``raw`` request), none of the keys in READONLY_FORBIDDEN_KEYS, no out-of-band protocol, and no data sent
@@ -183,7 +192,7 @@ def approved_template(path, cve_id=None):
         ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
         problem = '' if ok else f'template not validated: {why}'
     else:
-        problem = readonly_problem(text)
+        problem = '' if all_templates_allowed() else readonly_problem(text)
     return ('', problem) if problem else (text, '')
 
 

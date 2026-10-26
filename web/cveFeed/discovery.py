@@ -501,7 +501,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None):
+                node2shell_checker=None, waf_runner=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -546,6 +546,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
 
     if stopped(scan_id):
         return gone
+    from cveFeed import waf_scan
+    waf_kwargs = {'runner': waf_runner} if waf_runner else {}
+    if retest or force:
+        waf_kwargs['force'] = True
+    waf_result = None
+    if waf_scan.enabled() and (waf_runner or waf_scan.installed()) and waf_scan.web_sites(scan):  # the product behind a host's firewall
+        waf_result = _stage(scan, 'WAF fingerprint (wafw00f)', 'wafw00f', lambda: waf_scan.run_for_scan(scan_id, **waf_kwargs),
+                            fallback={'checked': 0})
+        if stopped(scan_id):
+            return gone
     from cveFeed import route_auth
     route_kwargs = {'probe': route_probe} if route_probe else {}
     if retest or force:
@@ -623,6 +633,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
               'asset_changes': changes_result}
     if hygiene_result is not None:
         result['hygiene'] = hygiene_result
+    if waf_result is not None:
+        result['wafw00f'] = waf_result
     if wpscan_result is not None:
         result['wpscan'] = wpscan_result
     if node2shell_result is not None:

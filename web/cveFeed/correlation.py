@@ -30,6 +30,8 @@ GENERIC_PRODUCT_TOKENS = frozenset({
     'aws', 'awsservice', 'amazonaws', 'amazonwebservices', 'amazonwebservice',
     'azure', 'azureservice', 'microsoftazure', 'googlecloud', 'googlecloudservice',
     'cloudservice', 'webservice', 'service',
+    # a category a scanner reports when it sees one, not a product: "WAF" says a firewall answered, not which one
+    'waf', 'webapplicationfirewall',
 })
 
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploys every new master commit automatically. Run it from a timer: scripts/install-auto-deploy.sh.
+# Deploys every new master commit automatically, but only while Settings > Updates is set to Automatic (the default is Manual, and then it does
+# nothing). Run it from a timer: scripts/install-auto-deploy.sh.
 #
 # When master on GitHub is ahead of this checkout, it backs up the database and the secret key, then
 # runs scripts/update.sh --stop-scans: running scans stop cleanly, the scheduler and workers pause, the
@@ -35,6 +36,18 @@ mkdir -p "$state/backups"
 chmod 700 "$state" "$state/backups"
 exec 8>"$state/lock"
 flock -n 8 || { log "Another auto-deploy run is still working."; exit 0; }
+
+# Nothing here changes the code of an install unless its administrator chose Automatic in Settings > Updates (web/.update-mode). The default,
+# and anything unreadable, is Manual: the timer stays installed and does nothing.
+mode=$(python3 scripts/update-state.py mode 2>/dev/null) || mode=manual
+if [[ $mode != auto ]]; then
+    if [[ $(cat "$state/mode-note" 2>/dev/null) != manual ]]; then
+        log "Updates are set to Manual in Settings > Updates, so nothing is deployed automatically. Choose Automatic there to turn this on."
+        printf manual > "$state/mode-note"
+    fi
+    exit 0
+fi
+printf auto > "$state/mode-note"
 
 latest=$(timeout 60 git ls-remote origin refs/heads/master 2>/dev/null | cut -f1) || latest=''
 if [[ ! $latest =~ ^[0-9a-f]{40}$ ]]; then

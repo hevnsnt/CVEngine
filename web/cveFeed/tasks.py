@@ -1173,7 +1173,7 @@ def background_full_scan():
 @app.task(name="check_for_updates", bind=False, queue="cve_feed_queue")
 def check_for_updates():
     """Twice a day: ask GitHub whether a newer version exists. An administrator decides whether to apply it
-    (banner + Settings > Updates); nothing is ever installed from here."""
+    (banner + Settings > Updates). Nothing is approved from here unless they chose Automatic there; the default is Manual."""
     from cveFeed import updater
     from cveFeed.models import UpdateSettings
     row = UpdateSettings.current()
@@ -1186,6 +1186,11 @@ def check_for_updates():
         from dashboard.models import AuditLog
         AuditLog.objects.create(actor=None, actor_name="updater", action="update.available", target=row.latest_sha[:7],
                                 detail={"message": row.latest_message, "behind_by": row.behind_by})
+    if updater.auto_approve(row):  # only when the administrator chose Automatic in Settings > Updates; the default is Manual
+        from dashboard.models import AuditLog
+        AuditLog.objects.create(actor=None, actor_name="updater", action="update.approved", target=row.latest_sha[:7],
+                                detail={"message": row.latest_message, "behind_by": row.behind_by, "mode": "automatic"})
+        state = updater.state(row)
     return {"status": state["status"], "latest": state["latest"]}
 
 

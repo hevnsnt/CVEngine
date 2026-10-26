@@ -330,6 +330,26 @@ PHP_RANGES = [{"introduced": "8.2.*", "fixed": "8.2.35"}, {"introduced": "8.3.*"
 PHP2SHELL = FakeCVE(71, [{"vendor": "PHP Group", "product": "PHP", "package": "php-src", "ranges": PHP_RANGES}], kev=True)
 
 
+MOVEIT_WAF = FakeCVE(72, [{"vendor": "progress", "product": "MOVEit WAF", "ranges": [{"introduced": "1.0", "fixed": "9.9"}]}], kev=False)
+
+
+class TestCategoryLabelsAreNotProducts(unittest.TestCase):
+    """bbot labels a host "WAF" when it sees any web application firewall. That says a firewall answered, not which one, so it must
+    not stand for a product whose name merely contains the word (found on a host matched to the MOVEit WAF advisories)."""
+
+    def test_a_generic_waf_label_does_not_match_a_named_waf_product(self):
+        for label in ("WAF", "waf", "Web Application Firewall"):
+            self.assertEqual(_hits([MOVEIT_WAF], label, "1.0"), [], label)
+
+    def test_a_host_that_is_the_named_product_still_matches(self):
+        for label in ("MOVEit WAF", "moveitwaf"):
+            self.assertEqual([row[0] for row in _hits([MOVEIT_WAF], label, "1.0")], [72], label)
+
+    def test_a_cve_whose_product_is_just_waf_names_nothing_to_match(self):
+        bare = FakeCVE(73, [{"vendor": "acme", "product": "WAF", "ranges": [{"introduced": "1.0", "fixed": "9.9"}]}], kev=False)
+        self.assertEqual(_hits([bare], "WAF", "1.0"), [])
+
+
 class TestWordBoundaryMatching(unittest.TestCase):
     """A shorter name matches a longer one only as whole words. Found on a Netlify site tagged "datocms" that matched Craft CMS
     advisories because the advisory's product is "cms"."""
