@@ -385,10 +385,11 @@ a.cell{cursor:pointer;transition:background .12s}@media (hover:hover) and (point
 .cell p b{color:var(--ink)}
 
 /* surface map: one tile per host, coloured by its worst temperature. Few hosts get big labelled tiles; hundreds shrink to dots. */
-.map{--hx:22px;display:grid;gap:6px;grid-template-columns:repeat(auto-fill,minmax(var(--hx),1fr));align-content:start;min-height:56px}
+.map{--cols:1;--rows:1;display:grid;gap:6px;grid-template-columns:repeat(var(--cols),minmax(0,1fr));grid-template-rows:repeat(var(--rows),minmax(0,1fr));flex:1 1 0;min-height:150px}
+#c-map .map{height:auto}
 .map[data-size="xl"]{--hx:92px}
 .map[data-size="l"]{--hx:34px}
-.hx{display:block;aspect-ratio:1;min-width:0;border-radius:4px;background:var(--clean);padding:0;cursor:pointer;position:relative;transition:transform .1s,border-color .1s;
+.hx{display:block;min-width:0;min-height:0;border-radius:4px;background:var(--clean);padding:0;cursor:pointer;position:relative;transition:transform .1s,border-color .1s;
   overflow:hidden;text-decoration:none;color:var(--ink-2)}
 .hx .score{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:700 13px/1 var(--mono);color:var(--on-solid);opacity:.95}
 .hx.clean .score,.hx.ice .score{color:var(--ink)}
@@ -396,7 +397,7 @@ a.cell{cursor:pointer;transition:background .12s}@media (hover:hover) and (point
 .map[data-size="xl"] .hx .score,.map[data-size="l"] .hx .score{font-size:16px}
 .hx.fire{background:var(--fire)}.hx.smoke{background:var(--smoke)}.hx.ice{background:var(--ice)}.hx.clean{background:var(--ok)}
 /* few hosts: quiet labelled cards with a thin coloured edge; many hosts: compact solid squares */
-.map[data-size="xl"] .hx{aspect-ratio:5/4;padding:9px 10px 9px 13px;display:flex;align-items:flex-end;font:600 11.5px/1.15 var(--mono);letter-spacing:-.01em;border-radius:var(--r);background:var(--surface-2);border:1px solid var(--line-2);color:var(--ink)}
+.map[data-size="xl"] .hx{padding:9px 10px 9px 13px;display:flex;align-items:flex-end;font:600 11.5px/1.15 var(--mono);letter-spacing:-.01em;border-radius:var(--r);background:var(--surface-2);border:1px solid var(--line-2);color:var(--ink)}
 .map[data-size="xl"] .hx::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--ok)}
 .map[data-size="xl"] .hx.clean{border-color:var(--clean-ring)}
 .map[data-size="xl"] .hx.fire::before{background:var(--fire)}.map[data-size="xl"] .hx.smoke::before{background:var(--smoke)}.map[data-size="xl"] .hx.ice::before{background:var(--ice)}
@@ -767,7 +768,7 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
   .hero .graph-box{flex:1;min-height:300px;display:flex}
   .hero #d-graph{flex:1;height:auto;min-height:300px}
   .hero .agent{height:320px}
-  .panel{grid-template-columns:minmax(0,4fr) minmax(0,4fr) minmax(0,5fr)}
+  .panel{grid-template-columns:minmax(0,3fr) minmax(0,3.5fr) minmax(0,3.5fr)}
   .cell+.cell{border-top:0;border-left:1px solid var(--line)}
 }@media (min-width:1200px){.strip{grid-template-columns:repeat(7,minmax(0,1fr))}}@media (max-width:719px){.strip a:last-child:nth-child(odd){grid-column:span 2}}@media (min-width:1024px){
   :root{--gutter:32px}
@@ -1329,3 +1330,24 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (min-width:560px){.dlg-dest{grid-template-columns:1fr 1fr}}
 .dlg-dest-field{display:flex;flex-direction:column;gap:5px;margin:0}
 .dlg-dest .select select{min-height:40px;font-weight:600}
+
+/* the map fills its card: tiles are placed by the layout in dashboard.js (--cols, --rows, data-tier) */
+.hx[hidden]{display:none}
+.hx .hx-details{display:none}
+.map[data-tier="rich"] .hx{flex-direction:column;justify-content:flex-start;align-items:stretch;gap:3px;padding:8px 10px 8px 13px}
+.map[data-tier="rich"][data-size="xl"] .hx .score{position:static;inset:auto;order:1;justify-content:flex-start;padding:0;font:700 22px/1 var(--mono);color:var(--ink)}
+.map[data-tier="rich"][data-size="xl"] .hx .score::before{content:none}
+.map[data-tier="rich"][data-size="xl"] .hx .hx-name{order:2;margin-top:auto;font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map[data-tier="rich"] .hx .hx-details{display:flex;flex-direction:column;gap:2px;order:1;min-height:0;overflow:hidden;font:500 10.5px/1.3 var(--mono);color:var(--muted)}
+.map[data-tier="rich"] .hx .hx-d{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map[data-tier="rich"] .hx .hx-cve{color:var(--ink)}
+.hx .hx-tag{display:none}
+.map[data-tier="rich"] .hx .hx-tag{display:block;position:absolute;top:8px;right:8px;font:700 9.5px/1 var(--mono);font-style:normal;padding:3px 5px;border-radius:3px;background:var(--sunk);color:var(--ink);letter-spacing:.04em}
+.map[data-tier="rich"] .hx .hx-tag.fire{background:var(--fire);color:var(--on-solid)}
+.map[data-tier="rich"] .hx .hx-tag.smoke{background:var(--smoke);color:var(--on-solid)}
+.map[data-tier="rich"] .hx .hx-tag.ice{background:var(--ice);color:var(--on-solid)}
+.map[data-lines="1"] .hx-d:nth-child(n+2),.map[data-lines="2"] .hx-d:nth-child(n+3),.map[data-lines="3"] .hx-d:nth-child(n+4),.map[data-lines="4"] .hx-d:nth-child(n+5){display:none!important}
+.map[data-tier="rich"] .hx.fire .hx-name,.map[data-tier="rich"] .hx.smoke .hx-name{color:var(--ink)}
+@media (max-width:999px){#c-map .map{flex:none;height:clamp(200px,60vw,340px)}}
+.map[data-narrow="1"] .hx .hx-why{display:none!important}
+.map[data-lines="5"] .hx-d:nth-child(n+6){display:none!important}
