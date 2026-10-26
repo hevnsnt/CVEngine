@@ -1,5 +1,6 @@
 import importlib.util
 import os
+from urllib.parse import urlparse
 
 from django.test import SimpleTestCase
 
@@ -12,9 +13,10 @@ spec.loader.exec_module(tools)
 class ToolVersionCheckTests(SimpleTestCase):
 	def test_it_reads_the_pins_and_flags_the_ones_that_are_behind(self):
 		def get(url, as_json=True):
-			if 'nmap.org' in url:
+			host = urlparse(url).hostname
+			if host == 'nmap.org':
 				return '<a href="nmap-7.95.tar.bz2">x</a> <a href="nmap-99.1.tar.bz2">y</a> <a href="nmap-7.992.tar.bz2">z</a>'
-			if 'rubygems' in url:
+			if host == 'rubygems.org':
 				return {'version': '9.9.9'}
 			return {'tag_name': 'v0.0.1'}
 		rows = {r['tool']: r for r in tools.collect(get)}
