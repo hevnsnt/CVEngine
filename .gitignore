@@ -65,6 +65,10 @@ get-docker.sh
 web/.commit
 web/.update-approved
 web/.update-approved.tmp
+web/.update-branch
+web/.update-branch.tmp
+web/.update-mode
+web/.update-mode.tmp
 web/.update-log
 web/.update-lock
 web/.update-requeue.json

@@ -66,6 +66,14 @@ class UniqueIpTests(TransactionTestCase):
 		self.assertEqual(sorted(Subdomain.objects.filter(ip_addresses=keeper).values_list('name', flat=True)), ['a.dup.test', 'b.dup.test'])
 
 
+class MigrationTransactionTests(TransactionTestCase):
+	def test_the_merge_and_the_unique_index_are_not_one_transaction(self):
+		# PostgreSQL refuses to build the index in the transaction that rewrote the rows foreign keys point at ("pending trigger events"),
+		# which stopped an update on any install that held duplicate addresses. The upgrade rehearsal runs the real thing.
+		migration = importlib.import_module('startScan.migrations.0019_unique_ipaddress')
+		self.assertFalse(migration.Migration.atomic)
+
+
 class TolerantGetOrCreateTests(TransactionTestCase):
 	def test_a_duplicated_row_is_not_a_crash(self):
 		from startScan.ip_rows import get_or_create_first

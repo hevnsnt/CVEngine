@@ -84,6 +84,9 @@ class AIProviderSettings(models.Model):
 	auto_fire = models.BooleanField(default=False)
 	auto_fire_engine_id = models.IntegerField(null=True, blank=True)  # scanEngine.EngineType id
 	auto_fire_max_scans = models.IntegerField(default=200)  # hosts tested per CVE (the column keeps its old name)
+	# How many times a day the model may be asked to plan validation checks (each is a paid request): in total, and for one project.
+	plan_daily_total = models.PositiveIntegerField(default=200)
+	plan_daily_per_project = models.PositiveIntegerField(default=20)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
@@ -231,6 +234,18 @@ class SystemTimings(models.Model):
 	ct_watch_minutes = models.PositiveIntegerField(default=20)       # how often every target is re-checked against crt.sh
 	discovery_timeout_hours = models.PositiveSmallIntegerField(default=6)
 	nuclei_timeout_hours = models.PositiveSmallIntegerField(default=4)
+
+	@classmethod
+	def current(cls):
+		return cls.objects.first() or cls()
+
+
+class ScanPolicy(models.Model):
+	"""Single-row App Admin setting for what the scanners may run (Settings > Scan engines)."""
+	id = models.AutoField(primary_key=True)
+	# Off: only Nuclei templates whose own text is a read-only check run. On: every template Nuclei ships may run
+	# (the AI-written ones always stay read-only).
+	nuclei_all_templates = models.BooleanField(default=False)
 
 	@classmethod
 	def current(cls):

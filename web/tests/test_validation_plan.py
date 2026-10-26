@@ -1,7 +1,7 @@
 """AI may select only checks already admitted by the deterministic planner."""
 from unittest import mock
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from cveFeed.validation_plan import parse_plan, plan
 from cveFeed.validation import local_component_only, plan_checks
@@ -44,3 +44,40 @@ class PlanParsingTests(SimpleTestCase):
         checks, notes = plan_checks(subject, 'signature', ('', 'no template covers this CVE'))
         self.assertEqual(checks, [])
         self.assertIn('local kernel', notes[0])
+
+
+class PlanBudgetTests(TestCase):
+    def setUp(self):
+        from dashboard.models import Project
+        from django.utils import timezone
+        self.project = Project.objects.create(name='B', slug='budget', insert_date=timezone.now())
+
+    def reserve(self, signature):
+        from cveFeed.validation_plan import _reserve
+        claim, why = _reserve(self.project.id, signature)
+        if claim:
+            claim.status = 'succeeded'
+            claim.save(update_fields=['status'])
+        return why
+
+    def test_the_budget_comes_from_the_ai_settings(self):
+        from dashboard.models import AIProviderSettings
+        from cveFeed.validation_plan import daily_limits
+        self.assertEqual(daily_limits(), (200, 20))  # nothing configured yet: the defaults
+        AIProviderSettings.objects.create(plan_daily_total=3, plan_daily_per_project=2)
+        self.assertEqual(daily_limits(), (3, 2))
+
+    def test_the_project_limit_stops_planning_and_raising_it_resumes(self):
+        from dashboard.models import AIProviderSettings
+        cfg = AIProviderSettings.objects.create(plan_daily_total=100, plan_daily_per_project=2)
+        self.assertEqual([self.reserve(f's{i}') for i in range(2)], ['', ''])
+        self.assertIn('daily budget reached', self.reserve('s2'))
+        self.assertIn('Settings', self.reserve('s2'))  # the message says where to raise it
+        cfg.plan_daily_per_project = 3
+        cfg.save()
+        self.assertEqual(self.reserve('s3'), '')
+
+    def test_zero_turns_ai_planning_off(self):
+        from dashboard.models import AIProviderSettings
+        AIProviderSettings.objects.create(plan_daily_total=0)
+        self.assertIn('daily budget reached', self.reserve('s0'))
