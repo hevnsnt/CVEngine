@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from agentapi import system_status
 from agentapi.auth import create_token
+from agentapi.models import Agent, SentinelTask
 from cveFeed.models import ScanControl
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -320,3 +321,78 @@ class WorkConductorStatusTests(TestCase):
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
 		_, problems = self.problems()
 		self.assertFalse([p for p in problems if p.startswith('work:')])
+
+
+class SentinelStatusTests(TestCase):
+	"""system.sentinels: an App Admin (or an agent with only MCP access) sees Sentinel registration counts, how many are
+	live, scan-stage queue depth and the last day's completed/failed/expired SentinelTasks, without a separate query per
+	Sentinel, and a high failure/expiry share is surfaced as a problem."""
+
+	@classmethod
+	def setUpTestData(cls):
+		org = Org.objects.create(name='Sen', slug='sen-status-org')
+		cls.project = Project.objects.create(name='Sen', slug='sen-status-p', insert_date=NOW, org=org)
+		cls.root = User.objects.create_superuser('sen-root', 'r@x.io', 'x')
+		_, cls.t_root = create_token(cls.root, 'root')
+
+	def make_agent(self, name, status='active', last_seen=None):
+		owner = User.objects.create_user(f'owner-{name}', password='x')
+		token, _raw = create_token(owner, f'{name}-token')
+		return Agent.objects.create(token=token, name=name, kind='scanner', status=status,
+								   scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen)
+
+	def make_task(self, agent, status, finished_at=None, error=''):
+		return SentinelTask.objects.create(project=self.project, kind='nmap', target={'addresses': ['192.0.2.9']},
+										   host='h.example', ips=['192.0.2.9'], agent=agent, status=status,
+										   finished_at=finished_at, error=error)
+
+	def run_status(self):
+		a, b, c = patched()
+		with a, b, c:
+			return call(self.t_root, 'GET', '/api/v1/system/status')
+
+	def test_registered_counts_and_live_window(self):
+		self.make_agent('live-one', status='active', last_seen=timezone.now())
+		self.make_agent('stale-one', status='active', last_seen=timezone.now() - timedelta(hours=1))
+		self.make_agent('pending-one', status='pending')
+		_, data = self.run_status()
+		sentinels = data['system']['sentinels']
+		self.assertEqual(sentinels['registered']['active'], 2)
+		self.assertEqual(sentinels['registered']['pending'], 1)
+		self.assertEqual(sentinels['live'], 1)
+
+	def test_queue_depth_and_last_day_outcomes(self):
+		agent = self.make_agent('worker-one', last_seen=timezone.now())
+		self.make_task(agent, 'queued')
+		self.make_task(agent, 'running')
+		self.make_task(agent, 'done', finished_at=timezone.now())
+		self.make_task(agent, 'done', finished_at=timezone.now() - timedelta(days=3))  # outside the 24h window
+		_, data = self.run_status()
+		sentinels = data['system']['sentinels']
+		self.assertEqual(sentinels['queue'], {'queued': 1, 'claimed': 0, 'running': 1})
+		self.assertEqual(sentinels['finished_24h']['done'], 1)
+
+	def test_a_high_failure_share_is_a_problem_with_recent_errors_listed(self):
+		agent = self.make_agent('flaky-one', last_seen=timezone.now())
+		now = timezone.now()
+		for _ in range(4):
+			self.make_task(agent, 'failed', finished_at=now, error='nmap: connection refused')
+		self.make_task(agent, 'done', finished_at=now)
+		status, data = self.run_status()
+		self.assertEqual(status, 200)
+		self.assertEqual(data['overall'], 'degraded')
+		self.assertTrue(any('sentinels:' in p for p in data['problems']))
+		errors = data['system']['sentinels']['recent_errors']
+		self.assertEqual(len(errors), 4)
+		self.assertEqual(errors[0]['sentinel'], 'flaky-one')
+		self.assertIn('connection refused', errors[0]['error'])
+
+	def test_a_healthy_sentinel_fleet_is_not_a_problem(self):
+		# The default HEALTH/CLUSTER fixture (patched()) carries an unrelated past-due schedule, so this checks only
+		# that the Sentinel fleet itself contributes no problem, not that the whole snapshot is 'ok'.
+		agent = self.make_agent('reliable-one', last_seen=timezone.now())
+		for _ in range(5):
+			self.make_task(agent, 'done', finished_at=timezone.now())
+		status, data = self.run_status()
+		self.assertEqual(status, 200)
+		self.assertFalse([p for p in data['problems'] if p.startswith('sentinels:')])

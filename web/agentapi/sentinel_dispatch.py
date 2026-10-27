@@ -112,11 +112,13 @@ def _finding_to_nuclei_line(finding):
     """One Sentinel-reported nuclei finding, reshaped into the same dict ``reNgine.tasks.parse_nuclei_result`` and
     ``cveFeed.nuclei_scan.host_of`` already read from nuclei's own ``-jsonl`` output. Fields nuclei's full output carries
     that a Sentinel's typed, clipped result never does (the raw request/response transcript, a curl command) are left
-    out, not guessed: the untyped nuclei line already tolerates them being absent."""
+    out, not guessed: the untyped nuclei line already tolerates them being absent. ``matcher-name`` is carried through from
+    the Sentinel's own ``matcher_name`` field so a tech-detect template hit names a technology the same way
+    ``cveFeed.nuclei_scan.tech_name_from`` already reads it from a locally-run nuclei line."""
     return {'host': finding.get('host') or finding.get('matched_at') or '', 'matched-at': finding.get('matched_at') or '',
             'type': 'http', 'template': finding.get('template_id') or '', 'template-id': finding.get('template_id') or '',
-            'template-url': [], 'matcher-name': '', 'curl-command': None, 'request': None, 'response': None,
-            'extracted-results': finding.get('extracted_results') or [],
+            'template-url': [], 'matcher-name': finding.get('matcher_name') or '', 'curl-command': None, 'request': None,
+            'response': None, 'extracted-results': finding.get('extracted_results') or [],
             'info': {'name': finding.get('name') or '', 'severity': finding.get('severity') or 'unknown',
                      'description': finding.get('description') or '', 'classification': {}, 'reference': [],
                      'tags': finding.get('tags') or []}}
