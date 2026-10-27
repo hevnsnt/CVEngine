@@ -158,7 +158,7 @@ ROUTES = [
      lambda r, c, slug, scan_id, **k: svc.list_scan_vulnerabilities(c, slug, int(scan_id), r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/scans/(?P<scan_id>\d+)/activity', 'Task timeline of a scan',
      lambda r, c, slug, scan_id, **k: svc.scan_activity(c, slug, int(scan_id), r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/hosts', 'Inventory: hosts with IPs, ports, product/version and a score, highest score first (sort=name)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts', 'Inventory: hosts with IPs, ports, product/version, a score, highest score first (sort=name), and check_coverage (which of the checks that apply to the host have run)',
      lambda r, c, slug, **k: svc.list_hosts(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments', 'Queue a full, fresh assessment of one inventoried host; body {host_id}',
      lambda r, c, slug, **k: (svc.request_host_assessment(c, slug, _body(r).get('host_id')), 202)),

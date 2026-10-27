@@ -282,7 +282,7 @@ def _hosts(project, host, findings_by_host, cap):
         'technologies').order_by('-score', 'name')
     total, rows, page = qs.count(), [], 1
     while len(rows) < min(cap, total):
-        got = svc._hosts_page(project, qs, {'page': page, 'page_size': HOST_PAGE})['results']
+        got = svc._hosts_page(project, qs, {'page': page, 'page_size': HOST_PAGE}, coverage=False)['results']
         if not got:
             break
         rows += got

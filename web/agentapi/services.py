@@ -1156,7 +1156,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
     from cveFeed import host_context, subdir_apps
     probe_rows = ((shared or {}).get('probes') or {}).get(host_key) or []
-    return {'id': sub.id,
+    unverified = _unverified_products(sub, others, ips)
+    row = {'id': sub.id,
             # what version and identity probes and WPScan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
             'probes': [{'probe': r.probe, 'kind': r.kind, 'product': r.product, 'version': r.version, 'variant': r.variant, 'outcome': r.outcome,
                         'confidence': r.confidence, 'source': r.source, 'observed_at': r.observed_at.isoformat()}
@@ -1172,7 +1173,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'technologies': sorted(techs),
             'technology_details': details,
             # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
-            'unverified_products': _unverified_products(sub, others, ips),
+            'unverified_products': unverified,
             # what the web archive says the host ran at some point: historical evidence, never a current technology
             'archived_technologies': [{'name': n, 'urls': i.get('count', 0), 'examples': (i.get('sample') or [])[:3]}
                                       for n, i in sorted(archived.items())],
@@ -1206,6 +1207,35 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
             'inventory': _host_inventory(sub, others, shared)}
+    if (shared or {}).get('coverage') is not None:
+        row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
+                                                 probe_rows, root, shared.get('coverage_rich', False))
+    return row
+
+
+def _check_coverage(loaded, sub, others, project_id, excluded, hosting_info, reasons, unverified, probe_rows, root, rich):
+    """The host's check coverage (cveFeed.check_coverage): ``{done, applicable, paused, checks}``, or None when it could not be worked out, which
+    never breaks the host record."""
+    from cveFeed import check_coverage
+    try:
+        return check_coverage.for_host(
+            loaded, sub, others, project_id, excluded=excluded, shared_platform=bool(hosting_info.get('shared_ip')),
+            hot_cves=[r['label'] for r in reasons if r['kind'] == 'cve' and r['temp'] in ('fire', 'smoke')], unversioned=len(unverified),
+            probe_rows=probe_rows, root=root, rich=rich)
+    except Exception:  # noqa: BLE001 - accounting only: a host is shown without it rather than not at all
+        logger.exception('check coverage failed for host %s', sub.name)
+        return None
+
+
+def _coverage_for(subs, others, project, rich=False):
+    """The batched evidence for the check coverage of a page of hosts (a fixed number of queries, whatever the page holds), or None when it
+    could not be loaded."""
+    from cveFeed import check_coverage
+    try:
+        return check_coverage.load([(s, others.get(s.id, ()), _pid_of(project, s)) for s in subs])
+    except Exception:  # noqa: BLE001
+        logger.exception('check coverage could not be loaded')
+        return None
 
 
 def _host_inventory(sub, others, shared):
@@ -1410,8 +1440,9 @@ def _one_per_host(qs, per_project=False):
     return Subdomain.objects.filter(id__in=rep)
 
 
-def _hosts_page(project, qs, params, extra=None):
-    """Paginate hosts with each row's same-name copies folded in (one extra query per page). In the all-projects view each row
+def _hosts_page(project, qs, params, extra=None, coverage=True):
+    """Paginate hosts with each row's same-name copies folded in (one extra query per page). ``coverage=False`` leaves out ``check_coverage``
+    (the PDF report does not print it). In the all-projects view each row
     also names its project, and everything folded in (copies, labels, asset info, exclusions) is looked up per (project, host)."""
     everywhere = _is_all(project)
     page = paginate(qs, params, lambda sub: sub)
@@ -1421,6 +1452,8 @@ def _hosts_page(project, qs, params, extra=None):
     profiles, excluded = _profiles_for(project, subs)
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
     shared['inventories'] = _inventories_for(project, subs, others)
+    if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
+        shared['coverage'] = _coverage_for(subs, others, project)
     rows = []
     for sub in subs:
         key = (_pid_of(project, sub), sub.name.lower())
@@ -1438,7 +1471,8 @@ def host_group(project, sub):
     profiles, excluded = _profiles_for(project, [sub])
     key = (project.id, sub.name.lower())
     others = _name_siblings(project, [sub])
-    shared = {**_shared_for(project, [sub]), 'inventories': _inventories_for(project, [sub], others)}
+    shared = {**_shared_for(project, [sub]), 'inventories': _inventories_for(project, [sub], others),
+              'coverage': _coverage_for([sub], others, project), 'coverage_rich': True}  # the single host also names each address, port or CVE judged
     return _host(sub, others[sub.id], _labels_for(project, [sub]).get(key, ()),
                  profiles.get(key), key in excluded, _roots_for(project, [sub]).get(key), shared)
 
