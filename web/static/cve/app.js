@@ -1010,7 +1010,7 @@ function renderFinding(d, cfg, row) {
   if (d.severity) head.append(badge(d.severity, d.severity));
   // from the machine's own inventory report, not from an outside scan: the only way a local-only CVE becomes a finding
   if (d.host_reported) head.append(Object.assign(badge("Reported by the host", "success"), { title: "Found in this host's own inventory report (installed software and patch level), not by an outside scan" }));
-  if (d.assessment_status === "closed_not_applicable") head.append(badge(/local-only/.test(d.assessment_reason || "") ? "Closed: local-only vulnerability" : "Closed: invalid product match", "ice"));
+  if (d.assessment_status === "closed_not_applicable") head.append(badge(/local-only/.test(d.assessment_reason || "") ? "Closed: local-only vulnerability" : /no version evidence/.test(d.assessment_reason || "") ? "Closed: no version evidence" : "Closed: different product", "ice"));
   head.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
   const vb = validationBadge({ validation_status: d.validation.status });
   if (vb) head.append(vb);

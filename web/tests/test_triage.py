@@ -271,7 +271,7 @@ class SignatureCacheTests(TriageDbBase):
 		m.refresh_from_db()
 		row = Triage.objects.get(match=m)
 		self.assertEqual((m.ai_verdict, row.classification), ('not_affected', 'not_applicable'))
-		self.assertIn('invalid product correlation', m.ai_reason)
+		self.assertIn('different product', m.ai_reason)
 		self.assertEqual(provider.complete.call_count, 0)
 		self.run_all(provider=provider)
 		self.assertEqual(provider.complete.call_count, 0)
