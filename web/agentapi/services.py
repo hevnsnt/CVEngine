@@ -144,7 +144,7 @@ def require_write_token(ctx):
 def _int_param(value, name):
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: JSON 1e999 parses to infinity
         raise ApiError(400, f'{name} must be an integer')
 
 

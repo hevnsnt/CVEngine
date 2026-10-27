@@ -10,7 +10,7 @@ ACTIVE_TASK_STATUSES = ('queued', 'assigned', 'running')
 
 class Agent(models.Model):
     KINDS = ('remediation', 'validation', 'scanner', 'reporter', 'human')
-    STATUSES = ('active', 'suspended', 'revoked')
+    STATUSES = ('pending', 'active', 'suspended', 'revoked')
 
     token = models.OneToOneField('dashboard.ApiToken', on_delete=models.CASCADE, related_name='agent')
     name = models.CharField(max_length=100)
@@ -22,7 +22,7 @@ class Agent(models.Model):
     os = models.JSONField(default=list, blank=True)  # operating system families the agent can act on; empty means any
     tools = models.JSONField(default=list, blank=True)  # free-form tool names the agent has (nmap, curl, ansible ...)
     max_concurrent = models.PositiveSmallIntegerField(default=2)
-    status = models.CharField(max_length=10, default='active')
+    status = models.CharField(max_length=10, default='pending')  # pending until an administrator approves it (see agent_broker._initial_status)
     # An administrator's narrowing: {capabilities: [..] | null, projects: [slug] | null, max_concurrent: int | null}.
     limits = models.JSONField(default=dict, blank=True)
     status_note = models.CharField(max_length=200, blank=True, default='')

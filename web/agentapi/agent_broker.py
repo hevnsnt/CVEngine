@@ -32,6 +32,12 @@ BACKOFF = timedelta(seconds=30)
 HEARTBEAT_SECONDS = 60
 MAX_WAIT = 20  # seconds a get_next_task call may hold a web thread
 MAX_WAITERS = 6  # concurrent holders, so long polls can never take every web thread (16 by default)
+MAX_WAITERS_PER_USER = 2  # and one user, however many tokens it mints, cannot hold more than this of them
+MAX_AGENTS_PER_USER = 10
+MAX_SCAN = 5000  # queued rows one claim looks through, in pages of CANDIDATES, before it says there is nothing for this agent
+USER_RATE_FACTOR = 3  # a user's tokens together may make this many times one token's calls
+MAX_ATTEMPTS_PER_DAY = 5  # tasks for one match and kind in a day, so a loop of queue, fail, queue cannot grow the audit trail without bound
+RETENTION_DAYS = 30  # finished agent tasks are deleted after this (the audit log keeps the trail)
 MAX_CONCURRENT_CAP = 10
 MAX_ACTIVE_PER_PROJECT = 2000
 MAX_QUEUE_BATCH = 200
@@ -40,7 +46,8 @@ MAX_SUMMARY = 1000
 MAX_CHECK_OUTPUT = 2000
 MAX_CHECKS = 20
 MAX_NOTE = 200
-RATES = {'register': (30, 3600), 'heartbeat': (120, 60), 'claim': (60, 60), 'report': (120, 60), 'release': (120, 60)}
+RATES = {'register': (30, 3600), 'heartbeat': (120, 60), 'claim': (60, 60), 'report': (120, 60), 'release': (120, 60), 'queue': (30, 60)}
+ADMIN_STATUSES = ('active', 'suspended', 'revoked')
 STATUS_ORDER = ('queued', 'assigned', 'running', 'completed', 'failed', 'cancelled')
 
 
@@ -54,13 +61,40 @@ def _need_token(ctx, write=True):
     return ctx.token
 
 
+def _hit(name, limit, window):
+    """Count one call against a window and say whether it is within ``limit``. One INCR, so concurrent callers cannot all pass the check."""
+    cache.add(name, 0, window)
+    try:
+        used = cache.incr(name)
+    except ValueError:  # the key expired between the add and the incr
+        cache.set(name, 1, window)
+        used = 1
+    return used <= limit
+
+
 def _limit(token, action):
-    """Count one call of ``action`` by ``token``'s agent against its window; 429 past the limit. Keyed by the token's hash, not an id."""
+    """Count one call of ``action`` against the token's window and against its user's, so minting more tokens buys no more calls; 429 past
+    either. The token is keyed by its hash, not an id."""
     limit, window = RATES[action]
-    name = f'agentapi:{action}:{token.key_hash[:16]}'
-    if throttle.exceeded(name, limit):
+    if not (_hit(f'agentapi:{action}:{token.key_hash[:16]}', limit, window)
+            and _hit(f'agentapi:{action}:user:{token.user_id}', limit * USER_RATE_FACTOR, window)):
         raise ApiError(429, f'too many {action} calls: at most {limit} per {window} seconds')
-    throttle.count(name, window)
+
+
+def _limit_user(user, action):
+    limit, window = RATES[action]
+    if not _hit(f'agentapi:{action}:user:{user.pk}', limit, window):
+        raise ApiError(429, f'too many {action} calls: at most {limit} per {window} seconds')
+
+
+def _whole(value, name, low=0, high=None):
+    """``value`` as a whole number, or a 400: a bool, a float, a huge or infinite number and a list are the caller's mistake, never a crash."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) == float('inf') or int(value) != value:
+        raise ApiError(400, f'{name} must be a whole number')
+    value = int(value)
+    if value < low or (high is not None and value > high):
+        raise ApiError(400, f'{name} must be at least {low}' + (f' and at most {high}' if high is not None else ''))
+    return value
 
 
 def _agent_of(ctx, usable=True, write=True):
@@ -121,9 +155,12 @@ def register(ctx, body):
     fields = _parse_registration(body, creating=agent is None)
     if 'scope' in fields:
         _authorise(ctx.user, fields['scope'])
+    if agent is None and Agent.objects.filter(token__user=ctx.user, token__revoked=False).count() >= MAX_AGENTS_PER_USER:
+        raise ApiError(429, f'a user may have at most {MAX_AGENTS_PER_USER} registered agents; unregister one first')
     created = agent is None
     if created:
-        agent = Agent(token=token, **fields)
+        status, note = _initial_status(ctx.user)
+        agent = Agent(token=token, status=status, status_note=note, **fields)
         changed = sorted(fields)
         try:
             with transaction.atomic():
@@ -136,9 +173,8 @@ def register(ctx, body):
             setattr(agent, key, fields[key])
         if changed:
             agent.save()
-    hosts = fields.get('scope', {}).get('hosts')
-    if hosts and token.assets != hosts:
-        token.assets = hosts  # the remediation work list narrows to the same hosts
+    if 'scope' in fields and token.assets != fields['scope']['hosts']:
+        token.assets = fields['scope']['hosts']  # the remediation work list narrows to the same hosts, and stops doing so when they are cleared
         token.save(update_fields=['assets'])
     _touch(agent)
     if changed:
@@ -152,12 +188,23 @@ def register(ctx, body):
     return out
 
 
+def _initial_status(user):
+    """``(status, note)`` of a new registration. A user who has an agent suspended or revoked does not get round it with a new token: the new
+    agent starts suspended. Otherwise an administrator's agent is active at once and anyone else's waits for approval, because an agent
+    can take work, and report it fixed, in every project its user writes to."""
+    if Agent.objects.filter(token__user=user, status__in=('suspended', 'revoked')).exists():
+        return 'suspended', 'another agent of this user is suspended or revoked; an administrator must reinstate this one'
+    return ('active', '') if roles.is_admin_anywhere(user) else ('pending', '')
+
+
 def _warnings(agent):
     scope = agent.scope or {}
     out = []
     if not scope.get('orgs') and not scope.get('projects'):
         out.append('the scope names no organization or project, so no work will be assigned; add orgs or projects (hosts narrow it further)')
-    if agent.status != 'active':
+    if agent.status == 'pending':
+        out.append('this agent is waiting for an administrator to approve it: no work is assigned until then')
+    elif agent.status != 'active':
         out.append(f'this agent is {agent.status}: no work is assigned until an administrator reinstates it')
     if not agent.capabilities:
         out.append('no capabilities are declared, so no work can match')
@@ -165,7 +212,10 @@ def _warnings(agent):
 
 
 def unregister(ctx):
+    """Remove the caller's registration. Not open to a suspended or revoked agent: deleting the row would wipe the administrator's decision."""
     agent = _agent_of(ctx, usable=False)
+    if agent.status not in ('active', 'pending'):
+        raise ApiError(403, f'this agent is {agent.status}; only an administrator can change that')
     release_agent_tasks(agent, 'agent unregistered', actor=ctx.user)
     audit.record_for_user(ctx.user, 'agent.unregister', ctx.user, target=agent.name, agent_id=agent.pk)
     agent.delete()
@@ -180,6 +230,7 @@ def heartbeat(ctx, body=None):
     now = timezone.now()
     _touch(agent, now)
     reap_expired(now)
+    release_ineligible(agent)  # a role downgraded, a project left or a limit tightened since the claim ends the lease now, not in four hours
     leases = []
     for task in AgentTask.objects.filter(agent=agent, status__in=('assigned', 'running')).order_by('id'):
         if task.status == 'running' and agent.status == 'active':
@@ -214,6 +265,8 @@ class Eff:
 
     @staticmethod
     def _problem(agent, token, user, now):
+        if agent.status == 'pending':
+            return 'the agent is waiting for an administrator to approve it'
         if agent.status != 'active':
             return f'the agent is {agent.status}'
         if token.revoked or (token.expires_at and token.expires_at <= now):
@@ -256,10 +309,18 @@ def effective(agent, now=None):
     return Eff(agent, now or timezone.now())
 
 
-def _usable_effs(now):
-    agents = Agent.objects.filter(status='active', token__revoked=False).select_related('token__user')
-    effs = [Eff(a, now) for a in agents]
-    return [e for e in effs if not e.problem]
+def _effs_for(projects, now):
+    """The Eff of every active agent whose scope names one of ``projects`` (or its organization): the only agents that could matter to work
+    there, found in SQL, so a call never builds the rights of every agent on the instance."""
+    named = Q()
+    for project in projects:
+        named |= Q(scope__projects__contains=[project.slug])
+        if project.org_id:
+            named |= Q(scope__orgs__contains=[project.org.slug])
+    if not named:
+        return []
+    agents = Agent.objects.filter(named, status='active', token__revoked=False).select_related('token__user')[:CANDIDATES]
+    return [e for e in (Eff(a, now) for a in agents) if not e.problem]
 
 
 def explain(task, effs):
@@ -297,13 +358,17 @@ def queue_work(ctx, slug, kind, match_ids=None, mode=None, tier=None, host=None,
     and ``host`` (a substring), up to ``limit``. Each task records what it needs; work that is already queued is left alone. The answer
     says what was queued, what was skipped and why, and which queued tasks no live agent can take."""
     project, _ = svc.get_one_project(ctx, slug, write=True)
-    if kind not in AgentTask.KINDS:
+    if not isinstance(kind, str) or kind not in AgentTask.KINDS:
         raise ApiError(400, f'kind must be one of {", ".join(AgentTask.KINDS)}')
-    limit = min(MAX_QUEUE_BATCH, max(1, svc._int_param(limit, 'limit')))
+    _limit_user(ctx.user, 'queue')
+    limit = min(MAX_QUEUE_BATCH, _whole(limit, 'limit', 1))
+    for value, label in ((mode, 'mode'), (host, 'host')):
+        if value is not None and not isinstance(value, str):
+            raise ApiError(400, f'{label} must be a string')
     if match_ids is not None and (not isinstance(match_ids, list) or not match_ids or len(match_ids) > MAX_QUEUE_BATCH
                                   or not all(isinstance(i, int) and not isinstance(i, bool) for i in match_ids)):
         raise ApiError(400, f'match_ids must be a list of 1 to {MAX_QUEUE_BATCH} whole numbers')
-    if tier is not None and tier not in agent_tasks.PRIORITY:
+    if tier is not None and (not isinstance(tier, str) or tier not in agent_tasks.PRIORITY):
         raise ApiError(400, 'tier must be fire, smoke or ice')
     active = AgentTask.objects.filter(project=project, status__in=ACTIVE_TASK_STATUSES).count()
     if active >= MAX_ACTIVE_PER_PROJECT:
@@ -324,7 +389,7 @@ def queue_work(ctx, slug, kind, match_ids=None, mode=None, tier=None, host=None,
         reason = _queue_one(ctx, project, match, kind, mode, tier, created)
         if reason:
             skipped.append({'match_id': match.pk, 'reason': reason})
-    effs = _usable_effs(timezone.now())
+    effs = _effs_for([project], timezone.now())
     stuck = [{'task_id': t.pk, 'host': t.host, 'reason': r} for t in created if (r := explain(t, effs))]
     return {'queued': [task_brief(t) for t in created], 'skipped': skipped, 'unassignable': stuck}
 
@@ -336,6 +401,8 @@ def _queue_one(ctx, project, match, kind, mode, tier, created):
     match_tier = agent_tasks.tier_of(match)
     if tier and match_tier != tier:
         return f'its tier is {match_tier}, not {tier}'
+    if AgentTask.objects.filter(match=match, kind=kind, created_at__gte=timezone.now() - timedelta(days=1)).count() >= MAX_ATTEMPTS_PER_DAY:
+        return f'{MAX_ATTEMPTS_PER_DAY} tasks for it were already queued in the last day'
     try:
         task_mode, needs = agent_tasks.describe(match, kind, mode)
     except ApiError as exc:
@@ -397,6 +464,23 @@ def release_ineligible(agent):
                for t in list(held) if eff.problem or eff.refusal(t))
 
 
+def prune_tasks(now=None, days=None):
+    """Delete finished, failed and cancelled tasks older than the retention. The audit log keeps who did what; the rows would only pile up."""
+    import os
+    now = now or timezone.now()
+    try:
+        days = days or max(1, int(os.environ.get('CVENGINE_AGENT_TASK_RETENTION_DAYS', '')))
+    except ValueError:
+        days = RETENTION_DAYS
+    old = AgentTask._base_manager.filter(status__in=('completed', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days))
+    deleted = 0
+    while True:
+        ids = list(old.values_list('pk', flat=True)[:5000])
+        if not ids:
+            return deleted
+        deleted += AgentTask._base_manager.filter(pk__in=ids).delete()[0]
+
+
 def release_for_tokens(token_ids):
     for agent in Agent.objects.filter(token_id__in=list(token_ids)):
         release_agent_tasks(agent, 'the agent\'s token was revoked')
@@ -405,25 +489,34 @@ def release_for_tokens(token_ids):
 # --- claiming ---------------------------------------------------------------------------------------
 
 @contextmanager
-def _waiter_slot(wanted):
-    """Whether this caller may hold a web thread for a long poll. Yields False when the slots are taken, and the caller answers at once."""
+def _waiter_slot(wanted, token):
+    """Whether this caller may hold a web thread for a long poll: the instance, the token's user and the token each have a cap, so one
+    user cannot take every slot by minting tokens. Yields False when a cap is reached, and the caller answers at once."""
     if not wanted:
         yield False
         return
-    key = 'agentapi:waiters'
-    cache.add(key, 0, 120)
+    caps = (('agentapi:waiters', MAX_WAITERS), (f'agentapi:waiters:user:{token.user_id}', MAX_WAITERS_PER_USER),
+            (f'agentapi:waiters:{token.key_hash[:16]}', 1))
+    taken, within = [], True
     try:
-        taken = cache.incr(key)
-    except ValueError:
-        cache.set(key, 1, 120)
-        taken = 1
-    try:
-        yield taken <= MAX_WAITERS
+        for key, cap in caps:
+            cache.add(key, 0, 120)
+            try:
+                used = cache.incr(key)
+            except ValueError:
+                cache.set(key, 1, 120)
+                used = 1
+            taken.append(key)
+            if used > cap:
+                within = False
+                break
+        yield within
     finally:
-        try:
-            cache.decr(key)
-        except ValueError:
-            pass
+        for key in taken:
+            try:
+                cache.decr(key)
+            except ValueError:
+                pass
 
 
 def _better_placed(eff, task, effs, counts):
@@ -443,7 +536,21 @@ def _still_needed(task):
     return match
 
 
-def _try_claim(agent, kinds, now):
+def _claimable(eff, kinds, now):
+    """The queued tasks this agent's registration can possibly take, in hand-out order. The operating system and the capabilities are
+    settled in SQL (a task's requirement lists are few distinct values, so the agent's satisfiable ones are looked up first), so a run of
+    tasks the agent cannot do never fills the window it looks through; only the host scope is left to Python."""
+    qs = AgentTask.objects.filter(status='queued', kind__in=kinds, project__slug__in=eff.projects) \
+        .filter(Q(not_before__isnull=True) | Q(not_before__lte=now))
+    if eff.os:
+        qs = qs.filter(Q(os_family='') | Q(os_family__in=eff.os))
+    wanted = list(qs.order_by().values_list('required_capabilities', flat=True).distinct())
+    satisfiable = [needs for needs in wanted if not scope_lib.missing_requirements(needs, eff.caps)]
+    return qs.filter(required_capabilities__in=satisfiable).select_related('project__org').order_by('-priority', 'created_at', 'id') \
+        if satisfiable else AgentTask.objects.none()
+
+
+def _try_claim(agent, kinds, now, effs_cache):
     eff = effective(agent, now)
     if eff.problem:
         raise ApiError(403, f'no work can be assigned: {eff.problem}')
@@ -452,28 +559,40 @@ def _try_claim(agent, kinds, now):
         counts = dict(AgentTask._base_manager.filter(status__in=('assigned', 'running')).values_list('agent_id').annotate(n=Count('id')))
         if counts.get(agent.pk, 0) >= eff.max_concurrent:
             return None, f'at capacity ({counts[agent.pk]} of {eff.max_concurrent} tasks in progress)'
-        queued = AgentTask.objects.filter(status='queued', kind__in=kinds, project__slug__in=eff.projects) \
-            .filter(Q(not_before__isnull=True) | Q(not_before__lte=now)).select_related('project')[:CANDIDATES]
-        effs = None
-        for task in queued:
-            if eff.refusal(task):
-                continue
-            if counts.get(agent.pk, 0):
-                effs = effs if effs is not None else _usable_effs(now)
-                if _better_placed(eff, task, effs, counts):
-                    continue
-            match = _still_needed(task)
-            if match is None:
-                continue
-            won = AgentTask.objects.filter(pk=task.pk, status='queued').update(
-                status='assigned', agent=agent, attempts=F('attempts') + 1, claimed_at=now, accepted_at=None, lease_expires_at=now + OFFER_LEASE,
-                error='', not_before=None)
-            if won:
-                task.refresh_from_db()
-                audit.record(agent.token.user, 'agent.task.claim', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk,
-                             agent=agent.name, attempt=task.attempts)
-                return (task, match), ''
+        queued, seen = _claimable(eff, kinds, now), set()
+        while len(seen) < MAX_SCAN:
+            page = list(queued.exclude(pk__in=seen)[:CANDIDATES])
+            if not page:
+                break
+            seen.update(t.pk for t in page)
+            for task in page:
+                claimed = _offer(agent, eff, task, counts, now, effs_cache)
+                if claimed:
+                    return claimed, ''
         return None, 'no eligible work is queued'
+
+
+def _offer(agent, eff, task, counts, now, effs_cache):
+    """Lease ``task`` to the agent if it may take it and nobody else has: ``(task, match)``, or None."""
+    if eff.refusal(task):
+        return None
+    if counts.get(agent.pk, 0):
+        if task.project_id not in effs_cache:
+            effs_cache[task.project_id] = _effs_for([task.project], now)
+        if _better_placed(eff, task, effs_cache[task.project_id], counts):
+            return None
+    match = _still_needed(task)
+    if match is None:
+        return None
+    won = AgentTask.objects.filter(pk=task.pk, status='queued').update(
+        status='assigned', agent=agent, attempts=F('attempts') + 1, claimed_at=now, accepted_at=None, lease_expires_at=now + OFFER_LEASE,
+        error='', not_before=None)
+    if not won:
+        return None
+    task.refresh_from_db()
+    audit.record(agent.token.user, 'agent.task.claim', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk,
+                 agent=agent.name, attempt=task.attempts)
+    return task, match
 
 
 def next_task(ctx, body=None):
@@ -482,18 +601,19 @@ def next_task(ctx, body=None):
     body = body or {}
     agent = _agent_of(ctx)
     kinds = body.get('kinds') or list(AgentTask.KINDS)
-    if not isinstance(kinds, list) or not kinds or not set(kinds) <= set(AgentTask.KINDS):
+    if not isinstance(kinds, list) or not all(isinstance(k, str) and k in AgentTask.KINDS for k in kinds):
         raise ApiError(400, f'kinds must be a list drawn from {", ".join(AgentTask.KINDS)}')
-    wait = min(MAX_WAIT, max(0, svc._int_param(body.get('wait', 0), 'wait')))
+    wait = min(MAX_WAIT, _whole(body.get('wait', 0), 'wait'))
     _limit(agent.token, 'claim')
     deadline = time.monotonic() + wait
-    with _waiter_slot(wait > 0) as slot:
+    effs_cache = {}
+    with _waiter_slot(wait > 0, agent.token) as slot:
         deadline = deadline if slot else 0
         while True:
             now = timezone.now()
             _touch(agent, now)
             reap_expired(now)
-            claimed, why = _try_claim(agent, kinds, now)
+            claimed, why = _try_claim(agent, kinds, now, effs_cache)
             if claimed or time.monotonic() >= deadline:
                 break
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
@@ -506,6 +626,17 @@ def next_task(ctx, body=None):
     return {'task': agent_tasks.payload(task, match), 'reason': ''}
 
 
+def _ensure_eligible(agent, task):
+    """Hand ``task`` back and answer 409 when the agent no longer may hold it: its user's role, its scope, a limit or its status changed
+    since the claim. Checked on accept and on report, so a demoted or limited agent cannot finish work it was leased before."""
+    if task.status not in ('assigned', 'running'):
+        return
+    eff = effective(agent)
+    if eff.problem or eff.refusal(task):
+        _requeue(task, 'the agent no longer covers this work', refund=True, action='agent.task.release', backoff=False)
+        raise ApiError(409, 'the task was taken back: this agent no longer covers it')
+
+
 def accept_task(ctx, task_id):
     agent = _agent_of(ctx)
     _limit(agent.token, 'claim')
@@ -515,6 +646,7 @@ def accept_task(ctx, task_id):
     task = AgentTask.objects.select_related('project').filter(pk=_int(task_id)).first()
     if task is None or task.agent_id != agent.pk:
         raise ApiError(404, 'task not found')
+    _ensure_eligible(agent, task)
     if task.status == 'running':
         return {'task': task_brief(task), 'accepted': True}
     won = AgentTask.objects.filter(pk=task.pk, agent=agent, status='assigned', lease_expires_at__gte=now).update(
@@ -597,6 +729,9 @@ def report_result(ctx, task_id, body):
     now = timezone.now()
     _touch(agent, now)
     reap_expired(now)
+    held = AgentTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent).first()
+    if held is not None:
+        _ensure_eligible(agent, held)
     with transaction.atomic():
         task = AgentTask.objects.select_for_update(of=('self',)).select_related('project').filter(pk=_int(task_id)).first()
         if task is None or task.agent_id != agent.pk:
@@ -661,7 +796,7 @@ def task_brief(task):
 
 
 def _task_rows(qs):
-    return qs.select_related('project', 'match__cve_entry', 'agent')
+    return qs.select_related('project__org', 'match__cve_entry', 'agent')
 
 
 def my_assignments(ctx, params=None):
@@ -680,9 +815,11 @@ def list_tasks(ctx, slug, params):
     qs = svc._scoped(AgentTask.objects.all(), project, 'project')
     if params.get('status') == 'active':  # waiting for an agent, or leased to one
         qs = qs.filter(status__in=ACTIVE_TASK_STATUSES)
-    for param, field in (('status', 'status'), ('kind', 'kind'), ('agent_id', 'agent_id')):
+    for param, field in (('status', 'status'), ('kind', 'kind')):
         if params.get(param) and params[param] != 'active':
-            qs = qs.filter(**{field: params[param]})
+            qs = qs.filter(**{field: str(params[param])[:20]})
+    if params.get('agent_id'):
+        qs = qs.filter(agent_id=svc._int_param(params['agent_id'], 'agent_id'))
     if params.get('host'):
         qs = qs.filter(host__icontains=str(params['host'])[:200])
     return svc.paginate(_task_rows(qs).order_by('-id'), params, task_brief)
@@ -693,9 +830,10 @@ def list_unassignable(ctx, slug, params):
     project, _ = svc.get_project(ctx, slug)
     reap_expired()
     qs = svc._scoped(AgentTask.objects.filter(status='queued'), project, 'project')
-    effs = _usable_effs(timezone.now())
+    tasks = list(_task_rows(qs).order_by('-priority', 'created_at')[:MAX_QUEUE_BATCH])
+    effs = _effs_for({t.project_id: t.project for t in tasks}.values(), timezone.now())
     rows = []
-    for task in _task_rows(qs).order_by('-priority', 'created_at')[:MAX_QUEUE_BATCH]:
+    for task in tasks:
         reason = explain(task, effs)
         if reason:
             rows.append({**task_brief(task), 'reason': reason})
@@ -718,7 +856,7 @@ def cancel_task(ctx, slug, task_id):
 
 # --- agents: listing and administration ---------------------------------------------------------------
 
-def agent_dict(agent, detail=False, counts=None):
+def agent_dict(agent, detail=False, counts=None, viewer=None):
     now = timezone.now()
     token = agent.token
     live = bool(agent.last_seen and now - agent.last_seen <= LIVE_WINDOW)
@@ -733,6 +871,27 @@ def agent_dict(agent, detail=False, counts=None):
         eff = effective(agent, now)
         out['effective'] = {'capabilities': sorted(eff.caps), 'projects': sorted(eff.projects), 'max_concurrent': eff.max_concurrent,
                             'can_receive_work': not eff.problem and bool(eff.projects) and bool(eff.caps), 'problem': eff.problem}
+    return _redacted(out, viewer, agent)
+
+
+def _redacted(out, viewer, agent):
+    """``out`` for an administrator looking at someone else's agent: the organizations and projects of other tenants (the user may belong to
+    more than one) are left out of what it is responsible for, with the host list, which could name their assets."""
+    if viewer is None or viewer.is_superuser or agent.token.user_id == viewer.pk:
+        return out
+    from dashboard.models import Org, Project
+    org_ids = roles.managed_org_ids(viewer)
+    orgs = set(Org.objects.filter(pk__in=org_ids).values_list('slug', flat=True))
+    projects = set(Project.objects.filter(org_id__in=org_ids).values_list('slug', flat=True))
+    scope = out['scope'] or {}
+    shown = {'orgs': [o for o in scope.get('orgs', []) if o in orgs], 'projects': [p for p in scope.get('projects', []) if p in projects]}
+    hidden = len(shown['orgs']) < len(scope.get('orgs', [])) or len(shown['projects']) < len(scope.get('projects', []))
+    out['scope'] = {**shown, 'hosts': [] if hidden else scope.get('hosts', [])}
+    out['scope_redacted'] = hidden
+    if 'projects' in (out['limits'] or {}):
+        out['limits'] = {**out['limits'], 'projects': [p for p in out['limits']['projects'] if p in projects]}
+    if 'effective' in out:
+        out['effective'] = {**out['effective'], 'projects': [p for p in out['effective']['projects'] if p in projects]}
     return out
 
 
@@ -780,7 +939,7 @@ def list_agents(ctx, params):
         qs = qs.filter(Q(name__icontains=str(params['q'])[:100]) | Q(token__user__username__icontains=str(params['q'])[:100]))
     page = svc.paginate(qs.order_by('name', 'id'), params, lambda a: a)
     counts = _counts([a.pk for a in page['results']])
-    page['results'] = [agent_dict(a, counts=counts.get(a.pk)) for a in page['results']]
+    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user) for a in page['results']]
     return page
 
 
@@ -789,7 +948,7 @@ def get_agent(ctx, agent_id):
     if agent is None:
         raise ApiError(404, 'agent not found')
     recent = _task_rows(AgentTask.objects.filter(agent=agent)).order_by('-id')[:20]
-    return {**agent_dict(agent, detail=True, counts=_counts([agent.pk]).get(agent.pk)), 'warnings': _warnings(agent),
+    return {**agent_dict(agent, detail=True, counts=_counts([agent.pk]).get(agent.pk), viewer=ctx.user), 'warnings': _warnings(agent),
             'recent_tasks': [task_brief(t) for t in recent]}
 
 
@@ -819,12 +978,16 @@ def update_agent(ctx, agent_id, body):
     agent = _manageable(ctx.user).filter(pk=svc._int_param(agent_id, 'agent_id')).first()
     if agent is None or not roles.can_manage_user(ctx.user, agent.token.user):
         raise ApiError(404, 'agent not found')
+    if agent.token.user_id == ctx.user.pk and not ctx.user.is_superuser:
+        raise ApiError(403, 'an administrator cannot approve, limit or reinstate their own agent; ask another administrator')
+    if not roles.can_manage_credentials(ctx.user, agent.token.user):
+        raise ApiError(403, 'this user also belongs to organizations you do not administer; ask an App Admin')
     if not isinstance(body, dict) or not set(body) & {'status', 'note', 'limits'} or set(body) - {'status', 'note', 'limits'}:
         raise ApiError(400, 'send status, note and/or limits')
     before = {'status': agent.status, 'limits': agent.limits}
     if 'status' in body:
-        if body['status'] not in Agent.STATUSES:
-            raise ApiError(400, f'status must be one of {", ".join(Agent.STATUSES)}')
+        if body['status'] not in ADMIN_STATUSES:
+            raise ApiError(400, f'status must be one of {", ".join(ADMIN_STATUSES)}')
         agent.status = body['status']
     if 'limits' in body:
         agent.limits = _clean_limits(body['limits'])
