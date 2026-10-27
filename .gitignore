@@ -101,3 +101,6 @@ logs/
 
 # a CVE catalog seed written by export_cve_seed (published as a release asset, never committed)
 web/cve-seed*
+
+# set by scripts/update-deploy.sh while an update runs; makes the proxy show the maintenance page
+config/nginx/state/maintenance
