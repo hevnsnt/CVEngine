@@ -244,6 +244,7 @@ def stats_payload():
     from targetApp.models import Domain
     tiers = tier_counts()
     reps = counts.host_reps()
+    oldest = counts.oldest_open()
     return {
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
@@ -257,6 +258,9 @@ def stats_payload():
         'matches': counts.exposed_matches().count(),
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
         'exposed_hosts': counts.exposed_host_count(),
+        'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
+        'oldest_open_kind': oldest['kind'],  # 'cve', 'scanner' or 'hygiene'
+        'oldest_open_id': oldest['id'],  # the row of that kind to link to
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
     }
