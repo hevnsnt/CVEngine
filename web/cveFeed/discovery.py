@@ -623,6 +623,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                          fallback={'subdomains': 0, 'matches': 0})  # run inline: the AI-targeted pass needs the matches
     if stopped(scan_id):
         return gone
+    from cveFeed import openvas_scan
+    openvas_scan.carry_forward(scan)  # the optional OpenVAS add-on's findings are evidence on this scan's host rows too (a no-op while it is off)
 
     targeted_kwargs = {'stream': targeted_stream} if targeted_stream else {}
     if force:

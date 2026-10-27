@@ -186,8 +186,8 @@ def _matches(sub, names):
 
 def _probe_rows(project_id, host):
     from cveFeed.models import ProbeObservation
-    # the virtual host sweep's rows name an address in ``product``: the model is never given an address
-    return list(ProbeObservation.objects.filter(project_id=project_id, host=host).exclude(kind='vhost').order_by('-observed_at')[:MAX_PROBES])
+    # the virtual host sweep's rows name an address in ``product``: the model is never given an address; the OpenVAS add-on's rows are its own evidence, not version probes
+    return list(ProbeObservation.objects.filter(project_id=project_id, host=host).exclude(kind='vhost').exclude(probe='openvas').order_by('-observed_at')[:MAX_PROBES])
 
 
 def _probes(rows, names):

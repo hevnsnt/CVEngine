@@ -45,6 +45,8 @@ SCOPES = {
     'cveFeed.HostProfile': 'project_id',
     'cveFeed.TailscaleLink': 'project_id',
     'cveFeed.TailscaleDevice': 'project_id',
+    'cveFeed.OpenvasProject': 'project_id',
+    'cveFeed.OpenvasRun': 'project_id',
     'cveFeed.HostInventory': 'project_id',
     'cveFeed.HostInventoryReport': 'inventory__project_id',
     'cveFeed.Triage': 'project_id',

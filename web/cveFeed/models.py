@@ -1672,3 +1672,65 @@ class ReportExport(models.Model):
 
     def __str__(self):
         return f"report {self.pk} {self.project_id} {self.host or 'project'} [{self.status}]"
+
+
+class OpenvasSettings(models.Model):
+    """Single-row state of the optional OpenVAS (Greenbone) add-on (see cveFeed.openvas_scan): the App Admin's switch, the GMP login of the
+    sidecar and what the worker last saw of it. Off by default; while it is off nothing contacts the sidecar and the beat task is disabled.
+    The password is encrypted like every other stored secret and never leaves the server: the settings page says only whether it is set."""
+
+    enabled = models.BooleanField(default=False)
+    gmp_username = models.CharField(max_length=64, blank=True, default="")
+    gmp_password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
+    state = models.JSONField(default=dict, blank=True)  # the worker's last check: {checked_at, connected, gmp_version, error, feed: {...}}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls.objects.create()
+
+    def __str__(self):
+        return f"OpenVAS add-on ({'on' if self.enabled else 'off'})"
+
+
+class OpenvasProject(models.Model):
+    """A project's opt-in to OpenVAS scanning. Off by default, and ``hosts`` (the hosts to scan, each one already a host of the project) is
+    empty by default: nothing is scanned that an App Admin did not name. ``target_id`` is the GVM target last made for this host set, kept
+    so an unchanged set reuses it."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="openvas_link")
+    enabled = models.BooleanField(default=False)
+    hosts = models.JSONField(default=list, blank=True)
+    target_id = models.CharField(max_length=40, blank=True, default="")
+    target_key = models.CharField(max_length=64, blank=True, default="")  # hash of the address set the target was made for
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    def __str__(self):
+        return f"OpenVAS opt-in of project {self.project_id}"
+
+
+class OpenvasRun(models.Model):
+    """One GVM task cvENGINE started: the batch of hosts it covers, where it stands and what its import found. At most one is ``running``
+    at a time (the constraint), which is how the sweep stays one task at a time even across workers and restarts."""
+
+    STATUSES = ("running", "done", "failed", "stopped")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    status = models.CharField(max_length=10, default="running")
+    task_id = models.CharField(max_length=40, blank=True, default="")
+    target_id = models.CharField(max_length=40, blank=True, default="")
+    gvm_status = models.CharField(max_length=30, blank=True, default="")  # the task's own status: New, Requested, Queued, Running, Done ...
+    progress = models.IntegerField(default=0)
+    hosts = models.JSONField(default=dict, blank=True)  # {address: host name the results are stored under}
+    summary = models.JSONField(default=dict, blank=True)  # what the import did: results, findings, evidence, resolved, skipped
+    error = models.CharField(max_length=300, blank=True, default="")
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["status"], condition=models.Q(status="running"), name="uniq_openvasrun_one_running")]
+        ordering = ["-id"]
+
+    def __str__(self):
+        return f"OpenVAS run {self.pk} ({self.status})"

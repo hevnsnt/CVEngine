@@ -1,4 +1,4 @@
-// Admin settings: AI, API keys, Tailscale, notifications, scan engines, proxy. Superuser only (the API enforces it).
+// Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, scan engines, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
 
@@ -758,6 +758,110 @@ const sections = {
     await draw();
   },
 
+  async openvas(m) {
+    const wrap = el("div");
+    m.append(wrap);
+    const lines = (box) => box.value.split(/[\s,]+/).filter(Boolean);
+    const when = (iso) => (iso ? new Date(iso).toLocaleString() : "never");
+    // everything that came from gvmd or an NVT is set with textContent, never as markup
+    const stateBlock = (s) => {
+      const st = s.state || {};
+      const kids = [];
+      if (!st.checked_at) {
+        kids.push(el("p", "note", "The worker has not looked at the add-on yet. Press Test connection, or wait for the next sweep (every 15 minutes while it is on)."));
+        return kids;
+      }
+      kids.push(el("p", st.connected ? "note" : "msg err", st.connected ? `Connected to gvmd (GMP ${st.gmp_version || "?"}), checked ${when(st.checked_at)}.` : `Not connected, checked ${when(st.checked_at)}: ${st.error || "no answer"}`));
+      if (st.connected && st.feed) {
+        const feeds = Object.entries(st.feed.feeds || {}).map(([k, v]) => `${k} ${v.version || "not loaded"}${v.syncing ? " (synchronising)" : ""}`).join(", ");
+        kids.push(el("p", st.feed.ready ? "note" : "msg err", st.feed.ready ? `Feed ready: ${st.feed.nvts} vulnerability tests (${feeds}).` : `No scan can start yet: ${st.feed.reason}`));
+      }
+      if (st.connected && st.guard) kids.push(el("p", st.guard.ok ? "note" : "msg err", st.guard.ok ? "Resource guard: enough memory to start a scan." : `Resource guard: no scan starts now. ${st.guard.reason}`));
+      return kids;
+    };
+    const projectCard = (link, projects, redraw) => {
+      const l = link || {};
+      const project = link ? null : selectOf(projects.map((p) => [p.id, p.org ? `${p.name} (${p.org})` : p.name]), projects[0] && projects[0].id);
+      const enabled = check("Scan this project's listed hosts with OpenVAS (once a week each, one at a time)", link ? l.enabled : true);
+      const hosts = el("textarea", "", null, { rows: "4", placeholder: "www.example.test api.example.test (empty: nothing is scanned)" });
+      hosts.value = (l.hosts || []).join("\n");
+      const pid = () => (link ? l.project.id : project.value);
+      const kids = [];
+      if (link && l.last_run) {
+        const r = l.last_run;
+        const sum = r.summary && r.summary.results != null ? ` ${r.summary.hosts_scanned} host(s) scanned, ${r.summary.findings} finding(s) with a CVE, ${r.summary.resolved} resolved${r.summary.without_cve ? `, ${r.summary.without_cve} result(s) without a CVE not imported` : ""}.` : "";
+        kids.push(el("p", r.error ? "msg err" : "note", `Last run: ${r.status}${r.gvm_status ? ` (${r.gvm_status}${r.status === "running" ? `, ${r.progress}%` : ""})` : ""}, started ${when(r.started_at)}.${sum}${r.error ? ` ${r.error}` : ""}`));
+      }
+      if (!link) kids.push(field("Project", project));
+      kids.push(
+        enabled.wrap,
+        field("Hosts to scan", hosts, "Each must already be a host of the project. Hosts that are excluded, archived or resolve to a prohibited range are refused, and tailnet addresses are never scanned by this add-on. Nothing is scanned that is not listed here."),
+      );
+      const actions = el("div", "", null, { style: "display:flex;gap:8px;flex-wrap:wrap" });
+      actions.append(
+        button(link ? "Save" : "Opt in", async () => {
+          if (!link && !project.value) throw new Error("Choose a project first");
+          await api("PUT", `openvas/projects/${pid()}`, { enabled: enabled.box.checked, hosts: lines(hosts) });
+          toast("Saved");
+          await redraw();
+        }),
+      );
+      if (link) {
+        actions.append(
+          button("Remove", async () => {
+            if (!(await ask("The project's earlier OpenVAS findings stay; nothing more is scanned.", { title: "Remove this opt-in?", ok: "Remove" }))) return;
+            await api("DELETE", `openvas/projects/${pid()}`);
+            toast("Removed");
+            await redraw();
+          }, "btn ghost"),
+        );
+      }
+      return card(link ? `OpenVAS for ${l.project.name}` : "Opt a project in", ...kids, actions);
+    };
+    const draw = async () => {
+      wrap.textContent = "";
+      const s = await api("GET", "openvas");
+      const user = text(s.username || "", { autocomplete: "off", placeholder: "cvengine" });
+      const pass = secret(s.password_set, "GMP password");
+      const on = check("Switch the OpenVAS add-on on (needs the compose openvas profile running)", s.enabled);
+      const out = el("p", "note", "", { style: "margin:8px 0 0" });
+      const actions = el("div", "", null, { style: "display:flex;gap:8px;flex-wrap:wrap" });
+      actions.append(
+        button("Save", async () => {
+          await api("PUT", "openvas", { enabled: on.box.checked, gmp_username: user.value, gmp_password: pass.value });
+          toast("Saved");
+          await draw();
+        }),
+        button("Test connection", async () => {
+          const r = await api("POST", "openvas/test", {});
+          out.className = r.connected ? "note" : "msg err";
+          out.textContent = r.connected
+            ? `Connected (GMP ${r.gmp_version}). ${r.feed && r.feed.ready ? `Feed ready, ${r.feed.nvts} tests.` : `Not ready to scan: ${r.feed ? r.feed.reason : ""}`}${r.guard && !r.guard.ok ? ` Resource guard: ${r.guard.reason}` : ""}`
+            : r.error;
+          await draw();
+        }, "btn ghost"),
+      );
+      wrap.append(
+        card(
+          "OpenVAS (Greenbone)",
+          el("p", "note", "An optional second scanner. It is off unless the compose `openvas` profile is running and this switch is on, and it costs nothing while off. It scans only the hosts you list for a project, slowly (a few hosts at a time, each host once a week), with a configuration that leaves out denial-of-service and brute-force tests. Only results that name a CVE are imported; a result is treated as confirmed only at a quality of detection of 80 or more. See docs/OPENVAS.md."),
+          el("p", "note", `Needs about ${s.floor.min_available_mb} MB of free memory to start a scan (the resource guard refuses below that). Reached through ${s.transport}.`),
+          el("p", "note", "The GMP login is generated for you by `make openvas-user` and stored encrypted; the password is never shown again."),
+          ...stateBlock(s),
+          field("GMP user name", user),
+          field("GMP password", pass, "Leave blank to keep the saved one."),
+          on.wrap,
+          actions,
+          out,
+        ),
+        el("div", "", null, { style: "height:16px" }),
+      );
+      s.links.forEach((link) => wrap.append(projectCard(link, [], draw), el("div", "", null, { style: "height:16px" })));
+      if (s.projects.length) wrap.append(projectCard(null, s.projects, draw));
+    };
+    await draw();
+  },
+
   async keys(m) {
     const s = await api("GET", "keys");
     const rows = {};
@@ -1148,6 +1252,7 @@ const labels = {
   ai: "AI model",
   keys: "API vault",
   tailscale: "Tailscale",
+  openvas: "OpenVAS",
   notifications: "Notifications",
   engines: "Scan engines",
   ip_allowlist: "IP allowlist",
