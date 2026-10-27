@@ -126,7 +126,7 @@ jobs:
           # take far longer than this rehearsal waits. What is being rehearsed is how the second update is applied, not how long a scan takes:
           # stop what runs now, the way an operator's "Stop all scans" does, then let the update wait for whatever is left.
           . "$GITHUB_WORKSPACE/.github/rehearsal/lib.sh"
-          dc exec -T web python3 manage.py shell -c "from cveFeed.scan_control import abort_running_scans; print(abort_running_scans('rehearsal'), 'scans stopped')"
+          dc exec -T web python3 manage.py shell -c "from cveFeed.scan_control import abort_running_scans; print(abort_running_scans(None), 'scans stopped')"
           # exit 3 is "waiting: scans are running, approval kept": the host watcher calls it again a minute later, so this does too
           for attempt in $(seq 1 60); do
             status=0
