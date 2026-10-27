@@ -190,6 +190,10 @@ PRODUCT_ALIASES = {
     "iscbind": {"bind"},
     "bind9": {"bind"},
     "nextjs": {"next"},  # the npm package of Next.js is named "next"
+    # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently
+    "apache2": {"httpserver", "apachehttpserver"},
+    "opensshserver": {"openssh"},
+    "linuxkernel": {"linux"},
 }
 
 
@@ -557,6 +561,8 @@ def invalid_identity_reason(match):
     produced the match is compared with the advisory's named products, using the same aliases as
     candidate generation. Conflicting positive evidence prevents automatic closure.
     """
+    if match.source == 'host':  # the host reported the version itself: no banner to second-guess, and a local-only CVE is what it is for
+        return ''
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
@@ -862,7 +868,19 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
 
 # One product index per process, rebuilt only when the CVE table changes (a new or re-synced entry moves the key).
 _INDEX_CACHE = {"key": None, "value": None}
+_LOCAL_CACHE = {"key": None, "value": None}
 _CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss")
+
+
+def _pool(qs, cache, key):
+    if cache["key"] == key:
+        return cache["value"]
+    cve_by_id = {c.id: c for c in qs}
+    for c in cve_by_id.values():
+        c.affected = clean_affected(c.affected)
+    value = (cve_by_id, build_product_index(cve_by_id.values()))
+    cache.update(key=key, value=value)
+    return value
 
 
 def cve_pool(cve_limit=None):
@@ -877,14 +895,19 @@ def cve_pool(cve_limit=None):
         return _INDEX_CACHE["value"]
     # a rejected CVE matches nothing, and neither does one only usable from the host itself (cveFeed.locality)
     qs = CVEEntry.objects.exclude(status__icontains="reject").exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
-    if cve_limit:
-        qs = qs[:cve_limit]
-    cve_by_id = {c.id: c for c in qs}
-    for c in cve_by_id.values():
-        c.affected = clean_affected(c.affected)
-    value = (cve_by_id, build_product_index(cve_by_id.values()))
-    _INDEX_CACHE.update(key=key, value=value)
-    return value
+    return _pool(qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key)
+
+
+def local_pool():
+    """(cve_by_id, product_index) for the CVEs only usable from the host itself. External correlation never reads it: only what a host
+    reported about itself (cveFeed.inventory_match) is checked against these."""
+    from django.db.models import Count, Max
+
+    from cveFeed.models import CVEEntry
+
+    qs = CVEEntry.objects.exclude(status__icontains="reject").filter(local_only=True)
+    stamp = qs.aggregate(n=Count("id"), latest=Max("synced_at"))
+    return _pool(qs.only(*_CVE_FIELDS).order_by("-published_at"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]))
 
 
 def _index_hit(token, product_index):

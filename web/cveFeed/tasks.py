@@ -392,6 +392,13 @@ def correlate_refreshed_cves():
     return {'correlated': len(pending)}
 
 
+@app.task(name="correlate_host_inventory", bind=False, queue="cve_feed_queue")
+def correlate_host_inventory(inventory_id):
+    """Match one host report (its packages, operating system and patch level) against the CVEs."""
+    from cveFeed import host_inventory
+    return host_inventory.run_correlation(inventory_id)
+
+
 @app.task(name="correlate_cves", bind=False, queue="cve_feed_queue")
 def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, cve_limit=None):
     """Correlate stored CVE entries against discovered subdomains' technologies.
@@ -423,6 +430,9 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
         'inventory', f'Checking {len(cve_by_id)} CVEs against the host inventory', status='running')
     subdomains, matches = correlate_subdomains(
         subs.iterator(chunk_size=500), index, cve_by_id, min_confidence=min_confidence, scan_history=scan)
+    if scan or not scan_history_id:
+        from cveFeed import host_inventory
+        host_inventory.refresh_scope(scan=scan, project_slug=project_slug)  # what the hosts reported about themselves, on the new rows
     result = {"subdomains": subdomains, "matches": matches, "cve_pool": len(cve_by_id)}
     logger.info(f"correlate_cves complete: {result}")
     activity.settle(checking, 'done', message=(

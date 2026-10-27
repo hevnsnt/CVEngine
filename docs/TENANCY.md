@@ -29,4 +29,6 @@ Background tasks and management commands run unscoped. When a model gains a proj
 
 Time-based codes (TOTP: 30 seconds, 6 digits) and 8 single-use recovery codes, managed under Two-step sign-in on **My account** (`/cve/account/`). A code cannot be reused, and five wrong codes lock two-step sign-in for five minutes. An organization can require it for all members (`Org.require_mfa`): those members are sent to My account until they enroll, cannot turn it off, and are refused by the REST API and MCP endpoint (with any token they own) until they do. An administrator can reset a user's two-step sign-in on the Administration page.
 
+A token can also be a **reporter token** (`scope: inventory`), bound to one project and able to do nothing except post that project's host inventory reports; it acts with its creator's role, so it needs a write role in the project and stops working when the creator is removed or disabled ([HOST-INVENTORY.md](HOST-INVENTORY.md)).
+
 See also: [AGENT-API.md](AGENT-API.md) for how API tokens inherit roles, [documentation index](README.md).

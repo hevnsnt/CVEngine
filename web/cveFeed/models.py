@@ -1361,6 +1361,10 @@ class ProjectSettings(models.Model):
 
     project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="cve_settings")
     sla_days = models.JSONField(default=dict, blank=True)  # only the severities changed from DEFAULT_SLA_DAYS
+    # host inventory reports (cveFeed.host_inventory): whether a report from a host nobody scans yet may add it to the project (off:
+    # it waits for an administrator to adopt it), and how old a report may get before it stops creating findings
+    inventory_create_hosts = models.BooleanField(default=False)
+    inventory_stale_days = models.PositiveSmallIntegerField(default=14)
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 
@@ -1518,3 +1522,59 @@ class TailscaleDevice(models.Model):
 
     def __str__(self):
         return self.name or self.node_id
+
+
+class HostInventory(models.Model):
+    """The latest report one machine sent about itself (cveFeed.host_inventory): what the on-host reporter script found, which an
+    external scan cannot see. One row per (project, machine); ``host`` is the name of the project's host it was matched to (lowercase,
+    like HostProfile), empty while the report is unmatched and waiting for an administrator. The package list is kept compact
+    (``[{n, v, e, a, s}]``); older reports are summarised in HostInventoryReport."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    key = models.CharField(max_length=300)  # the machine's app-specific id hash, else "h:" plus its lowercase host name
+    host = models.CharField(max_length=500, blank=True, default="")
+    match_basis = models.CharField(max_length=12, blank=True, default="")  # ip | name | adopted | "" (unmatched)
+    hostname = models.CharField(max_length=255, blank=True, default="")
+    fqdn = models.CharField(max_length=255, blank=True, default="")
+    ips = models.JSONField(default=list, blank=True)
+    os_family = models.CharField(max_length=16, blank=True, default="")  # linux | windows | macos
+    os_name = models.CharField(max_length=120, blank=True, default="")
+    os_version = models.CharField(max_length=60, blank=True, default="")
+    os_build = models.CharField(max_length=60, blank=True, default="")
+    os_kernel = models.CharField(max_length=80, blank=True, default="")
+    os_arch = models.CharField(max_length=20, blank=True, default="")
+    os_info = models.JSONField(default=dict, blank=True)  # the whole validated os block (id, pretty name, last boot and update, ...)
+    packages = models.JSONField(default=list, blank=True)
+    package_count = models.PositiveIntegerField(default=0)
+    patches = models.JSONField(default=list, blank=True)
+    services = models.JSONField(default=list, blank=True)  # listening sockets
+    details = models.JSONField(default=dict, blank=True)  # runtime (reboot, containers, units) and security posture
+    script_name = models.CharField(max_length=40, blank=True, default="")
+    script_version = models.CharField(max_length=20, blank=True, default="")
+    collected_at = models.DateTimeField(null=True, blank=True)  # the host's own clock
+    reported_at = models.DateTimeField(default=timezone.now)  # ours: staleness is judged on this one
+    token_id = models.PositiveBigIntegerField(null=True, blank=True)  # which token sent it (kept after the token is deleted)
+    source_ip = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "key"], name="uniq_hostinventory_project_key")]
+        indexes = [models.Index(fields=["project", "host"], name="hostinv_project_host_idx")]
+
+    def __str__(self):
+        return f"{self.hostname or self.key}: {self.os_name} {self.os_version}".strip()
+
+
+class HostInventoryReport(models.Model):
+    """One report of a HostInventory, summarised (never the whole package list): when, what changed since the one before and how big.
+    Trimmed to the newest ``host_inventory.HISTORY_KEEP`` per machine."""
+
+    inventory = models.ForeignKey(HostInventory, on_delete=models.CASCADE, related_name="history")
+    reported_at = models.DateTimeField()
+    script_version = models.CharField(max_length=20, blank=True, default="")
+    os_summary = models.CharField(max_length=200, blank=True, default="")
+    package_count = models.PositiveIntegerField(default=0)
+    changes = models.JSONField(default=dict, blank=True)  # {added, removed, changed: counts, names: [first few], os_changed: bool}
+
+    class Meta:
+        ordering = ["-reported_at", "-id"]

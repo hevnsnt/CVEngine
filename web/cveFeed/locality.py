@@ -99,11 +99,13 @@ def refresh(limit=20000, chunk=2000):
 
 def close_local_matches():
     """Close every open match of a local-only CVE, the way a rejected CVE's matches are closed, and rescore the hosts they were on.
-    Matches a person already worked keep their remediation state. Returns how many were closed."""
+    Matches a person already worked keep their remediation state, and so do the ones the host reported itself (source ``host``,
+    cveFeed.inventory_match): those are how a local-only CVE becomes a finding, from the one place that can decide it.
+    Returns how many were closed."""
     from cveFeed import scoring
     from cveFeed.models import CVEMatch
     from startScan.models import Subdomain
-    open_matches = CVEMatch.objects.filter(cve_entry__local_only=True).exclude(
+    open_matches = CVEMatch.objects.filter(cve_entry__local_only=True).exclude(source='host').exclude(
         ai_verdict='not_affected', ai_reason__startswith='Closed automatically:')
     ids = list(open_matches.values_list('id', flat=True))
     if not ids:

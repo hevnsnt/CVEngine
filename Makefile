@@ -15,7 +15,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -81,6 +81,9 @@ rm:				## Remove all services containers.
 
 test:			## Run the test suite (the stack must be running).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) exec celery python3 manage.py test tests
+
+inventory-sync:	## Copy the host inventory reporter scripts to the copies the server hands out (web/static/cve/inventory).
+	cp -p scripts/inventory/cvengine-inventory.sh scripts/inventory/cvengine-inventory.py scripts/inventory/cvengine-inventory.ps1 web/static/cve/inventory/
 
 logs:			## Tail all logs with -n 1000.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) logs --follow --tail=1000 ${SERVICES}

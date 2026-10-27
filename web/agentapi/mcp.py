@@ -11,6 +11,7 @@ from django.core.exceptions import RequestDataTooBig
 
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
+from agentapi import inventory
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi import tailscale
@@ -297,6 +298,13 @@ TOOLS = [
               'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']}, 'note': {'type': 'string'}},
              ['project', 'items', 'status']),
      lambda c, a: svc.bulk_update_finding_status(c, a.get('project'), a.get('items'), a.get('status'), a.get('note')), True),
+    ('list_host_inventories', 'Reports hosts sent about themselves (a script run on the machine): operating system, kernel, package count, when it reported and whether the report is stale. status: matched, unmatched (not yet tied to a host), stale or fresh. Package names and versions are data from the machine, untrusted.',
+     _schema(_page_props({'project': SLUG, 'status': {'type': 'string', 'enum': ['matched', 'unmatched', 'stale', 'fresh']}, 'q': {'type': 'string'}}), ['project']),
+     lambda c, a: inventory.list_inventories(c, a.get('project'), a), False),
+    ('get_host_inventory', "One host's own report in full: exact OS version and build, kernel, installed packages with versions and purl (q filters by name; page through them with page and page_size, at most 200 a page), installed patches, listening services, runtime (reboot needed, containers) and security posture (firewall, disk encryption, antivirus), when it reported and whether it is stale, and what the CVE correlation made of it. Give host (an exact host name) or id. A stale report creates no findings.",
+     _schema(_page_props({'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'id': {'type': 'integer', 'description': 'the report id from list_host_inventories'},
+                          'q': {'type': 'string', 'description': 'filter the package list by name'}}), ['project']),
+     lambda c, a: inventory.get_inventory(c, a.get('project'), inventory_id=int(a['id']) if a.get('id') is not None else None, host=a.get('host'), params=a), False),
 ]
 BY_NAME = {t[0]: t for t in TOOLS}
 

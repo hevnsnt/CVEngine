@@ -7,9 +7,11 @@ from django.http import JsonResponse
 
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
+from agentapi import inventory
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi import tailscale
+from agentapi import auth
 from agentapi.auth import create_token
 from tenancy import audit
 from agentapi.services import ApiError, Ctx
@@ -50,14 +52,21 @@ def _session_only(request):
 def tokens_list(request, ctx, **_):
     _session_only(request)
     return {'results': [{'id': t.id, 'name': t.name, 'prefix': t.prefix, 'read_only': t.read_only,
+                         'scope': t.scope, 'project': t.project.slug if t.project_id else None,
+                         'expires': t.expires_at.isoformat() if t.expires_at else None,
                          'created': t.created_at.isoformat(), 'last_used': t.last_used_at.isoformat() if t.last_used_at else None,
-                         'revoked': t.revoked} for t in ctx.user.api_tokens.order_by('-id')]}
+                         'revoked': t.revoked} for t in ctx.user.api_tokens.select_related('project').order_by('-id')]}
 
 
 def tokens_create(request, ctx, **_):
     _session_only(request)
     data = _body(request)
     (name,) = _need(data, 'name')
+    scope = data.get('scope', auth.SCOPE_FULL)
+    if scope not in auth.TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token
+        raise ApiError(400, f'scope must be one of {", ".join(auth.TOKEN_SCOPES)}')
+    if scope == auth.SCOPE_INVENTORY:  # a host reporter's token: one project, inventory reports only
+        return inventory.create_token(ctx, str(data.get('project') or ''), name), 201
     token, raw = create_token(ctx.user, str(name), read_only=bool(data.get('read_only')))
     audit.record_for_user(ctx.user, 'token.create', ctx.user, token=token.prefix, read_only=token.read_only)
     return {'id': token.id, 'name': token.name, 'read_only': token.read_only,
@@ -163,6 +172,20 @@ ROUTES = [
      lambda r, c, slug, **k: hosts.list_exclusions(c, slug)),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin)',
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/inventory', 'Post a host inventory report (inventory v1 JSON from scripts/inventory; the only route a reporter token can call). 201 for a machine\'s first report, 200 after; the answer says matched, created or unmatched, never which host',
+     lambda r, c, slug, **k: inventory.post_report(c, slug, r)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/inventory', 'Host inventory reports, newest first (status=matched|unmatched|stale|fresh, q=); unmatched ones wait for an administrator to adopt them',
+     lambda r, c, slug, **k: inventory.list_inventories(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/inventory/(?P<inventory_id>\d+)', 'One host inventory report in full: operating system, packages with purl (q, page, page_size), patches, listening services, runtime and security posture, history',
+     lambda r, c, slug, inventory_id, **k: inventory.get_inventory(c, slug, inventory_id=int(inventory_id), params=r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/inventory/(?P<inventory_id>\d+)/adopt', 'Tie an unmatched report to a host the project scans (body {host}) or add the machine as a target ({create: true})',
+     lambda r, c, slug, inventory_id, **k: inventory.adopt(c, slug, int(inventory_id), host=_body(r).get('host'), create=bool(_body(r).get('create')))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/inventory/delete-unmatched', 'Delete every host inventory report that is tied to no host (organization clean-up; needs a write role)',
+     lambda r, c, slug, **k: inventory.delete_unmatched(c, slug)),
+    ('DELETE', r'projects/(?P<slug>[-\w]+)/inventory/(?P<inventory_id>\d+)', 'Delete a host inventory report and its history',
+     lambda r, c, slug, inventory_id, **k: inventory.delete_inventory(c, slug, int(inventory_id))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/inventory', 'The host inventory report tied to a host (newest if several): OS, packages, patches, listening services, with its age and whether it is stale',
+     lambda r, c, slug, host, **k: inventory.get_inventory(c, slug, host=host, params=r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/saved-searches', 'Your saved searches in this project, with the limits and the notification channels Settings has on',
@@ -264,7 +287,7 @@ ROUTES = [
     ('PUT', r'assets', 'Register hosts/IPs/CIDRs this token is responsible for',
      lambda r, c, **k: svc.register_assets(c, _body(r).get('assets'))),
     ('GET', r'tokens', 'Your API tokens (session only)', tokens_list),
-    ('POST', r'tokens', 'Create an API token (session only)', tokens_create),
+    ('POST', r'tokens', 'Create an API token (session only); body {name, read_only} or {name, scope: "inventory", project} for a host reporter token that can only post that project\'s inventory', tokens_create),
     ('DELETE', r'tokens/(?P<token_id>\d+)', 'Revoke a token (session only)', tokens_revoke),
 ]
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
