@@ -214,8 +214,22 @@ def _embedded_v4(ip):
     return ip
 
 
-def is_scannable_ip(value, allow_private=None):
-    """True if it is safe to point a scanner at this IP address. Any text that is not an IP is False."""
+def _tailnet_authorised(ip):
+    """Whether ``ip`` is the tailnet address of a device a connected Tailscale integration imported (cveFeed.tailscale_scope). Only
+    consulted for an address that would otherwise be refused as internal; a lookup problem means "no"."""
+    try:
+        from cveFeed import tailscale_scope
+        return tailscale_scope.is_authorised(ip)
+    except Exception:  # noqa: BLE001 - the answer is the safe one when the table cannot be read
+        return False
+
+
+def is_scannable_ip(value, allow_private=None, tailnet=True):
+    """True if it is safe to point a scanner at this IP address. Any text that is not an IP is False. An internal address is also
+    allowed when it is the tailnet address of a device a connected Tailscale integration imported, because connecting the tailnet
+    is what authorised it. That authority is for an address presented as itself, the host name of the device's own target: an address
+    a DNS name resolved to, or one a person typed in, passes ``tailnet=False``, so no name and no tenant can aim a scanner at a tailnet
+    they did not connect. Loopback, link-local and metadata addresses stay refused either way."""
     try:
         ip = ipaddress.ip_address(str(value).strip())
     except ValueError:
@@ -228,7 +242,7 @@ def is_scannable_ip(value, allow_private=None):
     if allow_private is None:
         allow_private = private_targets_allowed()
     if not allow_private and any(ip.version == n.version and ip in n for n in _INTERNAL):
-        return False
+        return tailnet and _tailnet_authorised(ip)
     return True
 
 
@@ -237,13 +251,21 @@ RESOLVE_WORKERS = 16
 RESOLVE_BATCH_SECONDS = 120  # the most a whole list of names may take
 
 
+def _literal_ip(value):
+    """``value`` as an address string when it is one (an IP literal, bracketed or not), else None."""
+    try:
+        return str(ipaddress.ip_address(str(value).strip().strip('[]')))
+    except ValueError:
+        return None
+
+
 def _lookup_blocked(hostname):
     import socket
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError, OSError):
         return False
-    return any(not is_scannable_ip(info[4][0]) for info in infos)
+    return any(not is_scannable_ip(info[4][0], tailnet=False) for info in infos)  # an answer from DNS is never tailnet authority
 
 
 def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT):
@@ -253,6 +275,9 @@ def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT):
     the host is checked again on the next pass. (Resolution can change between this check and the scan, so this narrows the
     DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.)"""
     import threading
+    literal = _literal_ip(hostname)
+    if literal is not None:  # an address presented as itself: no lookup, and no thread (the tailnet check reads the database)
+        return not is_scannable_ip(literal)
     answer = []
     worker = threading.Thread(target=lambda: answer.append(_lookup_blocked(hostname)), daemon=True)
     worker.start()

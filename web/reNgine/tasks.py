@@ -946,7 +946,8 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, **kwa
 		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
 		return None, False
 	from targetApp.target_types import is_scannable_ip
-	if not is_scannable_ip(ip_address):
+	# a tailnet device's own address is allowed on the host named by that address; an address a name resolved to never is
+	if not is_scannable_ip(ip_address, tailnet=subdomain is None or str(subdomain.name) == ip_address):
 		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
 		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
 		return None, False

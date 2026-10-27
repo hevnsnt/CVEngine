@@ -475,12 +475,38 @@ def email_domains(domain, mx=has_record):
     return names + extra
 
 
-def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
-    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
+def store_findings(domain, found, hosts=None, owns=lambda check: True):
+    """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
+    owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
+    Tailscale checks (cveFeed.tailscale_checks) store through here too, and the TLS and email sweep leaves their rows alone."""
     from django.utils import timezone
 
+    from cveFeed.models import HygieneFinding
+    keep = set()
+    for f in found:
+        keep.add((f.host or domain.name, f.check))
+        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
+                    'status': 'open', 'resolved_at': None}
+        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
+        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
+            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
+            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
+                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
+                            + 'Reopened: the check found this again after it was marked fixed.')
+        HygieneFinding.objects.update_or_create(
+            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
+    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
+             if owns(x.check_name) and (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
+    for x in stale:
+        x.status, x.resolved_at = 'resolved', timezone.now()
+        x.save(update_fields=['status', 'resolved_at'])
+    return stale
+
+
+def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
+    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
     from cveFeed import activity, changes
-    from cveFeed.models import HygieneFinding, TlsCertificate
+    from cveFeed.models import TlsCertificate
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     project = domain.project_id
@@ -524,24 +550,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             f'MailFail checks (Black Hills Information Security) on {shown}: {issues} issue{"s" if issues != 1 else ""}'),
             credit=CREDIT, mail_domains=len(mail_hosts), issues=issues)
 
-    keep = set()
-    for f in found:
-        keep.add((f.host or domain.name, f.check))
-        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
-                    'status': 'open', 'resolved_at': None}
-        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
-        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
-            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
-            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
-                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
-                            + 'Reopened: the check found this again after it was marked fixed.')
-        HygieneFinding.objects.update_or_create(
-            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
-    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
-             if (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
-    for x in stale:
-        x.status, x.resolved_at = 'resolved', timezone.now()
-        x.save(update_fields=['status', 'resolved_at'])
+    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith('ts_'))
     try:  # the medium and worse findings are triaged (impact and a fix); never fatal to the check
         from cveFeed import triage
         triage.triage_hygiene(domain_id)

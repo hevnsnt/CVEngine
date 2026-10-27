@@ -296,7 +296,7 @@ def _expand_target(value):
     if not names:
         raise ApiError(400, 'target expands to no hosts')
     if kind != DOMAIN:
-        blocked = next((n for n in names if not is_scannable_ip(n)), None)
+        blocked = next((n for n in names if not is_scannable_ip(n, tailnet=False)), None)  # a tailnet address is only ever imported by the Tailscale sync
         if blocked:
             raise ApiError(400, f'{blocked} is a loopback, link-local or internal address, which cannot be scanned '
                                 '(an operator can allow internal ranges with CVENGINE_ALLOW_PRIVATE_TARGETS=1)')

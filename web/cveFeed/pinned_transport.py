@@ -11,6 +11,13 @@ import time
 from targetApp.target_types import is_scannable_ip
 
 
+def _is_literal(host, ip):
+    try:
+        return ipaddress.ip_address(host.strip('[]')) == ip
+    except ValueError:
+        return False
+
+
 def resolve(host, port):
     """Resolve once, rejecting failed/empty answers or any prohibited address."""
     if not isinstance(host, str) or not host or any(c.isspace() or ord(c) < 32 for c in host):
@@ -24,7 +31,7 @@ def resolve(host, port):
         if family not in (socket.AF_INET, socket.AF_INET6):
             raise ValueError('unsupported address family')
         ip = ipaddress.ip_address(address[0])
-        if not is_scannable_ip(str(ip)):
+        if not is_scannable_ip(str(ip), tailnet=_is_literal(host, ip)):  # a name that resolves into a tailnet is not that tailnet's device
             raise ValueError('probe destination is prohibited')
         # Reconstruct numeric sockaddr; never pass an untrusted hostname to connect.
         numeric = (str(ip), int(port)) if family == socket.AF_INET else (str(ip), int(port), 0, 0)

@@ -51,7 +51,7 @@ def observe(row, resolver=resolve_one, tcp_probe=None):
         status, addresses = resolver(host)
         if status != 'resolved':
             return {'status': status, 'addresses': []}
-        if not addresses or any(not is_scannable_ip(ip) for ip in addresses):
+        if not addresses or any(not is_scannable_ip(ip, tailnet=False) for ip in addresses):  # answers from DNS carry no tailnet authority
             return {'status': 'blocked', 'addresses': []}
         parent = host.partition('.')[2]
         if parent:

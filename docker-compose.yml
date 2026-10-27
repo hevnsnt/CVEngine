@@ -44,6 +44,7 @@ services:
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
       - static_volume:/usr/src/app/staticfiles/
+      - tailscale_run:/var/run/tailscale:ro  # the optional tailscale profile's status socket (docs/TAILSCALE.md); empty without it
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
     env_file:
@@ -141,6 +142,7 @@ services:
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
       - static_volume:/usr/src/app/staticfiles/
+      - tailscale_run:/var/run/tailscale:ro  # the optional tailscale profile's status socket (docs/TAILSCALE.md); empty without it
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -179,6 +181,39 @@ services:
     networks:
       - rengine_network
 
+  # Optional: attach this install to a Tailscale tailnet so Settings > Tailscale can scan its devices. Off unless COMPOSE_PROFILES=tailscale is
+  # in .env (or `docker compose --profile tailscale up -d`); the rest of the stack is the same either way. docs/TAILSCALE.md has the steps.
+  # It joins the celery container's network namespace (network_mode), which is where every scan runs: tailscaled puts the tailscale0
+  # interface and the 100.64.0.0/10 route there, so scans reach the tailnet with no routing changes and no extra privileges for celery.
+  # The auth key is read from .env.tailscale, not .env, so it is not handed to every other container.
+  tailscale:
+    profiles: ["tailscale"]
+    image: "${TAILSCALE_IMAGE:-tailscale/tailscale:stable}"
+    pull_policy: always  # as for the proxy: a security release arrives with the next up
+    restart: always
+    network_mode: "service:celery"
+    depends_on:
+      - celery
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    env_file:
+      - path: .env.tailscale
+        required: false
+    environment:
+      - TS_USERSPACE=false
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SOCKET=/var/run/tailscale/tailscaled.sock
+      - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-cvengine}
+      - TS_ACCEPT_DNS=false  # scans use addresses; MagicDNS names are shown from the device list
+      - TS_AUTH_ONCE=true  # the key is only needed to enrol; the node's own state keeps it signed in afterwards
+      - TS_EXTRA_ARGS=${TAILSCALE_EXTRA_ARGS:-}
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - tailscale_run:/var/run/tailscale
+
 networks:
   rengine_network:
 
@@ -190,6 +225,8 @@ volumes:
   github_repos:
   scan_results:
   static_volume:
+  tailscale_state:
+  tailscale_run:
 
 secrets:
   proxy.ca:

@@ -745,7 +745,7 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
             pairs = resolver(wanted)
             if force:
                 from targetApp.target_types import is_scannable_ip
-                pairs = {(name, address) for name, address in pairs if is_scannable_ip(address)}
+                pairs = {(name, address) for name, address in pairs if is_scannable_ip(address, tailnet=name == address)}
             persist_bbot_result(bbot_lib.BbotResult(subdomains=set(wanted), resolutions=pairs),
                                 ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
             ScanActivity.objects.filter(pk=step.pk).update(status=SUCCESS, time=timezone.now())

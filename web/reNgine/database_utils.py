@@ -158,6 +158,12 @@ def store_url(url, project, description, h1_team_handle):
 
 def store_ip(ip_address, project, description, h1_team_handle):
 
+	from cveFeed.tailscale_scope import is_tailnet_address
+	from targetApp.target_types import is_scannable_ip
+	if is_tailnet_address(ip_address) and not is_scannable_ip(ip_address, tailnet=False):
+		logger.warning(f'{ip_address} is a tailnet address: only a connected Tailscale integration adds those. Skipping.')
+		return None
+
 	domain = org_domains(project).filter(name=ip_address).first()
 	
 	if domain:

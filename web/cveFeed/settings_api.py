@@ -12,6 +12,7 @@ import yaml
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
+from cveFeed import tailscale_admin
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import EngineType, Notification, Proxy, VulnerabilityReportSetting
 
@@ -670,6 +671,11 @@ ROUTES = [
     ('GET', r'engines', lambda r, **k: engines_list(r)), ('POST', r'engines', lambda r, **k: engines_create(r)),
     ('PUT', r'engines/(?P<engine_id>\d+)', lambda r, engine_id, **k: engines_update(r, int(engine_id))),
     ('DELETE', r'engines/(?P<engine_id>\d+)', lambda r, engine_id, **k: engines_delete(r, int(engine_id))),
+    ('GET', r'tailscale', lambda r, **k: tailscale_admin.tailscale_get(r)),
+    ('PUT', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_put(r, project_id)),
+    ('DELETE', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_delete(r, project_id)),
+    ('POST', r'tailscale/(?P<project_id>\d+)/test', lambda r, project_id, **k: tailscale_admin.tailscale_test(r, project_id)),
+    ('POST', r'tailscale/(?P<project_id>\d+)/sync', lambda r, project_id, **k: tailscale_admin.tailscale_sync_now(r, project_id)),
     ('GET', r'ip_allowlist', lambda r, **k: ip_allowlist_get(r)), ('PUT', r'ip_allowlist', lambda r, **k: ip_allowlist_put(r)),
     ('POST', r'ip_allowlist/entries', lambda r, **k: ip_allowlist_entry_create(r)),
     ('DELETE', r'ip_allowlist/entries/(?P<entry_id>\d+)', lambda r, entry_id, **k: ip_allowlist_entry_delete(r, int(entry_id))),

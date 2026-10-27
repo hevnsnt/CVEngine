@@ -136,8 +136,11 @@ def _cve_inputs(sub):
 
 
 def _has_public_ip(sub):
+    from cveFeed.tailscale_scope import is_tailnet_address
     from targetApp.target_types import is_scannable_ip
-    return any(ip.address and not ip.is_private and is_scannable_ip(ip.address) for ip in sub.ip_addresses.all())
+    # a tailnet address is reachable only by the tailnet's own devices: it is never "public", however scannable it is
+    return any(ip.address and not ip.is_private and not is_tailnet_address(ip.address) and is_scannable_ip(ip.address)
+               for ip in sub.ip_addresses.all())
 
 
 def usable_rows(qs):

@@ -35,6 +35,20 @@ def review_inactive_hosts(run_id=None):
     return run_page(run_id)
 
 
+@app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
+def sync_tailscale():
+    """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""
+    from cveFeed import tailscale_sync
+    return tailscale_sync.sync_all()
+
+
+@app.task(name='sync_tailscale_link', bind=False, queue='cve_feed_queue')
+def sync_tailscale_link(link_id):
+    """One tailnet now, started by an administrator (Settings, REST or MCP)."""
+    from cveFeed import tailscale_sync
+    return tailscale_sync.sync_link(link_id)
+
+
 def _known_in_batches(summaries, size=100):
     """Yield (summary, ids already stored) with one lookup per ``size`` summaries instead of one per entry."""
     from itertools import islice
