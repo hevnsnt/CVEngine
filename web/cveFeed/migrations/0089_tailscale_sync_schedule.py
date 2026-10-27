@@ -14,5 +14,5 @@ def unschedule(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0087_tailscale'), ('django_celery_beat', '0001_initial')]
+    dependencies = [('cveFeed', '0088_tailscale'), ('django_celery_beat', '0001_initial')]
     operations = [migrations.RunPython(schedule, unschedule)]

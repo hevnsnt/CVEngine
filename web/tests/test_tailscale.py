@@ -1,13 +1,11 @@
 """Tailscale integration: parsing hostile device data, the checks, the tailnet-only scanning policy, the sync, the settings API, the
 REST and MCP surface, and the compose profile. Every Tailscale HTTP and socket call is mocked: no test touches a network."""
-import http.server
 import json
 import logging
 import os
 import re
-import socketserver
 import tempfile
-import threading
+import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 from unittest import mock
@@ -24,7 +22,7 @@ from cveFeed.models import HostExclusion, HostLabel, HostProfile, HostState, Hyg
 from cveFeed.tailscale_api import TailscaleError
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
 from scanEngine.models import EngineType
-from startScan.models import IpAddress, Port, Subdomain
+from startScan.models import IpAddress, Port, ScanHistory, Subdomain
 from targetApp.models import Domain
 from targetApp.target_types import is_scannable_ip
 from tests.test_agentapi import call, tool_call
@@ -51,6 +49,12 @@ def raw_device(n=1, **over):
 
 def device(n=1, **over):
     return tailscale_api.parse_device(raw_device(n, **over), now=NOW)
+
+
+def reset_sync_gap(link_id):
+    """Forget the last hand-started sync of a link (the gap lives in the shared cache and outlives a test)."""
+    from django.core.cache import cache
+    cache.delete(f'tailscale:manual-sync:{connection.settings_dict["NAME"]}:{link_id}')
 
 
 class ParsingTests(SimpleTestCase):
@@ -228,45 +232,21 @@ STATUS = {
 }
 
 
-class _Handler(http.server.BaseHTTPRequestHandler):
-    seen = []
+class StatusFileTests(SimpleTestCase):
+    """The sidecar publishes status.json; the worker reads it. tailscaled's own socket is never mounted."""
 
-    def do_GET(self):
-        _Handler.seen.append((self.path, self.headers.get('Host')))
-        body = json.dumps(STATUS).encode() if self.path == '/localapi/v0/status' else b'{}'
-        self.send_response(200 if self.path == '/localapi/v0/status' else 404)
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    daemon_threads = True
-
-    def get_request(self):
-        request, _ = super().get_request()
-        return request, ('local', 0)
-
-
-class LocalApiTests(SimpleTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.dir, 'tailscaled.sock')
-        self.server = _UnixServer(self.path, _Handler)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        patcher = mock.patch.dict(os.environ, {'CVENGINE_TAILSCALE_SOCKET': self.path})
+        self.path = os.path.join(self.dir, 'status.json')
+        Path(self.path).write_text(json.dumps(STATUS))
+        patcher = mock.patch.dict(os.environ, {'CVENGINE_TAILSCALE_STATUS_FILE': self.path})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        _Handler.seen = []
+        tailscale_local.invalidate()
+        self.addCleanup(tailscale_local.invalidate)
 
-    def test_status_is_read_over_the_unix_socket_with_the_cli_host_header(self):
+    def test_status_is_read_from_the_published_file(self):
         state, peers = tailscale_local.read()
-        self.assertEqual(_Handler.seen, [('/localapi/v0/status', 'local-tailscaled.sock')])
         self.assertEqual((state['backend_state'], state['tailnet'], state['self_name']), ('Running', 'example.test', 'cvengine.tail1234.ts.net'))
         self.assertEqual(state['self_ids'], ['nSELFCNTRL', 'nodekey:self'])
         names = {p['node_id']: p for p in peers}
@@ -276,16 +256,38 @@ class LocalApiTests(SimpleTestCase):
                          ('amy@example.test', True, ['10.9.0.0/24'], True, 'local'))
         self.assertTrue(names['nSHARED']['is_external'])
 
-    def test_a_missing_socket_is_an_error_not_a_crash(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_TAILSCALE_SOCKET': os.path.join(self.dir, 'nope.sock')}):
+    def test_a_missing_or_stale_file_is_no_node(self):
+        os.utime(self.path, (time.time() - 3600, time.time() - 3600))
+        with self.assertRaises(TailscaleError) as caught:
+            tailscale_local.read()
+        self.assertIn('not running', str(caught.exception))
+        self.assertFalse(tailscale_local.live())
+        with mock.patch.dict(os.environ, {'CVENGINE_TAILSCALE_STATUS_FILE': os.path.join(self.dir, 'nope.json')}):
             self.assertFalse(tailscale_local.available())
             with self.assertRaises(TailscaleError):
                 tailscale_local.read()
 
+    def test_live_means_a_fresh_status_that_says_running_and_is_cached(self):
+        self.assertTrue(tailscale_local.live())
+        Path(self.path).write_text(json.dumps({**STATUS, 'BackendState': 'Stopped'}))
+        self.assertTrue(tailscale_local.live())  # cached for 30 seconds
+        tailscale_local.invalidate()
+        self.assertFalse(tailscale_local.live())
+
     def test_the_status_is_never_trusted_for_shape(self):
-        with mock.patch.object(tailscale_local, '_status_json', return_value={'Peer': 'x', 'Self': [], 'User': 5, 'CurrentTailnet': 'x'}):
-            state, peers = tailscale_local.read()
+        Path(self.path).write_text(json.dumps({'Peer': 'x', 'Self': [], 'User': 5, 'CurrentTailnet': 'x'}))
+        state, peers = tailscale_local.read()
         self.assertEqual((peers, state['self_ids'], state['tailnet']), ([], [], ''))
+        for body in ('not json', '[1, 2]', '\x00\xff'):
+            Path(self.path).write_text(body)
+            with self.assertRaises(TailscaleError):
+                tailscale_local.read()
+
+    def test_no_code_path_connects_to_the_tailscaled_socket(self):
+        import inspect
+        source = inspect.getsource(tailscale_local)
+        self.assertNotIn('AF_UNIX', source)
+        self.assertNotIn('localapi', source)
 
 
 def finding_checks(findings):
@@ -428,60 +430,75 @@ class PolicyCheckTests(SimpleTestCase):
 
 
 class ScopeFixture:
-    """One reachable link with one imported device, 100.64.0.5."""
+    """One reachable, freshly synced link (host routing, so no node is asked) with one imported device, 100.64.0.5, in project P."""
 
     def setUp(self):
         tailscale_scope.invalidate()
+        tailscale_local.invalidate()
         self.addCleanup(tailscale_scope.invalidate)
         now = timezone.now()
         self.org = Org.objects.create(name='O', slug='o')
         self.other_org = Org.objects.create(name='X', slug='x')
         self.project = Project.objects.create(name='P', slug='p', insert_date=now, org=self.org)
+        self.sibling = Project.objects.create(name='S', slug='s', insert_date=now, org=self.org)
         self.other_project = Project.objects.create(name='Q', slug='q', insert_date=now, org=self.other_org)
-        self.link = TailscaleLink.objects.create(project=self.project, credentials={'access_token': TOKEN}, scan_reachable=True)
+        self.link = TailscaleLink.objects.create(project=self.project, credentials={'access_token': TOKEN}, scan_reachable=True, routing='host',
+                                                 last_status='ok', last_sync_at=now)
         self.domain = Domain.objects.create(name='100.64.0.5', project=self.project, insert_date=now)
         self.row = TailscaleDevice.objects.create(link=self.link, project=self.project, node_id='n1', domain=self.domain,
                                                   addresses=['100.64.0.5', 'fd7a:115c:a1e0::5'])
 
+    def ok(self, address, project=None, **kw):
+        return is_scannable_ip(address, project=self.project.id if project is None else project, **kw)
+
 
 class ScopePolicyTests(ScopeFixture, TestCase):
-
     def test_without_a_link_the_range_stays_internal(self):
         self.row.delete()
         tailscale_scope.invalidate()
-        self.assertFalse(is_scannable_ip('100.64.0.5'))
-        self.assertFalse(is_scannable_ip('fd7a:115c:a1e0::5'))
+        self.assertFalse(self.ok('100.64.0.5'))
+        self.assertFalse(self.ok('fd7a:115c:a1e0::5'))
 
-    def test_an_imported_device_address_is_scannable_and_nothing_else_in_the_range_is(self):
-        self.assertTrue(is_scannable_ip('100.64.0.5'))
-        self.assertTrue(is_scannable_ip('fd7a:115c:a1e0::5'))
-        self.assertFalse(is_scannable_ip('100.64.0.6'))  # a neighbour that is not a device of the tailnet
-        self.assertFalse(is_scannable_ip('100.127.255.254'))
-        self.assertFalse(is_scannable_ip('fd7a:115c:a1e0::6'))
+    def test_the_authority_needs_the_project_and_is_off_by_default(self):
+        self.assertTrue(self.ok('100.64.0.5'))
+        self.assertFalse(is_scannable_ip('100.64.0.5'))  # no project: no authority (the old default was open)
+        self.assertFalse(self.ok('100.64.0.5', project=self.sibling.id))  # another project of the same organization
+        self.assertFalse(self.ok('100.64.0.5', project=self.other_project.id))
+        self.assertFalse(self.ok('100.64.0.5', project=0))
+
+    def test_only_the_devices_own_target_name_carries_the_authority(self):
+        # the IPv6 address is recorded on the device but its target is named by the IPv4 one
+        self.assertFalse(self.ok('fd7a:115c:a1e0::5'))
+        self.assertFalse(self.ok('100.64.0.6'))  # a neighbour that is not a device of the tailnet
+        self.assertFalse(self.ok('100.127.255.254'))
+
+    def test_a_mapped_nat64_or_6to4_spelling_never_carries_it(self):
+        for spelling in ('::ffff:100.64.0.5', '::ffff:6440:5', '64:ff9b::6440:5', '2002:6440:5::', '[::ffff:100.64.0.5]'):
+            self.assertFalse(self.ok(spelling), spelling)
 
     def test_other_internal_ranges_are_unaffected(self):
         for address in ('10.0.0.5', '192.168.1.1', '172.16.0.9', 'fd00::1'):
-            self.assertFalse(is_scannable_ip(address), address)
+            self.assertFalse(self.ok(address), address)
 
     def test_loopback_link_local_and_metadata_are_never_allowed_whatever_a_device_row_says(self):
-        TailscaleDevice.objects.create(link=self.link, project=self.project, node_id='evil', domain=self.domain,
+        evil = Domain.objects.create(name='127.0.0.1', project=self.project, insert_date=timezone.now())
+        TailscaleDevice.objects.create(link=self.link, project=self.project, node_id='evil', domain=evil,
                                        addresses=['127.0.0.1', '169.254.169.254', '100.100.100.200', '100.100.100.100', '10.0.0.1', '::1'])
         tailscale_scope.invalidate()
         for address in ('127.0.0.1', '169.254.169.254', '100.100.100.200', '100.100.100.100', '10.0.0.1', '::1', 'fe80::1', '168.63.129.16'):
-            self.assertFalse(is_scannable_ip(address), address)
-        self.assertEqual(tailscale_scope.authorised_addresses(), frozenset({'100.64.0.5', 'fd7a:115c:a1e0::5'}))
+            self.assertFalse(self.ok(address), address)
+        self.assertEqual(tailscale_scope.authorised_addresses(), {'100.64.0.5': self.project.id})
 
     def test_the_operator_block_list_still_wins(self):
         with mock.patch.dict(os.environ, {'CVENGINE_BLOCKED_CIDRS': '100.64.0.5/32'}):
-            self.assertFalse(is_scannable_ip('100.64.0.5'))
+            self.assertFalse(self.ok('100.64.0.5'))
 
     def test_the_global_private_switch_is_not_touched(self):
         with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': ''}):
-            self.assertFalse(is_scannable_ip('10.9.9.9'))
-            self.assertTrue(is_scannable_ip('100.64.0.5'))
+            self.assertFalse(self.ok('10.9.9.9'))
+            self.assertTrue(self.ok('100.64.0.5'))
 
     def test_a_person_typing_a_tailnet_address_is_refused_even_when_a_device_has_it(self):
-        self.assertFalse(is_scannable_ip('100.64.0.5', tailnet=False))
         with self.assertRaises(ApiError) as caught:
             svc._expand_target('100.64.0.5')
         self.assertEqual(caught.exception.status, 400)
@@ -492,81 +509,204 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.link.enabled = False
         self.link.save()
         tailscale_scope.invalidate()
-        self.assertFalse(is_scannable_ip('100.64.0.5'))
+        self.assertFalse(self.ok('100.64.0.5'))
         self.link.enabled = True
         self.link.save()
         TailscaleDevice.objects.filter(pk=self.row.pk).update(departed_at=timezone.now())
         tailscale_scope.invalidate()
-        self.assertFalse(is_scannable_ip('100.64.0.5'))
+        self.assertFalse(self.ok('100.64.0.5'))
 
-    def test_a_device_whose_target_was_deleted_is_no_longer_authorised(self):
+    def test_a_device_whose_target_was_deleted_or_renamed_is_no_longer_authorised(self):
+        self.domain.name = 'renamed.example'
+        self.domain.save()
+        tailscale_scope.invalidate()
+        self.assertFalse(self.ok('100.64.0.5'))  # the address must be the very name of the target
         self.domain.delete()
         tailscale_scope.invalidate()
-        self.assertFalse(is_scannable_ip('100.64.0.5'))
+        self.assertFalse(self.ok('100.64.0.5'))
 
     def test_a_lookup_failure_means_no(self):
         with mock.patch.object(tailscale_scope, 'is_authorised', side_effect=RuntimeError('db down')):
-            self.assertFalse(is_scannable_ip('100.64.0.5'))
+            self.assertFalse(self.ok('100.64.0.5'))
 
     def test_a_tailnet_the_scanner_cannot_reach_authorises_nothing(self):
         self.link.scan_reachable = False
         self.link.save()
         tailscale_scope.invalidate()
-        self.assertFalse(is_scannable_ip('100.64.0.5'))
+        self.assertFalse(self.ok('100.64.0.5'))
+
+    def test_a_link_that_stopped_syncing_authorises_nothing(self):
+        # the old code never looked at last_status or last_sync_at: a failed or abandoned link kept its authority for ever
+        for status, age in (('error', 1), ('never', 1), ('ok', 31 * 60), ('partial', 3 * 60 * 60)):
+            TailscaleLink.objects.filter(pk=self.link.pk).update(last_status=status, last_sync_at=timezone.now() - timedelta(minutes=age))
+            tailscale_scope.invalidate()
+            self.assertFalse(self.ok('100.64.0.5'), (status, age))
+        for status, age in (('ok', 29), ('partial', 5)):
+            TailscaleLink.objects.filter(pk=self.link.pk).update(last_status=status, last_sync_at=timezone.now() - timedelta(minutes=age))
+            tailscale_scope.invalidate()
+            self.assertTrue(self.ok('100.64.0.5'), (status, age))
+
+    def test_a_link_that_depends_on_this_servers_node_needs_that_node_up_now(self):
+        TailscaleLink.objects.filter(pk=self.link.pk).update(routing='auto')
+        for body, age, expected in (({'BackendState': 'Running'}, 0, True), ({'BackendState': 'Stopped'}, 0, False),
+                                    ({'BackendState': 'Running'}, 600, False)):  # a stale file is a dead sidecar
+            with tempfile.TemporaryDirectory() as folder:
+                path = os.path.join(folder, 'status.json')
+                Path(path).write_text(json.dumps(body))
+                os.utime(path, (time.time() - age, time.time() - age))
+                with mock.patch.dict(os.environ, {'CVENGINE_TAILSCALE_STATUS_FILE': path}):
+                    tailscale_scope.invalidate()
+                    tailscale_local.invalidate()
+                    self.assertEqual(self.ok('100.64.0.5'), expected, (body, age))
+        with mock.patch.dict(os.environ, {'CVENGINE_TAILSCALE_STATUS_FILE': '/nonexistent/status.json'}):
+            tailscale_scope.invalidate()
+            tailscale_local.invalidate()
+            self.assertFalse(self.ok('100.64.0.5'))  # no file at all
+        tailscale_local.invalidate()
 
     def test_an_address_two_tailnets_both_use_is_ambiguous_and_authorises_nothing(self):
         other_link = TailscaleLink.objects.create(project=self.other_project, credentials={'access_token': TOKEN}, scan_reachable=False)
         domain = Domain.objects.create(name='100.64.0.5', project=self.other_project, insert_date=timezone.now())
         TailscaleDevice.objects.create(link=other_link, project=self.other_project, node_id='z1', domain=domain, addresses=['100.64.0.5'])
         tailscale_scope.invalidate()
-        self.assertFalse(is_scannable_ip('100.64.0.5'))  # which machine would a scan reach?
-        self.assertTrue(is_scannable_ip('fd7a:115c:a1e0::5'))  # only the first link has this one
+        self.assertFalse(self.ok('100.64.0.5'))  # which machine would a scan reach?
+        self.assertFalse(self.ok('100.64.0.5', project=self.other_project.id))
 
     def test_an_address_a_name_resolved_to_is_never_tailnet_authority(self):
         import socket
         from targetApp.target_types import resolves_to_blocked
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('100.64.0.5', 0))]
         with mock.patch('socket.getaddrinfo', return_value=answer):
-            self.assertTrue(resolves_to_blocked('evil.example.test'))  # a name pointed at a tailnet device is refused
+            self.assertTrue(resolves_to_blocked('evil.example.test', project=self.project.id))  # a name pointed at a tailnet device is refused
         from reNgine.tasks import save_ip_address
         sub = Subdomain.objects.create(target_domain=self.domain, name='evil.example.test')
-        self.assertEqual(save_ip_address('100.64.0.5', subdomain=sub), (None, False))
+        self.assertEqual(save_ip_address('100.64.0.5', subdomain=sub, project_id=self.project.id), (None, False))
         own = Subdomain.objects.create(target_domain=self.domain, name='100.64.0.5')
         with mock.patch('reNgine.tasks.geo_localize.delay'):
-            ip, created = save_ip_address('100.64.0.5', subdomain=own)
+            ip, created = save_ip_address('100.64.0.5', subdomain=own, project_id=self.project.id)
         self.assertEqual(ip.address, '100.64.0.5')
+        self.assertEqual(save_ip_address('100.64.0.5', subdomain=own), (None, False))  # without the project there is no authority
 
-    def test_probe_transport_pins_a_tailnet_literal_but_not_a_name_that_resolves_there(self):
+    def test_bbot_port_events_for_a_name_that_resolves_into_a_tailnet_store_nothing(self):
+        """Old code: a port event whose host was the address (no subdomain) was stored with tailnet authority for any scan."""
+        from reNgine import bbot as bbot_lib
+        from reNgine.tasks import persist_bbot_result
+        EngineType.objects.get_or_create(engine_name='e', defaults={'yaml_configuration': 'x', 'default_engine': True})
+        attacker = Domain.objects.create(name='evil.example.test', project=self.other_project, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=attacker, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=1,
+                                          results_dir='/tmp')
+        ctx = {'scan_history_id': scan.id, 'domain_id': attacker.id, 'subdomain_id': None, 'subscan_id': None}
+        with mock.patch('reNgine.tasks.geo_localize.delay'):
+            persist_bbot_result(bbot_lib.BbotResult(subdomains={'evil.example.test'}, resolutions={('evil.example.test', '100.64.0.5')},
+                                                    ports={('100.64.0.5', 22), ('evil.example.test', 22)}), ctx)
+        self.assertFalse(IpAddress.objects.filter(address='100.64.0.5').exists())
+        self.assertFalse(Port.objects.filter(number=22).exists())
+        # the device's own scan, in its own project, still records it
+        own = ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=1,
+                                         results_dir='/tmp')
+        with mock.patch('reNgine.tasks.geo_localize.delay'):
+            persist_bbot_result(bbot_lib.BbotResult(subdomains={'100.64.0.5'}, resolutions={('100.64.0.5', '100.64.0.5')}, ports={('100.64.0.5', 22)}),
+                                {'scan_history_id': own.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None})
+        self.assertEqual(list(IpAddress.objects.filter(address='100.64.0.5').values_list('org_id', flat=True)), [self.org.id])
+        self.assertTrue(Port.objects.filter(number=22).exists())
+
+    def test_probe_transport_pins_a_tailnet_literal_of_its_project_but_not_a_name_that_resolves_there(self):
         import socket
         from cveFeed import pinned_transport
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('100.64.0.5', 80))]
         with mock.patch('socket.getaddrinfo', return_value=answer):
-            self.assertEqual(pinned_transport.resolve('100.64.0.5', 80), ((socket.AF_INET, ('100.64.0.5', 80)),))
+            self.assertEqual(pinned_transport.resolve('100.64.0.5', 80, project=self.project.id), ((socket.AF_INET, ('100.64.0.5', 80)),))
             with self.assertRaises(ValueError):
-                pinned_transport.resolve('evil.example.test', 80)
+                pinned_transport.resolve('100.64.0.5', 80)  # no project
+            with self.assertRaises(ValueError):
+                pinned_transport.resolve('100.64.0.5', 80, project=self.other_project.id)
+            with self.assertRaises(ValueError):
+                pinned_transport.resolve('evil.example.test', 80, project=self.project.id)
 
     def test_archived_host_rediscovery_judges_dns_answers_without_tailnet_authority(self):
         from cveFeed import archive_rediscovery
-        row = mock.Mock(host='evil.example.test', pk=1)
+        row = mock.Mock(host='evil.example.test', pk=1, project_id=self.project.id)
         result = archive_rediscovery.observe(row, resolver=lambda host: ('resolved', {'100.64.0.5'}) if host == 'evil.example.test' else ('absent', set()))
         self.assertEqual(result['status'], 'blocked')
 
-    def test_the_legacy_bulk_import_does_not_create_tailnet_targets(self):
-        from reNgine.database_utils import store_ip
-        self.assertIsNone(store_ip('100.64.0.77', self.other_project, '', None))
-        self.assertFalse(Domain.objects.filter(name='100.64.0.77').exists())
-        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
-            self.assertIsNotNone(store_ip('100.64.0.78', self.other_project, '', None))  # an operator who allowed internal ranges is unaffected
+    def test_the_legacy_bulk_import_refuses_tailnet_addresses_in_every_spelling(self):
+        """Old code: store_url had no check at all, and store_ip's pre-test was blind to mapped, NAT64 and 6to4 spellings."""
+        from reNgine.database_utils import bulk_import_targets, store_ip, store_url
+        for spelling in ('100.64.1.5', '::ffff:100.64.1.5', '64:ff9b::6440:105', '2002:6440:105::', 'fd7a:115c:a1e0::9'):
+            self.assertIsNone(store_ip(spelling, self.other_project, '', None), spelling)
+        for url in ('http://100.64.1.5:8080/', 'https://[::ffff:100.64.1.5]/x', 'http://user:pw@100.64.1.5/', 'http://[64:ff9b::6440:105]:9/',
+                    'http://127.0.0.1/', 'http://169.254.169.254/latest', 'http://10.0.0.5/'):
+            self.assertIsNone(store_url(url, self.other_project, '', None), url)
+        status = bulk_import_targets([{'name': 'http://100.64.1.5:8080/'}, {'name': '100.64.1.6'}], 'q')
+        self.assertFalse(status)
+        self.assertFalse(Domain.objects.filter(project=self.other_project, name__startswith='100.').exists())
+        self.assertFalse(Domain.objects.filter(project=self.other_project, name__icontains='100.64').exists())
 
-    def test_the_other_scan_gates_agree(self):
-        from targetApp.target_types import scannable_hosts
-        self.assertEqual(scannable_hosts(['100.64.0.5', '100.64.0.6', '10.0.0.1']), ['100.64.0.5'])
+    def test_the_legacy_import_still_accepts_public_targets_and_operators_who_allowed_internal_ranges(self):
+        from reNgine.database_utils import store_ip, store_url
+        self.assertIsNotNone(store_ip('198.51.100.9', self.other_project, '', None))
+        self.assertIsNotNone(store_url('https://www.example.test:8443/a', self.other_project, '', None))
+        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
+            self.assertIsNotNone(store_ip('100.64.0.78', self.other_project, '', None))
+            self.assertIsNotNone(store_url('http://100.64.0.79:80/', self.other_project, '', None))
+
+    def test_the_other_scan_gates_are_bound_to_the_project(self):
+        from targetApp.target_types import blocked_names, scannable_hosts
+        self.assertEqual(scannable_hosts(['100.64.0.5', '100.64.0.6', '10.0.0.1'], project=self.project.id), ['100.64.0.5'])
+        self.assertEqual(scannable_hosts(['100.64.0.5'], project=self.other_project.id), [])
+        self.assertEqual(scannable_hosts(['100.64.0.5']), [])
+        self.assertEqual(blocked_names(['100.64.0.5', '100.64.0.6'], project=self.project.id), {'100.64.0.6'})
+        self.assertEqual(blocked_names(['100.64.0.5'], project=self.sibling.id), {'100.64.0.5'})
+        from cveFeed import route_auth
+        self.assertTrue(route_auth.host_allowed('100.64.0.5', self.project.id))
+        self.assertFalse(route_auth.host_allowed('100.64.0.5', self.other_project.id))
+        self.assertFalse(route_auth.host_allowed('100.64.0.5'))
         from cveFeed.scoring import _has_public_ip
         sub = mock.Mock()
         sub.ip_addresses.all.return_value = [mock.Mock(address='100.64.0.5', is_private=False)]
         self.assertFalse(_has_public_ip(sub))  # a tailnet address is never "public"
         sub.ip_addresses.all.return_value = [mock.Mock(address='198.51.100.7', is_private=False)]
         self.assertTrue(_has_public_ip(sub))
+
+    def test_nuclei_db_exposure_and_the_change_log_pass_the_owning_project(self):
+        from cveFeed import changes, db_exposure, nuclei_scan
+        EngineType.objects.get_or_create(engine_name='e', defaults={'yaml_configuration': 'x', 'default_engine': True})
+        ip = IpAddress.objects.create(address='100.64.0.5', org=self.org)
+        ip.ports.add(Port.objects.create(number=6379, service_name='redis', state='open'))
+
+        def scan_of(domain, name):
+            scan = ScanHistory.objects.create(domain=domain, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=1,
+                                              results_dir='/tmp')
+            sub = Subdomain.objects.create(target_domain=domain, scan_history=scan, name=name)
+            sub.ip_addresses.add(ip)
+            return scan, sub
+        scan, sub = scan_of(self.domain, '100.64.0.5')
+        self.assertEqual(nuclei_scan.scan_targets(scan)[1], {'100.64.0.5'})
+        self.assertEqual(changes.host_state(Subdomain.objects.get(pk=sub.pk))['ips'].keys(), {'100.64.0.5'})
+        probed = []
+        db_exposure.run_db_exposure_checks(scan.id, checks={'redis': ('Redis', lambda host, port: probed.append(host) or False)})
+        self.assertEqual(probed, ['100.64.0.5'])
+        stranger = Domain.objects.create(name='stranger.example.test', project=self.other_project, insert_date=timezone.now())
+        scan2, sub2 = scan_of(stranger, 'stranger.example.test')  # another project's host that somehow holds the address
+        self.assertEqual(nuclei_scan.scan_targets(scan2)[1], set())
+        self.assertEqual(changes.host_state(Subdomain.objects.get(pk=sub2.pk))['ips'], {})
+        probed.clear()
+        db_exposure.run_db_exposure_checks(scan2.id, checks={'redis': ('Redis', lambda host, port: probed.append(host) or False)})
+        self.assertEqual(probed, [])
+
+    def test_the_full_port_sweep_admits_a_device_only_through_its_own_project(self):
+        from cveFeed import fullscan
+        EngineType.objects.get_or_create(engine_name='e', defaults={'yaml_configuration': 'x', 'default_engine': True})
+        ip = IpAddress.objects.create(address='100.64.0.5', org=self.org)
+        scan = ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=2,
+                                          results_dir='/tmp')
+        Subdomain.objects.create(target_domain=self.domain, scan_history=scan, name='100.64.0.5').ip_addresses.add(ip)
+        with mock.patch('cveFeed.hosting.shared_by_address', return_value=[]):
+            self.assertTrue(fullscan.in_scope(ip))
+            self.assertFalse(fullscan.in_scope(IpAddress.objects.create(address='100.64.0.6', org=self.org)))
+            TailscaleLink.objects.filter(pk=self.link.pk).update(last_status='error')
+            tailscale_scope.invalidate()
+            self.assertFalse(fullscan.in_scope(ip))
 
 
 class PipelineReachTests(ScopeFixture, TestCase):
@@ -603,10 +743,17 @@ class PipelineReachTests(ScopeFixture, TestCase):
         self.assertEqual(Subdomain.objects.get(scan_history=scan).ip_addresses.count(), 0)
         self.assertEqual(nmap, [])
 
+    def test_the_same_address_as_a_target_of_another_project_is_refused(self):
+        twin = Domain.objects.create(name='100.64.0.5', project=self.other_project, insert_date=timezone.now())
+        scan, nmap = self.run_pipeline(twin)
+        self.assertEqual(Subdomain.objects.get(scan_history=scan).ip_addresses.count(), 0)
+        self.assertEqual(nmap, [])
+
     def test_resolution_checks_agree(self):
         from targetApp.target_types import resolves_to_blocked
-        self.assertFalse(resolves_to_blocked('100.64.0.5'))
-        self.assertTrue(resolves_to_blocked('100.64.0.99'))
+        self.assertFalse(resolves_to_blocked('100.64.0.5', project=self.project.id))
+        self.assertTrue(resolves_to_blocked('100.64.0.5'))
+        self.assertTrue(resolves_to_blocked('100.64.0.99', project=self.project.id))
 
 
 class SyncBase(TestCase):
@@ -800,7 +947,7 @@ class SyncTests(SyncBase):
         domain = self.domains()['100.64.0.2']
         HygieneFinding.objects.create(domain=domain, host='100.64.0.2', check_name='ts_stale_device', severity=1, title='t')
         HostState.objects.create(project=self.project, domain=domain, host='100.64.0.2')
-        self.assertTrue(is_scannable_ip('100.64.0.2'))
+        self.assertTrue(is_scannable_ip('100.64.0.2', project=self.project.id))
         self.devices = [raw_device(1)]
         out = self.sync()
         self.assertEqual(out['departed'], 1)
@@ -812,7 +959,7 @@ class SyncTests(SyncBase):
         self.assertTrue(state.archive_reason.startswith(tailscale_sync.ARCHIVE_MARK))
         self.assertEqual(HygieneFinding.objects.get(domain=domain, check_name='ts_stale_device').status, 'resolved')
         self.assertTrue(Domain.objects.filter(pk=domain.pk).exists())  # history stays
-        self.assertFalse(is_scannable_ip('100.64.0.2'))
+        self.assertFalse(is_scannable_ip('100.64.0.2', project=self.project.id))
 
     def test_an_empty_answer_never_retires_anyone(self):
         self.sync()
@@ -948,7 +1095,7 @@ class SyncTests(SyncBase):
 
     def test_a_routed_tailnet_authorises_its_devices_before_the_scans_are_queued(self):
         seen = []
-        self.start_discoveries.side_effect = lambda domains, **k: seen.append([is_scannable_ip(d.name) for d in domains]) or list(domains)
+        self.start_discoveries.side_effect = lambda domains, **k: seen.append([is_scannable_ip(d.name, project=self.project.id) for d in domains]) or list(domains)
         self.sync()
         self.assertEqual(seen, [[True, True]])  # the authority is in place when the workers pick the scans up
         self.assertTrue(TailscaleLink.objects.get(pk=self.link.pk).scan_reachable)
@@ -969,6 +1116,56 @@ class SyncTests(SyncBase):
             self.sync()
         self.link.refresh_from_db()
         self.assertEqual(set(self.link.local_state), {'backend_state', 'tailnet', 'self_name', 'version', 'peers', 'reachable'})
+
+    def test_a_failed_read_withdraws_the_authority_of_a_link_that_depends_on_this_servers_node(self):
+        """Old code: the early return left scan_reachable True and _load never looked at the sync status."""
+        self.link.routing = 'auto'
+        self.link.save()
+        self.sync()  # no node: not reachable
+        TailscaleLink.objects.filter(pk=self.link.pk).update(scan_reachable=True, last_status='ok', last_sync_at=timezone.now())
+        self.api_error = 'Tailscale rejected the credentials (expired or revoked)'
+        self.sync()
+        self.link.refresh_from_db()
+        self.assertEqual((self.link.last_status, self.link.scan_reachable), ('error', False))
+        self.assertFalse(is_scannable_ip('100.64.0.1', project=self.project.id))
+
+    def test_a_failed_read_of_a_host_routed_link_stops_scanning_until_the_next_good_sync(self):
+        self.sync()
+        self.assertTrue(is_scannable_ip('100.64.0.1', project=self.project.id))
+        self.api_error = 'Tailscale answered HTTP 500'
+        self.sync()
+        self.assertFalse(is_scannable_ip('100.64.0.1', project=self.project.id))
+        self.api_error = None
+        self.sync()
+        self.assertTrue(is_scannable_ip('100.64.0.1', project=self.project.id))
+
+    def test_a_steady_state_sync_costs_the_same_queries_for_ten_devices_or_sixty(self):
+        """Old code ran about six queries per device on every sync."""
+        from django.test.utils import CaptureQueriesContext
+
+        def steady(count):
+            self.devices = [raw_device(i, clientVersion='1.104.2') for i in range(1, count + 1)]
+            self.link.max_devices = 500
+            self.link.save()
+            self.sync()  # imports
+            with CaptureQueriesContext(connection) as queries:
+                out = self.sync()
+            self.assertEqual((out['same'], out['new'], out['changed']), (count, 0, 0))
+            return len(queries)
+        small = steady(10)
+        TailscaleDevice.objects.all().delete()
+        Domain.objects.filter(project=self.project).delete()
+        large = steady(60)
+        self.assertLessEqual(large, small + 3, (small, large))
+        self.assertLess(large, 80)
+
+    def test_unchanged_devices_still_move_their_online_state_and_last_seen(self):
+        self.sync()
+        self.devices = [raw_device(1, connectedToControl=False, lastSeen='2026-10-26T11:00:00Z'), raw_device(2)]
+        self.sync()
+        row = TailscaleDevice.objects.get(node_id='nDEV1CNTRL')
+        self.assertEqual((row.online, row.facts['last_seen']), (False, '2026-10-26T11:00:00+00:00'))
+        self.assertTrue(HostLabel.objects.filter(project=self.project, host='100.64.0.1', label='tailscale offline').exists())
 
     def test_the_tenancy_of_a_sync_stays_inside_its_project(self):
         other = TailscaleLink.objects.create(project=self.foreign, credentials={'access_token': TOKEN}, use_local=False)
@@ -1109,7 +1306,8 @@ class SettingsApiTests(TestCase):
         tailscale_scope.invalidate()
         self.addCleanup(tailscale_scope.invalidate)
         self.c = client_for(self.root)
-        patcher = mock.patch('cveFeed.tailscale_local.available', return_value=False)
+        self.node = {'present': False}  # what the worker says about this server's own node
+        patcher = mock.patch('cveFeed.tailscale_admin.node_state_from_worker', lambda: self.node)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1189,6 +1387,30 @@ class SettingsApiTests(TestCase):
         self.assertFalse(TailscaleLink.objects.exists())
         self.assertNotIn(TOKEN, json.dumps(data))
 
+    def test_the_connection_test_asks_the_worker_about_this_servers_node(self):
+        """The web container has no status file; the node is read by the worker (a celery task, no credential in it)."""
+        self.node = {'present': True, 'state': {'backend_state': 'Running', 'tailnet': 'example.test', 'self_name': 'cv.tail1.ts.net',
+                                                'version': '1.104.2', 'peers': 3}, 'peer_count': 3}
+        data = send(self.c, 'POST', f'tailscale/{self.project.id}/test', {})[1]
+        self.assertEqual((data['ok'], data['devices'], data['tailnet'], data['local']['backend_state']), (True, 3, 'example.test', 'Running'))
+        self.node = {'present': True, 'error': 'the Tailscale node has not reported for 400 seconds: it is not running'}
+        data = send(self.c, 'POST', f'tailscale/{self.project.id}/test', {})[1]
+        self.assertFalse(data['ok'])
+        self.assertIn('not running', data['local']['error'])
+
+    def test_the_worker_task_reports_without_credentials_and_the_web_never_opens_the_status_file(self):
+        from cveFeed import tailscale_admin
+        from cveFeed.tasks import tailscale_node_state
+        with mock.patch('cveFeed.tailscale_local.available', return_value=False):
+            self.assertEqual(tailscale_node_state(), {'present': False})
+        with mock.patch('cveFeed.tailscale_local.available', return_value=True), \
+                mock.patch('cveFeed.tailscale_local.read', return_value=({'backend_state': 'Running', 'tailnet': 't', 'self_name': 's', 'version': 'v', 'peers': 1,
+                                                                          'self_ids': ['x']}, [{}])):
+            out = tailscale_node_state()
+        self.assertEqual((out['present'], out['peer_count'], 'self_ids' in out['state']), (True, 1, False))
+        import inspect
+        self.assertNotIn('tailscale_local', inspect.getsource(tailscale_admin))
+
     def test_the_connection_test_explains_failures_and_missing_scopes(self):
         with mock.patch('cveFeed.tailscale_api.Client.devices', side_effect=TailscaleError('Tailscale rejected the credentials (expired or revoked)')):
             data = send(self.c, 'POST', f'tailscale/{self.project.id}/test', {'access_token': TOKEN})[1]
@@ -1207,23 +1429,28 @@ class SettingsApiTests(TestCase):
         self.put({'access_token': TOKEN, 'enabled': False})
         self.assertEqual(send(self.c, 'POST', f'tailscale/{self.project.id}/sync', {})[0], 409)
         self.put({'enabled': True})
+        reset_sync_gap(TailscaleLink.objects.get(project=self.project).pk)
         with mock.patch('cveFeed.tasks.sync_tailscale_link.delay') as delay:
             status, data = send(self.c, 'POST', f'tailscale/{self.project.id}/sync', {})
-        self.assertEqual((status, data), (200, {'queued': True}))
-        delay.assert_called_once_with(TailscaleLink.objects.get(project=self.project).pk)
+            self.assertEqual((status, data), (200, {'queued': True}))
+            delay.assert_called_once_with(TailscaleLink.objects.get(project=self.project).pk)
+            status, data = send(self.c, 'POST', f'tailscale/{self.project.id}/sync', {})  # the second one inside the gap
+            self.assertEqual(status, 429)
+            self.assertEqual(delay.call_count, 1)
 
     def test_disconnecting_archives_the_devices_and_ends_the_authority(self):
-        link = TailscaleLink.objects.create(project=self.project, credentials={'access_token': TOKEN}, scan_reachable=True)
+        link = TailscaleLink.objects.create(project=self.project, credentials={'access_token': TOKEN}, scan_reachable=True,
+                                         routing='host', last_status='ok', last_sync_at=timezone.now())
         domain = Domain.objects.create(name='100.64.0.9', project=self.project, insert_date=timezone.now())
         TailscaleDevice.objects.create(link=link, project=self.project, node_id='n9', domain=domain, addresses=['100.64.0.9'], online=True)
         tailscale_scope.invalidate()
-        self.assertTrue(is_scannable_ip('100.64.0.9'))
+        self.assertTrue(is_scannable_ip('100.64.0.9', project=self.project.id))
         self.assertEqual(send(self.c, 'DELETE', f'tailscale/{self.project.id}')[0], 200)
         self.assertFalse(TailscaleLink.objects.exists())
         self.assertFalse(TailscaleDevice.objects.exists())
         self.assertTrue(Domain.objects.filter(pk=domain.pk).exists())
         self.assertIsNotNone(HostState.objects.get(project=self.project, host='100.64.0.9').archived_at)
-        self.assertFalse(is_scannable_ip('100.64.0.9'))
+        self.assertFalse(is_scannable_ip('100.64.0.9', project=self.project.id))
         self.assertEqual(send(self.c, 'DELETE', f'tailscale/{self.project.id}')[0], 404)
 
 
@@ -1303,10 +1530,15 @@ class AgentSurfaceTests(TestCase):
         self.assertEqual(call(self.tokens['root'], 'GET', '/api/v1/projects/_all/tailscale')[0], 400)
 
     def test_sync_is_queued_for_admins_and_blocked_for_read_only_tokens(self):
+        reset_sync_gap(self.link.pk)
         with mock.patch('cveFeed.tasks.sync_tailscale_link.delay') as delay:
             status, data = call(self.tokens['admin'], 'POST', '/api/v1/projects/net/tailscale/sync', {})
             self.assertEqual((status, data), (202, {'queued': True}))
             delay.assert_called_once_with(self.link.pk)
+            status, data = call(self.tokens['admin'], 'POST', '/api/v1/projects/net/tailscale/sync', {})  # inside the 60 second gap
+            self.assertEqual(status, 429)
+            self.assertEqual(delay.call_count, 1)
+            reset_sync_gap(self.link.pk)
             self.assertEqual(call(self.tokens['admin_ro'], 'POST', '/api/v1/projects/net/tailscale/sync', {})[0], 403)
             self.assertEqual(delay.call_count, 1)
         TailscaleLink.objects.filter(pk=self.link.pk).update(enabled=False)
@@ -1325,10 +1557,16 @@ class AgentSurfaceTests(TestCase):
         error, message = tool_call(self.tokens['member'], 'tailscale_status', {'project': 'net'})
         self.assertTrue(error)
         self.assertIn('administrator', message)
+        reset_sync_gap(self.link.pk)
         with mock.patch('cveFeed.tasks.sync_tailscale_link.delay') as delay:
             error, data = tool_call(self.tokens['admin'], 'sync_tailscale', {'project': 'net'})
             self.assertEqual((error, data), (False, {'queued': True}))
             delay.assert_called_once()
+            error, message = tool_call(self.tokens['admin'], 'sync_tailscale', {'project': 'net'})
+            self.assertTrue(error)
+            self.assertIn('seconds ago', message)
+            self.assertEqual(delay.call_count, 1)
+            reset_sync_gap(self.link.pk)
             error, _ = tool_call(self.tokens['admin_ro'], 'sync_tailscale', {'project': 'net'})
             self.assertTrue(error)
 
@@ -1394,7 +1632,6 @@ class ComposeProfileTests(SimpleTestCase):
         services = self.compose['services']
         self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy'})
         for name in ('celery', 'web'):
-            self.assertIn('tailscale_run:/var/run/tailscale:ro', services[name]['volumes'])  # the status socket is read-only for them
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])
         self.assertEqual(services['celery']['networks'], ['rengine_network'])
@@ -1403,3 +1640,34 @@ class ComposeProfileTests(SimpleTestCase):
         text = (ROOT / '.env.example').read_text()
         self.assertIn('COMPOSE_PROFILES=tailscale', text)
         self.assertIsNone(re.search(r'tskey-[A-Za-z0-9]{6}', text))  # a placeholder, never a key
+
+    def test_tailscaled_control_socket_is_mounted_nowhere_outside_the_sidecar(self):
+        """Root on the socket reconfigures the node and every container runs as root; the worker reads a published status file instead."""
+        services = self.compose['services']
+        for name, service in services.items():
+            for volume in service.get('volumes', []):
+                self.assertNotIn('/var/run/tailscale:', volume if isinstance(volume, str) else '', name)
+                self.assertNotIn('tailscale_run', str(volume), name)
+        self.assertFalse(any('tailscale' in str(v) for v in services['web'].get('volumes', [])))  # the web container gets nothing
+        celery = [v for v in services['celery']['volumes'] if 'tailscale' in v]
+        self.assertEqual(celery, ['tailscale_status:/var/run/tailscale-status:ro'])
+        self.assertIn('tailscale_status:/status', services['tailscale']['volumes'])
+        self.assertNotIn('tailscale_run', self.compose['volumes'])
+
+    def test_the_node_refuses_inbound_connections_and_the_image_is_pinned(self):
+        ts = self.compose['services']['tailscale']
+        env = dict(item.split('=', 1) for item in ts['environment'])
+        self.assertTrue(env['TS_EXTRA_ARGS'].startswith('--shields-up'))
+        image = ts['image']
+        self.assertNotRegex(image, r':(stable|latest|unstable)\b')
+        self.assertRegex(image, r':v\d+\.\d+\.\d+\}$')  # a version tag, with the TAILSCALE_IMAGE override around it
+        self.assertNotIn('pull_policy', ts)
+
+    def test_without_a_key_the_node_stops_with_a_message_instead_of_printing_a_login_url(self):
+        ts = self.compose['services']['tailscale']
+        script = ts['entrypoint'][2]
+        self.assertIn('-z "$$TS_AUTHKEY"', script)
+        self.assertIn('tailscaled.state', script)  # a node that is already enrolled does not need the key again
+        self.assertLess(script.index('exit 1'), script.index('containerboot'))
+        self.assertIn('AuthURL', script)  # the published status never carries a login URL
+        self.assertIn('/status/status.json', script)

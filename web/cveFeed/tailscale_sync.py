@@ -155,12 +155,13 @@ def _domain_for(link, host, device):
                                  description=_describe(device), insert_date=timezone.now())
 
 
-def _held_by_another_tailnet(link, device):
-    """Tailnets reuse the 100.x range, so one address can be two machines. A device whose address a device of another link already
-    holds is not imported: scanning that address could reach the wrong machine, and the finding would land on the wrong host."""
+def _addresses_of_other_links(link):
+    """Every address a device of another link holds (tailnets reuse the 100.x range, so one address can be two machines)."""
     from cveFeed.models import TailscaleDevice
-    return any(TailscaleDevice.objects.filter(departed_at__isnull=True).exclude(link=link).filter(addresses__contains=[address]).exists()
-               for address in device['addresses'])
+    held = set()
+    for addresses in TailscaleDevice.objects.filter(departed_at__isnull=True).exclude(link=link).values_list('addresses', flat=True):
+        held.update(addresses or [])
+    return held
 
 
 def _chips(device):
@@ -195,30 +196,39 @@ def _store_chips(link, domain, host, device):
         profile.save(update_fields=['owner', 'updated_at'])
 
 
-def import_device(link, device, now):
-    """Create or update the target and the TailscaleDevice row of one device. ``(row, status)`` where status is 'new', 'changed' or
-    'same', or ``(None, 'conflict')`` when the address belongs to another project's target."""
+def import_device(link, device, now, row=None, taken=frozenset()):
+    """Create or update the target and the TailscaleDevice row of one device (``row`` is the one already loaded for it, ``taken`` the
+    addresses other links hold). ``(row, status)`` where status is 'new', 'changed' or 'same', or ``(None, 'conflict')`` when the
+    address belongs to another tailnet or project. A 'same' row is only updated in memory (online state, last seen): the caller saves
+    all of them in one query, and no per-device query runs for a device that did not change."""
     from cveFeed.models import TailscaleDevice
     host = primary_address(device)
-    row = TailscaleDevice.objects.filter(link=link, node_id=device['node_id']).first()
-    domain = row.domain if row and row.domain_id else None
-    if domain is None:
-        if _held_by_another_tailnet(link, device):
-            return None, 'conflict'
-        domain = _domain_for(link, host, device)
-        if domain is None:
-            return None, 'conflict'
     digest = tailscale_api.fingerprint(device)
-    if row is None:
-        row = TailscaleDevice(link=link, project=link.project, node_id=device['node_id'], first_seen=now)
-        status = 'new'
-    else:
-        status = 'same' if row.fingerprint == digest and not row.departed_at else 'changed'
-    row.domain, row.name, row.addresses, row.online = domain, device['name'], device['addresses'], bool(device['online'])
-    row.facts, row.fingerprint, row.last_seen, row.departed_at = {k: v for k, v in device.items() if k not in ('node_id',)}, digest, now, None
-    row.save()
-    _store_chips(link, domain, host, device)
-    _restore_if_ours(link, host)
+    facts = {k: v for k, v in device.items() if k != 'node_id'}
+    if row is not None and row.domain_id and not row.departed_at and row.fingerprint == digest:
+        went_online_or_off = row.online != bool(device['online'])
+        row.online, row.facts, row.last_seen = bool(device['online']), facts, now
+        if went_online_or_off:  # the offline chip follows
+            _store_chips(link, row.domain, host, device)
+        return row, 'same'
+    with transaction.atomic():  # a new or changed device is written whole or not at all
+        domain = row.domain if row is not None and row.domain_id else None
+        if domain is None:
+            if taken.intersection(device['addresses']):
+                return None, 'conflict'
+            domain = _domain_for(link, host, device)
+            if domain is None:
+                return None, 'conflict'
+        if row is None:
+            row = TailscaleDevice(link=link, project=link.project, node_id=device['node_id'], first_seen=now)
+            status = 'new'
+        else:
+            status = 'changed'
+        row.domain, row.name, row.addresses, row.online = domain, device['name'], device['addresses'], bool(device['online'])
+        row.facts, row.fingerprint, row.last_seen, row.departed_at = facts, digest, now, None
+        row.save()
+        _store_chips(link, domain, host, device)
+        _restore_if_ours(link, host)
     return row, status
 
 
@@ -247,25 +257,34 @@ def retire(link, row, why, now):
 
 # --- findings ----------------------------------------------------------------------------------------------------------------
 
-def _open_ports(row):
-    from startScan.models import IpAddress, open_ports
-    seen = {}
-    for ip in IpAddress.objects.filter(ip_addresses__target_domain=row.domain, address__in=row.addresses).distinct().prefetch_related('ports'):
-        for port in open_ports(ip):
-            seen.setdefault(port.number, {'number': port.number, 'service': port.service_name or ''})
-    return sorted(seen.values(), key=lambda p: p['number'])
+def _open_ports(rows):
+    """``{domain id: [{'number', 'service'}]}``: the open ports a scan found on the tailnet addresses of these devices, in one query."""
+    from startScan.models import OPEN_PORT_STATES, IpAddress
+    wanted = {r.domain_id: set(r.addresses) for r in rows if r.domain_id}
+    found = {}
+    query = IpAddress.objects.filter(ip_addresses__target_domain_id__in=list(wanted), ports__state__in=OPEN_PORT_STATES).values_list(
+        'ip_addresses__target_domain_id', 'address', 'ports__number', 'ports__service_name')
+    for domain_id, address, number, service in query.distinct():
+        if address in wanted.get(domain_id, ()):
+            found.setdefault(domain_id, {}).setdefault(number, {'number': number, 'service': service or ''})
+    return {d: sorted(ports.values(), key=lambda p: p['number']) for d, ports in found.items()}
 
 
 def device_findings(link, rows, now):
-    """Store the Tailscale findings of every imported device, each on its own target."""
+    """Store the Tailscale findings of every imported device, each on its own target. A device with nothing found and nothing open
+    from before costs no query beyond the two that load the ports and the open findings for the whole run."""
     from cveFeed.hygiene import store_findings
+    from cveFeed.models import HygieneFinding
+    rows = [r for r in rows if r.domain_id]
+    ports = _open_ports(rows)
+    open_now = set(HygieneFinding.objects.filter(domain_id__in=[r.domain_id for r in rows], check_name__startswith=tailscale_checks.PREFIX,
+                                                 status='open').values_list('domain_id', 'host'))
     count = 0
     for row in rows:
-        if row.domain is None:
-            continue
         host = primary_address({'addresses': row.addresses})
-        found = tailscale_checks.evaluate_device(row.facts, host, now=now, ports=_open_ports(row))
-        store_findings(row.domain, found, hosts=[host], owns=lambda check: check.startswith(tailscale_checks.PREFIX))
+        found = tailscale_checks.evaluate_device(row.facts, host, now=now, ports=ports.get(row.domain_id, []))
+        if found or (row.domain_id, host) in open_now:
+            store_findings(row.domain, found, hosts=[host], owns=lambda check: check.startswith(tailscale_checks.PREFIX))
         count += len(found)
     return count
 
@@ -334,28 +353,37 @@ def _sync(link, scan):
     now = timezone.now()
     devices, policy, local_state, notes = read_tailnet(link)
     if devices is None:
+        if link.routing == 'auto':  # a tailnet that cannot be read is not one the scanner can be said to reach
+            link.scan_reachable = False
         _record(link, now, 'error', notes[0] if notes else 'no Tailscale source is available', local_state, link.device_count)
+        tailscale_scope.invalidate()
         return {'status': 'error', 'error': link.last_error}
     link.tailnet_name = (local_state.get('tailnet') or tailscale_api.tailnet_suffix(devices) or link.tailnet_name)[:200]
     wanted, skipped = select(link, devices, excluded_names(link.project_id))
     existing = {r.node_id: r for r in TailscaleDevice.objects.filter(link=link).select_related('domain')}
     counts = {'new': 0, 'changed': 0, 'same': 0, 'departed': 0, 'conflict': 0, 'deferred': 0}
-    rows, pending = [], []
+    rows, pending, unchanged = [], [], []
     new_budget = max(1, link.max_devices)
+    taken = None  # the addresses other links hold, loaded once and only when a new device needs it
     for device in wanted[:MAX_DEVICES_PER_RUN]:
         if device['node_id'] not in existing or existing[device['node_id']].departed_at:
             if new_budget <= 0:
                 counts['deferred'] += 1  # the rest follow on the next run
                 continue
             new_budget -= 1
-        with transaction.atomic():
-            row, status = import_device(link, device, now)
+        if device['node_id'] not in existing and taken is None:
+            taken = _addresses_of_other_links(link)
+        row, status = import_device(link, device, now, row=existing.get(device['node_id']), taken=taken or frozenset())
         counts[status] += 1
         if row is None:
             continue
+        if status == 'same':
+            unchanged.append(row)
         rows.append(row)
         if device['online'] and (status in ('new', 'changed') or row.scan_queued_at is None):
             pending.append(row)
+    if unchanged:  # one query for every device that only moved its online state and last seen time
+        TailscaleDevice.objects.bulk_update(unchanged, ['online', 'facts', 'last_seen'], batch_size=500)
     if devices:  # an empty answer is never read as "everyone left"
         still_wanted = {d['node_id'] for d in wanted}  # imported, or deferred by the cap or a conflict: not gone
         for node_id, row in existing.items():
@@ -365,7 +393,8 @@ def _sync(link, scan):
     else:
         notes.append('Tailscale listed no devices, so nothing was retired')
     link.scan_reachable = bool(local_state.get('reachable'))
-    link.save(update_fields=['scan_reachable'])  # before any scan is queued, so the workers that pick it up already see the authority
+    link.last_sync_at, link.last_status = now, 'partial' if notes else 'ok'
+    link.save(update_fields=['scan_reachable', 'last_sync_at', 'last_status'])  # before any scan is queued, so the workers that pick it up already see the authority
     tailscale_scope.invalidate()
     findings = device_findings(link, rows, now)
     if policy is not None:
@@ -396,6 +425,17 @@ def _record(link, now, status, error, local_state, count):
     link.last_sync_at, link.last_status, link.last_error = now, status, error[:300]
     link.device_count, link.local_state = count, {k: local_state[k] for k in SHOWN_LOCAL if k in local_state}
     link.save(update_fields=['last_sync_at', 'last_status', 'last_error', 'device_count', 'local_state', 'tailnet_name', 'anchor_domain', 'scan_reachable', 'updated_at'])
+
+
+MANUAL_SYNC_GAP = 60  # seconds between syncs started by a person or an agent for one link
+
+
+def manual_sync_allowed(link_id):
+    """True when a sync of this link may be started by hand now: one per MANUAL_SYNC_GAP seconds (shared by Settings, REST and MCP, and
+    by every worker through the cache), so a loop of requests cannot keep the control-plane API and the database busy."""
+    from django.core.cache import cache
+    from django.db import connection
+    return bool(cache.add(f'tailscale:manual-sync:{connection.settings_dict["NAME"]}:{link_id}', 1, MANUAL_SYNC_GAP))
 
 
 def sync_all():

@@ -306,13 +306,13 @@ def scan_targets(scan):
     subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
             if not (banned and normalize(s.name) in banned)]
     # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
-    pointing_inside = blocked_names([s.name for s in subs])
+    pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
     for sub in subs:
         if sub.name in pointing_inside:
             continue
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():
-            if not is_scannable_ip(ip.address):
+            if not is_scannable_ip(ip.address, project=scan.domain.project_id):
                 continue
             ips.add(ip.address)
             for port in open_ports(ip):

@@ -39,9 +39,11 @@ logger = get_task_logger(__name__)
 
 def persist_bbot_result(result, ctx):
 	"""Write a BbotResult to the DB as Subdomain / IpAddress / Port rows."""
+	own_name = own_project = None  # the target this batch belongs to: only it can carry a tailnet device's address
 	if ctx.get('scan_history_id'):  # the organization's excluded hosts, read once for the whole batch
 		from cveFeed.exclusions import excluded_names
-		project_id = ScanHistory.objects.filter(pk=ctx['scan_history_id']).values_list('domain__project_id', flat=True).first()
+		own_project, own_name = ScanHistory.objects.filter(pk=ctx['scan_history_id']).values_list('domain__project_id', 'domain__name').first() or (None, None)
+		project_id = own_project
 		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id)}
 	subdomains = {}
 	for name in result.subdomains:
@@ -50,7 +52,7 @@ def persist_bbot_result(result, ctx):
 			subdomains[name] = subdomain
 	for name, address in result.resolutions:
 		if name in subdomains:
-			save_ip_address(address, subdomain=subdomains[name], org_id=ctx.get('_org_id'))
+			save_ip_address(address, subdomain=subdomains[name], org_id=ctx.get('_org_id'), project_id=own_project if name == own_name else None)
 	banned = ctx.get('_excluded_hosts') or ()
 	for host, port_number in result.ports:
 		if banned and host.strip().lower().rstrip('.') in banned:
@@ -60,7 +62,7 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		ip = None
 		if validators.ipv4(host) or validators.ipv6(host):
-			ip, _ = save_ip_address(host, subdomain=None, org_id=ctx.get('_org_id'))
+			ip, _ = save_ip_address(host, subdomain=None, org_id=ctx.get('_org_id'), project_id=own_project if host == own_name else None)
 		elif subdomain:
 			ip = subdomain.ip_addresses.first()
 		if not ip:
@@ -941,13 +943,15 @@ def save_subdomain(subdomain_name, ctx={}):
 	return subdomain, created
 
 
-def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, **kwargs):
+def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, project_id=None, **kwargs):
+	"""Store one address (and attach it to ``subdomain``). ``project_id`` may authorise a tailnet device of that project, and only when
+	the host IS that address (``subdomain`` named by it, or no subdomain because the host is the address itself)."""
 	if not (validators.ipv4(ip_address) or validators.ipv6(ip_address)):
 		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
 		return None, False
 	from targetApp.target_types import is_scannable_ip
 	# a tailnet device's own address is allowed on the host named by that address; an address a name resolved to never is
-	if not is_scannable_ip(ip_address, tailnet=subdomain is None or str(subdomain.name) == ip_address):
+	if not is_scannable_ip(ip_address, project=project_id if subdomain is None or str(subdomain.name) == ip_address else None):
 		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
 		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
 		return None, False

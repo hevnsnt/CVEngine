@@ -13,7 +13,7 @@ Two separate things talk to Tailscale, with two separate credentials.
 | **The scanner's node** | A `tailscaled` sidecar (the compose `tailscale` profile) that joins your tailnet as one more device | An auth key, in `.env.tailscale` | Scans reaching `100.x` addresses |
 | **The tailnet reader** | The Tailscale control-plane API, read-only | An OAuth client (or an API access token), stored encrypted in Settings | The full device list, client versions, key-expiry settings, the policy file |
 
-Either is useful alone. Without the API credential, cvENGINE reads what its own node can see (`tailscale status`): the peers it is allowed to reach, their addresses, OS, tags, online state and routes. Without the node, it lists and checks every device through the API but cannot scan any of them.
+Either is useful alone. Without the API credential, cvENGINE reads what its own node can see (a status file the sidecar publishes, the `tailscale status --json` data): the peers it is allowed to reach, their addresses, OS, tags, online state and routes. Without the node, it lists and checks every device through the API but cannot scan any of them.
 
 A sync runs every 15 minutes (and on **Sync now**) for each connected tailnet:
 
@@ -30,7 +30,7 @@ The `tailscale` service joins the **celery container's network namespace** (`net
 - Routing celery through a gateway container needs `NET_ADMIN` inside celery to add the route.
 - Putting celery in the sidecar's namespace instead (`network_mode` on celery) would need a compose override that removes celery's networks, which depends on a recent Compose and breaks `extra_hosts`.
 
-The web and celery containers also mount the sidecar's status socket read-only (`tailscale_run` volume), which is how cvENGINE reads `tailscale status`. The mount is there whether or not the profile is on; it is an empty volume without it.
+**How cvENGINE reads the node, and why not through its socket.** tailscaled's control socket stays inside the sidecar. A read-only mount does not stop a connection to a unix socket, and every container runs as root, which tailscaled treats as a local administrator: whoever could connect could reconfigure the node. So the sidecar instead rewrites `status.json` (the output of `tailscale status --json`, with the login URL removed) every 15 seconds into the `tailscale_status` volume, which **only the celery container mounts, read-only**. The web container has no Tailscale mount at all; Settings > Tailscale's Test connection asks a worker (a task that carries no credential). A status file older than 90 seconds counts as no node, which is how a dead sidecar shows. The volume exists whether or not the profile is on and is empty without it.
 
 **Already have the Docker host on the tailnet?** Then containers can usually reach `100.x` through the host and you do not need the sidecar. In Settings > Tailscale set "How scans reach the tailnet" to **Already routed**. cvENGINE cannot check that, so it takes your word; if scans still fail the route is missing.
 
@@ -38,8 +38,9 @@ The web and celery containers also mount the sidecar's status socket read-only (
 
 `100.64.0.0/10` and `fd7a:115c:a1e0::/48` are internal ranges, and cvENGINE refuses internal ranges unless `CVENGINE_ALLOW_PRIVATE_TARGETS=1`, which opens every private network. The Tailscale integration does not use that switch. Instead:
 
-- An address is scannable **only while it is the tailnet address of a device the integration imported**, in a link that is switched on, whose tailnet the scanner can reach, for a device that has not left. Any other address in the range is refused as before.
-- It applies to an address **presented as itself**: the host name of the device's own target. An address a DNS name resolved to, or one typed into Add targets, never gets it, so no name and no user can aim a scanner at a tailnet they did not connect. Adding a `100.x` target by hand (Add targets, bulk import, bug bounty import) is refused.
+- An address is scannable **only for the project that owns the device, and only while all of this holds**: it is the tailnet address of a device the integration imported for that project and the device's target is named by that very address; the link is switched on, synced successfully (ok or partial) within the last 30 minutes (two sync intervals) and can reach its tailnet; for a link that depends on this server's own node, that node is up right now (a fresh status that says Running, re-checked every 30 seconds, so a dead sidecar stops tailnet scanning at once instead of letting the packets leave by the Docker default route); and no device of another link carries the same address. A failed sync withdraws the authority until the next good one. Any other address in the range is refused as before.
+- **There is no default.** `is_scannable_ip` refuses these ranges unless the caller names the project (`project=`), and every scan stage that knows its project passes it (discovery, nmap, nuclei, the database exposure check, the full port sweep, change tracking, route checks, TLS checks). The IPv6 `fd7a:` address is recorded but the target is named by the IPv4 one, so only that is scannable. An address unwrapped from an IPv4-mapped, NAT64 or 6to4 spelling never carries it.
+- An address a DNS name resolved to never gets it, and neither does one a person typed: Add targets, the bug bounty import and the legacy bulk import (including the HackerOne URL import) refuse every internal literal in every spelling, and `bbot` port events for another project's host never store a tailnet device's ports.
 - Loopback, link-local, multicast and cloud metadata addresses (including `100.100.100.200`) are never allowed, and `100.100.100.0/24` (Tailscale's resolver) is never a device. `CVENGINE_BLOCKED_CIDRS` still wins.
 - Tailnets reuse the `100.x` range, so an address that devices of two connected tailnets both carry is ambiguous and authorises nothing; the second tailnet's device is not imported.
 - Connecting, changing and disconnecting are Settings actions (App Admin only) and are in the audit log (`tailscale.link.enable`, `.update`, `.remove`, `tailscale.sync`).
@@ -51,13 +52,13 @@ The web and celery containers also mount the sidecar's status socket read-only (
 Create a tag for the scanner and let it reach the devices. In the policy file (Access controls):
 
 ```json
-"tagOwners": { "tag:cvengine": ["autogroup:admin"] },
+"tagOwners": { "tag:cvengine": ["autogroup:admin"], "tag:scan-target": ["autogroup:admin"] },
 "grants": [
-  { "src": ["tag:cvengine"], "dst": ["*"], "ip": ["*"] }
+  { "src": ["tag:cvengine"], "dst": ["tag:scan-target"], "ip": ["*"] }
 ]
 ```
 
-The scanner can only reach what your policy lets `tag:cvengine` reach. Scope the `dst` to what you want scanned; a device the policy hides from the scanner is listed but cannot be scanned.
+Give the scanner only what you intend to scan: tag the devices to be scanned (here `tag:scan-target`) and grant `tag:cvengine` access to that tag, not to `*`. The scanner can only reach what the policy lets it reach, and (see Security notes below) so can every tool that runs in the scanner's container. Nothing should have a grant whose destination is `tag:cvengine`; the node also runs with `--shields-up`. A device the policy hides from the scanner is listed but cannot be scanned.
 
 ### 2. Create the credentials
 
@@ -78,12 +79,12 @@ printf 'TS_AUTHKEY=tskey-auth-xxxx\n' > .env.tailscale      # the key from step 
 echo 'COMPOSE_PROFILES=tailscale' >> .env
 echo 'TAILSCALE_HOSTNAME=cvengine' >> .env                   # the name shown in your admin console
 docker compose up -d                                         # or: make up
-docker compose exec tailscale tailscale --socket=/var/run/tailscale/tailscaled.sock status
+docker compose exec tailscale tailscale status
 ```
 
-The key is in `.env.tailscale`, not `.env`, because every variable in `.env` is handed to every container. It is only used to enrol: once the node is signed in, its state (the `tailscale_state` volume) keeps it signed in, and you can delete the file. Updates keep the profile when `COMPOSE_PROFILES` is in `.env`.
+The key is in `.env.tailscale`, not `.env`, because every variable in `.env` is handed to every container. It is only used to enrol: once the node is signed in, its state (the `tailscale_state` volume) keeps it signed in, and you can delete the file. Updates keep the profile when `COMPOSE_PROFILES` is in `.env`. Without `.env.tailscale` (and without an already enrolled node) the service stops with a message saying so, instead of printing an interactive login URL. It starts with `--shields-up`, so other devices cannot connect into the scanner's network namespace; `TAILSCALE_EXTRA_ARGS` adds flags to that (for example `--advertise-tags=tag:cvengine`).
 
-The service needs the `/dev/net/tun` device and `NET_ADMIN`; on a host or container platform that provides neither (some managed container hosts), use the **Already routed** option instead. The sidecar's image is `tailscale/tailscale:stable`; set `TAILSCALE_IMAGE` to pin a version. If you start the dev stack (`docker-compose.dev.yml`) the profile is not in it.
+The service needs the `/dev/net/tun` device and `NET_ADMIN`; on a host or container platform that provides neither (some managed container hosts), use the **Already routed** option instead. The sidecar's image is pinned to a version tag (`tailscale/tailscale:v1.104.2`) on purpose, because it runs inside the scanner's namespace. To update, change the tag in `docker-compose.yml` or set `TAILSCALE_IMAGE` in `.env`, check the [security bulletins](https://tailscale.com/security-bulletins) for the version you want, and run `docker compose up -d tailscale`. If you start the dev stack (`docker-compose.dev.yml`) the profile is not in it.
 
 ### 4. Connect the tailnet
 
@@ -96,7 +97,7 @@ Settings > Tailscale > **Connect a tailnet**:
 - **Most devices one sync imports or queues** (default 100): the cap. New devices beyond it follow on the next sync; devices already imported are always kept up to date.
 - **Filters**: only devices with these tags, never devices with these tags, only these operating systems.
 
-The card shows the tailnet name, how many devices there are, how many are imported, online, offline and departed, the last sync, and the last error. **Sync now** queues a sync at once; **Disconnect** archives the devices (the targets, findings and history stay) and ends the scan authority.
+The card shows the tailnet name, how many devices there are, how many are imported, online, offline and departed, the last sync, and the last error. **Sync now** queues a sync at once (at most one by hand per minute for a tailnet, from Settings, REST or MCP together); **Disconnect** archives the devices (the targets, findings and history stay) and ends the scan authority.
 
 ## What is imported
 
@@ -151,9 +152,17 @@ For project administrators (an organization admin of the project's organization,
 
 Connecting, changing and disconnecting a tailnet, and its credentials, are Settings (App Admin) only. The findings are in the normal findings API: `type=hygiene` and checks starting with `ts_`.
 
+## Security notes
+
+- **The scanner's namespace is on your tailnet.** `tailscale0` lives in the celery container's network namespace, so every process in that container can reach whatever the scanner node's policy allows, not only the checks that go through cvENGINE's own address gate. cvENGINE's gate covers its in-process probes and the addresses it hands to nmap and nuclei, but the external scanner tools (nuclei, httpx, bbot) follow redirects and resolve names themselves, and their own protection against being steered at internal addresses has known gaps that existed before this integration. With the node attached, a scanned site that redirects to, or a name that rebinds to, a tailnet address can be followed by those tools. Treat the scanner node as a machine that an attacker-controlled web page might be able to aim at your tailnet: **scope its policy to what you mean to scan** (the example above), give no one a rule that reaches it, and prefer a dedicated tag.
+- **Nothing connects in.** The node runs with `--shields-up`. The control socket is not mounted anywhere else, and the only thing celery gets is a read-only status file.
+- **Host routing is taken as given.** With "Already routed" cvENGINE cannot verify the route, does not know which tailnet the Docker host is in, and does not exclude the Docker host's own tailnet address from being scanned if it appears as a device. Use it only when you know the host's tailnet is the one you connected.
+- **Credentials.** The OAuth client or token is stored encrypted and never leaves the web and worker containers; the node's auth key is only in `.env.tailscale`.
+- **Untrusted data.** Everything from Tailscale (names, hostnames, OS strings, tags, users, routes) is typed and clipped before it is stored: host names keep only name characters, a user must look like an email address, tags must look like tags, addresses must lie in the tailnet ranges.
+
 ## Troubleshooting
 
-- **"Scans cannot reach this tailnet yet"**: the scanner's own node is not running in this tailnet. Check `docker compose ps tailscale` and the logs, that `.env` has `COMPOSE_PROFILES=tailscale`, that the key was valid, and that the policy lets `tag:cvengine` reach the devices. With API credentials the check is that the scanner's node appears in the API's device list; a node in a different tailnet does not count.
+- **"Scans cannot reach this tailnet yet"**: the scanner's own node is not running in this tailnet, or its status file is stale. Check `docker compose ps tailscale` and `docker compose logs tailscale` (a missing `.env.tailscale` is reported there), that `.env` has `COMPOSE_PROFILES=tailscale`, that the key was valid, and that the policy lets `tag:cvengine` reach the devices. With API credentials the check is that the scanner's node appears in the API's device list; a node in a different tailnet does not count.
 - **"the credentials lack a scope"**: add the scope named above to the OAuth client. The device list works without `policy_file:read`; the sync then reports the policy as not read and skips the tailnet-wide findings.
 - **A device is listed but its scan fails**: the policy does not let the scanner's tag reach it, or the device is offline. Offline devices are not queued.
 - **A device is missing**: it is shared in, unauthorized, filtered, excluded or beyond the cap (the card and the sync result say how many were skipped and why), or another connected tailnet already holds its address.
@@ -163,6 +172,7 @@ Connecting, changing and disconnecting a tailnet, and its credentials, are Setti
 
 - Needs Docker Compose with `network_mode: service:` and a host that gives containers `/dev/net/tun` and `NET_ADMIN`. The compose profile was written against Tailscale's documented container variables (`TS_AUTHKEY`, `TS_STATE_DIR`, `TS_USERSPACE`, `TS_SOCKET`, `TS_EXTRA_ARGS`, `TS_ACCEPT_DNS`, `TS_AUTH_ONCE`, `TS_HOSTNAME`).
 - One tailnet per project, and the scanner's node is in one tailnet.
-- `fd7a:` IPv6 addresses are recorded but the pipeline scans the IPv4 address.
+- `fd7a:` IPv6 addresses are recorded but the pipeline scans the IPv4 address. The full-port naabu sweep skips tailnet devices (nmap's top ports and the extra service ports still run).
+- A sync that fails (credentials, a missing scope, no source) stops tailnet scanning for that project until the next good sync.
 - The control-plane API is Tailscale's; headscale is not supported through it.
 - Tailscale's API field names are read defensively: a field that is missing is unknown and produces no finding.

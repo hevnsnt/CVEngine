@@ -743,9 +743,7 @@ const sections = {
         card(
           "Tailscale",
           el("p", "note", "Connect a tailnet to a project and its devices become targets automatically, are scanned like any other host and are checked for Tailscale-specific problems (outdated clients with known security fixes, key expiry, stale devices, broad subnet routes, an allow-all policy, broad SSH rules). Connecting is what authorises scanning the addresses of the devices it imports (100.64.0.0/10 and fd7a:115c:a1e0::/48), and nothing else in those ranges."),
-          el("p", "note", s.sidecar.present
-            ? "This server's own Tailscale node is running, so scans can reach the tailnet."
-            : "This server's own Tailscale node is not running. Devices are still listed through the API, but scans cannot reach them until you start the compose `tailscale` profile (see docs/TAILSCALE.md)."),
+          el("p", "note", "Scanning needs this server's own Tailscale node (the compose `tailscale` profile, see docs/TAILSCALE.md) or a Docker host that is already on the tailnet. Without a route, devices are still listed and checked from API data, but never scanned."),
         ),
         el("div", "", null, { style: "height:16px" }),
       );

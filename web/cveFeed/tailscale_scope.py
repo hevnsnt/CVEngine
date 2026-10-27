@@ -3,19 +3,26 @@
 CGNAT space (100.64.0.0/10) and Tailscale's unique-local range (fd7a:115c:a1e0::/48) are "internal" to cvENGINE's target policy
 (targetApp.target_types), so on a normal install nothing in them can be scanned. A person who connects a tailnet and turns the
 integration on has, by that act, said the tailnet's devices are theirs to scan. This module turns that into something narrow and
-checkable instead of a switch for the whole range: an address is authorised only while it is the tailnet address of a device that
-a ``TailscaleLink`` imported (``TailscaleDevice`` row, link enabled, device not departed) and the scanner can really reach that
-link's tailnet (``scan_reachable``, so a tailnet that is only read through the API never authorises an address that the scanner's
-own tailnet might also use for a different machine). Nothing else in the ranges becomes scannable, the link can be switched off at
-any time, and the loopback, link-local and metadata blocks are never consulted here. The caller decides which addresses may use this
-(target_types.is_scannable_ip): an address presented as the host itself, never one a DNS name resolved to or a person typed.
+checkable instead of a switch for the whole range. An address is authorised, for ONE project, only while all of this holds:
 
-The set is cached for a short time per process: the policy check runs on hot paths, and only for an address that would otherwise
-be refused. A change (sync, disabling the link) clears the cache of the process that made it; other workers follow within
+  * it is the tailnet address of a device a ``TailscaleLink`` of that project imported, and the device's target is named by that very
+    address (so a name that resolves there, or an address typed into another project, is never it);
+  * the link is switched on, synced successfully within the last two sync intervals, and can reach its tailnet: the sync proved it
+    (``scan_reachable``), and a link that depends on this server's own node also needs that node up right now;
+  * no device of another link carries the same address (tailnets reuse the 100.x range, and only one is the scanner's own).
+
+The caller names the project (``is_scannable_ip(address, project=...)``); nothing in the ranges is scannable without it, an address
+unwrapped from a mapped, NAT64 or 6to4 form never is, and the loopback, link-local and metadata blocks are never consulted here.
+
+The set is cached for a short time per process: the policy check runs on hot paths, and only for an address that would otherwise be
+refused. A change (sync, disabling the link) clears the cache of the process that made it; other workers follow within
 ``CACHE_SECONDS``.
 """
 import ipaddress
 import time
+from datetime import timedelta
+
+from django.utils import timezone
 
 TAILNET_V4 = ipaddress.ip_network('100.64.0.0/10')
 TAILNET_V6 = ipaddress.ip_network('fd7a:115c:a1e0::/48')
@@ -23,7 +30,7 @@ TAILNET_V6 = ipaddress.ip_network('fd7a:115c:a1e0::/48')
 RESERVED = (ipaddress.ip_network('100.100.100.0/24'),)
 CACHE_SECONDS = 30
 
-_cache = {'at': 0.0, 'addresses': frozenset()}
+_cache = {'at': 0.0, 'addresses': {}}
 
 
 def parse_address(value):
@@ -50,22 +57,35 @@ def invalidate():
     _cache['at'] = 0.0
 
 
+SYNC_MINUTES = 15  # the beat interval of the sync (migration 0088)
+FRESH_FOR = timedelta(minutes=2 * SYNC_MINUTES)  # a link that has not synced successfully this recently authorises nothing
+
+
 def _load():
-    """The addresses of devices of enabled links whose tailnet the scanner can reach (cveFeed.tailscale_sync checks that at every sync),
-    not departed and still a target. An address that devices of two links both carry is ambiguous (tailnets reuse the 100.x range, and
-    only one of them is the scanner's own) and is left out, whether or not the other link is reachable."""
+    """``{address: project id}`` of the addresses that may be scanned right now. A device counts when it is not departed, its
+    target is named by that very address, and its link is switched on, synced successfully (ok or partial) within FRESH_FOR, and
+    can reach its tailnet: the sync proved it and, for a link that depends on this server's own node, that node is up now
+    (cveFeed.tailscale_local.live). An address that devices of two links both carry is ambiguous (tailnets reuse the 100.x range, and
+    only one of them is the scanner's own) and is left out, whether or not the other link qualifies."""
+    from cveFeed import tailscale_local
     from cveFeed.models import TailscaleDevice
     rows = TailscaleDevice.objects.filter(departed_at__isnull=True, domain__isnull=False).values_list(
-        'link_id', 'addresses', 'link__enabled', 'link__scan_reachable')
-    owners, usable = {}, set()
-    for link_id, addresses, enabled, reachable in rows.iterator():
+        'link_id', 'addresses', 'project_id', 'domain__name', 'link__enabled', 'link__scan_reachable', 'link__last_status',
+        'link__last_sync_at', 'link__routing')
+    cutoff = timezone.now() - FRESH_FOR
+    owners, usable, node_up = {}, {}, None
+    for link_id, addresses, project_id, target, enabled, reachable, status, synced, routing in rows.iterator():
         for address in addresses or []:
             ip = parse_address(address)
             if ip is not None:
                 owners.setdefault(str(ip), set()).add(link_id)
-                if enabled and reachable:
-                    usable.add(str(ip))
-    return frozenset(address for address in usable if len(owners[address]) == 1)
+                good = enabled and reachable and status in ('ok', 'partial') and synced is not None and synced >= cutoff
+                if good and routing == 'auto':
+                    node_up = tailscale_local.live() if node_up is None else node_up
+                    good = node_up
+                if good and str(ip) == target:
+                    usable[str(ip)] = project_id
+    return {address: project for address, project in usable.items() if len(owners[address]) == 1}
 
 
 def authorised_addresses():
@@ -76,7 +96,7 @@ def authorised_addresses():
     return _cache['addresses']
 
 
-def is_authorised(ip):
-    """True when ``ip`` (an ``ipaddress`` object) is the address of an imported tailnet device."""
+def is_authorised(ip, project_id):
+    """True when ``ip`` is the tailnet address of an imported device of ``project_id`` that may be scanned now."""
     ip = parse_address(ip)
-    return ip is not None and str(ip) in authorised_addresses()
+    return ip is not None and project_id is not None and authorised_addresses().get(str(ip)) == project_id

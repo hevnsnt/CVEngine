@@ -214,35 +214,39 @@ def _embedded_v4(ip):
     return ip
 
 
-def _tailnet_authorised(ip):
-    """Whether ``ip`` is the tailnet address of a device a connected Tailscale integration imported (cveFeed.tailscale_scope). Only
-    consulted for an address that would otherwise be refused as internal; a lookup problem means "no"."""
+def _tailnet_authorised(ip, project):
+    """Whether ``ip`` is the tailnet address of a device a connected Tailscale integration imported for ``project`` (the device's
+    target is named by that very address; see cveFeed.tailscale_scope). Only consulted for an address that would otherwise be
+    refused as internal; a lookup problem means "no"."""
     try:
         from cveFeed import tailscale_scope
-        return tailscale_scope.is_authorised(ip)
+        return tailscale_scope.is_authorised(ip, project)
     except Exception:  # noqa: BLE001 - the answer is the safe one when the table cannot be read
         return False
 
 
-def is_scannable_ip(value, allow_private=None, tailnet=True):
-    """True if it is safe to point a scanner at this IP address. Any text that is not an IP is False. An internal address is also
-    allowed when it is the tailnet address of a device a connected Tailscale integration imported, because connecting the tailnet
-    is what authorised it. That authority is for an address presented as itself, the host name of the device's own target: an address
-    a DNS name resolved to, or one a person typed in, passes ``tailnet=False``, so no name and no tenant can aim a scanner at a tailnet
-    they did not connect. Loopback, link-local and metadata addresses stay refused either way."""
+def is_scannable_ip(value, allow_private=None, project=None):
+    """True if it is safe to point a scanner at this IP address. Any text that is not an IP is False.
+
+    An internal address is also allowed when ``project`` (an id) is given and the address is the tailnet address of a device a
+    connected Tailscale integration imported for that very project, because connecting the tailnet is what authorised it. Without a
+    project there is no such authority, so every caller that does not know the project that owns the target, every address a DNS name
+    resolved to and every address a person typed is refused as before. An address that was unwrapped from a mapped, NAT64 or 6to4
+    form never gets it. Loopback, link-local and metadata addresses stay refused either way."""
     try:
         ip = ipaddress.ip_address(str(value).strip())
     except ValueError:
         return False
     if getattr(ip, "scope_id", None) is not None:
         return False
+    original = ip
     ip = _embedded_v4(ip)
     if any(ip.version == n.version and ip in n for n in _ALWAYS_BLOCKED + _extra_blocked()):
         return False
     if allow_private is None:
         allow_private = private_targets_allowed()
     if not allow_private and any(ip.version == n.version and ip in n for n in _INTERNAL):
-        return tailnet and _tailnet_authorised(ip)
+        return project is not None and ip is original and _tailnet_authorised(ip, project)
     return True
 
 
@@ -265,19 +269,20 @@ def _lookup_blocked(hostname):
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError, OSError):
         return False
-    return any(not is_scannable_ip(info[4][0], tailnet=False) for info in infos)  # an answer from DNS is never tailnet authority
+    return any(not is_scannable_ip(info[4][0]) for info in infos)  # an answer from DNS is never tailnet authority: no project is passed
 
 
-def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT):
+def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT, project=None):
     """True if ``hostname`` currently resolves to any address a scanner must not touch. A name that does not exist is not blocked:
     the scanners cannot reach it either. A name whose nameserver does not answer within ``timeout`` seconds is treated as blocked,
     because a nameserver that stalls the check and then answers the scanner with an internal address would otherwise get through;
     the host is checked again on the next pass. (Resolution can change between this check and the scan, so this narrows the
-    DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.)"""
+    DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.) A name that is an address is judged as that address,
+    with ``project`` as its possible tailnet authority; an address a name resolves to never has any."""
     import threading
     literal = _literal_ip(hostname)
     if literal is not None:  # an address presented as itself: no lookup, and no thread (the tailnet check reads the database)
-        return not is_scannable_ip(literal)
+        return not is_scannable_ip(literal, project=project)
     answer = []
     worker = threading.Thread(target=lambda: answer.append(_lookup_blocked(hostname)), daemon=True)
     worker.start()
@@ -285,19 +290,22 @@ def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT):
     return not answer or bool(answer[0])
 
 
-def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, timeout=RESOLVE_TIMEOUT):
+def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, timeout=RESOLVE_TIMEOUT, project=None):
     """The subset of ``names`` that resolves to something a scanner must not touch. Names are looked up in parallel, each bounded
     by ``timeout`` and the whole list by ``budget`` seconds, so thousands of names with dead nameservers cannot hold a worker for
-    hours; a name still unanswered at the deadline counts as blocked, as in resolves_to_blocked."""
+    hours; a name still unanswered at the deadline counts as blocked, as in resolves_to_blocked. A name that is an address is judged
+    in this thread (``project`` may authorise a tailnet one); only real names go to the pool, which never touches the database."""
     import time
     from concurrent.futures import ThreadPoolExecutor
     names = list(dict.fromkeys(names))
+    literals = {name for name in names if _literal_ip(name) is not None}
+    blocked = {name for name in literals if resolves_to_blocked(name, project=project)}
+    names = [name for name in names if name not in literals]
     if not names:
-        return set()
+        return blocked
     pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(names))), thread_name_prefix='dnscheck')
     futures = {name: pool.submit(resolves_to_blocked, name) for name in names}  # each bounded by RESOLVE_TIMEOUT itself
     deadline = time.monotonic() + budget
-    blocked = set()
     for name, future in futures.items():
         try:
             if future.result(timeout=max(0.0, min(timeout * (1 + len(names) // max(1, workers)), deadline - time.monotonic()))):
@@ -343,7 +351,7 @@ def scannable_hosts(names, resolver=None, project=None):
             continue
         if host not in verdict:
             if classify_target(host) == IP:
-                verdict[host] = is_scannable_ip(host)
+                verdict[host] = is_scannable_ip(host, project=project or None)
             else:
                 verdict[host] = not check(host)
         if verdict[host]:

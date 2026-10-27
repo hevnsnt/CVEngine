@@ -9,7 +9,7 @@ import re
 
 from django.utils import timezone
 
-from cveFeed import tailscale_api, tailscale_local, tailscale_scope
+from cveFeed import tailscale_api, tailscale_scope
 from cveFeed.tailscale_api import TailscaleError, clean_text
 
 MAX_LIST = 30
@@ -57,7 +57,6 @@ def tailscale_get(request):
         'links': [link_dict(link) for link in links],
         'projects': [{'id': p.id, 'name': p.name, 'slug': p.slug, 'org': p.org.name if p.org else ''}
                      for p in Project.objects.select_related('org').order_by('name') if p.id not in linked],
-        'sidecar': {'socket': tailscale_local.socket_path(), 'present': tailscale_local.available()},
     }
 
 
@@ -174,16 +173,26 @@ def tailscale_sync_now(request, project_id):
         raise _error(404, 'that project has no tailnet connected')
     if not link.enabled:
         raise _error(409, 'turn the connection on first')
+    from cveFeed.tailscale_sync import MANUAL_SYNC_GAP, manual_sync_allowed
+    if not manual_sync_allowed(link.pk):
+        raise _error(429, f'a sync was started less than {MANUAL_SYNC_GAP} seconds ago; wait before asking again')
     sync_tailscale_link.delay(link.pk)
     audit(request.user, 'tailscale.sync', project.slug, org=project.org_id, project=project.slug)
     return {'queued': True}
 
 
+def node_state_from_worker():
+    """This server's own node as the worker sees it (the web container has no status file): ``{present, state?, error?}``."""
+    from cveFeed.tasks import tailscale_node_state
+    try:
+        return tailscale_node_state.delay().get(timeout=20)
+    except Exception:  # noqa: BLE001 - no worker answered in time: say so, never fail the whole test
+        return {'present': False, 'error': 'no worker answered; is the celery container running?'}
+
+
 def test_connection(credentials, use_local=True):
     """Try the credentials and the local node without saving or importing anything. ``{ok, devices, tailnet, policy, local, error}``."""
-    from cveFeed.tailscale_sync import merge
     out = {'ok': False, 'devices': None, 'tailnet': '', 'policy': None, 'local': None, 'error': ''}
-    api_devices = None
     if credentials:
         try:
             client = tailscale_api.Client(credentials)
@@ -196,14 +205,14 @@ def test_connection(credentials, use_local=True):
                 out['policy'] = f'not readable: {exc}'
         except TailscaleError as exc:
             out['error'] = str(exc)
-    if use_local and tailscale_local.available():
-        try:
-            state, peers = tailscale_local.read()
-            out['local'] = {k: state[k] for k in ('backend_state', 'tailnet', 'self_name', 'version', 'peers')}
-            if api_devices is None:
-                out['devices'], out['tailnet'] = len(merge(None, peers, state)), out['tailnet'] or state['tailnet']
-        except TailscaleError as exc:
-            out['local'] = {'error': str(exc)}
+    if use_local:
+        node = node_state_from_worker()
+        if node.get('state'):
+            out['local'] = node['state']
+            if out['devices'] is None:
+                out['devices'], out['tailnet'] = node['peer_count'], out['tailnet'] or node['state']['tailnet']
+        elif node.get('error'):
+            out['local'] = {'error': node['error']}
     out['ok'] = out['devices'] is not None
     if not out['ok'] and not out['error']:
         out['error'] = 'no credentials are saved and this server\'s own Tailscale node is not running'

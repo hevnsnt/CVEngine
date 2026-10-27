@@ -445,7 +445,7 @@ def engagement_import(request, user, engagement_id):
     data = _body(request)
     project, eng = _engagement(request, data, engagement_id, write=True)
     from targetApp.target_types import is_scannable_ip
-    plan = bounty_scope.import_plan(eng.program.assets.filter(removed_at__isnull=True), scannable=lambda ip: is_scannable_ip(ip, tailnet=False))
+    plan = bounty_scope.import_plan(eng.program.assets.filter(removed_at__isnull=True), scannable=lambda ip: is_scannable_ip(ip))
     if data.get("dry_run", True) is not False:
         return {"dry_run": True, "targets": plan["targets"][:2000], "skipped": plan["skipped"][:500], "total": len(plan["targets"]),
                 "discovery": eng.automated_ok}

@@ -23,15 +23,14 @@ def _link(project):
 
 def tailscale_status(ctx, slug):
     """The project's tailnet connection: tailnet name, device counts, last sync, errors and settings; ``connected: false`` when none."""
-    from cveFeed import tailscale_admin, tailscale_local
+    from cveFeed import tailscale_admin
     project = _admin(ctx, slug)
     link = _link(project)
-    sidecar = {'present': tailscale_local.available()}
     if link is None:
-        return {'connected': False, 'sidecar': sidecar}
+        return {'connected': False}
     status = tailscale_admin.link_dict(link)
     status.pop('project')
-    return {'connected': True, **status, 'sidecar': sidecar}
+    return {'connected': True, **status}
 
 
 def _device(row):
@@ -75,6 +74,9 @@ def tailscale_sync(ctx, slug):
         raise ApiError(404, 'that project has no tailnet connected')
     if not link.enabled:
         raise ApiError(409, 'the tailnet connection is switched off')
+    from cveFeed.tailscale_sync import MANUAL_SYNC_GAP, manual_sync_allowed
+    if not manual_sync_allowed(link.pk):
+        raise ApiError(429, f'a sync was started less than {MANUAL_SYNC_GAP} seconds ago; wait before asking again')
     sync_tailscale_link.delay(link.pk)
     from cveFeed.admin_api import audit
     audit(ctx.user, 'tailscale.sync', project.slug, org=project.org_id, project=project.slug)

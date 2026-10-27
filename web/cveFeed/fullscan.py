@@ -98,8 +98,13 @@ def in_scope(ip, *, strict=False):
     at least one of the in-scope names on it that does not resolve anywhere blocked."""
     from targetApp import target_types
     address = (ip.address or '').strip()
-    if not address or ip.is_cdn or not target_types.is_scannable_ip(address):
+    if not address or ip.is_cdn:
         return False
+    rows = None
+    if not target_types.is_scannable_ip(address):  # an internal address passes only as the tailnet device of one of the projects it belongs to
+        rows = list(active_attached(ip).values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
+        if not any(target_types.is_scannable_ip(address, project=project) for _name, project in rows):
+            return False
     from cveFeed import hosting
     shared = hosting.shared_by_address([address])
     if shared:  # a shared platform's edge (Netlify, Vercel, a CDN): other customers answer here. Flag it so the queue skips it for good.
@@ -107,8 +112,8 @@ def in_scope(ip, *, strict=False):
         return False
     from cveFeed.exclusions import excluded_names
     from cveFeed.archive_rediscovery import archived_names
-    rows = list(active_attached(ip)
-                .values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
+    if rows is None:
+        rows = list(active_attached(ip).values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
     banned = {}  # project id -> the names its organization excluded for good: such a name does not make the address in scope
     for _name, project in rows:
         if project not in banned:
@@ -118,8 +123,12 @@ def in_scope(ip, *, strict=False):
             else:
                 banned[project] = excluded_names(project)
             banned[project] = banned[project] | archived_names(project)
-    names = [name for name, project in rows if name.lower().rstrip('.') not in banned[project]]
-    return any(not target_types.resolves_to_blocked(name) for name in names)
+    names = [(name, project) for name, project in rows if name.lower().rstrip('.') not in banned[project]]
+    def blocked(name, project):  # an address is judged as that address (its project may authorise a tailnet device); a name only by DNS
+        if target_types.classify_target(name) == target_types.IP:
+            return not target_types.is_scannable_ip(name, project=project)
+        return target_types.resolves_to_blocked(name)
+    return any(not blocked(name, project) for name, project in names)
 
 
 def pick():

@@ -10,7 +10,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cveFeed", "0086_saved_search_schedule"),
+        ("cveFeed", "0087_runzero_sync"),
         ("dashboard", "0027_ai_provider_lmstudio"),
         ("targetApp", "0004_domain_org_unique"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),

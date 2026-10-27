@@ -7,6 +7,7 @@ resolves the ones that no longer apply, so the table always reflects the current
 import base64
 import concurrent.futures
 import datetime
+import functools
 import logging
 import re
 import socket
@@ -272,7 +273,7 @@ def _legacy_context():
     return ctx
 
 
-def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
+def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None, project=None):
     """Connect without verification (so broken certs can still be read), return a plain info dict or None."""
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -287,7 +288,7 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
             der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
     except (OSError, ssl.SSLError, socket.timeout, ValueError):
         return None
@@ -310,12 +311,12 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
             'key_description': key, 'protocol': protocol, 'cipher': cipher}
 
 
-def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
+def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """Empty string if the system trust store accepts the certificate for this host, else the reason."""
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host):
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host):
             return ''
     except ssl.SSLCertVerificationError as exc:
         return (exc.verify_message or str(exc))[:300]
@@ -323,11 +324,11 @@ def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
         return ''
 
 
-def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None):
+def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
     try:
         ctx = _legacy_context()
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
             return tls.version() in ('TLSv1', 'TLSv1.1')
     except (OSError, ssl.SSLError, ValueError):
         return False
@@ -349,17 +350,24 @@ def clip_certificate(info):
     return out
 
 
-def probe_tls(host, port):
+def _project_kw(project):
+    """``{'project': id}`` when the target has one that may authorise a tailnet device, else nothing (the probes take it as an option)."""
+    return {} if project is None else {'project': project}
+
+
+def probe_tls(host, port, project=None):
+    """Read the certificate and TLS posture of ``host:port``. ``project`` may authorise a tailnet device of its own."""
+    kw = _project_kw(project)
     try:
-        addresses = pinned_transport.resolve(host, port)
+        addresses = pinned_transport.resolve(host, port, **kw)
     except (OSError, ValueError):
         return None
-    info = _fetch_cert(host, port, addresses=addresses)
+    info = _fetch_cert(host, port, addresses=addresses, **kw)
     if info:
-        info['chain_error'] = _chain_error(host, port, addresses=addresses)
-        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses)
+        info['chain_error'] = _chain_error(host, port, addresses=addresses, **kw)
+        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses, **kw)
         return info
-    info = _fetch_cert(host, port, legacy=True, addresses=addresses)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
+    info = _fetch_cert(host, port, legacy=True, addresses=addresses, **kw)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
     if info:
         info['chain_error'] = 'cannot be verified: the server only speaks TLS 1.0 / 1.1'
         info['legacy_tls'] = True
@@ -510,6 +518,8 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     project = domain.project_id
+    if probe is probe_tls:  # the project may authorise the tailnet devices of its own
+        probe = functools.partial(probe_tls, project=project)
     running = activity.log('hygiene', f'Checking TLS and email authentication for {domain.name}', project=project, status='running')
     found = []
 

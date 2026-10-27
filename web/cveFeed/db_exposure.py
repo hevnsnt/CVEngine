@@ -236,7 +236,7 @@ def run_db_exposure_checks(scan_id, checks=None):
         if normalize(sub.name) in banned:
             continue
         for ip in sub.ip_addresses.all():
-            if not is_scannable_ip(ip.address):
+            if not is_scannable_ip(ip.address, project=project):
                 continue
             for port in open_ports(ip):
                 label, fn = checker_for(port, table)
@@ -258,7 +258,7 @@ def run_db_exposure_checks(scan_id, checks=None):
         # this project's records. Recheck at dispatch, not only while planning.
         banned = _excluded_names(project)
         subs = [sub for sub in subs if normalize(sub.name) not in banned]
-        if not subs or not is_scannable_ip(host):
+        if not subs or not is_scannable_ip(host, project=project):
             continue
         checked += 1
         try:

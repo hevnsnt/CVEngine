@@ -29,11 +29,15 @@ def host_state(sub):
     ``{"ips": {ip: {"ports": {"443/tcp": {service, product, version}}}}, "techs": [...], "http": {status, title}}``.
     Only open ports count, and only addresses a scanner may touch."""
     from targetApp.target_types import is_scannable_ip
-    ips = {}
+    ips, project = {}, None
     for ip in sub.ip_addresses.all():
         address = (ip.address or '').strip()
-        if not address or not is_scannable_ip(address):
+        if not address:
             continue
+        if not is_scannable_ip(address):
+            project = project if project is not None else (sub.target_domain.project_id if sub.target_domain_id else 0)  # the owner, read once
+            if not project or not is_scannable_ip(address, project=project):  # a tailnet device of this host's own project
+                continue
         ports = ips.setdefault(address, {'ports': {}})['ports']
         for port in ip.ports.all():
             if (port.state or '') not in ('', 'open'):
