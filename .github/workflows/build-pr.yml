@@ -11,7 +11,7 @@ on:
       - develop
       - release/*
   schedule:
-    # weekly rebuild without the layer cache, so the @latest tools and templates are re-fetched
+    # weekly rebuild without the layer cache, so the pinned tools and the runtime-fetched templates are re-fetched from scratch
     - cron: '17 6 * * 1'
 
 permissions:
