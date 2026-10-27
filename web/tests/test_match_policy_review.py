@@ -165,7 +165,7 @@ class WorkedMatchGuardTests(Fixture):
 		request = OnDemandValidation.objects.create(match=match, project=self.project, source='manual', status='queued')
 		self.assertEqual(correlation.invalid_identity_reason(match), '')
 		OnDemandValidation.objects.filter(pk=request.pk).update(status='running')
-		self.assertIn('invalid product correlation', correlation.invalid_identity_reason(match))
+		self.assertIn('different product', correlation.invalid_identity_reason(match))
 
 	def test_the_same_wrong_product_match_with_nobody_behind_it_closes_without_a_shared_verdict(self):
 		ingress = self.cve(Cve(170, affected('ingress-nginx', '1.0.0', '1.12.1', 'kubernetes')))
@@ -457,3 +457,54 @@ class PolicyClosureTriageTests(Fixture):
 		self.assertTrue(row.reason.startswith('Closed automatically: no version evidence'))
 		bump.assert_called_once()
 
+
+class ClosureWordingTests(Fixture):
+	"""A closure says what happened (a different product, which one) and never calls the data "invalid"."""
+
+	def wrong_product_match(self):
+		ingress = self.cve(Cve(173, affected('ingress-nginx', '1.0.0', '1.12.1', 'kubernetes')))
+		tech = self.tech('nginx:1.10.0')
+		return self.match_for(ingress, product='ingress-nginx', version='1.10.0', in_range=True,
+							  evidence={'source': 'tech', 'source_id': tech.id})
+
+	def test_the_reason_names_the_recorded_product_and_the_one_the_advisory_covers(self):
+		reason = correlation.invalid_identity_reason(self.wrong_product_match())
+		self.assertTrue(reason.startswith(correlation.DIFFERENT_PRODUCT), reason)
+		self.assertIn('"nginx"', reason)
+		self.assertIn('"ingress-nginx"', reason)
+		self.assertNotIn('invalid', reason.lower())
+		self.assertIn('absent elsewhere on the host', reason)
+
+	def test_the_activity_line_carries_the_reason_not_a_fixed_phrase(self):
+		match = self.wrong_product_match()
+		with mock.patch('cveFeed.activity.log') as log:
+			self.assertTrue(correlation.close_invalid_correlation(match))
+		line = log.call_args.args[1]
+		self.assertIn(match.cve_entry.cve_id, line)
+		self.assertIn('different product', line)
+		self.assertIn('"ingress-nginx"', line)
+		self.assertNotIn('invalid', line.lower())
+
+	def test_a_local_only_or_no_evidence_closure_is_not_called_a_product_mismatch(self):
+		self.assertEqual(correlation.closure_summary(match_policy.NO_EVIDENCE + ' (no version, no usable range). It stays closed.'),
+						 'no version evidence (no version, no usable range)')
+		self.assertTrue(correlation.closure_summary('Closed automatically: local-only vulnerability (AV:L). An attacker needs to be on the host.')
+						.startswith('local-only vulnerability'))
+
+	def test_a_row_closed_under_the_first_wording_is_still_an_automatic_closure(self):
+		legacy = 'Closed automatically: invalid product correlation; the recorded product identity does not match an affected product in the advisory.'
+		self.assertTrue(legacy.startswith(correlation.AUTO_CLOSED))
+
+	def test_the_migration_rewrites_the_first_wording_in_stored_rows(self):
+		from importlib import import_module
+		from django.apps import apps
+		migration = import_module('cveFeed.migrations.0092_reword_different_product_closures')
+		match = self.wrong_product_match()
+		old = ('Closed automatically: invalid product correlation; the recorded product identity does not match an affected product '
+			   'in the advisory. This closes this candidate match only.')
+		CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='not_affected', ai_reason=old)
+		migration.reword(apps, None)
+		match.refresh_from_db()
+		self.assertNotIn('invalid', match.ai_reason)
+		self.assertTrue(match.ai_reason.startswith('Closed automatically: different product; the recorded product is not one the advisory covers'))
+		self.assertTrue(match.ai_reason.endswith('This closes this candidate match only.'))

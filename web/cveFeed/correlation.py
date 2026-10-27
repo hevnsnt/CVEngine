@@ -652,8 +652,27 @@ def signature_of(obj):
 
 # the stored reasons of a deterministic closure (this module, cveFeed.locality, cveFeed.match_policy): a verdict that starts with one
 # was reached on the evidence alone, so it is reusable and a person's or the AI's later answer does not replace it
-AUTO_CLOSED = ('Closed automatically: invalid product correlation', 'Closed automatically: local-only',
+DIFFERENT_PRODUCT = 'Closed automatically: different product'
+# the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
+AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
                match_policy.NO_EVIDENCE)
+
+
+def closure_summary(reason):
+    """The first sentence of a stored closure reason without its "Closed automatically:" lead, for a one-line activity entry."""
+    text = (reason or '').strip()
+    if text.startswith('Closed automatically:'):
+        text = text[len('Closed automatically:'):].strip()
+    return text.split('. ')[0].rstrip('.')[:200]
+
+
+def _names(values, limit=3):
+    seen = []
+    for value in values:
+        value = ' '.join(str(value or '').split())[:60]
+        if value and value.lower() not in [x.lower() for x in seen]:
+            seen.append(value)
+    return ', '.join('"%s"' % v for v in seen[:limit])
 
 
 def invalid_identity_reason(match):
@@ -685,11 +704,15 @@ def invalid_identity_reason(match):
     index = build_product_index([cve])
     if any(_match_candidates(name, None, token, index, {cve.pk: cve}, cpe=cpe)):
         return ''
+    seen = _names([name])
+    covers = _names(item.get('product') or item.get('package') for item in affected if isinstance(item, dict))
     if token in GENERIC_PRODUCT_TOKENS:
-        basis = 'the recorded fingerprint is a generic cloud or service label, not the affected product'
+        basis = f'the recorded fingerprint {seen} is a generic cloud or service label, not the affected software'
+    elif covers:
+        basis = f'it was recorded as {seen}, but the advisory covers {covers}'
     else:
-        basis = 'the recorded product identity does not match an affected product in the advisory'
-    return ('Closed automatically: invalid product correlation; ' + basis + '. This closes this candidate match only; '
+        basis = f'it was recorded as {seen}, which is not a product this advisory names'
+    return (DIFFERENT_PRODUCT + '; ' + basis + '. This closes this candidate match only; '
             'it does not establish that the software is absent elsewhere on the host.')
 
 
@@ -725,7 +748,7 @@ def close_invalid_correlation(match, reason=None):
         MatchVerdict.objects.update_or_create(cve_entry=match.cve_entry, matched_product=match.matched_product,
             matched_version=match.matched_version, version_in_range=match.version_in_range, source=match.source,
             defaults={'ai_verdict': 'not_affected', 'ai_reason': reason, 'ai_model': 'deterministic-correlation'})
-    activity.log('confirm', f'{match.cve_entry.cve_id}: invalid product correlation closed for this asset',
+    activity.log('confirm', f'{match.cve_entry.cve_id}: closed for this asset ({closure_summary(reason)})',
                  project=row.project_id, cve_id=match.cve_entry.cve_id, match_id=match.pk,
                  finding_id=row.pk, decision='closed_not_applicable', reason=reason)
     scoring.rescore_for_matches([match])
