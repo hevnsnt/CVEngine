@@ -84,11 +84,67 @@ function setNum(id, value) {
   n.classList.add("bump");
 }
 
+// The biggest hygiene problems, worst first: the open issues grouped by what was checked, so the strip says what is wrong
+// (expired certificates, no DMARC) and not only how many. Reads the worst three severities; a group counts what those pages hold.
+const HY_AREA = { tls_expired: "Expired certificates", tls_expiring: "Certificates expiring", tls_legacy: "Old TLS versions", tls_weak: "Weak TLS" };
+const HY_PREFIX = { spf: "SPF", dkim: "DKIM", dmarc: "DMARC", caa: "CAA", mx: "Mail exchangers", mta_sts: "MTA-STS", smtp_tlsrpt: "TLS reporting", dane: "DANE", tls: "TLS" };
+const HY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+const hyName = (check) => {
+  if (HY_AREA[check]) return HY_AREA[check];
+  const word = check.replace(/_/g, " ");
+  const area = Object.keys(HY_PREFIX).sort((a, b) => b.length - a.length).find((k) => check === k || check.startsWith(`${k}_`));
+  const rest = area ? word.slice(area.length).trim() : word;
+  return area ? `${HY_PREFIX[area]}${rest ? ` ${rest}` : ""}` : word.charAt(0).toUpperCase() + word.slice(1);
+};
+// Scan coverage: the share of hosts a scan has looked at. The host search already counts every temperature, so one request answers it.
+let coverageAt = 0;
+async function paintCoverage() {
+  if (!$("n-coverage") || Date.now() - coverageAt < 30000) return;
+  coverageAt = Date.now();
+  try {
+    const r = await get(`/api/v1/projects/${encodeURIComponent(slug || "_all")}/search?q=&page_size=1`);
+    const heat = (r.facets && r.facets.heat) || {};
+    const total = Object.values(heat).reduce((n, v) => n + v, 0);
+    const never = heat.unscanned || 0;
+    if (!total) return;
+    $("s-coverage").textContent = `${Math.round((100 * (total - never)) / total)}%`;
+    $("s-coverage_note").textContent = never ? `${never} of ${total} hosts never scanned` : `all ${total} hosts scanned`;
+  } catch (_) {
+    coverageAt = 0;
+  }
+}
+let hygieneSig = null;
+async function paintHygiene(open) {
+  const box = $("hy-top");
+  if (!box || open === hygieneSig) return;
+  hygieneSig = open;
+  try {
+    const path = `/api/v1/projects/${encodeURIComponent(slug || "_all")}/hygiene`;
+    const pages = await Promise.all(["critical", "high", "medium"].map((sev) => get(`${path}?severity=${sev}&page_size=100`).catch(() => ({ results: [] }))));
+    const groups = new Map();
+    pages.flatMap((p) => p.results || []).forEach((f) => {
+      const g = groups.get(f.check) || { check: f.check, worst: f.severity, n: 0 };
+      g.n += 1;
+      if ((HY_RANK[f.severity] || 0) > (HY_RANK[g.worst] || 0)) g.worst = f.severity;
+      groups.set(f.check, g);
+    });
+    const top = [...groups.values()].sort((a, b) => (HY_RANK[b.worst] || 0) - (HY_RANK[a.worst] || 0) || b.n - a.n).slice(0, 3);
+    box.textContent = "";
+    top.forEach((g) => {
+      const li = el("li", `sev-${g.worst}`);
+      li.append(el("i", "hy-dot"), el("span", "", hyName(g.check)), el("b", "", String(g.n)));
+      box.append(li);
+    });
+    if (!top.length) box.append(el("li", "hy-none", open ? "Low severity only" : "All clear"));
+  } catch (_) {
+    hygieneSig = null;
+  }
+}
+
 async function pollStats() {
   try {
     const s = await get(`/cve/api/stats${projParam ? "?" + projParam : ""}`);
     const flat = {
-      targets: s.targets,
       hosts: s.hosts,
       exposed_hosts: s.exposed_hosts,
       fire: s.tiers.fire,
@@ -96,19 +152,21 @@ async function pollStats() {
       ice: s.tiers.ice,
       matches: s.matches,
       scanner_findings: s.scanner_findings,
-      autofire_runs: s.autofire_runs,
-      templates: s.templates,
+      hygiene_open: s.hygiene_open,
       certs_expiring: s.certs_expiring,
-      scans_running: s.scans_running,
     };
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
     statsNow = s;
     paintMapCount();
-    const scansLabel = $("s-scans_label");
-    if (scansLabel)
-      scansLabel.textContent = s.scans_queued
-        ? `Scans running, ${s.scans_queued} queued`
-        : "Scans running";
+    const certNote = $("s-certs_total_note");
+    if (certNote) certNote.textContent = s.certs_total ? `of ${s.certs_total} tracked` : "";
+    paintHygiene(s.hygiene_open);
+    const stuck = $("n-queue");
+    if (stuck) {
+      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0);
+      setNum("s-scans_queued", s.scans_queued);
+    }
+    paintCoverage();
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
     $("m-exposed").style.width = `${pct}%`;
     const top = Math.max(s.tiers.fire, s.tiers.smoke, s.tiers.ice, 1);
