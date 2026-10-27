@@ -221,6 +221,13 @@ LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'admin_login_redirect',
 ]
 
+# A Sentinel's very first call has no bearer token and no session yet: it authenticates with a one-time enrollment
+# secret instead (agentapi.sentinel_broker.bootstrap), checked by the route itself. Every other /api/v1/ and /mcp/
+# path still requires a bearer token or a signed-in session, enforced by agentapi.auth.AgentTokenMiddleware.
+LOGIN_REQUIRED_IGNORE_PATHS = [
+    r'^/api/v1/sentinels/bootstrap/?$',
+]
+
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'cve_dashboard'
 LOGOUT_REDIRECT_URL = 'login'

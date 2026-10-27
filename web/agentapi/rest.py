@@ -10,6 +10,7 @@ from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
+from agentapi import sentinel_broker as sentinels
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -91,6 +92,16 @@ def tokens_revoke(request, ctx, token_id, **_):
 def _register_agent(request, ctx, **_):
     out = broker.register(ctx, _body(request))
     return out, (201 if out['created'] else 200)
+
+
+def _register_sentinel(request, ctx, **_):
+    out = sentinels.register(ctx, _body(request))
+    return out, (201 if out['created'] else 200)
+
+
+def _sentinel_bootstrap(request, ctx, **_):
+    out = sentinels.bootstrap(_body(request))
+    return out, 201
 
 
 def _queue_agent_work(request, ctx, slug, **_):
@@ -359,6 +370,30 @@ ROUTES = [
      lambda r, c, slug, **k: broker.list_unassignable(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks/(?P<task_id>\d+)/cancel', 'Cancel queued or leased agent work',
      lambda r, c, slug, task_id, **k: broker.cancel_task(c, slug, task_id)),
+    ('POST', r'sentinels/bootstrap', 'A Sentinel\'s first call: trade a one-time enrollment secret (from the project\'s sentinels/enroll) for its own API token and Agent row (kind=scanner), pre-scoped to what the secret was generated for; body {enrollment_token, name, capabilities, os, tools, max_concurrent}. No bearer token needed; the token is returned once',
+     _sentinel_bootstrap),
+    ('GET', r'sentinel', 'The Sentinel registered on this token: scope, capabilities, open assignments', lambda r, c, **k: sentinels.identity(c)),
+    ('PUT', r'sentinel', 'Register or update this token\'s Sentinel (kind is always scanner): {name, scope: {orgs, projects, hosts}, capabilities: [nmap, naabu, nuclei_light, nuclei_targeted], os, tools, max_concurrent}',
+     _register_sentinel),
+    ('DELETE', r'sentinel', 'Unregister this token\'s Sentinel and hand its tasks back', lambda r, c, **k: sentinels.unregister(c)),
+    ('POST', r'sentinel/heartbeat', 'Say the Sentinel is alive; extends the leases of its running tasks (same call as agent/heartbeat)',
+     lambda r, c, **k: sentinels.heartbeat(c, _body(r))),
+    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted]}',
+     lambda r, c, **k: sentinels.next_task(c, _body(r))),
+    ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a SentinelTask: {outcome: done|error, ...the typed result fields for its kind, or error}',
+     lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
+     lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at}',
+     lambda r, c, slug, **k: (sentinels.generate_enrollment(c, slug), 201)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this project',
+     lambda r, c, slug, **k: (sentinels.generate_enrollment(c, slug), 201)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/sentinel-tasks', 'Scan-stage work dispatched to Sentinels for this project (status, kind, agent_id, scan_id)',
+     lambda r, c, slug, **k: sentinels.list_tasks(c, slug, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/sentinel-tasks/(?P<task_id>\d+)/cancel', 'Cancel a queued or leased SentinelTask',
+     lambda r, c, slug, task_id, **k: sentinels.cancel_task(c, slug, task_id)),
     ('GET', r'tokens', 'Your API tokens (session only)', tokens_list),
     ('POST', r'tokens', 'Create an API token (session only); body {name, read_only} or {name, scope: "inventory", project} for a host reporter token that can only post that project\'s inventory', tokens_create),
     ('DELETE', r'tokens/(?P<token_id>\d+)', 'Revoke a token (session only)', tokens_revoke),

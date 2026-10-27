@@ -87,6 +87,14 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_SUPPLIERS_MAX_PER_PROJECT`, `CVENGINE_SUPPLIERS_MAX_DOMAINS`, `CVENGINE_SUPPLIERS_MAX_REQUESTS` | `50`, `10`, `600` | Suppliers one project may list (1 to 500), exact names one supplier may list (1 to 25), and requests one daily sweep may make across all projects (50 to 5000; a certificate read counts as three). A supplier that does not fit waits for the next sweep. |
 | `CVENGINE_TTL_SUPPLIER`, `CVENGINE_TTL_SUPPLIER_FAILED` | `168`, `24` | Hours before a supplier is checked again, and before one that answered nothing is asked again. |
 
+## Sentinels
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_SENTINEL_DISPATCH_TIMEOUT` | `90` | Seconds a scan stage (nmap, naabu, a nuclei pass) waits for a dispatched `SentinelTask` to be claimed and reported before falling back to running the tool locally (see [ARCHITECTURE.md](ARCHITECTURE.md#sentinels)). A project with no Sentinel registered pays none of this: dispatch is a single existence check, not a wait. |
+
+See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) for the enrollment secret's 30-minute expiry (not yet configurable) and `CVENGINE_AGENT_TASK_RETENTION_DAYS`, which also governs how long a finished `SentinelTask` is kept.
+
 ## AI limits
 
 | Variable | Default | Purpose |

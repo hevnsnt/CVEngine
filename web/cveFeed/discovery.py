@@ -566,7 +566,11 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                        fallback={'checked': 0, 'exposed': 0})
     if stopped(scan_id):
         return gone
-    light_kwargs = {'stream': light_stream} if light_stream else {}
+    # A test that injects its own light_stream is never second-guessed; otherwise a registered Sentinel gets first refusal
+    # at the stage (agentapi.sentinel_dispatch), and wrap_nuclei_stream returns the real stream_nuclei, unwrapped, when
+    # none is eligible, so a project with no Sentinels runs exactly as before this existed.
+    from agentapi import sentinel_dispatch
+    light_kwargs = {'stream': light_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_light')}
     if force:
         light_kwargs['force'] = True
     light_result = _stage(scan, 'Nuclei HTTP and technology pass', 'nuclei_light_scan',
@@ -634,7 +638,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     from cveFeed import openvas_scan
     openvas_scan.carry_forward(scan)  # the optional OpenVAS add-on's findings are evidence on this scan's host rows too (a no-op while it is off)
 
-    targeted_kwargs = {'stream': targeted_stream} if targeted_stream else {}
+    targeted_kwargs = {'stream': targeted_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_targeted')}
     if force:
         targeted_kwargs['force'] = True
     targeted_result = _stage(scan, 'AI-targeted nuclei scan', 'nuclei_targeted_scan',

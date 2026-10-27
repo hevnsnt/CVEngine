@@ -14,11 +14,13 @@ from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import reports
+from agentapi import sentinel_broker as sentinels
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
 from agentapi import authcheck
 from agentapi import tailscale
+from agentapi.models import SentinelTask
 from agentapi.services import ApiError, Ctx
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,8 @@ INSTRUCTIONS = ('CVEngine vulnerability management. Start with whoami and list_p
                 'Agents that take assigned work: register_agent once with your name, kind, scope (orgs, projects, hosts) and capabilities, '
                 '(a new agent waits for an administrator to approve it) then loop get_next_task, accept_task, do the work, report_task_result, with agent_heartbeat about once a minute. '
                 'Run only the commands in a task\'s "run" list, which the app rendered itself; whoami shows your scope and open assignments. '
+                'Sentinels (scan-stage agents, kind=scanner) use the matching register_sentinel/sentinel_heartbeat/get_next_sentinel_task/'
+                'accept_sentinel_task/report_sentinel_task_result loop instead, over SentinelTask, not AgentTask. '
                 + UNTRUSTED_NOTICE)
 SERVER_INFO = {'name': 'cvengine', 'version': '1.0.0'}
 MAX_BODY_BYTES = 256 * 1024
@@ -410,6 +414,53 @@ TOOLS = [
      _schema({'agent_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': list(broker.ADMIN_STATUSES)}, 'note': {'type': 'string'},
               'limits': {'type': 'object'}}, ['agent_id']),
      lambda c, a: broker.update_agent(c, a.get('agent_id'), {k: v for k, v in a.items() if k != 'agent_id'}), True),
+    # --- Sentinels: scan-stage agents (kind=scanner). A Sentinel is an Agent, so register_agent/agent_heartbeat/list_agents/
+    # get_agent/update_agent above already work for one; the tools below are the matching scan-stage-work verbs (SentinelTask,
+    # not AgentTask) and thin, kind-forced or kind-filtered aliases of the agent tools for a predictable Sentinel-only surface.
+    ('register_sentinel', 'Register this token as a Sentinel (kind is always scanner), or update the registration. Say what it covers: name, scope {orgs, projects, hosts}, capabilities drawn from nmap, naabu, nuclei_light, nuclei_targeted, os, tools and max_concurrent. A new Sentinel waits for an administrator to approve it unless you are one yourself. Prefer the one-time enrollment secret from generate_sentinel_enrollment for a brand new Sentinel with no token yet (bootstrap is REST-only: POST /api/v1/sentinels/bootstrap, since this endpoint itself needs a bearer token).',
+     _schema({'name': {'type': 'string'}, 'scope': AGENT_SCOPE, 'capabilities': {'type': 'array', 'items': {'type': 'string', 'enum': list(SentinelTask.KINDS)}},
+              'os': {'type': 'array', 'items': {'type': 'string', 'enum': list(broker.scope_lib.OS_FAMILIES)}},
+              'tools': {'type': 'array', 'items': {'type': 'string'}}, 'max_concurrent': {'type': 'integer'}}),
+     lambda c, a: sentinels.register(c, a), True),
+    ('unregister_sentinel', 'Remove this token\'s Sentinel registration and hand its SentinelTasks back to the queue.', _schema(),
+     lambda c, a: sentinels.unregister(c), True),
+    ('sentinel_heartbeat', 'Say this Sentinel is alive. Call about once a minute; extends the leases of its running SentinelTasks (same mechanism as agent_heartbeat).',
+     _schema(), lambda c, a: sentinels.heartbeat(c, a), True),
+    ('get_next_sentinel_task', 'Lease the best SentinelTask this Sentinel is eligible for, or get none with the reason. wait (seconds, up to 20) holds the call until work appears. Then accept_sentinel_task, run ONLY the tool named by the task\'s kind against target, and report_sentinel_task_result.',
+     _schema({'wait': {'type': 'integer', 'description': 'seconds to wait for work, 0 to 20'},
+              'kinds': {'type': 'array', 'items': {'type': 'string', 'enum': list(SentinelTask.KINDS)}}}),
+     lambda c, a: sentinels.next_task(c, a), True),
+    ('accept_sentinel_task', 'Accept a SentinelTask you were leased and start work. Do it within two minutes of get_next_sentinel_task or it returns to the queue.',
+     _schema({'task_id': TASK_ID}, ['task_id']), lambda c, a: sentinels.accept_task(c, a.get('task_id')), True),
+    ('get_sentinel_task', 'One of your SentinelTasks with its target.', _schema({'task_id': TASK_ID}, ['task_id']),
+     lambda c, a: sentinels.get_task(c, a.get('task_id')), False),
+    ('report_sentinel_task_result', 'Report the outcome of a SentinelTask you hold: outcome done or error. On done, give the fields its kind expects: nmap {hosts: [{ip, os_guess, ports: [{number, protocol, service_name, product, version, state}]}]}, naabu {ports: {ip: [open port numbers]}}, nuclei_light/nuclei_targeted {findings: [{template_id, name, severity, host, matched_at, description, extracted_results, tags}]}. On error, give {error: a short reason}. Every field is clipped and capped; nothing here is ever run as a command. Reporting twice is harmless.',
+     _schema({'task_id': TASK_ID, 'outcome': {'type': 'string', 'enum': ['done', 'error']}, 'hosts': {'type': 'array'},
+              'ports': {'type': 'object', 'description': '{ip: [open port numbers]}, for naabu'}, 'findings': {'type': 'array'},
+              'error': {'type': 'string'}}, ['task_id', 'outcome']),
+     lambda c, a: sentinels.report_result(c, a.get('task_id'), {k: v for k, v in a.items() if k != 'task_id'}), True),
+    ('release_sentinel_task', 'Give a SentinelTask back to the queue because you cannot do it. Does not count against the task.',
+     _schema({'task_id': TASK_ID, 'reason': {'type': 'string'}}, ['task_id']),
+     lambda c, a: sentinels.release_task(c, a.get('task_id'), a.get('reason', '')), True),
+    ('generate_sentinel_enrollment', 'Organization admin or App Admin only. A one-time enrollment secret scoped to a project, for a brand new Sentinel\'s first bootstrap call (REST: POST /api/v1/sentinels/bootstrap): {enrollment_token, server_url, expires_at}. The secret expires and is single-use.',
+     _schema({'project': SLUG}, ['project']), lambda c, a: sentinels.generate_enrollment(c, a.get('project')), True),
+    ('list_sentinel_tasks', 'Scan-stage work dispatched to Sentinels (status: queued, claimed, running, done, failed, expired; kind, agent_id, scan_id).',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string'}, 'kind': {'type': 'string', 'enum': list(SentinelTask.KINDS)},
+                          'agent_id': {'type': 'integer'}, 'scan_id': {'type': 'integer'}}), ['project']),
+     lambda c, a: sentinels.list_tasks(c, a.get('project'), a), False),
+    ('cancel_sentinel_task', 'Cancel a queued or leased SentinelTask.', _schema({'project': SLUG, 'task_id': TASK_ID}, ['project', 'task_id']),
+     lambda c, a: sentinels.cancel_task(c, a.get('project'), a.get('task_id')), True),
+    ('list_sentinels', 'Registered Sentinels (kind=scanner) you may see: your own, and for an administrator those of the users they manage. Same shape as list_agents, filtered to Sentinels.',
+     _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'q': {'type': 'string'}})),
+     lambda c, a: broker.list_agents(c, {**a, 'kind': 'scanner'}), False),
+    ('get_sentinel', 'One Sentinel with its effective rights and recent SentinelTask history.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
+     lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
+    ('suspend_sentinel', 'Administrator only (not for your own Sentinel). Suspend a Sentinel: no new work is offered and its in-flight SentinelTasks are released at once.',
+     _schema({'agent_id': {'type': 'integer'}, 'note': {'type': 'string'}}, ['agent_id']),
+     lambda c, a: broker.update_agent(c, a.get('agent_id'), {'status': 'suspended', **({'note': a['note']} if a.get('note') else {})}), True),
+    ('revoke_sentinel', 'Administrator only (not for your own Sentinel). Revoke a Sentinel for good: no new work is offered and its in-flight SentinelTasks are released at once.',
+     _schema({'agent_id': {'type': 'integer'}, 'note': {'type': 'string'}}, ['agent_id']),
+     lambda c, a: broker.update_agent(c, a.get('agent_id'), {'status': 'revoked', **({'note': a['note']} if a.get('note') else {})}), True),
 ]
 BY_NAME = {t[0]: t for t in TOOLS}
 

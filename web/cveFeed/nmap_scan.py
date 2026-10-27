@@ -352,12 +352,19 @@ def _plural(n, word):
     return f'{n} {word}{"s" if n != 1 else ""}'
 
 
-def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=False):
+def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=False, dispatch=True):
     """Fingerprint the scan's discovered IPs that no scan has covered recently, in one ``-O -sV --top-ports 1000`` pass (the full-port
     sweep is the background task in cveFeed.fullscan). Only IPs are scanned, each at most once per TTL across all scans (see
     cveFeed.ledger); an IP another pipeline is scanning right now is left to it. ``runner(targets, flags, host_timeout) ->
     xml text`` is injectable so tests need no nmap binary. When naabu is installed (see cveFeed.naabu_scan) it finds the open TCP
-    ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged."""
+    ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged.
+
+    ``dispatch`` (on by default) is the one seam a registered Sentinel (agentapi.sentinel_dispatch) uses: before any
+    address reaches the runner or naabu above, it is offered to a live, eligible Sentinel for this project; what a
+    Sentinel actually fingerprints is persisted through the exact same ``persist_inventory`` this module already calls,
+    and whatever is left (everything, when no Sentinel is registered or none answers in time) runs locally exactly as
+    before. Callers that pass their own ``naabu_runner`` (tests) are never second-guessed: dispatch only ever supplies
+    its own naabu_runner when the caller left that argument out."""
     from cveFeed import activity, ledger
     from cveFeed.nuclei_scan import scan_targets
     from startScan.models import ScanHistory
@@ -398,11 +405,19 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
             fast_running = activity.log('run_check', f'nmap is fingerprinting {len(targets)} new IP(s) for {domain.name}{note} '
                                         f'(-O -sV, the top 1000 ports plus {len(EXTRA_PORTS)} high-risk ones), scan #{scan_id}', project=project, status='running', scan_id=scan.id)
             try:
-                ports_by_ip = naabu_scan.discover(targets, scan, naabu_runner)
+                effective_naabu_runner = naabu_runner
+                sentinel_targets, sentinel_totals = targets, {'ports': 0, 'hosts_with_os': 0}
+                if dispatch:
+                    from agentapi import sentinel_dispatch
+                    if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
+                        effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
+                    sentinel_targets, sentinel_totals = sentinel_dispatch.try_nmap(domain.project, scan, targets, org_id=org_id)
+                ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
                 flags = fast_flags()
-                fast = scan_in_chunks(runner, targets, flags, HOST_TIMEOUT_FAST,
+                fast = scan_in_chunks(runner, sentinel_targets, flags, HOST_TIMEOUT_FAST,
                                       flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None,
                                       org_id=org_id)
+                fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)
                 ledger.record('nmap-fast', targets, project, scan, 'failed')
