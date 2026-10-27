@@ -29,8 +29,10 @@ from django.db.models import Count
 from startScan.models import Subdomain, IpAddress
 from targetApp.models import Domain
 assert Domain.objects.filter(name='rehearsal.example').exists(), 'the target is gone'
-hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example')
-assert hosts.count() == 4, f'{hosts.count()} hosts, expected 4'
+# discovery runs in the background of an updated install and may add hosts of its own (the domain itself, say): the seeded four must all be there
+wanted = {'h0.rehearsal.example', 'h1.rehearsal.example', 'h2.rehearsal.example', 'www.rehearsal.example'}
+hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted)
+assert {h.name for h in hosts} == wanted, f'seeded hosts missing: {sorted(wanted - {h.name for h in hosts})}'
 assert all(h.ip_addresses.exists() for h in hosts), 'a host lost its address'
 dups = IpAddress.objects.values('address').annotate(c=Count('id')).filter(c__gt=1).count()
 assert dups == 0, f'{dups} addresses are still stored more than once'
