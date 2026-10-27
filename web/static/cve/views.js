@@ -44,7 +44,7 @@ export function readParam(key, fallback, allowed) {
 
 const storageKey = (page, slug) => `cve.views.v1.${slug}.${page}`;
 
-function loadViews(page, slug) {
+export function loadViews(page, slug) {
   try {
     const list = JSON.parse(
       localStorage.getItem(storageKey(page, slug)) || "[]",

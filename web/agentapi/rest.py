@@ -6,6 +6,7 @@ import re
 from django.http import JsonResponse
 
 from agentapi import host_manage as hosts
+from agentapi import saved_search as saved
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi.auth import create_token
@@ -163,6 +164,20 @@ ROUTES = [
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
     ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/saved-searches', 'Your saved searches in this project, with the limits and the notification channels Settings has on',
+     lambda r, c, slug, **k: saved.list_saved_searches(c, slug)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/saved-searches', 'Save a search; body {name, query, enabled, alert_new, alert_gone, threshold, channels, frequency: hourly|daily|weekly}. The query is checked like a live search',
+     lambda r, c, slug, **k: saved.create_saved_search(c, slug, _body(r))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/saved-searches/(?P<search_id>\d+)', 'One saved search of yours',
+     lambda r, c, slug, search_id, **k: saved.get_saved_search(c, slug, int(search_id))),
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/saved-searches/(?P<search_id>\d+)', 'Change a saved search (any subset of the create fields); a new query or switching it back on restarts its baseline',
+     lambda r, c, slug, search_id, **k: saved.update_saved_search(c, slug, int(search_id), _body(r))),
+    ('DELETE', r'projects/(?P<slug>[-\w]+)/saved-searches/(?P<search_id>\d+)', 'Delete a saved search',
+     lambda r, c, slug, search_id, **k: saved.delete_saved_search(c, slug, int(search_id))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/saved-searches/(?P<search_id>\d+)/run', 'Evaluate a saved search now, as the schedule would (alerts included); the first run only learns the baseline',
+     lambda r, c, slug, search_id, **k: saved.run_saved_search(c, slug, int(search_id))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/saved-searches/(?P<search_id>\d+)/matches', 'The hosts a saved search matches now: the live search with the saved query (page, page_size, sort, heat, facets)',
+     lambda r, c, slug, search_id, **k: saved.saved_search_matches(c, slug, int(search_id), r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/routes', 'Web routes and how they answer an anonymous GET: open, login, session_required, sso (auth_state=, host=, sensitive=1, zombie=1)',
      lambda r, c, slug, **k: svc.list_routes(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/certificates', 'TLS certificates, soonest expiry first (?expiring_within=30)',

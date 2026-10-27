@@ -1734,6 +1734,46 @@ def _search_facets(host_ids, names, size):
     return out
 
 
+def _term_q(field, value, quoted, project):
+    """The Q of one parsed term: a filter value takes a comma-separated list for OR, unless it was quoted."""
+    from django.db.models import Q
+    if field and not quoted and ',' in value:
+        q = Q()
+        for part in [p.strip() for p in value.split(',') if p.strip()][:MAX_SEARCH_TERMS]:
+            q |= _term_filter(field, part, project)
+        return q
+    return _term_filter(field, value, project)
+
+
+def _search_matches(project, terms):
+    """The current-inventory Subdomain rows that satisfy every term (before they are folded into one row per host). The one
+    place a search is turned into a queryset, shared by the interactive search and the saved-search evaluator."""
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
+    for neg, field, value, quoted in terms:
+        q = _term_q(field, value, quoted, project)
+        qs = qs.exclude(q) if neg else qs.filter(q)
+    return qs
+
+
+def search_host_rows(project, terms):
+    """One Subdomain row per host that matches ``terms``: what the interactive search lists and a saved search counts."""
+    return _one_per_host(_search_matches(project, terms), per_project=_is_all(project))
+
+
+def check_search(query):
+    """The parsed terms of ``query``, or a 400 naming the problem: too long, too many terms, or a value a filter cannot take
+    (``port:abc``, ``sev:scary``, a bad CIDR). Builds every term's filter without running it, so a saved search is rejected when
+    it is saved, not when it is first evaluated. A search with no terms lists every host, which is nothing to watch: refused."""
+    terms = parse_search(query)
+    if not terms:
+        raise ApiError(400, 'the search is empty: add at least one term, for example tech:grafana')
+    for _, field, value, quoted in terms:
+        _term_q(field, value, quoted, None)
+    return terms
+
+
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
@@ -1746,10 +1786,6 @@ def search_hosts(ctx, slug, params):
     selected. ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
     each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
     host. Highest score first; ``sort=name`` for names."""
-    from django.db.models import Q
-
-    from cveFeed.correlation import latest_scan_q
-    from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     heat = params.get('heat') or ''
     if heat and heat not in HEAT_FACET_VALUES:
@@ -1763,16 +1799,7 @@ def search_hosts(ctx, slug, params):
     except (TypeError, ValueError):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
-    qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
-    for neg, field, value, quoted in terms:
-        if field and not quoted and ',' in value:
-            q = Q()
-            for part in [p.strip() for p in value.split(',') if p.strip()][:MAX_SEARCH_TERMS]:
-                q |= _term_filter(field, part, project)
-        else:
-            q = _term_filter(field, value, project)
-        qs = qs.exclude(q) if neg else qs.filter(q)
-    qs = _one_per_host(qs, per_project=_is_all(project))
+    qs = search_host_rows(project, terms)
     heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
     search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
     if heat:

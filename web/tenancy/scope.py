@@ -40,6 +40,7 @@ SCOPES = {
     'cveFeed.AssetChange': 'project_id',
     'cveFeed.RouteAuth': 'project_id',
     'cveFeed.HostLabel': 'project_id',
+    'cveFeed.SavedSearch': 'project_id',
     'cveFeed.HostProfile': 'project_id',
     'cveFeed.Triage': 'project_id',
     'cveFeed.BountyEngagement': 'project_id',

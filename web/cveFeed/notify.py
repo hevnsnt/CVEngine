@@ -1,9 +1,10 @@
 """Notification messages for the CVE pipeline, sent through the channels configured under Settings, Notifications.
 
-Three events, each one message per call and each call made once per scan or per feed sync, never per host:
+Four events, each one message per call and each call made once per scan, per feed sync or per saved-search evaluation, never per host:
 - ``fire_matches``: new fire-tier CVE matches (``send_vuln_notif``);
 - ``template_hits``: hosts a template test confirmed vulnerable (``send_vuln_notif``);
-- ``scan_finished``: a discovery scan ended, with a one-line summary (``send_scan_status_notif``).
+- ``scan_finished``: a discovery scan ended, with a one-line summary (``send_scan_status_notif``);
+- ``saved_search``: a saved search found new matches, lost some or reached its threshold (``send_interesting_notif``).
 
 The senders are the reNgine helpers (Slack, Discord, Telegram, Lark), which read the one Notification row and do nothing
 for a channel that is off or incomplete. Sending is best effort: a failure is logged without its text (a Telegram error
@@ -14,7 +15,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-CHANNEL_SENDERS = ('send_discord_message', 'send_slack_message', 'send_lark_message', 'send_telegram_message')
+CHANNEL_SENDERS = {'discord': 'send_discord_message', 'slack': 'send_slack_message', 'lark': 'send_lark_message', 'telegram': 'send_telegram_message'}
 SAMPLE = 5  # names listed in a message; the count says the rest
 _UNSAFE = re.compile(r'[^A-Za-z0-9.:_-]')
 
@@ -25,20 +26,42 @@ def _name(value):
     return '`' + _UNSAFE.sub('?', str(value))[:100] + '`'
 
 
+def _label(value):
+    """A person-chosen name (a saved search, a project) safe to place in a message: spaces stay, markup characters do not."""
+    return '`' + re.sub(r'[^A-Za-z0-9 .:_-]', '?', str(value))[:80] + '`'
+
+
+def _names(hosts):
+    shown = ', '.join(_name(h) for h in hosts[:SAMPLE])
+    more = len(hosts) - SAMPLE
+    return shown + (f' and {more} more' if more > 0 else '')
+
+
 def _settings():
     from scanEngine.models import Notification
     return Notification.objects.first()
 
 
-def _send(text, flag):
-    """Send one message to every enabled channel when the Notification row allows this kind of event. Returns True if a
-    send was attempted."""
+def enabled_channels():
+    """Names of the channels Settings, Notifications has switched on (never their addresses or tokens)."""
+    try:
+        row = _settings()
+        return [c for c in CHANNEL_SENDERS if row and getattr(row, f'send_to_{c}')]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _send(text, flag, channels=()):
+    """Send one message to every enabled channel (or only to those of ``channels``, which the Notification row must still have
+    on) when the Notification row allows this kind of event. Returns True if a send was attempted."""
     try:
         row = _settings()
         if not (row and getattr(row, flag) and (row.send_to_slack or row.send_to_discord or row.send_to_telegram or row.send_to_lark)):
             return False
         from reNgine import common_func
-        for name in CHANNEL_SENDERS:
+        for channel, name in CHANNEL_SENDERS.items():
+            if channels and channel not in channels:
+                continue
             try:
                 getattr(common_func, name)(text)
             except Exception as exc:  # noqa: BLE001 - one channel failing must not stop the others
@@ -120,4 +143,27 @@ def scan_finished(scan, results):
         return _send(text, 'send_scan_status_notif')
     except Exception as exc:  # noqa: BLE001
         logger.warning('scan finished notification failed (%s)', type(exc).__name__)
+        return False
+
+
+def saved_search(search, new, gone, count, reached):
+    """One message for one evaluation of a saved search: the hosts that newly match (``new``, names), the hosts that stopped
+    matching (``gone``), and whether the match ``count`` reached the search's threshold. Names are listed up to SAMPLE, the count
+    says the rest; the link opens the search on the Hosts page. Only what the search asked to hear about is passed in."""
+    try:
+        from urllib.parse import quote
+
+        from django.conf import settings
+        parts = []
+        if new:
+            parts.append(f'{len(new)} new host{"s" if len(new) != 1 else ""}: {_names(new)}')
+        if gone:
+            parts.append(f'{len(gone)} host{"s" if len(gone) != 1 else ""} no longer match{"" if len(gone) != 1 else "es"}: {_names(gone)}')
+        if reached:
+            parts.append(f'{count} matches, which reaches the threshold of {search.threshold}')
+        link = f'https://{settings.DOMAIN_NAME}/cve/{search.project.slug}/hosts/?q={quote(search.query, safe="")}'.replace('_', '%5F')  # Telegram Markdown reads _ as italics
+        text = f'CVEngine saved search {_label(search.name)} in {_label(search.project.name)}: {"; ".join(parts)}. {link}'
+        return _send(text, 'send_interesting_notif', search.channels or ())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('saved search notification failed (%s)', type(exc).__name__)
         return False
