@@ -108,7 +108,7 @@ ROUTES = [
     ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed and AI budget',
      lambda r, c, **k: system_status.system_status(c)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
-    ('GET', r'engines', 'Scan engines', lambda r, c, **k: svc.list_engines(c)),
+    ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
     ('GET', r'cves', 'CVE feed (tier, q filters)', lambda r, c, **k: svc.list_cve_feed(c, r.GET)),
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)/detection', 'The shared detection strategy of one CVE',
      lambda r, c, cve_id, **k: svc.get_cve_detection(c, cve_id)),

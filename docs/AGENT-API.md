@@ -23,7 +23,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 
 | Area | REST | MCP tool |
 | --- | --- | --- |
-| identity | `GET me`, `projects`, `engines` | `whoami`, `list_projects`, `list_engines` |
+| identity | `GET me`, `projects`, `engines` (legacy labels) | `whoami`, `list_projects`, `list_engines` (legacy labels) |
 | instance status | `GET system/status` | `get_system_status` |
 | targets | `GET/POST projects/{slug}/targets`, `GET .../targets/{id}` | `list_targets`, `add_target` |
 | bulk add | `POST projects/{slug}/targets/bulk`, `POST targets/bulk-org` | `add_targets`, `add_targets_by_org` |

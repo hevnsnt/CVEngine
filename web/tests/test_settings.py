@@ -33,7 +33,7 @@ class SettingsApiTests(TestCase):
 
 	def test_superuser_only(self):
 		other = client_for(self.admin)  # org admin is still not a superuser
-		for method, path in (('GET', 'ai'), ('PUT', 'ai'), ('GET', 'keys'), ('GET', 'engines'), ('PUT', 'proxy')):
+		for method, path in (('GET', 'ai'), ('PUT', 'ai'), ('GET', 'keys'), ('GET', 'scan_policy'), ('PUT', 'proxy')):
 			self.assertEqual(send(other, method, path, {} if method == 'PUT' else None)[0], 403, path)
 		self.assertEqual(other.get('/cve/settings/').status_code, 403)
 		self.assertEqual(self.c.get('/cve/settings/').status_code, 200)
@@ -51,7 +51,6 @@ class SettingsApiTests(TestCase):
 		self.assertEqual((cfg.api_key, cfg.model), ('sk-ant-secret-123', 'claude-x'))
 		self.assertNotIn('sk-ant-secret-123', json.dumps(send(self.c, 'GET', 'ai')[1]))
 		self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': 'bogus'})[0], 400)
-		self.assertEqual(send(self.c, 'PUT', 'ai', {'auto_fire_engine_id': 99999})[0], 400)
 
 	def test_the_ai_planning_budget_is_a_setting(self):
 		data = send(self.c, 'GET', 'ai')[1]
@@ -114,28 +113,21 @@ class SettingsApiTests(TestCase):
 		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'not a proxy'})[0], 400)
 		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'file:///etc/passwd'})[0], 400)
 
-	def test_engines_crud_and_safe_delete(self):
-		status, e = send(self.c, 'POST', 'engines', {'name': 'Mine', 'yaml': GOOD_YAML})
-		self.assertEqual(status, 201)
-		self.assertEqual(send(self.c, 'POST', 'engines', {'name': 'bad', 'yaml': 'a: [unclosed'})[0], 400)
-		self.assertEqual(send(self.c, 'POST', 'engines', {'name': 'list', 'yaml': '- a\n- b'})[0], 400)
-		self.assertEqual(send(self.c, 'POST', 'engines', {'name': '', 'yaml': GOOD_YAML})[0], 400)
-		self.assertEqual(send(self.c, 'PUT', f"engines/{e['id']}", {'name': 'Renamed'})[1]['name'], 'Renamed')
-		# an engine with scan history cannot be deleted (the FK cascades)
-		now = timezone.now()
-		project = Project.objects.create(name='P', slug='p-s', insert_date=now)
-		domain = Domain.objects.create(name='s.example', project=project, insert_date=now)
-		ScanHistory.objects.create(domain=domain, scan_type=EngineType.objects.get(id=e['id']), start_scan_date=now)
-		self.assertEqual(send(self.c, 'DELETE', f"engines/{e['id']}")[0], 409)
-		self.assertEqual(ScanHistory.objects.count(), 1)
-		ScanHistory.objects.all().delete()
-		self.assertEqual(send(self.c, 'DELETE', f"engines/{e['id']}")[0], 200)
-		self.assertEqual(send(self.c, 'DELETE', 'engines/999999')[0], 404)
+	def test_the_inherited_engine_editor_is_gone_and_the_ai_settings_no_longer_carry_an_engine(self):
+		# the engine YAML was never read by anything; its create, update and delete endpoints and the auto-fire engine setting are removed
+		for method, path in (('GET', 'engines'), ('POST', 'engines'), ('PUT', 'engines/1'), ('DELETE', 'engines/1')):
+			self.assertEqual(send(self.c, method, path, {} if method in ('POST', 'PUT') else None)[0], 404, f'{method} {path}')
+		self.assertNotIn('auto_fire_engine_id', send(self.c, 'GET', 'ai')[1])
 
-	def test_auto_fire_engine_cannot_be_deleted(self):
-		engine = EngineType.objects.create(engine_name='AF', yaml_configuration=GOOD_YAML)
-		send(self.c, 'PUT', 'ai', {'auto_fire_engine_id': engine.id})
-		self.assertEqual(send(self.c, 'DELETE', f'engines/{engine.id}')[0], 409)
+	def test_scans_are_filed_under_the_recommended_engine_not_whichever_default_comes_first(self):
+		from cveFeed.discovery import RECOMMENDED_ENGINE, pick_engine
+		# the inherited engines are all flagged default; the first of them used to label every scan "Full Scan"
+		full = EngineType.objects.create(engine_name='Full Scan', yaml_configuration=GOOD_YAML, default_engine=True)
+		recommended = EngineType.objects.create(engine_name=RECOMMENDED_ENGINE, yaml_configuration=GOOD_YAML, default_engine=True)
+		self.assertLess(full.id, recommended.id)
+		self.assertEqual(pick_engine().id, recommended.id)
+		recommended.delete()
+		self.assertEqual(pick_engine().id, EngineType.objects.filter(default_engine=True).order_by('id').first().id)  # no recommended one: the lowest id, always
 
 	def test_ip_allowlist_requires_an_entry_and_your_own_ip_before_enabling(self):
 		from reNgine import ip_allowlist as ipa

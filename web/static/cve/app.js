@@ -3760,7 +3760,7 @@ pages.scan = async function scanDetail(mount) {
         durValue.textContent = duration(s.started, s.finished);
       };
       if (live) ticker = setInterval(paintDur, 1000);
-      meta.append(fact("Engine", s.engine)[0], fact("Started", shortDate(s.started))[0], durBox);
+      meta.append(fact("Started", shortDate(s.started))[0], durBox);
       if (s.finished) meta.append(fact("Finished", shortDate(s.finished))[0]);
       // report downloads: a PDF built by the server from this scan's results and the branding in Settings > Reports
       const pop = el("details", "pop");

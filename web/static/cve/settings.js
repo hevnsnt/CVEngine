@@ -1,4 +1,4 @@
-// Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, scan engines, proxy. Superuser only (the API enforces it).
+// Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
 
@@ -987,7 +987,7 @@ const sections = {
     );
   },
 
-  async engines(m) {
+  async scan_policy(m) {
     const policy = await api("GET", "scan_policy");
     const everything = check(
       "Let scans run every Nuclei template that is installed (turn off to run only the read-only ones)",
@@ -1010,81 +1010,13 @@ const sections = {
     );
     policyCard.style.maxWidth = "none";
     m.append(policyCard);
-    const list = el("div", "grid");
-    m.append(list);
-    const draw = async () => {
-      list.textContent = "";
-      const data = await api("GET", "engines");
-      data.results.forEach((e) => {
-        const area = Object.assign(
-          el("textarea", "", null, {
-            rows: "10",
-            spellcheck: "false",
-            "aria-label": `${e.name} configuration`,
-            style:
-              "width:100%;font:13px/1.5 var(--mono);padding:10px 12px;border:0;border-radius:6px;box-shadow:var(--ring)",
-          }),
-          { value: e.yaml },
-        );
-        const name = text(e.name);
-        const row = el("div");
-        row.append(
-          button("Save", async () => {
-            await api("PUT", `engines/${e.id}`, {
-              name: name.value,
-              yaml: area.value,
-            });
-            toast("Engine saved");
-          }),
-          document.createTextNode(" "),
-          button(
-            "Delete",
-            async () => {
-              if (!(await ask("Scans already run with it keep their history.", { title: `Delete engine "${e.name}"?`, ok: "Delete engine" }))) return;
-              await api("DELETE", `engines/${e.id}`);
-              toast("Engine deleted");
-              await draw();
-            },
-            "btn ghost",
-          ),
-        );
-        const c = card(
-          e.name,
-          field("Name", name),
-          field("Configuration (YAML)", area),
-          row,
-        );
-        c.style.maxWidth = "none";
-        list.append(c);
-      });
-      const nName = text("", { placeholder: "e.g. Weekly deep scan" });
-      const nYaml = Object.assign(
-        el("textarea", "", null, {
-          rows: "8",
-          spellcheck: "false",
-          placeholder: "subdomain_discovery:\n  uses_tools: [subfinder]",
-          style:
-            "width:100%;font:13px/1.5 var(--mono);padding:10px 12px;border:0;border-radius:6px;box-shadow:var(--ring)",
-        }),
-        { value: "" },
-      );
-      const add = card(
-        "New engine",
-        field("Name", nName),
-        field("Configuration (YAML)", nYaml),
-        button("Create", async () => {
-          await api("POST", "engines", {
-            name: nName.value,
-            yaml: nYaml.value,
-          });
-          toast("Engine created");
-          await draw();
-        }),
-      );
-      add.style.maxWidth = "none";
-      list.append(add);
-    };
-    await draw();
+    m.append(
+      el(
+        "p",
+        "note",
+        "Every scan runs the same fixed pipeline (discovery, nmap, the read-only checks, correlation, triage). There are no per-scan engines to edit: earlier versions listed editable engine configurations inherited from reNgine, but nothing ever read them, so they were removed.",
+      ),
+    );
   },
 
   async ip_allowlist(m) {
@@ -1254,7 +1186,7 @@ const labels = {
   tailscale: "Tailscale",
   openvas: "OpenVAS",
   notifications: "Notifications",
-  engines: "Scan engines",
+  scan_policy: "Scan policy",
   ip_allowlist: "IP allowlist",
   proxy: "Proxy",
   reports: "Reports",
@@ -1287,4 +1219,7 @@ Object.entries(labels).forEach(([name, label]) => {
   b.onclick = () => open(name);
   tabs.append(b);
 });
-open(sections[location.hash.slice(1)] ? location.hash.slice(1) : "ai");
+// an old link to #engines (the tab this replaced) opens the scan policy
+const legacyTabs = { engines: "scan_policy" };
+const hashTab = legacyTabs[location.hash.slice(1)] || location.hash.slice(1);
+open(sections[hashTab] ? hashTab : "ai");

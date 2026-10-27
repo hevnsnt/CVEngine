@@ -8,15 +8,13 @@ never what it is, and an empty value on update keeps the stored one.
 import json
 import re
 
-import yaml
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
 from cveFeed import openvas_admin, tailscale_admin
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
-from scanEngine.models import EngineType, Notification, Proxy, VulnerabilityReportSetting
+from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
-MAX_YAML_BYTES = 100_000
 
 
 class SettingsError(Exception):
@@ -104,7 +102,7 @@ def ai_get(request):
     return {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
             'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
             'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
-            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire, 'auto_fire_engine_id': cfg.auto_fire_engine_id,
+            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
             'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
             'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
             'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
@@ -137,14 +135,6 @@ def ai_put(request):
         cfg.enabled = bool(data['enabled'])
     if 'auto_fire' in data:
         cfg.auto_fire = bool(data['auto_fire'])
-    if 'auto_fire_engine_id' in data:
-        engine = data['auto_fire_engine_id']
-        if engine in (None, ''):
-            cfg.auto_fire_engine_id = None
-        elif EngineType.objects.filter(id=engine).exists():
-            cfg.auto_fire_engine_id = int(engine)
-        else:
-            raise SettingsError(400, 'unknown scan engine')
     if 'auto_fire_max_scans' in data:
         try:
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
@@ -404,65 +394,6 @@ def report_put(request):
     return report_get(request)
 
 
-# --- scan engines ------------------------------------------------------------------
-
-def _engine(e):
-    return {'id': e.id, 'name': e.engine_name, 'default': bool(e.default_engine), 'yaml': e.yaml_configuration}
-
-
-def engines_list(request):
-    return {'results': [_engine(e) for e in EngineType.objects.order_by('engine_name')]}
-
-
-def _valid_engine_yaml(text):
-    if not text or len(text.encode()) > MAX_YAML_BYTES:
-        raise SettingsError(400, 'engine YAML is empty or too large')
-    try:
-        doc = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise SettingsError(400, f'invalid YAML: {str(exc)[:200]}')
-    if not isinstance(doc, dict):
-        raise SettingsError(400, 'engine YAML must be a mapping of tasks to settings')
-
-
-def engines_create(request):
-    data = _body(request)
-    name = _text(data, 'name', max_len=200)
-    if not name:
-        raise SettingsError(400, 'name is required')
-    text = data.get('yaml') or ''
-    _valid_engine_yaml(text)
-    return _engine(EngineType.objects.create(engine_name=name, yaml_configuration=text, default_engine=False)), 201
-
-
-def engines_update(request, engine_id):
-    engine = EngineType.objects.filter(id=engine_id).first()
-    if not engine:
-        raise SettingsError(404, 'engine not found')
-    data = _body(request)
-    if 'name' in data:
-        engine.engine_name = _text(data, 'name', engine.engine_name, max_len=200) or engine.engine_name
-    if 'yaml' in data:
-        _valid_engine_yaml(data['yaml'])
-        engine.yaml_configuration = data['yaml']
-    engine.save()
-    return _engine(engine)
-
-
-def engines_delete(request, engine_id):
-    from startScan.models import ScanHistory
-    engine = EngineType.objects.filter(id=engine_id).first()
-    if not engine:
-        raise SettingsError(404, 'engine not found')
-    # ScanHistory.scan_type cascades, so deleting a used engine would delete scan history
-    if ScanHistory._base_manager.filter(scan_type=engine).exists():
-        raise SettingsError(409, 'this engine has scans; deleting it would delete their history')
-    if AIProviderSettings.objects.filter(auto_fire_engine_id=engine.id).exists():
-        raise SettingsError(409, 'this engine is used by auto-fire')
-    engine.delete()
-    return {'deleted': True}
-
-
 # --- ip allowlist ---------------------------------------------------------------
 
 def _client_ip(request):
@@ -691,9 +622,6 @@ ROUTES = [
     ('PUT', r'notifications', lambda r, **k: notifications_put(r)),
     ('GET', r'proxy', lambda r, **k: proxy_get(r)), ('PUT', r'proxy', lambda r, **k: proxy_put(r)),
     ('GET', r'reports', lambda r, **k: report_get(r)), ('PUT', r'reports', lambda r, **k: report_put(r)),
-    ('GET', r'engines', lambda r, **k: engines_list(r)), ('POST', r'engines', lambda r, **k: engines_create(r)),
-    ('PUT', r'engines/(?P<engine_id>\d+)', lambda r, engine_id, **k: engines_update(r, int(engine_id))),
-    ('DELETE', r'engines/(?P<engine_id>\d+)', lambda r, engine_id, **k: engines_delete(r, int(engine_id))),
     ('GET', r'tailscale', lambda r, **k: tailscale_admin.tailscale_get(r)),
     ('PUT', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_put(r, project_id)),
     ('DELETE', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_delete(r, project_id)),

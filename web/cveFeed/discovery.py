@@ -38,9 +38,17 @@ def discovery_timeout():
 QUEUED, RUNNING, FAILED, SUCCESS, ABORTED = -1, 1, 0, 2, 3
 
 
+RECOMMENDED_ENGINE = 'CVEngine Recommended'
+
+
 def pick_engine():
+    """The ScanHistory.scan_type row a new scan is filed under. It is only a label: every scan runs the fixed pipeline below, and nothing
+    reads an engine's YAML (the editable engines were inherited from reNgine and never did anything). All the inherited engines are flagged
+    default, so "the first default" used to file every scan under "Full Scan", one-second host retests included; the recommended one is
+    taken by name and the order of the rest is fixed."""
     from scanEngine.models import EngineType
-    return EngineType.objects.filter(default_engine=True).first() or EngineType.objects.order_by('id').first()
+    return (EngineType.objects.filter(engine_name=RECOMMENDED_ENGINE).order_by('id').first()
+            or EngineType.objects.filter(default_engine=True).order_by('id').first() or EngineType.objects.order_by('id').first())
 
 
 FALLBACK = {'deep': ['deep', 'standard', 'passive'], 'standard': ['standard', 'passive']}  # modes tried when memory runs out
