@@ -6,6 +6,7 @@ import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
 import { collectAll, exportButton, stamp } from "/staticfiles/cve/csv.js";
 import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
+import { fold, glance } from "/staticfiles/cve/finding-glance.js";
 import { fmtDateTime, fmtDay, fmtTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { isNewSince, newTag, newToggle, sinceLastVisit } from "/staticfiles/cve/seen.js";
 import {
@@ -1067,6 +1068,9 @@ const guidanceBox = (det, cveId) => {
 
 function renderFinding(d, cfg, row) {
   const out = [];
+  let jobFold = null;
+  let advisoryFold = null;
+  let requestFold = null;
   const project = projectOf(row); // the finding's own project: its host, history and screenshots live there
   const head = el("div", "host-head");
   head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
@@ -1094,7 +1098,8 @@ function renderFinding(d, cfg, row) {
 
   if (d.automatic_validation) {
     const job = d.automatic_validation;
-    const status = detailSection(job.source === "manual" ? "Manual validation" : "Automatic validation");
+    jobFold = fold(job.source === "manual" ? "Manual validation" : "Automatic validation", `Job #${job.id}, ${job.status}${job.finished ? `, finished ${shortDate(job.finished)}` : ""}`);
+    const status = jobFold.body;
     status.append(kvBox([
       { label: "Queue priority", value: job.priority === 0 ? "Fire" : job.priority === 3 ? "Manual" : "Smoke" },
       { label: "Job", value: `#${job.id} · ${job.status}` },
@@ -1106,7 +1111,6 @@ function renderFinding(d, cfg, row) {
       ...(job.reason ? [{ label: "Why skipped", value: job.reason.replaceAll("_", " ") }] : []),
     ]));
     if (job.error) status.append(el("p", "note", job.error));
-    out.push(status);
   }
 
   if (d.assessment_status === "closed_not_applicable") {
@@ -1117,7 +1121,8 @@ function renderFinding(d, cfg, row) {
   }
 
   if (d.kind === "match" && d.cve) {
-    const advisory = detailSection("About this CVE");
+    advisoryFold = fold(`About ${d.cve_id || "this CVE"}`, "What the advisory says, the products it names and its links");
+    const advisory = advisoryFold.body;
     advisory.append(el("p", d.cve.description ? "" : "note", d.cve.description || "No description is available in the CVE feed yet."));
     if (d.cve.summary && d.cve.summary !== d.cve.description) {
       advisory.append(el("h3", "sec", "Feed summary"), el("p", "", d.cve.summary));
@@ -1156,27 +1161,22 @@ function renderFinding(d, cfg, row) {
         advisory.append(line);
       });
     }
-    out.push(advisory);
   }
 
-  const why = detailSection("Why this matters");
   const noAssessment = {
-    not_triaged: "No AI provider is configured, so there is no written assessment. The evidence below stands on its own.",
+    not_triaged: "No AI provider is configured, so there is no written assessment. The evidence stands on its own.",
     pending: "Waiting for AI triage.",
     untracked: "Waiting for AI triage.",
     error: "The last triage attempt failed. It is retried automatically.",
   };
-  why.append(el("p", d.why_it_matters ? "" : "note", d.why_it_matters || noAssessment[d.ai.status] || "The model gave no assessment."));
-  out.push(why);
+  const excerpts = Object.entries(d.how_found.excerpts || {}).filter(([, v]) => v);
+  if (excerpts.length) {
+    requestFold = fold("Request and response", "The exact exchange the scanner matched (excerpts)");
+    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(k === "request" ? "Request (excerpt)" : "Response (excerpt)", v)));
+  }
 
-  const how = detailSection("How it was found");
-  how.append(kvBox(d.how_found.steps));
-  Object.entries(d.how_found.excerpts || {}).forEach(([k, v]) => {
-    if (v) how.append(excerpt(k === "request" ? "Request (excerpt)" : "Response (excerpt)", v));
-  });
-  out.push(how);
-
-  const seen = detailSection("Seen");
+  const seenFold = fold("Seen and history", `First seen ${shortDate(d.first_seen)}, last seen ${shortDate(d.last_seen)}${d.history.length ? `, ${d.history.length} change${d.history.length === 1 ? "" : "s"} on this host` : ""}`);
+  const seen = seenFold.body;
   seen.append(kvBox([
     { label: "First seen", value: shortDate(d.first_seen) },
     { label: "Last seen", value: shortDate(d.last_seen) },
@@ -1187,31 +1187,21 @@ function renderFinding(d, cfg, row) {
     line.append(badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)), changeCell(c, project), el("span", "note", shortDate(c.detected)));
     seen.append(line);
   });
-  out.push(seen);
 
-  const ai = detailSection("AI classification");
-  const top = el("div", "find");
-  top.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
-  if (d.ai.reason) top.append(el("span", "", d.ai.reason));
-  ai.append(top);
-  if (d.ai.overridden) {
-    const said = el("div", "find");
-    said.append(el("span", "note", "The model said:"), aiBadge({ classification: d.ai.model_classification }), el("span", "", d.ai.model_reason));
-    ai.append(said);
-    ai.append(el("p", "note", "Deterministic evidence rules determine whether a candidate can be cleared or confirmed."));
-  }
+  // The verdict, the model's own words, the severity view and the reason are in the AI card at the top; what is left is the detail behind them.
+  const aiFold = fold("AI details", `${d.ai.model ? `Assessed by ${d.ai.model}${d.ai.triaged ? ` on ${shortDate(d.ai.triaged)}` : ""}` : "How the AI reached its view"}`);
+  const ai = aiFold.body;
+  if (d.ai.overridden) ai.append(el("p", "note", "Deterministic evidence rules determine whether a candidate can be cleared or confirmed."));
   if (d.ai.hard_evidence.length) {
     ai.append(el("h3", "sec", "Hard evidence"));
     d.ai.hard_evidence.forEach((t) => ai.append(el("div", "find", t)));
   }
   if (d.ai.invalid_output) ai.append(el("p", "note", "The model's reply could not be used, so this is marked as needing validation."));
-  if (d.severity_ai) ai.append(el("p", "note", `Scanner severity ${d.severity}; AI view ${d.severity_ai}${d.ai.severity_reason ? `: ${d.ai.severity_reason}` : ""}`));
   if (d.ai.advice.length && d.kind !== "match") {
     ai.append(el("h3", "sec", "Checks suggested by the model"));
     d.ai.advice.forEach((a) => ai.append(el("div", "find", `${a.kind}: ${a.note}`)));
     ai.append(el("p", "note", "These suggestions have not been executed unless a matching check appears below."));
   }
-  if (d.ai.model) ai.append(el("p", "note", `Assessed by ${d.ai.model}${d.ai.triaged ? ` on ${shortDate(d.ai.triaged)}` : ""}`));
   if (d.ai.diagnostic) {
     const data = JSON.stringify(d.ai.diagnostic, null, 2);
     ai.append(excerpt("Safe diagnostic to share with support", data));
@@ -1219,9 +1209,10 @@ function renderFinding(d, cfg, row) {
     copy.onclick = () => navigator.clipboard.writeText(data);
     ai.append(copy);
   }
-  out.push(ai);
+  const aiHasDetail = ai.children.length > 0;
 
-  const fix = detailSection("Remediation");
+  const fix = el("section", "gl-card gl-todo");
+  fix.append(el("h3", "gl-h", "What to do"));
   if (d.remediation.text) fix.append(el("p", "", d.remediation.text));
   if (d.remediation.scanner) fix.append(el("p", "", d.remediation.scanner));
   if ((d.remediation.fixed_in || []).length) fix.append(el("p", "note", `Fixed in: ${d.remediation.fixed_in.join(", ")}`));
@@ -1238,9 +1229,6 @@ function renderFinding(d, cfg, row) {
       fix.append(ro, openInProject(row, cfg.kind === "match" ? "matches" : "vulns", `#${row.id}`));
     }
   }
-  out.push(fix);
-
-  const check = detailSection("Confirm it yourself");
   if (d.kind === "match" && d.assessment_status !== "closed_not_applicable") {
     const controls = el("div", "tools");
     const run = el("button", "btn sm", "Validate now", { type: "button" });
@@ -1279,8 +1267,12 @@ function renderFinding(d, cfg, row) {
       run.disabled = false;
     };
     controls.append(run, state);
-    check.append(controls);
+    fix.append(controls);
   }
+
+
+  const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}How to verify it by hand, and every check that ran`);
+  const check = checkFold.body;
   const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, d.cve_id || (d.title || "").split(" ")[0]) : null;
   if (guide) check.append(guide);
   const v = d.validation;
@@ -1312,7 +1304,11 @@ function renderFinding(d, cfg, row) {
     ? "The check did not reproduce the finding; the hard evidence listed above still needs to be reconciled."
     : "This check did not reproduce the finding. It does not prove the host is unaffected."));
   if (v.status === "observed") check.append(el("p", "note", "These checks observed host metadata only. They did not validate or rule out this CVE on this host."));
-  out.push(check);
+  out.push(
+    ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[d.ai.status] }),
+    fix,
+    ...[checkFold, advisoryFold, seenFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
+  );
   return out;
 }
 

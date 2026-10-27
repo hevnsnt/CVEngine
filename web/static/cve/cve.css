@@ -1304,6 +1304,7 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 @keyframes update-pulse{50%{transform:scale(.6);opacity:.5}}
 @media (max-width:760px){.update-live .ul-steps{order:5;flex:1 0 100%;overflow-x:auto}}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}.update-live .ul-dot{animation:none}}
+.update-veil{position:fixed;inset:0;width:100%;height:100%;border:0;z-index:1000;background:var(--bg,#f4f4f5)}
 html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointer-events:none;transition:opacity .3s}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
 .proj-wrap:has(.org-switch){gap:4px}.proj-wrap:has(.org-switch) .select+.select,.proj-wrap:has(.org-switch) .select+.proj-label+.select{margin-top:2px}
@@ -1503,3 +1504,54 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .supplier-kv dd{margin:0;overflow-wrap:anywhere}
 .supplier-finding{border-top:1px solid var(--line);padding:8px 0}
 .supplier-finding .card-head{justify-content:flex-start}
+
+/* A finding's detail: three cards that answer "what was found, how sure, what did the AI say", then folds for the rest */
+.gl-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));margin-top:14px}
+.gl-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.gl-h{margin:0;font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.gl-big{font-size:20px;font-weight:700;line-height:1.2;overflow-wrap:anywhere}
+.gl-big.mono{font-family:var(--mono);font-size:16px}
+.gl-sub{color:var(--muted);font-size:12.5px}
+.gl-facts{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;margin:4px 0 0;font-size:12.5px}
+.gl-facts dt{color:var(--muted);font-family:var(--mono)}
+.gl-facts dd{margin:0;overflow-wrap:anywhere}
+.gl-pct{font-size:34px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.gl-pct.high{color:var(--fire-ink)}.gl-pct.mid{color:var(--smoke-ink)}.gl-pct.low{color:var(--ice-ink)}
+.meter{height:6px;border-radius:3px;background:var(--sunk);overflow:hidden}
+.meter i{display:block;height:100%;border-radius:3px;background:var(--ice)}
+.meter i.mid{background:var(--smoke)}.meter i.high{background:var(--fire)}
+.sigs{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:7px}
+.sig{display:grid;grid-template-columns:18px 1fr;gap:8px;align-items:start;font-size:12.5px;line-height:1.35}
+.sig-mark{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:10px;font-weight:700;background:var(--sunk);color:var(--muted)}
+.sig-for .sig-mark{background:var(--fire-bg);color:var(--fire-ink)}
+.sig-against .sig-mark{background:var(--ok-bg);color:var(--ok-ink)}
+.sig-text b{font-weight:700}
+.gl-verdict{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.gl-verdict .badge{font-size:12px;padding:7px 9px}
+.gl-override,.gl-reason{margin:0;font-size:13px;line-height:1.45}
+.gl-override .badge{margin:0 2px}
+.gl-ai{grid-column:1/-1}
+.gl-ai-cols{display:grid;gap:14px 24px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));align-items:start}
+.gl-ai-left,.gl-ai-right{display:flex;flex-direction:column;gap:8px;min-width:0}
+.gl-rule{margin:0;font-size:12.5px;color:var(--ink-2);line-height:1.4}
+.gl-clamp{display:flex;flex-direction:column;align-items:flex-start}
+.gl-sev{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.gl-arrow{color:var(--muted)}
+.gl-h2{margin:6px 0 0;font:700 12px/1.2 var(--font)}
+.gl-ai-right .gl-h2:first-child{margin-top:0}
+.clamp{margin:0;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.clamp.open{display:block;-webkit-line-clamp:unset}
+.linkish{background:none;border:0;padding:4px 0;color:var(--ink-2);text-decoration:underline;font:600 12px var(--font);cursor:pointer}
+.gl-foot{margin:auto 0 0;padding-top:4px;font:11px var(--mono);color:var(--faint)}
+.gl-threats{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.gl-todo{margin-top:12px}
+.gl-todo p{margin:0}
+.fold{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);margin-top:10px}
+.fold>summary{list-style:none;cursor:pointer;display:flex;gap:4px 12px;align-items:baseline;padding:12px 14px;flex-wrap:wrap}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:"\25B8";color:var(--muted);transition:transform .15s}
+.fold[open]>summary::before{transform:rotate(90deg)}
+.fold>summary b{font-size:14px}
+.fold-sub{color:var(--muted);font-size:12.5px}
+.fold-body{padding:2px 14px 14px;border-top:1px solid var(--line)}
+@media (prefers-reduced-motion:reduce){.fold>summary::before{transition:none}}

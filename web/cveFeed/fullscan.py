@@ -12,6 +12,10 @@ A failed or timed-out sweep records its attempt in ``full_scan_started_at`` but 
 sweeps keep failing backs off (``full_scan_retry_at``: 6 hours after the first failure, doubling, at most 7 days) and goes
 behind the clean never-swept IPs, so a few dead addresses cannot hold the one sweep slot. Waiting too long for memory or a
 pause is not the address's failure and does not count.
+
+Before picking a target, each firing also defers entirely, instance-wide, while any project (not bounty-blocked) still has a
+host missing core first-pass coverage (see ``cveFeed.coverage_topup.backlog_exists``): a full 65,535-port sweep of one address
+is never worth more than a first pass over every host. The next firing checks again.
 """
 import functools
 import logging
@@ -336,10 +340,19 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
 # ----------------------------------------------------------------------------- the task body
 
 def run(runner=None, fingerprint_runner=None, pipeline=None):
-    """One firing of the background sweep: up to CVENGINE_FULLSCAN_BATCH IPs, one at a time, under one Redis claim."""
+    """One firing of the background sweep: up to CVENGINE_FULLSCAN_BATCH IPs, one at a time, under one Redis claim.
+
+    Skips the whole firing, instance-wide, while any project (not bounty-blocked) still has a host missing core
+    first-pass coverage (see cveFeed.coverage_topup.backlog_exists): every host gets a first look before any one
+    address gets a full 65,535-port sweep. The next firing checks again.
+    """
+    from cveFeed import coverage_topup
     from reNgine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_FULLSCAN is off'}
+    if coverage_topup.backlog_exists():
+        coverage_topup.log_deferral('Full-port scan')
+        return {'skipped': 'coverage backlog: first-pass hosts are still outstanding'}
     swept = []
     with resources.redis_claim(CLAIM_KEY, f'fullscan-{os.getpid()}', CLAIM_TTL) as held:
         if held is not True:

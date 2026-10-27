@@ -50,8 +50,11 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     selector = HostState.objects.filter(pk=row.pk, retired_at=row.retired_at,
                                         archived_at__isnull=True, pinned=False)
     if status in ('rediscovered_dns', 'rediscovered_ip'):
+        # A fresh assessment follows below; the separate never-resolved streak (cveFeed.unresolved_archive) starts
+        # over with it too, so a single new attempt cannot immediately re-trip that path from a stale, pre-rediscovery streak.
         selector.update(inactive_first_absent_at=None, inactive_last_absent_at=None,
-                        inactive_absent_checks=0, archive_checked_at=now, archive_check_status=status)
+                        inactive_absent_checks=0, archive_checked_at=now, archive_check_status=status,
+                        unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
         sub = Subdomain.objects.filter(target_domain=domain, name=host).order_by('-id').first()
         if sub is None:
             sub = Subdomain.objects.create(target_domain=domain, name=host)

@@ -35,6 +35,22 @@ def review_inactive_hosts(run_id=None):
     return run_page(run_id)
 
 
+@app.task(name='review_unresolved_hosts', bind=False, queue='cve_feed_queue')
+def review_unresolved_hosts(run_id=None):
+    """Daily, checkpointed archival of hosts that have never once resolved to a scannable IP (see
+    cveFeed.unresolved_archive), a shorter and separate timeline from review_inactive_hosts' 30-day case."""
+    from cveFeed.unresolved_archive import run_page
+    return run_page(run_id)
+
+
+@app.task(name='top_up_host_assessments', bind=False, queue='discovery_queue')
+def top_up_host_assessments():
+    """Every few minutes: enqueue due host assessments directly (no model call), draining a coverage backlog far
+    faster than the three-hour AI review's one-due-host-per-project-per-window pace (see cveFeed.coverage_topup)."""
+    from cveFeed.coverage_topup import top_up
+    return top_up()
+
+
 @app.task(name='wpscan_thorough', bind=False, queue='wpscan_queue')
 def wpscan_thorough(project_id):
     """The thorough WPScan pass (plugins and themes in mixed mode, hours per site) for one project: see ``wpscan_scan.run_thorough``. It has a
