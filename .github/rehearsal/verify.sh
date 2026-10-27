@@ -37,6 +37,25 @@ assert dups == 0, f'{dups} addresses are still stored more than once'
 print('DATA OK')
 PY
 
+# The old containers ran on the new schema for a while: nothing the update added may make the old code's inserts fail
+if [ -f "$HOME/schema-before.txt" ]; then
+  "$GITHUB_WORKSPACE/.github/rehearsal/schema.sh" check "$HOME/schema-before.txt" || bad "the update added a column the old code cannot insert around"
+fi
+# The application works on the new schema: the MCP endpoint and its token lookup, tools that read the changed tables, the main pages
+dc exec -T web python3 manage.py shell < "$GITHUB_WORKSPACE/.github/rehearsal/smoke.py" || bad "the functional smoke test failed (see the lines above)"
+if [ "$(cat "$HOME/base.sha")" != "$(cat "$HOME/candidate.sha")" ]; then
+  dc exec -T web python3 manage.py shell <<'PY' || bad "the stored closure wording was not rewritten"
+from cveFeed.models import CVEMatch, TriageVerdict
+old = CVEMatch.objects.filter(ai_reason__contains='invalid product correlation').count() + TriageVerdict.objects.filter(reason__contains='invalid product correlation').count()
+new = CVEMatch.objects.filter(ai_reason__contains='different product').count()
+assert old == 0, f'{old} rows still carry the first wording'
+if CVEMatch.objects.exists():
+    assert new > 0 or CVEMatch.objects.filter(ai_reason__contains='Closed automatically').count() == 0, 'no row carries the reworded closure'
+print('WORDING OK', new)
+PY
+fi
+dc exec -T celery celery -A reNgine.tasks inspect active_queues -t 20 2>/dev/null | grep -q wpscan_queue || bad "no worker consumes wpscan_queue"
+
 if [ "$(mode)" = overlay ]; then
   ports=$(docker ps --filter "label=com.docker.compose.service=proxy" --format '{{.Ports}}')
   echo "proxy ports: $ports"

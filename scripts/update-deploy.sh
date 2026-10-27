@@ -27,7 +27,11 @@ deploy_current() {
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
-  verify_running "${services[@]}"
+  verify_running "${services[@]}" || return 1
+  # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
+  # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema
+  phase applying verifying
+  verify_serving
 }
 
 # `up -d` can leave a service created but not started (a published port that is already taken, for one): that is a failed update, not a done one.
@@ -42,4 +46,29 @@ verify_running() {
   done
   log "after the restart these services are not running:$missing (see docker compose ps and docker compose logs)"
   return 1
+}
+
+# "Running" is what Docker says about a container that may be restarting over and over, and an update that only checked that reported "done"
+# for a web service that never came up, or one whose database lacked what its code needs. After the restart the web service must ANSWER (any
+# status under 500: the redirect to the login page counts, and so does a 400 for a host name it does not allow) and no migration may be
+# waiting. The web entrypoint migrates when it starts, so a migration still waiting here means something else went wrong: it is applied
+# once, and if it still cannot be the update fails visibly instead of reporting success on an install that returns errors.
+verify_serving() {
+  local compose=("${COMPOSE[@]}") attempt served=0
+  for attempt in $(seq 1 "${CVENGINE_VERIFY_WEB_TRIES:-90}"); do
+    if "${compose[@]}" exec -T web python3 -c "import http.client, sys; c = http.client.HTTPConnection('127.0.0.1', 8000, timeout=5); c.request('GET', '/', headers={'Host': 'localhost'}); sys.exit(0 if c.getresponse().status < 500 else 1)" >/dev/null 2>&1; then served=1; break; fi
+    sleep "${CVENGINE_VERIFY_POLL:-2}"
+  done
+  if [ "$served" != 1 ]; then
+    log "after the restart the web service does not answer (see docker compose logs web)"
+    return 1
+  fi
+  if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
+    log "the web service answers but the database has migrations waiting; applying them"
+    "${compose[@]}" exec -T web python3 manage.py migrate --noinput || return 1
+    if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
+      log "migrations are still waiting after migrate; the update is not complete"
+      return 1
+    fi
+  fi
 }
