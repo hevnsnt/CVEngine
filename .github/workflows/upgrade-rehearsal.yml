@@ -122,7 +122,14 @@ jobs:
           git -C "$second" rev-parse HEAD > "$HOME/candidate.sha"
           cp "$HOME/candidate.sha" web/.update-approved
           printf 'master\n' > web/.update-branch
-          scripts/apply-update.sh
+          # exit 3 is "waiting: scans are running, approval kept": the host watcher calls it again a minute later, so this does too
+          for attempt in $(seq 1 60); do
+            status=0
+            scripts/apply-update.sh || status=$?
+            [ "$status" = 3 ] || break
+            sleep 30
+          done
+          [ "$status" = 0 ] || { echo "::error::the second update ended with status $status"; exit 1; }
           [ ! -e web/.update-approved ] || { echo "::error::the second update did not clear its approval"; exit 1; }
           "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
       - name: Approving the same commit again does nothing
