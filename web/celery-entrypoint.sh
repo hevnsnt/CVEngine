@@ -106,6 +106,10 @@ generate_worker_command() {
     fi
 }
 
+# An update kills the workers holding messages they took and never started; Redis hands those back only after the visibility timeout
+# (12 hours). Nothing of this stack consumes yet, so what is still unacknowledged is orphaned: return it to its queues now.
+python3 manage.py requeue_unacked || echo "Could not return the unacknowledged broker messages (they are returned after the visibility timeout)"
+
 echo "Starting Celery Workers..."
 
 # Three gevent workers instead of one process per queue: every worker process loads all of Django (150-250 MB), so

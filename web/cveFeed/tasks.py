@@ -1415,6 +1415,11 @@ def reap_stuck_jobs():
     if counts:
         activity.log('validate', 'Expired stuck jobs a restarted worker left behind: '
                      + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='failed', **counts)
+    again = reaper.redispatch_queued_assessments()
+    if again:
+        activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',
+                     status='done', requeued=again)
+        counts['HostAssessment:requeued'] = again
     return counts
 
 

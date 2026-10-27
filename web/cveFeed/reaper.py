@@ -37,6 +37,41 @@ def _hours(name, default):
         return default
 
 
+REDISPATCH_AFTER_MINUTES = 30  # a queued assessment nobody started in this long is asked for again
+REDISPATCH_EVERY_HOURS = 2  # and no more often than this, so a long but healthy queue does not fill with copies
+
+
+def redispatch_queued_assessments(now=None):
+    """Queue the host assessments still waiting after ``REDISPATCH_AFTER_MINUTES`` once more. A queued row whose worker message was lost
+    (a broker or worker restart that returned nothing, see cveFeed.broker_recovery) would otherwise count toward the capacity limit until
+    the reaper expires it hours later. A second message is harmless: ``host_assessment.execute`` moves a row from queued to running once,
+    and a message for a row that already moved does nothing. Returns how many were queued again."""
+    from django.db.models import Q
+
+    from cveFeed import ledger
+    from cveFeed.models import HostAssessment
+    from cveFeed.scan_control import pause_requested
+    from cveFeed.tasks import assess_host
+    from reNgine import resources
+    if pause_requested():  # waiting on purpose
+        return 0
+    now = now or timezone.now()
+    client = getattr(resources.get_store(), 'r', None)
+    queued = 0
+    for job in HostAssessment._base_manager.filter(Q(status='queued'), created_at__lt=now - timedelta(minutes=REDISPATCH_AFTER_MINUTES)
+                                                    ).order_by('id')[:50]:
+        key = f'cvengine:assess:redispatch:{job.pk}'
+        try:
+            if client is None or not client.set(key, ledger._owner(), nx=True, ex=REDISPATCH_EVERY_HOURS * 3600):
+                continue
+        except Exception:  # noqa: BLE001 - no Redis, no way to rate-limit: leave it to the reaper
+            continue
+        task = assess_host.apply_async(args=[job.pk], queue='discovery_queue')
+        HostAssessment._base_manager.filter(pk=job.pk, status='queued').update(celery_id=task.id)
+        queued += 1
+    return queued
+
+
 def reap(now=None):
     """Expire the stuck jobs. Returns {'<Model>:<state>': n} for the ones expired."""
     from django.apps import apps

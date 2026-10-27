@@ -99,3 +99,52 @@ class ReaperTests(TestCase):
 		self.assertIn('1 HostAssessment running', AgentActivity.objects.order_by('-id').first().message)
 		self.assertEqual(PeriodicTask.objects.get(name='cvengine-reap-stuck-jobs').interval.every, 15)
 		self.assertIn('reap_stuck_jobs', PAUSE_EXEMPT_TASKS)
+
+
+class RedispatchTests(ReaperTests):
+	def setUp(self):
+		super().setUp()
+		from reNgine import resources
+		client = resources.get_store().r
+		self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:assess:redispatch:*')])
+		[client.delete(k) for k in client.scan_iter('cvengine:assess:redispatch:*')]
+
+	def redispatch(self):
+		with mock.patch('cveFeed.tasks.assess_host.apply_async', return_value=mock.Mock(id='again-1')) as send:
+			return reaper.redispatch_queued_assessments(now=NOW), send
+
+	def test_an_assessment_nobody_started_is_queued_again_and_remembers_the_new_message(self):
+		lost = self.assessment('h0.reap.example', 'queued', 1, started=False)
+		count, send = self.redispatch()
+		self.assertEqual(count, 1)
+		send.assert_called_once_with(args=[lost.pk], queue='discovery_queue')
+		lost.refresh_from_db()
+		self.assertEqual((lost.status, lost.celery_id), ('queued', 'again-1'))
+
+	def test_a_young_assessment_a_running_one_and_a_paused_system_are_left_alone(self):
+		self.assessment('h0.reap.example', 'queued', 0.2, started=False)
+		self.assessment('h1.reap.example', 'running', 1)
+		self.assertEqual(self.redispatch()[0], 0)
+		self.assessment('h2.reap.example', 'queued', 1, started=False)
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+		self.assertEqual(self.redispatch()[0], 0)
+
+	def test_the_same_assessment_is_not_queued_again_for_two_hours(self):
+		self.assessment('h0.reap.example', 'queued', 1, started=False)
+		self.assertEqual(self.redispatch()[0], 1)
+		self.assertEqual(self.redispatch()[0], 0)  # a long but healthy queue does not fill with copies
+
+	def test_a_second_message_for_a_started_assessment_does_nothing(self):
+		from cveFeed.host_assessment import execute
+		job = self.assessment('h0.reap.example', 'running', 1)
+		self.assertEqual(execute(job.pk), {'status': 'stopped_or_already_started'})
+
+	def test_the_reaper_task_reports_it_as_done_not_failed(self):
+		from cveFeed.tasks import reap_stuck_jobs
+		self.assessment('h0.reap.example', 'queued', 1, started=False)
+		with mock.patch('cveFeed.tasks.assess_host.apply_async', return_value=mock.Mock(id='again-1')):
+			counts = reap_stuck_jobs()
+		self.assertEqual(counts, {'HostAssessment:requeued': 1})
+		row = AgentActivity.objects.order_by('-id').first()
+		self.assertEqual(row.status, 'done')
+		self.assertIn('Queued 1 host assessment again', row.message)

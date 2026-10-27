@@ -94,7 +94,7 @@ class AdminMatrixTests(TestCase):
 		from django_celery_beat.models import IntervalSchedule, PeriodicTask
 		interval = IntervalSchedule.objects.create(every=5, period='minutes')
 		PeriodicTask.objects.create(name='test-hot-sweep', task='hot_validation_sweep', interval=interval,
-			queue='cve_feed_queue', last_run_at=timezone.now() - timedelta(minutes=7), total_run_count=4)
+			queue='cve_feed_queue', last_run_at=timezone.now() - timedelta(minutes=15), total_run_count=4)
 		inspector = mock.Mock()
 		inspector.active_queues.return_value = {
 			'cve_feed_worker@local': [{'name': 'cve_feed_queue'}],
