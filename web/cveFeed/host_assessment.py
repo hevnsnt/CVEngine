@@ -129,6 +129,8 @@ def execute(job_id, celery_id=None):
     # a stage that failed leaves the assessment incomplete even though the scan (and the inventory it found) stands
     status = (('failed' if result.get('failed_stages') else 'completed') if state == 2 else 'stopped' if state == 'aborted' else
               'inconclusive' if state in ('empty', 'inconclusive') else 'failed')
+    from cveFeed.unresolved_archive import record_attempt
+    record_attempt(job.project, job.domain, job.host, result)
     HostAssessment.objects.filter(pk=job_id, status='running').update(
         status=status, result=result, error=str(result.get('error') or '')[:300], finished_at=timezone.now())
     activity.log('discovery', f'Host assessment #{job.pk} {status} for {job.host}' +
