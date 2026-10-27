@@ -11,7 +11,7 @@ import functools
 import logging
 import re
 import socket
-from cveFeed import pinned_transport
+from cveFeed import legacy_tls, pinned_transport
 import ssl
 from dataclasses import dataclass, field
 
@@ -263,35 +263,25 @@ def evaluate_cert(info, now=None):
     return findings
 
 
-def _legacy_context():
-    """A client that will talk TLS 1.0 / 1.1 only, to find servers that still accept the old protocols."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.minimum_version, ctx.maximum_version = ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1
-    ctx.set_ciphers('ALL:@SECLEVEL=0')
-    return ctx
-
-
 def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None, project=None):
     """Connect without verification (so broken certs can still be read), return a plain info dict or None."""
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
-    if legacy:
-        try:
-            ctx = _legacy_context()
-        except (ValueError, ssl.SSLError):
+    if legacy:  # a modern client cannot read servers that only speak TLS 1.0 / 1.1: legacy_tls is the one module that speaks those
+        got = legacy_tls.handshake(host, port, timeout, addresses=addresses, project=project)
+        if got is None:
             return None
+        der, protocol, cipher = got
     else:
         ctx = ssl.create_default_context()
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: the legacy check below is the only place old protocols are spoken
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: legacy_tls is the only place old protocols are spoken
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-            der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
-    except (OSError, ssl.SSLError, socket.timeout, ValueError):
-        return None
+        try:
+            with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+                der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
+        except (OSError, ssl.SSLError, socket.timeout, ValueError):
+            return None
     cert = x509.load_der_x509_certificate(der)
     try:
         sans = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
@@ -326,12 +316,7 @@ def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
 
 def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
-    try:
-        ctx = _legacy_context()
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-            return tls.version() in ('TLSv1', 'TLSv1.1')
-    except (OSError, ssl.SSLError, ValueError):
-        return False
+    return legacy_tls.accepts(host, port, timeout, addresses=addresses, project=project)
 
 
 CERT_TEXT_LIMITS = {'subject': 500, 'issuer': 500, 'signature_algorithm': 100, 'key_description': 100, 'protocol': 20, 'cipher': 100,
