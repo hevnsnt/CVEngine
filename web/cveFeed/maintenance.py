@@ -1,4 +1,5 @@
-"""Weekly log maintenance: archive the old rows of the log tables to a tar.gz, then delete them, and drop finished agent tasks.
+"""Weekly log maintenance: archive the old rows of the log tables to a tar.gz, then delete them, and drop finished agent tasks and
+expired PDF reports.
 
 The AI activity feed (AgentActivity), the AI call leases (TriageCall) and the AI usage ledger (AIUsage) grow with every scan and
 every model call, and nothing else removes them. Once a week the rows older than each table's retention are written, one JSON
@@ -111,5 +112,6 @@ def run(now=None):
         path = ''
     deleted = {name: _delete(qs) for name, qs in plan.items()}
     from agentapi import agent_broker
+    from cveFeed import report_export
     return {'archive': path, 'archived': archived, 'deleted': deleted, 'archives_removed': prune_archives(directory, now),
-            'agent_tasks_deleted': agent_broker.prune_tasks(now)}
+            'agent_tasks_deleted': agent_broker.prune_tasks(now), 'reports_removed': report_export.prune_expired(now)}

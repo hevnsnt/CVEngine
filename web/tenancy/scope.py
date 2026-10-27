@@ -48,6 +48,7 @@ SCOPES = {
     'cveFeed.HostInventory': 'project_id',
     'cveFeed.HostInventoryReport': 'inventory__project_id',
     'cveFeed.Triage': 'project_id',
+    'cveFeed.ReportExport': 'project_id',
     'cveFeed.BountyEngagement': 'project_id',
     'cveFeed.BountyReport': 'project_id',
     'cveFeed.BountyEngagementTarget': 'engagement__project_id',

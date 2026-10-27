@@ -113,6 +113,18 @@ To fill the CVE store faster on a fresh install or after a factory reset: `docke
 | `CVENGINE_ASSESSMENT_QUEUED_HOURS`, `_ASSESSMENT_RUNNING_HOURS`, `_VALIDATION_QUEUED_HOURS`, `_VALIDATION_RUNNING_HOURS` | `12`, `6`, `6`, `2` | After this long a host assessment or validation job (on-demand or automatic) still queued or running is marked failed, checked every 15 minutes. Queued jobs wait while scanning is paused. |
 | `CVENGINE_ACTIVITY_RUNNING_HOURS` | `11` | After this long an AI activity row still "running" (a killed worker left it) is closed. |
 
+## PDF reports
+
+A PDF report of a project or a host ([Front end](FRONTEND.md#pdf-reports), [API](AGENT-API.md#pdf-reports)) is built by one worker task and kept for a day.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_REPORT_MAX_HOSTS`, `_MAX_FINDINGS`, `_MAX_HYGIENE` | `500`, `1000`, `500` | Most hosts in the table, detailed findings (CVE matches and scanner findings, hottest first) and hygiene findings one report prints. The counts in the summary always cover everything, and the report says what was left out. Held under ceilings of 5,000 each. |
+| `CVENGINE_REPORT_TTL_HOURS` | `24` | Hours a finished report can be downloaded before it is deleted (1 to 168). Expired files are also removed by the weekly maintenance. |
+| `CVENGINE_REPORT_ACTIVE_PER_USER`, `_PER_HOUR`, `_ACTIVE_TOTAL` | `3`, `20`, `8` | Reports one user may have queued or running, one user may ask for in an hour, and queued or running across the installation. Over a limit the API answers `429`. |
+| `CVENGINE_REPORT_RENDER_SECONDS` | `900` | Longest the PDF renderer may run (at least 30). A report that takes longer fails with a message to report one host instead. |
+| `CVENGINE_REPORT_DIR` | `/usr/src/scan_results/.reports` | Where the PDFs are written, a dot-folder of the scan results volume that no media path can name. The web and worker containers must share it. |
+
 ## Updates
 
 | Variable | Default | Purpose |

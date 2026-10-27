@@ -1557,6 +1557,14 @@ def weekly_maintenance():
     return result
 
 
+@app.task(name='generate_report', bind=True, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
+def generate_report(self, export_id):
+    """Make one queued PDF report (cveFeed.report_export): read for the project as the user who asked, rendered in a child process,
+    written under the report directory with a random name. The broker carries only the row id."""
+    from cveFeed import report_export
+    return report_export.execute(export_id, celery_id=self.request.id)
+
+
 @app.task(name="rescore_all_hosts", bind=False, queue="cve_feed_queue")
 def rescore_all_hosts():
     """Daily: recompute every host's score (the latest finished scan's hosts and the certificate watch's), per project, 500 at a
