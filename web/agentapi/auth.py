@@ -9,6 +9,10 @@ from django.utils import timezone
 
 TOKEN_PREFIX = 'cve_'
 AGENT_PATHS = ('/api/v1/', '/mcp/')
+# A Sentinel's very first call: it has no bearer token yet, only the one-time enrollment secret a project admin gave it
+# (agentapi.sentinel_broker.generate_enrollment), which the route itself checks. No other /api/v1/ or /mcp/ path is ever
+# reachable without a bearer token or a signed-in session.
+SENTINEL_BOOTSTRAP_PATH = '/api/v1/sentinels/bootstrap'
 MFA_REQUIRED_MESSAGE = ('your organization requires multi-factor authentication: set up MFA '
                         'in the web app (My account, /cve/account/) before using the API')
 LAST_USED_RESOLUTION = timedelta(minutes=1)
@@ -77,6 +81,9 @@ class AgentTokenMiddleware:
 
     def __call__(self, request):
         if not request.path.startswith(AGENT_PATHS):
+            return self.get_response(request)
+        if request.method == 'POST' and request.path.rstrip('/') == SENTINEL_BOOTSTRAP_PATH:
+            request._dont_enforce_csrf_checks = True  # no session cookie is involved; the route authenticates the enrollment secret itself
             return self.get_response(request)
         raw = bearer_from(request)
         if raw:

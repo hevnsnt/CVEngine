@@ -509,6 +509,10 @@ def agents_page(request):
     return render(request, 'cveFeed/agents.html', {'host': request.get_host(), **ui_context(request, 'agents')})
 
 
+def sentinels_page(request):
+    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), **ui_context(request, 'sentinels')})
+
+
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def onboarding(request):
     return render(request, 'cveFeed/onboarding.html', ui_context(request, 'setup'))

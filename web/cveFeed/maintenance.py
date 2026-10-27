@@ -112,6 +112,8 @@ def run(now=None):
         path = ''
     deleted = {name: _delete(qs) for name, qs in plan.items()}
     from agentapi import agent_broker
+    from agentapi import sentinel_broker
     from cveFeed import report_export
     return {'archive': path, 'archived': archived, 'deleted': deleted, 'archives_removed': prune_archives(directory, now),
-            'agent_tasks_deleted': agent_broker.prune_tasks(now), 'reports_removed': report_export.prune_expired(now)}
+            'agent_tasks_deleted': agent_broker.prune_tasks(now), 'sentinel_tasks_deleted': sentinel_broker.prune_tasks(now),
+            'reports_removed': report_export.prune_expired(now)}
