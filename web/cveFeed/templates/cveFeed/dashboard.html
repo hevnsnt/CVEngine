@@ -54,6 +54,10 @@
   <a id="n-hygiene" class="wide" title="Open hygiene issues of low severity or worse: TLS, certificates, SPF, DKIM, DMARC, CAA" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-hygiene_open">-</b><span>Hygiene issues</span><ul class="hy-top" id="hy-top" aria-label="Biggest hygiene issues"></ul></a>
   <a id="n-coverage" title="Share of hosts that have been through a scan. Hosts never scanned have no findings because nothing looked, not because they are clean." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?heat=unscanned"{% endif %}><b id="s-coverage">-</b><span>Scan coverage</span><small id="s-coverage_note"></small></a>
   <a id="n-queue" hidden title="Scans are waiting but none is running. Look at the Scans page." {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_queued">-</b><span>Queued, none running</span></a>
+<<<<<<< HEAD
+=======
+  <a id="n-oldest" hidden title="How long the longest-open serious item has been waiting: a CVE match with CVSS 7.0 or more, or a high or critical scanner or hygiene finding. Fixed, accepted-risk, ruled-out and resolved items are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}"{% endif %}><b id="s-oldest_open_days">-</b><span>Oldest critical or high, days open</span><small id="s-oldest_note"></small></a>
+>>>>>>> 7c54450a (Counter strip: oldest-open tooltip states what counts)
   <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span><small id="s-certs_total_note"></small></a>
 </nav>
 

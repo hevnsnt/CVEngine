@@ -1453,3 +1453,8 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (max-width:719px){.strip a:last-child{grid-column:span 2}}
 .strip a[hidden]{display:none}
 .strip a#n-queue b{color:var(--smoke-ink)}
+/* the counter strip wraps and every row fills its width: optional tiles (queue, oldest open) never leave a grey hole */
+.strip{display:flex;flex-wrap:wrap}
+.strip a{flex:1 1 170px}
+.strip a.wide{flex:2 1 300px}
+@media (max-width:719px){.strip a{flex-basis:140px}.strip a.wide{flex-basis:100%}}
