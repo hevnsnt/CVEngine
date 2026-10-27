@@ -675,12 +675,19 @@ class HostState(models.Model):
     inactive_first_absent_at = models.DateTimeField(null=True, blank=True)
     inactive_last_absent_at = models.DateTimeField(null=True, blank=True)
     inactive_absent_checks = models.PositiveSmallIntegerField(default=0)
+    # A different streak from inactive_first_absent_at/retired_at: this host is still enumerated every run (it never
+    # vanished), but every attempt since unresolved_first_at failed to resolve to a scannable IP (see
+    # cveFeed.unresolved_archive). One successful resolution resets all three fields to their defaults.
+    unresolved_first_at = models.DateTimeField(null=True, blank=True)
+    unresolved_last_at = models.DateTimeField(null=True, blank=True)
+    unresolved_checks = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hoststate_project_host")]
         indexes = [models.Index(fields=["domain", "retired_at"], name="hoststate_domain_retired_idx"),
                    models.Index(fields=["project", "zombie_since"], name="hoststate_proj_zombie_idx"),
-                   models.Index(fields=['archived_at', 'retired_at', 'id'], name='hoststate_inactive_idx')]
+                   models.Index(fields=['archived_at', 'retired_at', 'id'], name='hoststate_inactive_idx'),
+                   models.Index(fields=['archived_at', 'unresolved_first_at', 'id'], name='hoststate_unresolved_idx')]
 
     def __str__(self):
         return self.host
@@ -778,6 +785,23 @@ class InactiveArchiveReview(models.Model):
     checked = models.PositiveIntegerField(default=0)
     archived = models.PositiveIntegerField(default=0)
     reactivated = models.PositiveIntegerField(default=0)
+    deferred = models.PositiveIntegerField(default=0)
+    errors = models.PositiveIntegerField(default=0)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+
+class UnresolvedArchiveReview(models.Model):
+    """One daily, checkpointed pass over hosts stuck without a scannable IP (see cveFeed.unresolved_archive): a
+    shorter, separate timeline from InactiveArchiveReview's 30-day vanished-from-enumeration case."""
+
+    day = models.DateField(unique=True)
+    status = models.CharField(max_length=16, default='queued')
+    cursor_hoststate_id = models.PositiveBigIntegerField(default=0)
+    total = models.PositiveIntegerField(default=0)
+    checked = models.PositiveIntegerField(default=0)
+    archived = models.PositiveIntegerField(default=0)
     deferred = models.PositiveIntegerField(default=0)
     errors = models.PositiveIntegerField(default=0)
     lease_until = models.DateTimeField(null=True, blank=True)

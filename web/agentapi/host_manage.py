@@ -143,8 +143,12 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
         if state.archived_at:
             state.archived_at, state.archive_reason, state.archived_by_user = None, '', False
             state.inactive_first_absent_at, state.inactive_last_absent_at, state.inactive_absent_checks = None, None, 0
+            # A host archived for never resolving to a scannable IP (cveFeed.unresolved_archive) must not be
+            # immediately re-eligible on the very next daily sweep; a manual restore clears that streak too.
+            state.unresolved_first_at, state.unresolved_last_at, state.unresolved_checks = None, None, 0
             state.save(update_fields=['archived_at', 'archive_reason', 'archived_by_user', 'inactive_first_absent_at',
-                                      'inactive_last_absent_at', 'inactive_absent_checks'])
+                                      'inactive_last_absent_at', 'inactive_absent_checks', 'unresolved_first_at',
+                                      'unresolved_last_at', 'unresolved_checks'])
     elif action == 'pin':
         if not isinstance(pinned, bool):
             raise ApiError(400, 'pinned must be true or false')

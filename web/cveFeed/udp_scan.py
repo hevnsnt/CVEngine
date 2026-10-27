@@ -6,7 +6,9 @@ with ``nmap -sU -sV`` at a low rate, one IP at a time, each IP at most once a we
 celery-beat firing as the TCP sweep (``background_full_scan`` calls ``kick``) but runs on a queue of its own (``udp_queue``) under its
 own heavy job (``nmap-udp-bg``), and has its own switch (``CVENGINE_UDPSCAN``, on by default). Like the other slow sweeps it stops
 while scanning is paused, scans no address an organization excluded or that is not scannable, and skips a project whose bug bounty
-engagement has not confirmed automated testing.
+engagement has not confirmed automated testing. Like the TCP full-port sweep, it also defers its whole firing, instance-wide,
+while any project still has a host missing core first-pass coverage (see cveFeed.coverage_topup.backlog_exists): a deep UDP
+sweep of one address is never worth more than a first pass over every host.
 
 What a UDP answer means. UDP has no handshake: a port that replies is ``open``; one that sends an ICMP port-unreachable is ``closed``;
 silence is ``open|filtered`` (open but quiet, or dropped by a firewall), which nmap cannot tell apart. ``-sV`` sends its service
@@ -537,11 +539,19 @@ def scan_ip(ip, runner=None, pipeline=None):
 
 def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
     """One firing: IPs one at a time until the time budget is spent, under one Redis claim, never while scanning is paused. Does
-    nothing, and says why, when the sweep is off or this worker cannot do raw-socket scans."""
-    from cveFeed import activity, ledger
+    nothing, and says why, when the sweep is off or this worker cannot do raw-socket scans.
+
+    Also skips the whole firing, instance-wide, while any project (not bounty-blocked) still has a host missing
+    core first-pass coverage (see cveFeed.coverage_topup.backlog_exists): every host gets a first look before any
+    one address gets a UDP exposure sweep. The next firing checks again.
+    """
+    from cveFeed import activity, coverage_topup, ledger
     from reNgine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_UDPSCAN is off'}
+    if coverage_topup.backlog_exists():
+        coverage_topup.log_deferral('UDP scan')
+        return {'skipped': 'coverage backlog: first-pass hosts are still outstanding'}
     if runner is None:  # a real run needs the binary and raw sockets; an injected runner stands in for both
         ok, reason = (raw_check or raw_sockets_available)()
         if ok and shutil.which('nmap') is None:
