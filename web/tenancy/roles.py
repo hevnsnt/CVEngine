@@ -34,7 +34,7 @@ ADMIN_ONLY = re.compile(r'^/(?!)')
 # set through /cve/api/admin/users/<id>/bug-bounty, which only an App Admin may call and which is written to the audit log).
 BUGBOUNTY = re.compile(r'^/cve/(api/)?bounty(/|$)|hackerone|bountyhub|vulnerability/report|toggle-bug-bounty', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
-ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$))')
+ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$)|cve/how-it-works(/|$))')
 
 
 def best_role(roles):

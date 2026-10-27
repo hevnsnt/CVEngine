@@ -92,10 +92,7 @@
   </div>
   <ul class="feed" id="feed" aria-live="polite" tabindex="0" aria-label="CVE feed"></ul>
   <p class="empty" id="feed-empty">Waiting for CVEs. They arrive as cve.now publishes them.</p>
-  <details class="how">
-    <summary>How the engine works</summary>
-    <p>New <b>fire</b> and <b>smoke</b> CVEs are matched against your inventory, confirmed by the AI, checked with a nuclei template (written on the spot if none exists), and validated.</p>
-  </details>
+  <a class="how-link" href="{% url 'cve_how' %}">How the engine works <span aria-hidden="true">→</span></a>
 </section>
 {% endblock %}
 {% block scripts %}
