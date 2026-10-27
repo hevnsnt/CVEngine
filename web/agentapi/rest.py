@@ -11,6 +11,7 @@ from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import services as svc
 from agentapi import system_status
+from agentapi import authcheck
 from agentapi import tailscale
 from agentapi import auth
 from agentapi.auth import create_token
@@ -243,6 +244,12 @@ ROUTES = [
      lambda r, c, slug, **k: svc.set_runzero(c, slug, _body(r))),
     ('POST', r'projects/(?P<slug>[-\w]+)/runzero/sync', 'Queue a runZero sync of this project now',
      lambda r, c, slug, **k: (svc.run_runzero_sync(c, slug), 202)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/auth-credentials', 'Stored sign-ins (headers and cookie the scanners send) of the project, masked: names only, never a value (App Admin or organization admin; target_id=)',
+     lambda r, c, slug, **k: authcheck.list_credentials(c, slug, r.GET)),
+    ('PUT', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/auth-credential', 'Create or replace the stored sign-in of a target or of one host of it: {label, host?, headers: [{name, secret}], cookie_secret?, origins?, expires_at?}; values are write-only (App Admin or organization admin)',
+     lambda r, c, slug, target_id, **k: authcheck.set_credential(c, slug, target_id, _body(r))),
+    ('DELETE', r'projects/(?P<slug>[-\w]+)/auth-credentials/(?P<credential_id>\d+)', 'Remove a stored sign-in (App Admin or organization admin)',
+     lambda r, c, slug, credential_id, **k: authcheck.delete_credential(c, slug, credential_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/tailscale', 'The project\'s Tailscale connection: tailnet, device counts, last sync, errors, settings (administrators only; never the credentials)',
      lambda r, c, slug, **k: tailscale.tailscale_status(c, slug)),
     ('GET', r'projects/(?P<slug>[-\w]+)/tailscale/devices', 'Tailnet devices imported into the project with their Tailscale facts (state=active|offline|departed|all, q=; administrators only)',

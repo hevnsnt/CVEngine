@@ -15,6 +15,7 @@ from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import services as svc
 from agentapi import system_status
+from agentapi import authcheck
 from agentapi import tailscale
 from agentapi.services import ApiError, Ctx
 
@@ -183,6 +184,12 @@ TOOLS = [
     ('remove_exclusion', 'Lift an exclusion so the organization can scan the host again (organization admin only).', _schema(
         {'project': SLUG, 'host': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.remove_exclusion(c, a.get('project'), a['host']), True),
+    ('list_auth_credentials', "The stored sign-ins (request headers and a cookie the scanners send, so Nuclei and the web route check see the signed-in application) of a project, masked: label, target, scope (host or target), host, origins, header and cookie NAMES, expiry and days left, state; never a value. Read only: a credential is set on the Targets page or over REST, never through a tool, because a secret must not pass through the model's context. App Admin or organization admin only. target_id narrows to one target.",
+     _schema({'project': SLUG, 'target_id': {'type': 'integer'}}, ['project']),
+     lambda c, a: authcheck.list_credentials(c, a.get('project'), a), False),
+    ('delete_auth_credential', 'Revoke (delete) a stored sign-in so the scanners stop sending it (see list_auth_credentials for the id). App Admin or organization admin only.',
+     _schema({'project': SLUG, 'credential_id': {'type': 'integer'}}, ['project', 'credential_id']),
+     lambda c, a: authcheck.delete_credential(c, a.get('project'), a.get('credential_id')), True),
     ('tailscale_status', "The project's Tailscale connection: tailnet name, devices imported/online/offline/departed, last sync and its errors, auto-scan and filters. Project administrators only; never returns credentials.", _schema({'project': SLUG}, ['project']),
      lambda c, a: tailscale.tailscale_status(c, a.get('project')), False),
     ('list_tailscale_devices', 'Tailnet devices imported into the project with what Tailscale reported: MagicDNS name, addresses, OS, client version, update flag, tags, user, key expiry, last seen, routes. state: active (default), offline, departed or all. Project administrators only.',

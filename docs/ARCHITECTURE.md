@@ -30,6 +30,7 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.993, and Go 1.2
 | `CVEDetection` | One shared detection strategy and validation profile per CVE, the same for every organization |
 | `RouteAuth`, `HygieneFinding`, `TlsCertificate` | Web route auth states, email and domain findings, and certificates |
 | `Vulnerability` | Scanner findings: nuclei, the exposure checks, nmap (RDP without NLA, anonymous FTP), WPScan, and node2shell |
+| `AuthCredential` | Encrypted request headers and a cookie an owner stored for a target, for authenticated checks ([PIPELINE.md](PIPELINE.md#authenticated-checks)) |
 | `RdpScreenshot`, `HostArchive` | RDP login-screen captures, and archived-URL evidence of what a host once ran |
 | `CVEEntry`, `CVEMatch` | The CVE store, and which CVEs apply to which hosts |
 | `Triage`, `TriageVerdict` | One triage per finding, and the AI answer shared by findings with the same evidence |
