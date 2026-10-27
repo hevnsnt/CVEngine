@@ -65,8 +65,11 @@ def _need_user(actor, user_id, credentials=False):
 
 def _revoke_tokens(user):
     """A password or MFA reset must also cut off bearer tokens, which otherwise keep working."""
+    from agentapi import agent_broker
     from dashboard.models import ApiToken
-    ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
+    ids = list(ApiToken.objects.filter(user=user, revoked=False).values_list('pk', flat=True))
+    ApiToken.objects.filter(pk__in=ids).update(revoked=True)
+    agent_broker.release_for_tokens(ids)  # the agents' leases go back to the queue now, not when they run out
 
 
 def _profile(user):
