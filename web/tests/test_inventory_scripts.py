@@ -331,6 +331,7 @@ class RoundTripTests(SimpleTestCase):
 			'-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-days', '2'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 		cls.server = HTTPServer(('127.0.0.1', 0), RecordingHandler)
 		context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+		context.minimum_version = ssl.TLSVersion.TLSv1_2
 		context.load_cert_chain(str(cls.certs / 'ca.pem'), str(cls.certs / 'key.pem'))
 		cls.server.socket = context.wrap_socket(cls.server.socket, server_side=True)
 		cls.server.seen, cls.server.answers = [], [(201, '{"accepted": true}')]
