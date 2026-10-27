@@ -177,7 +177,8 @@ async function pollStats() {
     paintHygiene(s.hygiene_open);
     const stuck = $("n-queue");
     if (stuck) {
-      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0);
+      // the activity feed also shows scans that run under a finished scan record (weekly deep Nuclei, host rescans): those are work, so not stuck
+      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0 && running.size === 0);
       setNum("s-scans_queued", s.scans_queued);
     }
     paintCoverage();
