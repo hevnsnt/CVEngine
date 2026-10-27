@@ -1451,3 +1451,5 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (min-width:1200px){.strip{grid-template-columns:repeat(5,minmax(0,1fr))}}
 @media (min-width:720px) and (max-width:1199px){.strip{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media (max-width:719px){.strip a:last-child{grid-column:span 2}}
+.strip a[hidden]{display:none}
+.strip a#n-queue b{color:var(--smoke-ink)}

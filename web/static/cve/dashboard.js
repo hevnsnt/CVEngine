@@ -96,6 +96,23 @@ const hyName = (check) => {
   const rest = area ? word.slice(area.length).trim() : word;
   return area ? `${HY_PREFIX[area]}${rest ? ` ${rest}` : ""}` : word.charAt(0).toUpperCase() + word.slice(1);
 };
+// Scan coverage: the share of hosts a scan has looked at. The host search already counts every temperature, so one request answers it.
+let coverageAt = 0;
+async function paintCoverage() {
+  if (!$("n-coverage") || Date.now() - coverageAt < 30000) return;
+  coverageAt = Date.now();
+  try {
+    const r = await get(`/api/v1/projects/${encodeURIComponent(slug || "_all")}/search?q=&page_size=1`);
+    const heat = (r.facets && r.facets.heat) || {};
+    const total = Object.values(heat).reduce((n, v) => n + v, 0);
+    const never = heat.unscanned || 0;
+    if (!total) return;
+    $("s-coverage").textContent = `${Math.round((100 * (total - never)) / total)}%`;
+    $("s-coverage_note").textContent = never ? `${never} of ${total} hosts never scanned` : `all ${total} hosts scanned`;
+  } catch (_) {
+    coverageAt = 0;
+  }
+}
 let hygieneSig = null;
 async function paintHygiene(open) {
   const box = $("hy-top");
@@ -144,6 +161,12 @@ async function pollStats() {
     const certNote = $("s-certs_total_note");
     if (certNote) certNote.textContent = s.certs_total ? `of ${s.certs_total} tracked` : "";
     paintHygiene(s.hygiene_open);
+    const stuck = $("n-queue");
+    if (stuck) {
+      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0);
+      setNum("s-scans_queued", s.scans_queued);
+    }
+    paintCoverage();
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
     $("m-exposed").style.width = `${pct}%`;
     const top = Math.max(s.tiers.fire, s.tiers.smoke, s.tiers.ice, 1);
