@@ -3,6 +3,7 @@ import os
 import ssl
 from datetime import timedelta
 from unittest import mock
+from urllib.parse import urlsplit
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
@@ -62,7 +63,7 @@ class Net:
             return got
         if method == 'HEAD':
             return Response(404)
-        if 'storage.googleapis.com' in url:
+        if urlsplit(url).hostname.endswith('storage.googleapis.com'):
             return xml(404, GCS_MISSING)
         return xml(404, S3_NOSUCH)
 
