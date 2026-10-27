@@ -138,5 +138,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/assets"
           git archive --format=zip    --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.zip"    HEAD
           git archive --format=tar.gz --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.tar.gz" HEAD
-          (cd "$RUNNER_TEMP/assets" && sha256sum cvengine-"$TAG".zip cvengine-"$TAG".tar.gz > SHA256SUMS)
+          # the bill of materials of this tag: every pinned tool, package and image (scripts/generate_sbom.py)
+          python3 scripts/generate_sbom.py --output "$RUNNER_TEMP/assets/cvengine-$TAG.sbom.cdx.json"
+          (cd "$RUNNER_TEMP/assets" && sha256sum cvengine-"$TAG".zip cvengine-"$TAG".tar.gz cvengine-"$TAG".sbom.cdx.json > SHA256SUMS)
           gh release upload "$TAG" "$RUNNER_TEMP"/assets/* --clobber
