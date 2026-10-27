@@ -1184,6 +1184,7 @@ function renderFinding(d, cfg, row) {
     const state = el("span", "note", "Runs this match's safe template checks and requests AI review in the queue.");
     run.onclick = async () => {
       run.disabled = true;
+      run.textContent = "Validating…";
       try {
         const path = `${baseOf(project)}/matches/${d.id}/validate`;
         let job = await api("POST", path, {});
@@ -1210,6 +1211,7 @@ function renderFinding(d, cfg, row) {
       } catch (err) {
         state.textContent = err.message;
       }
+      run.textContent = "Validate now";
       run.disabled = false;
     };
     controls.append(run, state);
@@ -1933,13 +1935,20 @@ const pages = {
             });
             discover.onclick = async () => {
               discover.disabled = true;
+              discover.textContent = "Queueing…";
               try {
                 const r = await post(`targets/${t.id}/discover`, {});
                 toast(`Discovery #${r.scan_id} started`);
+                discover.textContent = "Discovery queued";
+                setTimeout(() => {
+                  discover.textContent = "Discover";
+                  discover.disabled = false;
+                }, 8000);
               } catch (err) {
                 toast(err.message, true);
+                discover.textContent = "Discover";
+                discover.disabled = false;
               }
-              discover.disabled = false;
             };
             const scan = el("button", "btn ghost sm", "Scan", {
               type: "button",
@@ -1948,13 +1957,20 @@ const pages = {
               "Run discovery, fingerprinting and nuclei on this target (anything already covered is reused)";
             scan.onclick = async () => {
               scan.disabled = true;
+              scan.textContent = "Queueing…";
               try {
                 const r = await post("scans", { target_id: t.id });
                 toast(`Scan #${r.scan_id} started`);
+                scan.textContent = "Scan queued";
+                setTimeout(() => {
+                  scan.textContent = "Scan";
+                  scan.disabled = false;
+                }, 8000);
               } catch (err) {
                 toast(err.message, true);
+                scan.textContent = "Scan";
+                scan.disabled = false;
               }
-              scan.disabled = false;
             };
             box.append(discover, scan);
             return box;
@@ -3222,16 +3238,23 @@ pages.hygiene = function hygiene(mount) {
   const run = el("button", "btn sm", "Run checks now", { type: "button" });
   run.onclick = async () => {
     run.disabled = true;
+    run.textContent = "Queueing…";
     try {
       const r = await api("POST", `${base}/hygiene/run`, {});
       toast(
         `Checking ${r.queued} target${r.queued === 1 ? "" : "s"}. Results appear in a minute.`,
       );
-      setTimeout(paintTiles, 60000);
+      run.textContent = "Checks queued";
+      setTimeout(() => {
+        run.textContent = "Run checks now";
+        run.disabled = false;
+        paintTiles();
+      }, 60000);
     } catch (err) {
       toast(err.message, true);
+      run.textContent = "Run checks now";
+      run.disabled = false;
     }
-    run.disabled = false;
   };
   if (!ALL) head.append(run); // running the checks is per project
   mount.append(head);
@@ -3848,12 +3871,14 @@ pages.keys = async function apiKeys(mount) {
     now.disabled = rz.state === "running";
     now.onclick = async () => {
       now.disabled = true;
+      now.textContent = "Sync queued";
       try {
         await api("POST", `${runzeroPath(scope)}/sync`, {});
         toast("runZero sync queued");
         setTimeout(draw, 4000);
       } catch (err) {
         toast(err.message, true);
+        now.textContent = "Sync now";
         now.disabled = false;
       }
     };

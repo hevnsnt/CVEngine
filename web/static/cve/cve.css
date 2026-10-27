@@ -1437,3 +1437,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .map[data-size="xl"] .hx .hx-target{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:10.5px;font-weight:500;margin-top:1px}
 .map[data-size="xl"] .hx .hx-name{line-height:1.25}
 .map[data-size="xl"] .hx .hx-name.ip{font-size:10.5px;letter-spacing:-.03em}
+.btn[disabled]:is(.sm,.ghost){background:var(--sunk);color:var(--faint);border-color:var(--line);opacity:1}
