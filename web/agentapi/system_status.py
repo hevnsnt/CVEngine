@@ -11,7 +11,7 @@ the whole answer. Nothing here returns an address, credential, command line or t
 import re
 import shutil
 import time
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
@@ -288,6 +288,40 @@ def _udp_scan(problems):
     return udp_scan.status(problems)
 
 
+SENTINEL_RECENT_ERRORS = 10
+SENTINEL_ERROR_RATE_PROBLEM = 0.5  # failed/expired share of the last day's finished tasks that counts as a problem, once there are enough to judge
+
+
+def _sentinels(problems):
+    """Registered Sentinels (scan-stage agents, ``Agent`` ``kind='scanner'``) and the scan-stage work they have taken off
+    the queue: counts by registration status, how many are live (heartbeating within the agent live window), queue
+    depth, the last day's completed/failed/expired ``SentinelTask``s, and a short sample of the most recent errors, so
+    an admin (or an agent with only MCP access) can see Sentinel health and throughput without a separate query per
+    Sentinel. A high failure/expiry share of the last day's finished work is a problem worth surfacing here."""
+    from agentapi.agent_broker import LIVE_WINDOW
+    from agentapi.models import Agent, SentinelTask
+    from django.db.models import Count
+    now = timezone.now()
+    day_ago = now - timedelta(days=1)
+    agents = Agent.objects.filter(kind='scanner')
+    by_status = {status: 0 for status in Agent.STATUSES}
+    for row in agents.values('status').annotate(n=Count('id')):
+        by_status[row['status']] = row['n']
+    live = agents.filter(last_seen__gte=now - LIVE_WINDOW).count()
+    tasks = SentinelTask.objects
+    queue = {status: tasks.filter(status=status).count() for status in ('queued', 'claimed', 'running')}
+    finished_24h = {status: tasks.filter(status=status, finished_at__gte=day_ago).count() for status in ('done', 'failed', 'expired')}
+    finished_total = sum(finished_24h.values())
+    bad = finished_24h['failed'] + finished_24h['expired']
+    if finished_total >= 5 and bad / finished_total >= SENTINEL_ERROR_RATE_PROBLEM:
+        problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or expired")
+    recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).order_by('-finished_at')
+                         .values('id', 'kind', 'error', 'finished_at', 'agent__name')[:SENTINEL_RECENT_ERRORS])
+    return {'registered': by_status, 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+           'recent_errors': [{'task_id': r['id'], 'kind': r['kind'], 'sentinel': r['agent__name'], 'error': r['error'],
+                              'at': _iso(r['finished_at'])} for r in recent_errors]}
+
+
 def _work():
     """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
     from cveFeed import conductor
@@ -347,6 +381,7 @@ def _system(user, problems, notes):
     out['ai'] = _probe(problems, 'ai', _ai)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
+    out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
     out['tools'] = _probe(problems, 'tools', _tools)
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:

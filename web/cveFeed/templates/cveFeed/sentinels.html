@@ -15,13 +15,13 @@
     </div>
   </div>
   <div class="card">
-    <h2 style="margin-bottom:8px">Enroll a Sentinel</h2>
-    <p class="note" style="margin-bottom:6px">Needs the admin role in the project (or App Admin). The secret is single-use and expires in 30 minutes; the Sentinel trades it for its own token on its first call.</p>
+    <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
+    <p class="note" style="margin-bottom:6px">Needs the admin role in the project (or App Admin). Clicking Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, and packages it into one opaque blob. On the machine that will scan, clone <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code>, and run <code>docker compose up -d</code>; see that repository's <code>README.md</code> (or its <code>AGENTS.md</code> if an AI agent is doing the provisioning).</p>
     <div class="field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
-    <button class="btn" type="button" id="enroll-go">Generate enrollment secret</button>
+    <button class="btn" type="button" id="enroll-go">Provision</button>
     <div id="enroll-out" class="msg ok" style="display:none" role="status"></div>
     <h2 style="margin:18px 0 8px">What a Sentinel needs</h2>
-    <p class="note">It is not a download yet in this release: point a client you run yourself at <code>POST /api/v1/sentinels/bootstrap</code> with the enrollment secret (body <code>{enrollment_token, name}</code>), store the token it returns, then loop <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+    <p class="note">The blob is nothing new: standard base64 of the same JSON <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, project}</code>), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
   </div>
 </div>
 {% endblock %}
@@ -89,15 +89,15 @@
   });
   document.getElementById('enroll-go').addEventListener('click', function () {
     if (!enrollProject.value) return;
-    api('POST', '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll').then(function (x) {
+    api('POST', '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll?format=blob').then(function (x) {
       enrollOut.style.display = 'block';
       if (x.ok) {
         enrollOut.className = 'msg ok secret-box'; enrollOut.textContent = '';
-        enrollOut.appendChild(el('span', '', 'One-time secret for ' + x.d.project + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Copy it now.'));
-        var code = el('pre', 'code', x.d.enrollment_token); code.appendChild(copyBtn(function () { return x.d.enrollment_token; })); enrollOut.appendChild(code);
+        enrollOut.appendChild(el('span', '', 'One-time blob for ' + x.d.project + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Paste this into your Sentinel\'s CVENGINE_SENTINEL_BLOB and run it once; the Sentinel then keeps its own token.'));
+        var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); enrollOut.appendChild(code);
         enrollOut.appendChild(el('div', 'meta', 'server_url: ' + x.d.server_url));
       } else {
-        enrollOut.className = 'msg err'; enrollOut.textContent = x.d.error || 'Could not generate an enrollment secret.';
+        enrollOut.className = 'msg err'; enrollOut.textContent = x.d.error || 'Could not generate an enrollment blob.';
       }
     });
   });

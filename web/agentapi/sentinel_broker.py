@@ -13,6 +13,9 @@ Everything a Sentinel reports is untrusted data, exactly like any other agent: i
 handed to the *same* persistence functions local execution already uses (``agentapi.sentinel_dispatch``), never executed and
 never used to build a command.
 """
+import base64
+import binascii
+import json
 import secrets
 import time
 from datetime import timedelta
@@ -150,6 +153,56 @@ def _server_url():
     domain = os.environ.get('DOMAIN_NAME', 'localhost').strip() or 'localhost'
     scheme = 'http' if domain in ('localhost', '127.0.0.1') else 'https'
     return f'{scheme}://{domain}'
+
+
+# --- provisioning blob: no new crypto, just one copy-pasteable string for generate_enrollment's own payload -------------
+#
+# The blob is standard base64 (RFC 4648, with padding) of compact JSON, nothing more: no custom framing, no new key
+# material, no signing. It exists purely so a person provisioning a Sentinel copies one opaque string into its
+# environment (CVENGINE_SENTINEL_BLOB) instead of typing out separate fields. generate_enrollment's own REST contract is
+# unchanged; see generate_enrollment_blob below, the Sentinels page's "Provision" button (cveFeed/templates/cveFeed/
+# sentinels.html) and ?format=blob on GET/POST projects/{slug}/sentinels/enroll. The Sentinel client
+# (sentinel/client/blob.py) decodes it the exact same way: this function is the documented reference for that format,
+# not a shared import (the client has no Django dependency and ships separately).
+def encode_enrollment_blob(payload):
+    return base64.b64encode(json.dumps(payload, separators=(',', ':')).encode('utf-8')).decode('ascii')
+
+
+def decode_enrollment_blob(raw):
+    """The inverse of ``encode_enrollment_blob``. Raises ``ValueError`` (never anything else) on anything that is not
+    valid base64-encoded JSON, so a caller can turn it into a clean 400 without a stack trace reaching the client."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError('blob must be a non-empty string')
+    try:
+        data = json.loads(base64.b64decode(raw.strip(), validate=True).decode('utf-8'))
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError('not a valid Sentinel provisioning blob') from exc
+    if not isinstance(data, dict):
+        raise ValueError('not a valid Sentinel provisioning blob')
+    return data
+
+
+SENTINEL_CLIENT_REPO = 'https://github.com/hevnsnt/cvengine-sentinel'
+
+
+def generate_enrollment_blob(ctx, slug):
+    """``generate_enrollment``'s own payload, plus the same data packaged as one opaque ``blob`` string (see above), plus a
+    ``setup`` block of ready-to-run steps. Used by ``?format=blob`` on ``GET/POST projects/{slug}/sentinels/enroll``, by
+    the Sentinels page's Provision button, and by the ``generate_sentinel_enrollment`` MCP tool: the ``setup`` block
+    exists so an agent with only Docker and shell access to a target machine, and no other context on Sentinels, can
+    provision one from this response alone, without reading documentation first."""
+    payload = generate_enrollment(ctx, slug)
+    blob = encode_enrollment_blob(payload)
+    setup = {
+        'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
+        'configure': f"cp .env.example .env && printf 'CVENGINE_SENTINEL_BLOB=%s\\n' '{blob}' >> .env",
+        'run': 'docker compose up -d',
+        'verify': 'docker compose logs -f',
+        'note': (f'The blob is single-use and expires at {payload["expires_at"]}; run these four steps once, in order, '
+                 'on the target machine (needs Docker and outbound HTTPS to this server, nothing else). A restarted '
+                 'container reuses its already-issued token from the sentinel-state volume and never needs the blob again.'),
+    }
+    return {**payload, 'blob': blob, 'setup': setup}
 
 
 def consume_enrollment(raw):
@@ -411,7 +464,7 @@ def get_task(ctx, task_id):
 # --- results: typed, clipped, never a command (mirrors agent_broker.clean_result) --------------------------
 
 _STR = {'ip': 60, 'os_guess': 120, 'service_name': 64, 'product': 120, 'version': 80, 'host': 260, 'matched_at': 500,
-        'template_id': 80, 'name': 200, 'description': 500, 'tag': 40}
+        'template_id': 80, 'name': 200, 'description': 500, 'tag': 40, 'matcher_name': 80}
 _SEVERITIES = ('info', 'low', 'medium', 'high', 'critical', 'unknown')
 _PORT_STATES = ('open', 'closed', 'filtered')
 _PROTOCOLS = ('tcp', 'udp')
@@ -478,6 +531,7 @@ def _clean_findings(findings):
                     'severity': item.get('severity') if item.get('severity') in _SEVERITIES else 'unknown',
                     'host': _clip(item.get('host'), 'host'), 'matched_at': _clip(item.get('matched_at'), 'matched_at'),
                     'description': _clip(item.get('description'), 'description'),
+                    'matcher_name': _clip(item.get('matcher_name'), 'matcher_name'),
                     'extracted_results': [_text(v, 300) for v in extracted[:MAX_EXTRACTED] if isinstance(v, str)],
                     'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)]})
     return out
