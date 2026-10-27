@@ -579,7 +579,7 @@ class ProbeObservation(models.Model):
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)  # lowercase
     probe = models.CharField(max_length=48)
-    kind = models.CharField(max_length=16)  # version | identity | edge | wordpress | wp-plugin | wp-theme
+    kind = models.CharField(max_length=16)  # version | identity | edge | wordpress | wp-plugin | wp-theme | vhost | subapp
     product = models.CharField(max_length=120, blank=True, default="")
     version = models.CharField(max_length=100, blank=True, default="")
     variant = models.CharField(max_length=60, blank=True, default="")  # identity: nginx, ingress-nginx, nginx-ui ...
@@ -816,7 +816,9 @@ class AssetChange(models.Model):
 class RouteAuth(models.Model):
     """How one web route answers an anonymous GET: open, a login page, a session requirement (401/403 or a redirect to a
     login), or single sign-on (a redirect to or a page from a known identity provider). Probes are safe GETs with no
-    credentials, no cookies, no redirects followed, and at most ROUTE_SAMPLE_BYTES of each body read."""
+    credentials, no cookies, no redirects followed, and at most ROUTE_SAMPLE_BYTES of each body read. When the owner stored a sign-in
+    for the target, the same GET is also made with it and answered under ``evidence["authenticated"]`` (cveFeed.auth_routes); the
+    state and every other field stay the anonymous answer."""
 
     STATES = ("open", "login", "session_required", "sso", "redirect", "not_found", "error")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
@@ -1611,3 +1613,30 @@ class HostInventoryReport(models.Model):
 
     class Meta:
         ordering = ["-reported_at", "-id"]
+
+
+class AuthCredential(models.Model):
+    """Request headers and a cookie the owner supplied for a target they may test, so Nuclei and the web route check see the signed-in
+    application and not only its login page (see cveFeed.auth_checks). One row per target and host: ``host`` names the one host it is
+    for, or is blank for every host of the target (the target's own name and its subdomains). ``origins`` lists the ``scheme:port`` pairs it
+    may be sent to; nothing else is covered. The header and cookie values are encrypted at rest and never returned by any read: only
+    the header names are shown. Past ``expires_at`` it is not sent."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="auth_credentials")
+    host = models.CharField(max_length=300, blank=True, default="")
+    label = models.CharField(max_length=80)
+    origins = models.JSONField(default=list)  # ["https:443"]: the only scheme and port pairs the values may be sent to
+    secret = EncryptedJSONField(default=dict)  # {"headers": [[name, value], ...], "cookie": "a=b; c=d"}
+    expires_at = models.DateTimeField(null=True, blank=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["domain", "host"], name="uniq_authcredential_domain_host")]
+        indexes = [models.Index(fields=["project"], name="authcred_project_idx")]
+
+    def __str__(self):
+        return f"{self.label} for {self.host or self.domain_id}"

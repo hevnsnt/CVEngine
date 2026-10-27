@@ -151,5 +151,19 @@ RUN apt-get update -y && \
     (wpscan --update --no-banner || echo "WPScan database not fetched at build time; it updates on first use") && \
     rm -rf /var/lib/apt/lists/* /root/.gem/cache
 
+# testssl.sh (GPLv2, run as a separate program) audits the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named
+# TLS vulnerabilities (see cveFeed/testssl_scan.py). Pinned tarball with its checksum, never a branch. It needs dig (--nodns none still checks
+# for it), hexdump and ps; the x86_64 tarball bundles an openssl that still speaks SSLv2/SSLv3 and export ciphers (arm64 uses the system openssl).
+ARG TESTSSL_VERSION=3.2.3
+ARG TESTSSL_SHA256=1c4bb10185a67592164eb870c717b8bdd03f290c8d68f9a8c658335ff5ac8b91
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends bind9-dnsutils bsdextrautils procps && \
+    curl -fsSL -o /tmp/testssl.tar.gz "https://testssl.sh/testssl.sh-${TESTSSL_VERSION}.tar.gz" && \
+    echo "${TESTSSL_SHA256}  /tmp/testssl.tar.gz" | sha256sum -c - && \
+    mkdir -p /opt/testssl && tar -xzf /tmp/testssl.tar.gz -C /opt/testssl --strip-components=1 && \
+    ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl.sh && \
+    rm -f /tmp/testssl.tar.gz && rm -rf /var/lib/apt/lists/* && \
+    testssl.sh --version 2>&1 | grep -q "${TESTSSL_VERSION}"
+
 # Copy source code
 COPY . /usr/src/app/

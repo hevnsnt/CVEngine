@@ -45,7 +45,8 @@ def redispatch_queued_assessments(now=None):
     """Queue the host assessments still waiting after ``REDISPATCH_AFTER_MINUTES`` once more. A queued row whose worker message was lost
     (a broker or worker restart that returned nothing, see cveFeed.broker_recovery) would otherwise count toward the capacity limit until
     the reaper expires it hours later. A second message is harmless: ``host_assessment.execute`` moves a row from queued to running once,
-    and a message for a row that already moved does nothing. Returns how many were queued again."""
+    and a message for a row that already moved does nothing. A row whose task the broker or a worker still holds is left alone when that can
+    be told (``broker_recovery.live_task_ids``). Returns how many were queued again."""
     from django.db.models import Q
 
     from cveFeed import ledger
@@ -55,11 +56,15 @@ def redispatch_queued_assessments(now=None):
     from reNgine import resources
     if pause_requested():  # waiting on purpose
         return 0
+    from cveFeed import broker_recovery
     now = now or timezone.now()
     client = getattr(resources.get_store(), 'r', None)
+    live = broker_recovery.live_task_ids()  # None when it cannot be told: then only the age and the rate limit decide
     queued = 0
     for job in HostAssessment._base_manager.filter(Q(status='queued'), created_at__lt=now - timedelta(minutes=REDISPATCH_AFTER_MINUTES)
                                                     ).order_by('id')[:50]:
+        if live is not None and job.celery_id and job.celery_id in live:  # still in a queue or a worker: it is only waiting its turn
+            continue
         key = f'cvengine:assess:redispatch:{job.pk}'
         try:
             if client is None or not client.set(key, ledger._owner(), nx=True, ex=REDISPATCH_EVERY_HOURS * 3600):

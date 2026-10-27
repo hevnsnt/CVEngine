@@ -19,6 +19,7 @@ import {
 } from "/staticfiles/cve/ui.js";
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
+import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -853,6 +854,56 @@ const probeCard = (h) => {
     if (p.version) line.append(el("span", "chip", p.version));
     line.append(badge(p.outcome === "hidden" ? "version not stated" : p.outcome, p.outcome === "found" ? "success" : "queued"));
     line.append(el("span", "note", `${p.probe}, ${p.source}`));
+    box.append(line);
+  });
+  return box;
+};
+// Other sites served from this host's addresses under another name (cveFeed.vhost_scan): only names already in the project's scope are listed.
+const alsoServedCard = (h) => {
+  const items = h.also_served || [];
+  const from = h.served_from || [];
+  if (!items.length && !from.length) return null;
+  const box = el("div", "tech-table also-served");
+  if (items.length) {
+    box.append(el("h3", "sec", `Also served here (${items.length})`));
+    box.append(el("p", "note", "Another site answers on this host's address under its own name, found by asking the address once for each name the project already knows. A distinct application is a host of its own, and what its page states is matched to CVEs like any other technology."));
+    items.forEach((a) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", a.name), el("span", "chip", a.address));
+      if (a.status) line.append(el("span", "chip", `HTTP ${a.status}`));
+      if (a.title) line.append(el("span", "note", a.title));
+      box.append(line);
+    });
+  }
+  if (from.length) {
+    box.append(el("h3", "sec", "Served from"));
+    from.forEach((a) => {
+      const line = el("div", "find tech-line");
+      line.append(el("span", "", `Answers on ${a.address} next to the sites already there`));
+      if (a.title) line.append(el("span", "note", a.title));
+      box.append(line);
+    });
+  }
+  return box;
+};
+// Applications mounted under a subdirectory (cveFeed.subdir_apps): a confirmed product, with its version when the page states one, and the
+// unconfirmed leads (a path that answered), which are never findings by themselves.
+const subdirectoryCard = (h) => {
+  const items = h.subdirectory_apps || [];
+  if (!items.length) return null;
+  const box = el("div", "tech-table subdirectory-apps");
+  box.append(el("h3", "sec", `Applications under subdirectories (${items.filter((a) => a.outcome !== "challenged").length})`));
+  box.append(el("p", "note", "Found by asking the host once for each well-known application path (and the directories its own pages and robots.txt show). A path that only answered is a lead: it becomes a CVE match only when the application and its version are both read from the response."));
+  items.forEach((a) => {
+    const line = el("div", "find tech-line");
+    if (a.outcome === "challenged") {
+      line.append(el("strong", "", `${a.product} challenged the scanner`), badge("challenged", "smoke"), el("span", "note", a.hint || ""));
+    } else {
+      line.append(el("strong", "", a.product), el("span", "chip", a.path));
+      if (a.version) line.append(el("span", "chip", a.version));
+      line.append(badge(a.confirmed ? (a.version ? "version read" : "version not stated") : "lead", a.confirmed && a.version ? "success" : "queued"));
+      if (a.status) line.append(el("span", "note", `HTTP ${a.status}${a.title ? `, ${a.title}` : ""}`));
+    }
     box.append(line);
   });
   return box;
@@ -1777,6 +1828,7 @@ const pages = {
     tools.append(q);
     mount.append(tools);
     const post = (path, body) => api("POST", `${base}/${path}`, body);
+    const signIns = await loadSignIns(base); // null unless the viewer is an App Admin or the organization's admin
     // selection: individual rows, a whole loaded page, or every target matching the search
     const selected = new Set();
     const boxes = new Map();
@@ -1973,6 +2025,7 @@ const pages = {
               }
             };
             box.append(discover, scan);
+            if (signIns) box.append(signInButton(signIns, t));
             return box;
           },
         },
@@ -2807,9 +2860,11 @@ const pages = {
       }
       const techBox = technologyTable(h);
       if (techBox) OV.side.append(techBox);
-      [wordpressCard(h), probeCard(h)].forEach((card) => {
+      [wordpressCard(h), probeCard(h), alsoServedCard(h)].forEach((card) => {
         if (card) OV.side.append(card);
       });
+      const appsCard = subdirectoryCard(h);
+      if (appsCard) S.web.append(appsCard);
       const history = el("div", "history");
       S.changes.append(history);
       api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "365d", page_size: 200 })}`)

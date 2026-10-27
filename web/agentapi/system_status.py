@@ -16,7 +16,7 @@ from datetime import datetime, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -56,7 +56,7 @@ def _update():
 
 def _projects(ctx):
     from agentapi.services import _allowed_ids
-    from cveFeed import counts, wpscan_scan
+    from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
     from dashboard.models import Project
     from startScan.models import ScanHistory
@@ -76,6 +76,8 @@ def _projects(ctx):
             'cve_matches': snap['cve_matches'],
             # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
             'wordpress': wpscan_scan.status_counts([project.id]),
+            # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
+            'web_discovery': subdir_apps.status_counts([project.id]),
         })
     return rows
 
@@ -202,7 +204,8 @@ def _tool_version(argv):
         return cached[1]
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        lines = [line.strip() for line in ((proc.stdout or '') + (proc.stderr or '')).splitlines() if line.strip()]
+        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # testssl.sh colours its banner
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
         value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
     except (OSError, subprocess.SubprocessError):
@@ -261,7 +264,8 @@ def _tools():
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
+                         'testssl': _tool_version(('testssl.sh', '--version'))}}
 
 
 def _runzero(problems):
@@ -305,7 +309,11 @@ def _system(user, problems, notes):
         out['last_activity'] = health.get('last_activity')
         if health.get('workers_state') != 'responding':
             problems.append(f"workers: {health.get('worker_note')}")
-        if out['schedules']['past_due']:
+        beat = health.get('beat') or {}
+        out['schedules']['beat'] = beat
+        if beat.get('state') == 'silent':
+            problems.append(f"celery beat has not ticked for {beat.get('seconds_since_tick', 0) // 60} minutes; no schedule is being dispatched")
+        elif out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
     out['work'] = _probe(problems, 'work', _work)
     work = out['work']

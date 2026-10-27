@@ -1,8 +1,9 @@
-"""Auth state per web route: how a route answers an anonymous request.
+"""Auth state per web route: how a route answers an anonymous request (and, when the owner stored a sign-in for the target, how it answers
+signed in: see cveFeed.auth_routes).
 
 For each web host a handful of common routes (``/``, ``/login``, ``/admin``, ``/api`` ...) and the paths bbot saw are asked
 once with a plain GET and classified as open, a login page, a session requirement, single sign-on, a redirect or not found.
-The probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
+The anonymous probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
 each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the network
 helper (``probe_url``) is injectable.
 """
@@ -304,8 +305,12 @@ def _read_scripts(result, probe, scan_id):
         evidence['fingerprint_names'] = [f['name'] for f in found]
 
 
-def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False):
-    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
+def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
+              connect_ip=None, auth_scope=None):
+    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI. ``connect_ip`` connects to that vetted address instead
+    of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan).
+    ``auth_scope`` (a cveFeed.auth_checks.AuthScope) adds the stored sign-in of the target, and only when this very destination (host, scheme and
+    port) is one the sign-in was stored for; the request is a single one, redirects are never followed, so the values go nowhere else."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
     from urllib.parse import quote, urlsplit
@@ -325,7 +330,15 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         raise ValueError('only a Host override is allowed for anonymous probes')
     host = parsed.hostname.encode('idna').decode('ascii')
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
-    addresses = pinned_transport.resolve(host, port, project=project)
+    if connect_ip:
+        import ipaddress
+        from targetApp.target_types import is_scannable_ip
+        pinned = ipaddress.ip_address(str(connect_ip))
+        if not is_scannable_ip(str(pinned), project=project):
+            raise ValueError('probe destination is prohibited')
+        addresses = ((socket.AF_INET6, (str(pinned), port, 0, 0)) if pinned.version == 6 else (socket.AF_INET, (str(pinned), port)),)
+    else:
+        addresses = pinned_transport.resolve(host, port, project=project)
     context = None
     if parsed.scheme == 'https':
         context = ssl.create_default_context()
@@ -341,6 +354,8 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
     if browser:
         request_headers.update(BROWSER_HEADERS)
     request_headers.update({key.title(): value for key, value in (headers or {}).items()})
+    if auth_scope is not None:
+        request_headers.update(dict(auth_scope.headers_for(host, parsed.scheme, port)))
     path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
@@ -385,7 +400,9 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
                 'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
                 'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
                 'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
-                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items())}
+                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items()),
+                'raw_headers': {k.lower(): ' '.join(v.split())[:200] for k, v in list(response.headers.items())[:60]
+                                if k.lower() not in ('set-cookie', 'authorization', 'proxy-authorization')}}
     except (OSError, http.client.HTTPException):
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget') from None
@@ -458,6 +475,17 @@ def _plan(scan, retired=None):
 
 
 def run_route_auth(scan_id, probe=probe_url, force=False):
+    """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes),
+    recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
+    from cveFeed import auth_routes
+    out = _run_route_auth(scan_id, probe, force)
+    signed = auth_routes.run_signed_in(scan_id, probe, force)
+    if signed is not None:
+        out['signed_in'] = signed
+    return out
+
+
+def _run_route_auth(scan_id, probe=probe_url, force=False):
     """Check how the scan's web routes answer an anonymous GET and store the result per project route. Routes checked inside
     the TTL (7 days, CVENGINE_TTL_ROUTE_AUTH) are not asked again. Returns
     ``{'routes', 'hosts', 'by_state', 'reused', 'errors'}``. ``force`` (a re-test of changed hosts) ignores the TTL: a version

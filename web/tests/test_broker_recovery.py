@@ -1,9 +1,10 @@
 import uuid
+from unittest import mock
 
 from django.test import TestCase
 from kombu import Queue
 
-from cveFeed.broker_recovery import requeue_unacked
+from cveFeed.broker_recovery import live_task_ids, requeue_unacked
 from reNgine.celery import app
 
 
@@ -48,3 +49,45 @@ class RequeueUnackedTests(TestCase):
 		import os
 		text = open(os.path.join(os.path.dirname(__file__), '..', 'celery-entrypoint.sh')).read()
 		self.assertLess(text.index('manage.py requeue_unacked'), text.index('echo "Starting Celery Workers..."'))
+
+
+class LiveTaskIdsTests(TestCase):
+	"""``live_task_ids`` against the real broker, with the workers' answers faked."""
+
+	def setUp(self):
+		self.queue = f'live_test_{uuid.uuid4().hex[:8]}'
+		self.connection = app.connection_for_write()
+		self.channel = self.connection.default_channel
+		self.client = self.channel.client
+		self.client.delete('unacked', 'unacked_index')
+		self.addCleanup(lambda: (self.client.delete(self.queue, 'unacked', 'unacked_index'), self.connection.release()))
+		queue = Queue(self.queue, routing_key=self.queue)
+		patch = mock.patch.object(app.amqp.queues, 'keys', lambda: [self.queue])
+		patch.start()
+		self.addCleanup(patch.stop)
+		self.queue_obj = queue
+
+	def publish(self, task_id):
+		with self.connection.Producer() as producer:
+			producer.publish({'n': 1}, routing_key=self.queue, declare=[self.queue_obj], serializer='json', headers={'id': task_id})
+
+	def ask(self, reserved=None, active=None, scheduled=None):
+		inspector = mock.Mock(reserved=lambda: reserved, active=lambda: active, scheduled=lambda: scheduled)
+		with mock.patch.object(app.control, 'inspect', return_value=inspector):
+			return live_task_ids()
+
+	def test_ids_in_a_queue_held_unacknowledged_or_inside_a_worker_are_live(self):
+		queued, held = str(uuid.uuid4()), str(uuid.uuid4())
+		reserved, running, later = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+		self.publish(queued)
+		self.publish(held)
+		self.assertTrue(self.channel.basic_get(self.queue, no_ack=False))  # the first one is taken and never acknowledged
+		ids = self.ask(reserved={'w': [{'id': reserved}]}, active={'w': [{'id': running}]}, scheduled={'w': [{'request': {'id': later}}]})
+		self.assertEqual(ids, {queued, held, reserved, running, later})
+
+	def test_nothing_is_concluded_when_no_worker_answers(self):
+		self.publish(str(uuid.uuid4()))
+		self.assertIsNone(self.ask())
+
+	def test_a_task_nobody_holds_is_not_live(self):
+		self.assertEqual(self.ask(reserved={'w': []}), set())

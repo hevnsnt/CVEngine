@@ -43,6 +43,36 @@ def wpscan_thorough(project_id):
     return wpscan_scan.run_thorough(project_id)
 
 
+@app.task(name='testssl_sweep', bind=False, queue='testssl_queue')
+def testssl_sweep():
+    """Daily: the TLS audit (testssl.sh) of the targets that are due, one at a time (see ``cveFeed.testssl_scan``). It has a queue of its own so
+    a minute-per-port test never holds up the feed workers."""
+    from cveFeed import testssl_scan
+    return testssl_scan.sweep_all()
+
+
+@app.task(name='bucket_sweep', bind=False, queue='bucketscan_queue')
+def bucket_sweep():
+    """Daily: the cloud storage exposure check of every project's due buckets, a few requests per second (see ``cveFeed.bucket_scan``). It has a
+    queue of its own so a slow, deliberately paced sweep never holds up the feed workers."""
+    from cveFeed import bucket_scan
+    return bucket_scan.sweep_all()
+
+@app.task(name='vhost_sweep', bind=False, queue='vhost_queue')
+def vhost_sweep():
+    """Hourly: the project's known names asked at its web addresses (other sites on the same address), a few addresses per run: see
+    ``cveFeed.vhost_scan``. It has a queue of its own, shared with the subdirectory sweep, so slow polite work never holds up the feed workers."""
+    from cveFeed import vhost_scan
+    return vhost_scan.sweep_all()
+
+
+@app.task(name='subdir_apps_sweep', bind=False, queue='vhost_queue')
+def subdir_apps_sweep():
+    """Every 30 minutes: a few web hosts asked for the well-known application mount paths (see ``cveFeed.subdir_apps``)."""
+    from cveFeed import subdir_apps
+    return subdir_apps.sweep_all()
+
+
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
 def sync_tailscale():
     """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""

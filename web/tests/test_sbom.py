@@ -32,13 +32,13 @@ class SbomTests(SimpleTestCase):
 	def test_every_scanner_tool_is_listed_with_its_pinned_version(self):
 		dockerfile = sbom.read('web/Dockerfile')
 		for name, argname in (('nmap', 'NMAPVERSION'), ('nuclei', 'NUCLEI_VERSION'), ('naabu', 'NAABU_VERSION'), ('bbot', 'BBOT_VERSION'),
-				('wpscan', 'WPSCAN_VERSION'), ('go', 'GOVERSION'), ('tzdata', 'TZDATA_VERSION')):
+				('wpscan', 'WPSCAN_VERSION'), ('go', 'GOVERSION'), ('tzdata', 'TZDATA_VERSION'), ('testssl.sh', 'TESTSSL_VERSION')):
 			self.assertEqual(self.by_name[name]['version'], sbom.arg(dockerfile, argname), name)
 			self.assertEqual(self.by_name[name]['properties'][0], {'name': 'cvengine:pinned', 'value': 'true'}, name)
 		self.assertEqual(self.by_name['nuclei']['purl'], f"pkg:golang/github.com/projectdiscovery/nuclei/v3@v{self.by_name['nuclei']['version']}")
 
 	def test_downloads_carry_their_checksums(self):
-		for name in ('nmap', 'go'):
+		for name in ('nmap', 'go', 'testssl.sh'):
 			hashes = [h['content'] for h in self.by_name[name]['hashes']]
 			self.assertTrue(hashes and all(re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes), name)
 		self.assertEqual(len(self.by_name['nmap']['hashes']), 2)  # the source tarball and the amd64 RPM

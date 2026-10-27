@@ -118,7 +118,10 @@ echo "Starting Celery Workers..."
 # api_queue tasks live in api.shared_api_tasks, which autodiscovery does not import, so the classic worker includes it.
 classic_queues="send_notif_queue,send_task_notif_queue,send_hackerone_report_queue,geo_localize_queue"
 # wpscan_queue: the thorough WPScan pass (hours per site, one per project at a time) must not hold a feed worker
-classic_queues+=",query_whois_queue,run_command_queue,query_reverse_whois_queue,query_ip_history_queue,llm_queue,api_queue,wpscan_queue"
+# testssl_queue: the daily TLS audit (a minute per port, one sweep at a time) likewise
+# bucketscan_queue: the daily cloud storage sweep (a few requests per second, one sweep at a time) likewise
+# vhost_queue: the slow, polite sweeps for other sites on an address and for applications under subdirectories (one request at a time)
+classic_queues+=",query_whois_queue,run_command_queue,query_reverse_whois_queue,query_ip_history_queue,llm_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue"
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
