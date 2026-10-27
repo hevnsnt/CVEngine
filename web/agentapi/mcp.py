@@ -125,6 +125,10 @@ TOOLS = [
     ('pin_host', 'Pin or unpin one stored host against future automatic archival.',
      _schema({'project': SLUG, 'host': {'type': 'string'}, 'pinned': {'type': 'boolean'}}, ['project', 'host', 'pinned']),
      lambda c, a: hosts.host_archive(c, a.get('project'), a['host'], 'pin', pinned=a['pinned']), True),
+    ('bulk_host_action', 'Archive, restore, pin or unpin up to 200 hosts of a project in one call. Each host is independent: failures are listed, the rest are done.',
+     _schema({'project': SLUG, 'hosts': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 200},
+              'action': {'type': 'string', 'enum': ['archive', 'restore', 'pin', 'unpin']}, 'reason': {'type': 'string'}}, ['project', 'hosts', 'action']),
+     lambda c, a: hosts.host_bulk(c, a.get('project'), a.get('hosts'), a.get('action'), reason=a.get('reason', '')), True),
     ('delete_host', 'Delete one host\'s data (findings, CVE matches, endpoints, state, asset information) from THIS project only. The host can be rediscovered by a later scan. Exact name, irreversible. with_aliases also deletes the other names on the same addresses (the Hosts page shows them as one host).', _schema(
         {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'with_aliases': {'type': 'boolean'}}, ['project', 'host']),
      lambda c, a: hosts.delete_host(c, a.get('project'), a['host'], with_aliases=bool(a.get('with_aliases'))), True),

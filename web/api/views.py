@@ -1583,16 +1583,6 @@ class GetFileContents(APIView):
 			response['content'] = f.read()
 			return Response(response)
 
-		if 'theharvester_config' in req.query_params:
-			path = "/usr/src/github/theHarvester/api-keys.yaml"
-			if not os.path.exists(path):
-				run_command(f'touch {path}')
-				response['message'] = 'File Created!'
-			f = open(path, "r")
-			response['status'] = True
-			response['content'] = f.read()
-			return Response(response)
-
 		if 'gf_pattern' in req.query_params:
 			basedir = '/root/.gf'
 			path = f'/root/.gf/{name}.json'

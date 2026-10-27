@@ -83,6 +83,34 @@ def update_host_profile(ctx, slug, host, owner=None, purpose=None, criticality=N
     return _profile(profile)
 
 
+MAX_BULK_HOSTS = 200
+BULK_ACTIONS = ('archive', 'restore', 'pin', 'unpin')
+
+
+def host_bulk(ctx, slug, hosts, action, reason=''):
+    """Archive, restore, pin or unpin up to MAX_BULK_HOSTS hosts of one project in one call. Each host is independent (a pinned host
+    that cannot be archived, or a name that is not in the project, never blocks the rest); returns {done, failed: [{host, error}]}."""
+    get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
+    if action not in BULK_ACTIONS:
+        raise ApiError(400, f'action must be one of {", ".join(BULK_ACTIONS)}')
+    if not isinstance(hosts, list) or not hosts:
+        raise ApiError(400, 'hosts must be a non-empty list of host names')
+    if len(hosts) > MAX_BULK_HOSTS:
+        raise ApiError(400, f'at most {MAX_BULK_HOSTS} hosts per call')
+    done, failed = [], []
+    for host in dict.fromkeys(h for h in hosts if isinstance(h, str)):  # a repeated name is done once
+        try:
+            if action in ('pin', 'unpin'):
+                host_archive(ctx, slug, host, 'pin', pinned=action == 'pin')
+            else:
+                host_archive(ctx, slug, host, action, reason=reason)
+            done.append(host)
+        except ApiError as e:
+            failed.append({'host': host[:200], 'error': e.message})
+    failed += [{'host': str(h)[:200], 'error': 'host names must be text'} for h in hosts if not isinstance(h, str)]
+    return {'done': len(done), 'hosts': done, 'failed': failed}
+
+
 def host_archive(ctx, slug, host, action, reason='', pinned=None):
     """Reversible project-scoped archive and owner pin; historical evidence is retained."""
     from cveFeed.models import HostAssessment, HostState
