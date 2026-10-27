@@ -478,6 +478,15 @@ def account_page(request):
     return render(request, 'cveFeed/account.html', ui_context(request, 'account'))
 
 
+# The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
+# (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
+HOW_REVIEWED_VERSION = '1.2.1'
+
+
+def how_page(request):
+    return render(request, 'cveFeed/how.html', {**ui_context(request, 'about'), 'how_reviewed_version': HOW_REVIEWED_VERSION})
+
+
 def about_page(request):
     return render(request, 'cveFeed/about.html', ui_context(request, 'about'))
 
