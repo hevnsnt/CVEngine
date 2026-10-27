@@ -290,17 +290,24 @@ def device_findings(link, rows, now):
 
 
 def policy_findings(link, policy, rows):
-    """The tailnet-wide findings, kept on the link's anchor target (the first imported device's), under the tailnet's own name."""
+    """The tailnet-wide findings, kept on an anchor target (an imported device's, under the tailnet's own name). The anchor is the first
+    imported device that is still on the tailnet: when it leaves (its target stays, archived or its address unused) the findings move to
+    another device instead of sitting on a host that no longer exists, and the old anchor's copies are resolved."""
     from cveFeed.hygiene import store_findings
-    anchor = link.anchor_domain
-    if anchor is None:
-        anchor = next((r.domain for r in rows if r.domain is not None), None)
-        if anchor is None:
-            return 0
-        link.anchor_domain = anchor
+    owns = lambda check: check.startswith(tailscale_checks.PREFIX)  # noqa: E731
     host = f'tailnet:{link.tailnet_name or "-"}'[:500]
+    present = [r.domain for r in rows if r.domain is not None and r.departed_at is None]
+    anchor = link.anchor_domain
+    if anchor is None or (present and anchor.pk not in {d.pk for d in present}):
+        replacement = present[0] if present else (anchor or next((r.domain for r in rows if r.domain is not None), None))
+        if replacement is None:
+            return 0
+        if anchor is not None and replacement.pk != anchor.pk:
+            store_findings(anchor, [], hosts=[host], owns=owns)  # resolve what the departed anchor held; the new one raises it again
+        anchor = replacement
+        link.anchor_domain = anchor
     found = tailscale_checks.evaluate_policy(policy, host, link.tailnet_name)
-    store_findings(anchor, found, hosts=[host], owns=lambda check: check.startswith(tailscale_checks.PREFIX))
+    store_findings(anchor, found, hosts=[host], owns=owns)
     return len(found)
 
 

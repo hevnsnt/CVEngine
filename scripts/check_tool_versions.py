@@ -6,8 +6,9 @@
 Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml and the nuclei version the CI smoke
 test downloads). This compares each pin with the newest release: nmap, WPScan, nuclei (the image and the CI smoke test), naabu, bbot, tzdata,
 wafw00f, the Go toolchain and, when the Tailscale profile is present, its sidecar image. Nuclei's templates are not pinned: they refresh at runtime.
-Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind (a site that cannot be reached is "unknown", never
-"behind"). The weekly workflow (.github/workflows/tool-releases.yml) turns "behind" into an issue; the release workflows use --fail-if-behind."""
+Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind, a pin cannot be found in its file or a newest
+version cannot be read (the gate fails closed: a renamed pin or an unreachable site must not pass a release; the weekly report, which
+runs without the flag, shows such a row as "?" and never calls it behind). The weekly workflow (.github/workflows/tool-releases.yml) turns "behind" into an issue; the release workflows use --fail-if-behind."""
 import json
 import re
 import sys
@@ -121,7 +122,7 @@ def report(rows):
 def main():
     result = collect()
     print(json.dumps(result) if '--json' in sys.argv else report(result))
-    if '--fail-if-behind' in sys.argv and any(r['behind'] for r in result):
+    if '--fail-if-behind' in sys.argv and any(r['behind'] or r['pinned'] is None or r['latest'] is None for r in result):
         sys.exit(1)
 
 

@@ -30,6 +30,7 @@ RUN_LEASE = timedelta(minutes=5)  # an accepted task is kept by heartbeats, each
 MAX_RUNTIME = timedelta(hours=4)  # heartbeats stop extending a task this long after it was accepted
 BACKOFF = timedelta(seconds=30)
 HEARTBEAT_SECONDS = 60
+DEFER_FOR = timedelta(seconds=60)  # a busy agent leaves a task to a less busy one for this long, then takes it: an agent that heartbeats but never polls must not hold work for ever
 MAX_WAIT = 20  # seconds a get_next_task call may hold a web thread
 MAX_WAITERS = 6  # concurrent holders, so long polls can never take every web thread (16 by default)
 MAX_WAITERS_PER_USER = 2  # and one user, however many tokens it mints, cannot hold more than this of them
@@ -521,7 +522,7 @@ def _waiter_slot(wanted, token):
 
 def _better_placed(eff, task, effs, counts):
     """Whether another live agent with free room and less on its plate could take ``task``: it is left for them, so one agent that polls
-    fastest does not end up with all the work."""
+    fastest does not end up with all the work. Only for DEFER_FOR: after that the busy agent that is asking takes it."""
     mine = counts.get(eff.agent.pk, 0)
     return any(o.agent.pk != eff.agent.pk and o.live and counts.get(o.agent.pk, 0) < min(mine, o.max_concurrent) and o.refusal(task) is None
                for o in effs)
@@ -579,7 +580,7 @@ def _offer(agent, eff, task, counts, now, effs_cache):
     if counts.get(agent.pk, 0):
         if task.project_id not in effs_cache:
             effs_cache[task.project_id] = _effs_for([task.project], now)
-        if _better_placed(eff, task, effs_cache[task.project_id], counts):
+        if now - task.created_at < DEFER_FOR and _better_placed(eff, task, effs_cache[task.project_id], counts):
             return None
     match = _still_needed(task)
     if match is None:
