@@ -18,7 +18,7 @@ The worker image holds the scanners: [bbot](https://github.com/blacklanternsecur
 
 ## Stack
 
-Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, and Go 1.27 for building the scanners.
+Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.993, and Go 1.27 for building the scanners.
 
 ## Main data
 

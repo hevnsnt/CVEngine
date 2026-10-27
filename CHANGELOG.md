@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Added
+
+- **Every scanner tool is pinned, and a release checks them all.** nuclei, naabu and bbot (and its `tzdata`) were installed as "latest" at build time, so a rebuild could change what a scan does. They are now pinned to their current releases like nmap, WPScan and wafw00f. `scripts/check_tool_versions.py` compares every pin (also the Go toolchain and the Tailscale image) with the newest release, the weekly check opens an issue for the ones behind, and a release is held until none is: the pull request into `master` fails the new *Tools up to date for release* check and the Release workflow stops, unless the newer version was looked at and the pull request is labelled `tools-reviewed` (or `tools_reviewed` is ticked on a manual run).
+
 ### Changed
 
 - **BinaryEdge is retired.** Coalition shut BinaryEdge down as a standalone service on 31 March 2025 and bbot has no module for it, so the stored key could never be used. The API keys pages and the API now say so (`retired`, with the reason, and `used_in_scans: false`), no new BinaryEdge key is accepted, and a key saved earlier is kept, shown as retired and can be removed. The runZero key is now described as read by the scheduled sync rather than "not used yet".

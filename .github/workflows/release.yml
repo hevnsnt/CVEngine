@@ -14,6 +14,11 @@ on:
         description: 'Tag to release (default: the version in web/.version, e.g. v1.0)'
         required: false
         default: ''
+      tools_reviewed:
+        description: 'Release even though a pinned tool is behind its newest release (only after looking at the newer version)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -29,6 +34,20 @@ jobs:
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
+
+      - name: 🔭 Every pinned tool is at its newest release
+        env:
+          REVIEWED: ${{ github.event.inputs.tools_reviewed }}
+        run: |
+          if python3 scripts/check_tool_versions.py --fail-if-behind; then
+            exit 0
+          fi
+          if [ "$REVIEWED" = "true" ]; then
+            echo "::warning::A tool is behind its newest release; this run says that was looked at."
+            exit 0
+          fi
+          echo "::error::A pinned tool is behind its newest release (table above). Bump the pin, or run again with tools_reviewed after deciding not to."
+          exit 1
 
       - name: 🏷️ Resolve the tag
         id: tag

@@ -6,8 +6,15 @@ FROM ubuntu:26.04
 ARG GOVERSION=1.27.3
 ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
-ARG NMAPVERSION=7.992
-ARG NMAP_SHA256=0c12660eddbf7eabeff6996cb0c044a4eadf2bb0c6fbcb340d6cf72b1caee402
+ARG NMAPVERSION=7.993
+# Scanner tools, pinned to versions that were built and tested together (the CI smoke test uses the same nuclei). A tool is bumped on
+# purpose, after scripts/check_tool_versions.py says a newer one exists: see "Pinned tools" in docs/UPDATES.md. Nuclei's TEMPLATES are not
+# pinned: they refresh at runtime.
+ARG NUCLEI_VERSION=3.11.1
+ARG NAABU_VERSION=2.6.1
+ARG BBOT_VERSION=3.0.2
+ARG TZDATA_VERSION=2026.5
+ARG NMAP_SHA256=270e55f04915bfcecb5db8feb959d4c5ba86a48c094520a4f1c07571e1c79c59
 
 RUN ARCH=$(dpkg --print-architecture) \
     && if [ "${ARCH}" != "arm64" ] && [ "${ARCH}" != "amd64" ]; then \
@@ -89,8 +96,8 @@ WORKDIR /usr/src/app
 
 ENV GO111MODULE=on
 RUN printf "\
-    github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest\n\
-    github.com/projectdiscovery/naabu/v2/cmd/naabu@latest\n" | \
+    github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v${NUCLEI_VERSION}\n\
+    github.com/projectdiscovery/naabu/v2/cmd/naabu@v${NAABU_VERSION}\n" | \
     xargs -L1 go install -ldflags="-s -w" -v && \
     rm -rf /go/pkg/* && rm -rf /root/.cache/go-build
 
@@ -105,7 +112,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 
 # bbot (isolated venv so its dependency pins cannot clash with the application's)
 RUN python3 -m venv /opt/bbot-venv && \
-    /opt/bbot-venv/bin/pip install --no-cache-dir bbot tzdata && \
+    /opt/bbot-venv/bin/pip install --no-cache-dir bbot==${BBOT_VERSION} tzdata==${TZDATA_VERSION} && \
     ln -s /opt/bbot-venv/bin/bbot /usr/local/bin/bbot
 # Fail the build when this bbot no longer reads the way cvENGINE passes it API keys (a preset file listed after the named presets,
 # which must still load every module of the default scan). bbot 3.x rejects a config file after -c and ignores all but the last -p,
