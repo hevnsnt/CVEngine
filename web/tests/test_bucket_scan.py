@@ -278,7 +278,7 @@ class ScheduleTests(TestCase):
         self.assertEqual(tasks.bucket_sweep.queue, 'bucketscan_queue')
         self.assertIn('bucketscan_queue', system_status.QUEUES)
         entry = open(os.path.join(os.path.dirname(__file__), '..', 'celery-entrypoint.sh')).read()
-        self.assertIn(',bucketscan_queue"', entry)
+        self.assertIn(',bucketscan_queue', entry)
         with mock.patch('cveFeed.bucket_scan.sweep_all', return_value={'checked': 0}) as sweep:
             self.assertEqual(tasks.bucket_sweep(), {'checked': 0})
         sweep.assert_called_once_with()

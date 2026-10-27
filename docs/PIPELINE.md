@@ -106,6 +106,41 @@ What it records:
 
 The x86-64 image bundles the openssl build that ships with testssl.sh, which still speaks SSLv2, SSLv3 and export ciphers. On arm64 testssl.sh uses the system openssl, which has those protocols compiled out: results for them are not reliable there.
 
+### Other sites and applications on a host
+
+Two slow background sweeps look for OTHER APPLICATIONS that could carry a known CVE. They are not content discovery: GET only, no body, no cookie, no credential, redirects never followed, a small curated set of questions, and a cap on what one host or address is asked. Both run on their own `vhost_queue` (a beat task each, `vhost_sweep` hourly and `subdir_apps_sweep` every 30 minutes, a few addresses or hosts per run), stop while scanning is paused, skip excluded and archived hosts and any address the scannable gate refuses, wait between requests (`CVENGINE_SLOW_WEB_GAP`, 1 second across all workers, and `CVENGINE_SLOW_WEB_HOST_GAP`, 2 seconds per host), and ask each question once per week (the service ledger: `vhost`, `subapp`). `CVENGINE_VHOST=0` and `CVENGINE_SUBDIR_APPS=0` turn them off.
+
+**Virtual hosts** (`cveFeed/vhost_scan.py`). One address can serve several sites, told apart by the Host header (and the TLS server name). For each web address of a project (not a CDN or shared-platform address), the sweep asks `/` once with each name the project ALREADY knows that is not yet recorded as answering there: the hosts stored for the project, the names in the certificates seen on that address and the reverse names discovery recorded for it, and the names certificate transparency found. There is no wordlist and nothing is guessed. A name is asked only when it is in scope (equal to or under a domain target of the project; a host-scoped target covers its own name only): a name outside it is never asked and never added, whatever a certificate lists. At most 20 names per address and 5 addresses per run (`CVENGINE_VHOST_MAX_NAMES`, `CVENGINE_VHOST_MAX_IPS`). The answer (status, title, length, redirect target; never the body) is compared with the address's own default response and with the name's own site (its stored front-page route check, else one GET at its own address): `distinct` is another application, `default_site` (the address ignores the name) and `same_app` (the application the name already serves elsewhere) add nothing. A distinct application is recorded as a `ProbeObservation` of kind `vhost` (host the name, product the address, evidence the classification) and added to the project as a host row of its own (like the rows certificate transparency creates) linked to the address, so names that resolve to the same addresses stay one host with aliases exactly as the Hosts page already merges them; what its page states (a product and a version, in its headers and markers) becomes the host's technologies, which the correlation reads. A later answer that is no longer distinct unlinks the address and says so in the record. The host page shows "Also served here" on the host that holds the address.
+
+**Applications under subdirectories** (`cveFeed/subdir_apps.py`). A product installed under a path (`/jira`, `/grafana`, `/owa`) is invisible to a check that reads only the front page. For each web host (and each distinct virtual host, asked at its own address with its own name) the sweep sends one GET per path of the curated list `web/cveFeed/data/subdir_apps.json`, which holds each path, the product it indicates and the signatures that confirm it, plus at most 10 directories the host's own crawled URLs, archived URLs, `robots.txt` and `sitemap.xml` already show, and three fixed requests (a path no site serves, as the baseline, `/robots.txt` and `/sitemap.xml`). At most `CVENGINE_SUBDIR_MAX_REQUESTS` requests per host per sweep (60) and `CVENGINE_SUBDIR_MAX_HOSTS` hosts per run (6). Only 200, 301, 302, 401 and 403 count as something being there, and an answer the server gives to every path (the baseline, or the front page) is not a mount. What answers is read from the response (title, a header, a marker in the body, a redirect to the product's login): a signature names the product, and a version pattern of that product reads the version when the page states one. A path that only answered is a **lead** (stored with its status, never a technology); a confirmed product that states no version is recorded as `hidden`, like a version probe does; a confirmed product AND a stated version is a Technology (`Jenkins:2.401.3`) of the host and the host is correlated again, so the CVE match rule above applies unchanged (a bare path hit is never a finding). No favicon hash is used. Results are `ProbeObservation` rows of kind `subapp` (an application that is gone at a later sweep becomes `absent`), shown on the host's Web tab as "Applications under subdirectories", and the versioned ones follow the host onto each new scan's rows. An edge that challenges or blocks a request (a Cloudflare challenge, an Akamai, Sucuri or Imperva block page) is recorded as `challenged` with what to allow and is never retried or worked around: that host or address is left alone until the next window.
+
+The curated paths and the product each one indicates:
+
+| Path | Product | Path | Product |
+| --- | --- | --- | --- |
+| `/jira/` | Jira | `/confluence/` | Confluence |
+| `/bitbucket/` | Bitbucket | `/grafana/` | Grafana |
+| `/wordpress/` | WordPress | `/phpmyadmin/` | phpMyAdmin |
+| `/gitlab/` | GitLab | `/jenkins/` | Jenkins |
+| `/owa/` | Microsoft Exchange Server | `/sonarqube/` | SonarQube |
+| `/nexus/` | Nexus Repository Manager | `/artifactory/` | JFrog Artifactory |
+| `/kibana/` | Kibana | `/zabbix/` | Zabbix |
+| `/nagios/` | Nagios Core | `/cacti/` | Cacti |
+| `/roundcube/` | Roundcube Webmail | `/squirrelmail/` | SquirrelMail |
+| `/horde/` | Horde | `/joomla/` | Joomla |
+| `/drupal/` | Drupal | `/moodle/` | Moodle |
+| `/mediawiki/` | MediaWiki | `/redmine/` | Redmine |
+| `/mantis/` | Mantis Bug Tracker | `/bugzilla/` | Bugzilla |
+| `/gitea/` | Gitea | `/portainer/` | Portainer |
+| `/manager/html` | Apache Tomcat | `/solr/` | Apache Solr |
+| `/zimbra/` | Zimbra | `/pgadmin4/` | pgAdmin |
+| `/adminer/` | Adminer | `/prometheus/` | Prometheus |
+| `/airflow/` | Apache Airflow | `/superset/` | Apache Superset |
+| `/metabase/` | Metabase | `/nextcloud/` | Nextcloud |
+| `/owncloud/` | ownCloud | `/typo3/` | TYPO3 |
+| `/umbraco/` | Umbraco | `/sitecore/` | Sitecore |
+| `/graylog/` | Graylog |  | |
+
 ## AI review every three hours
 
 With an AI model connected, cvENGINE reviews each project's inventory, matched CVEs, findings, scans, and recent activity every three hours and queues the most useful due action: triage, validation, a discovery on a stored target, or an assessment of a host missing a core stage. One action per project per run, at most 100 model calls and 20 actions per review. The server rechecks scope, exclusions, active scans, the pause switch, and queue caps first, and the model never supplies a target or a command.
@@ -211,6 +246,7 @@ Building the catalog from the cve.now feed takes one request per CVE, so a new i
 - **Rescan a host.** **Rescan host** (or `assess_host`) runs a full, fresh assessment of one host: DNS, ports, exposure, nuclei, firewall fingerprint, routes, correlation, AI triage, and TLS, ignoring recent results but keeping scope, exclusions, and resource limits. Progress shows stage by stage, and you can stop it.
 - **New hosts between scans.** When the certificate watch sees a new hostname, a short pipeline runs on up to 200 new hosts: the same stages a scan ends with (nmap, RDP screenshot, exposure checks, technology pass, firewall fingerprint, route checks, WPScan, node2shell if enabled, correlation, targeted pass, triage, and change recording). Agents can start it with `rescan_hosts`.
 - **Background full port scan.** A slow task sweeps all 65,535 TCP ports of one in-scope IP at a time (10 minutes per host at most), oldest first. Ports it finds are fingerprinted and the host is re-tested. `CVENGINE_FULLSCAN=0` turns it off.
+- **Other sites and subdirectory applications.** Two slow sweeps on their own `vhost_queue` ask the project's known names at its web addresses and the well-known application paths of its web hosts, a few at a time, once a week each (see [Other sites and applications on a host](#other-sites-and-applications-on-a-host)). `CVENGINE_VHOST=0` and `CVENGINE_SUBDIR_APPS=0` turn them off.
 - **Paced deep nuclei.** Every 10 minutes one due host gets the approved broad template set on its name and up to 20 nonstandard ports, which covers an inventory of about 1,000 hosts each week.
 - **Weekly deep discovery.** Daily, each apex domain without a deep discovery in the last 7 days gets one, up to 50 per run. If only its subdomains were targets, the apex is added. This is the one automatic rediscovery without an AI model.
 - **Pause everything.** An App Admin can **Pause all scanning** from **All projects, Activity**. The pause survives restarts: work that touches targets or spends AI budget waits, running scanners stop cooperatively, and running scans are marked aborted. Bookkeeping that touches no target keeps running (the feeds, notifications, pruning, rescoring). **Resume** releases the queue.
@@ -275,6 +311,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Tailscale sync (devices, findings, scans of connected tailnets; [Tailscale](TAILSCALE.md)) | every 15 minutes |
 | Validation of every CVE match (fire first), change re-tests | every 5 minutes |
 | Cloud storage exposure sweep ([details](#cloud-storage-exposure)) | daily at 01:38 UTC |
+| Other sites on an address (`vhost_sweep`), applications under subdirectories (`subdir_apps_sweep`) | hourly at :27, and every 30 minutes at :13 and :43, on `vhost_queue` |
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | AI review and capacity tuning | every 3 hours |
 | Stuck job cleanup | every 15 minutes |

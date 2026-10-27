@@ -592,6 +592,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                           fallback={'hosts': 0})  # finds the version of what the stages above saw without one, before correlation reads it
     if stopped(scan_id):
         return gone
+    from cveFeed import subdir_apps
+    subdir_apps.carry_forward(scan)  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
     if probe_get:
         wp_kwargs['probe_get'] = probe_get
