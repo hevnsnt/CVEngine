@@ -74,7 +74,7 @@ done
 
 case $TIMEOUT in ''|*[!0-9]*) die 1 "--timeout must be a number of seconds" ;; esac
 case $RETRIES in ''|*[!0-9]*) die 1 "--retries must be a number" ;; esac
-[ "$TIMEOUT" -ge 1 ] && [ "$TIMEOUT" -le 300 ] || die 1 "--timeout must be 1 to 300"
+if [ "$TIMEOUT" -lt 1 ] || [ "$TIMEOUT" -gt 300 ]; then die 1 "--timeout must be 1 to 300"; fi
 [ "$RETRIES" -le 10 ] || die 1 "--retries must be 0 to 10"
 
 # --- printing the scheduling snippets (nothing is installed) ---------------------------------------------------------------
