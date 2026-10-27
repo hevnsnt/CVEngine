@@ -465,6 +465,9 @@ def sweep(project_id, fetch=None, pace=None, stop=None, vet_ip=None):
     stop = stop or (lambda: resources.global_pause_requested(fail_closed=True))
     if stop():
         return {**summary, 'skipped': 'scanning is paused: the hosts stay due'}
+    from cveFeed.conductor import bounty_blocked_projects
+    if project_id in bounty_blocked_projects():
+        return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
     owner = f'subapp-{os.getpid()}'
     with resources.redis_claim(f'cvengine:subapp:{project_id}', owner, CLAIM_TTL) as holder:
         if holder is not True:

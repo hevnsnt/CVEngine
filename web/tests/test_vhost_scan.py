@@ -11,7 +11,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import ledger, probes, route_auth, slow_web, vhost_scan
-from cveFeed.models import HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun, TlsCertificate
+from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun, TlsCertificate
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
@@ -250,6 +250,13 @@ class SweepTests(VhostFixture, TestCase):
         ScanControl.objects.create(pk=1, paused=True)
         summary = self.run_sweep()
         self.assertIn('paused', summary['skipped'])
+        self.assertEqual(self.server.calls, [])
+
+    def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_asks_nothing(self):
+        program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
+        BountyEngagement.objects.create(project=self.project, program=program, status='active', automated_ok=False)
+        summary = self.run_sweep()
+        self.assertIn('automated testing', summary['skipped'])
         self.assertEqual(self.server.calls, [])
 
     def test_a_pause_that_arrives_mid_sweep_stops_before_the_next_request(self):
