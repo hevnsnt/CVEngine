@@ -13,7 +13,7 @@ cvENGINE is one Docker Compose deployment. The scanners run inside the worker im
 | `redis` | Job broker, locks, cache, and the memory queue |
 | `proxy` | nginx, terminates TLS on 443 and redirects 8082 to HTTPS |
 
-The worker image holds the scanners: [bbot](https://github.com/blacklanternsecurity/bbot), [nmap](https://nmap.org), [nuclei](https://github.com/projectdiscovery/nuclei), [naabu](https://github.com/projectdiscovery/naabu), and [WPScan](https://wpscan.com/) for WordPress sites. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone. bbot downloads [gowitness](https://github.com/sensepost/gowitness) for deep-mode screenshots. See [THIRD-PARTY.md](../THIRD-PARTY.md).
+The worker image holds the scanners: [bbot](https://github.com/blacklanternsecurity/bbot), [nmap](https://nmap.org), [nuclei](https://github.com/projectdiscovery/nuclei), [naabu](https://github.com/projectdiscovery/naabu), [wafw00f](https://github.com/EnableSecurity/wafw00f) to name firewalls, and [WPScan](https://wpscan.com/) for WordPress sites. [aardwolf](https://github.com/skelsec/aardwolf) reads RDP login screens. naabu and nuclei install at their latest release when the image is built, nmap 7.992 is built from source, and WPScan is pinned. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone. bbot downloads [gowitness](https://github.com/sensepost/gowitness) for deep-mode screenshots. See [THIRD-PARTY.md](../THIRD-PARTY.md).
 
 ## Stack
 
@@ -24,8 +24,9 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, and Go 1.2
 | Model | Holds |
 | --- | --- |
 | `Org`, `Project` | The tenancy hierarchy ([TENANCY.md](TENANCY.md)) |
-| `Domain` | A target: a domain, IP, or URL host |
-| `Subdomain`, `IpAddress`, `Port` | The inventory: hosts, addresses, and services with product and version |
+| `Domain` | A target: a domain, IP, or URL host. It belongs to an organization, which can track a name that another organization also tracks |
+| `Subdomain`, `IpAddress`, `Port` | The inventory: hosts, addresses (one row per address in an organization), and services with product and version |
+| `CVEDetection` | One shared detection strategy and validation profile per CVE, the same for every organization |
 | `RouteAuth`, `HygieneFinding`, `TlsCertificate` | Web route auth states, email and domain findings, and certificates |
 | `Vulnerability` | Scanner findings: nuclei, the exposure checks, nmap (RDP without NLA, anonymous FTP), WPScan, and node2shell |
 | `RdpScreenshot`, `HostArchive` | RDP login-screen captures, and archived-URL evidence of what a host once ran |
@@ -39,10 +40,11 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.992, and Go 1.2
 
 ## Where the AI is used
 
-- Triaging findings into confirmed, likely, needs validation, likely false positive, or not applicable. Fixed rules keep hard evidence from being dismissed.
-- Confirming CVE matches when auto-fire is on, and planning and reviewing **Validate now** checks.
-- Choosing nuclei template tags from those the installed templates use.
+- Triaging findings into confirmed, likely, needs validation, likely false positive, or not applicable. Fixed rules keep hard evidence from being dismissed. A reply the validator rejects is sent back to the model once with the reason.
+- Confirming CVE matches when auto-fire is on, planning **Validate now** checks, and re-triaging their evidence.
+- Choosing nuclei template tags and severities from those the installed templates use.
 - Drafting a nuclei template when none exists for a CVE.
+- Writing detection checks for the CVEs attackers use, from feed text only, within a daily budget.
 - The three-hour coverage review and scanner capacity tuning.
 - Reading RDP login-screen screenshots, and suggesting local checks for matches no external check can settle.
 - Report text on the bug bounty page.

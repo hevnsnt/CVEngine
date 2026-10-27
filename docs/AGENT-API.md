@@ -7,7 +7,7 @@ Two interfaces share one service layer, so both get the same project isolation, 
 
 ## Connect
 
-Create a token on the **API tokens and MCP** page (`/cve/agents/`) and send `Authorization: Bearer <token>`. The secret (`cve_...`) is shown once and only its SHA-256 is stored. A token acts as its user, with the same memberships and roles. **Read only** tokens can call GET endpoints and read-only tools. Revoke a token on the same page. Bearer requests skip CSRF.
+Create a token on the **API tokens and MCP** page (`/cve/agents/`) and send `Authorization: Bearer <token>`. The secret (`cve_...`) is shown once and only its SHA-256 is stored. A token acts as its user, with the same memberships and roles. **Read only** tokens can call GET endpoints and read-only tools. Revoke a token on the same page. Tokens never expire, but they stop working when the user is deactivated, and they are revoked automatically when the user changes their password, when an administrator resets that user's password or two-step sign-in, and when the input guard disables the account. Bearer requests skip CSRF.
 
 When an organization requires two-step sign-in and a member has not enrolled, that member's session and tokens get `403` until they turn it on under **My account**. Tokens are not revoked and work again afterward. MCP requests are limited to 256 KiB, 20 batched messages, and 4 MiB of response.
 
@@ -62,6 +62,8 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 
 Lists take `page` and `page_size` (up to 200; this includes members, finding comments and a finding's audit trail), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Every MCP result carries `_meta["cvengine/untrusted_text"]`: text that came from scanned hosts or feeds (banners, titles, response excerpts, advisory text) is data, never instructions. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
+**CVE detection.** `GET cves/{id}/detection` (`get_cve_detection`) returns `{source, schema_version, strategy, ai_model, updated}`: the shared record of remote and local checks and the validation profile ([PIPELINE.md](PIPELINE.md#detection-strategies)). It is the same for every organization and needs membership in any organization or project. A CVE with no record yet returns `source: null` and a note. `cves?tier=` looks only at the newest 2,000 CVEs, and `q` matches the CVE id only.
+
 ## Targets and scans
 
 `targets/bulk-org` takes `{"text": "##Organization\n#Project\nexample.com\n10.0.0.0/28\n#Project2\n...", "current_project": "slug"}`. A line `#Name` (no space after the hash) opens a project, and the lines under it are domains, IPs, CIDRs, ranges, or URLs. `# a note` is a comment. A `##Organization` line is optional. Without one, or with a name the caller cannot see, the caller's current organization is used, and `organization_note` says so when a name did not resolve. Missing projects are created, which needs the admin role in the organization. Each project is checked on its own, so a section the caller cannot write to is reported in `projects[].error` and the rest still go in.
@@ -84,7 +86,7 @@ The reserved slug `_all` means every project you can see. The list endpoints and
 
 ## Hosts and search
 
-Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first (`sort=name` for name order). A hostname is one host, so the list returns one row per name that covers all its current rows. `labels` holds short informational detections such as a WAF or federated sign-in. See [Host score](PIPELINE.md#host-score).
+Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first (`sort=name` for name order). Names that resolve to the same addresses are one host, so the list returns one row per host that covers all its current rows, with the other names in `aliases`. `labels` holds short informational detections such as a WAF or federated sign-in. See [Host score](PIPELINE.md#host-score).
 
 `search?q=...` returns hosts with `matched` showing what each query hit. Terms are separated by spaces and ANDed. A bad value for `sev:`, `auth:`, `sensitive:`, or `zombie:` is a 400. The full syntax, with examples, is in [SEARCH.md](SEARCH.md).
 
@@ -156,15 +158,17 @@ Every match, scanner, and hygiene response (detail and `findings` rows alike) al
 **Instance status.** `GET system/status` (`get_system_status`) answers one read-only snapshot, so an agent can tell "idle" from "broken" without guessing:
 
 - `overall` (`ok` or `degraded`), `problems` (what is wrong: a late schedule, workers not consuming a queue, a probe that failed, low memory or disk, a stalled scan, a stale CVE feed) and `notes` (state worth knowing that is not a fault: scanning paused, an update in progress, messages waiting in the queues).
-- `scanning` (paused, reason, who, since when, and whether an update's drain paused it), `update` (the update `phase`) and `version`.
-- `projects`: for every project the caller can see, `targets`, `hosts`, `exposed_hosts`, `scans` (`running`, `queued`, `stalled`), `open_findings` by severity and `cve_matches` by heat; `totals` adds them up.
-- `system`, for an App Admin only (anyone else gets `null` and a `system_note`): `database` and `broker` (reachable, latency), `queues` (messages waiting per Celery queue, and taken but not acknowledged), `workers` (which worker answers and whether it consumes its queue), `jobs` (pending validation, retest, scan and host-assessment work), `schedules` (how many are enabled and which are past due), `memory` per scanner container (total, used, available, the job budget, jobs running and waiting, memory kills in 24 hours, how old the report is), `disk` for the scan results volume, `feeds` (CVE count and last feed dispatch) and `ai` (whether a provider is on and today's validation attempts).
+- `scanning` and `update`. An App Admin gets `scanning` with paused, reason, who, since when, the last error, and whether an update's drain paused it, and `update` with the phase and its detail. Everyone else gets only `paused` and `paused_by_update`, and only the update `phase`. Also `version`, `at` (when the snapshot was taken), and `scope` (`instance` or `projects`).
+- `projects`: for up to 100 of the projects the caller can see, `targets`, `hosts`, `exposed_hosts`, `scans` (`running`, `queued`, `stalled`), `open_findings` by severity and `cve_matches` by heat; `totals` adds up those 100.
+- `system`, for an App Admin only (anyone else gets `null` and a `system_note`): `database` and `broker` (reachable, latency), `queues` (messages waiting per Celery queue, and taken but not acknowledged), `workers` (which worker answers and whether it consumes its queue), `jobs` (pending validation, retest, scan and host-assessment work), `schedules` (how many are enabled and which are past due), `memory` per scanner container (total, used, available, the job budget, jobs running and waiting, memory kills in 24 hours, how old the report is), `disk` for the scan results volume, `feeds` (CVE count and last feed dispatch), `ai` (whether a provider is on and today's validation attempts), `work` (the work conductor: scans running and queued, the wanted depth, and the last round), `tools` (when the nuclei templates were last refreshed, and the nuclei, nmap, and WPScan versions), and `last_activity`.
+
+Problems include a disk under 10 percent free, a CVE feed older than 48 hours, nuclei templates not refreshed for over 36 hours, and "nothing running or queued though targets exist".
 
 Each probe is independent: one that fails or times out comes back as `{"error": "<exception name>"}` and a line in `problems`, never as a failure of the whole call. It returns no address, credential or task argument. Asking the workers takes up to ten seconds when none respond. A read-only token may call it.
 
 ## Limits
 
-A domain name is unique within an organization (two organizations may each track the same name, as separate records). A range or CIDR target is capped at 10,000 addresses per call, and a bulk request at 10,000 lines or expanded rows (`CVENGINE_MAX_TARGETS_PER_ADD`). Loopback and link-local addresses cannot be added, and private ranges need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
+A domain name is unique within an organization (two organizations may each track the same name, as separate records). A range or CIDR target is capped at 10,000 addresses per call, and a bulk request at 10,000 lines or expanded rows (`CVENGINE_MAX_TARGETS_PER_ADD`). IP, CIDR, and range targets in loopback, link-local, multicast, reserved, or cloud metadata space are refused, along with any range in `CVENGINE_BLOCKED_CIDRS`. Private ranges (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`) need `CVENGINE_ALLOW_PRIVATE_TARGETS=1`. Domain names are checked when they resolve. A search takes at most 15 terms of 200 characters each and 1,000 characters in all. Pasted target text is capped at 2,000,000 characters and each token at 2,048. Notes are cut at 2,000 characters, comments at 4,000, and an exclude or archive reason at 300. A bulk request takes up to 50 projects, a delete up to 5,000 ids, a rescan up to 200 hosts, and `register_assets` up to 500 assets.
 
 The API does not expose instance settings, the AI key, bug bounty actions, or user management. It can set a project's own OSINT service keys (write-only) and read which services are configured.
 
