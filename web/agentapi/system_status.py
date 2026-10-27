@@ -16,7 +16,7 @@ from datetime import datetime, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -56,7 +56,7 @@ def _update():
 
 def _projects(ctx):
     from agentapi.services import _allowed_ids
-    from cveFeed import counts, wpscan_scan
+    from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
     from dashboard.models import Project
     from startScan.models import ScanHistory
@@ -76,6 +76,8 @@ def _projects(ctx):
             'cve_matches': snap['cve_matches'],
             # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
             'wordpress': wpscan_scan.status_counts([project.id]),
+            # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
+            'web_discovery': subdir_apps.status_counts([project.id]),
         })
     return rows
 

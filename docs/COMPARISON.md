@@ -26,6 +26,8 @@
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
 | Subdomains and assets | [bbot](https://github.com/blacklanternsecurity/bbot) in passive, standard, or deep mode, a certificate transparency watch, and a weekly deep sweep of every apex domain | A pre-indexed Chaos dataset for instant results, plus DNS brute forcing, permutations, and certificate transparency | ProjectDiscovery |
+| Other sites on an address | The project's own known names (hosts, certificate names, certificate transparency) are asked once a week at each web address with a Host header, and a distinct site is added as an alias of the host or a host of its own, in scope only. No name guessing. | Virtual host discovery is not described on the pages read | cvENGINE |
+| Applications under subdirectories | About 40 well-known mount paths (Jira, Grafana, phpMyAdmin, OWA and others) asked with one GET each, read into a product and version that CVE matching uses. Not a content wordlist. | Technology fingerprinting and directory brute forcing are described; the depth is not stated | Different |
 | Related assets | Whatever bbot finds from your domains | ASN mapping, Shodan, Censys, and FOFA data, subsidiaries, and associated domains | ProjectDiscovery |
 | Cloud accounts | Not supported | AWS, Azure, and GCP through Cloudlist | ProjectDiscovery |
 | Open ports | naabu by default (all 65,535 ports), a background full sweep, then nmap | naabu | Even |

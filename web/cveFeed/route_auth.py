@@ -304,8 +304,10 @@ def _read_scripts(result, probe, scan_id):
         evidence['fingerprint_names'] = [f['name'] for f in found]
 
 
-def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False):
-    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
+def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
+              connect_ip=None):
+    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI. ``connect_ip`` connects to that vetted address instead
+    of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan)."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
     from urllib.parse import quote, urlsplit
@@ -325,7 +327,15 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         raise ValueError('only a Host override is allowed for anonymous probes')
     host = parsed.hostname.encode('idna').decode('ascii')
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
-    addresses = pinned_transport.resolve(host, port, project=project)
+    if connect_ip:
+        import ipaddress
+        from targetApp.target_types import is_scannable_ip
+        pinned = ipaddress.ip_address(str(connect_ip))
+        if not is_scannable_ip(str(pinned), project=project):
+            raise ValueError('probe destination is prohibited')
+        addresses = ((socket.AF_INET6, (str(pinned), port, 0, 0)) if pinned.version == 6 else (socket.AF_INET, (str(pinned), port)),)
+    else:
+        addresses = pinned_transport.resolve(host, port, project=project)
     context = None
     if parsed.scheme == 'https':
         context = ssl.create_default_context()
@@ -385,7 +395,9 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
                 'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
                 'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
                 'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
-                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items())}
+                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items()),
+                'raw_headers': {k.lower(): ' '.join(v.split())[:200] for k, v in list(response.headers.items())[:60]
+                                if k.lower() not in ('set-cookie', 'authorization', 'proxy-authorization')}}
     except (OSError, http.client.HTTPException):
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget') from None

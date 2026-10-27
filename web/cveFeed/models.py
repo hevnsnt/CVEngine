@@ -579,7 +579,7 @@ class ProbeObservation(models.Model):
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)  # lowercase
     probe = models.CharField(max_length=48)
-    kind = models.CharField(max_length=16)  # version | identity | edge | wordpress | wp-plugin | wp-theme
+    kind = models.CharField(max_length=16)  # version | identity | edge | wordpress | wp-plugin | wp-theme | vhost | subapp
     product = models.CharField(max_length=120, blank=True, default="")
     version = models.CharField(max_length=100, blank=True, default="")
     variant = models.CharField(max_length=60, blank=True, default="")  # identity: nginx, ingress-nginx, nginx-ui ...
