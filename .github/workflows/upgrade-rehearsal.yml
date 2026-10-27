@@ -122,6 +122,11 @@ jobs:
           git -C "$second" rev-parse HEAD > "$HOME/candidate.sha"
           cp "$HOME/candidate.sha" web/.update-approved
           printf 'master\n' > web/.update-branch
+          # The conductor starts scans of the seeded (unreachable) targets as soon as the first update restarts the stack, and such a scan can
+          # take far longer than this rehearsal waits. What is being rehearsed is how the second update is applied, not how long a scan takes:
+          # stop what runs now, the way an operator's "Stop all scans" does, then let the update wait for whatever is left.
+          . "$GITHUB_WORKSPACE/.github/rehearsal/lib.sh"
+          dc exec -T web python3 manage.py shell -c "from cveFeed.scan_control import abort_running_scans; print(abort_running_scans('rehearsal'), 'scans stopped')"
           # exit 3 is "waiting: scans are running, approval kept": the host watcher calls it again a minute later, so this does too
           for attempt in $(seq 1 60); do
             status=0
@@ -129,7 +134,12 @@ jobs:
             [ "$status" = 3 ] || break
             sleep 30
           done
-          [ "$status" = 0 ] || { echo "::error::the second update ended with status $status"; exit 1; }
+          if [ "$status" != 0 ]; then
+            echo "::group::what the update was waiting for"
+            dc exec -T web python3 manage.py shell -c "from startScan.models import ScanHistory; [print(s.id, s.scan_status, s.start_scan_date, s.domain) for s in ScanHistory._base_manager.filter(scan_status=1)]" || true
+            echo "::endgroup::"
+            echo "::error::the second update ended with status $status"; exit 1
+          fi
           [ ! -e web/.update-approved ] || { echo "::error::the second update did not clear its approval"; exit 1; }
           "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
       - name: Approving the same commit again does nothing
