@@ -2,7 +2,7 @@
 
 How to put an install on the Internet under a real name (for example `scanner.example.com`) with a certificate browsers trust. The installer's own certificate comes from a private authority, so every browser warns until it is trusted; that is fine on a LAN and wrong for a public site.
 
-You need a server that already runs cvENGINE ([README quick start](../README.md#quick-start)), a domain you control, and the ability to open ports on the server's firewall.
+You need a server that already runs cvENGINE ([install steps](DEPLOYMENT.md#install)), a domain you control, and the ability to open ports on the server's firewall.
 
 ## 1. Point the name at the server
 
