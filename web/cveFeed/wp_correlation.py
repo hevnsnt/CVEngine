@@ -66,8 +66,10 @@ def match_rows(sub, found, cve_by_id, product_index, scan_history=None):
 
 
 def _close_stale(sub, current):
+    from cveFeed.match_policy import unworked
     from cveFeed.models import CVEMatch
-    stale = [m for m in CVEMatch.objects.filter(subdomain=sub, source=SOURCE).only('id', 'cve_entry_id', 'matched_product', 'ai_verdict', 'ai_reason')
+    # a match a person worked, a template confirmed or the host reported stays: the plugin missing from one scan is not evidence about it
+    stale = [m for m in unworked(CVEMatch.objects.filter(subdomain=sub, source=SOURCE)).only('id', 'cve_entry_id', 'matched_product', 'ai_verdict', 'ai_reason')
              if (m.cve_entry_id, m.matched_product) not in current
              and not (m.ai_verdict == 'not_affected' and (m.ai_reason or '').startswith('Closed automatically:'))]
     if stale:

@@ -158,7 +158,7 @@ class StateTests(WordPressFixture, TestCase):
                 raise wpscan_scan.Blocked('403 forbidden')
             return PLUGIN_REPORT
         self.go(runner=runner)
-        self.assertEqual(wpscan_scan.status_counts([self.project.id]), {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}})
+        self.assertEqual(wpscan_scan.status_counts([self.project.id]), {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}, 'thorough': {'pending': 1}})
         self.assertEqual(wpscan_scan.status_counts([self.project.id + 999])['hosts'], 0)  # another project's hosts are not counted
 
 
@@ -253,6 +253,109 @@ class PluginCorrelationTests(WordPressFixture, TestCase):
         self.assertEqual(CVEMatch.objects.filter(source='wp-plugin').count(), 1)
 
 
+class ThoroughPassTests(WordPressFixture, TestCase):
+    """WPScan must really run on every WordPress host, however long it takes: the quick pass finishes in minutes and always reports, the thorough
+    pass (every plugin and theme WPScan knows, hours per site) is a separate resumable background task that never blocks the scan."""
+
+    def thorough_state(self, host='www.rt.test'):
+        return (wpscan_scan.thorough_of(list(ProbeObservation.objects.filter(project=self.project, host=host))) or {}).get('state')
+
+    def quick(self):
+        self.table['/wp-login.php'] = page(200, headers=LINK, body='<form id="loginform" action="wp-login.php">')
+        self.go()
+        self.sites = len(self.calls)  # every name of the fixture answers the login probe
+        self.assertGreaterEqual(self.sites, 1)
+
+    def thorough(self, runner=None, **kw):
+        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True), mock.patch('cveFeed.wp_correlation.run_for_host'):
+            return wpscan_scan.run_thorough(self.project.id, runner=runner or self.runner, sleep=lambda s: None, probe_get=self.probe_get, **kw)
+
+    def test_the_quick_pass_queues_the_thorough_pass_and_does_not_wait_for_it(self):
+        self.quick()
+        self.assertEqual(self.thorough_state(), 'pending')
+        self.assertEqual(len(self.calls), self.sites)  # only the quick runs happened in the scan itself, none of the thorough kind
+
+    def test_the_real_runner_starts_the_background_task_on_its_own_queue(self):
+        with mock.patch('cveFeed.tasks.wpscan_thorough.apply_async') as start:
+            self.assertEqual(wpscan_scan.queue_thorough(self.project.id, ['www.rt.test'], self.domain.id), 1)
+        start.assert_called_once_with(args=[self.project.id], queue='wpscan_queue')
+
+    def test_the_stage_with_the_real_binary_dispatches_and_a_broker_failure_leaves_the_host_pending(self):
+        with mock.patch('cveFeed.tasks.wpscan_thorough.apply_async', side_effect=OSError('broker down')):
+            self.assertEqual(wpscan_scan.queue_thorough(self.project.id, ['www.rt.test'], self.domain.id), 1)
+        self.assertEqual(self.thorough_state(), 'pending')
+
+    def test_a_waiting_host_is_scanned_thoroughly_and_not_again_inside_its_window(self):
+        self.quick()
+        self.assertEqual(self.thorough()['done'], self.sites)
+        self.assertEqual(self.thorough_state(), 'done')
+        self.assertEqual(len(self.calls), 2 * self.sites)
+        self.assertEqual(wpscan_scan.queue_thorough(self.project.id, ['www.rt.test'], self.domain.id, dispatch=False), 0)  # fresh: not queued again
+        self.assertEqual(self.thorough()['done'], 0)
+
+    def test_a_cut_short_scan_keeps_what_it_read_and_is_asked_again_tomorrow(self):
+        self.quick()
+        partial = lambda url, token: {**PLUGIN_REPORT, 'cvengine_partial': 'Scan Aborted: duration'}  # noqa: E731
+        self.assertEqual(self.thorough(runner=partial)['partial'], self.sites)
+        self.assertEqual(self.thorough_state(), 'partial')
+        self.assertTrue(ServiceRun.objects.filter(service='wpscan-thorough-partial', asset='www.rt.test').exists())
+        self.assertFalse(ServiceRun.objects.filter(service='wpscan-thorough', asset='www.rt.test').exists())
+
+    def test_a_blocked_or_failing_site_is_recorded_once_and_the_next_one_goes_on(self):
+        self.quick()
+        def runner(url, token):
+            if 'www.' in url:
+                raise wpscan_scan.Blocked('403 forbidden')
+            raise RuntimeError('boom ' + (token or ''))
+        result = self.thorough(runner=runner)
+        self.assertEqual((result['blocked'], result['failed']), (1, self.sites - 1))  # each host once: nothing is retried in a loop
+        self.assertEqual(self.thorough_state(), 'blocked')
+        self.assertEqual(self.thorough_state('rt.test'), 'failed')
+
+    def test_scans_paused_leaves_the_hosts_waiting(self):
+        self.quick()
+        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+            result = self.thorough()
+        self.assertIn('paused', result['skipped'])
+        self.assertEqual(self.thorough_state(), 'pending')
+        self.assertEqual(len(self.calls), self.sites)
+
+    def test_only_one_pass_runs_per_project_at_a_time(self):
+        self.quick()
+        from contextlib import contextmanager
+
+        @contextmanager
+        def taken(key, owner, ttl):
+            yield 'thorough-999'
+        with mock.patch('reNgine.resources.redis_claim', taken):
+            self.assertIn('another thorough pass', self.thorough()['skipped'])
+        self.assertEqual(len(self.calls), self.sites)
+
+    def test_an_excluded_host_is_not_scanned_thoroughly(self):
+        self.quick()
+        with mock.patch('cveFeed.exclusions.excluded_names', return_value={'www.rt.test'}):
+            result = self.thorough()
+        self.assertEqual((result['failed'], result['done']), (1, self.sites - 1))
+        self.assertEqual(len(self.calls), self.sites + self.sites - 1)
+
+    def test_the_thorough_command_asks_for_every_plugin_and_theme_with_a_long_timeout(self):
+        flags = wpscan_scan.wpscan_args(wpscan_scan.thorough_timeout(), thorough=True)
+        self.assertEqual(flags[flags.index('--plugins-detection') + 1], 'mixed')
+        self.assertEqual(flags[flags.index('--themes-detection') + 1], 'mixed')
+        self.assertEqual(flags[flags.index('--enumerate') + 1], 'ap,at,tt')
+        self.assertEqual(wpscan_scan.thorough_timeout(), 12 * 3600)
+        self.assertEqual(flags[flags.index('--max-scan-duration') + 1], str(12 * 3600 - 30))
+        with mock.patch.dict('os.environ', {'CVENGINE_WPSCAN_THOROUGH_TIMEOUT': '60'}):
+            self.assertEqual(wpscan_scan.thorough_timeout(), 600)  # never shorter than ten minutes
+
+    def test_the_host_record_and_the_status_counts_show_the_thorough_pass(self):
+        self.quick()
+        self.assertEqual(self.state('www.rt.test')['thorough']['state'], 'pending')
+        self.assertEqual(wpscan_scan.status_counts([self.project.id])['thorough'], {'pending': self.sites})
+        self.thorough()
+        self.assertEqual(wpscan_scan.status_counts([self.project.id])['thorough'], {'done': self.sites})
+
+
 class ProcessExitTests(SimpleTestCase):
     def run_process(self, returncode, report=None, token='tok'):
         def fake_run(cmd, **kwargs):
@@ -274,15 +377,46 @@ class ProcessExitTests(SimpleTestCase):
         self.assertIsInstance(other, RuntimeError)
         self.assertNotIsInstance(other, wpscan_scan.Blocked)
         self.assertNotIn('tok', str(other))
-        self.assertIsInstance(self.run_process(4), wpscan_scan.NotWordPress)  # no report at all: nothing readable
+        none = self.run_process(4)  # no report at all: nothing was read, so it is a failure and never "not WordPress"
+        self.assertIsInstance(none, RuntimeError)
+        self.assertNotIsInstance(none, wpscan_scan.NotWordPress)
+        partial = self.run_process(4, {'scan_aborted': 'Scan Aborted: timeout', 'version': {'number': '6.0'}})  # what it read before it stopped is kept
+        self.assertEqual(partial['version']['number'], '6.0')
+        self.assertTrue(partial['cvengine_partial'])
 
     def test_the_command_line_is_the_verified_wpscan_4_form(self):
-        flags = wpscan_scan.FLAGS
-        self.assertEqual(flags[flags.index('--enumerate') + 1], 'ap,at,tt,cb,dbe,u1-10')  # plugins are not enumerated by default in WPScan 4
+        flags = wpscan_scan.wpscan_args(900)
+        self.assertEqual(flags[flags.index('--enumerate') + 1], 'ap,at,cb,dbe,u1-10')  # plugins are not enumerated by default in WPScan 4; tt is opt-in
         for flag in ('--random-user-agent', '--throttle', '--disable-tls-checks', '--format'):
             self.assertIn(flag, flags)
+        # plugin and theme detection fall back to the global mode in WPScan 4: without these two, "ap" in mixed mode asks for ~170,000 slugs
+        self.assertEqual(flags[flags.index('--plugins-detection') + 1], 'passive')
+        self.assertEqual(flags[flags.index('--themes-detection') + 1], 'passive')
+        self.assertEqual(flags[flags.index('--max-scan-duration') + 1], '870')  # a partial report is written 30 s before the process is killed
         self.assertNotIn('--api-token', flags)
         self.assertEqual(wpscan_scan.OK_EXIT_CODES, (0, 5))
+
+    def test_the_thorough_process_uses_its_own_long_timeout(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen['timeout'], seen['cmd'] = kwargs['timeout'], cmd
+            with open(cmd[cmd.index('-o') + 1], 'w') as f:
+                f.write('{"version": {"number": "6.0"}}')
+            return mock.Mock(returncode=0, stderr='')
+        with mock.patch('cveFeed.wpscan_scan.subprocess.run', side_effect=fake_run):
+            wpscan_scan.run_wpscan_process('https://www.rt.test/', '', thorough=True)
+        self.assertEqual(seen['timeout'], wpscan_scan.thorough_timeout())
+        self.assertIn('mixed', seen['cmd'])
+        with mock.patch('cveFeed.wpscan_scan.subprocess.run', side_effect=fake_run):
+            wpscan_scan.run_wpscan_process('https://www.rt.test/', '')
+        self.assertEqual(seen['timeout'], wpscan_scan.wpscan_timeout())
+        self.assertNotIn('mixed', seen['cmd'][seen['cmd'].index('--plugins-detection') + 1])
+
+    def test_timthumbs_are_opt_in(self):
+        with mock.patch.dict('os.environ', {'CVENGINE_WPSCAN_TIMTHUMBS': '1'}):
+            flags = wpscan_scan.wpscan_args(900)
+        self.assertEqual(flags[flags.index('--enumerate') + 1], 'ap,at,cb,dbe,u1-10,tt')
 
     def test_findings_say_what_to_do(self):
         rows = {r[0]: r for r in wpscan_scan._vuln_rows({**REPORT, 'plugins': {'p': {'version': {'number': '1.0'}, 'latest_version': '2.0', 'outdated': True}},

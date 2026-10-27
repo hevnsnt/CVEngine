@@ -192,10 +192,35 @@ class ClosureGroundsTests(ContextFixture, TestCase):
         row = self.judge()
         self.assertEqual(row.classification, 'needs_validation')
 
-    def test_edge_only_evidence_lets_the_models_judgement_stand(self):
+    def test_a_waf_fingerprint_or_an_edge_header_is_the_hosts_own_say_so_and_clears_nothing(self):
         self.sub.waf.add(Waf.objects.create(name='Cloudflare'))
+        self.observe('edge', 'Cloudflare', outcome='edge', probe='headers-root')
+        row = self.judge()
+        self.assertEqual(row.classification, 'needs_validation')
+
+    def test_a_dns_level_edge_clears_a_web_match_the_edge_answers_for(self):
+        self.sub.cname = 'www.rt.test.cdn.cloudflare.net'
+        self.sub.save()
         row = self.judge()
         self.assertEqual((row.classification, self.match.ai_verdict), ('likely_false_positive', 'not_affected'))
+
+    def test_an_edge_never_clears_a_match_on_a_port_the_edge_does_not_serve(self):
+        self.sub.cname = 'www.rt.test.cdn.cloudflare.net'
+        self.sub.save()
+        ssh = self.sub.ip_addresses.first().ports.get(number=22)
+        self.cve.affected = [{'product': 'OpenSSH', 'ranges': [{'introduced': '8.0', 'fixed': '9.0'}]}]
+        self.cve.save()
+        self.match.source, self.match.matched_product, self.match.matched_version = 'port', 'OpenSSH', '8.2'
+        self.match.evidence = {'source_id': ssh.pk}
+        self.match.save()
+        self.assertEqual(self.judge().classification, 'needs_validation')
+
+    def test_a_match_somebody_vouches_for_is_never_cleared_by_the_edge(self):
+        self.sub.cname = 'www.rt.test.cdn.cloudflare.net'
+        self.sub.save()
+        self.match.remediation_status = 'in_progress'
+        self.match.save()
+        self.assertEqual(self.judge().classification, 'needs_validation')
 
     def test_a_probe_that_found_a_different_product_lets_the_models_judgement_stand(self):
         self.cve.affected = [{'product': 'ingress-nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.25.0'}]}]
@@ -204,6 +229,15 @@ class ClosureGroundsTests(ContextFixture, TestCase):
         self.assertIn('ingressnginx', probes.lookalike_conflict(self.fresh(), self.match))
         row = self.judge('not_applicable')
         self.assertEqual(row.classification, 'not_applicable')
+
+    def test_a_host_that_really_runs_nginx_ui_is_not_cleared_of_an_nginx_ui_advisory(self):
+        self.cve.affected = [{'product': 'nginx-ui', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.25.0'}]}]
+        self.cve.save()
+        self.sub.technologies.add(Technology.objects.create(name='nginx-ui:1.24.0'))
+        self.match.matched_product = 'nginx-ui'
+        self.match.save()
+        self.observe('identity', 'nginx', variant='nginx', confidence=0.8)  # a plain nginx front answers the probe path
+        self.assertEqual(probes.lookalike_conflict(self.fresh(), self.match), '')
 
     def test_a_plain_nginx_probe_does_not_clear_an_advisory_for_nginx_itself(self):
         self.observe('identity', 'nginx', variant='nginx', confidence=0.8)

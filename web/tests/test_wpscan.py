@@ -83,11 +83,18 @@ class ProcessTests(SimpleTestCase):
         self.assertIn('version', report)
 
     def test_not_wordpress_and_failures(self):
-        error, _ = self.run_process(returncode=4)
-        self.assertIsInstance(error, ValueError)
+        error, _ = self.run_process(returncode=4)  # no report was written: nothing was read, so it is a failure, not "not WordPress"
+        self.assertIsInstance(error, RuntimeError)
         error, _ = self.run_process(returncode=2, stderr='boom tok-secret')
         self.assertIsInstance(error, RuntimeError)
         self.assertNotIn('tok-secret', str(error))
+
+    def test_the_child_gets_no_other_secret_of_the_worker(self):
+        with mock.patch.dict('os.environ', {'POSTGRES_PASSWORD': 'db-secret', 'FIELD_ENCRYPTION_KEY': 'key-secret', 'CELERY_BROKER': 'redis://x'}):
+            _, seen = self.run_process()
+        self.assertEqual(set(seen['env']) - {'WPSCAN_API_TOKEN'}, set(seen['env']) & set(wpscan_scan.CHILD_ENV_KEYS))
+        self.assertNotIn('db-secret', ' '.join(seen['env'].values()))
+        self.assertNotIn('key-secret', ' '.join(seen['env'].values()))
 
     def test_no_token_means_no_variable(self):
         with mock.patch.dict('os.environ', {'WPSCAN_API_TOKEN': 'leaked'}):

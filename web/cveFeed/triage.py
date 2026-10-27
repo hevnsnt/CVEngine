@@ -398,8 +398,10 @@ def closure_basis(match, context):
     ``different_product`` (a probe showed the host runs a look-alike, not the product the advisory names) and ``cdn_edge_only`` (a CDN, WAF or
     hosting edge answers for the host on DNS-level evidence, and the match rests on a web response: the banner or version came from the edge).
     Nothing the model says, and nothing a response header claims, creates one."""
-    from cveFeed import probes
+    from cveFeed import match_policy, probes
     basis = []
+    if match_policy.has_standing(match):
+        return basis  # a person, a template, a distribution tracker or the host itself vouches for it: no inference from the edge clears it
     if (context.get('edge') or {}).get('verified') and _web_evidence(match):
         basis.append('cdn_edge_only')
     if match.subdomain is not None and probes.lookalike_conflict(match.subdomain, match):

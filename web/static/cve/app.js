@@ -800,6 +800,11 @@ const WP_STATE_LABELS = {
   blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting", unavailable: "WPScan not available",
   not_wordpress: "Not WordPress",
 };
+// The thorough pass asks the site for every plugin and theme WPScan knows (hours per site) after the quick pass, in the background.
+const WP_THOROUGH_LABELS = {
+  pending: "Thorough pass queued (takes hours, runs in the background)", running: "Thorough pass running (takes hours)", done: "Thorough pass finished",
+  partial: "Thorough pass stopped early, what it read is kept", blocked: "Thorough pass blocked by the edge", failed: "Thorough pass failed",
+};
 const wordpressCard = (h) => {
   const wp = h.wordpress;
   if (!wp) return null;
@@ -814,6 +819,10 @@ const wordpressCard = (h) => {
   if (st.vulnerability_data) rows.push({ label: "Vulnerability data", value: st.vulnerability_data });
   if (st.next_scan) rows.push({ label: "Next scan", value: st.next_scan });
   if (st.hint) rows.push({ label: "What to do", value: st.hint });
+  if (st.thorough) {
+    rows.push({ label: "Thorough pass", value: WP_THOROUGH_LABELS[st.thorough.state] || st.thorough.state });
+    if (st.thorough.reason) rows.push({ label: "Thorough pass note", value: st.thorough.reason });
+  }
   box.append(kvBox(rows));
   const list = (title, items, withLatest) => {
     if (!items.length) return;

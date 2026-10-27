@@ -140,40 +140,10 @@ def _token(text):
 # ----------------------------------------------------------------------------- leads and the plan (no AI)
 
 def leads_for(sub):
-    """The products of ``sub`` seen without a version, the leads a probe can follow up. Uses the matching policy's list when that module
-    exists (it also drives the host page's unverified products), else the same rule here."""
-    try:
-        from cveFeed.match_policy import unversioned_products
-    except ImportError:
-        return _leads_without_policy(sub)
+    """The products of ``sub`` seen without a version, the leads a probe can follow up (the matching policy's list, which also drives the host
+    page's unverified products)."""
+    from cveFeed.match_policy import unversioned_products
     return unversioned_products(sub)
-
-
-def _leads_without_policy(sub):
-    from cveFeed.correlation import GENERIC_PRODUCT_TOKENS, parse_cpe, parse_version, split_name_version
-    from startScan.models import open_ports
-    seen, leads, versioned = set(), [], set()
-    candidates = []
-    for tech in sub.technologies.all():
-        name, version = split_name_version(tech.name or '')
-        candidates.append((name or (tech.name or '').strip(), bool(parse_version(version)), {'name': name, 'source': 'tech', 'source_id': tech.id}))
-    for ip in sub.ip_addresses.all():
-        for port in open_ports(ip):
-            version = (port.version or '').strip() or (parse_cpe(port.cpe or '') or ('', '', ''))[2]
-            candidates.append(((port.product or '').strip(), bool(parse_version(version)),
-                               {'name': (port.product or '').strip(), 'source': 'port', 'source_id': port.id, 'ip': ip.address,
-                                'port': port.number, 'service': port.service_name or ''}))
-    for name, has_version, _lead in candidates:
-        if has_version:
-            versioned.add(_token(name))
-    for name, has_version, lead in candidates:
-        token = _token(name)
-        key = (token, lead['source'], lead.get('port'))
-        if has_version or len(token) < 3 or token in GENERIC_PRODUCT_TOKENS or token in versioned or key in seen:
-            continue
-        seen.add(key)
-        leads.append(lead)
-    return leads
 
 
 def _lead_matches(probe, token, lead):

@@ -104,7 +104,7 @@ class SystemStatusTests(TestCase):
 		state(self.pa, self.da, 'blog.alpha.example', 'blocked', reason='the edge challenged the scanner')
 		state(self.pb, self.db, 'www.beta.example', 'failed')
 		_, data = self.get(self.t_member)
-		self.assertEqual(data['projects'][0]['wordpress'], {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}})
+		self.assertEqual(data['projects'][0]['wordpress'], {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}, 'thorough': {}})
 		self.assertEqual([p['slug'] for p in data['projects']], ['alpha'])  # the other project's WordPress host is not counted or shown
 
 	def test_an_app_admin_sees_every_project_and_the_infrastructure(self):

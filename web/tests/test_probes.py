@@ -80,7 +80,8 @@ class RuleTests(SimpleTestCase):
                      body='<meta name="generator" content="Drupal 10 (https://www.drupal.org)">')
         found = self.run_probe('headers-root', {'/': front})
         names = {(o['product'], o['version']) for o in found if o['kind'] == 'version'}
-        self.assertTrue({('Apache HTTP Server', '2.4.6'), ('PHP', '5.4.16'), ('ASP.NET', '4.0.30319'), ('Drupal', '10')} <= names)
+        self.assertTrue({('Apache HTTP Server', '2.4.6'), ('PHP', '5.4.16'), ('ASP.NET', '4.0.30319')} <= names)
+        self.assertFalse([o for o in found if o['product'] == 'Drupal' and o['version']])  # "Drupal 10" states no version: a bare major is never evidence
         self.assertEqual([(o['product'], o['outcome']) for o in found if o['kind'] == 'edge'], [('Cloudflare', 'edge')])
 
     def test_hostile_pages_cannot_inject_names_or_overflow(self):
@@ -144,15 +145,32 @@ class FetchTests(SimpleTestCase):
             with self.assertRaises(ValueError):
                 probes.fetch('https://internal.rt.test/', probe=mock.Mock(), sleep=lambda s: None)
 
-    def test_an_edge_challenge_is_retried_after_pauses_then_returned(self):
+    def test_an_edge_challenge_is_returned_at_once_and_never_pushed_against(self):
         challenge = {**page(503, headers={'server': 'cloudflare', 'cf-ray': 'x'}, title=''), 'challenge': ''}
         probe = mock.Mock(return_value=challenge)
         pauses = []
         with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
             got = probes.fetch('https://rt.test/', probe=probe, sleep=pauses.append)
+        self.assertEqual((probe.call_count, pauses), (1, []))
+        self.assertEqual(got['challenge'], 'Cloudflare')
+
+    def test_a_plain_try_later_is_asked_again_once_after_a_pause(self):
+        probe = mock.Mock(return_value=page(503, headers={'server': 'nginx'}))
+        pauses = []
+        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
+            got = probes.fetch('https://rt.test/', probe=probe, sleep=pauses.append)
         self.assertEqual(probe.call_count, len(probes.RETRY_DELAYS) + 1)
         self.assertEqual(pauses, list(probes.RETRY_DELAYS))
-        self.assertEqual(got['challenge'], 'Cloudflare')
+        self.assertEqual(got['challenge'], '')
+
+    def test_a_redirect_to_an_excluded_name_is_not_followed(self):
+        redirect = {**page(301), 'location': 'https://rt.test/'}
+        probe = mock.Mock(return_value=redirect)
+        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
+                mock.patch('cveFeed.archive_rediscovery.archived_names', return_value=frozenset()), \
+                mock.patch('cveFeed.exclusions.is_excluded', side_effect=lambda project, host: host == 'rt.test'):
+            with self.assertRaises(ValueError):
+                probes.fetch('https://www.rt.test/', probe=probe, sleep=lambda s: None, allowed={'www.rt.test', 'rt.test'}, project=1)
 
 
 NMAP_PROBE_XML = """<?xml version="1.0"?><nmaprun><scaninfo protocol="tcp" services="443"/><host><address addr="203.0.113.5" addrtype="ipv4"/><ports>
