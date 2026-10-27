@@ -107,6 +107,12 @@ def python_packages(requirements):
     return out
 
 
+def image_note(name):
+    if name.split('/', 1)[0] == 'registry.community.greenbone.net':
+        return 'optional OpenVAS add-on feed image: a moving tag on purpose, so the vulnerability definitions keep updating (what it holds changes without a cvENGINE release)'
+    return 'a moving tag, by design: refreshed with every update' if name == 'nginx' else 'a moving tag'
+
+
 def service_images(compose):
     out, seen = [], set()
     for image in re.findall(r'(?m)^\s*image:\s*"?([^"\s]+)"?\s*$', compose):
@@ -115,11 +121,13 @@ def service_images(compose):
         if image in seen or image.startswith('cvengine/'):
             continue
         seen.add(image)
+        image, _, digest = image.partition('@sha256:')  # a digest pin: the tag is a label, the digest is what runs
         name, _, tag = image.partition(':')
         tag = tag or 'latest'
         exact = bool(re.fullmatch(r'v?\d+(\.\d+){2,}', tag))
-        out.append(component(name, tag.lstrip('v') if exact else tag, f'pkg:docker/{name}@{tag}', kind='container', pinned=exact,
-                             note=None if exact else 'a moving tag, by design: refreshed with every update' if name == 'nginx' else 'a moving tag'))
+        out.append(component(name, tag.lstrip('v') if exact else tag, f'pkg:docker/{name}@{tag}', kind='container', pinned=exact or bool(digest),
+                             hashes=[digest] if digest else (),
+                             note=None if exact or digest else image_note(name)))
     return out
 
 

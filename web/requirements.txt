@@ -32,6 +32,7 @@ PyYAML==6.0.3
 PySocks==1.7.1
 psycopg2==2.9.13
 pymongo==4.19.0
+python-gvm==27.10.0
 PyMySQL==1.2.3
 redis==8.1.0
 requests==2.34.2

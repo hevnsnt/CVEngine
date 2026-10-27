@@ -45,6 +45,7 @@ services:
       - tool_config:/root/.config
       - static_volume:/usr/src/app/staticfiles/
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
+      - openvas_gvmd_socket_vol:/run/gvmd:ro  # the optional openvas profile's gvmd (GMP) socket (docs/OPENVAS.md); an empty directory without it, and only celery mounts it
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
     env_file:
@@ -236,8 +237,252 @@ services:
       - tailscale_state:/var/lib/tailscale
       - tailscale_status:/status
 
+  # Optional: OpenVAS (Greenbone Community Edition) as a vulnerability scanner. Off unless COMPOSE_PROFILES=openvas is in .env (or
+  # `docker compose --profile openvas up -d`, `make openvas-up`); without it none of these services exist, start or use memory. docs/OPENVAS.md has
+  # the hardware floor, the steps and what is not verified. This is the minimal set that exposes gvmd's GMP socket, taken from Greenbone's own
+  # compose file for the community containers (greenbone.github.io/docs, "Greenbone Community Containers"): without the web interface (gsa, gsad,
+  # nginx), the certificate generator and the gvm-tools shell. Only the celery container mounts gvmd's socket (read-only, see celery above); cvENGINE
+  # talks GMP to it with python-gvm (cveFeed/openvas_scan.py). The scanner containers are on a network of their own, not rengine_network, and publish
+  # no ports. Greenbone publishes no version tags, only the moving tags stable and community, so the program images are pinned by tag AND digest (to
+  # update, pick the new digests as docs/OPENVAS.md describes), while the feed data images (the vulnerability tests, scap, cert and gvmd data) follow
+  # their moving tag on purpose: they are data, refreshed daily and checked against Greenbone's GPG signing keys, and a pinned feed would be a stale one.
+  # The first start downloads the feeds, which takes a long time and several GB of disk: no scan is possible until it ends (Settings > OpenVAS says so).
+  openvas-vulnerability-tests:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/vulnerability-tests:community"
+    environment:
+      FEED_RELEASE: "24.10"
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_vt_data_vol:/mnt
+    networks:
+      - openvas_network
+
+  openvas-notus-data:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/notus-data:community"
+    environment:
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_notus_data_vol:/mnt
+    networks:
+      - openvas_network
+
+  openvas-scap-data:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/scap-data:community"
+    environment:
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_scap_data_vol:/mnt
+    networks:
+      - openvas_network
+
+  openvas-cert-bund-data:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/cert-bund-data:community"
+    environment:
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_cert_data_vol:/mnt
+    networks:
+      - openvas_network
+
+  openvas-dfn-cert-data:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/dfn-cert-data:community"
+    environment:
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_cert_data_vol:/mnt
+    depends_on:
+      openvas-cert-bund-data:
+        condition: service_healthy
+    networks:
+      - openvas_network
+
+  openvas-data-objects:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/data-objects:community"
+    environment:
+      FEED_RELEASE: "24.10"
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_data_objects_vol:/mnt
+    networks:
+      - openvas_network
+
+  openvas-report-formats:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/report-formats:community"
+    environment:
+      FEED_RELEASE: "24.10"
+      KEEP_ALIVE: 1
+    volumes:
+      - openvas_data_objects_vol:/mnt
+    depends_on:
+      openvas-data-objects:
+        condition: service_healthy
+    networks:
+      - openvas_network
+
+  openvas-gpg-data:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/gpg-data:stable@sha256:c18618252f7d874cd1fe09413b043cfc40b57e6464d8c5973d4a93b074d5d91a"
+    volumes:
+      - openvas_gpg_data_vol:/mnt
+    networks:
+      - openvas_network
+
+  openvas-redis:
+    profiles: ["openvas"]
+    restart: always
+    image: "registry.community.greenbone.net/community/redis-server:stable@sha256:83227e34b276bf7c7453a91bbfc070341af58f7ff40eb707ed6724965fe3846c"
+    volumes:
+      - openvas_redis_socket_vol:/run/redis/
+    networks:
+      - openvas_network
+
+  openvas-pg-gvm-migrator:
+    profiles: ["openvas"]
+    restart: "no"
+    image: "registry.community.greenbone.net/community/pg-gvm-migrator:stable@sha256:8fc1cc11cac0481674527e01ec7610a8195110cf117d700bd47fe3af7012b34d"
+    volumes:
+      - openvas_psql_data_vol:/var/lib/postgresql
+      - openvas_psql_socket_vol:/var/run/postgresql
+    networks:
+      - openvas_network
+
+  openvas-pg-gvm:
+    profiles: ["openvas"]
+    restart: always
+    image: "registry.community.greenbone.net/community/pg-gvm:stable@sha256:a18d9e2f0cbba7839e65547a2331ce8f984500e8c4fbe91d08f9a48036d03fa2"
+    volumes:
+      - openvas_psql_data_vol:/var/lib/postgresql
+      - openvas_psql_socket_vol:/var/run/postgresql
+    depends_on:
+      openvas-pg-gvm-migrator:
+        condition: service_completed_successfully
+    networks:
+      - openvas_network
+
+  openvas-gvmd:
+    profiles: ["openvas"]
+    restart: always
+    image: "registry.community.greenbone.net/community/gvmd:stable@sha256:e59a6a684b112ea77fe4ddd7e5ca35e6a07d36bf854f1b411d11d12f9b0c608a"
+    volumes:
+      - openvas_gvmd_data_vol:/var/lib/gvm
+      - openvas_scap_data_vol:/var/lib/gvm/scap-data/
+      - openvas_cert_data_vol:/var/lib/gvm/cert-data
+      - openvas_data_objects_vol:/var/lib/gvm/data-objects/gvmd
+      - openvas_vt_data_vol:/var/lib/openvas/plugins
+      - openvas_psql_data_vol:/var/lib/postgresql
+      - openvas_gvmd_socket_vol:/run/gvmd
+      - openvas_ospd_socket_vol:/run/ospd
+      - openvas_psql_socket_vol:/var/run/postgresql
+    depends_on:
+      openvas-pg-gvm:
+        condition: service_started
+      openvas-scap-data:
+        condition: service_healthy
+      openvas-cert-bund-data:
+        condition: service_healthy
+      openvas-dfn-cert-data:
+        condition: service_healthy
+      openvas-data-objects:
+        condition: service_healthy
+      openvas-report-formats:
+        condition: service_healthy
+    networks:
+      - openvas_network
+
+  # writes the scanner's configuration (notus, and where openvasd listens) into a volume, then exits
+  openvas-configure:
+    profiles: ["openvas"]
+    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee"
+    volumes:
+      - openvas_data_vol:/mnt
+      - openvas_log_data_vol:/var/log/openvas
+    command:
+      - /bin/sh
+      - -c
+      - |
+        printf "table_driven_lsc = yes\nopenvasd_server = http://openvasd:80\n" > /mnt/openvas.conf
+        sed "s/127/128/" /etc/openvas/openvas_log.conf | sed 's/gvm/openvas/' > /mnt/openvas_log.conf
+        chmod 644 /mnt/openvas.conf
+        chmod 644 /mnt/openvas_log.conf
+        touch /var/log/openvas/openvas.log
+        chmod 666 /var/log/openvas/openvas.log
+    networks:
+      - openvas_network
+
+  # notus, the static vulnerability engine for authenticated package checks (OPENVASD_MODE service_notus: nothing else), reachable only by name inside the add-on's network
+  openvas-openvasd:
+    profiles: ["openvas"]
+    restart: always
+    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee"
+    environment:
+      OPENVASD_MODE: service_notus
+      GNUPGHOME: /etc/openvas/gnupg
+      LISTENING: 0.0.0.0:80
+    volumes:
+      - openvas_data_vol:/etc/openvas
+      - openvas_log_data_vol:/var/log/openvas
+      - openvas_gpg_data_vol:/etc/openvas/gnupg
+      - openvas_notus_data_vol:/var/lib/notus
+    depends_on:
+      openvas-vulnerability-tests:
+        condition: service_healthy
+      openvas-notus-data:
+        condition: service_healthy
+      openvas-configure:
+        condition: service_completed_successfully
+      openvas-gpg-data:
+        condition: service_completed_successfully
+    networks:
+      openvas_network:
+        aliases:
+          - openvasd
+
+  # the scanner itself. It needs raw sockets (NET_RAW, NET_ADMIN) and the unconfined seccomp and AppArmor profiles Greenbone's compose file uses, which is why
+  # it is on its own network and why its scans leave by the Docker host's default route, never through the celery container (so no tailnet addresses: see docs/OPENVAS.md)
+  openvas-ospd:
+    profiles: ["openvas"]
+    restart: always
+    image: "registry.community.greenbone.net/community/ospd-openvas:stable@sha256:31a85272abc77521c98451ce6834ed7d2f887e98ff1b26ff3fd94f00d000b169"
+    hostname: ospd-openvas.local
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    command: ["ospd-openvas", "-f", "--config", "/etc/gvm/ospd-openvas.conf", "--notus-feed-dir", "/var/lib/notus/advisories", "-m", "666"]
+    volumes:
+      - openvas_gpg_data_vol:/etc/openvas/gnupg
+      - openvas_vt_data_vol:/var/lib/openvas/plugins
+      - openvas_notus_data_vol:/var/lib/notus
+      - openvas_ospd_socket_vol:/run/ospd
+      - openvas_redis_socket_vol:/run/redis/
+      - openvas_data_vol:/etc/openvas/
+      - openvas_log_data_vol:/var/log/openvas
+    depends_on:
+      openvas-redis:
+        condition: service_started
+      openvas-gpg-data:
+        condition: service_completed_successfully
+      openvas-configure:
+        condition: service_completed_successfully
+      openvas-vulnerability-tests:
+        condition: service_healthy
+      openvas-notus-data:
+        condition: service_healthy
+    networks:
+      - openvas_network
+
 networks:
   rengine_network:
+  openvas_network:
 
 volumes:
   tool_config:
@@ -249,6 +494,20 @@ volumes:
   static_volume:
   tailscale_state:
   tailscale_status:
+  openvas_gpg_data_vol:
+  openvas_scap_data_vol:
+  openvas_cert_data_vol:
+  openvas_data_objects_vol:
+  openvas_gvmd_data_vol:
+  openvas_psql_data_vol:
+  openvas_vt_data_vol:
+  openvas_notus_data_vol:
+  openvas_psql_socket_vol:
+  openvas_gvmd_socket_vol:
+  openvas_ospd_socket_vol:
+  openvas_redis_socket_vol:
+  openvas_data_vol:
+  openvas_log_data_vol:
 
 secrets:
   proxy.ca:
