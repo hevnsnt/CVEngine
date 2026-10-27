@@ -975,6 +975,7 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .host-tab[hidden]{display:none}
 .host-hdr{display:flex;flex-direction:column;gap:6px}
 .split-pane .host-head{gap:8px;align-items:center}
+.host-rescan[disabled]{background:var(--sunk);color:var(--faint);border-color:var(--line);opacity:1}
 .split-pane .host-title{font-size:26px;letter-spacing:-.045em;line-height:1.1;margin-right:2px;overflow-wrap:anywhere}
 .host-hdr>.sub,.host-hdr>.note{margin:0;font-size:13.5px;color:var(--muted)}
 .host-hdr>.sub{color:var(--ink-2)}

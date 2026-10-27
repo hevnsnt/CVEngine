@@ -2645,7 +2645,7 @@ const pages = {
         });
         if (job.status === "queued" || job.status === "running") {
           assessButton.disabled = true;
-          assessButton.textContent = "Assessment in progress";
+          assessButton.textContent = job.status === "queued" ? "Rescan queued" : "Scanning host";
           const stop = el("button", "btn ghost sm", "Stop assessment");
           stop.type = "button";
           stop.onclick = async () => {
@@ -2668,9 +2668,17 @@ const pages = {
       };
       assessButton.onclick = async () => {
         assessButton.disabled = true;
+        assessButton.textContent = "Queueing…";
         assessBody.textContent = "Queueing a fresh assessment…";
-        try { drawAssessment(await api("POST", assessPath, { host_id: h.id })); }
-        catch (e) { assessBody.textContent = e.message; assessButton.disabled = !!(h.excluded || h.archived); }
+        try {
+          drawAssessment(await api("POST", assessPath, { host_id: h.id }));
+          toast("Rescan queued");
+        } catch (e) {
+          assessBody.textContent = e.message;
+          assessButton.textContent = "Rescan host";
+          assessButton.disabled = !!(h.excluded || h.archived);
+          toast(e.message, true);
+        }
       };
       api("GET", `${assessPath}?host_id=${h.id}`).then(drawAssessment).catch((e) => {
         if (current === h.id) assessBody.textContent = e.message;
