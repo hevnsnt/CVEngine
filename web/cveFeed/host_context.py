@@ -120,10 +120,21 @@ def _os(sub, names):
         if ip.os_guess:
             guesses.append({'guess': _s(ip.os_guess, 80, names), 'accuracy': ip.os_accuracy,
                             'alternatives': [_s(m.get('name'), 80, names) for m in (fingerprint.get('os_matches') or [])[1:3] if isinstance(m, dict)]})
-        for key in ('runzero', 'facts', 'tailscale'):
+        for key in ('runzero', 'facts'):
             if isinstance(fingerprint.get(key), dict):
                 facts.setdefault(key, {k: _s(v, 80, names) for k, v in list(fingerprint[key].items())[:12] if isinstance(v, (str, int, float))})
     return {'guesses': guesses[:3], 'reported_by_other_tools': facts}
+
+
+def _tailscale(project_id, host):
+    """What Tailscale said about the device this host is (a tailnet device is a target named by its tailnet address), or None."""
+    from cveFeed.models import TailscaleDevice
+    row = TailscaleDevice.objects.filter(project_id=project_id, domain__name=host, departed_at__isnull=True).first()
+    if row is None:
+        return None
+    facts = {k: _s(v if not isinstance(v, (list, dict)) else json.dumps(v, default=str), 100) for k, v in list((row.facts or {}).items())[:15]
+             if isinstance(v, (str, int, float, bool, list))}
+    return {'online': row.online, **facts}
 
 
 def _certificates(project_id, host):
@@ -219,7 +230,7 @@ def host_context(sub, project_id=None, focus=None):
         'hosting': {k: _s(info.get(k), 60, names) for k in ('provider', 'kind', 'infrastructure')} | {'shared_ip': info['shared_ip']},
         'edge': {**edge, 'note': EDGE_NOTE if edge['fronted'] else ''},
         'labels': sorted({_s(label, 40) for label in HostLabel.objects.filter(project_id=project_id, host=host).values_list('label', flat=True)[:30]}),
-        'operating_system': _os(sub, names), 'certificates': _certificates(project_id, host), 'host_inventory': _inventory(project_id, host),
+        'operating_system': _os(sub, names), 'tailscale': _tailscale(project_id, host), 'certificates': _certificates(project_id, host), 'host_inventory': _inventory(project_id, host),
         'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host), 'other_cve_matches': _matches(sub, names),
         'wordpress': wordpress_summary(rows),
         'rules': [UNVERSIONED_NOTE] + ([EDGE_NOTE] if edge['fronted'] else []),

@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cveFeed", "0087_runzero_sync"),
+        ("cveFeed", "0089_tailscale_sync_schedule"),
         ("dashboard", "0027_ai_provider_lmstudio"),
         ("targetApp", "0004_domain_org_unique"),
     ]

@@ -344,3 +344,16 @@ class TechnologyIngestTests(SimpleTestCase):
     def test_the_prompt_builder_accepts_no_context_for_other_kinds(self):
         text = ai_providers.build_triage_prompt('nuclei', {'name': 'x'})
         self.assertNotIn('HOST_CONTEXT', text)
+
+
+class TailscaleFactsTests(ContextFixture, TestCase):
+    def test_a_tailnet_device_brings_its_facts_into_the_context(self):
+        from cveFeed.models import TailscaleDevice, TailscaleLink
+        link = TailscaleLink.objects.create(project=self.project)
+        TailscaleDevice.objects.create(link=link, project=self.project, node_id='n1', domain=self.domain, name='dev1', online=True,
+                                       facts={'os': 'linux', 'client_version': '1.80.0', 'tags': ['tag:server']})
+        self.sub.name = self.domain.name
+        self.sub.save()
+        context = host_context.host_context(self.fresh())
+        self.assertEqual((context['tailscale']['os'], context['tailscale']['online']), ('linux', True))
+        self.assertIn('tag:server', context['tailscale']['tags'])
