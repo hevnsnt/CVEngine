@@ -794,6 +794,60 @@ const technologyTable = (h) => {
   }
   return box;
 };
+// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions WPScan read.
+const WP_STATE_LABELS = {
+  scanned: "Scanned with WPScan", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
+  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting", unavailable: "WPScan not available",
+  not_wordpress: "Not WordPress",
+};
+const wordpressCard = (h) => {
+  const wp = h.wordpress;
+  if (!wp) return null;
+  const box = el("div", "tech-table wordpress");
+  box.append(el("h3", "sec", "WordPress"));
+  const st = wp.status || {};
+  const rows = [{ label: "Status", value: WP_STATE_LABELS[st.state] || st.state || "unknown" }];
+  if (st.reason) rows.push({ label: "Why", value: st.reason });
+  if (st.detected_how) rows.push({ label: "Detected by", value: st.detected_how });
+  if (wp.core) rows.push({ label: "Core version", value: wp.core });
+  if (st.scanned_at) rows.push({ label: "WPScan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
+  if (st.vulnerability_data) rows.push({ label: "Vulnerability data", value: st.vulnerability_data });
+  if (st.next_scan) rows.push({ label: "Next scan", value: st.next_scan });
+  if (st.hint) rows.push({ label: "What to do", value: st.hint });
+  box.append(kvBox(rows));
+  const list = (title, items, withLatest) => {
+    if (!items.length) return;
+    box.append(el("h3", "sec", `${title} (${items.length})`));
+    items.forEach((p) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", p.title || p.slug));
+      if (p.title) line.append(el("span", "note", p.slug));
+      line.append(el("span", "chip", p.version || "version not read"));
+      if (withLatest && p.outdated) line.append(badge(`outdated${p.latest ? `, latest ${p.latest}` : ""}`, "smoke"));
+      box.append(line);
+    });
+  };
+  list("Plugins", wp.plugins || [], true);
+  list("Themes", wp.themes || [], false);
+  return box;
+};
+// What version and identity probes found on the host: a version read, a product's identity, an edge, or a version that is hidden.
+const probeCard = (h) => {
+  const items = h.probes || [];
+  if (!items.length) return null;
+  const box = el("div", "tech-table probes");
+  box.append(el("h3", "sec", `Version and identity probes (${items.length})`));
+  items.forEach((p) => {
+    const line = el("div", "find tech-line");
+    const what = p.kind === "identity" ? `${p.product} is ${p.variant}` : p.kind === "edge" ? `edge: ${p.product}` : p.product;
+    line.append(el("strong", "", what));
+    if (p.version) line.append(el("span", "chip", p.version));
+    line.append(badge(p.outcome === "hidden" ? "version not stated" : p.outcome, p.outcome === "found" ? "success" : "queued"));
+    line.append(el("span", "note", `${p.probe}, ${p.source}`));
+    box.append(line);
+  });
+  return box;
+};
 // A port's RDP login-screen capture (cveFeed.rdp_shot): the image, exactly as read by the AI (never guessed), and its summary.
 // Only ever present when nmap already confirmed the server accepts a connection without Network Level Authentication.
 const rdpShotCard = (shot) => {
@@ -2720,6 +2774,9 @@ const pages = {
       }
       const techBox = technologyTable(h);
       if (techBox) OV.side.append(techBox);
+      [wordpressCard(h), probeCard(h)].forEach((card) => {
+        if (card) OV.side.append(card);
+      });
       const history = el("div", "history");
       S.changes.append(history);
       api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "365d", page_size: 200 })}`)

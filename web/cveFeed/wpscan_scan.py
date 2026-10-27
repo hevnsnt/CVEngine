@@ -1,17 +1,23 @@
-"""WPScan for the WordPress sites CVEngine already found.
+"""WPScan as the primary WordPress assessment.
 
-A host is scanned only after an earlier stage fingerprinted it as WordPress (a technology row or a route fingerprint), never
-blind. WPScan runs read-only (version, plugin, theme, config-backup and database-export detection, and listing the first
-author ids; no password guessing). Its known-vulnerability data comes from the wpscan.com API, so the token is a project or
-organization API key (Settings, API keys, WPScan), handed to WPScan in its environment and never on the command line or in a
-log. Without a token WPScan still reports versions, plugins and exposures, only without vulnerability data.
+Every host that shows any sign of WordPress is checked: a technology tag, a header or page signature, the login page, the REST API,
+the web archive's memory of the host, plugin or theme paths in crawled URLs, an earlier probe. A cheap read-only probe
+(``cveFeed.probes``, probe ``wordpress-detect``) confirms the signature with browser-like requests, follows apex and www redirects, and
+records an edge that challenged the scanner instead of concluding "not WordPress". Then WPScan runs on every candidate and on every name of
+a grouped host that probes positive. Nothing is skipped silently: each candidate ends in a recorded state on the host (``state_of``).
 
-Results become scanner findings (source ``wpscan``, with CVE ids where WPScan names them) and technology rows, so they reach
-the Findings view and CVE correlation like every other finding. A site is scanned at most once a week (the service ledger).
+WPScan runs read-only (version, plugins, themes, config backups, database exports, timthumbs and the first author ids; no password
+guessing). Its vulnerability data comes from the wpscan.com API, so the token is a project or organization API key (Settings, API keys,
+WPScan), given to WPScan in its environment and never on the command line or in a log. The free plan allows 25 requests a day: when the
+budget is spent WPScan still runs without the token (versions, plugins, themes, exposures and users come from the scan itself) and the
+host says its vulnerability data was not checked.
 
-WPScan's own licence allows testing your own systems and penetration testing, and requires a commercial licence for managed or
-hosted services (see docs/CONFIGURATION.md).
-"""
+Results become findings (source ``wpscan``, with CVE ids where WPScan names them and what to do about them), technology rows and, for the
+core, every plugin and every theme, versioned sightings (``ProbeObservation`` rows) that ``cveFeed.wp_correlation`` correlates with CVEs by
+exact plugin identity.
+
+WPScan's own licence allows testing your own systems and penetration testing, and requires a commercial licence for managed or hosted
+services (see docs/CONFIGURATION.md)."""
 import json
 import logging
 import os
@@ -19,21 +25,47 @@ import re
 import shutil
 import subprocess
 import tempfile
+from datetime import timedelta
+
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
 WPSCAN_BIN = 'wpscan'
 SERVICE = 'wpscan'
+PARTIAL_SERVICE = 'wpscan-partial'  # a run that finished but could not check vulnerability data: asked again soon
+PROBE_SERVICE = 'wp-probe'
 DEFAULT_TIMEOUT = 15 * 60
-DEFAULT_MAX_SITES = 10
-ENUMERATE = 'vp,vt,cb,dbe,u1-10'
+DEFAULT_MAX_SITES = 20
+# WPScan 4: plugins are no longer enumerated by default, so the tokens are explicit. ap and at list every plugin and theme the site shows
+# (with versions, no API token needed); tt timthumbs; cb config backups; dbe database exports; u1-10 the first author ids. vp and vt only
+# report vulnerable ones and need the API, so they cannot give versions without a token.
+ENUMERATE = 'ap,at,tt,cb,dbe,u1-10'
 MAX_OUTPUT = 8 * 1024 * 1024
-FLAGS = ['--format', 'json', '--no-banner', '--random-user-agent', '--max-threads', '5', '--request-timeout', '30',
-         '--connect-timeout', '15', '--detection-mode', 'mixed', '--disable-tls-checks', '--enumerate', ENUMERATE]
-OK_EXIT_CODES = (0, 5)  # 5 means "vulnerabilities found"
+# --throttle waits between requests (and runs WPScan on one thread): gentle on the site and on its WAF. --plugins-detection stays passive for
+# "ap": with mixed or aggressive WPScan asks for every plugin it knows, tens of thousands of requests.
+FLAGS = ['--format', 'json', '--no-banner', '--random-user-agent', '--throttle', '250', '--request-timeout', '30', '--connect-timeout', '15',
+         '--detection-mode', 'mixed', '--disable-tls-checks', '--enumerate', ENUMERATE]
+OK_EXIT_CODES = (0, 5)  # 5 means "vulnerabilities found"; 1 bad option, 2 interrupted, 3 unexpected exception, 4 the scan did not finish
 # severity of WPScan's "interesting findings" by their type; unlisted types are informational
-INTERESTING_SEVERITY = {'config_backup': 3, 'db_export': 3, 'debug_log': 2, 'upload_directory_listing': 1, 'multisite': 0}
+INTERESTING_SEVERITY = {'config_backup': 3, 'db_export': 3, 'debug_log': 2, 'upload_directory_listing': 1, 'multisite': 0, 'xmlrpc': 1,
+                        'registration': 1, 'search_replace_db2': 3, 'full_path_disclosure': 1}
 CVE_PART = re.compile(r'^(?:CVE-)?(\d{4}-\d{4,})$', re.I)
+NOT_WORDPRESS = re.compile(r'not seem to be running wordpress', re.I)
+BLOCKED = re.compile(r'\b(?:403|429|503|forbidden|blocked|waf|firewall|captcha|challenge|access denied|too many requests)\b', re.I)
+VULN_DATA = {'checked': 'checked', 'no_token': 'not checked: no API token', 'exhausted': 'not checked: API token budget exhausted'}
+# any of these in a technology name says the host runs (or is hosted for) WordPress
+WP_TECH = re.compile(r'^(wordpress|woocommerce|wp ?engine|elementor|wpml|yoast|wp-)', re.I)
+WP_URL = r'/wp-(content|includes|json|login\.php|admin)|/xmlrpc\.php'
+STATES = ('not_wordpress', 'candidate', 'detected', 'scanned', 'blocked', 'failed', 'waiting', 'unavailable')
+
+
+class NotWordPress(ValueError):
+    """WPScan could reach the site and it is not WordPress."""
+
+
+class Blocked(RuntimeError):
+    """WPScan was refused or challenged by an edge (a 403, 429 or 503, a captcha or a challenge page)."""
 
 
 def wpscan_timeout():
@@ -48,6 +80,13 @@ def max_sites():
         return max(1, int(os.environ.get('CVENGINE_WPSCAN_MAX_SITES', DEFAULT_MAX_SITES)))
     except ValueError:
         return DEFAULT_MAX_SITES
+
+
+def max_probe_hosts():
+    try:
+        return max(1, int(os.environ.get('CVENGINE_WP_PROBE_MAX_HOSTS', 100)))
+    except ValueError:
+        return 100
 
 
 def installed():
@@ -68,35 +107,97 @@ def severity_from_score(score):
     return 4 if score >= 9 else 3 if score >= 7 else 2 if score >= 4 else 1
 
 
-def wordpress_sites(scan):
-    """``[(Subdomain, base URL)]`` for this scan's hosts that were fingerprinted as WordPress, excluded and blocked names removed."""
-    from cveFeed.models import RouteAuth
-    from startScan.models import Subdomain
-    allowed, _ips, _ports = _scan_targets(scan)
-    subs = {s.name: s for s in Subdomain.objects.filter(scan_history=scan, name__in=allowed)}
-    names = {n for n, s in subs.items() if s.technologies.filter(name__istartswith='wordpress').exists()}
-    routes = RouteAuth.objects.filter(project_id=scan.domain.project_id, host__in=list(subs), retired_at__isnull=True)
-    for host, evidence in routes.values_list('host', 'evidence'):
-        found = [str(n) for n in (evidence or {}).get('fingerprint_names') or []]
-        if any(n.lower().startswith('wordpress') for n in found):
-            names.add(host)
-    sites = []
-    for name in sorted(names):
-        sub = subs[name]
-        base = (sub.http_url or f'https://{name}').split('?')[0]
-        sites.append((sub, base if base.startswith(('http://', 'https://')) else f'https://{name}'))
-    return sites
-
+# ----------------------------------------------------------------------------- candidates: any sign of WordPress
 
 def _scan_targets(scan):
     from cveFeed.nuclei_scan import scan_targets
     return scan_targets(scan)
 
 
+def candidate_signals(scan, subs):
+    """``{host name: [signal, ...]}`` for the scan's hosts that show any sign of WordPress: a live technology tag, a route check fingerprint or
+    wp-login page, a crawled URL under wp-content, a title or label, the web archive's memory of the host, an earlier positive probe or scan."""
+    from cveFeed.models import HostArchive, HostLabel, ProbeObservation, RouteAuth
+    from startScan.models import EndPoint
+    project = scan.domain.project_id
+    names = {s.name.lower() for s in subs}
+    found = {}
+
+    def add(host, signal):
+        host = (host or '').lower()
+        if host in names and signal not in found.setdefault(host, []):
+            found[host].append(signal)
+    for sub in subs:
+        if any(WP_TECH.match(t.name or '') for t in sub.technologies.all()):
+            add(sub.name, 'technology tag')
+        if re.search(r'wordpress', sub.page_title or '', re.I):
+            add(sub.name, 'page title')
+        if re.search(r'wp ?engine', sub.webserver or '', re.I):
+            add(sub.name, 'server header')
+    for host, path, state, evidence in RouteAuth.objects.filter(project_id=project, host__in=list(names), retired_at__isnull=True).values_list(
+            'host', 'path', 'auth_state', 'evidence'):
+        if any(str(n).lower().startswith('wordpress') for n in (evidence or {}).get('fingerprint_names') or []):
+            add(host, 'front page fingerprint')
+        if path.startswith('/wp-login') and state == 'login':  # a login form at wp-login.php; a catch-all that answers 200 to every path is not one
+            add(host, f'route {path}')
+    for host, tech in HostArchive.objects.filter(project_id=project, host__in=list(names)).values_list('host', 'technologies'):
+        if any(str(k).lower().startswith('wordpress') for k in (tech or {})):
+            add(host, 'web archive')
+    for host in EndPoint.objects.filter(scan_history=scan, http_url__iregex=WP_URL).values_list('subdomain__name', flat=True)[:5000]:
+        add(host, 'crawled WordPress path')
+    for host in HostLabel.objects.filter(project_id=project, host__in=list(names), label__icontains='wordpress').values_list('host', flat=True):
+        add(host, 'host label')
+    for host, probe in ProbeObservation.objects.filter(project_id=project, host__in=list(names), kind='wordpress', outcome='found',
+                                                       probe__in=('wordpress-detect', 'wpscan')).values_list('host', 'probe'):
+        add(host, 'earlier probe' if probe == 'wordpress-detect' else 'earlier scan')
+    return found
+
+
+def siblings_of(subs, hosts):
+    """Names that share an address with a host in ``hosts`` (one site, several names: apex, www, stage): probed too, and scanned when they
+    probe positive."""
+    by_ip = {}
+    for sub in subs:
+        for ip in sub.ip_addresses.all():
+            by_ip.setdefault(ip.address, set()).add(sub.name.lower())
+    out = set()
+    for names in by_ip.values():
+        if names & hosts:
+            out |= names
+    return out - hosts
+
+
+def wordpress_sites(scan):
+    """``[(Subdomain, base URL)]`` for this scan's hosts with any sign of WordPress, excluded and blocked names removed."""
+    from startScan.models import Subdomain
+    allowed, _ips, _ports = _scan_targets(scan)
+    subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses'))
+    found = candidate_signals(scan, subs)
+    by_name = {s.name.lower(): s for s in subs}
+    return [(by_name[name], _base_of(by_name[name])) for name in sorted(found)]
+
+
+def _base_of(sub):
+    base = (sub.http_url or f'https://{sub.name}').split('?')[0]
+    return base if base.startswith(('http://', 'https://')) else f'https://{sub.name}'
+
+
+# ----------------------------------------------------------------------------- running WPScan
+
+def _read_report(path):
+    if not os.path.exists(path) or os.path.getsize(path) > MAX_OUTPUT:
+        return None
+    with open(path, encoding='utf-8', errors='replace') as f:
+        try:
+            return json.load(f)
+        except ValueError:
+            return None
+
+
 def run_wpscan_process(url, token, timeout=None):
-    """Run WPScan on one site and return its parsed JSON report. The token travels in the environment. Raises on a timeout, a
-    bad exit code or unreadable output; an unreachable-or-not-WordPress site (exit 4) is a ``ValueError`` the caller treats as
-    "nothing to report"."""
+    """Run WPScan on one site and return its parsed JSON report. The token travels in the environment. Raises on a timeout, a bad exit
+    code or unreadable output. Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (the
+    site is up and is not WordPress, or nothing readable), ``Blocked`` (an edge refused or challenged WPScan) or a ``RuntimeError``."""
     env = {k: v for k, v in os.environ.items() if k != 'WPSCAN_API_TOKEN'}
     if token:
         env['WPSCAN_API_TOKEN'] = token
@@ -105,13 +206,18 @@ def run_wpscan_process(url, token, timeout=None):
         proc = subprocess.run([WPSCAN_BIN, '--url', url, *FLAGS, '-o', out], env=env, timeout=timeout or wpscan_timeout(),
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if proc.returncode == 4:
-            raise ValueError('not running WordPress, or not reachable')
+            reason = str((_read_report(out) or {}).get('scan_aborted') or '')
+            if reason and not NOT_WORDPRESS.search(reason):
+                if BLOCKED.search(reason):
+                    raise Blocked(_redact(reason, token))
+                raise RuntimeError(_redact(reason, token))
+            raise NotWordPress('not running WordPress, or not reachable')
         if proc.returncode not in OK_EXIT_CODES:
             raise RuntimeError(_redact((proc.stderr or '').strip().splitlines()[-1] if proc.stderr else f'exit {proc.returncode}', token))
-        if not os.path.exists(out) or os.path.getsize(out) > MAX_OUTPUT:
+        report = _read_report(out)
+        if report is None:
             raise RuntimeError('WPScan wrote no usable report')
-        with open(out, encoding='utf-8', errors='replace') as f:
-            return json.load(f)
+        return report
 
 
 def _redact(text, token):
@@ -132,8 +238,8 @@ def _urls(references):
 
 
 def _vuln_rows(report, base):
-    """``[(name, severity, description, cves, references, component)]`` from one WPScan report: the vulnerabilities of the core,
-    the main theme, every plugin and theme, plus exposures it listed."""
+    """``[(name, severity, description, cves, references, component)]`` from one WPScan report: the vulnerabilities of the core, the main
+    theme, every plugin and theme, what WPScan found exposed, users, and components it calls outdated. Each says what to do."""
     rows = []
 
     def add(component, version, items):
@@ -141,27 +247,45 @@ def _vuln_rows(report, base):
         for v in items or []:
             cvss = v.get('cvss') or {}
             fixed = v.get('fixed_in')
-            note = f'Fixed in {fixed}.' if fixed else 'No fixed version is listed.'
+            note = f'Fixed in {fixed}. Remediation: update {component} to {fixed} or later.' if fixed else (
+                'No fixed version is listed. Remediation: remove or replace the component, or restrict access to it.')
             rows.append((f'{label}: {v.get("title", "known vulnerability")}'[:500], severity_from_score(cvss.get('score')),
                          f'{note} Reported by WPScan for {label}.', _cves(v.get('references')), _urls(v.get('references')), component))
+
+    def outdated(component, info):
+        latest = info.get('latest_version')
+        version = (info.get('version') or {}).get('number')
+        if info.get('outdated') and latest and version:
+            rows.append((f'{component} {version} is outdated (latest {latest})'[:500], 1,
+                         f'WPScan reports {component} {version}; the latest release is {latest}. Remediation: update {component}.',
+                         [], [], f'{component} outdated'))
     version = report.get('version') or {}
     add('WordPress', version.get('number') or '', version.get('vulnerabilities'))
+    if version.get('status') == 'outdated' and version.get('number'):
+        rows.append((f'WordPress {version["number"]} is outdated'[:500], 1,
+                     f'WPScan reports WordPress {version["number"]} as outdated. Remediation: update WordPress.', [], [], 'WordPress outdated'))
     theme = report.get('main_theme') or {}
     add(f'WordPress theme {theme.get("slug", "")}', (theme.get('version') or {}).get('number') or '', theme.get('vulnerabilities'))
+    if theme.get('slug'):
+        outdated(f'WordPress theme {theme["slug"]}', theme)
     for kind, items in (('plugin', report.get('plugins')), ('theme', report.get('themes'))):
         for slug, info in (items or {}).items():
             add(f'WordPress {kind} {slug}', (info.get('version') or {}).get('number') or '', info.get('vulnerabilities'))
+            outdated(f'WordPress {kind} {slug}', info)
     for item in report.get('interesting_findings') or []:
         kind = str(item.get('type') or '')
         severity = INTERESTING_SEVERITY.get(kind)
         if severity is None:
             continue  # headers, robots, readme and the like are not findings
-        rows.append((f'WordPress: {item.get("to_s", kind)}'[:500], severity, f'WPScan found {kind.replace("_", " ")} at {item.get("url", base)}.',
-                     [], _urls(item.get('references')), kind))
+        rows.append((f'WordPress: {item.get("to_s", kind)}'[:500], severity, f'WPScan found {kind.replace("_", " ")} at {item.get("url", base)}. '
+                     'Remediation: remove or restrict access to it.', [], _urls(item.get('references')), kind))
     users = sorted((report.get('users') or {}))[:10]
     if users:
-        rows.append(('WordPress usernames can be listed', 1, 'The author archive or REST API names these accounts: ' + ', '.join(users) + '.',
-                     [], [], 'users'))
+        rows.append(('WordPress usernames can be listed', 1, 'The author archive or REST API names these accounts: ' + ', '.join(users) +
+                     '. Remediation: block author enumeration and the users REST route for anonymous requests.', [], [], 'users'))
+    for name in sorted((report.get('timthumbs') or {}))[:5]:
+        rows.append((f'WordPress: timthumb found at {name}'[:500], 3, 'An old TimThumb script is a well known remote file inclusion risk. '
+                     'Remediation: delete it or update to a current release.', [], [], 'timthumb'))
     return rows
 
 
@@ -180,6 +304,30 @@ def _technologies(report):
     if theme.get('slug') and (theme.get('version') or {}).get('number'):
         names.append(f'WordPress theme {theme["slug"]}:{theme["version"]["number"]}')
     return sorted(set(names))[:60]
+
+
+def components(report):
+    """``[(kind, slug, version, extra)]`` for the core, every plugin and every theme in a report (kind ``core``, ``wp-plugin``, ``wp-theme``);
+    a component whose version WPScan could not read has an empty version. Slugs are cut to a safe alphabet."""
+    out = [('core', 'WordPress', str((report.get('version') or {}).get('number') or ''), {'status': (report.get('version') or {}).get('status') or ''})]
+    for kind, items in (('wp-plugin', report.get('plugins')), ('wp-theme', report.get('themes'))):
+        for slug, info in list((items or {}).items())[:200]:
+            slug = re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80]
+            if slug and isinstance(info, dict):
+                out.append((kind, slug, str((info.get('version') or {}).get('number') or ''),
+                            {'latest': str(info.get('latest_version') or '')[:30], 'outdated': bool(info.get('outdated')),
+                             'found_by': str(info.get('found_by') or '')[:60]}))
+    return out
+
+
+def vulnerability_data(report, token):
+    """Whether WPScan could check vulnerability data: ``checked``, ``no_token`` or ``exhausted`` (the API refused or has no requests left)."""
+    api = report.get('vuln_api') or {}
+    if not token:
+        return 'no_token'
+    if api.get('error') or (isinstance(api.get('requests_remaining'), int) and api['requests_remaining'] < 0):
+        return 'exhausted'
+    return 'checked'
 
 
 def persist_report(scan, sub, url, report):
@@ -203,60 +351,265 @@ def persist_report(scan, sub, url, report):
     return new, added
 
 
+README_TITLE = re.compile(r'^===\s*(.{1,120}?)\s*===', re.M)
+MAX_TITLE_LOOKUPS = 8
+
+
+def plugin_titles(base, report, allowed, get=None, sleep=None, project=None):
+    """``{slug: title}`` read from each plugin's own readme.txt (``=== Plugin Name ===``, one small GET, at most MAX_TITLE_LOOKUPS per host): an
+    advisory names a plugin by its title, and a slug alone often differs from it. A plugin whose readme cannot be read has no title."""
+    import time
+
+    from cveFeed import probes
+    get = get or (lambda url: probes.fetch(url, allowed=allowed, project=project))
+    out = {}
+    for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]:
+        slug = re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80]
+        if not slug:
+            continue
+        (sleep or time.sleep)(probes.REQUEST_GAP)
+        try:
+            found = README_TITLE.search((get(f'{base.rstrip("/")}/wp-content/plugins/{slug}/readme.txt') or {}).get('body') or '')
+        except (OSError, ValueError):
+            continue
+        if found:
+            out[slug] = re.sub(r'[^A-Za-z0-9 ._+&()-]', '', found.group(1))[:120]
+    return out
+
+
+def record_components(project_id, domain_id, host, report, titles=None):
+    """Store the core, plugin and theme versions WPScan read as sightings the CVE correlation uses (with the plugin title when a readme gave
+    one); a plugin that is no longer reported is removed. Returns the number of plugins and themes with a version."""
+    from cveFeed.models import ProbeObservation
+    titles = titles or {}
+    now = timezone.now()
+    keep = {'wpscan-plugin': set(), 'wpscan-theme': set()}
+    versioned = 0
+    for kind, slug, version, extra in components(report):
+        probe = {'core': 'wpscan-core', 'wp-plugin': 'wpscan-plugin', 'wp-theme': 'wpscan-theme'}[kind]
+        ProbeObservation.objects.update_or_create(
+            project_id=project_id, host=host.lower(), probe=probe, port=0, kind='version' if kind == 'core' else kind, product=slug,
+            defaults={'domain_id': domain_id, 'version': version[:100],
+                      'outcome': 'found' if version else 'hidden', 'confidence': 0.9 if version else 0.5, 'source': 'wpscan',
+                      'evidence': {**extra, **({'title': titles[slug]} if slug in titles else {})}, 'observed_at': now})
+        if kind != 'core':
+            keep[probe].add(slug)
+            versioned += int(bool(version))
+    for probe, slugs in keep.items():
+        ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe=probe).exclude(product__in=slugs).delete()
+    return versioned
+
+
 def remaining_requests(report):
     """WPScan API requests the token has left, from the report, or None when it does not say."""
     value = (report.get('vuln_api') or {}).get('requests_remaining')
     return value if isinstance(value, int) else None
 
 
-def run_wpscan(scan_id, runner=None, force=False):
-    """The pipeline stage: WPScan every WordPress site of the scan not scanned in the last week. Returns a summary dict;
-    ``error`` is set only when every attempted site failed."""
-    from cveFeed import activity, ledger
-    from startScan.models import ScanHistory
+# ----------------------------------------------------------------------------- states: what happened to each candidate, on the host
+
+def record_state(project_id, domain_id, host, state, reason='', **extra):
+    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no WPScan result."""
+    from cveFeed.models import ProbeObservation
+    ProbeObservation.objects.update_or_create(
+        project_id=project_id, host=host.lower(), probe='wpscan', port=0, kind='wordpress', product='WordPress',
+        defaults={'domain_id': domain_id, 'version': str(extra.get('version') or '')[:100], 'variant': state,
+                  'outcome': {'scanned': 'found', 'blocked': 'challenged', 'not_wordpress': 'absent'}.get(state, 'hidden'),
+                  'confidence': 1.0 if state == 'scanned' else 0.0, 'source': 'wpscan',
+                  'evidence': {'state': state, 'reason': str(reason)[:300], **{k: v for k, v in extra.items() if k != 'version'}},
+                  'observed_at': timezone.now()})
+
+
+def state_of(rows):
+    """``{'state', 'reason', 'detected_how', ...}`` for one host from its probe rows, or None when nothing suggests WordPress. The scan's own
+    state wins; without one, a positive probe is "detected" and any other sign is "candidate"."""
+    scan = next((r for r in rows if r.probe == 'wpscan'), None)
+    detect_row = next((r for r in rows if r.probe == 'wordpress-detect'), None)
+    base = {'detected_how': detect_row.source if detect_row and detect_row.outcome == 'found' else '',
+            'probe': detect_row.outcome if detect_row else '', 'hint': ((detect_row.evidence or {}).get('hint') if detect_row else '') or ''}
+    if scan is not None:
+        evidence = scan.evidence or {}
+        return {**base, 'state': evidence.get('state') or 'failed', 'reason': evidence.get('reason', ''), 'scanned_at': scan.observed_at.isoformat(),
+                'findings': evidence.get('findings'), 'vulnerability_data': evidence.get('vulnerability_data', ''),
+                'next_scan': evidence.get('next_scan', ''), 'core': scan.version}
+    if detect_row is not None:
+        if detect_row.outcome == 'found':
+            return {**base, 'state': 'detected', 'reason': 'WordPress was detected; WPScan has not run on it yet', 'core': detect_row.version}
+        if detect_row.outcome == 'challenged':
+            return {**base, 'state': 'blocked', 'reason': 'the edge challenged the scanner, so WordPress could not be confirmed'}
+        if detect_row.outcome == 'absent':
+            return {**base, 'state': 'not_wordpress', 'reason': 'the probe found no WordPress signature'}
+    signals = next((r for r in rows if r.probe == 'wordpress-signals'), None)
+    if signals is not None:
+        return {**base, 'state': 'candidate', 'reason': 'signs of WordPress: ' + ', '.join((signals.evidence or {}).get('signals') or [])}
+    return None
+
+
+def record_signals(project_id, domain_id, host, signals):
+    from cveFeed.models import ProbeObservation
+    ProbeObservation.objects.update_or_create(
+        project_id=project_id, host=host.lower(), probe='wordpress-signals', port=0, kind='wordpress', product='WordPress',
+        defaults={'domain_id': domain_id, 'outcome': 'found', 'confidence': 0.5, 'source': (signals[0] if signals else '')[:48],
+                  'evidence': {'signals': signals[:10]}, 'observed_at': timezone.now()})
+
+
+def status_counts(project_ids=None):
+    """``{'hosts', 'scanned', 'never_scanned', 'reasons': {state: n}}`` over the hosts with any WordPress state: the system status line."""
+    from cveFeed.models import ProbeObservation
+    qs = ProbeObservation.objects.filter(kind='wordpress', probe__in=('wpscan', 'wordpress-detect', 'wordpress-signals'))
+    if project_ids is not None:
+        qs = qs.filter(project_id__in=project_ids)
+    by_host = {}
+    for row in qs.order_by('project_id', 'host'):
+        by_host.setdefault((row.project_id, row.host), []).append(row)
+    reasons, scanned, hosts = {}, 0, 0
+    for rows in by_host.values():
+        state = state_of(rows)
+        if state is None or state['state'] == 'not_wordpress':
+            continue
+        hosts += 1
+        if state['state'] == 'scanned':
+            scanned += 1
+        else:
+            reasons[state['state']] = reasons.get(state['state'], 0) + 1
+    return {'hosts': hosts, 'scanned': scanned, 'never_scanned': hosts - scanned, 'reasons': reasons}
+
+
+# ----------------------------------------------------------------------------- the stage
+
+def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
+    """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
+    Returns ``{host: first observation}`` for the hosts probed now."""
+    from cveFeed import ledger, probes, route_auth
+    from reNgine import resources
+    project, domain = scan.domain.project_id, scan.domain
+    by_name = {s.name.lower(): s for s in subs}
+    siblings = siblings_of(subs, set(candidates))
+    web = {name for name, s in by_name.items() if route_auth.web_bases(s)}
+    order = list(dict.fromkeys(sorted(set(candidates) & web) + sorted(siblings & web) + sorted(web)))[:max_probe_hosts()]
+    covered = set() if force else ledger.fresh(PROBE_SERVICE, order, project)
+    group = set(candidates) | siblings
+    results = {}
+    kwargs = {'get': probe_get, 'project': project} if probe_get else {'project': project}
+    if sleep:
+        kwargs['sleep'] = sleep
+    for host in order:
+        if host in covered:
+            continue
+        if resources.abort_requested(scan.id) or resources.global_pause_requested(fail_closed=True):
+            break
+        sub = by_name[host]
+        allowed = (group & set(by_name)) | probes.allowed_names(sub)
+        found = []
+        for base in route_auth.web_bases(sub):
+            try:
+                found = probes.run_http_probe('wordpress-detect', base, allowed, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - one host failing never stops the rest
+                logger.info('WordPress probe failed for %s: %s', host, type(exc).__name__)
+                found = []
+            if found and found[0]['outcome'] == 'found':
+                break
+        if not found:
+            ledger.record(PROBE_SERVICE, [host], project, scan, 'failed')
+            continue
+        probes.record(project, domain.id, host, 'wordpress-detect', found)
+        if found[0]['outcome'] == 'found':
+            probes.apply_to_subdomain(sub, found)
+        ledger.record(PROBE_SERVICE, [host], project, scan, 'failed' if found[0]['outcome'] == 'challenged' else 'done')
+        results[host] = found[0]
+    return results
+
+
+def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
+    """The pipeline stage: probe for WordPress, then WPScan every host that shows any sign of it (and every grouped name that probes
+    positive), positive probes first. Never silent: every candidate gets a recorded state. Returns a summary dict; ``error`` is set only when
+    every attempted site failed."""
+    from cveFeed import activity, ledger, probes, wp_correlation
+    from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
-    project, domain = scan.domain.project, scan.domain
+    project, domain = scan.domain.project_id, scan.domain
     runner = runner or run_wpscan_process
+    allowed, _ips, _ports = _scan_targets(scan)
+    subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports'))
+    by_name = {s.name.lower(): s for s in subs}
+    signals = candidate_signals(scan, subs)
+    for host, found in signals.items():
+        record_signals(project, domain.id, host, found)
+    probed = detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force)
+    positive = {h for h, o in probed.items() if o['outcome'] == 'found'}
+    for host in sorted(h for h, o in probed.items() if o['outcome'] == 'absent' and h not in signals):
+        record_state(project, domain.id, host, 'not_wordpress', 'the probe found no WordPress signature')
+    wanted = sorted(set(signals) | positive, key=lambda h: (h not in positive, h))
+    summary = {'candidates': len(signals), 'probed': len(probed), 'sites': len(wanted), 'scanned': 0, 'findings': 0, 'technologies': 0, 'reused': 0}
+    wp_correlation.carry_forward(scan)
+    if not wanted:
+        return summary
     if runner is run_wpscan_process and not installed():
-        return {'sites': 0, 'skipped': 'wpscan is not installed'}
-    sites = wordpress_sites(scan)
-    if not sites:
-        return {'sites': 0}
-    covered = set() if force else ledger.fresh(SERVICE, [s.name for s, _ in sites], project.id)
-    todo = [(s, u) for s, u in sites if s.name not in covered][:max_sites()]
+        for host in wanted:
+            record_state(project, domain.id, host, 'unavailable', 'WPScan is not installed in this worker image')
+        return {**summary, 'skipped': 'wpscan is not installed'}
+    fresh = set() if force else ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
+    summary['reused'] = len([h for h in wanted if h in fresh])
+    todo = [h for h in wanted if h not in fresh]
+    for host in todo[max_sites():]:
+        record_state(project, domain.id, host, 'waiting', f'over the per-scan limit of {max_sites()} sites; it goes first next time')
+    todo = todo[:max_sites()]
     if not todo:
-        return {'sites': len(sites), 'scanned': 0, 'reused': len(covered)}
-    token = api_token(project)
+        return summary
+    token = api_token(domain.project)
     running = activity.log('run_check', f'WPScan is checking {len(todo)} WordPress site(s) of {domain.name}'
-                           + ('' if token else ' (no API token: versions and exposures only)'),
+                           + ('' if token else ' (no API token: versions, plugins and exposures only)'),
                            project=project, status='running', scan_id=scan.id)
-    findings = added = 0
-    errors, scanned = [], []
-    for sub, url in todo:
+    errors, scanned, token_ok = [], [], bool(token)
+    for host in todo:
+        sub, url = by_name[host], _base_of(by_name[host])
+        use = token if token_ok else ''
         try:
-            report = runner(url, token)
-        except ValueError as exc:  # not WordPress after all: nothing to report, and no reason to ask again for a week
-            ledger.record(SERVICE, [sub.name], project.id, scan)
-            errors.append(f'{sub.name}: {exc}')
+            report = runner(url, use)
+        except ValueError as exc:  # NotWordPress (or any ValueError a runner raises): up and not WordPress: nothing to report, and no reason to ask again soon
+            ledger.record(SERVICE, [host], project, scan)
+            record_state(project, domain.id, host, 'not_wordpress', str(exc))
+            errors.append(f'{host}: {exc}')
+            continue
+        except Blocked as exc:
+            ledger.record(SERVICE, [host], project, scan, 'failed')
+            record_state(project, domain.id, host, 'blocked', _hint(str(exc), token))
+            errors.append(f'{host}: blocked by the edge')
             continue
         except Exception as exc:  # noqa: BLE001 - one site failing must not stop the rest
-            logger.warning('wpscan failed for %s: %s', sub.name, _redact(str(exc), token))
-            ledger.record(SERVICE, [sub.name], project.id, scan, 'failed')
-            errors.append(f'{sub.name}: {_redact(str(exc), token)}')
+            logger.warning('wpscan failed for %s: %s', host, _redact(str(exc), token))
+            ledger.record(SERVICE, [host], project, scan, 'failed')
+            record_state(project, domain.id, host, 'failed', _redact(str(exc), token))
+            errors.append(f'{host}: {_redact(str(exc), token)}')
             continue
         new, techs = persist_report(scan, sub, url, report)
-        findings, added = findings + new, added + techs
-        ledger.record(SERVICE, [sub.name], project.id, scan)
-        scanned.append(sub.name)
+        titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project)
+        versioned = record_components(project, domain.id, host, report, titles)
+        data = 'exhausted' if token and not use else vulnerability_data(report, use)  # a site run after the budget ran out has no vulnerability data
         left = remaining_requests(report)
-        if left is not None and left <= 0:
-            errors.append('the WPScan API token has no requests left today; the remaining sites wait')
-            break
-    summary = {'sites': len(sites), 'scanned': len(scanned), 'findings': findings, 'technologies': added, 'reused': len(covered)}
+        if data == 'exhausted' or (left is not None and left <= 0):
+            token_ok = False
+        partial = data == 'exhausted'  # a token that could not be used: asked again soon. Without any token a run cannot be more complete
+        service = PARTIAL_SERVICE if partial else SERVICE
+        ledger.record(service, [host], project, scan)
+        record_state(project, domain.id, host, 'scanned', '', version=(report.get('version') or {}).get('number') or '',
+                     findings=len(_vuln_rows(report, url)), new_findings=new, plugins=versioned, vulnerability_data=VULN_DATA[data],
+                     next_scan=(timezone.now() + timedelta(seconds=ledger.ttl(service))).date().isoformat())
+        wp_correlation.run_for_host(sub)
+        summary['findings'] += new
+        summary['technologies'] += techs
+        scanned.append(host)
+    summary['scanned'] = len(scanned)
     failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
-    message = (f'WPScan finished {domain.name}: {len(scanned)} site(s), {findings} new finding(s)'
+    message = (f'WPScan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
+               + ('; the API token budget ran out, so later sites were scanned without vulnerability data' if token and not token_ok else '')
                + (f'; {len(errors)} problem(s): {errors[0]}' if errors else ''))
     activity.settle(running, 'failed' if failed_all else 'done', message=message, **summary)
     if failed_all:
         summary['error'] = errors[0][:290]
     return summary
+
+
+def _hint(reason, token):
+    return ('the edge refused or challenged WPScan (' + _redact(reason, token)[:120] + '). Allow the scanner\'s address or user agent in the WAF or '
+            'bot rules for this host, then rescan; cvENGINE never tries to get past a challenge')

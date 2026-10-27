@@ -594,9 +594,15 @@ def validate_match_on_demand(request_id):
         template = validation.resolve_template(match.cve_entry.cve_id)
         available_checks, plan_notes = validation.plan_checks(subject, row.signature, template)
         available_checks = [check for check in available_checks if check]
+        if not any(check['kind'] == 'fact_probe' for check in available_checks):
+            from cveFeed import probes
+            plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
+                              'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
         planning = activity.log('confirm', f'Validation request #{job.pk}: choosing permitted checks for {cve_id}',
                                 project=job.project_id, cve_id=cve_id, status='running', **detail)
-        plan, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, available_checks, template)
+        from cveFeed import host_context
+        host = host_context.clipped(host_context.host_context(match.subdomain, job.project_id, focus=match.matched_product))
+        plan, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, available_checks, template, host=host)
         selected = set(plan['check_kinds'])
         checks = [check for check in available_checks if check['kind'] in selected]
         plans = [plan]
@@ -631,7 +637,7 @@ def validate_match_on_demand(request_id):
             second_step = activity.log('confirm', f'Validation request #{job.pk}: reviewing observations and choosing the next check',
                                        project=job.project_id, cve_id=cve_id, status='running', **detail)
             second, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, remaining, template,
-                                                    provider=provider, observations=observations)
+                                                    provider=provider, observations=observations, host=host)
             next_kinds = set(second['check_kinds'])
             plans.append(second)
             activity.settle(second_step, 'done', f'Validation request #{job.pk}: {second["reason"]}',

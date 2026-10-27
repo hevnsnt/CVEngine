@@ -1141,7 +1141,14 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
     host_key = (sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())
     rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
-    return {'id': sub.id, 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
+    from cveFeed import host_context
+    probe_rows = ((shared or {}).get('probes') or {}).get(host_key) or []
+    return {'id': sub.id,
+            # what version and identity probes and WPScan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
+            'probes': [{'probe': r.probe, 'kind': r.kind, 'product': r.product, 'version': r.version, 'variant': r.variant, 'outcome': r.outcome,
+                        'confidence': r.confidence, 'source': r.source, 'observed_at': r.observed_at.isoformat()}
+                       for r in probe_rows if r.kind in ('version', 'identity', 'edge')][:40],
+            'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
             'screenshot': bool(sub.screenshot_path),
@@ -1279,7 +1286,11 @@ def _shared_for(project, subs):
     rdp_shots = {}
     for row in RdpScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}):
         rdp_shots.setdefault((row.project_id, row.host), {})[row.port] = row
-    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots}
+    from cveFeed.models import ProbeObservation
+    probe_rows = {}
+    for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}).order_by('-observed_at'):
+        probe_rows.setdefault((row.project_id, row.host), []).append(row)
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'probes': probe_rows}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}

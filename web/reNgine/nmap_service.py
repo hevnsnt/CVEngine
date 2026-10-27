@@ -26,6 +26,19 @@ def _host_ip(host):
     return None
 
 
+def _os_alternatives(host, limit=3):
+    """The best ``limit`` OS guesses of a host as ``[{name, accuracy, cpe}]``: nmap ranks many guesses and the first is often only a few
+    points ahead of a different family, so the runners-up are kept for whoever reads the guess."""
+    out = []
+    for match in _as_list((host.get("os") or {}).get("osmatch"))[:limit]:
+        if not isinstance(match, dict):
+            continue
+        classes = [c for c in _as_list(match.get("osclass")) if isinstance(c, dict)]
+        cpes = [x for c in classes for x in _as_list(c.get("cpe")) if isinstance(x, str)]
+        out.append({"name": str(match.get("@name", ""))[:100], "accuracy": match.get("@accuracy"), "cpe": (cpes or [""])[0][:120]})
+    return out
+
+
 def _host_os(host):
     """Best OS match (name, accuracy) from an nmap <host><os> element, if any."""
     os_el = host.get("os") or {}
@@ -66,6 +79,34 @@ def _banner_from(scripts, service):
     return raw.strip()[:BANNER_CAP]
 
 
+def parse_ssl_cert(text):
+    """``{subject, issuer, sans, not_before, not_after, key, signature}`` from the ssl-cert script's output (``Subject: commonName=...``
+    lines); only the fields it printed, each clipped. {} for output that is not a certificate."""
+    out = {}
+    for raw in str(text or "").splitlines():
+        key, _, value = raw.strip().partition(":")
+        value = value.strip()
+        if not value:
+            continue
+        if key == "Subject":
+            out["subject"] = value[:300]
+        elif key == "Issuer":
+            out["issuer"] = value[:300]
+        elif key == "Subject Alternative Name":
+            out["sans"] = [part.strip()[:200] for part in value.split(",") if part.strip()][:40]
+        elif key == "Not valid before":
+            out["not_before"] = value[:40]
+        elif key == "Not valid after":
+            out["not_after"] = value[:40]
+        elif key == "Public Key type":
+            out["key_type"] = value[:20]
+        elif key == "Public Key bits":
+            out["key_bits"] = value[:10]
+        elif key == "Signature Algorithm":
+            out["signature"] = value[:60]
+    return out if "subject" in out else {}
+
+
 def _service_record(port):
     """One port's service record from an nmap <port> element, including any NSE <script> output and a banner."""
     service = port.get("service") or {}
@@ -82,10 +123,15 @@ def _service_record(port):
         "service_extra": service.get("@extrainfo", "") or "",
         "ostype": service.get("@ostype", "") or "",
         "method": service.get("@method", "") or "",  # "probed" (it answered) or "table" (guessed from the port number)
+        "tunnel": service.get("@tunnel", "") or "",  # "ssl": the service speaks TLS (name="http" tunnel="ssl" is HTTPS)
+        "hostname": service.get("@hostname", "") or "",  # a name the service gave for itself (SMTP and IMAP greetings, SSH banners)
+        "devicetype": service.get("@devicetype", "") or "",
+        "confidence": service.get("@conf", "") or "",  # nmap's 1-10 certainty that the product and version are right
         "cpe": cpes[0] if cpes else "",
         "cpes": cpes,
         "scripts": scripts,
         "banner": _banner_from(scripts, service),
+        "tls": parse_ssl_cert(scripts.get("ssl-cert")),
     }
 
 
@@ -139,6 +185,7 @@ def extract_nmap_inventory(nmap_results):
             "ip": _host_ip(host),
             "os_guess": os_guess,
             "os_accuracy": os_accuracy,
+            "os_matches": _os_alternatives(host),
             "ports": records,
             "hostscripts": _scripts(host.get("hostscript")),  # smb-os-discovery, nbstat: attach to the host, not a port
             "status": (host.get("status") or {}).get("@state", "up") if isinstance(host.get("status"), dict) else "up",

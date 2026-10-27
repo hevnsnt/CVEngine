@@ -520,7 +520,16 @@ TRIAGE_SYSTEM_PROMPT = (
 	'Use "confirmed" only when the evidence itself shows the problem is present; your own reasoning is not evidence. Use '
 	'"needs_validation" when you cannot tell. Use "likely_false_positive" only when the evidence points away from the '
 	'finding. validation_steps are advice for a person: never write commands. The CVE may carry "guidance": earlier notes about what '
-	'makes it apply or what makes a match false. Treat it as a hint that may be wrong; the evidence in this finding decides. ' + UNTRUSTED_NOTICE)
+	'makes it apply or what makes a match false. Treat it as a hint that may be wrong; the evidence in this finding decides. '
+	'A HOST_CONTEXT block, when present, is everything cvENGINE holds about the host: read it before you answer. Decide from it, in this '
+	'order. 1) Is the product the advisory names the same product the host runs (nginx is not ingress-nginx or nginx-ui; a plugin is not '
+	'its CMS)? 2) Is the version found inside the advisory range, and did a probe state it or only a banner? 3) Is the host behind a CDN, '
+	'WAF or hosting edge (host_context.edge)? Then the Server header, X-Powered-By and error pages describe the edge, so the origin product '
+	'and version are unknown: a tag such as cloudflare names the edge, not an application; say that instead of assuming an origin. '
+	'4) Does the advisory need local state (kernel, driver, hardware, a local account)? Then no network evidence settles it: answer '
+	'needs_validation and say the host inventory reporter is what decides. Use likely_false_positive or not_applicable only when you can '
+	'name concrete metadata that points away: a different product, a version out of range or patched, or edge-only evidence. A banner or '
+	'tag that says nothing about a version is no reason to close a finding and none to confirm it. ' + UNTRUSTED_NOTICE)
 
 
 def _triage_text(value, limit):
@@ -605,34 +614,36 @@ def _triage_clean(value, depth=0):
 	return clean_text(value, 200, strict=True)
 
 
-def build_triage_prompt(kind, payload):
+def build_triage_prompt(kind, payload, host_context=None):
 	"""The user message for one finding: its kind and its cleaned, structured evidence between nonce markers. No hostname, no
-	raw request or response, no secret ever goes in: ``payload`` is built from structured columns and is cleaned again here."""
-	return f'Finding kind: {clean_text(kind, 20, strict=True)}\n' + untrusted_block('FINDING', _triage_clean(payload))
+	raw request or response, no secret ever goes in: ``payload`` is built from structured columns and is cleaned again here.
+	``host_context`` (cveFeed.host_context, already cleaned) is a second untrusted block: what is known about the host."""
+	text = f'Finding kind: {clean_text(kind, 20, strict=True)}\n' + untrusted_block('FINDING', _triage_clean(payload))
+	return text + ('\n' + untrusted_block('HOST_CONTEXT', host_context) if host_context else '')
 
 
-def build_repair_prompt(kind, payload, reply, reason):
+def build_repair_prompt(kind, payload, reply, reason, host_context=None):
 	"""The original request again, with the model's rejected reply and exactly why it was rejected, so it can answer correctly. The earlier
 	reply goes back as untrusted text (it was written from untrusted evidence), cleaned and capped."""
-	return (build_triage_prompt(kind, payload) + '\n\nYour previous reply was REJECTED by the validator: ' + reason + '.\n'
+	return (build_triage_prompt(kind, payload, host_context) + '\n\nYour previous reply was REJECTED by the validator: ' + reason + '.\n'
 			'Answer the original request again. Reply with ONLY one JSON object that has exactly the keys in the schema you were given, '
 			'with the types the schema gives. No other text, no markdown fence, no extra keys.\n'
 			+ untrusted_block('REJECTED_REPLY', clean_text(str(reply), 2500)))
 
 
-def triage_finding(provider, kind, payload):
+def triage_finding(provider, kind, payload, host_context=None):
 	"""Ask ``provider`` to triage one finding. Returns {'parsed': dict, 'model': 'provider:model'} (plus 'repaired': True when the first
 	reply was rejected and the second was fine); the raw reply is dropped. A reply that fails validation is sent back to the model once,
 	with why it failed, and the second answer is the one that counts. Raises AIProviderError when the provider cannot be reached or the
 	second reply is also unusable (category schema_invalid, with the reason)."""
 	import hashlib
 	with usage_stage('finding_triage'):
-		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload))
+		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload, host_context))
 	parsed, reason = validate_triage(reply)
 	repaired = False
 	if parsed is None:
 		with usage_stage('finding_triage_repair'):
-			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason))
+			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason, host_context))
 		parsed, second = validate_triage(reply)
 		if parsed is None:
 			digest = hashlib.sha256(str(reply).encode()).hexdigest()[:12]

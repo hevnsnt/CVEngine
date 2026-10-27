@@ -6,25 +6,12 @@ detected technology. A target controls its own headers and pages, so every name 
 is capped; the evidence for each says where it came from."""
 import re
 
+from cveFeed import versions
+from cveFeed.versions import POWERED_BY_PRODUCTS, SAFE_NAME, SERVER_PRODUCTS, VERSION  # defined with the header parsers
+
 MAX_FINGERPRINTS = 20
 MAX_NAME = 60
-SAFE_NAME = re.compile(r"[^A-Za-z0-9 .+#_-]")
-VERSION = re.compile(r"\d[A-Za-z0-9.+_-]{0,30}")
 
-# Server header product -> stored name. The first word of the header is the product, "/" separates its version.
-SERVER_PRODUCTS = {
-    "nginx": "nginx", "apache": "Apache HTTP Server", "microsoft-iis": "Microsoft IIS", "openresty": "OpenResty",
-    "litespeed": "LiteSpeed", "caddy": "Caddy", "gunicorn": "Gunicorn", "kestrel": "Kestrel", "tomcat": "Apache Tomcat", "apache-coyote": "Apache Tomcat", "apache tomcat": "Apache Tomcat",
-    "jetty": "Jetty", "lighttpd": "lighttpd", "envoy": "Envoy", "traefik": "Traefik", "haproxy": "HAProxy",
-    "netlify": "Netlify", "vercel": "Vercel", "cloudflare": "Cloudflare", "cloudfront": "Amazon CloudFront",
-    "amazons3": "Amazon S3", "github.com": "GitHub Pages", "akamaighost": "Akamai", "fastly": "Fastly",
-    "varnish": "Varnish", "gws": "Google Web Server", "awselb": "AWS Elastic Load Balancing", "heroku": "Heroku",
-}
-POWERED_BY_PRODUCTS = {
-    "php": "PHP", "asp.net": "ASP.NET", "express": "Express", "next.js": "Next.js", "craft cms": "Craft CMS",
-    "seomatic": "SEOmatic", "wp engine": "WP Engine", "phusion passenger": "Phusion Passenger", "servd": "Servd",
-    "laravel": "Laravel", "drupal": "Drupal", "plesk": "Plesk", "nuxt": "Nuxt.js", "django": "Django",
-}
 # Tags are found first with a pattern that cannot run past the next '<' and then read attribute by attribute: a page full of
 # '<meta ' with no '>' used to make the one-pattern forms quadratic, and the scanned host controls the page.
 _META_TAG_RE = re.compile(r"<meta\b[^<>]{0,2000}>", re.IGNORECASE)
@@ -67,7 +54,8 @@ def _versioned(name, version):
 
 
 def _parse_products(value, table, source):
-    """Entries of a Server or X-Powered-By style header: "PHP/8.2.30", "nginx/1.25.3 (Ubuntu)", "Craft CMS"."""
+    """Entries of an X-Powered-By style header: "PHP/8.2.30", "Craft CMS". (The Server header goes through
+    ``versions.parse_server_header``, which also reads the modules an Apache header lists.)"""
     out = []
     for part in re.split(r",", value or ""):
         part = part.strip()
@@ -83,19 +71,18 @@ def _parse_products(value, table, source):
     return out
 
 
-def from_response(server="", powered_by="", body="", content_type="", scripts=(), script_bodies=()):
+def from_response(server="", powered_by="", body="", content_type="", scripts=(), script_bodies=(), headers=None):
     """``[{'name', 'source'}]`` for one response, de-duplicated, at most MAX_FINGERPRINTS, in the order found. ``scripts`` are the
-    script URLs the page loads and ``script_bodies`` the text of ones read from the same host."""
-    found = []
-    found += _parse_products(server, SERVER_PRODUCTS, "header:server")
+    script URLs the page loads and ``script_bodies`` the text of ones read from the same host. ``headers`` (every response header the
+    caller kept) adds what the version headers state (X-AspNet-Version, X-Generator, Via, a framework's own headers)."""
+    found = [(c["name"], "header:server") for c in versions.parse_server_header(server)["components"]]
     found += _parse_products(powered_by, POWERED_BY_PRODUCTS, "header:x-powered-by")
+    found += [(f["name"], f["source"]) for f in versions.parse_headers(headers or {})
+              if f["source"] not in ("header:server", "header:x-powered-by")]
     text = body or ""
     if text and (not content_type or "html" in content_type):
-        value = generator_content(text).strip()
-        if value:
-            product = re.match(r"([A-Za-z][A-Za-z0-9 .!+_-]*?)(?:[ /]+(\d[\w.+-]*))?(?:\s|$|[-(,])", value + " ")
-            if product:
-                found.append((_versioned(product.group(1).rstrip(" .!-"), product.group(2) or ""), "meta:generator"))
+        for product, version in versions.generator_tags(text):
+            found.append((_versioned(product, version), "meta:generator"))
         for pattern, name, source in BODY_MARKERS:
             if pattern.search(text):
                 found.append((name, source))

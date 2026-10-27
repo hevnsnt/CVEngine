@@ -24,6 +24,7 @@ from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
+from cveFeed import versions
 
 """
 Celery tasks.
@@ -84,6 +85,9 @@ def persist_bbot_result(result, ctx):
 		if subdomain is None and ctx.get('scan_history_id'):  # found in an earlier streaming batch
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		if not subdomain:
+			continue
+		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
+		if not tech_name:
 			continue
 		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
 		subdomain.technologies.add(tech)

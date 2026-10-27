@@ -4,7 +4,7 @@ from django.test import SimpleTestCase, TestCase
 
 from cveFeed import discovery, wpscan_scan
 from cveFeed.api_credentials import SERVICES, used_in_scans
-from cveFeed.models import RouteAuth, ServiceRun
+from cveFeed.models import ProbeObservation, RouteAuth, ServiceRun
 from dashboard.models import ApiCredential
 from startScan.models import ScanActivity, Subdomain, Technology, Vulnerability
 from tests.test_route_auth import RouteFixture
@@ -103,12 +103,18 @@ class StageTests(RouteFixture, TestCase):
         self.wp.technologies.add(Technology.objects.create(name='WordPress'))
         self.calls = []
 
+    def go(self, *args, **kw):
+        kw.setdefault('probe_get', lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
+                                                'content_type': '', 'final_url': url, 'url': url})
+        kw.setdefault('sleep', lambda s: None)
+        return wpscan_scan.run_wpscan(self.scan_obj.id, *args, **kw)
+
     def runner(self, url, token):
         self.calls.append((url, token))
         return REPORT
 
     def test_only_wordpress_hosts_are_scanned_and_findings_are_saved(self):
-        out = wpscan_scan.run_wpscan(self.scan_obj.id, runner=self.runner)
+        out = self.go(runner=self.runner)
         self.assertEqual([c[0] for c in self.calls], ['https://www.rt.test'])
         self.assertEqual((out['scanned'], out['findings']), (1, 4))
         vuln = Vulnerability.objects.get(name__startswith='WordPress 6.4.2')
@@ -124,15 +130,15 @@ class StageTests(RouteFixture, TestCase):
         self.assertEqual([s.name for s, _ in wpscan_scan.wordpress_sites(self.scan_obj)], ['plain.rt.test', 'www.rt.test'])
 
     def test_each_site_is_scanned_once_a_week(self):
-        wpscan_scan.run_wpscan(self.scan_obj.id, runner=self.runner)
-        again = wpscan_scan.run_wpscan(self.scan_obj.id, runner=self.runner)
+        self.go(runner=self.runner)
+        again = self.go(runner=self.runner)
         self.assertEqual((len(self.calls), again['scanned']), (1, 0))
-        wpscan_scan.run_wpscan(self.scan_obj.id, runner=self.runner, force=True)
+        self.go(runner=self.runner, force=True)
         self.assertEqual(len(self.calls), 2)
 
     def test_the_project_token_is_used(self):
         ApiCredential.objects.create(project=self.project, service='wpscan', value={'api_key': 'abc123'})
-        wpscan_scan.run_wpscan(self.scan_obj.id, runner=self.runner)
+        self.go(runner=self.runner)
         self.assertEqual(self.calls[0][1], 'abc123')
 
     def test_a_failing_site_is_reported_but_the_rest_continue(self):
@@ -143,27 +149,37 @@ class StageTests(RouteFixture, TestCase):
             if 'blog' in url:
                 raise RuntimeError('timed out')
             return REPORT
-        out = wpscan_scan.run_wpscan(self.scan_obj.id, runner=runner)
+        out = self.go(runner=runner)
         self.assertEqual(out['scanned'], 1)
         self.assertNotIn('error', out)
         self.assertEqual(ServiceRun.objects.get(service='wpscan', asset='blog.rt.test').status, 'failed')
 
     def test_every_site_failing_is_an_error_and_a_non_wordpress_site_is_not(self):
-        out = wpscan_scan.run_wpscan(self.scan_obj.id, runner=mock.Mock(side_effect=RuntimeError('boom')))
+        out = self.go(runner=mock.Mock(side_effect=RuntimeError('boom')))
         self.assertIn('boom', out['error'])
         ServiceRun.objects.all().delete()
-        out = wpscan_scan.run_wpscan(self.scan_obj.id, runner=mock.Mock(side_effect=ValueError('not running WordPress')))
+        out = self.go(runner=mock.Mock(side_effect=ValueError('not running WordPress')))
         self.assertNotIn('error', out)
 
-    def test_stops_when_the_api_budget_is_spent(self):
+    def test_when_the_api_budget_is_spent_the_next_site_is_still_scanned_without_the_token(self):
         other = Subdomain.objects.create(name='blog.rt.test', target_domain=self.domain, scan_history=self.scan_obj)
         other.technologies.add(Technology.objects.get(name='WordPress'))
-        out = wpscan_scan.run_wpscan(self.scan_obj.id, runner=lambda url, token: {**REPORT, 'vuln_api': {'requests_remaining': 0}})
-        self.assertEqual(out['scanned'], 1)
+        ApiCredential.objects.create(project=self.project, service='wpscan', value={'api_key': 'abc123'})
+        calls = []
+
+        def runner(url, token):
+            calls.append((url, token))
+            return {**REPORT, 'vuln_api': {'requests_remaining': 0}}
+        out = self.go(runner=runner)
+        self.assertEqual(out['scanned'], 2)
+        self.assertEqual([t for _u, t in calls], ['abc123', ''])  # the second site runs with no token: versions and exposures, no vulnerability data
+        state = wpscan_scan.state_of(list(ProbeObservation.objects.filter(host='www.rt.test')))
+        self.assertEqual(state['vulnerability_data'], 'not checked: API token budget exhausted')
+        self.assertTrue(ServiceRun.objects.filter(service='wpscan-partial', asset='www.rt.test').exists())  # asked again soon, not in a week
 
     def test_skipped_without_the_binary(self):
         with mock.patch('cveFeed.wpscan_scan.installed', return_value=False):
-            self.assertEqual(wpscan_scan.run_wpscan(self.scan_obj.id)['skipped'], 'wpscan is not installed')
+            self.assertEqual(self.go()['skipped'], 'wpscan is not installed')
 
     def test_the_pipeline_runs_the_stage_only_for_wordpress_sites(self):
         stages = []
@@ -172,7 +188,8 @@ class StageTests(RouteFixture, TestCase):
             discovery._run_stages(self.scan_obj.id, {'scan_id': self.scan_obj.id, 'status': discovery.SUCCESS}, hygiene=False,
                                   nmap_runner=lambda targets, flags, timeout: '', db_exposure_checks={}, provider=None,
                                   light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-                                  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, wpscan_runner=runner)
+                                  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, wpscan_runner=runner,
+                                  probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '', 'final_url': url, 'url': url})
         self.assertEqual(stages, ['https://www.rt.test'])
         self.assertTrue(ScanActivity.objects.filter(scan_of=self.scan_obj, name='wpscan').exists())
 

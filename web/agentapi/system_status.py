@@ -55,7 +55,7 @@ def _update():
 
 def _projects(ctx):
     from agentapi.services import _allowed_ids
-    from cveFeed import counts
+    from cveFeed import counts, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
     from dashboard.models import Project
     from startScan.models import ScanHistory
@@ -73,6 +73,8 @@ def _projects(ctx):
                       'stalled': counts.stalled_scans(scans).count()},
             'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
             'cve_matches': snap['cve_matches'],
+            # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
+            'wordpress': wpscan_scan.status_counts([project.id]),
         })
     return rows
 

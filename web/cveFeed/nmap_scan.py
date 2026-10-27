@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 NMAP_BIN = 'nmap'
 # NSE scripts that read what a service says about itself and its host. All are in nmap's safe or discovery categories and none
 # exploits anything: banner (the raw greeting), ssh-hostkey and ssh2-enum-algos (SSH server identity), ssl-cert (certificate
-# subject, issuer, validity), http-headers and http-title, ftp-anon (whether anonymous login is accepted, and the top level
+# subject, issuer, validity), http-headers, http-title, http-server-header (the Server header when -sV could not read it) and
+# http-generator (the generator meta tag of the front page: one GET), ftp-anon (whether anonymous login is accepted, and the top level
 # listing it shows), rdp-ntlm-info (the OS build, host and domain names RDP's NTLM challenge reveals, without logging in),
 # rdp-enum-encryption (which RDP security layers the server accepts, so a server that does not insist on NLA is visible),
 # smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). mysql-info, mongodb-info, redis-info,
@@ -30,7 +31,8 @@ NMAP_BIN = 'nmap'
 # reads a credential-protected value; cveFeed.db_intel turns their output into Port.version/Port.extra, and
 # cveFeed.db_exposure separately tests whether a database answers a real query with no authentication at all. Scripts only
 # run on ports whose service matches.
-NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'ftp-anon',
+NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'http-server-header', 'http-generator',
+               'ftp-anon',
                'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat', 'mysql-info', 'ms-sql-info',
                'ms-sql-ntlm-info', 'mongodb-info', 'redis-info', 'memcached-info', 'couchdb-stats')
 NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
@@ -208,6 +210,9 @@ def persist_inventory(inventory, source='nmap', org_id=None):
             ip_obj.last_seen = now
             fit_columns(ip_obj)
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
+            if host.get('os_matches'):  # the runners-up: a guess a few points ahead of another family is not settled
+                ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_matches': host['os_matches']}
+                ip_obj.save(update_fields=['fingerprint'])
             hosts_with_os += 1
         host_scripts = _reviewed_scripts(host.get('hostscripts'))
         if host_scripts:
@@ -229,6 +234,10 @@ def persist_inventory(inventory, source='nmap', org_id=None):
                 # a different product answers on this port now: the version, CPE and banner belonged to the old one, and a scan that
                 # reports none for the new one must not leave them behind to be matched against its CVEs
                 port.version = port.service_extra = port.cpe = port.banner = ''
+            elif port.pk and rec.get('product') and rec.get('method') == 'probed' and not rec.get('version') and not _cpe_version(rec):
+                # the same product answered and no longer states a version (server_tokens off, an upgrade): the old version, and the CPE
+                # that carried it, are not what runs there now
+                port.version = port.cpe = ''
             for field in ('protocol', 'state', 'product', 'version', 'service_extra', 'cpe'):
                 if rec.get(field):
                     setattr(port, field, rec[field])
@@ -237,7 +246,10 @@ def persist_inventory(inventory, source='nmap', org_id=None):
             # everything nmap said, not just the first CPE: the OS CPE carries the distro release, and "table" means the service
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
-                          'method': rec.get('method', '')}
+                          'method': rec.get('method', ''), 'tunnel': rec.get('tunnel', ''), 'hostname': rec.get('hostname', ''),
+                          'devicetype': rec.get('devicetype', ''), 'confidence': rec.get('confidence', '')}
+            if rec.get('tls'):
+                port.tls = rec['tls']  # the certificate ssl-cert read, in the same place bbot's TLS facts go
             kept_scripts = _reviewed_scripts(rec.get('scripts'))
             if kept_scripts:
                 port.extra['scripts'] = kept_scripts  # this run's reviewed NSE output; a run with none kept leaves the last in place
@@ -258,6 +270,12 @@ def persist_inventory(inventory, source='nmap', org_id=None):
             ports_written += 1
         close_unreported_ports(ip_obj, host)
     return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
+
+
+def _cpe_version(rec):
+    """The version an application CPE of this record states, or ''."""
+    from cveFeed.correlation import parse_cpe
+    return next((parsed[2] for parsed in (parse_cpe(c) for c in rec.get('cpes') or [rec.get('cpe', '')]) if parsed and parsed[2]), '')
 
 
 def fit_columns(instance):

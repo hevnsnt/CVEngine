@@ -521,7 +521,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None):
+                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -584,16 +584,23 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                           fallback={'routes': 0})
     if stopped(scan_id):
         return gone
-    from cveFeed import wpscan_scan
+    from cveFeed import probes, wpscan_scan
+    probe_kwargs = {k: v for k, v in (('get', probe_get), ('nmap_runner', probe_nmap)) if v}
+    if retest or force:
+        probe_kwargs['force'] = True
+    probe_result = _stage(scan, 'Version and identity probes', 'version_probes', lambda: probes.run_for_scan(scan_id, **probe_kwargs),
+                          fallback={'hosts': 0})  # finds the version of what the stages above saw without one, before correlation reads it
+    if stopped(scan_id):
+        return gone
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
+    if probe_get:
+        wp_kwargs['probe_get'] = probe_get
     if retest or force:
         wp_kwargs['force'] = True
-    wpscan_result = None
-    if (wpscan_runner or wpscan_scan.installed()) and wpscan_scan.wordpress_sites(scan):  # only for sites already fingerprinted as WordPress
-        wpscan_result = _stage(scan, 'WPScan (WordPress sites)', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
-                               fallback={'sites': 0})
-        if stopped(scan_id):
-            return gone
+    wpscan_result = _stage(scan, 'WordPress detection and WPScan', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
+                           fallback={'sites': 0})  # every host with any sign of WordPress, and the names grouped with it
+    if stopped(scan_id):
+        return gone
     from cveFeed import node2shell_scan
     n2s_kwargs = {'checker': node2shell_checker} if node2shell_checker else {}
     if retest or force:
@@ -655,8 +662,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['hygiene'] = hygiene_result
     if waf_result is not None:
         result['wafw00f'] = waf_result
-    if wpscan_result is not None:
-        result['wpscan'] = wpscan_result
+    result['version_probes'] = probe_result
+    result['wpscan'] = wpscan_result
     if node2shell_result is not None:
         result['node2shell'] = node2shell_result
     if rdp_result is not None:
