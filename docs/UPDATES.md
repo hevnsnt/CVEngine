@@ -127,3 +127,17 @@ If the bar says the host updater is not reporting, or an approval does not start
 2. `tail -30 web/.update-log`: the script writes why it refused (local changes to tracked files, an unreachable origin, a commit that is not on the branch) or which command stopped it. Each reason is written once, not on every check.
 3. `scripts/apply-update.sh` run by hand prints the same lines to the terminal, and applies a pending approval at once.
 4. `git status --short` in the checkout: a modified tracked file (other than `.env`) blocks the update until it is committed or stashed.
+
+## When the files are new but the database is not
+
+Symptoms: Settings > Updates shows the new commit as installed, but pages or `/mcp/` return 500 and the database log says a column or relation "does not exist". An earlier update was interrupted after the files were merged and before `migrate` ran. Updates from the version that adds the deploy record on detect this and deploy again by themselves; a host already in this state is repaired once by hand, from the install directory (add the `-f` and `--env-file` options your install starts with):
+
+```
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > ~/cvengine-before-repair.sql.gz
+docker compose build web celery celery-beat
+docker compose run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput
+docker compose run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput
+docker compose up -d --no-deps --force-recreate web celery celery-beat proxy
+```
+
+Build first: the new code can need packages and tools the old image lacks, so migrating and restarting the old image is not enough. Migrations are never rolled back, which is why the dump comes first.

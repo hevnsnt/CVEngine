@@ -247,6 +247,19 @@ resume_scanning() {
     log "could not release the update's scan-pause; release it by hand in Settings > Scan control"
 }
 
+# web/.commit is written when a deploy STARTS (the build needs it), so on its own it cannot say the deploy finished: a run that was
+# stopped after the files were merged but before the migration (the host rebooted, the timer was killed) left the new files, that
+# marker and an old database, and the next approval was answered "already at" with the schema unmigrated. A deploy counts as finished
+# only when this host-side marker, written after the services were recreated, names the commit too, and the database has no migration
+# waiting. If either cannot be confirmed the deploy runs again (a rebuild that finds nothing to do is harmless).
+mark_deployed() { printf '%s\n' "$1" > "$STATE/deployed-commit" 2>>"$LOG" || true; }
+deployed_commit() { head -n1 "$STATE/deployed-commit" 2>/dev/null | tr 'A-F' 'a-f' || true; }
+schema_current() {
+  local compose=("${COMPOSE[@]}")
+  "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1 ||
+    "${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py migrate --check >/dev/null 2>&1
+}
+
 if ! SHA=$(python3 "$STATE_HELPER" approval); then
   log "refusing: approval file does not hold a commit id"
   clear_approval
@@ -352,7 +365,7 @@ restore_branch() { if [ "$SWITCHED" = 1 ]; then git checkout -q -f "$BRANCH" >>"
 # The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
 # without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
 BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
-if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ]; then
+if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ] && [ "$(deployed_commit)" = "$SHA" ] && schema_current; then
   log "already at $SHA"
   python3 "$STATE_HELPER" commit "$SHA"
   clear_approval
@@ -362,7 +375,11 @@ if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ]; then
 fi
 
 if [ "$PREV" = "$SHA" ]; then
-  log "the files are at $SHA but the running build is ${BUILT:-unknown}; rebuilding"
+  if [ "$BUILT" = "$SHA" ]; then
+    log "the files are at $SHA but a finished deploy of it is not on record or the database has migrations waiting (an earlier update was interrupted); deploying it again"
+  else
+    log "the files are at $SHA but the running build is ${BUILT:-unknown}; rebuilding"
+  fi
   phase applying "files are current, rebuilding the services"
 else
   log "updating $PREV -> $SHA"
@@ -381,6 +398,7 @@ fi
 
 if deploy >>"$LOG" 2>&1; then
   python3 "$STATE_HELPER" commit "$SHA"
+  mark_deployed "$SHA"
   clear_approval
   resume_scanning
   phase done
@@ -390,6 +408,7 @@ elif [ "$DEPLOY_STAGE" = migrated ]; then
   log "restarting $SHA failed after its migrations ran; keeping $SHA and retrying the restart"
   if deploy >>"$LOG" 2>&1; then
     python3 "$STATE_HELPER" commit "$SHA"
+    mark_deployed "$SHA"
     clear_approval
     resume_scanning
     phase done
@@ -405,6 +424,7 @@ else
   git reset --hard "$PREV" >>"$LOG" 2>&1
   restore_env
   if deploy >>"$LOG" 2>&1; then
+    mark_deployed "$PREV"
     resume_scanning
     phase done
   else
