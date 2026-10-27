@@ -88,7 +88,7 @@ class AIProviderSettings(models.Model):
 	plan_daily_total = models.PositiveIntegerField(default=200)
 	plan_daily_per_project = models.PositiveIntegerField(default=20)
 	# How many CVEs a day the model may write or revise guidance for (each is a paid request); the catalogue is covered in this many days.
-	cve_guidance_daily = models.PositiveIntegerField(default=25)
+	cve_guidance_daily = models.PositiveIntegerField(default=25, db_default=25)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
@@ -225,7 +225,7 @@ class ApiToken(models.Model):
 	assets = models.JSONField(default=list, blank=True)
 	# "full": acts as its user everywhere. "inventory": a host reporter's token (cveFeed.host_inventory); it can post one project's
 	# inventory reports and do nothing else, so a token left on a server is worth little if it leaks.
-	scope = models.CharField(max_length=12, default='full')
+	scope = models.CharField(max_length=12, default='full', db_default='full')
 	project = models.ForeignKey('Project', null=True, blank=True, on_delete=models.CASCADE, related_name='+')  # the one project an inventory token reports to
 
 	def __str__(self):

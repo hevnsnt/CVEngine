@@ -57,7 +57,7 @@ class CVEEntry(models.Model):
     # A flaw an attacker can only use from the host itself (CVSS attack vector local or physical, or a kernel or operating-system
     # elevation of privilege): an external scan cannot see the software or patch level that decides it, so it is never matched to a
     # host (cveFeed.locality). Computed from the record; ``locality_at`` is when it was last worked out.
-    local_only = models.BooleanField(default=False, db_index=True)
+    local_only = models.BooleanField(default=False, db_default=False, db_index=True)
     locality_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     synced_at = models.DateTimeField(auto_now=True)
@@ -634,7 +634,7 @@ class HostExclusion(models.Model):
 
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="host_exclusions")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
-    include_subdomains = models.BooleanField(default=False)  # a whole domain: the name and every name under it ("-example.com")
+    include_subdomains = models.BooleanField(default=False, db_default=False)  # a whole domain: the name and every name under it ("-example.com")
     reason = models.CharField(max_length=300, blank=True, default="")
     created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(default=timezone.now)
@@ -1396,8 +1396,8 @@ class ProjectSettings(models.Model):
     sla_days = models.JSONField(default=dict, blank=True)  # only the severities changed from DEFAULT_SLA_DAYS
     # host inventory reports (cveFeed.host_inventory): whether a report from a host nobody scans yet may add it to the project (off:
     # it waits for an administrator to adopt it), and how old a report may get before it stops creating findings
-    inventory_create_hosts = models.BooleanField(default=False)
-    inventory_stale_days = models.PositiveSmallIntegerField(default=14)
+    inventory_create_hosts = models.BooleanField(default=False, db_default=False)
+    inventory_stale_days = models.PositiveSmallIntegerField(default=14, db_default=14)
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 
@@ -1443,7 +1443,7 @@ class CVEDetection(models.Model):
     ai_model = models.CharField(max_length=128, blank=True, default="")
     ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
     ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
-    ai_input_hash = models.CharField(max_length=16, blank=True, default="")  # what the CVE said when the model last read it: a change re-asks
+    ai_input_hash = models.CharField(max_length=16, blank=True, default="", db_default="")  # what the CVE said when the model last read it: a change re-asks
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
