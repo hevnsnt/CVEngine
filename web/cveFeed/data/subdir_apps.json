@@ -1,0 +1,990 @@
+[
+ {
+  "path": "/jira/",
+  "product": "Jira",
+  "indicates": "Atlassian Jira (issue tracker) mounted under a context path",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*(?:JIRA|Jira)\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "data-name=[\"\\']jira[\"\\']",
+    "confidence": 0.85
+   },
+   {
+    "where": "location",
+    "regex": "/jira/(?:login|secure/)",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "data-name=[\"\\']jira[\"\\'] data-version=[\"\\'](\\d+\\.\\d+(?:\\.\\d+)?)"
+   },
+   {
+    "where": "body",
+    "regex": "Atlassian Jira[^<]{0,40}?Version[: ]+(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/confluence/",
+  "product": "Confluence",
+  "indicates": "Atlassian Confluence (wiki) mounted under a context path",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Confluence\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Atlassian Confluence",
+    "confidence": 0.85
+   },
+   {
+    "where": "body",
+    "regex": "name=[\"\\']confluence-request-time[\"\\']",
+    "confidence": 0.85
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Atlassian Confluence (\\d+\\.\\d+(?:\\.\\d+)?)"
+   },
+   {
+    "where": "body",
+    "regex": "name=[\"\\']ajs-version-number[\"\\'] content=[\"\\'](\\d+\\.\\d+(?:\\.\\d+)?)"
+   }
+  ]
+ },
+ {
+  "path": "/bitbucket/",
+  "product": "Bitbucket",
+  "indicates": "Atlassian Bitbucket Server or Data Center (Git hosting)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Bitbucket\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Atlassian Bitbucket v\\d",
+    "confidence": 0.85
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Atlassian Bitbucket v(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/grafana/",
+  "product": "Grafana",
+  "indicates": "Grafana dashboards, served under a sub path",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Grafana\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "grafanaBootData|window\\.grafanaBootData",
+    "confidence": 0.85
+   },
+   {
+    "where": "location",
+    "regex": "/grafana/login",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "\"buildInfo\":\\{[^}]{0,200}?\"version\":\"(\\d+\\.\\d+\\.\\d+)\""
+   },
+   {
+    "where": "body",
+    "regex": "\"version\":\"(\\d+\\.\\d+\\.\\d+)\"[^}]{0,200}?\"commit\""
+   }
+  ]
+ },
+ {
+  "path": "/wordpress/",
+  "product": "WordPress",
+  "indicates": "A WordPress site installed in a subdirectory",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "/wp-content/|/wp-includes/",
+    "confidence": 0.8
+   },
+   {
+    "where": "header:link",
+    "regex": "api\\.w\\.org",
+    "confidence": 0.9
+   },
+   {
+    "where": "header:x-pingback",
+    "regex": "xmlrpc\\.php",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "<meta name=[\"\\']generator[\"\\'] content=[\"\\']WordPress (\\d+\\.\\d+(?:\\.\\d+)?)"
+   }
+  ]
+ },
+ {
+  "path": "/phpmyadmin/",
+  "product": "phpMyAdmin",
+  "indicates": "phpMyAdmin (MySQL web administration)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*phpMyAdmin\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "phpMyAdmin",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "phpMyAdmin (\\d+\\.\\d+\\.\\d+)"
+   },
+   {
+    "where": "body",
+    "regex": "[?&]v=(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/gitlab/",
+  "product": "GitLab",
+  "indicates": "GitLab (relative URL root)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*GitLab\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "content=[\"\\']GitLab[\"\\'] property=[\"\\']og:site_name[\"\\']|property=[\"\\']og:site_name[\"\\'] content=[\"\\']GitLab[\"\\']",
+    "confidence": 0.85
+   },
+   {
+    "where": "location",
+    "regex": "/gitlab/users/sign_in",
+    "confidence": 0.7
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/jenkins/",
+  "product": "Jenkins",
+  "indicates": "Jenkins automation server (context path)",
+  "signatures": [
+   {
+    "where": "header:x-jenkins",
+    "regex": ".",
+    "confidence": 0.9
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Jenkins\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "location",
+    "regex": "/jenkins/login\\?from=",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "header:x-jenkins",
+    "regex": "^(\\d+\\.\\d+(?:\\.\\d+)?)"
+   }
+  ]
+ },
+ {
+  "path": "/owa/",
+  "product": "Microsoft Exchange Server",
+  "indicates": "Outlook on the web, the Exchange Server client access front end",
+  "signatures": [
+   {
+    "where": "header:x-owa-version",
+    "regex": ".",
+    "confidence": 0.9
+   },
+   {
+    "where": "location",
+    "regex": "/owa/auth/logon\\.aspx",
+    "confidence": 0.85
+   },
+   {
+    "where": "body",
+    "regex": "/owa/auth/\\d+\\.\\d+\\.\\d+\\.\\d+/",
+    "confidence": 0.85
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Outlook\\b",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "header:x-owa-version",
+    "regex": "^(\\d+\\.\\d+\\.\\d+\\.\\d+)"
+   },
+   {
+    "where": "body",
+    "regex": "/owa/auth/(\\d+\\.\\d+\\.\\d+\\.\\d+)/"
+   }
+  ]
+ },
+ {
+  "path": "/sonarqube/",
+  "product": "SonarQube",
+  "indicates": "SonarQube code quality server",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*SonarQube\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "SonarQube",
+    "confidence": 0.7
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/nexus/",
+  "product": "Nexus Repository Manager",
+  "indicates": "Sonatype Nexus Repository Manager (artifact repository)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Nexus Repository Manager\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Nexus Repository Manager",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Nexus Repository Manager[^<]{0,40}?(\\d+\\.\\d+\\.\\d+(?:-\\d+)?)"
+   }
+  ]
+ },
+ {
+  "path": "/artifactory/",
+  "product": "JFrog Artifactory",
+  "indicates": "JFrog Artifactory (artifact repository)",
+  "signatures": [
+   {
+    "where": "header:server",
+    "regex": "(?i)^Artifactory",
+    "confidence": 0.9
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Artifactory\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "JFrog Artifactory",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "header:server",
+    "regex": "(?i)^Artifactory/(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/kibana/",
+  "product": "Kibana",
+  "indicates": "Kibana (Elastic dashboards)",
+  "signatures": [
+   {
+    "where": "header:kbn-name",
+    "regex": ".",
+    "confidence": 0.9
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Kibana\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "kbn-injected-metadata|window\\.__kbnNonce__",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "header:kbn-version",
+    "regex": "^(\\d+\\.\\d+\\.\\d+)"
+   },
+   {
+    "where": "body",
+    "regex": "\"version\":\"(\\d+\\.\\d+\\.\\d+)\",\"buildNumber\""
+   }
+  ]
+ },
+ {
+  "path": "/zabbix/",
+  "product": "Zabbix",
+  "indicates": "Zabbix monitoring front end",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Zabbix\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Zabbix SIA|zbx_sessionid",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Zabbix (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/nagios/",
+  "product": "Nagios Core",
+  "indicates": "Nagios Core web interface (Basic authentication)",
+  "signatures": [
+   {
+    "where": "header:www-authenticate",
+    "regex": "(?i)realm=\\\"Nagios",
+    "confidence": 0.9
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Nagios\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Nagios(?:&reg;)? Core",
+    "confidence": 0.85
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Nagios(?:&reg;)? Core(?:&trade;|\u2122)? (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/cacti/",
+  "product": "Cacti",
+  "indicates": "Cacti network graphing",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*(?:Login to )?Cacti\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Cacti Group",
+    "confidence": 0.75
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Version (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/roundcube/",
+  "product": "Roundcube Webmail",
+  "indicates": "Roundcube webmail",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Roundcube Webmail\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Roundcube Webmail",
+    "confidence": 0.8
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/squirrelmail/",
+  "product": "SquirrelMail",
+  "indicates": "SquirrelMail webmail",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*SquirrelMail\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "SquirrelMail",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "SquirrelMail version (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/horde/",
+  "product": "Horde",
+  "indicates": "Horde groupware",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Horde\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Horde Project|horde-login",
+    "confidence": 0.7
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/joomla/",
+  "product": "Joomla",
+  "indicates": "A Joomla site installed in a subdirectory",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "<meta name=[\"\\']generator[\"\\'] content=[\"\\']Joomla!",
+    "confidence": 0.9
+   },
+   {
+    "where": "body",
+    "regex": "/media/jui/|/templates/system/css/system\\.css",
+    "confidence": 0.6
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/drupal/",
+  "product": "Drupal",
+  "indicates": "A Drupal site installed in a subdirectory",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "<meta name=[\"\\']Generator[\"\\'] content=[\"\\']Drupal",
+    "confidence": 0.9
+   },
+   {
+    "where": "header:x-generator",
+    "regex": "(?i)^Drupal",
+    "confidence": 0.9
+   },
+   {
+    "where": "body",
+    "regex": "Drupal\\.settings|/sites/default/files/",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "header:x-generator",
+    "regex": "(?i)^Drupal (\\d+\\.\\d+(?:\\.\\d+)?)"
+   }
+  ]
+ },
+ {
+  "path": "/moodle/",
+  "product": "Moodle",
+  "indicates": "Moodle learning platform",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "M\\.cfg\\s*=|moodle-",
+    "confidence": 0.8
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Moodle\\b",
+    "confidence": 0.8
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/mediawiki/",
+  "product": "MediaWiki",
+  "indicates": "MediaWiki (wiki engine)",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "<meta name=[\"\\']generator[\"\\'] content=[\"\\']MediaWiki",
+    "confidence": 0.95
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*MediaWiki\\b",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "<meta name=[\"\\']generator[\"\\'] content=[\"\\']MediaWiki (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/redmine/",
+  "product": "Redmine",
+  "indicates": "Redmine project management",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "<meta name=[\"\\']description[\"\\'] content=[\"\\']Redmine",
+    "confidence": 0.9
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Redmine\\b",
+    "confidence": 0.8
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/mantis/",
+  "product": "Mantis Bug Tracker",
+  "indicates": "MantisBT issue tracker",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*MantisBT\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "MantisBT",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "MantisBT (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/bugzilla/",
+  "product": "Bugzilla",
+  "indicates": "Bugzilla bug tracker",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Bugzilla\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Bugzilla",
+    "confidence": 0.6
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Bugzilla[^<]{0,30}?[Vv]ersion (\\d+\\.\\d+(?:\\.\\d+)?)"
+   }
+  ]
+ },
+ {
+  "path": "/gitea/",
+  "product": "Gitea",
+  "indicates": "Gitea self-hosted Git service (sub path)",
+  "signatures": [
+   {
+    "where": "body",
+    "regex": "Powered by Gitea|Gitea Version",
+    "confidence": 0.9
+   },
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Gitea\\b",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Gitea Version: (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/portainer/",
+  "product": "Portainer",
+  "indicates": "Portainer container management",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Portainer\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "portainer\\.io|portainer-",
+    "confidence": 0.7
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/manager/html",
+  "product": "Apache Tomcat",
+  "indicates": "The Apache Tomcat Manager application (answers 401 until a login)",
+  "signatures": [
+   {
+    "where": "header:www-authenticate",
+    "regex": "(?i)realm=\\\"Tomcat Manager",
+    "confidence": 0.9
+   },
+   {
+    "where": "body",
+    "regex": "Apache Tomcat/\\d",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Apache Tomcat/(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/solr/",
+  "product": "Apache Solr",
+  "indicates": "Apache Solr admin interface",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Solr Admin\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Solr Admin",
+    "confidence": 0.7
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/zimbra/",
+  "product": "Zimbra",
+  "indicates": "Zimbra collaboration suite web client",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Zimbra\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Zimbra Web Client|ZimbraWebClient",
+    "confidence": 0.8
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/pgadmin4/",
+  "product": "pgAdmin",
+  "indicates": "pgAdmin 4 (PostgreSQL administration)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*pgAdmin\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "pgAdmin 4",
+    "confidence": 0.8
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/adminer/",
+  "product": "Adminer",
+  "indicates": "Adminer (database administration in one file)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*(?:Login - )?Adminer\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "<a href=[\"\\']https://www\\.adminer\\.org/",
+    "confidence": 0.9
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "class=[\"\\']version[\"\\']>(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/prometheus/",
+  "product": "Prometheus",
+  "indicates": "Prometheus monitoring server",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Prometheus Time Series\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Prometheus Time Series Collection",
+    "confidence": 0.8
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/airflow/",
+  "product": "Apache Airflow",
+  "indicates": "Apache Airflow web server",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Airflow\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Apache Airflow",
+    "confidence": 0.7
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "Airflow[^<]{0,40}?v?(\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/superset/",
+  "product": "Apache Superset",
+  "indicates": "Apache Superset (answers a redirect to its login)",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Superset\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "location",
+    "regex": "/superset/login",
+    "confidence": 0.85
+   },
+   {
+    "where": "body",
+    "regex": "Apache Superset",
+    "confidence": 0.7
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/metabase/",
+  "product": "Metabase",
+  "indicates": "Metabase business intelligence",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Metabase\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Metabase",
+    "confidence": 0.6
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "\"tag\":\"v?(\\d+\\.\\d+\\.\\d+(?:\\.\\d+)?)\""
+   }
+  ]
+ },
+ {
+  "path": "/nextcloud/",
+  "product": "Nextcloud",
+  "indicates": "Nextcloud file sharing",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Nextcloud\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Nextcloud",
+    "confidence": 0.6
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/owncloud/",
+  "product": "ownCloud",
+  "indicates": "ownCloud file sharing",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*ownCloud\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "ownCloud",
+    "confidence": 0.6
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/typo3/",
+  "product": "TYPO3",
+  "indicates": "TYPO3 CMS back end login",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*TYPO3 CMS\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "TYPO3 CMS|typo3conf",
+    "confidence": 0.8
+   }
+  ],
+  "version": [
+   {
+    "where": "body",
+    "regex": "TYPO3 CMS (\\d+\\.\\d+\\.\\d+)"
+   }
+  ]
+ },
+ {
+  "path": "/umbraco/",
+  "product": "Umbraco",
+  "indicates": "Umbraco CMS back office",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Umbraco\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Umbraco",
+    "confidence": 0.6
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/sitecore/",
+  "product": "Sitecore",
+  "indicates": "Sitecore CMS login",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Sitecore\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Sitecore",
+    "confidence": 0.6
+   }
+  ],
+  "version": []
+ },
+ {
+  "path": "/graylog/",
+  "product": "Graylog",
+  "indicates": "Graylog log management",
+  "signatures": [
+   {
+    "where": "title",
+    "regex": "(?i)(?:^|[-|:\u2013] )\\s*Graylog\\b",
+    "confidence": 0.8
+   },
+   {
+    "where": "body",
+    "regex": "Graylog",
+    "confidence": 0.6
+   }
+  ],
+  "version": []
+ }
+]

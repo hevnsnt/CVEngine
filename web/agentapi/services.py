@@ -1089,6 +1089,19 @@ def _host_names(sub):
         domain_id=sub.target_domain_id, host=sub.name, module__in=('ptr', 'tls-san'))})
 
 
+def _also_served(sub, ips, shared):
+    """The other sites the virtual host sweep found on this host's addresses: ``[{'name', 'address', 'status', 'title'}]``, not the host itself."""
+    project = sub.target_domain.project_id if sub.target_domain else None
+    found = (shared or {}).get('vhosts') or {}
+    out = []
+    for address in sorted(ips):
+        for row in found.get((project, address), []):
+            if row.host.lower() != sub.name.lower():
+                answer = (row.evidence or {}).get('answer', {})
+                out.append({'name': row.host, 'address': address, 'status': answer.get('status'), 'title': answer.get('title', '')})
+    return out[:20]
+
+
 def _merge_group(sub, others):
     """The whole host as one: ``sub`` (the richest copy of the name) plus its other current-inventory copies. IPs are merged by
     address and ports by (address, number, protocol), CVE matches by CVE id and open findings by id, so the counts agree with the
@@ -1141,13 +1154,17 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
     host_key = (sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())
     rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
-    from cveFeed import host_context
+    from cveFeed import host_context, subdir_apps
     probe_rows = ((shared or {}).get('probes') or {}).get(host_key) or []
     return {'id': sub.id,
             # what version and identity probes and WPScan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
             'probes': [{'probe': r.probe, 'kind': r.kind, 'product': r.product, 'version': r.version, 'variant': r.variant, 'outcome': r.outcome,
                         'confidence': r.confidence, 'source': r.source, 'observed_at': r.observed_at.isoformat()}
                        for r in probe_rows if r.kind in ('version', 'identity', 'edge')][:40],
+            'also_served': _also_served(sub, ips, shared),
+            'served_from': [{'address': r.product, 'status': (r.evidence or {}).get('answer', {}).get('status'), 'title': (r.evidence or {}).get('answer', {}).get('title', '')}
+                            for r in probe_rows if r.kind == 'vhost' and r.outcome == 'found'][:10],
+            'subdirectory_apps': subdir_apps.applications_from_rows(probe_rows),
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
@@ -1290,7 +1307,12 @@ def _shared_for(project, subs):
     probe_rows = {}
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}).order_by('-observed_at'):
         probe_rows.setdefault((row.project_id, row.host), []).append(row)
-    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'probes': probe_rows}
+    # other sites the virtual host sweep found on these addresses (cveFeed.vhost_scan), by (project, address)
+    vhosts = {}
+    for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), probe='vhost-probe', kind='vhost', outcome='found',
+                                               product__in=list(addresses)).order_by('host'):
+        vhosts.setdefault((row.project_id, row.product), []).append(row)
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'probes': probe_rows, 'vhosts': vhosts}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
