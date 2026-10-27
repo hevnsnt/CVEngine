@@ -229,7 +229,7 @@ A sync runs every `CVENGINE_RUNZERO_SYNC_HOURS` hours (default 6) for each proje
 
 The API keys page shows the last sync, its counts and any error; `get_system_status` lists each project's runZero state for an App Admin and reports a failing sync as a problem; every sync writes an activity entry. A rejected token (401 or 403), a rate limit (429), an unreachable console, malformed JSON and an oversized reply (more than 32 MB, or more than 50,000 records per call) are each reported in plain words, the next scheduled sync tries again, and none of them stops the worker. Managing the sync (status, settings, Sync now) needs the organization admin or App Admin role. Needs migration 0087 (`RunZeroSync`) and the beat entry it creates, `cvengine-runzero-sync`.
 
-Superusers set the rest under **Settings**: AI model, API vault, Tailscale, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset.
+Superusers set the rest under **Settings**: AI model, API vault, Tailscale, notifications, scan policy, IP allowlist, proxy, reports, resources, updates, and factory reset.
 
 **Nuclei templates.** Settings, Scan engines starts with a switch, off by default, that lets scans run every installed Nuclei template, not only those that make plain GET, HEAD, or OPTIONS requests. It applies to the broad scans and to validating a CVE match. AI-written templates always stay read-only, Nuclei's denial-of-service templates stay excluded, and out-of-band checks stay off. Changing it is recorded in the audit log and makes hosts due for a new Nuclei pass. The tab also holds the scan engine YAML. The Reports tab only sets report branding.
 
