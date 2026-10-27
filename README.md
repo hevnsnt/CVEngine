@@ -21,6 +21,19 @@
   <img src="docs/images/cvengine-tour.gif" alt="A 30-second tour of cvENGINE: add a domain name, watch it discover every host, port and service, see today's exploited CVEs matched and AI-validated against what you run, hosts ranked with their evidence, and a timeline of every change" width="900">
 </p>
 
+## New in 1.2
+
+- **Every CVE says how to prove it.** One shared detection strategy and validation profile per CVE: the remote checks that can decide a match, and read-only host commands for each platform. Rules write them for the whole catalog, and the AI adds checks for the CVEs attackers use. Read them in the API and MCP ([how it works](docs/PIPELINE.md#detection-strategies)).
+- **A full CVE catalog on day one.** A new install downloads a checksummed catalog of every fire, smoke, and ice CVE on first start instead of rebuilding it one request at a time, then the live feed takes over.
+- **It names the firewall in front of every host.** [wafw00f](https://github.com/EnableSecurity/wafw00f) identifies the product (FortiWeb, Cloudflare, BIG-IP, and more). It is searchable and feeds CVE matching and the AI.
+- **It never sits idle.** A work conductor starts discovery of the targets that have waited longest, so the queue stays fed with a thousand hosts to watch.
+- **One host, many names.** `example.com` and `www.example.com` on the same servers are one host, with their findings counted once.
+- **Every Nuclei template, if you choose.** A switch in Settings, Scan engines runs the whole library, not just the read-only subset (off by default). Templates refresh four times a day, and a new known-exploited CVE with no template triggers a refresh.
+- **Updates in seconds.** Approve an update and a host watcher starts it about two seconds later, keeps your Compose layout, shows each step, and can move the server to another branch. Every release is rehearsed in CI first, upgrading a seeded install with the real scripts ([updates](docs/UPDATES.md)).
+- **Hardened.** A Redis password, a dedicated key for stored secrets with rotation, hashed sessions, a sign-in throttle, targets owned by an organization, a Content-Security-Policy, TLS 1.3, and an encrypted CA key. New installs get them automatically, and [upgrading](docs/UPGRADE.md#upgrading-to-12) older ones takes `make redis-auth` and `make rotate-field-key`.
+
+The full list is in the [changelog](CHANGELOG.md).
+
 ## Why cvENGINE
 
 Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. cvENGINE runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the one question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
@@ -52,7 +65,7 @@ cvENGINE stands on excellent open source work. Full credits and licenses are in 
 
 | | |
 | --- | --- |
-| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot) discovery, [nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [nmap](https://nmap.org), [naabu](https://github.com/projectdiscovery/naabu), [gowitness](https://github.com/sensepost/gowitness) screenshots, [WPScan](https://wpscan.com/) for WordPress, [aardwolf](https://github.com/skelsec/aardwolf) RDP screenshots, [node2shell](https://github.com/assetnote/node2shell-scanner) detection |
+| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot) discovery, [nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [nmap](https://nmap.org), [naabu](https://github.com/projectdiscovery/naabu), [gowitness](https://github.com/sensepost/gowitness) screenshots, [wafw00f](https://github.com/EnableSecurity/wafw00f) firewall identification, [WPScan](https://wpscan.com/) for WordPress, [aardwolf](https://github.com/skelsec/aardwolf) RDP screenshots, [node2shell](https://github.com/assetnote/node2shell-scanner) detection |
 | **Exploitation intelligence** | [CVE feed cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
 | **Backport and certificate data** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh) |
 | **Email security checks** | adapted from [MailFail](https://github.com/ACK-J/MailFail) |
@@ -75,7 +88,7 @@ flowchart LR
 
     subgraph PROBE["2 &nbsp; PROBE"]
         direction TB
-        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Web route<br/>checks"] --> W["WPScan<br/>node2shell, opt-in"]
+        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Firewall and web<br/>route checks"] --> W["WPScan<br/>node2shell, opt-in"]
     end
 
     subgraph MATCH["3 &nbsp; MATCH"]
@@ -178,11 +191,11 @@ Create a token on **API tokens and MCP** and send `Authorization: Bearer <token>
 
 ## Safe by design
 
-- nuclei runs only templates that pass read-only and destination checks, and no password lists are ever tried: each database gets one attempt with no password (or none at all).
+- By default nuclei runs only templates that pass read-only and destination checks (a superuser can switch on every installed template, minus the denial-of-service ones), and no password lists are ever tried: each database gets one attempt with no password (or none at all).
 - Loopback, link-local, and cloud metadata addresses are never scanned, private ranges stay off until you allow them, and addresses on shared platforms such as CDNs are never port-scanned.
-- Injection attempts are blocked, and at the strike threshold the account is disabled and the source IP is blocked for 24 hours.
-- Each project's data is isolated, and stored secrets are encrypted.
-- Two-step sign-in, an IP allowlist, and an audit log protect access.
+- Injection attempts are rejected. Three strikes in 15 minutes (a command injection counts as three) disable the account, revoke its API tokens, and block its public address for 24 hours. Superusers are only logged.
+- Each project's data is isolated, targets and addresses belong to an organization, and stored secrets are encrypted under a dedicated key you can rotate.
+- Two-step sign-in, a sign-in throttle, an IP allowlist, and an audit log protect access.
 
 Only scan systems you own or are authorized to test.
 
@@ -197,6 +210,7 @@ Only scan systems you own or are authorized to test.
 | [Architecture](docs/ARCHITECTURE.md) | Services, data, and where AI is used |
 | [Configuration](docs/CONFIGURATION.md) | Environment variables |
 | [Deployment](docs/DEPLOYMENT.md) | HTTPS, proxies, AI models, backups, dev stack |
+| [Hosting online](docs/HOSTING-ONLINE.md) | A public name with a trusted certificate |
 | [Updates](docs/UPDATES.md) and [Upgrade](docs/UPGRADE.md) | Staying current |
 | [Tenancy](docs/TENANCY.md) | Organizations, roles, and two-step sign-in |
 | [Agent API](docs/AGENT-API.md) | REST API and MCP tools |

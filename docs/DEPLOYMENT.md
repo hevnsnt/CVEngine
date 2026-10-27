@@ -6,17 +6,18 @@ cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `cele
 
 | Port | Bound to | Service |
 | --- | --- | --- |
-| 443 and 8082 | all interfaces | `proxy`, the HTTPS front door |
+| 443 | all interfaces | `proxy`, the HTTPS front door |
+| 8082 | all interfaces | `proxy`, redirects to HTTPS |
 | 8000 | `127.0.0.1` | `web`, for your own reverse proxy |
 | 5432 | `127.0.0.1` | `db` |
 
-Firewall 443 and 8082 to the people who need them. The development stack publishes 8000 on all interfaces, so keep it off untrusted networks.
+Firewall 443 and 8082 to the people who need them. The development stack publishes 8000 and 5432 on `127.0.0.1` only.
 
 ## Linux, Mac, and Windows
 
-`install.sh` asks nothing. It checks that this is Linux, that it is root (it re-runs itself through `sudo`), the architecture, memory (it warns below about 3.5 GB), free disk on the checkout's filesystem (it warns below about 14 GiB), that ports 443 and 8082 are free (it stops if not), and whether Docker's registry and GitHub answer (it only warns). On Debian and Ubuntu it installs curl, make, python3, git, openssl, and the Compose plugin with `apt`. Docker comes from `get.docker.com` on any distribution that script supports. On other Linux it stops and names the missing tools, so install them and run it again, or follow the README steps. It needs Compose 2.24 or newer but does not check the version. When a step fails it prints the log lines of the failing service.
+`install.sh` asks nothing. It checks that this is Linux, that it is root (it re-runs itself through `sudo`), the architecture, memory (it warns below about 3.5 GB), free disk on the checkout's filesystem (it warns below about 14 GiB), that ports 443 and 8082 are free (it stops if not), and whether Docker's registry and GitHub answer (it only warns). On Debian and Ubuntu it installs curl, make, python3, git, openssl, and the Compose plugin with `apt`. Docker comes from `get.docker.com` on any distribution that script supports. On other Linux it stops at the first missing one of those tools and names it, so install them and run it again, or follow the README steps. It needs Compose 2.24 or newer but does not check the version. When a step fails it prints the last 25 log lines of `web`, `proxy`, and `db`. It also installs the update watcher into root's crontab, so the Approve button works straight away (it only warns when `crontab` is missing, and skips it when automatic deployment is installed).
 
-Running it again keeps `.env`, the certificate (unless the address changed), and your data, then rebuilds and restarts from the code in your checkout. It does not fetch new code or wait for scans ([UPDATES.md](UPDATES.md)).
+Running it again keeps `.env`, the certificate (unless the address changed), and your data, then rebuilds and restarts from the code in your checkout. It does not fetch new code or wait for scans ([UPDATES.md](UPDATES.md)). `make admin` then says the account already exists and changes nothing.
 
 On macOS or Windows, install Docker Desktop (with the WSL 2 backend on Windows), clone the repository, and run the README steps from a shell where `make` works, such as the macOS terminal or a WSL 2 distribution. Without `make`, the commands are plain Compose calls:
 
@@ -28,13 +29,15 @@ docker compose up -d --build
 docker compose exec -T web python3 manage.py create_admin
 ```
 
-`.env` must exist first, because the database will not start with an empty password. A plain `docker compose up` does not record the installed commit for the updater, so the in-app update check shows it as unknown. `make up` records it.
+`.env` must exist first, because the database will not start with an empty password. A plain `docker compose up` does not record the installed commit for the updater, so the in-app update check shows it as unknown (`make up` records it). It also does not install the update watcher: run `sudo scripts/install-updater.sh` once so the Approve button works.
 
 Give Docker Desktop at least the memory recommended above.
 
 ## HTTPS
 
-`make certs` creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. `install.sh` runs it only when the certificate is missing or does not match the address. Run it before `make up`, and again after changing `DOMAIN_NAME`. The built-in proxy serves HTTPS (TLS 1.2) on 443 and redirects plain HTTP on 8082 to it. Browsers warn until you trust `secrets/certs/ca.crt`, which you copy from the server.
+`make certs` creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. `install.sh` runs it only when the certificate is missing or does not match the address. Run it before `make up`, and again after changing `DOMAIN_NAME`. The built-in proxy serves HTTPS (TLS 1.2 and 1.3, HTTP/2) on 443 and redirects plain HTTP on 8082 to it. It accepts request bodies up to 4 MB. Browsers warn until you trust `secrets/certs/ca.crt`, which you copy from the server.
+
+The files in `secrets/certs/` are `ca.crt`, `ca.key`, `ca.srl`, `rengine.pem`, `rengine_chain.pem`, and `rengine_rsa.key`. Both certificates use RSA 4096 and are valid for 3,650 days. A new authority's key is encrypted with `AUTHORITY_PASSWORD`. Every `make certs` issues a fresh server key and reuses the authority, so browsers that trust `ca.crt` keep trusting it. An authority made by an older version keeps an unencrypted key until you delete `ca.key` and `ca.crt` and run `make certs` again, after which browsers need the new `ca.crt`.
 
 For a public site with a browser-trusted certificate (Let's Encrypt, Cloudflare), follow [HOSTING-ONLINE.md](HOSTING-ONLINE.md).
 
@@ -54,14 +57,14 @@ cvENGINE runs no model itself. In **Settings, AI model**, choose Anthropic, Open
 
 ## Backups
 
-Back up the database, `.env` and the secret file, but keep the keys apart from the dump. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
+Back up the database, `.env` and the secret file, but keep the keys apart from the dump. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
 
 ```bash
 docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > cvengine-$(date +%F).sql.gz
 cp web/secret cvengine-secret.bak
 ```
 
-To restore, start a fresh stack with the original `web/secret` in place, then load the dump into the empty database:
+To restore, put the original `.env` (with `CVENGINE_FIELD_KEY`) and `web/secret` in place, start only the database (`docker compose up -d db`), load the dump, then start everything with `make up`:
 
 ```bash
 gunzip -c cvengine-2026-01-01.sql.gz | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
@@ -85,14 +88,14 @@ docker compose -f docker-compose.dev.yml exec web python3 manage.py createsuperu
 
 ## Updating
 
-Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans. See [UPDATES.md](UPDATES.md). Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md).
+Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans. See [UPDATES.md](UPDATES.md). `make up` always uses `docker-compose.yml` alone, so on an install with its own overlay use `scripts/update.sh` or `docker compose` with your files instead. Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md).
 
 ## Factory reset
 
-**Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It removes every organization, project, target, host, scan, result file, other user, token, and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines, wordlists, and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
+**Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It recreates a "Default" organization and project, ends every other session (yours stays), and records one `system.factory_reset` audit row after clearing the log. Five wrong passwords lock the button for 10 minutes. It removes every organization, project, target, host, scan, result file, other user, token, and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines, wordlists, and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
 
 ## Uninstall
 
-`scripts/uninstall.sh` lists the containers, volumes, and networks of this install's Compose project (named by `CVENGINE_COMPOSE_PROJECT`, then `COMPOSE_PROJECT_NAME`, then the checkout directory) and, once you type yes, deletes them and their locally built images. That includes all scan results. Other applications, including other reNgine installs, are not touched. `.env`, `secrets/`, `web/secret`, and `backups/` stay. It needs access to Docker, not necessarily `sudo`.
+`scripts/uninstall.sh` lists the containers, volumes, and networks of this install's Compose project (named by `CVENGINE_COMPOSE_PROJECT`, then `COMPOSE_PROJECT_NAME`, then the checkout directory) and, once you type yes, deletes them and their locally built images. That includes all scan results. Other applications, including other reNgine installs, are not touched. `.env`, `secrets/`, `web/secret`, and `backups/` stay, and so do the update watcher and the automatic-deployment timer: run `sudo scripts/install-updater.sh --remove` and `sudo scripts/install-auto-deploy.sh --remove` first. It needs access to Docker, not necessarily `sudo`.
 
 See also: [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).

@@ -30,7 +30,7 @@ The proxy reads three files from `secrets/certs/`:
 | `rengine_rsa.key` | the private key (`privkey.pem`) |
 | `rengine_chain.pem` | the intermediates only (`chain.pem`) |
 
-**The key must be RSA.** The proxy's cipher list is RSA-only (`aRSA` in `config/nginx/rengine.conf`), and TLS 1.2 is the only protocol it speaks, so an ECDSA certificate (certbot's default since 2.0) makes every handshake fail. Ask for RSA explicitly.
+**The key must be RSA.** The proxy's cipher list is RSA-only (`aRSA` in `config/nginx/rengine.conf`) for TLS 1.2, and the proxy speaks TLS 1.2 and 1.3, so an ECDSA certificate (certbot's default since 2.0) makes TLS 1.2 handshakes fail. Ask for RSA explicitly.
 
 Port 80 is not used by the stack, so certbot can answer the challenge itself while the proxy keeps running:
 
