@@ -273,7 +273,9 @@ class AIProvider:
 			resp.raise_for_status()
 			return resp.json()
 		except (requests.RequestException, ValueError) as e:
-			raise AIProviderError(f'{self.name} model list failed: {e}') from e
+			# the error's own text names the address it tried and why it failed: to a caller that is a map of what answers where
+			status = getattr(getattr(e, 'response', None), 'status_code', None)
+			raise AIProviderError(f'{self.name} model list failed ({type(e).__name__}{f", HTTP {status}" if status else ""})') from e
 
 
 def _anthropic_text(data):
@@ -462,14 +464,34 @@ def get_provider(name, model=None, api_key=None, base_url=None):
 	return cls(model=model, api_key=api_key, base_url=base_url)
 
 
+_THINK = re.compile(r'<think(?:ing)?>.*?</think(?:ing)?>', re.DOTALL | re.IGNORECASE)
+
+
+def extract_json(text, keys=()):
+	"""The JSON object a model reply holds, or None. Reasoning models (qwen3, deepseek-r1 and others served by LM Studio, Ollama or vLLM) put
+	their thinking, braces and all, before the answer: the thinking block is dropped, every top-level object that parses is a candidate, and
+	the last one that has all of ``keys`` wins (the answer follows the reasoning)."""
+	text = _THINK.sub('', str(text or ''))
+	text = re.sub(r'^.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)  # a reply cut at the closing tag has no opening one
+	decoder, found, position = json.JSONDecoder(), None, 0
+	while True:
+		start = text.find('{', position)
+		if start < 0:
+			return found
+		try:
+			obj, end = decoder.raw_decode(text, start)
+		except (json.JSONDecodeError, RecursionError):
+			position = start + 1
+			continue
+		if isinstance(obj, dict) and all(k in obj for k in keys):
+			found = obj
+		position = end
+
+
 def parse_verdict(text):
 	"""Extract {'verdict', 'reason'} from a model reply; None if unusable."""
-	match = re.search(r'\{.*\}', text or '', re.DOTALL)
-	if not match:
-		return None
-	try:
-		obj = json.loads(match.group(0))
-	except json.JSONDecodeError:
+	obj = extract_json(text, ('verdict',))
+	if obj is None:
 		return None
 	verdict = str(obj.get('verdict', '')).strip().lower()
 	if verdict not in VERDICTS:

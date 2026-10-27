@@ -228,11 +228,8 @@ def ai_plan(signatures, provider, allowed):
 	except Exception:  # noqa: BLE001 - AI trouble must never block a scan
 		logger.warning('AI nuclei targeting failed', exc_info=True)
 		return {}
-	match = re.search(r'\{.*\}', reply or '', re.DOTALL)
-	try:
-		data = json.loads(match.group(0)) if match else {}
-	except json.JSONDecodeError:
-		return {}
+	from reNgine.ai_providers import extract_json
+	data = extract_json(reply) or {}
 	out = {}
 	for key, choice in (data.items() if isinstance(data, dict) else ()):
 		if not (isinstance(choice, dict) and str(key).isdigit() and int(key) < len(signatures)):

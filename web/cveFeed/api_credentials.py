@@ -13,7 +13,7 @@ SERVICES = {
                [('modules.shodan_dns.api_key', 'api_key')]),  # shodan_idb is the free InternetDB: it has no key option
     # bbot's Censys module talks to the legacy Search API (search.censys.io) with the API ID and secret. censys_ip is not mapped:
     # none of the scan modes enables it, so a key for it would be stored and never used.
-    'censys': ('Censys (legacy Search API: API ID and secret)', [('api_id', 'API ID', False), ('api_secret', 'API secret', True)],
+    'censys': ('Censys (legacy Search API: API ID and secret; Censys is retiring that API)', [('api_id', 'API ID', False), ('api_secret', 'API secret', True)],
                [('modules.censys_dns.api_key', ('api_id', 'api_secret'))]),
     'virustotal': ('VirusTotal', [('api_key', 'API key', True)], [('modules.virustotal.api_key', 'api_key')]),
     'securitytrails': ('SecurityTrails', [('api_key', 'API key', True)], [('modules.securitytrails.api_key', 'api_key')]),

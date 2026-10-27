@@ -147,6 +147,22 @@ class ClientTests(SimpleTestCase):
         self.assertEqual(len(c.fetch_assets()[0]), 2)  # the third page is never asked for
         self.assertEqual(len(session.calls), 2)
 
+    def test_a_nearly_spent_daily_quota_stops_the_walk_and_says_so(self):
+        low = FakeResponse(200, json.dumps({'assets': [{'addresses': ['192.0.2.1']}], 'next_key': 'k1'}).encode(), {'X-API-Usage-Remaining': '3'})
+        c, session, _ = client(low, page('assets', [{'addresses': ['192.0.2.2']}]))
+        assets, _ = c.fetch_assets()
+        self.assertEqual((len(assets), len(session.calls), c.quota_low, c.remaining), (1, 1, True, 3))  # the second page is not asked for
+
+    def test_plenty_of_quota_or_no_header_changes_nothing(self):
+        c, session, _ = client(FakeResponse(200, json.dumps({'assets': [{'addresses': ['192.0.2.1']}], 'next_key': 'k1'}).encode(),
+                                            {'X-API-Usage-Remaining': '900'}), page('assets', [{'addresses': ['192.0.2.2']}]))
+        self.assertEqual((len(c.fetch_assets()[0]), c.quota_low), (2, False))
+
+    def test_the_vulnerabilities_key_may_be_spelled_the_way_runzeros_prose_spells_it(self):
+        record = {'vulnerability_asset_address': '192.0.2.1', 'vulnerability_cve': 'CVE-2099-1'}
+        c, _, _ = client(FakeResponse(200, json.dumps({'vulnerabilites': [record], 'next_key': ''}).encode()))
+        c.fetch_vulnerabilities()  # no bad_response
+
     def test_the_record_limit_cuts_the_list_and_says_so(self):
         c, _, _ = client(page('assets', [{'addresses': ['192.0.2.%d' % i]} for i in range(1, 6)], 'more'))
         assets, truncated = c.fetch_assets(limit=3)
@@ -258,6 +274,7 @@ class ClientTests(SimpleTestCase):
 class FakeClient:
     """Stands in for runzero.Client in the sync tests."""
     assets, reports, error, searches = [], [], None, []
+    quota_low = False
 
     def __init__(self, token):
         self.token = token
@@ -387,6 +404,22 @@ class ReportsAsEvidenceTests(SyncFixture):
         m.refresh_from_db()
         self.assertEqual(m.confidence, 0.95)  # not again on the next sync
 
+    def test_a_boost_is_taken_back_when_the_report_goes_away_or_the_asset_leaves(self):
+        m = self.match(self.cve)
+        r = [report('192.0.2.10', 'CVE-2099-5', 443)]
+        self.sync(assets=[asset(['192.0.2.10'], os='Ubuntu Linux')], reports=r)
+        m.refresh_from_db()
+        self.assertEqual((m.confidence, m.evidence['runzero']), (0.95, True))
+        self.sync(assets=[asset(['192.0.2.10'], os='Ubuntu Linux')], reports=[])  # the report is gone, the asset is still there
+        m.refresh_from_db()
+        self.assertEqual((m.confidence, 'runzero' in m.evidence), (0.85, False))
+        self.sync(assets=[asset(['192.0.2.10'])], reports=r)
+        self.sync(assets=[asset(['192.0.2.99'])], reports=[])  # the asset itself left the inventory
+        m.refresh_from_db()
+        self.ip_a.refresh_from_db()
+        self.assertEqual((m.confidence, 'runzero' in m.evidence), (0.85, False))
+        self.assertNotIn('runzero', self.ip_a.fingerprint)  # its OS and reports no longer describe the host
+
     def test_reports_never_create_a_match_and_are_stored_on_the_host(self):
         result = self.sync(assets=[asset(['192.0.2.10'])], reports=[report('192.0.2.10', 'CVE-2099-6', 80)])
         self.assertEqual(CVEMatch.objects.count(), 0)
@@ -478,6 +511,26 @@ class ImportTests(SyncFixture):
         self.assertEqual(result['counts']['imported'], 1)
         self.assertEqual((skipped['blocked'], skipped['already_known'], skipped['excluded']), (3, 1, 1))
         self.assertNotIn('10.0.0.5', self.domains())
+
+    def test_a_public_address_outside_every_owned_network_is_never_imported(self):
+        """An inventory search can hold addresses nobody authorized scanning (a partner's range, a cloud address a device talked to)."""
+        result, discoveries, _ = self.run_import([asset(['8.8.8.8'])])
+        self.assertEqual(result['counts']['imported'], 0)
+        self.assertEqual(result['counts']['skipped']['not_owned'], 1)
+        self.assertEqual(self.domains(), {'a.example.test'})
+        discoveries.assert_not_called()
+
+    def test_a_public_address_inside_a_network_the_organization_owns_is_imported(self):
+        Domain.objects.create(name='8.8.8.0/24', project=self.pa, insert_date=timezone.now(), org=self.org_a)
+        result, _, _ = self.run_import([asset(['8.8.8.8']), asset(['1.1.1.1'])])
+        self.assertEqual(result['counts']['imported'], 1)
+        self.assertEqual(result['counts']['skipped']['not_owned'], 1)
+        self.assertIn('8.8.8.8', self.domains())
+
+    def test_the_networks_of_another_organization_prove_nothing(self):
+        Domain.objects.create(name='8.8.8.0/24', project=self.pb, insert_date=timezone.now(), org=self.org_b)
+        result, _, _ = self.run_import([asset(['8.8.8.8'])])
+        self.assertEqual(result['counts']['skipped']['not_owned'], 1)
 
     def test_private_ranges_are_imported_only_when_the_operator_allows_them(self):
         result, _, _ = self.run_import([asset(['10.0.0.5'])], CVENGINE_ALLOW_PRIVATE_TARGETS='1')

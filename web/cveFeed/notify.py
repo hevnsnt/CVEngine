@@ -53,20 +53,24 @@ def enabled_channels():
 
 def _send(text, flag, channels=()):
     """Send one message to every enabled channel (or only to those of ``channels``, which the Notification row must still have
-    on) when the Notification row allows this kind of event. Returns True if a send was attempted."""
+    on) when the Notification row allows this kind of event. Returns True when at least one channel took the message, False when no channel
+    was set up for this kind of event (nothing was tried), and None when channels were tried and every one failed."""
     try:
         row = _settings()
         if not (row and getattr(row, flag) and (row.send_to_slack or row.send_to_discord or row.send_to_telegram or row.send_to_lark)):
             return False
         from reNgine import common_func
+        sent = tried = 0
         for channel, name in CHANNEL_SENDERS.items():
             if channels and channel not in channels:
                 continue
+            tried += 1
             try:
                 getattr(common_func, name)(text)
+                sent += 1
             except Exception as exc:  # noqa: BLE001 - one channel failing must not stop the others
                 logger.warning('notification via %s failed (%s)', name, type(exc).__name__)
-        return True
+        return True if sent or not tried else None
     except Exception as exc:  # noqa: BLE001 - notifications never break a scan or a feed sync
         logger.warning('notification failed (%s)', type(exc).__name__)
         return False

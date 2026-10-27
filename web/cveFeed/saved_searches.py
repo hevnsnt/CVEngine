@@ -141,13 +141,21 @@ def _evaluate(search, now):
                      project=search.project_id, search_id=search.pk, count=count)
     elif alert['new'] or alert['gone'] or reached:
         alerted = _alert(search, alert, count)
+        if alerted is None:
+            # every channel that was tried failed: the baseline stays where it was, so the next check says it again instead of the alert
+            # being lost for good
+            _save(search, last_status='alert_failed', last_error='the alert could not be delivered; it will be tried again at the next check', **{
+                k: v for k, v in due.items() if k != 'last_error'})
+            return {'status': 'alert_failed', 'count': count, 'new_count': len(new), 'gone_count': len(gone), 'baseline': False, 'alerted': False,
+                    'new': new[:MAX_NAMES]}
     _save(search, matched=found, last_match_count=count, last_status='ok', baseline_at=search.baseline_at or now,
           **({'last_alert_at': now} if alerted else {}), **due)
     return {'status': 'ok', 'count': count, 'new_count': len(new), 'gone_count': len(gone), 'baseline': baseline, 'alerted': alerted, 'new': new[:MAX_NAMES]}
 
 
 def _alert(search, alert, count):
-    """One notification and one activity line for what this evaluation found. True when a channel was tried."""
+    """One notification and one activity line for what this evaluation found. True when a channel took it, False when no channel is set up
+    (the alert is the activity line alone), None when channels were tried and all failed."""
     parts = []
     if alert['new']:
         parts.append(f'{_plural(len(alert["new"]), "new host")} ({", ".join(alert["new"][:MAX_NAMES])}{", ..." if len(alert["new"]) > MAX_NAMES else ""})')

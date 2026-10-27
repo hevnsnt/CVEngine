@@ -206,6 +206,17 @@ def _read(response):
     return b''.join(chunks)
 
 
+LOW_QUOTA = 5  # runZero's daily quota is calls per licensed asset: below this many calls left a sync stops asking and says so
+
+
+def _remaining(response):
+    """The calls runZero says are left for today (``X-API-Usage-Remaining``), or None when it did not say."""
+    try:
+        return int(str(response.headers.get('X-API-Usage-Remaining', '')).strip())
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 class Client:
     """Reads one runZero organization with one token. ``session`` and ``sleep`` are injectable for tests."""
 
@@ -216,6 +227,8 @@ class Client:
         self._token = token
         self.session = session or requests.Session()
         self.sleep = sleep
+        self.remaining = None  # calls left today, as the last reply said
+        self.quota_low = False  # a walk stopped early because the daily quota is nearly spent
 
     def _request(self, path, params):
         headers = {'Authorization': f'Bearer {self._token}', 'Accept': 'application/json', 'User-Agent': USER_AGENT}
@@ -241,6 +254,9 @@ class Client:
             if status != 200:
                 response.close()
                 raise RunZeroError('http', f'runZero answered HTTP {status}', status)
+            left = _remaining(response)
+            if left is not None:
+                self.remaining = left
             return _read(response)
 
     def _get_json(self, path, params):
@@ -267,6 +283,8 @@ class Client:
                     params.pop('fields')
                     continue
                 raise
+            if isinstance(data, dict) and key == 'vulnerabilities' and key not in data:
+                data = {**data, key: data.get('vulnerabilites')}  # runZero's prose spells the key this way; its schema does not
             records, next_key = (data, '') if isinstance(data, list) else (
                 data.get(key) if isinstance(data, dict) else None, data.get('next_key') if isinstance(data, dict) else '')
             if not isinstance(records, list):
@@ -278,6 +296,9 @@ class Client:
                     return
             next_key = next_key if isinstance(next_key, str) else ''
             if not next_key or next_key in seen_keys:
+                return
+            if self.remaining is not None and self.remaining < LOW_QUOTA:
+                self.quota_low = True  # the rest waits for the next sync, with a day's quota again
                 return
             seen_keys.add(next_key)
             params['start_key'] = next_key

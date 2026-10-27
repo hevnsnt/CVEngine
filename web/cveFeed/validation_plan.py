@@ -39,14 +39,9 @@ MAX_REASON = 700
 
 def parse_plan(reply, checks, can_generate):
     """Reject out-of-schema choices. A model cannot expand the deterministic check set."""
-    match = re.search(r'\{.*\}', reply or '', re.DOTALL)
-    if not match:
-        return None
-    try:
-        obj = json.loads(match.group(0))
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(obj, dict) or set(obj) != {'check_kinds', 'generate_template', 'reason'}:
+    from reNgine.ai_providers import extract_json
+    obj = extract_json(reply, ('check_kinds', 'generate_template', 'reason'))
+    if obj is None or set(obj) != {'check_kinds', 'generate_template', 'reason'}:
         return None
     kinds, generate, reason = obj['check_kinds'], obj['generate_template'], obj['reason']
     allowed = {c['kind'] for c in checks}

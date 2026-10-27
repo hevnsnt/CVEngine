@@ -630,67 +630,37 @@ def fetch_whois_data_using_netlas(target):
 			target (str): IP address or domain name.
 		Returns:
 			dict: WHOIS information.
+
+		The key goes to Netlas through its Python client, in a request header: a command line would show it to every process on the host
+		(``/proc/<pid>/cmdline``) whatever the logs hide.
 	"""
 	logger.info(f'Fetching WHOIS data for {target} using Netlas...')
-	command = f'netlas host {target} -f json'
 	netlas_key = get_netlas_key()
-	secrets = ()
-	if netlas_key:
-		if netlas_key.key and netlas_key.key != "None":
-			command += f' -a {netlas_key.key}'
-			secrets = (netlas_key.key,)
+	key = netlas_key.key if netlas_key and netlas_key.key and netlas_key.key != "None" else ''
+
+	def failure(message):
+		return {'status': False, 'message': message}
 
 	try:
-		_, result = run_command(command, remove_ansi_sequence=True, redact=secrets)
-		
-		# catch errors
-		if 'Failed to parse response data' in result:
-			return {
-				'status': False, 
-				'message': 'Netlas limit exceeded.'
-			}
-		
-		if 'api key doesn\'t exist' in result:
-			return {
-				'status': False, 
-				'message': 'Invalid Netlas API Key!'
-			}
-		
-		if 'Request limit' in result:
-			return {
-				'status': False, 
-				'message': 'Netlas request limit exceeded.'
-			}
-		
-		data = json.loads(result)
-
-		if not data:
-			return {
-				'status': False, 
-				'message': 'No data available for the given domain or IP.'
-			}
-		# if 'whois' not in data:
-		# 	return {
-		# 		'status': False, 
-		# 		'message': 'Invalid domain or no WHOIS data available.'
-		# 	}
-
-		return {
-			'status': True, 
-			'data': data
-		}
-
-	except json.JSONDecodeError:
-		return {
-			'status': False, 
-			'message': 'Failed to parse JSON response from Netlas.'
-		}
+		import netlas
+		data = netlas.Netlas(api_key=key).host(host=str(target))
+	except netlas.exception.ThrottlingError:
+		return failure('Netlas request limit exceeded.')
+	except netlas.exception.APIError as e:
+		text = str(e).replace(key, '***') if key else str(e)
+		if 'Failed to parse response data' in text:
+			return failure('Netlas limit exceeded.')
+		if 'api key doesn\'t exist' in text:
+			return failure('Invalid Netlas API Key!')
+		if 'Request limit' in text:
+			return failure('Netlas request limit exceeded.')
+		return failure('An error occurred while fetching WHOIS data: ' + text[:200])
 	except Exception as e:
-		return {
-			'status': False, 
-			'message': f'An error occurred while fetching WHOIS data: {str(e)}'
-		}
-	
+		text = str(e).replace(key, '***') if key else str(e)
+		return failure('An error occurred while fetching WHOIS data: ' + text[:200])
+	if not data:
+		return failure('No data available for the given domain or IP.')
+	return {'status': True, 'data': data}
 
 
 @app.task(name='run_command', bind=False, queue='run_command_queue')

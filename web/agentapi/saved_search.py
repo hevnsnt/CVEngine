@@ -6,6 +6,7 @@ search itself; creating, changing, deleting and running it (a run can notify) ne
 token gets 403), and ``_all`` is refused because a search belongs to one project.
 """
 import re
+from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -138,6 +139,11 @@ def update_saved_search(ctx, slug, search_id, body):
     if 'name' in fields and fields['name'].lower() != s.name.lower() and _name_taken(ctx, project, fields['name'], s.pk):
         raise ApiError(400, 'you already have a saved search with that name')
     restart = ('query' in fields and fields['query'] != s.query) or (fields.get('enabled') and not s.enabled)
+    if 'frequency' in fields and fields['frequency'] != s.frequency and not restart:
+        # the next check follows the new rhythm from the last one, not from the old slot: weekly to hourly must not wait out the week
+        now = timezone.now()
+        due = (s.last_run_at or now) + timedelta(minutes=SavedSearch.FREQUENCIES.get(fields['frequency'], SavedSearch.FREQUENCIES['daily']))
+        fields['next_run_at'] = max(now, due) if s.last_run_at else now
     if restart:
         # a different query, or a search that was off while hosts changed, has no meaningful "new": learn the baseline again, silently
         fields.update(matched={}, baseline_at=None, last_match_count=0, last_status='', last_error='', next_run_at=timezone.now())

@@ -85,6 +85,19 @@ class ResolveAndBbotArgsTests(TestCase):
 		self.assertFalse(creds.used_in_scans('binaryedge'))
 		self.assertTrue(creds.used_in_scans('shodan'))
 
+	def test_every_service_with_a_bbot_mapping_feeds_its_key_to_that_module(self):
+		"""Not just Shodan and a few others: a service listed on the keys page must reach bbot when a key exists (a dropped mapping, such as
+		Hunter.io's, must fail a test)."""
+		mapped = {name: spec for name, spec in creds.SERVICES.items() if spec[2]}
+		self.assertTrue({'shodan', 'censys', 'virustotal', 'securitytrails', 'fullhunt', 'leakix', 'hunterio', 'chaos', 'github', 'otx', 'c99',
+		                 'bevigil', 'builtwith', 'bufferoverrun'} <= set(mapped))
+		for name, (_label, fields, mapping) in mapped.items():
+			ApiCredential.objects.filter(project=self.project).delete()
+			ApiCredential.objects.create(project=self.project, service=name, value={f[0]: f'value-{f[0]}' for f in fields})
+			args = ' '.join(creds.bbot_config_args(self.project))
+			for path, _field in mapping:
+				self.assertIn(path + '=', args, f'{name} does not reach {path}')
+
 	def test_blank_fields_produce_no_args_and_credential_summary_never_leaks_the_secret(self):
 		cred = ApiCredential.objects.create(project=self.project, service='shodan', value={})
 		self.assertEqual(creds.bbot_config_args(self.project), [])
