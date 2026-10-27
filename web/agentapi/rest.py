@@ -4,6 +4,7 @@ import logging
 import re
 
 from django.http import JsonResponse
+from django.http.response import HttpResponseBase
 
 from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
@@ -12,6 +13,7 @@ from agentapi import inventory
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi import authcheck
+from agentapi import reports
 from agentapi import tailscale
 from agentapi import auth
 from agentapi.auth import create_token
@@ -297,6 +299,12 @@ ROUTES = [
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/audit',
      "One finding's audit trail (status, assignee and comment events, newest first), each with who, when, and before/after",
      lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id), r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/reports', 'Queue a PDF report of the project, or of one host; body {host, include_closed}. Open findings only unless include_closed. Answers 202 with the report id and a status_url to poll; a read, so a read-only token may ask',
+     lambda r, c, slug, **k: reports.export_report(c, slug, _body(r))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)', 'The state of a report you asked for: queued, running, done (with download_url), failed or expired',
+     lambda r, c, slug, token, **k: reports.report_status(c, slug, token)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished report as application/pdf (only the user who asked, until it expires, 24 hours by default)',
+     lambda r, c, slug, token, **k: reports.report_download(c, slug, token)),
     ('GET', r'projects/(?P<slug>[-\w]+)/settings', "The project's settings: sla_days (days to fix per severity: critical, high, medium, low) and the defaults",
      lambda r, c, slug, **k: svc.get_project_settings(c, slug)),
     ('PUT', r'projects/(?P<slug>[-\w]+)/settings', "Change the project's settings; sla_days is a partial update, a severity set to null goes back to its default",
@@ -338,6 +346,7 @@ ROUTES = [
     ('POST', r'tokens', 'Create an API token (session only); body {name, read_only} or {name, scope: "inventory", project} for a host reporter token that can only post that project\'s inventory', tokens_create),
     ('DELETE', r'tokens/(?P<token_id>\d+)', 'Revoke a token (session only)', tokens_revoke),
 ]
+READ_ONLY_POSTS = re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
 
 
@@ -366,7 +375,7 @@ def dispatch(request, path):
         if method != request.method:
             continue
         try:
-            if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens'):
+            if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path):
                 raise ApiError(403, 'this token is read only')
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
@@ -374,6 +383,8 @@ def dispatch(request, path):
         except (KeyError, TypeError, ValueError, AttributeError):  # a field of the wrong type: the caller's mistake, not a crash
             logger.warning('API request with invalid parameters: %s %s', request.method, path, exc_info=True)
             return JsonResponse({'error': 'invalid request parameters'}, status=400)
+        if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
+            return result
         data, status = result if isinstance(result, tuple) else (result, 200)
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:

@@ -58,6 +58,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | stored sign-ins for authenticated checks (App Admin or organization admin) | `GET projects/{slug}/auth-credentials` (`target_id`), `PUT projects/{slug}/targets/{id}/auth-credential` (`label`, `scope`: `host` or `target`, `host`, `expires`: `30`, `90`, `120` or `never`, `headers`: `[{name, secret}]`, `cookie_secret`, `clear_cookie`, `origins`), `DELETE projects/{slug}/auth-credentials/{id}` | `list_auth_credentials`, `delete_auth_credential` (no tool sets a value) |
 | Tailscale (project admins) | `GET projects/{slug}/tailscale`, `GET .../tailscale/devices?state=`, `POST .../tailscale/sync` | `tailscale_status`, `list_tailscale_devices`, `sync_tailscale` |
 | validate a match | `POST projects/{slug}/matches/{id}/validate`, `GET .../matches/{id}/validate/{request_id}` | `validate_cve_match`, `get_validation_request` |
+| PDF report | `POST projects/{slug}/reports` (`host`, `include_closed`), `GET projects/{slug}/reports/{id}`, `GET .../reports/{id}/download` | `export_report`, `get_report` |
 | remediation | `PUT assets`, `GET projects/{slug}/work` | `register_assets`, `get_remediation_work` |
 | host info | `POST` or `PATCH projects/{slug}/hosts/{host}/profile` (`owner`, `purpose`, `criticality`) | `set_host_profile` |
 | delete host | `POST projects/{slug}/hosts/{host}/delete` | `delete_host` |
@@ -257,6 +258,14 @@ Every match, scanner, and hygiene response (detail and `findings` rows alike) al
 Problems include a disk under 10 percent free, a CVE feed older than 48 hours, nuclei templates not refreshed for over 36 hours, and "nothing running or queued though targets exist".
 
 Each probe is independent: one that fails or times out comes back as `{"error": "<exception name>"}` and a line in `problems`, never as a failure of the whole call. It returns no address, credential or task argument. Asking the workers takes up to ten seconds when none respond. A read-only token may call it.
+
+## PDF reports
+
+`POST projects/{slug}/reports` (`export_report`) queues a PDF report of one project, or of one host of it (`host`, an exact name from the inventory). It lists open findings only; `include_closed: true` also lists fixed and accepted-risk ones. The answer is `202` with `{id, status: "queued", status_url, download_url: null, ...}`; asking again for the same report while one is queued or running gives that one back with `200`. The report is built by a worker, so poll `GET projects/{slug}/reports/{id}` (`get_report`, `report_id`) until `status` is `done` (`queued`, `running`, `failed` with a short `error`, or `expired`). A finished report carries `size_bytes`, a `summary` (hosts and findings printed, the total, and `omitted`, what the caps left out) and `download_url`. `GET .../reports/{id}/download` returns `application/pdf` as an attachment with the same bearer token; MCP clients fetch it over REST.
+
+A report is a read. Any role that can read the project (audit included) may ask for one, and so may a read-only token. It holds only that project's rows, and the worker checks the asker's role again when it runs: access removed in between is a failed report with no file. Only the user who asked can read it (anyone else, even an App Admin, gets `404`, the same as a missing report), and the file is deleted after 24 hours (`CVENGINE_REPORT_TTL_HOURS`; a download after that is `410`). `_all` is a `400`. More than 3 reports in progress per user, 20 an hour per user or 8 at once overall is `429` ([Configuration](CONFIGURATION.md#pdf-reports)). Each request is recorded in the audit log.
+
+A report prints at most 500 hosts, 1,000 detailed findings (CVE matches and scanner findings, hottest first) and 500 hygiene findings; the summary counts always cover every finding, and the PDF and `summary.omitted` say what was left out. Text that came from scanned hosts is escaped and printed as text: the renderer is a separate process that fetches no URL and reads no file. See [Front end](FRONTEND.md#pdf-reports) for the contents.
 
 ## Limits
 

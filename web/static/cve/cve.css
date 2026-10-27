@@ -1459,6 +1459,10 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .strip a.wide{flex:2 1 300px}
 @media (max-width:719px){.strip a{flex-basis:140px}.strip a.wide{flex-basis:100%}}
 .strip a#n-oldest.old b{color:var(--fire-ink)}
+.report-export{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+.report-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.report-switch input{margin:0;min-width:16px;min-height:16px}
+.report-status{min-height:1em}
 /* How it works page */
 .how-hero{margin-bottom:14px}
 .how-lede{font:500 clamp(16px,1.6vw,20px)/1.5 var(--font);color:var(--ink-2);max-width:62ch;margin:0 0 18px}

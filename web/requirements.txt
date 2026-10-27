@@ -45,6 +45,7 @@ validators==0.36.0
 watchdog==6.0.0
 whatportis==0.8
 weasyprint==70.0
+pypdf==6.21.3  # reads text back out of the generated report PDFs in the tests; pure Python, BSD-3-Clause
 wafw00f==2.4.2
 xmltodict==1.0.4
 django-environ==0.14.0

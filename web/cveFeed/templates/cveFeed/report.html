@@ -1,0 +1,231 @@
+{% comment %}
+The PDF report (cveFeed.report_pdf). Every value is escaped by Django's autoescape: banners, titles, product names, notes and finding
+text come from scanned hosts, feeds and people, and must stay inert text. Never switch escaping off in this file (tests.test_report_pdf
+reads it and fails if any escaping bypass appears). The page has no image, linked stylesheet, font file or embedded object, so the renderer has nothing to fetch.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ r.title }}: {{ r.subject }}</title>
+<style>
+  @page { size: A4; margin: 22mm 17mm 21mm 17mm;
+    @bottom-left { content: element(foot); font: 8pt sans-serif; color: #6b7280; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt sans-serif; color: #6b7280; } }
+  @page cover { margin: 0; @bottom-left { content: none; } @bottom-right { content: none; } }
+  :root { --accent: {{ r.branding.accent }}; --ink: #111827; --mute: #6b7280; --line: #d1d5db; --fire: #b91c1c; --smoke: #b45309; --ice: #1e40af; --ok: #15803d; }
+  * { box-sizing: border-box; }
+  body { font: 9.5pt/1.45 "DejaVu Sans", "Liberation Sans", Helvetica, sans-serif; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+  .foot { position: running(foot); }
+  h1, h2, h3, h4 { margin: 0; line-height: 1.2; }
+  h2 { font-size: 16pt; border-bottom: 2px solid var(--accent); padding-bottom: 4pt; margin-bottom: 10pt; }
+  h3 { font-size: 11pt; margin: 12pt 0 5pt; }
+  p { margin: 0 0 6pt; }
+  .mute { color: var(--mute); }
+  .small { font-size: 8pt; }
+  .pre { white-space: pre-line; }
+  .mono { font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 8pt; }
+  section.page { break-before: page; }
+
+  .cover { page: cover; height: 297mm; padding: 38mm 24mm 24mm; border-left: 9mm solid var(--accent); }
+  .cover .brand { font-size: 10pt; letter-spacing: 2pt; text-transform: uppercase; color: var(--mute); margin-bottom: 40mm; }
+  .cover h1 { font-size: 30pt; margin-bottom: 6pt; }
+  .cover .subject { font-size: 17pt; color: var(--accent); margin-bottom: 30mm; }
+  .cover table { border-collapse: collapse; width: 100%; font-size: 10pt; }
+  .cover td { padding: 5pt 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .cover td:first-child { color: var(--mute); width: 38%; }
+  .cover .note { margin-top: 14mm; font-size: 8.5pt; color: var(--mute); }
+
+  .tiles { display: flex; gap: 8pt; margin: 0 0 12pt; }
+  .tile { flex: 1; border: 1px solid var(--line); border-top-width: 4px; padding: 7pt 9pt; }
+  .tile b { display: block; font-size: 22pt; line-height: 1.1; }
+  .tile span { font-size: 8pt; text-transform: uppercase; letter-spacing: 1pt; color: var(--mute); }
+  .t-fire { border-top-color: var(--fire); } .t-smoke { border-top-color: var(--smoke); } .t-ice { border-top-color: var(--ice); } .t-ok { border-top-color: var(--ok); }
+  .bars td { padding: 2pt 0; font-size: 9pt; }
+  .bars .lbl { width: 22mm; text-transform: capitalize; }
+  .bars .cnt { width: 14mm; text-align: right; padding-left: 5pt; }
+  .bar { height: 8pt; background: #e5e7eb; } .bar i { display: block; height: 8pt; background: var(--accent); }
+  .bar .s-critical { background: #7f1d1d; } .bar .s-high { background: var(--fire); } .bar .s-medium { background: var(--smoke); } .bar .s-low { background: #64748b; }
+
+  table.grid { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+  table.grid th { text-align: left; background: #f3f4f6; border-bottom: 1.5px solid #9ca3af; padding: 4pt 5pt; font-size: 8pt; text-transform: uppercase; letter-spacing: .5pt; }
+  table.grid td { padding: 4pt 5pt; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+  table.grid tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+  .num { text-align: right; white-space: nowrap; }
+
+  .chip { display: inline-block; padding: 1pt 5pt; border-radius: 2pt; font-size: 7.5pt; font-weight: bold; text-transform: uppercase; letter-spacing: .5pt; color: #fff; background: #6b7280; white-space: nowrap; }
+  .c-fire, .c-critical, .c-high { background: var(--fire); } .c-critical { background: #7f1d1d; }
+  .c-smoke, .c-medium { background: var(--smoke); } .c-ice, .c-low { background: var(--ice); } .c-clean { background: var(--ok); }
+  .c-unscanned, .c-info { background: #6b7280; }
+
+  .finding { margin: 0 0 14pt; border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 8pt 10pt; }
+  .finding.f-fire { border-left-color: var(--fire); } .finding.f-smoke { border-left-color: var(--smoke); } .finding.f-ice { border-left-color: var(--ice); }
+  .finding h3 { margin: 0 0 3pt; font-size: 11.5pt; break-after: avoid; }
+  .finding .meta { margin-bottom: 5pt; }
+  .finding h4 { font-size: 8pt; text-transform: uppercase; letter-spacing: 1pt; color: var(--mute); margin: 7pt 0 2pt; break-after: avoid; }
+  dl.kv { margin: 0; display: grid; grid-template-columns: 30mm 1fr; gap: 1.5pt 8pt; font-size: 8.5pt; }
+  dl.kv dt { color: var(--mute); } dl.kv dd { margin: 0; }
+  .cmd { background: #f3f4f6; border: 1px solid #e5e7eb; padding: 3pt 5pt; margin: 2pt 0 4pt; font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 7.5pt; white-space: pre-wrap; }
+  .proof { margin: 0 0 4pt; font-size: 8.5pt; }
+  .track { background: #f9fafb; border: 1px solid #e5e7eb; padding: 4pt 7pt; margin-top: 4pt; }
+  .basis-confirmed { color: var(--ok); font-weight: bold; } .basis-version { color: var(--smoke); font-weight: bold; }
+  ul.tight { margin: 0; padding-left: 14pt; } ul.tight li { margin-bottom: 2pt; }
+  .callout { border: 1px solid var(--line); background: #f9fafb; padding: 6pt 9pt; margin: 0 0 10pt; font-size: 9pt; }
+</style>
+</head>
+<body>
+<div class="foot">cvENGINE {{ r.title|lower }} &middot; {{ r.subject }} &middot; {{ r.generated_date }}{% if r.branding.footer %} &middot; {{ r.branding.footer }}{% endif %}</div>
+
+<section class="cover">
+  <div class="brand">{% if r.branding.company %}{{ r.branding.company }}{% else %}cvENGINE{% endif %}</div>
+  <h1>{{ r.title }}</h1>
+  <div class="subject">{{ r.subject }}</div>
+  <table>
+    {% if r.host %}<tr><td>Host</td><td>{{ r.host }}</td></tr>{% endif %}
+    <tr><td>Project</td><td>{{ r.project }}</td></tr>
+    {% if r.organization %}<tr><td>Organization</td><td>{{ r.organization }}</td></tr>{% endif %}
+    <tr><td>Generated</td><td>{{ r.generated }}</td></tr>
+    <tr><td>Scope</td><td>{% if r.host %}One host of the project&rsquo;s current inventory{% else %}{{ r.scope.targets }} target{{ r.scope.targets|pluralize }}, {{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} in the current inventory{% endif %}</td></tr>
+    {% if r.scope.target_names and not r.host %}<tr><td>Targets</td><td>{% for n in r.scope.target_names %}{{ n }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if r.scope.targets_more %} and {{ r.scope.targets_more }} more{% endif %}</td></tr>{% endif %}
+    <tr><td>Findings in this report</td><td>{% if r.include_closed %}Open, fixed and accepted-risk findings{% else %}Open findings only (fixed and accepted-risk findings are left out){% endif %}</td></tr>
+    <tr><td>Last completed scan</td><td>{{ r.method.last_scan|default:"none recorded" }}</td></tr>
+  </table>
+  <p class="note">This is a point-in-time, outside-in view produced by cvENGINE. Read the method and validity notes at the end before acting on a finding.</p>
+</section>
+
+<section class="page">
+  <h2>Executive summary</h2>
+  <p>
+    {% if r.summary.findings %}This report lists <b>{{ r.summary.findings }}</b> {% if r.include_closed %}finding{{ r.summary.findings|pluralize }}{% else %}open finding{{ r.summary.findings|pluralize }}{% endif %}
+    {% if r.host %}on this host{% else %}across {{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }}{% endif %}:
+    <b>{{ r.summary.heat.fire }}</b> fire, <b>{{ r.summary.heat.smoke }}</b> smoke and <b>{{ r.summary.heat.ice }}</b> ice.
+    {% else %}No {% if not r.include_closed %}open {% endif %}CVE matches or scanner findings are recorded for this scope.{% endif %}
+    {% if r.summary.hygiene %}A further <b>{{ r.summary.hygiene }}</b> TLS, certificate or email hygiene finding{{ r.summary.hygiene|pluralize }} {{ r.summary.hygiene|pluralize:"is,are" }} listed separately.{% endif %}
+  </p>
+  <div class="tiles">
+    <div class="tile t-fire"><b>{{ r.summary.heat.fire }}</b><span>Fire: dangerous now</span></div>
+    <div class="tile t-smoke"><b>{{ r.summary.heat.smoke }}</b><span>Smoke: warning signs</span></div>
+    <div class="tile t-ice"><b>{{ r.summary.heat.ice }}</b><span>Ice: low priority</span></div>
+    {% if not r.host %}<div class="tile t-ok"><b>{{ r.summary.hosts_exposed }}</b><span>Hosts on fire or smoke{% if r.caps.hosts_omitted %} (of those listed){% endif %}</span></div>{% endif %}
+  </div>
+  <p class="small mute">Fire: known to be exploited, has a public exploit, CVSS 9.0 or higher, or likely to be exploited and CVSS 7.0 or higher; for a scanner finding, critical or high. Smoke: CVSS 7.0 or higher or a raised exploitation probability; scanner medium. Ice: everything else.</p>
+
+  <h3>By severity</h3>
+  <table class="bars" style="width:100%">
+    {% for name, n in r.summary.severity.items %}<tr><td class="lbl">{{ name }}</td>
+      <td><div class="bar"><i class="s-{{ name }}" style="width: {% widthratio n r.summary.findings 100 %}%"></i></div></td><td class="cnt">{{ n }}</td></tr>{% endfor %}
+  </table>
+
+  <h3>Top risks</h3>
+  {% if r.summary.top %}
+  <table class="grid">
+    <thead><tr><th>Heat</th><th>Finding</th><th>Host</th><th>Status</th></tr></thead>
+    <tbody>{% for f in r.summary.top %}
+      <tr><td><span class="chip c-{{ f.heat }}">{{ f.heat }}</span></td><td>{{ f.title }}{% if f.cves and f.kind != 'CVE match' %} <span class="mute">({{ f.cves|join:", " }})</span>{% endif %}</td><td>{{ f.host }}</td><td>{{ f.tracking.status }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="mute">Nothing to list.</p>{% endif %}
+  {% if r.summary.ruled_out %}<p class="small mute" style="margin-top:8pt">{{ r.summary.ruled_out }} candidate finding{{ r.summary.ruled_out|pluralize }} that the AI triage classed as a likely false positive or not applicable {{ r.summary.ruled_out|pluralize:"is,are" }} not counted or listed.</p>{% endif %}
+</section>
+
+<section class="page">
+  <h2>{% if r.host %}Host{% else %}Hosts{% endif %}</h2>
+  <p class="small mute">{% if r.host %}The host, its exposed services and why it has its score.{% else %}Highest score first. Score is 0 to 100 and adds up the reasons shown in the host&rsquo;s detail in cvENGINE. {% if r.caps.hosts_omitted %}Showing the top {{ r.scope.hosts_listed }} of {{ r.scope.hosts_total }} hosts; the report limit is {{ r.caps.hosts }}.{% else %}All {{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} are listed.{% endif %}{% endif %}</p>
+  {% if r.hosts %}
+  <table class="grid">
+    <thead><tr><th>Host</th><th>Heat</th><th class="num">Score</th><th class="num">Findings</th><th>Exposure (open ports)</th><th>Owner</th></tr></thead>
+    <tbody>{% for h in r.hosts %}
+      <tr><td>{{ h.host }}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
+        <td><span class="chip c-{{ h.heat }}">{{ h.heat }}</span></td><td class="num">{{ h.score }}</td><td class="num">{{ h.findings }}</td>
+        <td>{% if h.port_count %}{{ h.ports|join:", " }}{% if h.ports_more %} +{{ h.ports_more }} more{% endif %}{% else %}<span class="mute">none open</span>{% endif %}<br><span class="mute small">{{ h.addresses }} address{{ h.addresses|pluralize:"es" }}</span></td>
+        <td>{{ h.owner|default:"-" }}{% if h.criticality and h.criticality != 'unknown' %}<br><span class="mute small">{{ h.criticality }} criticality</span>{% endif %}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="mute">No hosts in the current inventory.</p>{% endif %}
+  {% if r.host and r.hosts %}{% with h=r.hosts.0 %}
+    {% if h.aliases %}<p class="small" style="margin-top:8pt">Also answers to: {{ h.aliases|join:", " }}</p>{% endif %}
+    {% if h.title or h.purpose %}<dl class="kv" style="margin-top:8pt">{% if h.title %}<dt>Page title</dt><dd>{{ h.title }}{% if h.http_status %} (HTTP {{ h.http_status }}){% endif %}</dd>{% endif %}{% if h.purpose %}<dt>Purpose</dt><dd>{{ h.purpose }}</dd>{% endif %}</dl>{% endif %}
+    {% if h.services %}<h3>Services</h3>
+    <table class="grid"><thead><tr><th>Address</th><th>Port</th><th>Service</th><th>Product and version</th><th>Banner</th></tr></thead>
+      <tbody>{% for s in h.services %}<tr><td>{{ s.address }}</td><td>{{ s.port }}</td><td>{{ s.service }}</td><td>{{ s.product }}</td><td class="mono">{{ s.banner }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+    {% if h.score_lines %}<h3>Why the score is {{ h.score }}</h3>
+    <table class="grid"><tbody>{% for d in h.score_lines %}<tr><td>{{ d.label }}</td><td class="num">{{ d.points }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+  {% endwith %}{% endif %}
+</section>
+
+<section class="page">
+  <h2>Findings</h2>
+  <p class="small mute">CVE matches and scanner findings, hottest first.
+    {% if r.caps.findings_omitted %}Showing the {{ r.findings|length }} hottest of {{ r.summary.findings }}; the report limit is {{ r.caps.findings }}. The rest are in cvENGINE{% if not r.host %}; a report for one host lists everything on it{% endif %}.{% endif %}</p>
+  {% for f in r.findings %}
+  <div class="finding f-{{ f.heat }}">
+    <h3>{{ f.title }}</h3>
+    <div class="meta"><span class="chip c-{{ f.heat }}">{{ f.heat }}</span> <span class="chip c-{{ f.severity }}">{{ f.severity }}</span>
+      <span class="mute small">{{ f.kind }}{% if f.host %} on {{ f.host }}{% endif %}{% if f.subtitle %} &middot; {{ f.subtitle }}{% endif %}</span></div>
+    <dl class="kv">
+      {% if f.cves %}<dt>CVE</dt><dd>{{ f.cves|join:", " }}{% if f.cvss %} &middot; CVSS {{ f.cvss }}{% endif %}{% if f.signals %} &middot; {{ f.signals|join:", " }}{% endif %}</dd>{% endif %}
+      <dt>Basis</dt><dd><span class="{% if f.confirmed %}basis-confirmed{% else %}basis-version{% endif %}">{{ f.basis }}</span></dd>
+      {% if f.first_seen %}<dt>Seen</dt><dd>first {{ f.first_seen }}{% if f.last_seen %}, last {{ f.last_seen }}{% endif %}</dd>{% endif %}
+    </dl>
+    {% if f.description %}<h4>What it is</h4><p class="pre">{{ f.description }}</p>{% endif %}
+    {% if f.impact %}<h4>Why it matters</h4><p class="pre">{{ f.impact }}</p>{% endif %}
+    {% if f.evidence or f.proof %}<h4>Evidence</h4>{% endif %}
+    {% if f.evidence %}<dl class="kv">{% for e in f.evidence %}<dt>{{ e.label }}</dt><dd>{{ e.value }}</dd>{% endfor %}</dl>{% endif %}
+    {% for p in f.proof %}<div class="proof"><b>{{ p.label }}</b> <span class="mute">{{ p.result }}{% if p.when %} &middot; {{ p.when }}{% endif %}{% if p.proved %} &middot; showed the finding{% endif %}</span>{% if p.summary %}<br>{{ p.summary }}{% endif %}{% if p.command %}<div class="cmd">{{ p.command }}</div>{% endif %}</div>{% endfor %}
+    <h4>Remediation</h4>
+    {% if f.fixed_in %}<p>Fixed in {{ f.fixed_in|join:", " }}.</p>{% endif %}
+    {% if f.remediation %}<p class="pre">{{ f.remediation }}</p>{% elif not f.fixed_in %}<p class="mute">No remediation text is recorded for this finding.</p>{% endif %}
+    <div class="track"><dl class="kv"><dt>Status</dt><dd><b>{{ f.tracking.status }}</b>{% if f.tracking.changed %} (changed {{ f.tracking.changed }}{% if f.tracking.changed_by %} by {{ f.tracking.changed_by }}{% endif %}){% endif %}</dd>
+      <dt>Assignee</dt><dd>{{ f.tracking.assignee|default:"unassigned" }}</dd>{% if f.tracking.note %}<dt>Notes</dt><dd class="pre">{{ f.tracking.note }}</dd>{% endif %}</dl></div>
+  </div>
+  {% empty %}<p class="mute">No findings to list.</p>{% endfor %}
+</section>
+
+<section class="page">
+  <h2>Hygiene: TLS, certificates and email</h2>
+  <p class="small mute">Configuration findings about the hosts&rsquo; certificates and the domains&rsquo; mail records.
+    {% if r.caps.hygiene_omitted %}Showing {{ r.caps.hygiene_shown }} of {{ r.summary.hygiene }}; the report limit is {{ r.caps.hygiene }}.{% endif %}</p>
+  {% for g in r.hygiene %}
+  <h3>{{ g.name }}</h3>
+  <table class="grid">
+    <thead><tr><th>Severity</th><th>Finding</th><th>Host</th><th>Status</th></tr></thead>
+    <tbody>{% for f in g.items %}
+      <tr><td><span class="chip c-{{ f.severity }}">{{ f.severity }}</span></td>
+        <td>{{ f.title }}{% if f.detail %}<br><span class="mute small pre">{{ f.detail }}</span>{% endif %}{% if f.remediation %}<br><span class="small pre"><b>Fix:</b> {{ f.remediation }}</span>{% endif %}</td>
+        <td>{{ f.host }}</td>
+        <td>{{ f.tracking.status }}{% if f.tracking.assignee %}<br><span class="mute small">{{ f.tracking.assignee }}</span>{% endif %}{% if f.tracking.note %}<br><span class="mute small pre">{{ f.tracking.note }}</span>{% endif %}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% empty %}<p class="mute">No {% if not r.include_closed %}open {% endif %}hygiene findings.</p>{% endfor %}
+</section>
+
+<section class="page">
+  <h2>Method and validity</h2>
+  <h3>What was scanned, and when</h3>
+  <dl class="kv" style="grid-template-columns: 42mm 1fr">
+    <dt>Completed scans</dt><dd>{{ r.method.scans }}{% if r.method.first_scan %} (first {{ r.method.first_scan }}, latest {{ r.method.last_scan }}){% endif %}</dd>
+    <dt>Report generated</dt><dd>{{ r.generated }}</dd>
+    <dt>Inventory</dt><dd>{{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} in the current inventory{% if not r.host %}, {{ r.scope.targets }} target{{ r.scope.targets|pluralize }}{% endif %}</dd>
+  </dl>
+  {% if r.method.services %}
+  <table class="grid" style="margin-top:8pt">
+    <thead><tr><th>Check</th><th class="num">Assets</th><th>Most recent run</th></tr></thead>
+    <tbody>{% for s in r.method.services %}<tr><td>{{ s.name }}</td><td class="num">{{ s.assets }}</td><td>{{ s.last }}</td></tr>{% endfor %}</tbody>
+  </table>{% else %}<p class="mute">No scanner runs are recorded for this scope.</p>{% endif %}
+
+  <h3>How to read the findings</h3>
+  <ul class="tight">
+    <li><b>Version-based findings.</b> A CVE match marked &ldquo;version-based&rdquo; rests on the version a service reports being inside the range the advisory names. Vendors and Linux distributions often fix a flaw without changing the version number (a backported patch), and a banner can be hidden or false. Treat such a finding as a lead that needs confirmation on the host, not as proof. A finding marked &ldquo;confirmed&rdquo; was reproduced by a check recorded under its evidence, with the exact command a person can repeat.</li>
+    <li><b>Outside-in and unauthenticated.</b> cvENGINE looks at hosts from the network the way an outsider would. It does not log in, cannot see software that does not answer on the network, and finds nothing on hosts that were out of scope, excluded, unreachable or not yet scanned. No finding is not the same as safe.</li>
+    <li><b>Point in time.</b> Results are as of the scan dates above. Findings can appear after a fix or disappear after a change that was not a fix; a status of fixed is what a person recorded, until a later scan agrees.</li>
+    <li><b>Checks are read-only.</b> Template checks and probes do not exploit, change or damage anything. A check that could not run, or that the scanner&rsquo;s limits skipped, leaves a finding as version-based.</li>
+    <li><b>AI assistance.</b> An AI model helps triage findings and write explanations. It never sets severity, CVSS or exploitation data, and its remediation text is guidance to be reviewed by the owner of the host.</li>
+    <li><b>Left out.</b> Candidates the triage classed as a likely false positive or not applicable, CVE matches the AI ruled out, and informational detections are not listed{% if not r.include_closed %}, nor are findings marked fixed or accepted risk{% endif %}.</li>
+  </ul>
+
+  <h3>Limits of this report</h3>
+  <p>Up to {{ r.caps.hosts }} hosts, {{ r.caps.findings }} detailed findings and {{ r.caps.hygiene }} hygiene findings are printed in one report, hottest first; the counts in the summary always cover every finding.
+  {% if r.caps.findings_omitted or r.caps.hosts_omitted or r.caps.hygiene_omitted %}In this report the limits left out {{ r.caps.hosts_omitted }} host{{ r.caps.hosts_omitted|pluralize }}, {{ r.caps.findings_omitted }} finding{{ r.caps.findings_omitted|pluralize }} and {{ r.caps.hygiene_omitted }} hygiene finding{{ r.caps.hygiene_omitted|pluralize }}.{% else %}Nothing was left out of this report by those limits.{% endif %}</p>
+</section>
+</body>
+</html>

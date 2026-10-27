@@ -18,7 +18,9 @@ class SbomTests(SimpleTestCase):
 	def setUpClass(cls):
 		super().setUpClass()
 		cls.doc = sbom.build()
-		cls.by_name = {c['name']: c for c in cls.doc['components']}
+		# the operating system packages are kept apart: tzdata is both an apt package and a PyPI package
+		cls.apt = {c['name']: c for c in cls.doc['components'] if c.get('purl', '').startswith('pkg:deb/')}
+		cls.by_name = {c['name']: c for c in cls.doc['components'] if c['name'] not in cls.apt or not c.get('purl', '').startswith('pkg:deb/')}
 
 	def test_it_is_a_cyclonedx_document_about_this_version(self):
 		self.assertEqual((self.doc['bomFormat'], self.doc['specVersion']), ('CycloneDX', '1.5'))
@@ -65,3 +67,16 @@ class SbomTests(SimpleTestCase):
 		self.assertEqual(parsed['baz']['properties'][0]['value'], 'false')
 		self.assertEqual(parsed['qux']['properties'][0]['value'], 'false')
 		self.assertNotIn('-r', parsed)
+
+	def test_the_apt_packages_and_the_report_dependencies_are_listed(self):
+		for name in ('fonts-dejavu-core', 'bind9-dnsutils', 'libpango-1.0-0'):
+			self.assertEqual(self.apt[name]['purl'], f"pkg:deb/ubuntu/{name}?distro=ubuntu-26.04", name)
+			self.assertEqual(self.apt[name]['properties'][0]['value'], 'false', name)  # apt installs whatever the release holds that day
+		self.assertNotIn('libarchive-tools', self.apt)  # installed and purged in the same build
+		self.assertEqual(self.by_name['tzdata']['purl'], f"pkg:pypi/tzdata@{self.by_name['tzdata']['version']}")
+		self.assertEqual(self.by_name['pypdf']['version'], re.search(r'(?m)^pypdf==(\S+)', sbom.read('web/requirements.txt')).group(1))
+		self.assertEqual(self.by_name['pypdf']['properties'][0]['value'], 'true')
+
+	def test_apt_lines_are_parsed_defensively(self):
+		text = 'RUN apt-get update -y && \\\n    apt-get install -y --no-install-recommends \\\n    foo \\\n    bar && \\\n    rm -rf /x\nRUN (apt-get install -y baz || echo "no") && apt-get purge -y baz qux\n'
+		self.assertEqual([c['name'] for c in sbom.apt_packages(text)], ['bar', 'foo'])

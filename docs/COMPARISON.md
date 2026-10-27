@@ -69,6 +69,7 @@
 | Access control | Organizations, projects, roles (admin, user, audit), TOTP two-step sign-in, an IP allowlist, and an audit log | Team enrollment, SSO (SAML and OIDC), and scoped runs | ProjectDiscovery |
 | Notifications | Slack, Discord, Telegram, and Lark | Slack, Teams, email, and webhooks | Even |
 | Ticketing | Not supported | Jira | ProjectDiscovery |
+| Reports | A one-click PDF of a project or a host (PDF only): summary by fire, smoke and ice, hosts, one section per finding with its evidence, the exact check and fix status, TLS and email hygiene, and the method and its limits ([details](FRONTEND.md#pdf-reports)). Not a compliance or audit-framework report. | Per-scan export as JSONL, CSV, and PDF, from a [January 2024 changelog entry](https://projectdiscovery.featurebase.app/en/changelog/v056-export-early-templates-and-new-teams-tier). The current pricing and docs pages read for this page do not describe reports, so what a report holds today is not verified. | Not compared |
 | Compliance | None | SOC 2 Type II stated | ProjectDiscovery |
 | Bug bounty | A built-in workbench ([details](BUG-BOUNTY.md)) | Not stated | cvENGINE |
 
