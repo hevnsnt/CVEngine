@@ -32,7 +32,7 @@ Static files are content-versioned and nginx sends `Cache-Control: no-cache` for
 | `/cve/admin/` | Administration: people, organizations, projects, audit log, activity and error log, plus timings and scheduler health for superusers |
 | `/cve/account/` | Your password, two-step sign-in, and a **Display and alerts** card (theme, time zone, desktop notifications) |
 | `/cve/about/` | Version, license, and credits (account menu, About) |
-| `/cve/settings/` | Superusers: AI model, API vault, Tailscale, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, factory reset |
+| `/cve/settings/` | Superusers: AI model, API vault, Tailscale, notifications, scan policy, IP allowlist, proxy, reports, resources, updates, factory reset |
 | `/cve/welcome/`, `/cve/setup/` | First-run setup (`/cve/` sends a superuser there on a fresh install; `?skip=1` skips it) and connecting an AI model. For superusers, the account menu shows **Connect AI model**, and **AI Model Usage** once one is connected ([AI-USAGE.md](AI-USAGE.md)). |
 | `/login/` | Sign-in with two-step verification |
 
