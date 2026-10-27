@@ -1,0 +1,7 @@
+name: cvENGINE CodeQL configuration
+
+# web/cveFeed/legacy_tls.py is the one module that speaks TLS 1.0 / 1.1 on purpose: the hygiene check must find servers that still
+# accept the old protocols. It reads a certificate and the negotiated version, sends no credential and verifies nothing. Every other
+# use of TLS in the code base is analysed as usual. Approved by the project owner.
+paths-ignore:
+  - web/cveFeed/legacy_tls.py

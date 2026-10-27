@@ -6,7 +6,7 @@ correlation engine matches against the discovered asset inventory.
 """
 from django.db import models
 
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField
+from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -1458,3 +1458,63 @@ class SavedSearch(models.Model):
 
     def __str__(self):
         return f"{self.name}: {self.query}"
+
+
+class TailscaleLink(models.Model):
+    """A tailnet an administrator connected to one project (see cveFeed.tailscale_sync): its devices become that project's targets.
+    One link per project. The credentials are encrypted like every other stored secret and never leave the server; the settings
+    page and the API say only whether they are set. Connecting is what authorises scanning the tailnet's addresses for this
+    project's imported devices (cveFeed.tailscale_scope)."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="tailscale_link")
+    enabled = models.BooleanField(default=True)
+    credentials = EncryptedJSONField(default=dict, blank=True)  # {"access_token"} or {"client_id", "client_secret"}
+    use_local = models.BooleanField(default=True)  # also read this server's own tailscaled (the sidecar) for status and peers
+    ROUTING_CHOICES = (("auto", "this server's tailscale sidecar"), ("host", "already routed (the Docker host is on the tailnet)"))
+    routing = models.CharField(max_length=8, choices=ROUTING_CHOICES, default="auto")  # how scans reach the tailnet; "host" is the operator's word
+    scan_reachable = models.BooleanField(default=False)  # the scanner can reach this tailnet (checked at each sync); only then may its devices be scanned
+    auto_scan = models.BooleanField(default=False)  # queue the normal pipeline for new and changed devices
+    max_devices = models.PositiveIntegerField(default=100)  # most devices one sync imports or queues; the rest follow on the next run
+    only_tags = models.JSONField(default=list, blank=True)  # import only devices carrying one of these tags (empty: any)
+    skip_tags = models.JSONField(default=list, blank=True)  # never import devices carrying one of these tags
+    only_os = models.JSONField(default=list, blank=True)  # import only these operating systems (empty: any)
+    check_policy = models.BooleanField(default=True)  # read the tailnet policy file for the tailnet-wide findings
+    tailnet_name = models.CharField(max_length=200, blank=True, default="")
+    device_count = models.PositiveIntegerField(default=0)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=12, default="never")  # never | ok | partial | error
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    local_state = models.JSONField(default=dict, blank=True)  # what this server's own tailscaled reported at the last sync
+    anchor_domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # carries the tailnet-wide findings
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    def __str__(self):
+        return f"tailnet of project {self.project_id}"
+
+
+class TailscaleDevice(models.Model):
+    """One device of a linked tailnet and what Tailscale said about it at the last sync. ``domain`` is the target the device became
+    (named by its tailnet IPv4 address, which every scanner already handles); ``facts`` is the clipped, typed record. A device that
+    left the tailnet keeps its row with ``departed_at`` set, so its findings and history stay and its address stops being scannable."""
+
+    link = models.ForeignKey(TailscaleLink, on_delete=models.CASCADE, related_name="devices")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    node_id = models.CharField(max_length=80)  # Tailscale's stable node id (the API's nodeId or id; the public key from a local status)
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    name = models.CharField(max_length=300, blank=True, default="")  # MagicDNS name without the trailing dot, else the hostname
+    addresses = models.JSONField(default=list, blank=True)  # tailnet IPs only (100.64.0.0/10, fd7a:115c:a1e0::/48)
+    online = models.BooleanField(default=False)
+    facts = models.JSONField(default=dict, blank=True)
+    fingerprint = models.CharField(max_length=40, blank=True, default="")  # of the facts that matter for scanning, to spot a changed device
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)  # the last sync that listed it
+    departed_at = models.DateTimeField(null=True, blank=True)
+    scan_queued_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["link", "node_id"], name="uniq_tailscaledevice_link_node")]
+        indexes = [models.Index(fields=["project", "departed_at"], name="tsdevice_proj_departed_idx")]
+
+    def __str__(self):
+        return self.name or self.node_id

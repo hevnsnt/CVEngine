@@ -35,6 +35,36 @@ def review_inactive_hosts(run_id=None):
     return run_page(run_id)
 
 
+@app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
+def sync_tailscale():
+    """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""
+    from cveFeed import tailscale_sync
+    return tailscale_sync.sync_all()
+
+
+@app.task(name='tailscale_node_state', bind=False, queue='cve_feed_queue')
+def tailscale_node_state():
+    """What this server's own Tailscale node reports, for Settings > Tailscale's Test connection. Only the worker can read the
+    node's status file (the web container has none), so the page asks here; no credential is involved."""
+    from cveFeed import tailscale_local
+    from cveFeed.tailscale_api import TailscaleError
+    if not tailscale_local.available():
+        return {'present': False}
+    try:
+        state, peers = tailscale_local.read()
+    except TailscaleError as exc:
+        return {'present': True, 'error': str(exc)}
+    shown = {k: state[k] for k in ('backend_state', 'tailnet', 'self_name', 'version', 'peers')}
+    return {'present': True, 'state': shown, 'peer_count': len(peers)}
+
+
+@app.task(name='sync_tailscale_link', bind=False, queue='cve_feed_queue')
+def sync_tailscale_link(link_id):
+    """One tailnet now, started by an administrator (Settings, REST or MCP)."""
+    from cveFeed import tailscale_sync
+    return tailscale_sync.sync_link(link_id)
+
+
 def _known_in_batches(summaries, size=100):
     """Yield (summary, ids already stored) with one lookup per ``size`` summaries instead of one per entry."""
     from itertools import islice

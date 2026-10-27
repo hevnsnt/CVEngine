@@ -13,6 +13,7 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Ports, HTTPS, proxies, AI models, backups and restore, dev stack, factory reset, uninstall |
 | [HOSTING-ONLINE.md](HOSTING-ONLINE.md) | Putting an install on the Internet under a real name: DNS, Let's Encrypt, Cloudflare, your own proxy |
 | [TENANCY.md](TENANCY.md) | Organizations, projects, roles, and two-step sign-in |
+| [TAILSCALE.md](TAILSCALE.md) | Attaching a tailnet: the scanner's node, device import and auto-scan, the Tailscale checks, and how tailnet addresses are allowed |
 | [BUG-BOUNTY.md](BUG-BOUNTY.md) | The bug bounty page: who may use it, program scope, reports, and submission |
 | [AI-USAGE.md](AI-USAGE.md) | AI model usage, tokens, and cost estimates |
 | [AGENT-API.md](AGENT-API.md) | REST and MCP interface for agents |

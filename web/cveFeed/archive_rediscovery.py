@@ -51,7 +51,7 @@ def observe(row, resolver=resolve_one, tcp_probe=None):
         status, addresses = resolver(host)
         if status != 'resolved':
             return {'status': status, 'addresses': []}
-        if not addresses or any(not is_scannable_ip(ip) for ip in addresses):
+        if not addresses or any(not is_scannable_ip(ip) for ip in addresses):  # answers from DNS carry no tailnet authority
             return {'status': 'blocked', 'addresses': []}
         parent = host.partition('.')[2]
         if parent:
@@ -62,7 +62,7 @@ def observe(row, resolver=resolve_one, tcp_probe=None):
             if wildcard_status == 'resolved' and addresses == wildcard_ips:
                 return {'status': 'ambiguous_wildcard', 'addresses': sorted(addresses)}
         return {'status': 'rediscovered_dns', 'addresses': sorted(addresses)}
-    if not is_scannable_ip(host):
+    if not is_scannable_ip(host, project=row.project_id):
         return {'status': 'blocked', 'addresses': []}
     from cveFeed.zombie import tcp_alive
     probe = tcp_probe or tcp_alive

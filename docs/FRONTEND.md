@@ -31,7 +31,7 @@ Static files are content-versioned and nginx sends `Cache-Control: no-cache` for
 | `/cve/agents/` | API tokens and MCP connection commands |
 | `/cve/admin/` | Administration: people, organizations, projects, audit log, activity and error log, plus timings and scheduler health for superusers |
 | `/cve/account/` | Your password and two-step sign-in |
-| `/cve/settings/` | Superusers: AI model, API vault, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, factory reset |
+| `/cve/settings/` | Superusers: AI model, API vault, Tailscale, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, factory reset |
 | `/cve/welcome/`, `/cve/setup/` | First-run setup and connecting an AI model. Once a model is connected, the account menu shows **AI Model Usage** ([AI-USAGE.md](AI-USAGE.md)). |
 | `/login/` | Sign-in with two-step verification |
 

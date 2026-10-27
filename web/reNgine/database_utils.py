@@ -129,7 +129,18 @@ def store_domain(domain_name, project, description, h1_team_handle):
 
 	return new_domain
 
+def literal_target_refused(value):
+	"""True when ``value`` (an IP, or a URL or host:port whose host is one) names an address that cannot be a target: loopback,
+	link-local, metadata, and the internal ranges unless the operator allowed them. No project is passed, so a tailnet address is
+	refused here too (any spelling: mapped, NAT64, 6to4): only a connected Tailscale integration imports those."""
+	from targetApp.target_types import IP, bare_host, classify_target, is_scannable_ip
+	host = bare_host(str(value).rsplit('@', 1)[-1])  # whatever precedes an @ is credentials, not the host
+	return classify_target(host) == IP and not is_scannable_ip(host)
+
 def store_url(url, project, description, h1_team_handle):
+	if literal_target_refused(url):
+		logger.warning(f'{url} is an address a scanner may not be pointed at. Skipping.')
+		return None
 	parsed_url = urlparse(url)
 	http_url = parsed_url.geturl()
 	domain_name = parsed_url.netloc
@@ -157,6 +168,10 @@ def store_url(url, project, description, h1_team_handle):
 	return domain
 
 def store_ip(ip_address, project, description, h1_team_handle):
+
+	if literal_target_refused(ip_address):
+		logger.warning(f'{ip_address} is an address a scanner may not be pointed at (a tailnet address is only added by a connected Tailscale integration). Skipping.')
+		return None
 
 	domain = org_domains(project).filter(name=ip_address).first()
 	

@@ -7,6 +7,7 @@ each body are read. ``classify`` and the planning helpers are pure functions so 
 helper (``probe_url``) is injectable.
 """
 import concurrent.futures
+import functools
 import http.client
 import logging
 import re
@@ -293,7 +294,7 @@ def _read_scripts(result, probe, scan_id):
         evidence['fingerprint_names'] = [f['name'] for f in found]
 
 
-def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET'):
+def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None):
     """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
@@ -314,14 +315,14 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         raise ValueError('only a Host override is allowed for anonymous probes')
     host = parsed.hostname.encode('idna').decode('ascii')
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
-    addresses = pinned_transport.resolve(host, port)
+    addresses = pinned_transport.resolve(host, port, project=project)
     context = None
     if parsed.scheme == 'https':
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE  # scanner must inspect broken-certificate sites too
-    connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context)
+    connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context, project=project)
     authority = f'[{host}]' if ':' in host else host
     if parsed.port is not None:
         authority += f':{port}'
@@ -392,11 +393,12 @@ def _chunks(items, size=CHUNK):
         yield items[i:i + size]
 
 
-def host_allowed(host):
-    """The SSRF gate: an IP must be one a scanner may touch, and a name must not resolve to anything blocked."""
+def host_allowed(host, project=None):
+    """The SSRF gate: an IP must be one a scanner may touch (``project`` may authorise a tailnet device of its own), and a name must
+    not resolve to anything blocked."""
     from targetApp.target_types import IP, classify_target, is_scannable_ip, resolves_to_blocked
     if classify_target(host) == IP:
-        return is_scannable_ip(host)
+        return is_scannable_ip(host, project=project)
     return not resolves_to_blocked(host)
 
 
@@ -457,6 +459,8 @@ def run_route_auth(scan_id, probe=probe_url, force=False):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     empty = {'routes': 0, 'hosts': 0, 'by_state': {}, 'reused': 0, 'errors': 0}
+    if probe is probe_url:  # the project may authorise the tailnet devices of its own
+        probe = functools.partial(probe_url, project=project)
     retired = _retired_endpoints(scan)
     plan = _plan(scan, retired)
     if not plan:
@@ -481,7 +485,7 @@ def run_route_auth(scan_id, probe=probe_url, force=False):
         probed, errors, blocked = {}, {}, 0
 
         def probe_host(host, urls):
-            if not host_allowed(host):
+            if not host_allowed(host, project):
                 return host, None
             out = []
             for i, url in enumerate(urls):

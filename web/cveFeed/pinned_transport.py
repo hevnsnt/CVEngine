@@ -11,8 +11,16 @@ import time
 from targetApp.target_types import is_scannable_ip
 
 
-def resolve(host, port):
-    """Resolve once, rejecting failed/empty answers or any prohibited address."""
+def _is_literal(host, ip):
+    try:
+        return ipaddress.ip_address(host.strip('[]')) == ip
+    except ValueError:
+        return False
+
+
+def resolve(host, port, project=None):
+    """Resolve once, rejecting failed/empty answers or any prohibited address. ``project`` may authorise a tailnet device of its own,
+    and only when ``host`` is that address itself: a name that resolves into a tailnet never is."""
     if not isinstance(host, str) or not host or any(c.isspace() or ord(c) < 32 for c in host):
         raise ValueError('invalid probe hostname')
     if any(c in host for c in '/\\@%') or not 0 < int(port) < 65536:
@@ -24,7 +32,7 @@ def resolve(host, port):
         if family not in (socket.AF_INET, socket.AF_INET6):
             raise ValueError('unsupported address family')
         ip = ipaddress.ip_address(address[0])
-        if not is_scannable_ip(str(ip)):
+        if not is_scannable_ip(str(ip), project=project if _is_literal(host, ip) else None):
             raise ValueError('probe destination is prohibited')
         # Reconstruct numeric sockaddr; never pass an untrusted hostname to connect.
         numeric = (str(ip), int(port)) if family == socket.AF_INET else (str(ip), int(port), 0, 0)
@@ -36,13 +44,14 @@ def resolve(host, port):
     return tuple(pinned)
 
 
-def open_socket(addresses, timeout):
-    """Connect only to vetted numeric addresses within one connection budget."""
+def open_socket(addresses, timeout, project=None):
+    """Connect only to vetted numeric addresses within one connection budget (``project`` as for ``resolve``: the vetted address of a
+    tailnet device of that project is vetted again here, but a name's answer was already refused there)."""
     deadline = time.monotonic() + timeout
     last_error = OSError('no probe address available')
     for family, address in addresses:
         ip = ipaddress.ip_address(address[0])
-        if not is_scannable_ip(str(ip)):
+        if not is_scannable_ip(str(ip), project=project):
             raise ValueError('probe destination is prohibited')
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -60,13 +69,14 @@ def open_socket(addresses, timeout):
 
 class HTTPConnection(http.client.HTTPConnection):
     """Single-origin HTTP, optionally over TLS, with no hostname fallback."""
-    def __init__(self, host, port, addresses, timeout, context=None):
+    def __init__(self, host, port, addresses, timeout, context=None, project=None):
         super().__init__(host, port, timeout=timeout)
         self.addresses = addresses
         self.context = context
+        self.project = project
 
     def connect(self):
-        raw = open_socket(self.addresses, self.timeout)
+        raw = open_socket(self.addresses, self.timeout, project=self.project)
         try:
             self.sock = self.context.wrap_socket(raw, server_hostname=self.host) if self.context else raw
         except Exception:

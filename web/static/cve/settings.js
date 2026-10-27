@@ -1,4 +1,4 @@
-// Admin settings: AI, API keys, notifications, scan engines, proxy. Superuser only (the API enforces it).
+// Admin settings: AI, API keys, Tailscale, notifications, scan engines, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
 
@@ -622,6 +622,139 @@ const sections = {
     await refresh();
   },
 
+  async tailscale(m) {
+    const wrap = el("div");
+    m.append(wrap);
+    const lines = (box) => box.value.split(/[\s,]+/).filter(Boolean);
+    const when = (iso) => (iso ? new Date(iso).toLocaleString() : "never");
+    const statusBadge = (l) => {
+      const cls = { ok: "", partial: "medium", error: "failed", never: "" }[l.last_status] || "";
+      const word = { ok: "synced", partial: "synced with notes", error: "error", never: "not synced yet" }[l.last_status] || l.last_status;
+      return el("span", `badge ${cls}`.trim(), l.enabled ? word : "off");
+    };
+    // one card: an existing link, or (link === null) the form that connects a tailnet to a project
+    const linkCard = (link, projects, redraw) => {
+      const l = link || {};
+      const project = link
+        ? null
+        : selectOf(projects.map((p) => [p.id, p.org ? `${p.name} (${p.org})` : p.name]), projects[0] && projects[0].id);
+      const kind = l.credential_kind;
+      const clientId = text("", { autocomplete: "off", placeholder: kind === "oauth" ? "saved (leave blank to keep)" : "OAuth client id" });
+      const clientSecret = secret(kind === "oauth", "OAuth client secret");
+      const token = secret(kind === "token", "or an API access token (tskey-api-...)");
+      const routing = selectOf(
+        [
+          ["auto", "This server's Tailscale node (the compose `tailscale` profile)"],
+          ["host", "Already routed: the Docker host is on the tailnet"],
+        ],
+        l.routing || "auto",
+      );
+      const enabled = check("Keep this project's targets in step with the tailnet (sync every 15 minutes)", link ? l.enabled : true);
+      const local = check("Also read this server's own Tailscale node (the compose `tailscale` profile), no credential needed", link ? l.use_local : true);
+      const policy = check("Read the tailnet policy file for tailnet-wide findings (needs the policy_file:read scope)", link ? l.check_policy : true);
+      const auto = check("Auto-scan: queue the normal discovery and scan pipeline for new and changed online devices", !!l.auto_scan);
+      const cap = text(l.max_devices || 100, { type: "number", min: "1", max: "5000" });
+      const onlyTags = text((l.only_tags || []).join(" "), { placeholder: "tag:server tag:prod (empty: any device)" });
+      const skipTags = text((l.skip_tags || []).join(" "), { placeholder: "tag:printer" });
+      const onlyOs = text((l.only_os || []).join(" "), { placeholder: "linux windows (empty: any)" });
+      const body = () => ({
+        enabled: enabled.box.checked,
+        use_local: local.box.checked,
+        routing: routing.value,
+        check_policy: policy.box.checked,
+        auto_scan: auto.box.checked,
+        max_devices: cap.value,
+        only_tags: lines(onlyTags),
+        skip_tags: lines(skipTags),
+        only_os: lines(onlyOs),
+        client_id: clientId.value,
+        client_secret: clientSecret.value,
+        access_token: token.value,
+      });
+      const pid = () => (link ? l.project.id : project.value);
+      const kids = [];
+      if (link) {
+        const status = el("div", "", null, { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px" });
+        status.append(
+          statusBadge(l),
+          el("span", "note", `${l.tailnet || "tailnet not named yet"}: ${l.device_count} device${l.device_count === 1 ? "" : "s"} on the tailnet, ${l.imported} imported (${l.online} online, ${l.offline} offline, ${l.departed} departed). Last sync ${when(l.last_sync_at)}.`, { style: "margin:0" }),
+        );
+        kids.push(status);
+        if (l.last_error) kids.push(el("p", "msg err", l.last_error));
+        if (!l.scan_reachable) kids.push(el("p", "note", "Scans cannot reach this tailnet yet, so its devices are listed and checked but not scanned."));
+        const node = l.local && l.local.backend_state ? `This server's node is ${l.local.backend_state}${l.local.self_name ? ` as ${l.local.self_name}` : ""}, running Tailscale ${l.local.version || "?"}.` : "";
+        if (node) kids.push(el("p", "note", node));
+      } else {
+        kids.push(field("Project the tailnet's devices become targets of", project));
+      }
+      kids.push(
+        el("p", "note", "Credentials are stored encrypted and never shown again. Create an OAuth client with only these read-only scopes: devices:core:read, devices:routes:read, policy_file:read and devices:posture_attributes:read (policy_file:read needs the other two).", { style: "margin:0 0 10px" }),
+        field("OAuth client id", clientId),
+        field("OAuth client secret", clientSecret),
+        field("API access token (alternative to an OAuth client)", token, "An access token expires after at most 90 days; an OAuth client does not and can be revoked."),
+        enabled.wrap,
+        field("How scans reach the tailnet", routing, "Scanning needs a route: with the compose profile this server joins the tailnet itself. Choose Already routed only if the Docker host is on the tailnet and containers can reach 100.x addresses through it; that is taken on your word. Without a route devices are still listed and checked from API data, but never scanned."),
+        local.wrap,
+        policy.wrap,
+        auto.wrap,
+        field("Most devices one sync imports or queues for scanning", cap, "The rest follow on the next sync. Existing devices are always kept up to date."),
+        field("Only devices tagged", onlyTags),
+        field("Never devices tagged", skipTags),
+        field("Only these operating systems", onlyOs),
+        el("p", "note", "Devices shared into your tailnet from another tailnet are never imported, and neither is this server's own node. Hosts excluded for the organization are never added or scanned.", { style: "margin:0 0 12px" }),
+      );
+      const out = el("p", "note", "", { style: "margin:8px 0 0" });
+      const actions = el("div", "", null, { style: "display:flex;gap:8px;flex-wrap:wrap" });
+      actions.append(
+        button(link ? "Save" : "Connect", async () => {
+          if (!link && !project.value) throw new Error("Choose a project first");
+          await api("PUT", `tailscale/${pid()}`, body());
+          toast("Saved");
+          await redraw();
+        }),
+        button("Test connection", async () => {
+          const r = await api("POST", `tailscale/${pid()}/test`, body());
+          out.className = r.ok ? "note" : "msg err";
+          out.textContent = r.ok
+            ? `Connected${r.tailnet ? ` to ${r.tailnet}` : ""}: ${r.devices} device${r.devices === 1 ? "" : "s"}.${r.policy ? ` Policy file: ${r.policy}.` : ""}${r.local && r.local.backend_state ? ` This server's node: ${r.local.backend_state}.` : ""}${r.local && r.local.error ? ` This server's node: ${r.local.error}.` : ""}`
+            : r.error;
+        }, "btn ghost"),
+      );
+      if (link) {
+        actions.append(
+          button("Sync now", async () => {
+            await api("POST", `tailscale/${pid()}/sync`);
+            toast("Sync queued: refresh in a minute");
+          }, "btn ghost"),
+          button("Disconnect", async () => {
+            if (!(await ask("The project keeps its targets and findings; the devices are archived and their tailnet addresses can no longer be scanned.", { title: "Disconnect this tailnet?", ok: "Disconnect" }))) return;
+            await api("DELETE", `tailscale/${pid()}`);
+            toast("Disconnected");
+            await redraw();
+          }, "btn ghost"),
+        );
+      }
+      return card(link ? `Tailnet of ${l.project.name}` : "Connect a tailnet", ...kids, actions, out);
+    };
+    const draw = async () => {
+      wrap.textContent = "";
+      const s = await api("GET", "tailscale");
+      wrap.append(
+        card(
+          "Tailscale",
+          el("p", "note", "Connect a tailnet to a project and its devices become targets automatically, are scanned like any other host and are checked for Tailscale-specific problems (outdated clients with known security fixes, key expiry, stale devices, broad subnet routes, an allow-all policy, broad SSH rules). Connecting is what authorises scanning the addresses of the devices it imports (100.64.0.0/10 and fd7a:115c:a1e0::/48), and nothing else in those ranges."),
+          el("p", "note", "Scanning needs this server's own Tailscale node (the compose `tailscale` profile, see docs/TAILSCALE.md) or a Docker host that is already on the tailnet. Without a route, devices are still listed and checked from API data, but never scanned."),
+        ),
+        el("div", "", null, { style: "height:16px" }),
+      );
+      s.links.forEach((link) => {
+        wrap.append(linkCard(link, [], draw), el("div", "", null, { style: "height:16px" }));
+      });
+      if (s.projects.length) wrap.append(linkCard(null, s.projects, draw));
+    };
+    await draw();
+  },
+
   async keys(m) {
     const s = await api("GET", "keys");
     const rows = {};
@@ -1011,6 +1144,7 @@ view.append(tabs, panel);
 const labels = {
   ai: "AI model",
   keys: "API vault",
+  tailscale: "Tailscale",
   notifications: "Notifications",
   engines: "Scan engines",
   ip_allowlist: "IP allowlist",

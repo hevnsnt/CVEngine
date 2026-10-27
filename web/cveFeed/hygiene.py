@@ -7,10 +7,11 @@ resolves the ones that no longer apply, so the table always reflects the current
 import base64
 import concurrent.futures
 import datetime
+import functools
 import logging
 import re
 import socket
-from cveFeed import pinned_transport
+from cveFeed import legacy_tls, pinned_transport
 import ssl
 from dataclasses import dataclass, field
 
@@ -262,35 +263,25 @@ def evaluate_cert(info, now=None):
     return findings
 
 
-def _legacy_context():
-    """A client that will talk TLS 1.0 / 1.1 only, to find servers that still accept the old protocols."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.minimum_version, ctx.maximum_version = ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1
-    ctx.set_ciphers('ALL:@SECLEVEL=0')
-    return ctx
-
-
-def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
+def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None, project=None):
     """Connect without verification (so broken certs can still be read), return a plain info dict or None."""
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
-    if legacy:
-        try:
-            ctx = _legacy_context()
-        except (ValueError, ssl.SSLError):
+    if legacy:  # a modern client cannot read servers that only speak TLS 1.0 / 1.1: legacy_tls is the one module that speaks those
+        got = legacy_tls.handshake(host, port, timeout, addresses=addresses, project=project)
+        if got is None:
             return None
+        der, protocol, cipher = got
     else:
         ctx = ssl.create_default_context()
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: the legacy check below is the only place old protocols are spoken
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: legacy_tls is the only place old protocols are spoken
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-            der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
-    except (OSError, ssl.SSLError, socket.timeout, ValueError):
-        return None
+        try:
+            with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+                der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
+        except (OSError, ssl.SSLError, socket.timeout, ValueError):
+            return None
     cert = x509.load_der_x509_certificate(der)
     try:
         sans = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
@@ -310,12 +301,12 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
             'key_description': key, 'protocol': protocol, 'cipher': cipher}
 
 
-def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
+def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """Empty string if the system trust store accepts the certificate for this host, else the reason."""
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host):
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host):
             return ''
     except ssl.SSLCertVerificationError as exc:
         return (exc.verify_message or str(exc))[:300]
@@ -323,14 +314,9 @@ def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
         return ''
 
 
-def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None):
+def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
-    try:
-        ctx = _legacy_context()
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-            return tls.version() in ('TLSv1', 'TLSv1.1')
-    except (OSError, ssl.SSLError, ValueError):
-        return False
+    return legacy_tls.accepts(host, port, timeout, addresses=addresses, project=project)
 
 
 CERT_TEXT_LIMITS = {'subject': 500, 'issuer': 500, 'signature_algorithm': 100, 'key_description': 100, 'protocol': 20, 'cipher': 100,
@@ -349,17 +335,24 @@ def clip_certificate(info):
     return out
 
 
-def probe_tls(host, port):
+def _project_kw(project):
+    """``{'project': id}`` when the target has one that may authorise a tailnet device, else nothing (the probes take it as an option)."""
+    return {} if project is None else {'project': project}
+
+
+def probe_tls(host, port, project=None):
+    """Read the certificate and TLS posture of ``host:port``. ``project`` may authorise a tailnet device of its own."""
+    kw = _project_kw(project)
     try:
-        addresses = pinned_transport.resolve(host, port)
+        addresses = pinned_transport.resolve(host, port, **kw)
     except (OSError, ValueError):
         return None
-    info = _fetch_cert(host, port, addresses=addresses)
+    info = _fetch_cert(host, port, addresses=addresses, **kw)
     if info:
-        info['chain_error'] = _chain_error(host, port, addresses=addresses)
-        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses)
+        info['chain_error'] = _chain_error(host, port, addresses=addresses, **kw)
+        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses, **kw)
         return info
-    info = _fetch_cert(host, port, legacy=True, addresses=addresses)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
+    info = _fetch_cert(host, port, legacy=True, addresses=addresses, **kw)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
     if info:
         info['chain_error'] = 'cannot be verified: the server only speaks TLS 1.0 / 1.1'
         info['legacy_tls'] = True
@@ -475,15 +468,43 @@ def email_domains(domain, mx=has_record):
     return names + extra
 
 
-def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
-    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
+def store_findings(domain, found, hosts=None, owns=lambda check: True):
+    """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
+    owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
+    Tailscale checks (cveFeed.tailscale_checks) store through here too, and the TLS and email sweep leaves their rows alone."""
     from django.utils import timezone
 
+    from cveFeed.models import HygieneFinding
+    keep = set()
+    for f in found:
+        keep.add((f.host or domain.name, f.check))
+        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
+                    'status': 'open', 'resolved_at': None}
+        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
+        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
+            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
+            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
+                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
+                            + 'Reopened: the check found this again after it was marked fixed.')
+        HygieneFinding.objects.update_or_create(
+            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
+    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
+             if owns(x.check_name) and (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
+    for x in stale:
+        x.status, x.resolved_at = 'resolved', timezone.now()
+        x.save(update_fields=['status', 'resolved_at'])
+    return stale
+
+
+def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
+    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
     from cveFeed import activity, changes
-    from cveFeed.models import HygieneFinding, TlsCertificate
+    from cveFeed.models import TlsCertificate
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     project = domain.project_id
+    if probe is probe_tls:  # the project may authorise the tailnet devices of its own
+        probe = functools.partial(probe_tls, project=project)
     running = activity.log('hygiene', f'Checking TLS and email authentication for {domain.name}', project=project, status='running')
     found = []
 
@@ -524,24 +545,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             f'MailFail checks (Black Hills Information Security) on {shown}: {issues} issue{"s" if issues != 1 else ""}'),
             credit=CREDIT, mail_domains=len(mail_hosts), issues=issues)
 
-    keep = set()
-    for f in found:
-        keep.add((f.host or domain.name, f.check))
-        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
-                    'status': 'open', 'resolved_at': None}
-        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
-        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
-            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
-            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
-                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
-                            + 'Reopened: the check found this again after it was marked fixed.')
-        HygieneFinding.objects.update_or_create(
-            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
-    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
-             if (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
-    for x in stale:
-        x.status, x.resolved_at = 'resolved', timezone.now()
-        x.save(update_fields=['status', 'resolved_at'])
+    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith('ts_'))
     try:  # the medium and worse findings are triaged (impact and a fix); never fatal to the check
         from cveFeed import triage
         triage.triage_hygiene(domain_id)

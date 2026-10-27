@@ -9,6 +9,7 @@ from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import services as svc
 from agentapi import system_status
+from agentapi import tailscale
 from agentapi.auth import create_token
 from tenancy import audit
 from agentapi.services import ApiError, Ctx
@@ -204,6 +205,12 @@ ROUTES = [
      lambda r, c, slug, **k: svc.set_runzero(c, slug, _body(r))),
     ('POST', r'projects/(?P<slug>[-\w]+)/runzero/sync', 'Queue a runZero sync of this project now',
      lambda r, c, slug, **k: (svc.run_runzero_sync(c, slug), 202)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/tailscale', 'The project\'s Tailscale connection: tailnet, device counts, last sync, errors, settings (administrators only; never the credentials)',
+     lambda r, c, slug, **k: tailscale.tailscale_status(c, slug)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/tailscale/devices', 'Tailnet devices imported into the project with their Tailscale facts (state=active|offline|departed|all, q=; administrators only)',
+     lambda r, c, slug, **k: tailscale.tailscale_devices(c, slug, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/tailscale/sync', 'Sync the project\'s tailnet now: devices, findings and (if enabled) scans (administrators only)',
+     lambda r, c, slug, **k: (tailscale.tailscale_sync(c, slug), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/findings', 'Every finding in one list, hottest first: CVE matches, scanner and hygiene findings (type=all|cve|scanner|hygiene, heat=fire|smoke|ice, severity=, status=actionable|all, host=)',
      lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/vulnerabilities', 'Scanner findings (severity, open filters)',

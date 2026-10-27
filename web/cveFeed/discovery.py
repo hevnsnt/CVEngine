@@ -6,6 +6,7 @@ worker, and every few seconds the batch it has seen is persisted as Subdomain,
 IP and Port rows plus DiscoveryEvent rows, which the dashboard polls to draw the
 discovery graph and the live feed while it happens.
 """
+import functools
 import logging
 import os
 import shutil
@@ -239,7 +240,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
         from targetApp.target_types import resolves_to_blocked
-        if resolves_to_blocked(scan.domain.name):
+        if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
             raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
                              'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
         for attempt, run_mode in enumerate(modes):
@@ -346,10 +347,10 @@ def ptr_names(ip, timeout=IP_LOOKUP_TIMEOUT):
         pool.shutdown(wait=False)
 
 
-def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT):
+def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT, project=None):
     """The hostnames on the certificate ``ip`` serves on 443: the subject name and the subject alternative names."""
     from cveFeed import hygiene
-    info = hygiene._fetch_cert(ip, 443, timeout=timeout)
+    info = hygiene._fetch_cert(ip, 443, timeout=timeout, project=project)
     if not info:
         return []
     names = [info.get('subject') or ''] + list(info.get('sans') or [])
@@ -373,7 +374,7 @@ def discover_ip(scan, ptr=None, certificate=None):
     try:
         persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
                             ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
-        for module, lookup in (('ptr', ptr or ptr_names), ('tls-san', certificate or tls_names)):
+        for module, lookup in (('ptr', ptr or ptr_names), ('tls-san', certificate or functools.partial(tls_names, project=domain.project_id))):
             try:
                 found[module] = [n for n in lookup(ip) if n and n != ip]
             except Exception:  # noqa: BLE001 - a dead port or a refused connection is the normal case
@@ -745,7 +746,7 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
             pairs = resolver(wanted)
             if force:
                 from targetApp.target_types import is_scannable_ip
-                pairs = {(name, address) for name, address in pairs if is_scannable_ip(address)}
+                pairs = {(name, address) for name, address in pairs if is_scannable_ip(address, project=domain.project_id if name == address else None)}
             persist_bbot_result(bbot_lib.BbotResult(subdomains=set(wanted), resolutions=pairs),
                                 ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
             ScanActivity.objects.filter(pk=step.pk).update(status=SUCCESS, time=timezone.now())

@@ -186,6 +186,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Discovery time limit, per bbot run | 6 hours |
 | nuclei time limit, per run | 4 hours |
 | Work conductor (keeps the discovery queue fed) | every minute |
+| Tailscale sync (devices, findings, scans of connected tailnets; [Tailscale](TAILSCALE.md)) | every 15 minutes |
 | Fire and smoke validation, change re-tests | every 5 minutes |
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | AI review and capacity tuning | every 3 hours |

@@ -138,8 +138,10 @@ What this protects: a database dump, a backup, or SQL injection reads only ciphe
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_ALLOW_PRIVATE_TARGETS` | `0` | `1` allows private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`). Loopback, link-local, multicast, `0.0.0.0/8`, and cloud metadata addresses are always refused. |
+| `CVENGINE_ALLOW_PRIVATE_TARGETS` | `0` | `1` allows private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`). Loopback, link-local, multicast, `0.0.0.0/8`, and cloud metadata addresses are always refused. A connected Tailscale tailnet does not need this: its imported devices' addresses are allowed on their own ([Tailscale](TAILSCALE.md#which-addresses-may-be-scanned)). |
 | `CVENGINE_BLOCKED_CIDRS` | none | Extra networks that are never scanned. |
+| `COMPOSE_PROFILES` | none | Set to `tailscale` to run the optional Tailscale node that lets scans reach a tailnet. Its auth key goes in `.env.tailscale`, not here. `TAILSCALE_HOSTNAME`, `TAILSCALE_EXTRA_ARGS` (added to the always-on `--shields-up`) and `TAILSCALE_IMAGE` (pinned to a version by default) tune it. See [Tailscale](TAILSCALE.md). |
+| `CVENGINE_TAILSCALE_STATUS_FILE` | `/var/run/tailscale-status/status.json` | The status file the Tailscale sidecar publishes and the worker reads (the compose volume, mounted read-only in celery only). Change it only if you mount it elsewhere. |
 | `CVENGINE_MAX_TARGETS_PER_ADD` | `10000` | Most addresses one CIDR, range, or bulk add may expand to. |
 | `CVENGINE_TRUSTED_PROXIES` | `172.16.0.0/12` | The addresses the web container sees connecting to it whose `X-Forwarded-For` is believed, for the IP allowlist and the input guard. The default covers Docker's networks, so the bundled proxy, or your own proxy on the Docker host, works with no setting. Add to it, never replace it with your proxy's own network, or every request appears to come from the Docker gateway. See [Deployment](DEPLOYMENT.md#https). The default applies to the production compose file. |
 | `CVENGINE_CSRF_TRUSTED_ORIGINS` | none | Your public https address when you use your own proxy or CDN, such as `https://scanner.example.com`. |
@@ -190,7 +192,7 @@ A sync runs every `CVENGINE_RUNZERO_SYNC_HOURS` hours (default 6) for each proje
 
 The API keys page shows the last sync, its counts and any error; `get_system_status` lists each project's runZero state for an App Admin and reports a failing sync as a problem; every sync writes an activity entry. A rejected token (401 or 403), a rate limit (429), an unreachable console, malformed JSON and an oversized reply (more than 32 MB, or more than 50,000 records per call) are each reported in plain words, the next scheduled sync tries again, and none of them stops the worker. Managing the sync (status, settings, Sync now) needs the organization admin or App Admin role. Needs migration 0085 (`RunZeroSync`) and the beat entry it creates, `cvengine-runzero-sync`.
 
-Superusers set the rest under **Settings**: AI model, API vault, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset.
+Superusers set the rest under **Settings**: AI model, API vault, Tailscale, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset.
 
 **node2shell (CVE-2026-111497).** Off by default (`CVENGINE_NODE2SHELL=0`): see above for why. When on, it runs [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) against hosts already fingerprinted as Node.js or Express. It never executes a command and never sends a credential; a host is reported vulnerable only when the detector's own controls establish a real, stable signal first.
 
