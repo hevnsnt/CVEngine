@@ -175,7 +175,7 @@ example.com
 198.51.100.7
 ```
 
-Create a token on **API tokens and MCP** and send `Authorization: Bearer <token>` to `/api/v1/`, or connect an MCP client to `/mcp/`. Tokens use the roles of their user, and read-only tokens are supported. See the [Agent API](docs/AGENT-API.md).
+Create a token on **API tokens and MCP** and send `Authorization: Bearer <token>` to `/api/v1/`, or connect an MCP client to `/mcp/`. Tokens use the roles of their user, and read-only tokens are supported. Agents can register which hosts, projects, or organizations they are responsible for and what they can do, and the server hands them matching validation and remediation tasks with leases, retries, and an audit trail. See the [Agent API](docs/AGENT-API.md#agents-and-assigned-work).
 
 ## Safe by design
 

@@ -144,7 +144,7 @@ def require_write_token(ctx):
 def _int_param(value, name):
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: JSON 1e999 parses to infinity
         raise ApiError(400, f'{name} must be an integer')
 
 
@@ -194,19 +194,24 @@ def _comment_count_annotation(kind):
 
 # --- identity ----------------------------------------------------------------
 
-def me(ctx):
+def _project_roles(ctx):
     from dashboard.models import Project
-    projects = [{'slug': p.slug, 'name': p.name, 'role': roles.effective_role(ctx.user, p)}
-                for p in Project.objects.order_by('name')]
+    return [{'slug': p.slug, 'name': p.name, 'role': roles.effective_role(ctx.user, p)} for p in Project.objects.order_by('name')]
+
+
+def me(ctx):
+    from agentapi import agent_broker
+    projects = _project_roles(ctx)
     profile = getattr(ctx.user, 'tenancy_profile', None)
     return {'username': ctx.user.username, 'projects': projects,
             'bugbounty_enabled': ctx.user.is_superuser or bool(profile and profile.bugbounty_enabled),
             'token': {'name': ctx.token.name, 'read_only': ctx.token.read_only,
-                      'assets': ctx.token.assets} if ctx.token else None}
+                      'assets': ctx.token.assets} if ctx.token else None,
+            'agent': agent_broker.identity(ctx)}
 
 
 def list_projects(ctx, params=None):
-    return {'results': me(ctx)['projects']}
+    return {'results': _project_roles(ctx)}
 
 
 def list_engines(ctx, params=None):
@@ -2427,9 +2432,26 @@ def _match(m):
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
             'remediation_updated': _iso(m.remediation_updated_at),
             'status_changed_at': _iso(m.remediation_updated_at), 'status_changed_by': _user_brief(m.remediation_by),
-            'assignee': _user_brief(m.assignee), 'comment_count': _comment_count(m, 'match'),
+            'assignee': _user_brief(m.assignee), 'comment_count': _comment_count(m, 'match'), 'agent_task': _agent_task_of(m),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m))}
+
+
+def _agent_task_of(m):
+    """The agent work waiting on or doing this match, as the list query annotated it (see _agent_task_annotations), else None."""
+    status = getattr(m, 'agent_task_status', None)
+    return {'kind': m.agent_task_kind, 'status': status, 'agent': m.agent_task_agent} if status else None
+
+
+def _agent_task_annotations():
+    """Per match, the newest unfinished agent task: its status, kind and the agent holding it (None while it is queued), in one subquery each
+    so a page of matches costs no query per row."""
+    from django.db.models import OuterRef, Subquery
+
+    from agentapi.models import ACTIVE_TASK_STATUSES, AgentTask
+    active = AgentTask.objects.filter(match=OuterRef('pk'), status__in=ACTIVE_TASK_STATUSES).order_by('-id')
+    return {'agent_task_status': Subquery(active.values('status')[:1]), 'agent_task_kind': Subquery(active.values('kind')[:1]),
+            'agent_task_agent': Subquery(active.values('agent__name')[:1])}
 
 
 def _matches_qs(project):
@@ -2437,7 +2459,7 @@ def _matches_qs(project):
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
         .select_related('cve_entry', 'subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
-        .annotate(comment_count=_comment_count_annotation('match')).order_by('-confidence', '-id')
+        .annotate(comment_count=_comment_count_annotation('match'), **_agent_task_annotations()).order_by('-confidence', '-id')
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs
 
 
@@ -2555,7 +2577,7 @@ def _finding_row(kind, obj):
             'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
             'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)),
             'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
-            'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
+            'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
 
 
 def _finding_project(kind, obj):
@@ -3097,6 +3119,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
         'assignee': _user_brief(obj.assignee) if kind in STATUS_KINDS else None,
         'comment_count': obj.comment_count if kind in STATUS_KINDS else 0,
+        'agent_task': _agent_task_of(obj) if kind == 'match' else None,
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,

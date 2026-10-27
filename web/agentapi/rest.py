@@ -5,6 +5,7 @@ import re
 
 from django.http import JsonResponse
 
+from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
@@ -78,8 +79,22 @@ def tokens_revoke(request, ctx, token_id, **_):
     updated = ctx.user.api_tokens.filter(id=token_id).update(revoked=True)
     if not updated:
         raise ApiError(404, 'token not found')
+    broker.release_for_tokens([token_id])
     audit.record_for_user(ctx.user, 'token.revoke', ctx.user, token_id=int(token_id))
     return {'revoked': True}
+
+
+def _register_agent(request, ctx, **_):
+    out = broker.register(ctx, _body(request))
+    return out, (201 if out['created'] else 200)
+
+
+def _queue_agent_work(request, ctx, slug, **_):
+    body = _body(request)
+    # kind is validated inside queue_work, after its project gate, so an _all caller gets that gate's answer first
+    out = broker.queue_work(ctx, slug, body.get('kind'), match_ids=body.get('match_ids'), mode=body.get('mode'), tier=body.get('tier'),
+                            host=body.get('host'), limit=body.get('limit', broker.MAX_QUEUE_BATCH))
+    return out, (201 if out['queued'] else 200)
 
 
 # --- routes ---------------------------------------------------------------------
@@ -286,6 +301,32 @@ ROUTES = [
     ('GET', r'assets', 'Assets registered on this token', lambda r, c, **k: {'assets': c.token.assets if c.token else []}),
     ('PUT', r'assets', 'Register hosts/IPs/CIDRs this token is responsible for',
      lambda r, c, **k: svc.register_assets(c, _body(r).get('assets'))),
+    ('GET', r'agent', 'The agent registered on this token: scope, capabilities, open assignments', lambda r, c, **k: broker.my_agent(c)),
+    ('PUT', r'agent', 'Register or update this token\'s agent: {name, kind, scope: {orgs, projects, hosts}, capabilities, os, tools, max_concurrent}',
+     _register_agent),
+    ('DELETE', r'agent', 'Unregister this token\'s agent and hand its tasks back', lambda r, c, **k: broker.unregister(c)),
+    ('POST', r'agent/heartbeat', 'Say the agent is alive; extends the leases of its running tasks', lambda r, c, **k: broker.heartbeat(c, _body(r))),
+    ('GET', r'agent/assignments', 'Tasks leased to this agent (?status= for others)', lambda r, c, **k: broker.my_assignments(c, r.GET)),
+    ('POST', r'agent/tasks/next', 'Lease the best eligible task, or none; body {wait: seconds up to 20, kinds: [validate, remediate]}',
+     lambda r, c, **k: broker.next_task(c, _body(r))),
+    ('GET', r'agent/tasks/(?P<task_id>\d+)', 'One of your tasks with its payload', lambda r, c, task_id, **k: broker.get_task(c, task_id)),
+    ('POST', r'agent/tasks/(?P<task_id>\d+)/accept', 'Accept a leased task and start work', lambda r, c, task_id, **k: broker.accept_task(c, task_id)),
+    ('POST', r'agent/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a task: {outcome, summary, checks: [{id, result, output}], retryable}',
+     lambda r, c, task_id, **k: broker.report_result(c, task_id, _body(r))),
+    ('POST', r'agent/tasks/(?P<task_id>\d+)/release', 'Give a task back to the queue; body {reason}',
+     lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
+    ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents)', lambda r, c, **k: broker.list_agents(c, r.GET)),
+    ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
+    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}',
+     lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Validation and remediation work for agents (status, kind, agent_id, host)',
+     lambda r, c, slug, **k: broker.list_tasks(c, slug, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Queue work for agents: body {kind: validate|remediate, match_ids or tier/host, mode}',
+     _queue_agent_work),
+    ('GET', r'projects/(?P<slug>[-\w]+)/agent-tasks/unassignable', 'Queued work no live agent can take, each with the reason',
+     lambda r, c, slug, **k: broker.list_unassignable(c, slug, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks/(?P<task_id>\d+)/cancel', 'Cancel queued or leased agent work',
+     lambda r, c, slug, task_id, **k: broker.cancel_task(c, slug, task_id)),
     ('GET', r'tokens', 'Your API tokens (session only)', tokens_list),
     ('POST', r'tokens', 'Create an API token (session only); body {name, read_only} or {name, scope: "inventory", project} for a host reporter token that can only post that project\'s inventory', tokens_create),
     ('DELETE', r'tokens/(?P<token_id>\d+)', 'Revoke a token (session only)', tokens_revoke),

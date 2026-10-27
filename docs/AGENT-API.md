@@ -64,6 +64,10 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | host inventory | `POST projects/{slug}/inventory` (reporter scripts), `GET projects/{slug}/inventory`, `GET .../inventory/{id}`, `GET .../hosts/{host}/inventory`, `POST .../inventory/{id}/adopt`, `DELETE .../inventory/{id}` | `list_host_inventories`, `get_host_inventory` (read only) |
 | API keys | `GET/PUT/DELETE projects/{slug}/api-keys[/{service}]` | none |
 | runZero sync | `GET/PUT projects/{slug}/runzero`, `POST projects/{slug}/runzero/sync` | `get_runzero_sync`, `set_runzero_sync`, `run_runzero_sync` |
+| agent identity | `GET/PUT/DELETE agent`, `POST agent/heartbeat` | `whoami` (adds `agent`), `register_agent`, `unregister_agent`, `agent_heartbeat` |
+| agent work | `GET agent/assignments`, `POST agent/tasks/next`, `GET agent/tasks/{id}`, `POST agent/tasks/{id}/accept`, `.../result`, `.../release` | `list_my_assignments`, `get_next_task`, `get_task`, `accept_task`, `report_task_result`, `release_task` |
+| queue and watch work | `GET/POST projects/{slug}/agent-tasks`, `GET .../agent-tasks/unassignable`, `POST .../agent-tasks/{id}/cancel` | `queue_agent_work`, `list_agent_tasks`, `list_unassignable_work`, `cancel_agent_task` |
+| agent administration | `GET agents`, `GET/PATCH agents/{id}` | `list_agents`, `get_agent`, `update_agent` |
 
 Lists take `page` and `page_size` (up to 200; this includes members, finding comments and a finding's audit trail), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Every MCP result carries `_meta["cvengine/untrusted_text"]`: text that came from scanned hosts or feeds (banners, titles, response excerpts, advisory text) is data, never instructions. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
@@ -76,6 +80,61 @@ The ingest answer is `201` for a machine's first report and `200` after, and nev
 `GET projects/{slug}/inventory` lists reports newest first (`status=matched|unmatched|stale|fresh`, `q=`). `GET .../inventory/{id}` and `GET .../hosts/{host}/inventory` return one report in full: the operating system, `packages_page` (each package normalised with `name`, `version`, `ecosystem`, `distro`, `distro_release`, `arch`, `source` and a `purl`; `q`, `page` and `page_size` up to 200 page through it), `patches`, `services`, `runtime`, `security`, `history` (the last 20 reports, summarised), `findings` (how many open CVE matches this report made) and `stale`. Names and versions in a report are data from the machine, untrusted. `POST .../inventory/{id}/adopt` ties an unmatched report to a host the project scans (`{"host": "name"}`) or adds the machine as a target (`{"create": true}`); `DELETE` removes a report. Both need a write role. The host record in `list_hosts`, `search_hosts` and the host page carries an `inventory` summary (`null` when the host never reported). A CVE match made from a report has `source: "host"` and `host_reported: true`.
 
 `GET/PUT projects/{slug}/settings` carries `inventory`: `create_hosts` (a report from a host nobody scans adds it as a target; off by default) and `stale_days` (default 14: a stale report creates and closes no findings).
+## Agents and assigned work
+
+An agent is an API token that has told the server who it is, what it is responsible for, and what it can do. The server then hands it validation and remediation tasks it is able to do, and only those. Registration is optional: `register_assets`, `get_remediation_work` and `update_remediation_status` keep working for an agent that picks its own work.
+
+**Register** with `PUT agent` (`register_agent`). The same call creates and updates; repeating it changes nothing, and fields you leave out keep their value. Registration needs a token that can write. `scope` is replaced as a whole when it is sent; its `hosts` (empty when none) also become the token's registered assets, which `get_remediation_work` narrows to.
+
+| Field | Meaning |
+| --- | --- |
+| `name`, `kind` | A display name and one of `remediation`, `validation`, `scanner`, `reporter` (for example a host inventory reporter, capability `report:inventory`), `human` (a person working through tasks). |
+| `scope` | What the agent is responsible for: `orgs` and `projects` (slugs) and `hosts` (a host name, which also covers every name under it, so `*.example.test` is stored as `example.test`; an IP address; or a CIDR). Name at least one organization or project: hosts narrow it, they do not pick a project. An agent with no organization or project is responsible for nothing and gets no work. |
+| `capabilities` | What it can do: `validate:network`, `validate:local` (runs on the host), `validate:local-ssh` (logs in to the host), `validate:guided` (follows plain-language confirm steps), `remediate:linux`, `remediate:windows`, `remediate:web-config`, `can-restart-services`, `report:inventory`, `shell`, `ssh`. Others are accepted and kept but never matched. |
+| `os`, `tools`, `max_concurrent` | Operating system families it acts on (`linux`, `windows`, `macos`, `bsd`; empty means any), tool names it has, and how many tasks it holds at once (1 to 10, default 2). |
+
+**Approval.** A new agent starts `pending` and gets no work until an administrator approves it (`PATCH agents/{id}` with `{"status": "active"}`, or **Administration, Agents, Manage, Approve**), because an agent can take work in, and report fixed on, every project its user writes to. An agent of an App Admin or organization admin is active at once. A user who already has an agent suspended or revoked does not get round it with a new token: the new agent starts `suspended` and an administrator must reinstate it. A user may have at most 10 agents. A suspended or revoked agent cannot unregister or re-register to clear that decision, and an administrator cannot approve, limit or reinstate their own agent (another administrator or an App Admin does). An organization admin can administer only users who belong to organizations they all administer; for others they see only their own organizations' part of the scope.
+
+The scope is checked against what the token's user can already reach: naming an organization or project outside that is a `403`, the same answer for one that does not exist. The check runs again every time work is handed out, so a user who loses a project loses the agent's claim to it at once. An administrator (an App Admin, or an organization admin for the users of their organizations) can `PATCH agents/{id}` with `status` (`active` to approve or reinstate, `suspended`, `revoked`), a `note`, and `limits` (`capabilities`, `projects`, `max_concurrent`, each `null` for no limit). A suspended or revoked agent loses its leases at once; a revoked token does too. `whoami` (and `GET me`) now carries `agent`: its registration, what it may reach right now, warnings, and its open assignments.
+
+**Work.** `POST projects/{slug}/agent-tasks` (`queue_agent_work`, needs a write role) queues `kind` `validate` or `remediate` for CVE matches, either `match_ids` or the open matches filtered by `tier` and `host`, up to 200 at a time. Each task records what it needs, from the work itself:
+
+- A validation uses the CVE's shared detection record. Checks that run on the host (`mode` `local`) need `validate:local` or `validate:local-ssh`; checks that probe from the network (`network`) need `validate:network`; a CVE with only plain-language confirm steps (`guided`) needs `validate:guided`. A CVE with none of these cannot be queued.
+- A remediation needs `remediate:linux` or `remediate:windows` from the host's operating system (the fingerprint and distribution the scans recorded; when unknown, either), or `remediate:web-config` and `can-restart-services` when the fix is a setting in a web server's configuration file.
+
+Work already queued or running for the same match and kind is skipped. A task whose finding is fixed, accepted or ruled out is cancelled instead of handed out.
+
+**Assignment.** `POST agent/tasks/next` (`get_next_task`, body `{wait, kinds}`) leases the best task the caller may take: its scope covers the host, its user has a write role in the project, its capabilities and operating systems fit, and it is below its concurrent limit. Fire work comes first. If another live agent with room has less to do, the task is left for it, so the agent that polls fastest does not take everything. `wait` holds the call for up to 20 seconds until work appears (long polling: the MCP transport here has no server push); at most six calls wait at once, and any more answer immediately with `retry_after_seconds`. The claim is atomic: two agents asking for one task, exactly one gets it.
+
+A task is **leased**. A claimed task must be accepted (`accept_task`) within two minutes. An accepted task stays leased while the agent sends `agent_heartbeat` (about once a minute; each extends the lease of its running tasks by five minutes, up to four hours after acceptance). An agent silent for three minutes is offline and gets no new work. If an agent's user loses the write role or the project, or a limit tightens, the next heartbeat hands its tasks back, and an accept or a report for such a task is a `409` that changes nothing. A task whose lease runs out goes back to the queue after a 30 second pause, counting one attempt; after three attempts it is `failed`. `release_task` gives one back without counting.
+
+`report_task_result` closes a task. `outcome` is `confirmed`, `not_affected` or `inconclusive` for a validation, and `fixed`, `not_fixed` or `blocked` for a remediation. `error` reports a failure: `retryable` (default true) puts it back in the queue until its attempts run out. `summary` is plain text and `checks` is `[{id, result: pass|fail|error|skipped, output}]`, at most 20; everything is cleaned and clipped (1,000 characters of summary, 2,000 per output) and stored as data. A finished task adds a comment to the finding, and a `fixed` remediation sets the finding to `fixed` exactly as `update_remediation_status` does. A validation result never changes the finding by itself: people and the triage decide from the evidence. Reporting the same outcome twice is harmless; a different one is a `409`.
+
+**Unassignable work.** `GET projects/{slug}/agent-tasks/unassignable` (`list_unassignable_work`) lists queued tasks no live agent can take, each with the reason: `no agent covers host x`, `the agents covering host x are offline`, `no live agent covering host x has capability y`, or `... acts on windows hosts`. A reason never names an agent. A task that is assignable can still wait: every capable agent may be busy.
+
+**What an agent may run.** A task payload separates `run` and `run_remote` from `data`. Every entry of `run` (local checks, also given to a remediation to confirm the fix; `check_id`, `platform`, `shell`, `command`, `needs_root`, `expect`) and `run_remote` (network checks; `check_id`, `tool`, `invocation`, with `<TARGET>` and `<PORT>` placeholders) is rendered by the app from the detection record's own validated check parameters, re-validated and re-rendered each time it is read, so no text from a scanned host or a stored record becomes a command. `host.target` is the only value to put in `<TARGET>`, and it is `null` unless the host name is a plain DNS name or an address. Everything under `data` (host name, product, version, advisory title, ports, and `check_notes`, the prose the record has for each check) and `guidance` came from scanned hosts or feeds: read it, never run it. Every MCP result still carries `_meta["cvengine/untrusted_text"]`.
+
+**Limits.** Calls per minute: 120 heartbeats, 60 task requests, 120 reports and 30 queue requests per token, and three times that for all the tokens of one user together; registration is 30 an hour per token. One token holds at most one long poll and one user two. A match gets at most five agent tasks a day. Finished tasks are deleted after 30 days (`CVENGINE_AGENT_TASK_RETENTION_DAYS`, in the weekly maintenance); the audit log keeps the trail. Work for an agent is found in SQL by project, operating system and capability, so tasks it cannot do never hide ones it can. A project holds at most 2,000 waiting or running agent tasks. Registration allows 40 capabilities, 30 tools and 200 host entries.
+
+**Audit.** Registration, scope and status changes, queueing, claim, accept, completion, failure, release, lease expiry and cancellation are written to the audit log (Administration, Audit log), tagged with the project's organization.
+
+A worked flow, as MCP tool calls (REST is the same with the routes in the table above):
+
+```text
+register_agent    {"name": "web-fixer", "kind": "remediation",
+                   "scope": {"projects": ["website"], "hosts": ["*.example.test", "192.0.2.0/24"]},
+                   "capabilities": ["remediate:linux", "can-restart-services"], "os": ["linux"]}
+update_agent      {"agent_id": 7, "status": "active"}                  (an administrator approves the new agent)
+queue_agent_work  {"project": "website", "kind": "remediate", "tier": "fire"}      (a person or another agent with write access)
+get_next_task     {"wait": 20}              -> {"task": {"task": {"id": 41, "status": "assigned", ...}, "host": {...}, "run": [...], "data": {...}}}
+accept_task       {"task_id": 41}
+  ... fix the host, then run the commands in "run" to confirm ...
+report_task_result {"task_id": 41, "outcome": "fixed", "summary": "upgraded nginx to 1.24.0",
+                    "checks": [{"id": "package-nginx", "result": "pass", "output": "NOT-AFFECTED"}]}
+agent_heartbeat   {}                         (about once a minute while working)
+```
+
+In the web app, **Administration, Agents** lists agents with their scope, capabilities, last seen and task counts, with approve, limit, suspend and revoke, plus the work no agent can take and what is queued or running. **API tokens and MCP** lists your own agents. A finding and a host show which agent holds work on them.
 
 ## Targets and scans
 

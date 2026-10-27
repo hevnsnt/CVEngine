@@ -1090,6 +1090,7 @@ function renderFinding(d, cfg, row) {
   if (!d.remediation.text && !d.remediation.scanner && !(d.remediation.fixed_in || []).length) {
     fix.append(el("p", "note", "No remediation advice is recorded yet."));
   }
+  if (d.agent_task) fix.append(el("p", "note", agentLine(d.agent_task)));
   if (cfg.statusControl) {
     // the status is a change: in the all-projects view it is shown, and set from the finding's own project
     if (!ALL) fix.append(cfg.statusControl(d));
@@ -1178,6 +1179,14 @@ function renderFinding(d, cfg, row) {
 // One page of findings: the list down the left, the selected finding's full picture on the right (like Hosts). cfg:
 // kind (the API's finding kind), path, noun and plural, filters (nodes), params(), empty, onLoaded, row(item) -> {heat, title, meta[],
 // notes[]}, statusControl(detail) -> node (optional).
+// Who is working on a finding: the registered agent holding its task, or a note that the work is waiting for one.
+function agentLine(task) {
+  if (!task) return null;
+  const what = task.kind === "remediate" ? "fix" : "validation";
+  return task.agent ? `Assigned to agent ${task.agent} (${what}, ${task.status})` : `Queued for an agent (${what})`;
+}
+const agentTag = (task) => (task ? badge(task.agent ? `agent: ${task.agent}` : "queued for agent", "info") : null);
+
 // A CVE match's remediation status, set in its detail pane with the fix (the CVE matches and Findings pages)
 function matchStatusControl(d) {
   const s = select(
@@ -2803,6 +2812,19 @@ const pages = {
       };
       findingLines("Open findings", (h.vulns || []).filter((v) => v.severity !== "info"), h.vuln_count);
       findingLines("Informational detections", (h.vulns || []).filter((v) => v.severity === "info"), h.info_count);
+      // the validation and remediation work agents hold or wait for on this host
+      const agentBox = el("div", "agent-work");
+      S.findings.append(agentBox);
+      api("GET", `${baseOf(projectOf(h))}/agent-tasks?${query({ host: h.host, status: "active", page_size: 20 })}`)
+        .then((data) => {
+          if (current !== h.id) return;
+          const mine = (data.results || []).filter((t) => t.host === h.host);
+          if (!mine.length) return;
+          agentBox.append(el("h3", "sec", `Agent work (${mine.length})`));
+          mine.forEach((t) => agentBox.append(el("div", "find", `${t.finding.cve || "finding"}: ${agentLine({ kind: t.kind, status: t.status, agent: t.agent && t.agent.name })}`)));
+          foldTabs();
+        })
+        .catch(() => {});
       if (ALL) S.manage.append(assetInfoReadOnly(h));
       else S.manage.append(assetInfo(h), hostActions(h));
       foldTabs();
@@ -3028,7 +3050,7 @@ const pages = {
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
         meta: [badge(TYPE_LABEL[f.type] || f.type), badge(f.severity, f.severity), aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
-               f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, projChip(f)],
+               f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
         notes: [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),
     });
@@ -3102,7 +3124,7 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), projChip(m)],
+        meta: [badge(m.cve.tier, m.cve.tier), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });

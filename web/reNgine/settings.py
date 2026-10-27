@@ -117,6 +117,7 @@ INSTALLED_APPS = [
     'startScan.apps.StartscanConfig',
     'recon_note.apps.ReconNoteConfig',
     'cveFeed.apps.CveFeedConfig',
+    'agentapi.apps.AgentapiConfig',
     'django_ace',
     'django_celery_beat',
     'mathfilters',
