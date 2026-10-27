@@ -24,16 +24,16 @@ class MaintenancePageTests(SimpleTestCase):
 
 	def test_the_compose_file_hands_the_proxy_the_page_and_the_flag_directory(self):
 		compose = read('docker-compose.yml')
-		self.assertIn('./config/nginx/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro', compose)
+		self.assertIn('./web/static/cve/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro', compose)
 		self.assertIn('./config/nginx/state:/etc/nginx/state:ro', compose)
-		self.assertTrue(os.path.isdir(os.path.join(REPO, 'config', 'nginx', 'state')))
+		self.assertTrue(os.path.isdir(os.path.join(REPO, "config", "nginx", "state")))
 
 	def test_the_flag_is_never_committed(self):
 		self.assertIn('config/nginx/state/maintenance', read('.gitignore').splitlines())
 
 	def test_the_page_needs_nothing_from_the_application(self):
 		"""The application is the thing that is down: no stylesheet, script, font or image may be fetched from it (or anywhere else)."""
-		page = read('config', 'nginx', 'maintenance.html')
+		page = read('web', 'static', 'cve', 'maintenance.html')
 		self.assertNotRegex(page, r'<link[^>]+href=')
 		self.assertNotRegex(page, r'<script[^>]+src=')
 		self.assertNotRegex(page, r'<img\b')
@@ -53,3 +53,14 @@ class MaintenancePageTests(SimpleTestCase):
 	def test_make_up_clears_a_flag_an_interrupted_update_left_behind(self):
 		up = re.search(r'^up:.*\n((?:\t.*\n)+)', read('Makefile'), re.M).group(1)
 		self.assertIn('rm -f config/nginx/state/maintenance', up)
+
+	def test_an_administrator_waiting_for_an_update_gets_the_scene_and_is_sent_back_to_the_live_page(self):
+		bar = read('web', 'static', 'cve', 'updatebar.js')
+		self.assertIn('new URL("maintenance.html", import.meta.url)', bar)
+		self.assertIn('location.replace("/cve/")', bar)
+		self.assertNotIn('location.reload()', bar)
+		self.assertIn('.update-veil', read('web', 'static', 'cve', 'cve.css'))
+		# framed, the page only shows what it is told; alone, it polls for the site itself
+		page = read('web', 'static', 'cve', 'maintenance.html')
+		self.assertIn('window.top !== window', page)
+		self.assertIn('e.origin === location.origin', page)

@@ -1304,6 +1304,7 @@ button,.btn,[role="tab"],summary{-webkit-user-select:none!important;user-select:
 @keyframes update-pulse{50%{transform:scale(.6);opacity:.5}}
 @media (max-width:760px){.update-live .ul-steps{order:5;flex:1 0 100%;overflow-x:auto}}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}.update-live .ul-dot{animation:none}}
+.update-veil{position:fixed;inset:0;width:100%;height:100%;border:0;z-index:1000;background:var(--bg,#f4f4f5)}
 html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointer-events:none;transition:opacity .3s}
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
 .proj-wrap:has(.org-switch){gap:4px}.proj-wrap:has(.org-switch) .select+.select,.proj-wrap:has(.org-switch) .select+.proj-label+.select{margin-top:2px}

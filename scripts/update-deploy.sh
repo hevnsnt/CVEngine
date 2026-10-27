@@ -4,7 +4,7 @@
 # in the very update that delivers it. The update script itself is the copy already on the host and only changes on the next update.
 # Not run on its own: it uses the update script's COMPOSE, STATE_HELPER, phase and log, and sets DEPLOY_STAGE for its rollback decision.
 
-# The proxy shows its friendly maintenance page (config/nginx/maintenance.html) for as long as this flag file exists. It is set after the
+# The proxy shows its friendly maintenance page (web/static/cve/maintenance.html) for as long as this flag file exists. It is set after the
 # build, which keeps the running site untouched, and before the database changes, because from then until the new web service answers the
 # old code runs on a new schema or nothing runs at all, and a visitor would get an error page. It is always removed when the deploy ends,
 # failed or not: a failed update must not claim "back soon", and a retry sets it again. A host that was stopped mid-update can leave it

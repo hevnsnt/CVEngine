@@ -36,9 +36,33 @@ function watchUpdate(first) {
   const layout = document.querySelector(".layout") || document.getElementById("main");
   layout.parentNode.insertBefore(bar, layout.parentNode.firstChild);
   const body = [...document.querySelectorAll(".layout, #main")];
-  const grey = (on) => {
+  // From the moment the host picks the update up, the whole page is covered by the "we are rebuilding" scene (the same file the proxy
+  // serves to everyone else, which needs nothing from the application) with the current step as its status line. It stays until the
+  // update is done, and then this page goes back to /cve/.
+  let veil = null;
+  let veilText = "";
+  const tellVeil = () => {
+    try {
+      veil.contentWindow.postMessage({ state: veilText }, location.origin);
+    } catch (_) {}
+  };
+  const grey = (on, status) => {
     document.documentElement.classList.toggle("updating", on);
     body.forEach((n) => (on ? n.setAttribute("inert", "") : n.removeAttribute("inert")));
+    if (on && !veil) {
+      veil = el("iframe", "update-veil");
+      veil.title = "cvENGINE is being rebuilt";
+      veil.src = new URL("maintenance.html", import.meta.url).pathname;
+      veil.addEventListener("load", tellVeil);
+      document.body.append(veil);
+    } else if (!on && veil) {
+      veil.remove();
+      veil = null;
+    }
+    if (veil && status) {
+      veilText = status;
+      tellVeil();
+    }
   };
   let unreachable = 0;
   let sawDown = false;
@@ -57,9 +81,9 @@ function watchUpdate(first) {
     }
   };
   const finish = (now) => {
-    grey(false);
+    grey(true, `Updated to ${now.latest || first.latest}. Taking you back.`);
     paint(3, `Updated to ${now.latest || first.latest}`, "Scanning has resumed. Reloading.", false);
-    setTimeout(() => location.reload(), 2500);
+    setTimeout(() => location.replace("/cve/"), 1800);
   };
   const tick = async () => {
     let now = null;
@@ -70,7 +94,7 @@ function watchUpdate(first) {
     } catch (_) {
       unreachable += 1;
       sawDown = true;
-      grey(true);
+      grey(true, "Waiting for the site to answer. Usually 2 to 5 minutes.");
       paint(2, "Rebuilding CVEngine", "The page is paused and returns when the services are back. Usually 2 to 5 minutes.");
       return setTimeout(tick, POLL_MS);
     }
@@ -89,10 +113,10 @@ function watchUpdate(first) {
     }
     const phase = now.phase;
     if (phase === "applying" || phase === "restarting") {
-      grey(true);
+      grey(true, now.phase_detail ? `Rebuilding: ${now.phase_detail}` : "Building and restarting the services.");
       paint(2, "Rebuilding CVEngine", now.phase_detail || "Building and restarting the services.");
     } else if (phase === "resuming") {
-      grey(false);
+      grey(true, "Back up. Resuming scanning.");
       paint(3, "Back up. Resuming scanning", now.phase_detail || "");
     } else {
       grey(false);
