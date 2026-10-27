@@ -471,7 +471,7 @@ def email_domains(domain, mx=has_record):
 def store_findings(domain, found, hosts=None, owns=lambda check: True):
     """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
     owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
-    Tailscale checks (cveFeed.tailscale_checks) store through here too, and the TLS and email sweep leaves their rows alone."""
+    Tailscale checks (cveFeed.tailscale_checks) and the UDP exposure checks (cveFeed.udp_scan) store through here too, and the TLS and email sweep leaves their rows alone."""
     from django.utils import timezone
 
     from cveFeed.models import HygieneFinding
@@ -545,7 +545,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             f'MailFail checks (Black Hills Information Security) on {shown}: {issues} issue{"s" if issues != 1 else ""}'),
             credit=CREDIT, mail_domains=len(mail_hosts), issues=issues)
 
-    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_')))  # the tailnet, testssl.sh and cloud storage checks keep their own
+    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_')))  # the tailnet, testssl.sh, cloud storage and UDP checks keep their own
     try:  # the medium and worse findings are triaged (impact and a fix); never fatal to the check
         from cveFeed import triage
         triage.triage_hygiene(domain_id)

@@ -966,9 +966,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
             leads=leads)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
-    from startScan.models import open_ports
+    from startScan.models import open_services
     for ip in subdomain.ip_addresses.all():
-        for port in open_ports(ip):
+        for port in open_services(ip):  # a UDP service that identified itself (SNMP, NTP, SSDP, memcached) is evidence like a TCP one
             name = (port.product or "").strip()
             token = _norm(name)
             if len(token) < _MIN_TOKEN:
@@ -978,7 +978,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                 subdomain, name, version, token, "port",
                 product_index, cve_by_id, min_confidence, scan_history, rows, cpe=port.cpe or "",
                 distro=port_distro(port), fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
-                evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number,
+                evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number, "protocol": port.protocol or "tcp",
                           "service_extra": (port.service_extra or "")[:255], "cpe": (port.cpe or "")[:255],
                           "method": ((port.extra or {}).get("method") or "")},
                 leads=leads)

@@ -1254,8 +1254,18 @@ def weekly_deep_nuclei():
 def background_full_scan():
     """Every few minutes: sweep all 65,535 TCP ports of the one in-scope IP that was swept longest ago (never-swept first), under
     the lowest-priority heavy job, and let only one such sweep run at a time (see cveFeed.fullscan). CVENGINE_FULLSCAN=0 turns it off."""
-    from cveFeed import fullscan
-    return fullscan.run()
+    from cveFeed import fullscan, udp_scan
+    result = fullscan.run()
+    udp_scan.kick()  # the UDP sweep rides this firing, on a queue and a switch of its own
+    return result
+
+
+@app.task(name='udp_scan_sweep', bind=False, queue='udp_queue')
+def udp_scan_sweep():
+    """Queued by the background full scan's firing: UDP-scan the in-scope IPs that are due, one at a time, slowly (see ``cveFeed.udp_scan``).
+    It has a queue of its own so a sweep that waits on silent UDP ports never holds up the feed workers."""
+    from cveFeed import udp_scan
+    return udp_scan.run()
 
 
 @app.task(name="check_for_updates", bind=False, queue="cve_feed_queue")

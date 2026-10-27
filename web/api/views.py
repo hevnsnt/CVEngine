@@ -455,6 +455,8 @@ class GPTAttackSuggestion(APIView):
 		for ip in ip_addrs:
 			ports = ip.ports.all()
 			for port in ports:
+				if port.state not in ('', 'open'):
+					continue
 				open_ports_str += f'{port.number}/{port.service_name}, '
 		tech_used = ''
 		for tech in subdomain.technologies.all():

@@ -109,7 +109,7 @@ def hosts(project_slug, root, page=1, q=''):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch, HostState
     from dashboard.models import Project
-    from startScan.models import ScanActivity, Subdomain, Vulnerability, open_ports
+    from startScan.models import ScanActivity, Subdomain, Vulnerability, open_services
 
     project = Project.objects.filter(slug=project_slug).first()
     if not project:
@@ -143,5 +143,5 @@ def hosts(project_slug, root, page=1, q=''):
                                    'assessed' if row.scan_history_id in scanned else 'unscanned',
                          'archived': row.name.lower() in archived,
                          'ip_count': len(row.ip_addresses.all()),
-                         'service_count': sum(len(open_ports(ip)) for ip in row.ip_addresses.all()),
+                         'service_count': sum(len(open_services(ip)) for ip in row.ip_addresses.all()),
                          'score': row.score} for row in rows]}

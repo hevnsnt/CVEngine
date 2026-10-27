@@ -669,13 +669,23 @@ class IpAddress(models.Model):
 
 
 OPEN_PORT_STATES = ('', 'open')
+TCP_PROTOCOLS = ('', 'tcp')  # a row written before the protocol column was filled in is TCP
+OPEN_FILTERED = 'open|filtered'  # a UDP port nothing answered on: open, or dropped by a firewall. Not open, so never in OPEN_PORT_STATES
+
+
+def open_services(ip):
+	"""The ports of an IpAddress that answered, over any protocol: nmap also reports filtered and closed ones, a UDP port that did
+	not answer is ``open|filtered`` (it may be open or dropped), and a port that closed since the last scan keeps its row (state
+	'closed'). What the host runs and exposes (evidence, CVE matching, the host page, counts) reads this. Reads through
+	``ip.ports.all()`` so a prefetch is used."""
+	return [p for p in ip.ports.all() if p.state in OPEN_PORT_STATES]
 
 
 def open_ports(ip):
-	"""The ports of an IpAddress that are open: nmap also reports filtered and closed ones, and a port that closed since the last
-	scan keeps its row (state 'closed'). Every consumer that scans, correlates or lists ports reads this, never ``ip.ports``.
-	Reads through ``ip.ports.all()`` so a prefetch is used."""
-	return [p for p in ip.ports.all() if p.state in OPEN_PORT_STATES]
+	"""The open TCP ports of an IpAddress. Every consumer that connects to a port (nuclei, the database and RDP checks, TLS) reads
+	this, never ``ip.ports``: a UDP service answers no TCP connection, and UDP 161 is not TCP 161. A UDP port that answered is in
+	``open_services``."""
+	return [p for p in open_services(ip) if p.protocol in TCP_PROTOCOLS]
 
 
 class Port(models.Model):

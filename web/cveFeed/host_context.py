@@ -94,10 +94,10 @@ def _technologies(sub, names, observed):
 
 
 def _ports(sub, names):
-    from startScan.models import open_ports
+    from startScan.models import open_services
     out = []
     for ip in sub.ip_addresses.all():
-        for port in open_ports(ip):
+        for port in open_services(ip):
             extra = port.extra or {}
             record = {'number': port.number, 'protocol': port.protocol, 'service': _s(port.service_name, 40, names),
                       'product': _s(port.product, 80, names), 'version': _s(port.version, 40, names),
