@@ -19,6 +19,8 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
 * **Scans running**: scans marked running that started within ``RUNNING_WINDOW``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
 * **Certs expiring**: certificates that expire within 30 days, including those already expired.
+* **Oldest open**: the age in whole days of the longest-open critical or high item among the exposed CVE matches, actionable scanner
+  findings and open hygiene findings (``oldest_open``).
 """
 from datetime import timedelta
 
@@ -161,6 +163,53 @@ def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
     informational detections and closed findings (fixed or an accepted risk too) are the rest (``status=all``)."""
     return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
+
+
+def oldest_open(now=None):
+    """How long the worst open thing has sat: ``{'days', 'kind', 'id'}`` for the oldest open, actionable item of critical or high severity
+    across the three sources, or ``{'days': None, 'kind': None, 'id': None}`` when none qualifies. Each source keeps its own definition
+    of actionable so the number agrees with the page it links to:
+
+    * ``cve``: an exposed match (``exposed_matches``: not ruled out by the AI, not fixed or accepted) whose CVE scores 7.0 or more, the
+      Findings page's high and critical bands. A match is stored once per scan, so it has been open since the first scan that held
+      the same CVE on the same host name of the same target.
+    * ``scanner``: an actionable finding (``actionable_findings``) of severity high (3) or critical (4), open since the earliest
+      discovery of the same finding on the same host.
+    * ``hygiene``: an open hygiene finding of severity high or critical that is not fixed or an accepted risk, open since its first_seen.
+
+    Whole days, rounded down. ``id`` is the id of the row to link to: the current row of that finding."""
+    from django.db.models import OuterRef, Subquery
+
+    from cveFeed.models import CVEMatch, HygieneFinding
+    from cveFeed.threat import HIGH_CVSS
+    from startScan.models import Vulnerability
+    now = now or timezone.now()
+    best = {'at': None, 'kind': None, 'id': None}
+
+    def consider(kind, at, row_id):
+        if at is not None and (best['at'] is None or at < best['at']):
+            best.update(at=at, kind=kind, id=row_id)
+
+    first_match = Subquery(CVEMatch.objects.filter(
+        cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
+        subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
+    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first').values('id', 'first').first())
+    if row:
+        consider('cve', row['first'], row['id'])
+    first_finding = Subquery(Vulnerability.objects.filter(
+        name=OuterRef('name'), subdomain__target_domain=OuterRef('subdomain__target_domain'), subdomain__name=OuterRef('subdomain__name'),
+        discovered_date__isnull=False).order_by('discovered_date').values('discovered_date')[:1])
+    row = (actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).annotate(first=first_finding)
+           .filter(first__isnull=False).order_by('first').values('id', 'first').first())
+    if row:
+        consider('scanner', row['first'], row['id'])
+    row = (HygieneFinding.objects.filter(status='open', severity__gte=3).exclude(remediation_status__in=CLOSED).order_by('first_seen')
+           .values('id', 'first_seen').first())
+    if row:
+        consider('hygiene', row['first_seen'], row['id'])
+    if best['at'] is None:
+        return {'days': None, 'kind': None, 'id': None}
+    return {'days': max(0, (now - best['at']).days), 'kind': best['kind'], 'id': best['id']}
 
 
 def expiring_certificates(qs, days=CERT_WARNING_DAYS):

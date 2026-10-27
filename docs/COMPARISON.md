@@ -38,7 +38,7 @@
 
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
-| Template library | By default only templates that pass a read-only check (about half the community set at last count). An App Admin can switch on every installed template; denial-of-service templates stay excluded. | The full Nuclei library, stated as over 9,000 community templates | ProjectDiscovery |
+| Template library | The whole installed Nuclei library by default (denial-of-service templates stay excluded). An App Admin can limit scans to templates that pass a read-only check, about half the community set at last count. | The full Nuclei library, stated as over 9,000 community templates | Even |
 | Custom templates | The AI drafts one when none exists. It never runs until a person approves it with reviewed fixtures. | Private custom checks and AI-assisted generation | Even |
 | Protocols | HTTP, plus network service checks through nmap and the exposure checks | HTTP(S), TCP, DNS, SMB, and more | ProjectDiscovery |
 | Extra scanners | wafw00f to name the firewall in front of a host, WPScan, a read-only node2shell check (off by default), unauthenticated-database checks (Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, CouchDB), web route auth and sensitive-data checks, and email and DNS hygiene | Not stated | cvENGINE |
