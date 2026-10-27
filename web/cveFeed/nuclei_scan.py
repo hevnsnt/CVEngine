@@ -186,11 +186,13 @@ def cve_service(cve_id):
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
-def build_flags(tags=None, profile='normal', severities=None, tech=False, templates_dir=None):
+def build_flags(tags=None, profile='normal', severities=None, tech=False, templates_dir=None, secret_file=None):
     """Pure: the nuclei CLI flags for a run, optionally narrowed to ``tags`` (an iterable of tag names
     already validated against a known-safe allowlist by the caller - see cveFeed.nuclei_templates).
     ``profile='light'`` lowers concurrency and rate for a memory-constrained retry. ``severities`` narrows the severity
-    list, and ``tech`` is the light technology-fingerprint pass (the http/technologies templates, info severity)."""
+    list, and ``tech`` is the light technology-fingerprint pass (the http/technologies templates, info severity). ``secret_file`` (the
+    path of a nuclei secrets file, see cveFeed.auth_checks) makes it an authenticated run: nuclei reads the headers from that file, so no
+    value is ever on the command line, and ``-dr`` stops it following redirects, which could carry a header to another host."""
     flags = list(BASE_FLAGS)
     if templates_dir:
         flags += ['-t', templates_dir]
@@ -204,6 +206,8 @@ def build_flags(tags=None, profile='normal', severities=None, tech=False, templa
         flags += TECH_FLAGS
     elif tags:
         flags += ['-tags', ','.join(sorted(tags))]
+    if secret_file:
+        flags += ['-sf', secret_file, '-dr']
     return flags
 
 
@@ -234,7 +238,7 @@ def host_of(line):
     return raw.rsplit(':', 1)[0].strip('[]').lower() if raw.count(':') == 1 else raw.strip('[]').lower()
 
 
-def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False):
+def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
     """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
     reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter)."""
     from reNgine import resources
@@ -246,7 +250,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
     kind = 'nuclei-light' if profile == 'light' or tech else 'nuclei'
     approved_dir, _, _ = approved_templates()
     with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
-        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir)], stdout=subprocess.PIPE,
+        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file)], stdout=subprocess.PIPE,
                                 stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)
         timed_out = threading.Event()
@@ -354,7 +358,7 @@ def reuse_findings(scan, project, targets):
     return copied, len(copied_hosts)
 
 
-def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
+def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
     """Run nuclei over the scan's discovered assets and persist every result. Returns a summary dict.
     ``tags`` narrows the template set to a focused pass (see cveFeed.nuclei_templates); omitted, this
     is the blanket info-severity-and-up pass over every default template. Targets this project's nuclei already covered
@@ -468,6 +472,22 @@ def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severitie
         f"({counts['critical']} critical, {counts['high']} high, {counts['medium']} medium, "
         f"{counts['low']} low, {counts['info']} info)"), **counts)
     return {'targets': len(targets), 'findings': new, 'reused': reused, **counts}
+
+
+def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
+    """``_run_nuclei``, then, when the scan's target has a stored sign-in (cveFeed.auth_checks), the same selection again for the hosts that
+    sign-in covers, with the headers read from a private secrets file (cveFeed.auth_nuclei). A target with none runs exactly as before."""
+    from cveFeed import auth_nuclei, ledger
+    scope = auth_nuclei.scope_for_scan(scan_id)
+    if scope is None:
+        return _run_nuclei(scan_id, stream, tags, targets, severities, service_override, force)
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
+    targets = list(targets) if targets is not None else build_targets(*scan_targets(scan))
+    out = _run_nuclei(scan_id, stream, tags, targets, severities, service_override, force)
+    out['authenticated'] = auth_nuclei.run_authenticated(scan, scope, targets, stream, tags=tags, severities=severities,
+                                                         service=service_override or (ledger.nuclei_tag_service(tags) if tags else 'nuclei'), force=force)
+    return out
 
 
 LIGHT_SERVICE = 'nuclei-light'

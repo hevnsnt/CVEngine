@@ -19,6 +19,7 @@ import {
 } from "/staticfiles/cve/ui.js";
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
+import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -1827,6 +1828,7 @@ const pages = {
     tools.append(q);
     mount.append(tools);
     const post = (path, body) => api("POST", `${base}/${path}`, body);
+    const signIns = await loadSignIns(base); // null unless the viewer is an App Admin or the organization's admin
     // selection: individual rows, a whole loaded page, or every target matching the search
     const selected = new Set();
     const boxes = new Map();
@@ -2023,6 +2025,7 @@ const pages = {
               }
             };
             box.append(discover, scan);
+            if (signIns) box.append(signInButton(signIns, t));
             return box;
           },
         },

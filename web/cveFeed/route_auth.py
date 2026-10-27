@@ -1,8 +1,9 @@
-"""Auth state per web route: how a route answers an anonymous request.
+"""Auth state per web route: how a route answers an anonymous request (and, when the owner stored a sign-in for the target, how it answers
+signed in: see cveFeed.auth_routes).
 
 For each web host a handful of common routes (``/``, ``/login``, ``/admin``, ``/api`` ...) and the paths bbot saw are asked
 once with a plain GET and classified as open, a login page, a session requirement, single sign-on, a redirect or not found.
-The probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
+The anonymous probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
 each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the network
 helper (``probe_url``) is injectable.
 """
@@ -305,9 +306,11 @@ def _read_scripts(result, probe, scan_id):
 
 
 def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
-              connect_ip=None):
+              connect_ip=None, auth_scope=None):
     """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI. ``connect_ip`` connects to that vetted address instead
-    of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan)."""
+    of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan).
+    ``auth_scope`` (a cveFeed.auth_checks.AuthScope) adds the stored sign-in of the target, and only when this very destination (host, scheme and
+    port) is one the sign-in was stored for; the request is a single one, redirects are never followed, so the values go nowhere else."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
     from urllib.parse import quote, urlsplit
@@ -351,6 +354,8 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
     if browser:
         request_headers.update(BROWSER_HEADERS)
     request_headers.update({key.title(): value for key, value in (headers or {}).items()})
+    if auth_scope is not None:
+        request_headers.update(dict(auth_scope.headers_for(host, parsed.scheme, port)))
     path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
@@ -470,6 +475,17 @@ def _plan(scan, retired=None):
 
 
 def run_route_auth(scan_id, probe=probe_url, force=False):
+    """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes),
+    recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
+    from cveFeed import auth_routes
+    out = _run_route_auth(scan_id, probe, force)
+    signed = auth_routes.run_signed_in(scan_id, probe, force)
+    if signed is not None:
+        out['signed_in'] = signed
+    return out
+
+
+def _run_route_auth(scan_id, probe=probe_url, force=False):
     """Check how the scan's web routes answer an anonymous GET and store the result per project route. Routes checked inside
     the TTL (7 days, CVENGINE_TTL_ROUTE_AUTH) are not asked again. Returns
     ``{'routes', 'hosts', 'by_state', 'reused', 'errors'}``. ``force`` (a re-test of changed hosts) ignores the TTL: a version

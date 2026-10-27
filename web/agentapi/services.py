@@ -495,7 +495,7 @@ def list_scan_vulnerabilities(ctx, slug, scan_id, params):
     from startScan.models import Vulnerability
     scan = _scan_in_project(ctx, slug, scan_id)
     qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
-        .prefetch_related('cve_ids', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
+        .prefetch_related('cve_ids', 'tags', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
@@ -1918,6 +1918,7 @@ def _vuln(v):
             'remediation_updated': _iso(v.remediation_updated_at),
             'status_changed_at': _iso(v.remediation_updated_at), 'status_changed_by': _user_brief(v.remediation_by),
             'assignee': _user_brief(v.assignee), 'comment_count': _comment_count(v, 'vulnerability'),
+            'seen_while_authenticated': any(t.name == 'seen-while-authenticated' for t in v.tags.all()),  # an authenticated request saw it (cveFeed.auth_checks)
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'triage': _triage_brief(_triage_of(v))}
 
@@ -1927,7 +1928,7 @@ def list_vulnerabilities(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
     qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
-        .prefetch_related('cve_ids', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
+        .prefetch_related('cve_ids', 'tags', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}

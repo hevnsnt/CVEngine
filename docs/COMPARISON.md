@@ -45,7 +45,7 @@
 | Protocols | HTTP, plus network service checks through nmap and the exposure checks | HTTP(S), TCP, DNS, SMB, and more | ProjectDiscovery |
 | Extra scanners | wafw00f to name the firewall in front of a host, WPScan, testssl.sh for the TLS configuration and the named TLS vulnerabilities, cloud storage bucket exposure checks (public and dangling S3, GCS and Azure Blob storage), a read-only node2shell check (off by default), unauthenticated-database checks (Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, CouchDB), web route auth and sensitive-data checks, and email and DNS hygiene | Not stated | cvENGINE |
 | Internal scanning | Possible only if you allow private ranges and the server can reach them. There is no tunnel or agent. | Internal scanning, with a tunnel (beta) | ProjectDiscovery |
-| Authenticated testing | Not supported. Routes are checked anonymously. | Stated for Neo, with SSO and TOTP | ProjectDiscovery |
+| Authenticated testing | Supported with headers and a cookie you store for a target (an API token or a session cookie of a test account; encrypted, write-only, host- and origin-scoped, with an expiry). Nuclei and the web route check then also see the signed-in application. Nothing logs in for you: no SSO, TOTP or login flow. | Stated for Neo, with SSO and TOTP | ProjectDiscovery |
 | Re-testing | Re-test on change, and **Validate now** on any CVE match | One-click retesting and regression monitoring | Even |
 | Pentesting, code review, cloud posture | Not supported | Neo: autonomous app and API pentesting, PR review, cloud security, and mobile (beta) | ProjectDiscovery |
 
