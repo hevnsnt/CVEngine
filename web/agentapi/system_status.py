@@ -307,7 +307,11 @@ def _system(user, problems, notes):
         out['last_activity'] = health.get('last_activity')
         if health.get('workers_state') != 'responding':
             problems.append(f"workers: {health.get('worker_note')}")
-        if out['schedules']['past_due']:
+        beat = health.get('beat') or {}
+        out['schedules']['beat'] = beat
+        if beat.get('state') == 'silent':
+            problems.append(f"celery beat has not ticked for {beat.get('seconds_since_tick', 0) // 60} minutes; no schedule is being dispatched")
+        elif out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
     out['work'] = _probe(problems, 'work', _work)
     work = out['work']
