@@ -24,6 +24,8 @@ class ToolVersionCheckTests(SimpleTestCase):
 				return {'Version': 'v99.0.0'}
 			if host == 'pypi.org':
 				return {'info': {'version': '9999.0'}}
+			if host == 'api.github.com':
+				return [{'name': 'v3.3dev'}, {'name': 'v99.1'}, {'name': 'v3.2.3'}]
 			if host == 'go.dev':
 				return [{'version': 'go99.1rc1', 'stable': False}, {'version': 'go99.0.1', 'stable': True}]
 			return {'results': [{'name': 'stable'}, {'name': 'v99.2.0'}, {'name': 'v1.0.0'}]}
@@ -34,6 +36,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 		for tool in ('nuclei', 'nuclei (CI smoke test)', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)'):
 			self.assertTrue(rows[tool]['behind'], tool)
 		self.assertEqual((rows['naabu']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
+		self.assertEqual((rows['testssl.sh']['latest'], rows['testssl.sh']['behind']), ('99.1', True))  # a development tag is not a release
 		self.assertIn('| nmap |', tools.report(list(rows.values())))
 
 	def test_an_unreachable_site_is_unknown_not_a_crash(self):
@@ -48,7 +51,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 
 	def test_every_image_build_tool_is_pinned_to_a_version(self):
 		rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
-		for tool in ('nuclei', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)', 'nmap', 'wpscan'):
+		for tool in ('nuclei', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)', 'nmap', 'wpscan', 'testssl.sh'):
 			self.assertRegex(rows[tool]['pinned'], r'^\d+(\.\d+)+$', tool)
 
 	def test_a_tool_missing_from_the_checkout_is_skipped_but_a_required_one_is_not(self):

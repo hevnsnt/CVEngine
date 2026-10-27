@@ -61,6 +61,9 @@ def tools(dockerfile):
         component('bbot', arg(dockerfile, 'BBOT_VERSION'), f'pkg:pypi/bbot@{arg(dockerfile, "BBOT_VERSION")}', url='https://github.com/blacklanternsecurity/bbot'),
         component('tzdata', arg(dockerfile, 'TZDATA_VERSION'), f'pkg:pypi/tzdata@{arg(dockerfile, "TZDATA_VERSION")}', kind='library', note='installed beside bbot'),
         component('wpscan', arg(dockerfile, 'WPSCAN_VERSION'), f'pkg:gem/wpscan@{arg(dockerfile, "WPSCAN_VERSION")}', url='https://github.com/wpscanteam/wpscan'),
+        component('testssl.sh', arg(dockerfile, 'TESTSSL_VERSION'), f'pkg:github/testssl/testssl.sh@v{arg(dockerfile, "TESTSSL_VERSION")}',
+                  hashes=[arg(dockerfile, 'TESTSSL_SHA256')], note='GPLv2, run as a separate program; the release tarball (hash: tarball)',
+                  url='https://testssl.sh'),
         component('nuclei-templates', None, None, kind='data', pinned=False, note='refreshed at runtime, by design',
                   url='https://github.com/projectdiscovery/nuclei-templates'),
     ]
