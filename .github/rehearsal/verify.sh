@@ -56,7 +56,9 @@ if CVEMatch.objects.exists():
 print('WORDING OK', new)
 PY
 fi
-dc exec -T celery celery -A reNgine.tasks inspect active_queues -t 20 2>/dev/null | grep -q wpscan_queue || bad "no worker consumes wpscan_queue"
+# captured first: `inspect | grep -q` fails under pipefail when grep exits early and the producer gets SIGPIPE, even though it matched
+queues=$(dc exec -T celery celery -A reNgine.tasks inspect active_queues -t 20 2>/dev/null || true)
+grep -q wpscan_queue <<<"$queues" || { bad "no worker consumes wpscan_queue"; grep -oE "'name': '[a-z_]+'" <<<"$queues" | sort -u | head -20; }
 
 if [ "$(mode)" = overlay ]; then
   ports=$(docker ps --filter "label=com.docker.compose.service=proxy" --format '{{.Ports}}')
