@@ -16,7 +16,7 @@ from datetime import datetime, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -202,7 +202,8 @@ def _tool_version(argv):
         return cached[1]
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        lines = [line.strip() for line in ((proc.stdout or '') + (proc.stderr or '')).splitlines() if line.strip()]
+        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # testssl.sh colours its banner
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
         value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
     except (OSError, subprocess.SubprocessError):
@@ -261,7 +262,8 @@ def _tools():
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
+                         'testssl': _tool_version(('testssl.sh', '--version'))}}
 
 
 def _runzero(problems):

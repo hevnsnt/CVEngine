@@ -60,6 +60,13 @@ def latest_go_toolchain(data):
     return None
 
 
+def latest_github_tag(data):
+    """api.github.com/repos/<repo>/tags lists the newest first: the newest plain vX.Y(.Z) tag (development tags such as v3.3dev are ignored)."""
+    names = [t.get('name', '') for t in data] if isinstance(data, list) else []
+    versions = [n.lstrip('v') for n in names if re.fullmatch(r'v\d+\.\d+(?:\.\d+)?', n)]
+    return max(versions, key=version_key) if versions else None
+
+
 def latest_docker_tag(data):
     """The newest vX.Y.Z tag of a Docker Hub repository (the moving tags such as stable and latest are ignored)."""
     names = [t.get('name', '') for t in (data.get('results') or [])] if isinstance(data, dict) else []
@@ -94,6 +101,8 @@ TOOLS = [
     ('bbot', 'web/Dockerfile', r'ARG BBOT_VERSION=([0-9.]+)', 'https://pypi.org/pypi/bbot/json', latest_pypi, True, False),
     ('tzdata (bbot)', 'web/Dockerfile', r'ARG TZDATA_VERSION=([0-9.]+)', 'https://pypi.org/pypi/tzdata/json', latest_pypi, True, False),
     ('wafw00f', 'web/requirements.txt', r'(?m)^wafw00f==([0-9.]+)', 'https://pypi.org/pypi/wafw00f/json', latest_pypi, True, False),
+    ('testssl.sh', 'web/Dockerfile', r'ARG TESTSSL_VERSION=([0-9.]+)', 'https://api.github.com/repos/testssl/testssl.sh/tags?per_page=30',
+     latest_github_tag, True, False),
     ('go (toolchain)', 'web/Dockerfile', r'ARG GOVERSION=([0-9.]+)', 'https://go.dev/dl/?mode=json', latest_go_toolchain, True, False),
     ('tailscale (sidecar image)', 'docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)',
      'https://hub.docker.com/v2/repositories/tailscale/tailscale/tags/?page_size=50&ordering=last_updated', latest_docker_tag, True, True),

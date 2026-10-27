@@ -43,6 +43,14 @@ def wpscan_thorough(project_id):
     return wpscan_scan.run_thorough(project_id)
 
 
+@app.task(name='testssl_sweep', bind=False, queue='testssl_queue')
+def testssl_sweep():
+    """Daily: the TLS audit (testssl.sh) of the targets that are due, one at a time (see ``cveFeed.testssl_scan``). It has a queue of its own so
+    a minute-per-port test never holds up the feed workers."""
+    from cveFeed import testssl_scan
+    return testssl_scan.sweep_all()
+
+
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
 def sync_tailscale():
     """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""
