@@ -2,7 +2,7 @@
 
 How to put an install on the Internet under a real name (for example `scanner.example.com`) with a certificate browsers trust. The installer's own certificate comes from a private authority, so every browser warns until it is trusted; that is fine on a LAN and wrong for a public site.
 
-You need a server that already runs cvENGINE ([README quick start](../README.md#quick-start)), a domain you control, and the ability to open ports on the server's firewall.
+You need a server that already runs cvENGINE ([install steps](DEPLOYMENT.md#install)), a domain you control, and the ability to open ports on the server's firewall.
 
 ## 1. Point the name at the server
 
@@ -30,7 +30,7 @@ The proxy reads three files from `secrets/certs/`:
 | `rengine_rsa.key` | the private key (`privkey.pem`) |
 | `rengine_chain.pem` | the intermediates only (`chain.pem`) |
 
-**The key must be RSA.** The proxy's cipher list is RSA-only (`aRSA` in `config/nginx/rengine.conf`), and TLS 1.2 is the only protocol it speaks, so an ECDSA certificate (certbot's default since 2.0) makes every handshake fail. Ask for RSA explicitly.
+**The key must be RSA.** The proxy's cipher list is RSA-only (`aRSA` in `config/nginx/rengine.conf`) for TLS 1.2, and the proxy speaks TLS 1.2 and 1.3, so an ECDSA certificate (certbot's default since 2.0) makes TLS 1.2 handshakes fail. Ask for RSA explicitly.
 
 Port 80 is not used by the stack, so certbot can answer the challenge itself while the proxy keeps running:
 

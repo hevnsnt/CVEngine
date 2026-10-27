@@ -19,7 +19,7 @@
 | Your data | Stays on your server. Nothing is sent to the authors. | Managed service. It states SOC 2 Type II and zero data retention. | Different |
 | AI models | Bring your own: Anthropic, OpenAI, OpenRouter, or a local Ollama, vLLM or LM Studio, on every install | Standard and frontier models. Bring your own key is enterprise only. | cvENGINE |
 | Support | Community, through GitHub | Vendor support | ProjectDiscovery |
-| Maturity | New: v1.1, written in days and tested far less | Years in production | ProjectDiscovery |
+| Maturity | New: v1.2, written in days and tested far less | Years in production | ProjectDiscovery |
 
 ## Discovery
 
@@ -38,10 +38,10 @@
 
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
-| Template library | Nuclei, limited to templates that pass a read-only check (about half the community set at last count) | The full Nuclei library, stated as over 9,000 community templates | ProjectDiscovery |
+| Template library | By default only templates that pass a read-only check (about half the community set at last count). An App Admin can switch on every installed template; denial-of-service templates stay excluded. | The full Nuclei library, stated as over 9,000 community templates | ProjectDiscovery |
 | Custom templates | The AI drafts one when none exists. It never runs until a person approves it with reviewed fixtures. | Private custom checks and AI-assisted generation | Even |
 | Protocols | HTTP, plus network service checks through nmap and the exposure checks | HTTP(S), TCP, DNS, SMB, and more | ProjectDiscovery |
-| Extra scanners | WPScan, a read-only node2shell check, unauthenticated-database checks (Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, CouchDB), web route auth and sensitive-data checks, and email and DNS hygiene | Not stated | cvENGINE |
+| Extra scanners | wafw00f to name the firewall in front of a host, WPScan, a read-only node2shell check (off by default), unauthenticated-database checks (Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, CouchDB), web route auth and sensitive-data checks, and email and DNS hygiene | Not stated | cvENGINE |
 | Internal scanning | Possible only if you allow private ranges and the server can reach them. There is no tunnel or agent. | Internal scanning, with a tunnel (beta) | ProjectDiscovery |
 | Authenticated testing | Not supported. Routes are checked anonymously. | Stated for Neo, with SSO and TOTP | ProjectDiscovery |
 | Re-testing | Re-test on change, and **Validate now** on any CVE match | One-click retesting and regression monitoring | Even |

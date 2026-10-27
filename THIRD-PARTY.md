@@ -13,6 +13,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [naabu](https://github.com/projectdiscovery/naabu) | MIT | Full-port discovery ahead of nmap |
 | [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Screenshots in deep discovery |
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
+| [wafw00f](https://github.com/EnableSecurity/wafw00f) | BSD-3-Clause | Names the web application firewall in front of a web host |
 | [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial licence is needed for managed or hosted use) | WordPress vulnerability scanning |
 | [Tailscale](https://github.com/tailscale/tailscale) (the `tailscale/tailscale` container image) | BSD-3-Clause | The optional `tailscale` compose service that joins a tailnet so scans can reach it; read through its local status API |
 | [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot |
@@ -32,6 +33,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
+| [IANA RDAP bootstrap](https://data.iana.org/rdap/dns.json) | Registry lookups for email hygiene checks |
+| [cvENGINE CVE seed](https://github.com/hevnsnt/CVEngine/releases/tag/cve-seed) | The pre-built CVE catalog a new install downloads and verifies on first start |
+| [GitHub API](https://docs.github.com/rest) | The in-app update check |
 | [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran |
 | [Tailscale API](https://tailscale.com/api) and [security bulletins](https://tailscale.com/security-bulletins) | Read-only access to your own tailnet with your own credentials, and the fixed versions the Tailscale checks use |
 | [Tailworm](https://tailworm.com/) (an October 2026 security assessment of Tailscale and headscale, unconfirmed by the vendor) | Guidance behind the SSH, tag-owner and Funnel policy checks; referenced, nothing copied |

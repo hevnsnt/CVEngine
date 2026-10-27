@@ -27,7 +27,8 @@ Use the slug `_all` to search every project you can see.
 - A space means **AND**. Every term must match the host, but each term is tested on its own: `port:22 product:nginx` finds hosts with SSH open somewhere and nginx somewhere, not necessarily on the same port.
 - A leading `-` **excludes**: `-host:www`.
 - Wrap a value with spaces in **quotes**: `tech:"apache tomcat"`.
-- Matching is case-insensitive and by substring, so `nginx` finds `nginx/1.24.0`. There is no OR, no parentheses, and no wildcard.
+- Matching is case-insensitive and by substring, so `nginx` finds `nginx/1.24.0`. There is no OR between terms, no parentheses, and no wildcard. Inside one filter, a comma list is OR: `port:80,443` is port 80 or 443, `sev:high,critical` is either severity, and it is still ANDed with the other terms. Quote the value (`tech:"foo,bar"`) to keep a literal comma.
+- A search may have at most 15 terms of 200 characters each and 1,000 characters in all. More is a 400.
 - Unknown filter names are treated as plain text, so a pasted URL searches for the URL.
 
 | Filter | Matches | Example |
@@ -41,11 +42,12 @@ Use the slug `_all` to search every project you can see.
 | `ip:` | An address, a prefix, or a CIDR range | `ip:198.51.100.0/24` |
 | `host:` | Part of a host name | `host:staging` |
 | `cve:` | Hosts matched by a CVE (a full id or a prefix) | `cve:CVE-2026-111497` |
-| `vuln:` | A finding by name | `vuln:jenkins` |
-| `sev:` | A finding of this severity: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
+| `vuln:` | A finding by name, open or closed | `vuln:jenkins` |
+| `sev:` | A finding of this severity, open or closed: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
 | `auth:` | A web route's sign-in state: `open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `error` | `auth:open` |
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
+| `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 
 `port:` takes a number only. Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
 
@@ -100,11 +102,12 @@ If you know Shodan's [filters](https://www.shodan.io/search/filters), these are 
 | `os:` | `os:` | |
 | `net:` | `ip:` | CIDR ranges and prefixes |
 | `hostname:` | `host:` | |
+| `country:` | `country:` | |
 | `http.component:` | `tech:` | Reads more than the web page |
 | `http.title:` | a bare word | Page titles are searched with everything else |
 | `vuln:CVE-...` | `cve:` | Here `vuln:` searches finding names |
 
-cvENGINE has no `org:`, `country:`, or `city:` filters, because every host in the inventory is yours.
+cvENGINE has no `org:`, `asn:`, `hosting:`, or `city:` filters, because every host in the inventory is yours.
 
 ## Reading the results
 
@@ -116,7 +119,7 @@ curl -s -H "Authorization: Bearer $CVENGINE_TOKEN" \
   | jq '.results[] | {host, score, matched}'
 ```
 
-`page_size` goes up to 200. With no `q`, the search lists every host.
+`page_size` goes up to 200. With no `q`, the search lists every host. `heat=fire|smoke|ice|clean|unscanned` narrows the page, and `facets=port,product,tech,os,country` (with `facet_size`, 10 by default and 50 at most) returns counts per value, plus `facets.heat` over the whole match; counts stop after 5,000 hosts. The heat chips on the Hosts page filter only the rows already loaded.
 
 ## Saved searches and alerts
 

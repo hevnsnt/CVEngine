@@ -1,6 +1,6 @@
 # Configuration
 
-Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers. To change a setting, add a line such as `CVENGINE_TTL_NUCLEI=48` to `.env` and run `make up`. This needs Docker Compose 2.24 or newer. Compose fixes a few values and ignores them in `.env`: the broker URLs, `DEBUG`, and `GUNICORN_WORKERS`. Avoid `#` and `$` in passwords, because `make` and Compose both parse `.env`.
+Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers. To change a setting, add a line such as `CVENGINE_TTL_NUCLEI=48` to `.env` and run `make up`. This needs Docker Compose 2.24 or newer. Compose fixes a few values and ignores them in `.env`: the broker URLs, `CELERY_BACKEND`, `DEBUG` (0 in production, 1 in the development stack), and `GUNICORN_WORKERS`. Avoid `#` and `$` in passwords, because `make` and Compose both parse `.env`.
 
 ## Basics
 
@@ -10,12 +10,12 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | `CVENGINE_ALLOWED_HOSTS` | Extra hostnames Django accepts, comma separated. Any other name or IP gets 400 ([UPGRADE.md](UPGRADE.md#accepted-host-names)). Never use `*` on an Internet-facing install. |
 | `CVENGINE_HSTS_SECONDS` | HTTPS policy lifetime in seconds (3600 in production, 0 in development). Raise it only once every public route reliably uses HTTPS. |
 | `POSTGRES_PASSWORD` | Database password. Set it before the first start, because changing it later does not update the existing database. |
-| `AUTHORITY_PASSWORD` | Passed to the certificate step of `make certs`. `secrets/certs/ca.key` is not encrypted with it, so protect the directory. |
+| `AUTHORITY_PASSWORD` | Encrypts the key of the certificate authority that `make certs` creates (`secrets/certs/ca.key`, AES-256). An authority made by an older version keeps an unencrypted key until you delete `ca.key` and `ca.crt` in `secrets/certs` and run `make certs` again (browsers then need the new CA). Protect the directory either way. |
 | `DJANGO_SUPERUSER_USERNAME`, `_EMAIL`, `_PASSWORD` | Used by `make admin` and `sudo ./install.sh`. Leave the password empty and `make admin` generates one and prints it once (you choose your own at first sign-in); set it to choose the first one yourself. `make admin-password` resets only the account named by `DJANGO_SUPERUSER_USERNAME` (`admin` by default), ignores `DJANGO_SUPERUSER_PASSWORD`, and always makes that account choose a new password at its next sign-in. For another user run `docker compose exec -T web python3 manage.py create_admin --reset --username NAME` or `make changepassword`. A plain `make username` asks instead. |
 | `COMPOSE_PROJECT_NAME`, `POSTGRES_DB`, `POSTGRES_USER` | Name the Docker volumes and the database. Change them only before the first start. Leave `POSTGRES_HOST=db` and `POSTGRES_PORT=5432` as they are. |
 | `AUTHORITY_NAME`, `COMPANY`, `COUNTRY_CODE`, `STATE`, `CITY` | Subject of the certificates `make certs` creates. |
 
-`make certs` and `make username` refuse to run while the database or certificate password still says `change-me`. `./scripts/init-env.sh` (which `install.sh` and `make` run for you when `.env` is missing) fills those two with random values and leaves any other value alone. `STATE` and `CITY` stay `change-me`, which only affects the certificate subject. **Do not run `init-env.sh` or `install.sh` on an install made from an older `.env.example` that still has `change-me` as the database password:** it would replace that password, and PostgreSQL reads it only when the database is first created. Set the password you actually use in `.env` first.
+`make certs` and `make username` refuse to run while the database or certificate password still says `change-me`. `./scripts/init-env.sh` (which `install.sh` and `make` run for you when `.env` is missing) fills those two with random values, also generates `CVENGINE_FIELD_KEY` and (when no Redis container exists yet) `REDIS_PASSWORD`, and leaves any other value alone. `STATE` and `CITY` stay `change-me`, which only affects the certificate subject. **Do not run `init-env.sh` or `install.sh` on an install made from an older `.env.example` that still has `change-me` as the database password:** it would replace that password, and PostgreSQL reads it only when the database is first created. Set the password you actually use in `.env` first.
 
 ## Memory and workers
 
@@ -36,17 +36,17 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 
 ## Scanning
 
-Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips a host it covered inside its window.
+Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips a host it covered inside its window. Switches are not all read the same way: `CVENGINE_FULLSCAN`, `_WAFW00F`, `_RDP_SHOT`, `_ARCHIVE_LOOKUP`, `_AUTO_VALIDATE_ALL_MATCHES`, and `_CVE_SEED` are off for `0`, `false`, `no`, or `off`; `CVENGINE_INTEL`, `_BOUNTY_CATALOGUE`, and `_HYGIENE_RDAP` are off only for exactly `0`; `CVENGINE_NAABU` and `CVENGINE_ALLOW_PRIVATE_TARGETS` are on only for `1`, `true`, or `yes` (naabu also `on`); `CVENGINE_NODE2SHELL` is off only for `0`, `false`, `no`, or `off`, so an empty value turns it on.
 
-| `CVENGINE_WORK_DEPTH`, `CVENGINE_WORK_MIN_GAP_HOURS` | `3`, `2` | The work conductor keeps this many discovery scans running or queued, starting the targets that have waited longest, and never rescans a target inside the minimum gap. `0` for the depth turns it off. See [PIPELINE.md](PIPELINE.md#the-work-conductor). |
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_TTL_NMAP_FAST`, `_BBOT`, `_BBOT_DEEP`, `_ROUTE_AUTH`, `_NAABU`, `_NUCLEI_DEEP_HOST`, `_NUCLEI_DEEP_TARGET` | `168` | nmap fingerprint, discovery, deep discovery of an apex, route checks, naabu, and deep nuclei. |
+| `CVENGINE_WORK_DEPTH`, `CVENGINE_WORK_MIN_GAP_HOURS` | `3`, `2` | The work conductor keeps this many discovery scans running or queued, starting the targets that have waited longest, and never rescans a target inside the minimum gap. `0` for the depth turns it off. See [PIPELINE.md](PIPELINE.md#the-work-conductor). |
+| `CVENGINE_TTL_NMAP_FAST`, `_BBOT`, `_BBOT_DEEP`, `_ROUTE_AUTH`, `_NAABU`, `_WAFW00F`, `_NUCLEI_DEEP_HOST`, `_NUCLEI_DEEP_TARGET` | `168` | nmap fingerprint, discovery, deep discovery of an apex, route checks, naabu, firewall identification, and deep nuclei. Windows are kept per project. |
 | `CVENGINE_TTL_NUCLEI`, `_NUCLEI_LIGHT`, `_NUCLEI_CVE`, `_CT_WATCH`, `_HYGIENE`, `_VALIDATE`, `_RETEST` | `24` | Nuclei runs, certificate watch, hygiene, validation checks, and re-tests, per host. |
 | `CVENGINE_DEEP_SWEEP_MAX` | `50` | Apex domains the daily sweep queues for deep discovery. |
 | `CVENGINE_FULLSCAN` | `1` | `0` turns off the background full port scan. |
-| `CVENGINE_FULLSCAN_INTERVAL_MIN`, `_BATCH`, `_INVESTIGATE_MAX` | `10`, `1`, `50` | Minutes between sweeps (1 to 1440, read when the schedule is created), IPs per sweep (1 to 20), and new ports fingerprinted per sweep (1 to 1000). |
-| `CVENGINE_NAABU` | `1` | `0` turns off the naabu full-port discovery that runs ahead of nmap by default (see [Pipeline](PIPELINE.md)). |
+| `CVENGINE_FULLSCAN_INTERVAL_MIN`, `_BATCH`, `_INVESTIGATE_MAX` | `10`, `1`, `50` | Minutes between sweeps (1 or more, read once when the schedule is created), IPs per sweep (1 to 20), and new ports fingerprinted per sweep (1 to 1000). |
+| `CVENGINE_NAABU` | `1` | Anything other than `1`, `true`, `yes`, or `on` (an empty value too) turns off the naabu full-port discovery that runs ahead of nmap by default (see [Pipeline](PIPELINE.md)). |
 | `CVENGINE_NAABU_BIN`, `CVENGINE_NAABU_RATE` | `naabu`, `1000` | The binary and packets per second (100 to 5000). |
 | `CVENGINE_HYGIENE_RDAP` | `1` | `0` skips the registry lookups that check whether SPF includes and DMARC report domains are registered. |
 | `CVENGINE_SHOT_THRESHOLD` | `12` | Bits (of 64) by which screenshot hashes must differ to count as a changed front page. |
@@ -64,7 +64,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_RDP_SHOT_MAX_HOSTS` | `10` | RDP servers screenshotted per scan; a live RDP session plus an AI call costs more than most checks. |
 | `CVENGINE_WAFW00F` | `1` | Set to `0` to stop naming the firewall in front of each web host with [wafw00f](https://github.com/EnableSecurity/wafw00f) (a few requests per host, some with an attack-looking string, so a WAF may log them). The product it names is stored as a technology of the host. |
 | `CVENGINE_WAFW00F_TIMEOUT`, `CVENGINE_WAFW00F_MAX_HOSTS`, `CVENGINE_TTL_WAFW00F` | `60`, `25`, `168` | Seconds allowed per host, hosts fingerprinted per scan, and hours before a host is fingerprinted again. |
-| `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts fingerprinted as Node.js or Express for CVE-2026-111497. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
+| `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts for CVE-2026-111497 (Node.js, Bun, Envoy, and the frameworks that run on them; see `CVENGINE_NODE2SHELL_SCOPE`). Any value other than `0`, `false`, `no`, or `off`, an empty one included, turns it on, so remove the line to keep it off. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
 | `CVENGINE_NODE2SHELL_SCOPE` | `runtimes` | `runtimes` checks hosts a fingerprint names as Node.js (and its frameworks), Bun or Envoy. `all` checks every web host the scan found, for what a name cannot show: a Python service using Brotli, a container base image, a sidecar that hides what it is. Still limited by `CVENGINE_NODE2SHELL_MAX_HOSTS`. |
 | `CVENGINE_NODE2SHELL_TIMEOUT`, `CVENGINE_NODE2SHELL_MAX_HOSTS`, `CVENGINE_TTL_NODE2SHELL` | `90`, `5`, `24` | Seconds allowed per host, hosts checked per scan, and hours before a host is checked again. |
 
@@ -81,7 +81,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_CVE_COVERAGE_DAYS` | `14` | Days of the cve.now feed the hourly coverage task keeps stored. `0` turns it off. |
+| `CVENGINE_CVE_COVERAGE_DAYS` | `14` | Days of the cve.now feed the hourly coverage task reads back. `0` turns it off. |
 | `CVENGINE_CVE_WATCH_TECHS` | `php` | Technology slugs whose cve.now feed the coverage task also reads. |
 | `CVENGINE_INTEL` | `1` | `0` turns off the exploitation sources ([PIPELINE.md](PIPELINE.md#cve-intelligence)). |
 | `CVENGINE_INTEL_SOURCES` | all | A subset of `cisa_kev,euvd,vulncheck_kev,epss,exploit_db,metasploit`. |
@@ -99,13 +99,15 @@ To fill the CVE store faster on a fresh install or after a factory reset: `docke
 | `CVENGINE_CHANGES_RETENTION_DAYS` | `90` | Days the Changes log is kept. |
 | `CVENGINE_ACTIVITY_RETENTION_DAYS`, `_TRIAGE_CALL_RETENTION_DAYS`, `_AI_USAGE_RETENTION_DAYS` | `30`, `90`, `400` | Days the activity feed, AI call leases, and AI usage ledger are kept. Each Sunday older rows are archived to `cvengine-logs-<time>.tar.gz` before deletion, and nothing is deleted if the archive cannot be written. |
 | `CVENGINE_LOG_ARCHIVE_DIR`, `CVENGINE_LOG_ARCHIVE_DAYS` | `/usr/src/scan_results/.log-archives`, `365` | Where archives go (superusers can download them) and how long they are kept. |
-| `CVENGINE_ASSESSMENT_QUEUED_HOURS`, `_ASSESSMENT_RUNNING_HOURS`, `_VALIDATION_QUEUED_HOURS`, `_VALIDATION_RUNNING_HOURS` | `12`, `6`, `6`, `2` | After this long a host assessment or validation job still queued or running is marked failed, checked every 15 minutes. Queued jobs wait while scanning is paused. |
+| `CVENGINE_ASSESSMENT_QUEUED_HOURS`, `_ASSESSMENT_RUNNING_HOURS`, `_VALIDATION_QUEUED_HOURS`, `_VALIDATION_RUNNING_HOURS` | `12`, `6`, `6`, `2` | After this long a host assessment or validation job (on-demand or automatic) still queued or running is marked failed, checked every 15 minutes. Queued jobs wait while scanning is paused. |
+| `CVENGINE_ACTIVITY_RUNNING_HOURS` | `11` | After this long an AI activity row still "running" (a killed worker left it) is closed. |
 
 ## Updates
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_COMPOSE_FILES`, `_COMPOSE_ENV_FILE`, `_COMPOSE_PROJECT` | `docker-compose.yml`, none, none | The Compose layout `scripts/update.sh` and automatic deployment use (the approval updater reads only `CVENGINE_COMPOSE_FILE`) ([UPDATES.md](UPDATES.md#custom-compose-layouts)). |
+| `CVENGINE_COMPOSE_FILES`, `_COMPOSE_ENV_FILE`, `_COMPOSE_PROJECT` | the layout the running `web` container was started with, else `docker-compose.yml`; none; none | The Compose layout used by `scripts/update.sh`, the in-app updater, automatic deployment, `scripts/uninstall.sh`, `make redis-auth`, and `make rotate-field-key` ([UPDATES.md](UPDATES.md#custom-compose-layouts)). The older single `CVENGINE_COMPOSE_FILE` is still read. |
+| `CVENGINE_UPDATE_POLL_SECONDS` | `5` | Pause between checks while `scripts/update.sh` waits for workers and readiness. A number of seconds, decimals allowed; `0` means 5. |
 | `CVENGINE_UPDATE_DRAIN_SECONDS` | `10800` | Longest wait for active tasks, 1 to 10800. |
 | `CVENGINE_UPDATE_READY_SECONDS` | `600` | Longest wait for the site, workers, and scheduler after an update, 1 to 900. |
 | `CVENGINE_UPDATE_MISSING_POLLS` | `12` | Drain checks in a row a worker may miss before it counts as gone. |
@@ -129,12 +131,13 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 | `NUCLEI_TEMPLATES_DIR` | `/root/nuclei-templates` | nuclei's installed templates. |
 | `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where validated AI-written templates live. It must sit outside `NUCLEI_TEMPLATES_DIR`, and the app says so at startup if it does not. In the shipped compose files it is the `generated_templates` volume, so validated templates survive an update, and a worker rewrites any validated template whose file is missing from the copy kept in the database when it starts. |
 | `CVENGINE_CVE_SEED` | `1` | Load the published CVE catalog on first start (`off` to skip). `CVENGINE_CVE_SEED_URL` points it at another https location. See [PIPELINE.md](PIPELINE.md#seeding-the-catalog). |
-| `CVENGINE_DETECTION_AI_PER_DAY` | `25` | How many CVEs the AI is asked to write detection checks for in 24 hours (rules-written checks have no limit). |
+| `CVENGINE_DETECTION_AI_PER_DAY` | `25` | How many CVEs the AI is asked to write detection checks for in 24 hours (rules-written checks are not limited by this). |
+| `CVENGINE_DETECTION_AI_PER_RUN`, `CVENGINE_DETECTION_RULES_BATCH` | `5`, `500` | AI-written detection checks started per run, and rules-written detection records per run. The task runs about every 30 minutes. |
 | `REDIS_PASSWORD` | generated into `.env` on a first start | Password of the Redis broker (queues, caches, lockout counters). Empty means no password, as on installations that predate it: `make redis-auth` generates one and recreates Redis and the services that use it (run it while scans are idle; the updater never recreates Redis, so the change cannot happen by itself). Letters and digits only: it is part of a connection URL. |
 | `CVENGINE_FIELD_KEY` | generated into `.env` | The key that encrypts stored secrets. `CVENGINE_FIELD_KEY_PREVIOUS` (comma separated) lists older keys that only decrypt, and `CVENGINE_FIELD_KEY_FILE` reads the key from a file. |
 | `RENGINE_SECRET_KEY` | the key in `web/secret` | Provide the Django secret key from the environment instead of the file. |
 
-The AI key, API vault, update token, webhook URLs, Telegram bot token and the two-step sign-in seeds are encrypted in the database. New installs get a dedicated key, `CVENGINE_FIELD_KEY` in `.env`, separate from the Django secret in `web/secret` (which signs sessions) and outside the `web/` directory every container mounts. An installation that predates it keeps reading its old values with the key derived from `web/secret`, and `make rotate-field-key` moves everything under a dedicated key: it writes a new key to `.env`, keeps the old one in `CVENGINE_FIELD_KEY_PREVIOUS` (which only decrypts), recreates the services and re-encrypts every stored secret. Back up `.env` and `web/secret` too, but not beside the database dumps: a restored database needs the same keys (with another key the stored secrets read as empty and must be entered again), and a dump stored together with its key is readable by anyone who can read the backup. To keep the key in a Docker secret instead, point `CVENGINE_FIELD_KEY_FILE` at the mounted file.
+The AI key, API vault, per-organization and per-project API keys, update token, webhook URLs, Telegram bot token and the two-step sign-in seeds are encrypted in the database. New installs get a dedicated key, `CVENGINE_FIELD_KEY` in `.env`, separate from the Django secret in `web/secret` (which signs sessions) and outside the `web/` directory every container mounts. An installation that predates it keeps reading its old values with the key derived from `web/secret`, and `make rotate-field-key` moves everything under a dedicated key: it writes a new key to `.env`, keeps the old one in `CVENGINE_FIELD_KEY_PREVIOUS` (which only decrypts), recreates the services and re-encrypts every stored secret. Back up `.env` and `web/secret` too, but not beside the database dumps: a restored database needs the same keys (with another key the stored secrets read as empty and must be entered again), and a dump stored together with its key is readable by anyone who can read the backup. To keep the key in a Docker secret instead, point `CVENGINE_FIELD_KEY_FILE` at the mounted file.
 
 What this protects: a database dump, a backup, or SQL injection reads only ciphertext, and a file read in `web/` no longer includes the key. What it does not: code execution inside a container that decrypts the secrets (the web service or a worker) can use the key that container holds. The settings API never returns a secret, only whether one is set.
 
@@ -143,7 +146,7 @@ What this protects: a database dump, a backup, or SQL injection reads only ciphe
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CVENGINE_ALLOW_PRIVATE_TARGETS` | `0` | `1` allows private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`). Loopback, link-local, multicast, `0.0.0.0/8`, and cloud metadata addresses are always refused. A connected Tailscale tailnet does not need this: its imported devices' addresses are allowed on their own ([Tailscale](TAILSCALE.md#which-addresses-may-be-scanned)). |
-| `CVENGINE_BLOCKED_CIDRS` | none | Extra networks that are never scanned. |
+| `CVENGINE_BLOCKED_CIDRS` | none | Extra networks that are never scanned, comma separated CIDRs. An entry that does not parse is silently skipped. |
 | `COMPOSE_PROFILES` | none | Set to `tailscale` to run the optional Tailscale node that lets scans reach a tailnet. Its auth key goes in `.env.tailscale`, not here. `TAILSCALE_HOSTNAME`, `TAILSCALE_EXTRA_ARGS` (added to the always-on `--shields-up`) and `TAILSCALE_IMAGE` (pinned to a version by default) tune it. See [Tailscale](TAILSCALE.md). |
 | `CVENGINE_TAILSCALE_STATUS_FILE` | `/var/run/tailscale-status/status.json` | The status file the Tailscale sidecar publishes and the worker reads (the compose volume, mounted read-only in celery only). Change it only if you mount it elsewhere. |
 | `CVENGINE_MAX_TARGETS_PER_ADD` | `10000` | Most addresses one CIDR, range, or bulk add may expand to. |
@@ -198,6 +201,12 @@ A sync runs every `CVENGINE_RUNZERO_SYNC_HOURS` hours (default 6) for each proje
 The API keys page shows the last sync, its counts and any error; `get_system_status` lists each project's runZero state for an App Admin and reports a failing sync as a problem; every sync writes an activity entry. A rejected token (401 or 403), a rate limit (429), an unreachable console, malformed JSON and an oversized reply (more than 32 MB, or more than 50,000 records per call) are each reported in plain words, the next scheduled sync tries again, and none of them stops the worker. Managing the sync (status, settings, Sync now) needs the organization admin or App Admin role. Needs migration 0087 (`RunZeroSync`) and the beat entry it creates, `cvengine-runzero-sync`.
 
 Superusers set the rest under **Settings**: AI model, API vault, Tailscale, notifications, scan engines, IP allowlist, proxy, reports, resources, updates, and factory reset.
+
+**Nuclei templates.** Settings, Scan engines starts with a switch, off by default, that lets scans run every installed Nuclei template, not only those that make plain GET, HEAD, or OPTIONS requests. It applies to the broad scans and to validating a CVE match. AI-written templates always stay read-only, Nuclei's denial-of-service templates stay excluded, and out-of-band checks stay off. Changing it is recorded in the audit log and makes hosts due for a new Nuclei pass. The tab also holds the scan engine YAML. The Reports tab only sets report branding.
+
+**AI planning budget.** Settings, AI model has two limits on how many times a day the model may be asked to plan **Validate now** checks: 200 across all projects and 20 per project by default (0 to 100000; 0 turns AI planning off). The day starts at 00:00 UTC. Once a limit is reached, only a vetted CVE-specific template runs until the next day, and the message points here. The auto-fire card on the same tab sets **Max hosts tested per CVE** (200 by default, 1 to 5000).
+
+**Development stack.** `CELERY_AUTORELOAD=1` restarts workers on every `.py` edit and kills any scan in flight. The development compose file sets it to 0. `CVENGINE_DOMAIN` gives `scripts/init-env.sh` the address when you do not pass one, and `CVENGINE_NO_START=1` makes `scripts/install-updater.sh` install only the cron entry.
 
 **node2shell (CVE-2026-111497).** Off by default (`CVENGINE_NODE2SHELL=0`): see above for why. When on, it runs [Assetnote's own read-only detector](https://github.com/assetnote/node2shell-scanner) against hosts already fingerprinted as Node.js or Express. It never executes a command and never sends a credential; a host is reported vulnerable only when the detector's own controls establish a real, stable signal first.
 

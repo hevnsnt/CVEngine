@@ -4,7 +4,9 @@
 
 <h3 align="center">The most advanced external attack surface assessment you can get for free.</h3>
 
-<p align="center">cvENGINE automatically discovers and maps your internet-facing assets, fingerprints every service and version it finds, and tells you which of today's exploited CVEs actually hit you, then reproduces what it can with safe, read-only checks. Enterprise-grade attack surface management with no license fee, no per-asset pricing, and fully opensource.
+<p align="center">
+  Type in your domain. cvENGINE finds everything you expose, then tells you which of today's exploited CVEs can actually hit you, with proof.<br>
+  No license fee. No per-asset pricing. No black box. 100% open source and self-hosted.
 </p>
 
 <p align="center">
@@ -21,49 +23,41 @@
   <img src="docs/images/cvengine-tour.gif" alt="A 30-second tour of cvENGINE: add a domain name, watch it discover every host, port and service, see today's exploited CVEs matched and AI-validated against what you run, hosts ranked with their evidence, and a timeline of every change" width="900">
 </p>
 
-## Why cvENGINE
+## Know what you expose. Fix what's exploitable first.
 
-Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. cvENGINE runs all three as one continuous loop and hands you a verdict instead of a pile of alerts. It answers the one question that matters: **which of today's vulnerabilities are live on assets I own, and can I reproduce them?**
+Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. **cvENGINE runs all three as one continuous loop** and hands you a verdict instead of a pile of alerts. It answers the question that matters: *of everything exploited today, what do I have exposed?*
 
-- **Total visibility.** Domains, subdomains, IPs, ports, products, versions, TLS, and technologies are auto-discovered and stored in one Shodan-style inventory that keeps itself current. Just enter your domain name and cvENGINE does the rest.
-- **Matched to your environment.** The live [cve.now](https://cve.now) feed and the major exploitation sources are rated [fire, smoke, or ice](docs/FIRE-SMOKE-ICE.md) and matched to what you actually run, by product and version, with distribution backports understood.
-- **Verdicts, not noise.** AI triages your findings, read-only checks reproduce what they can, and fixed rules mean the model can never wave away hard evidence. Every check records exactly what it ran.
-- **Nothing changes unseen.** New hosts, opened ports, version bumps, new certificates, login pages that appear, and front pages that change all land on a timeline.
-- **Scanning in minutes.** One Docker Compose stack with every scanner built in. No agents to install (an optional read-only script per host adds the inside view), no cloud account to open.
-- **Yours, completely.** Open source and self-hosted. Your inventory stays on your server, and you bring your own AI keys or run a model on your own hardware. Nothing is sent to the authors.
+- **Total visibility.** Domains, subdomains, IPs, ports, products, versions, TLS, and technologies, discovered for you and kept current in one Shodan-style inventory.
+- **Exploitation-ranked.** Every CVE is rated [fire, smoke, or ice](docs/FIRE-SMOKE-ICE.md) from the real exploitation sources, then matched to what you actually run.
+- **Proof, not noise.** AI triage plus read-only checks that reproduce the finding, with the exact command recorded.
+- **Nothing changes unseen.** New hosts, opened ports, version bumps, and changed front pages land on a timeline.
+- **Yours completely.** One Docker Compose stack on your own server. Bring your own AI keys, or run a local model.
 
 ## Everything in the box
 
-**Discover.** [bbot](https://github.com/blacklanternsecurity/bbot) subdomain and asset discovery in passive, standard, and deep modes (screenshots in deep). A certificate transparency watch that pulls new hostnames straight into assessment. Targets as domains, IPs, CIDR ranges, or URLs, bulk added by organization and project. Every apex domain gets a deep sweep each week. With a [runZero](docs/CONFIGURATION.md#runzero) Export API token, a read-only sync adds what that asset inventory knows (OS, hardware, tags, its own CVE reports as extra evidence) to the hosts cvENGINE already holds, and can import runZero addresses as targets through the same checks as Add targets.
-
-**Understand.** One record per host: ports, services, products, versions, OS, banners, TLS, and technologies, from [nmap](https://nmap.org) and [nuclei](https://github.com/projectdiscovery/nuclei). [naabu](https://github.com/projectdiscovery/naabu) sweeps every port of each address before nmap fingerprints it, plus a background sweep of all 65,535 ports, one host at a time, for anything that changes in between. Web route checks that label each route open, login, session required, SSO, or redirect. Exposure checks for Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB that answer without a login. Email and domain hygiene: SPF, DKIM, DMARC, CAA, MTA-STS, DANE, DNSSEC, and TLS. Attach a [Tailscale](docs/TAILSCALE.md) tailnet and its devices are imported, scanned and checked for Tailscale-specific problems (outdated clients with security fixes, key expiry, stale devices, broad subnet routes, an allow-all policy).
-**Understand.** One record per host: ports, services, products, versions, OS, banners, TLS, and technologies, from [nmap](https://nmap.org) and [nuclei](https://github.com/projectdiscovery/nuclei). [naabu](https://github.com/projectdiscovery/naabu) sweeps every port of each address before nmap fingerprints it, plus a background sweep of all 65,535 ports, one host at a time, for anything that changes in between. Web route checks that label each route open, login, session required, SSO, or redirect. Exposure checks for Redis, Memcached, PostgreSQL, Elasticsearch, and CouchDB that answer without a login. Email and domain hygiene: SPF, DKIM, DMARC, CAA, MTA-STS, DANE, DNSSEC, and TLS. **From the inside, when you want it:** a read-only script for Linux, macOS, or Windows lets a host report its exact OS build, installed packages and patches, so kernel and other local-only CVEs become decidable ([Host inventory](docs/HOST-INVENTORY.md)).
-
-**Prioritize.** [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) ratings from [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [Metasploit](https://github.com/rapid7/metasploit-framework), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [EPSS](https://www.first.org/epss/), [CVSS](https://www.first.org/cvss/), and optionally [VulnCheck KEV](https://vulncheck.com). A 0 to 100 score for every host, with the reasons shown. AI triage of every finding into confirmed, likely, needs validation, likely false positive, or not applicable. Connect your own AI, with your own API keys (Anthropic, OpenAI, OpenRouter) or a model on your own hardware (Ollama, vLLM, LM Studio), and a review every three hours queues the next triage, validation, or rescan per project and tunes scanner concurrency from real measurements.
-
-**Verify.** Automatic read-only validation: a vetted nuclei template, a single-port nmap check, a banner probe, a version and identity probe (which finds the version, or which look-alike product runs, behind a name seen without one), or the database check, each recording the exact command it ran. The AI judges each lead with everything cvENGINE holds about the host, and WPScan runs on every host that shows any sign of WordPress. **Validate now** on any CVE match. When no template exists, the AI drafts one, and it never runs on your hosts until a person approves it. Optional auto-fire (off by default) tests new CVEs on matching hosts as the feed delivers them.
-
-**Operate.** Search every host, port, banner, and finding the way you search Shodan: `port:3389 -host:vpn`, `tech:"apache tomcat" sev:high`, `ip:203.0.113.0/24 product:nginx` ([Search](docs/SEARCH.md)); save a search and get an alert when a new host starts to match. A live dashboard, an AI activity log, and a Changes page with side-by-side screenshot diffs. Rescan, pin, exclude, or archive any host, and record its owner and criticality. Organizations, projects, roles (admin, user, audit), an All projects view, two-step sign-in, an IP allowlist, and an audit log. A REST API, an MCP server, and an OpenAPI spec so agents work under the same permissions. A [bug bounty workbench](docs/BUG-BOUNTY.md) for hunters: browse HackerOne, Bugcrowd, Intigriti, and YesWeHack programs and scope, point the scanner at what is in scope, and draft reports from its findings. Off until an admin enables it. Slack, Discord, Telegram, and Lark alerts if you don't want to monitor a dashboard. One switch pauses all scanning. Memory-aware scheduling keeps small servers healthy, and updates drain running work first or deploy automatically on every new commit.
-
-**Bring your own AI.** Anthropic, OpenAI, OpenRouter, Ollama, vLLM, or LM Studio, with keys stored encrypted. Without a model, cvENGINE still discovers, scans, matches CVEs, and validates findings. The AI adds triage, targeted scans, and template drafts.
-
-## Built on the best
-
-cvENGINE stands on excellent open source work. Full credits and licenses are in [THIRD-PARTY.md](THIRD-PARTY.md).
-
 | | |
 | --- | --- |
-| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot) discovery, [nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [nmap](https://nmap.org), [naabu](https://github.com/projectdiscovery/naabu), [gowitness](https://github.com/sensepost/gowitness) screenshots, [WPScan](https://wpscan.com/) for WordPress, [aardwolf](https://github.com/skelsec/aardwolf) RDP screenshots, [node2shell](https://github.com/assetnote/node2shell-scanner) detection |
-| **Exploitation intelligence** | [CVE feed cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
-| **Backport and certificate data** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh) |
-| **Email security checks** | adapted from [MailFail](https://github.com/ACK-J/MailFail) |
-| **Bug bounty data** | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), [Bugcrowd VRT](https://github.com/bugcrowd/vulnerability-rating-taxonomy) |
-| **AI** | [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), [Ollama](https://github.com/ollama/ollama), [vLLM](https://github.com/vllm-project/vllm), [LM Studio](https://lmstudio.ai), over the [Model Context Protocol](https://modelcontextprotocol.io) |
-| **Platform** | [Django](https://github.com/django/django), [Celery](https://github.com/celery/celery), [PostgreSQL](https://www.postgresql.org), [Redis](https://github.com/redis/redis), [nginx](https://github.com/nginx/nginx), [Gunicorn](https://github.com/benoitc/gunicorn), [WeasyPrint](https://github.com/Kozea/WeasyPrint), [VivaGraphJS](https://github.com/anvaka/VivaGraphJS), [Geist](https://github.com/vercel/geist-font) |
+| **Discover** | Subdomains, certificates, IPs, and ports with [bbot](https://github.com/blacklanternsecurity/bbot) and [naabu](https://github.com/projectdiscovery/naabu), plus a certificate transparency watch and weekly deep sweeps |
+| **Understand** | [nmap](https://nmap.org) service and OS fingerprints, web routes and their sign-in state, exposed databases, firewalls, WordPress, and email and DNS hygiene |
+| **Prioritize** | Fire, smoke, and ice ratings, a 0 to 100 score per host, and AI triage into confirmed, likely, or needs validation |
+| **Verify** | Read-only validation with [Nuclei](https://github.com/projectdiscovery/nuclei), nmap, and banner probes. **Validate now** on any match |
+| **Search** | [Shodan-style search](docs/SEARCH.md) over your own inventory: `port:3389 -host:vpn`, `tech:"apache tomcat" sev:high` |
+| **Operate** | A live dashboard, a change timeline with screenshot diffs, organizations and roles, two-step sign-in, a REST API, an MCP server, and Slack, Discord, Telegram, and Lark alerts |
+| **Hunt** | A [bug bounty workbench](docs/BUG-BOUNTY.md): program scope from HackerOne, Bugcrowd, Intigriti, and YesWeHack, and report drafts |
+| **Bring your own AI** | Anthropic, OpenAI, OpenRouter, Ollama, or vLLM. Without a model it still discovers, scans, matches, and validates |
+
+## New in 1.2
+
+- **Every CVE says how to prove it.** A shared detection strategy and validation profile for the whole catalog, readable through the API and MCP.
+- **A full CVE catalog on day one.** New installs download a verified catalog on first start instead of rebuilding it one request at a time.
+- **It names the firewall in front of every host,** with [wafw00f](https://github.com/EnableSecurity/wafw00f).
+- **It never sits idle.** A work conductor keeps discovery running across a thousand hosts.
+- **One host, many names.** `example.com` and `www.example.com` on the same servers are one host.
+- **Every Nuclei template, if you choose.** A switch in Settings runs the whole library (off by default).
+- **Updates in seconds,** with a CI upgrade rehearsal before every release ([updates](docs/UPDATES.md)).
+- **Hardened.** A Redis password, a rotatable key for stored secrets, hashed sessions, a sign-in throttle, and an encrypted CA key. Older installs: see [upgrading to 1.2](docs/UPGRADE.md#upgrading-to-12).
 
 ## How it works
-
-Add a target and cvENGINE runs one pipeline for it. Each scanner runs once per host inside a time window, so repeat scans stay fast.
 
 ```mermaid
 flowchart LR
@@ -76,7 +70,7 @@ flowchart LR
 
     subgraph PROBE["2 &nbsp; PROBE"]
         direction TB
-        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Web route<br/>checks"] --> V["Version and<br/>identity probes"] --> W["WordPress detection,<br/>WPScan, node2shell opt-in"]
+        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Firewall and web<br/>route checks"] --> V["Version and<br/>identity probes"] --> W["WordPress detection,<br/>WPScan, node2shell opt-in"]
     end
 
     subgraph MATCH["3 &nbsp; MATCH"]
@@ -109,34 +103,21 @@ flowchart LR
     class H step
 ```
 
-Meanwhile the CVE feed runs on its own schedule:
+Each scanner runs once per host inside a time window, so repeat scans stay fast. See the [pipeline](docs/PIPELINE.md) for every stage.
 
-```mermaid
-flowchart LR
-    F["cve.now feed<br/>and exploitation sources"] --> T{"Tier"}
-    T --> FIRE["FIRE"]
-    T --> SMOKE["SMOKE"]
-    T --> ICE["ICE"]
-    FIRE --> M["Match to inventory<br/>product and version"]
-    SMOKE --> M
-    ICE --> M
-    M --> V["AI triage"]
-    V --> X["Validate<br/>read-only checks"]
-    X --> OUT["Finding<br/>tracked through the API"]
+## Built on the best
 
-    classDef fire fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
-    classDef smoke fill:#fef3c7,stroke:#f59e0b,color:#78350f
-    classDef ice fill:#e0f2fe,stroke:#0ea5e9,color:#0c4a6e
-    class FIRE fire
-    class SMOKE smoke
-    class ICE ice
-```
+cvENGINE stands on excellent open source work. Full credits and licenses are in [THIRD-PARTY.md](THIRD-PARTY.md).
 
-See [Pipeline](docs/PIPELINE.md) for each stage and [Architecture](docs/ARCHITECTURE.md) for the services.
+| | |
+| --- | --- |
+| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner) |
+| **Exploitation intelligence** | [cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
+| **Also** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh), [MailFail](https://github.com/ACK-J/MailFail), [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), [Bugcrowd VRT](https://github.com/bugcrowd/vulnerability-rating-taxonomy), [Ollama](https://github.com/ollama/ollama), [vLLM](https://github.com/vllm-project/vllm), [Model Context Protocol](https://modelcontextprotocol.io) |
 
-## Quick start
+## Install in minutes
 
-On a Linux server (Debian or Ubuntu is easiest; 4 GB of RAM at the least and 8 GB for comfort, and 20 GB of free disk), one command does everything:
+On a Linux server (Debian or Ubuntu is easiest, with 4 GB of RAM or more):
 
 ```bash
 git clone https://github.com/hevnsnt/CVEngine.git
@@ -144,68 +125,29 @@ cd CVEngine
 sudo ./install.sh
 ```
 
-It asks nothing. It checks the machine, installs what is missing (on Debian and Ubuntu: curl, make, python3, git, openssl, Docker, and the Compose plugin; on other Linux it installs Docker and names the rest), generates every secret, detects the address to use, creates the HTTPS certificate, builds and starts CVEngine (the first build takes several minutes), waits until it answers, and prints the address, your username, and a generated password. Copy the password from the terminal: it is shown once, and you choose your own at your first sign-in. Lost it: `make admin-password` prints a new one for the `admin` account (use `sudo` if the installer ran as root). To use a name instead of the detected address, run `sudo ./install.sh --domain scanner.example.com`. Running it again is safe: it keeps your settings, certificate, and data, and rebuilds and restarts CVEngine from the code you already have checked out. It does not fetch new code or wait for running scans, so use `scripts/update.sh` to update.
+It asks nothing: it installs what is missing, generates every secret, creates the HTTPS certificate, starts cvENGINE, and prints the address and your admin password. Open the address, sign in, and add a domain. The setup wizard does the rest. Your browser will warn about the private certificate until you trust `secrets/certs/ca.crt`.
 
-Open the printed address. Browsers warn about the private certificate authority until you trust `secrets/certs/ca.crt` (copy it from the server to the computer whose browser you use). After you choose your own password, the setup wizard (superusers only) creates your organization and project, offers an optional AI model (paste an Anthropic, OpenAI, or OpenRouter key; set up Ollama, vLLM or LM Studio later in Settings), adds your first target if you confirm you are authorized to test it (discovery starts the moment you add it), and offers optional Shodan, VirusTotal, and SecurityTrails keys. The CVE feed starts loading about a minute after the workers come up.
-
-Prefer to run the steps yourself (any Linux with [Docker Engine](https://docs.docker.com/engine/install/), the Compose plugin, `git`, `make`, and `python3`, in a `git clone`, not a release archive)?
-
-```bash
-./scripts/init-env.sh    # creates .env: generates its passwords and sets DOMAIN_NAME to this machine's address
-make certs               # HTTPS certificate for the built-in proxy
-make up                  # build and start
-# wait until https://<your address>/ answers (follow it with: make logs), then:
-make admin               # create your admin account: its password is generated and printed once
-```
-
-To choose the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` in `.env` before `make up`, or run `make username`.
-
-Update with `scripts/update.sh`, or deploy every new commit automatically ([updates](docs/UPDATES.md)). To serve it on the Internet under a real name with a trusted certificate, see [Hosting online](docs/HOSTING-ONLINE.md). Reverse proxies, backups, and the development stack are in [Deployment](docs/DEPLOYMENT.md).
-
-## Built for teams and agents
-
-Paste targets grouped by organization and project, and cvENGINE creates the projects for you (organization admins):
-
-```text
-##Acme Corp
-#Website
-example.com
-203.0.113.0/28
-#Staging
-198.51.100.7
-```
-
-Create a token on **API tokens and MCP** and send `Authorization: Bearer <token>` to `/api/v1/`, or connect an MCP client to `/mcp/`. Tokens use the roles of their user, and read-only tokens are supported. Agents can register which hosts, projects, or organizations they are responsible for and what they can do, and the server hands them matching validation and remediation tasks with leases, retries, and an audit trail. See the [Agent API](docs/AGENT-API.md#agents-and-assigned-work).
+Step-by-step install, a public name with a trusted certificate, and Mac and Windows are in [Deployment](docs/DEPLOYMENT.md) and [Hosting online](docs/HOSTING-ONLINE.md).
 
 ## Safe by design
 
-- nuclei runs only templates that pass read-only and destination checks, and no password lists are ever tried: each database gets one attempt with no password (or none at all).
-- Loopback, link-local, and cloud metadata addresses are never scanned, private ranges stay off until you allow them, and addresses on shared platforms such as CDNs are never port-scanned.
-- Injection attempts are blocked, and at the strike threshold the account is disabled and the source IP is blocked for 24 hours.
-- Each project's data is isolated, and stored secrets are encrypted.
-- Two-step sign-in, an IP allowlist, and an audit log protect access.
-
-Only scan systems you own or are authorized to test.
+Read-only checks, no password lists, and no scanning of loopback, link-local, or cloud metadata addresses. Each organization's data is isolated, stored secrets are encrypted, and access is protected by two-step sign-in, an IP allowlist, and an audit log. Only scan systems you own or are authorized to test.
 
 ## Documentation
 
 | Doc | What it covers |
 | --- | --- |
-| [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why |
-| [Compare](docs/COMPARISON.md) | cvENGINE and ProjectDiscovery, feature by feature, including where they are ahead |
-| [Search](docs/SEARCH.md) | Shodan-style search over your inventory, with examples, and saved searches with alerts |
-| [Host inventory](docs/HOST-INVENTORY.md) | Hosts reporting their own OS, packages and patches with a script |
-| [Pipeline](docs/PIPELINE.md) | How a target becomes findings |
-| [Architecture](docs/ARCHITECTURE.md) | Services, data, and where AI is used |
-| [Configuration](docs/CONFIGURATION.md) | Environment variables |
-| [Deployment](docs/DEPLOYMENT.md) | HTTPS, proxies, AI models, backups, dev stack |
+| [Deployment](docs/DEPLOYMENT.md) and [Hosting online](docs/HOSTING-ONLINE.md) | Install, HTTPS, proxies, backups, dev stack |
 | [Updates](docs/UPDATES.md) and [Upgrade](docs/UPGRADE.md) | Staying current |
+| [Configuration](docs/CONFIGURATION.md) | Every setting |
+| [Search](docs/SEARCH.md) | Shodan-style search, with examples |
+| [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | How CVEs are rated and why |
+| [Pipeline](docs/PIPELINE.md) and [Architecture](docs/ARCHITECTURE.md) | How it works |
+| [Compare](docs/COMPARISON.md) | cvENGINE and ProjectDiscovery, feature by feature |
+| [Tenancy](docs/TENANCY.md), [Agent API](docs/AGENT-API.md), [AI usage](docs/AI-USAGE.md) | Teams, the REST API and MCP, and AI cost |
+| [Bug bounty](docs/BUG-BOUNTY.md) and [Front end](docs/FRONTEND.md) | The bounty workbench and the interface |
+| [Host inventory](docs/HOST-INVENTORY.md) | Hosts reporting their own OS, packages and patches with a script |
 | [Tailscale](docs/TAILSCALE.md) | Scanning a tailnet and its Tailscale checks |
-| [Tenancy](docs/TENANCY.md) | Organizations, roles, and two-step sign-in |
-| [Agent API](docs/AGENT-API.md) | REST API and MCP tools |
-| [Bug bounty](docs/BUG-BOUNTY.md) | Programs, scope, reports, and submission |
-| [AI usage](docs/AI-USAGE.md) | Tracking model calls, tokens, and cost |
-| [Front end](docs/FRONTEND.md) | Design system and pages |
 
 ## Credits and license
 
