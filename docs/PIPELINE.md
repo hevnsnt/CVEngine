@@ -215,6 +215,31 @@ Building the catalog from the cve.now feed takes one request per CVE, so a new i
 - **Weekly deep discovery.** Daily, each apex domain without a deep discovery in the last 7 days gets one, up to 50 per run. If only its subdomains were targets, the apex is added. This is the one automatic rediscovery without an AI model.
 - **Pause everything.** An App Admin can **Pause all scanning** from **All projects, Activity**. The pause survives restarts: work that touches targets or spends AI budget waits, running scanners stop cooperatively, and running scans are marked aborted. Bookkeeping that touches no target keeps running (the feeds, notifications, pruning, rescoring). **Resume** releases the queue.
 
+### Cloud storage exposure
+
+A slow background sweep (its own queue, `bucketscan_queue`, daily at 01:38 UTC, never part of a scan) looks for AWS S3, Google Cloud Storage and Azure Blob storage that belongs to a project's domains and is public or dangling. It reads only the storage platforms' documented endpoints, never a project host: anonymous HTTPS `GET` and `HEAD` on port 443, no credentials, no signature, one listing page (20 keys at most) and one `HEAD` of a listed object that does not look sensitive. Object content is never downloaded, nothing is written, and the storage endpoints (shared platforms) are never port-scanned. Each name is resolved once through the same vetted transport as the other probes, so an answer in a prohibited range is never connected to.
+
+Candidate buckets, in order of ownership confidence (the tier is kept on the finding):
+
+1. **cname.** A host of the project has a CNAME to a storage endpoint: `<bucket>.s3.amazonaws.com` and its regional and website forms, `c.storage.googleapis.com` (the host name is then the bucket), `<account>.blob.core.windows.net`.
+2. **served.** A host answers with a storage `Server` header (`AmazonS3`, `UploadServer`); the bucket is inferred from the host name.
+3. **reference.** A storage URL in data cvENGINE already holds: crawled and archived endpoints, page URLs, route redirects, stored scanner responses. An Azure container is tested only when such a URL names it.
+4. **guess.** Permutations of the label of each target's registrable domain (`example`, `example-backup`, `example-assets`, `example-dev` and 37 more suffixes, plus the domain itself and its `www.` form at S3) checked at S3 and GCS. Azure account names are never guessed. Turn guesses off with `CVENGINE_BUCKETS_GUESS=0`.
+
+| Result | Finding |
+| --- | --- |
+| Public listing, tier cname or served | High; critical when the listed names look like backups, database dumps or keys |
+| Public listing, tier reference, name carries the project's own domain label | The same as above |
+| Public listing, tier reference otherwise | Medium, "ownership unconfirmed" |
+| Public listing, tier guess | Medium, never worse: "name guess, ownership unconfirmed, verify the bucket is yours" |
+| Name not registered (S3 `NoSuchBucket`, Azure account with no DNS name), tier cname or reference | High, a takeover: anyone can register the name. A GCS name with a dot is medium, because only a verified domain owner may create it |
+| Not registered, tier served or guess | Nothing: an inferred name proves nothing |
+| Exists, listing refused | An observation (info) on the host, never a finding |
+
+The findings are hygiene findings (check names `bkt_listing` and `bkt_takeover`), so status, assignee, comments, triage, notifications and the API work as for every other finding; the hygiene task leaves them alone. At most 20 object names are stored, and a name segment that looks like a secret (a provider key id, a token, a JWT, `key=value` with a secret word, a long random token) is stored as `[redacted]`. A finding resolves when a later check of the same bucket ran and no longer finds it, or when the reference that led to it is gone (a removed CNAME is the fix for a takeover); a check that gets no answer changes nothing and is asked again the next day.
+
+Politeness: one global request rate shared by every worker (`CVENGINE_BUCKETS_RPS`, 2 a second by default, at most 5), at most `CVENGINE_BUCKETS_MAX_PER_SWEEP` buckets per project per sweep (strongest tier first, longest waiting first), a weekly window per bucket (`CVENGINE_TTL_BUCKETS`), one sweep at a time, and a stop while scanning is paused. Excluded names, hosts of an excluded domain, archived hosts, hosts that resolve to a prohibited address and projects whose bug bounty engagement has not confirmed automated testing are skipped.
+
 ### Shared platform addresses
 
 A name on Netlify, Vercel, GitHub Pages, Heroku, or a CDN edge answers on addresses that belong to the platform. cvENGINE recognizes them from the name's CNAME, the `Server` header, or the CDN flag and never points nmap or the full-port sweep at them. The host record says so.
@@ -249,6 +274,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Work conductor (keeps the discovery queue fed) | every minute |
 | Tailscale sync (devices, findings, scans of connected tailnets; [Tailscale](TAILSCALE.md)) | every 15 minutes |
 | Validation of every CVE match (fire first), change re-tests | every 5 minutes |
+| Cloud storage exposure sweep ([details](#cloud-storage-exposure)) | daily at 01:38 UTC |
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | AI review and capacity tuning | every 3 hours |
 | Stuck job cleanup | every 15 minutes |

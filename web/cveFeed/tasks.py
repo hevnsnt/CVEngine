@@ -51,6 +51,14 @@ def testssl_sweep():
     return testssl_scan.sweep_all()
 
 
+@app.task(name='bucket_sweep', bind=False, queue='bucketscan_queue')
+def bucket_sweep():
+    """Daily: the cloud storage exposure check of every project's due buckets, a few requests per second (see ``cveFeed.bucket_scan``). It has a
+    queue of its own so a slow, deliberately paced sweep never holds up the feed workers."""
+    from cveFeed import bucket_scan
+    return bucket_scan.sweep_all()
+
+
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
 def sync_tailscale():
     """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""

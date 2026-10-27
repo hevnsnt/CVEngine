@@ -68,6 +68,9 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_NODE2SHELL` | `0` | Set to `1` to check hosts for CVE-2026-111497 (Node.js, Bun, Envoy, and the frameworks that run on them; see `CVENGINE_NODE2SHELL_SCOPE`). Any value other than `0`, `false`, `no`, or `off`, an empty one included, turns it on, so remove the line to keep it off. Off by default: alongside a few small requests it uploads about 23 MB to every host it checks, a much larger footprint than any other check here. |
 | `CVENGINE_NODE2SHELL_SCOPE` | `runtimes` | `runtimes` checks hosts a fingerprint names as Node.js (and its frameworks), Bun or Envoy. `all` checks every web host the scan found, for what a name cannot show: a Python service using Brotli, a container base image, a sidecar that hides what it is. Still limited by `CVENGINE_NODE2SHELL_MAX_HOSTS`. |
 | `CVENGINE_NODE2SHELL_TIMEOUT`, `CVENGINE_NODE2SHELL_MAX_HOSTS`, `CVENGINE_TTL_NODE2SHELL` | `90`, `5`, `24` | Seconds allowed per host, hosts checked per scan, and hours before a host is checked again. |
+| `CVENGINE_BUCKETS`, `CVENGINE_BUCKETS_GUESS` | `1`, `1` | `0` turns off the cloud storage exposure sweep ([PIPELINE.md](PIPELINE.md#cloud-storage-exposure)), or only its name guesses (permutations of a target's domain label). |
+| `CVENGINE_BUCKETS_RPS`, `CVENGINE_BUCKETS_MAX_PER_SWEEP` | `2`, `100` | Requests per second across all workers (0.1 to 5), and buckets checked per project per daily sweep (1 to 1000). A bucket takes one to four requests. |
+| `CVENGINE_TTL_BUCKETS`, `CVENGINE_TTL_BUCKETS_FAILED` | `168`, `24` | Hours before a checked bucket is checked again, and before one that gave no answer is asked again. |
 
 ## AI limits
 
