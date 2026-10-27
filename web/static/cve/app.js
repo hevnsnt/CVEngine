@@ -1184,6 +1184,7 @@ function renderFinding(d, cfg, row) {
     const state = el("span", "note", "Runs this match's safe template checks and requests AI review in the queue.");
     run.onclick = async () => {
       run.disabled = true;
+      run.textContent = "Validating…";
       try {
         const path = `${baseOf(project)}/matches/${d.id}/validate`;
         let job = await api("POST", path, {});
@@ -1210,6 +1211,7 @@ function renderFinding(d, cfg, row) {
       } catch (err) {
         state.textContent = err.message;
       }
+      run.textContent = "Validate now";
       run.disabled = false;
     };
     controls.append(run, state);

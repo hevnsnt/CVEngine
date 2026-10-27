@@ -81,12 +81,15 @@ function selectOf(options, value) {
 function button(label, onClick, cls = "btn") {
   const b = el("button", cls, label, { type: "button" });
   b.onclick = async () => {
+    const idle = b.textContent;
     b.disabled = true;
+    b.textContent = "Working…";
     try {
       await onClick();
     } catch (err) {
       toast(err.message, true);
     }
+    b.textContent = idle;
     b.disabled = false;
   };
   return b;
