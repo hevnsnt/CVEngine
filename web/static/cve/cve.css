@@ -1438,3 +1438,16 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .map[data-size="xl"] .hx .hx-name{line-height:1.25}
 .map[data-size="xl"] .hx .hx-name.ip{font-size:10.5px;letter-spacing:-.03em}
 .btn[disabled]:is(.sm,.ghost){background:var(--sunk);color:var(--faint);border-color:var(--line);opacity:1}
+/* hygiene cell in the counter strip: the biggest problems, worst first */
+.strip a.wide{grid-column:span 2}
+.strip .hy-top{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:3px}
+.strip .hy-top li{display:flex;align-items:center;gap:7px;font:600 11.5px/1.3 var(--font);color:var(--ink-2);min-width:0}
+.strip .hy-top li span{font:inherit;text-transform:none;letter-spacing:0;color:inherit;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.strip .hy-top li b{font:700 11.5px/1 var(--mono);letter-spacing:0}
+.strip .hy-dot{width:7px;height:7px;border-radius:50%;background:var(--ice);flex:none}
+.strip .sev-critical .hy-dot{background:var(--fire)}.strip .sev-high .hy-dot{background:var(--high)}.strip .sev-medium .hy-dot{background:var(--smoke)}
+.strip .hy-none{color:var(--muted)}
+.strip a small{font:500 11px/1.3 var(--mono);color:var(--muted)}
+@media (min-width:1200px){.strip{grid-template-columns:repeat(5,minmax(0,1fr))}}
+@media (min-width:720px) and (max-width:1199px){.strip{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media (max-width:719px){.strip a:last-child:nth-child(odd){grid-column:auto}.strip a.wide{grid-column:span 2}}

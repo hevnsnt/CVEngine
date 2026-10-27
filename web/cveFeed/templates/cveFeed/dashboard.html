@@ -49,13 +49,10 @@
 </section>
 
 <nav class="strip" aria-label="Engine counters">
-  <a id="n-targets" title="Targets in this view" {% if slug %}href="{% url 'cve_section' slug 'targets' %}"{% endif %}><b id="s-targets">-</b><span>Targets</span></a>
   <a id="n-matches" title="CVE matches the AI has not ruled out. The CVE matches page opens on the same view." {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-matches">-</b><span>CVE matches</span></a>
   <a id="n-findings" title="Open scanner findings of low severity or worse (the Findings page, Scanner, Actionable). Informational detections and closed findings are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
-  <a id="n-scans" title="Scans running now. A scan marked running for over 11 hours is stalled and is not counted." {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_running">-</b><span id="s-scans_label">Scans running</span></a>
-  <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span></a>
-  <a id="n-auto" title="CVE advisories in the Fire tier that CVEngine scanned for automatically. This is global, not per project." {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %}><b id="s-autofire_runs">-</b><span>Auto-fire runs</span></a>
-  <a id="n-ai" {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %} title="AI-authored Nuclei templates that passed syntax checks; this is not a count of reviewed or validated findings"><b id="s-templates">-</b><span>AI templates syntax-valid</span></a>
+  <a id="n-hygiene" class="wide" title="Open hygiene issues of low severity or worse: TLS, certificates, SPF, DKIM, DMARC, CAA" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-hygiene_open">-</b><span>Hygiene issues</span><ul class="hy-top" id="hy-top" aria-label="Biggest hygiene issues"></ul></a>
+  <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span><small id="s-certs_total_note"></small></a>
 </nav>
 
 
