@@ -25,7 +25,10 @@ export function snippets({ origin, project, privateCa = true }) {
     python: `${readToken} && curl -fsS${curlCa} ${script("cvengine-inventory.py")} -o cvengine-inventory.py && python3 cvengine-inventory.py ${target}`,
     windows:
       "$env:CVENGINE_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Token' -AsSecureString)).Password; " +
-      `Invoke-WebRequest ${script("cvengine-inventory.ps1")} -OutFile cvengine-inventory.ps1; ` +
+      // Invoke-WebRequest would not trust a private CA; curl.exe (in Windows 10 1803 and later) takes the installer's certificate
+      (privateCa
+        ? `curl.exe -fsS --cacert ca.crt ${script("cvengine-inventory.ps1")} -o cvengine-inventory.ps1; `
+        : `Invoke-WebRequest ${script("cvengine-inventory.ps1")} -OutFile cvengine-inventory.ps1; `) +
       `powershell -NoProfile -ExecutionPolicy Bypass -File .\\cvengine-inventory.ps1 -Server ${server} -Project ${slug}${privateCa ? " -CaFile .\\ca.crt" : ""}`,
     check: `sh cvengine-inventory.sh --dry-run`,
     checkWindows: `powershell -NoProfile -ExecutionPolicy Bypass -File .\\cvengine-inventory.ps1 -DryRun`,

@@ -415,7 +415,7 @@ class PolicyCheckTests(SimpleTestCase):
         self.assertEqual(len(f.evidence['rules']), 1)  # the check rule is not flagged
         self.assertEqual(f.evidence['rules'][0]['reasons'], ['allows login as root', 'accepts every member of the tailnet'])
         self.assertIn('tailworm.com', f.detail)
-        self.assertIn('not confirmed', f.detail)
+        self.assertIn('acknowledged', f.detail)  # Tailscale has acknowledged the report; no numbered release carries the fixes yet
 
     def test_tag_owners_and_funnel(self):
         found = self.evaluate({'tagOwners': {'tag:a': ['autogroup:member'], 'tag:b': ['group:eng']},
@@ -1195,6 +1195,18 @@ class FindingStorageTests(SyncBase):
         self.assertEqual((wide.host, wide.domain.name, wide.severity), ('tailnet:tail1234.ts.net', '100.64.0.1', 3))
         self.link.refresh_from_db()
         self.assertEqual(self.link.anchor_domain_id, wide.domain_id)
+
+    def test_the_tailnet_wide_findings_move_when_the_anchor_device_leaves_the_tailnet(self):
+        self.devices = [raw_device(1, clientVersion='1.104.2'), raw_device(2, clientVersion='1.104.2')]
+        self.sync()
+        self.link.refresh_from_db()
+        self.assertEqual(self.link.anchor_domain.name, '100.64.0.1')
+        self.devices = [raw_device(2, clientVersion='1.104.2')]  # the anchor device is gone
+        self.sync()
+        self.link.refresh_from_db()
+        self.assertEqual(self.link.anchor_domain.name, '100.64.0.2')
+        wide = HygieneFinding.objects.filter(check_name='ts_acl_allow_all')
+        self.assertEqual({(f.domain.name, f.status) for f in wide}, {('100.64.0.1', 'resolved'), ('100.64.0.2', 'open')})
 
     def test_findings_resolve_when_the_condition_clears_and_reopen_after_a_fix_regresses(self):
         self.sync()

@@ -27,5 +27,5 @@ jobs:
             echo "::warning::A tool is behind its newest release; the tools-reviewed label says that was looked at."
             exit 0
           fi
-          echo "::error::A pinned tool is behind its newest release (table above). Bump the pin, or label the pull request tools-reviewed after deciding not to."
+          echo "::error::A pinned tool is behind its newest release, a pin is missing or a newest version could not be read (table above). Bump the pin or fix the lookup, or label the pull request tools-reviewed after deciding not to."
           exit 1

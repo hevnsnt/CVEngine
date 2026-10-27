@@ -239,7 +239,7 @@ collect_packages() {
 	{
 		if have dpkg-query; then
 			dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${source:Package}\t${db:Status-Abbrev}\n' 2>/dev/null |
-				awk -F"$T" '$5 ~ /^ii/ { print $1 "\t" $2 "\tdpkg\t" $3 "\t" $4 }'
+				awk -F"$T" '$5 ~ /^.i/ { print $1 "\t" $2 "\tdpkg\t" $3 "\t" $4 }'
 		fi
 		if have rpm; then
 			rpm -qa --qf '%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t%{INSTALLTIME}\n' 2>/dev/null |
@@ -356,7 +356,7 @@ collect_runtime() {
 	fi
 	kernels=
 	if have dpkg-query; then
-		kernels=$(dpkg-query -W -f='${Package}\t${db:Status-Abbrev}\n' 'linux-image-[0-9]*' 2>/dev/null | awk -F"$T" '$2 ~ /^ii/ { sub(/^linux-image-/, "", $1); print $1 }')
+		kernels=$(dpkg-query -W -f='${Package}\t${db:Status-Abbrev}\n' 'linux-image-[0-9]*' 2>/dev/null | awk -F"$T" '$2 ~ /^.i/ { sub(/^linux-image-/, "", $1); print $1 }')
 	elif have rpm; then
 		kernels=$(rpm -q kernel-core kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v 'not installed')
 	fi

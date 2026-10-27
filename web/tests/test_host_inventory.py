@@ -231,7 +231,7 @@ class Base(TestCase):
 
 class IngestTests(Base):
 	def test_a_report_matches_the_host_by_name_first(self):
-		self.scanned('web01.example.test', ['192.0.2.77'])
+		self.scanned('web01.example.test', ['192.0.2.10'])
 		inv, outcome = host_inventory.ingest(self.project, schema.validate(report()))
 		self.assertEqual((outcome, inv.host, inv.match_basis), ('new', 'web01.example.test', 'name'))
 		self.assertEqual(inv.package_count, 2)

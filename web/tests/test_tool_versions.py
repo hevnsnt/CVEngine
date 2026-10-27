@@ -58,13 +58,30 @@ class ToolVersionCheckTests(SimpleTestCase):
 		self.assertNotIn('tailscale (sidecar image)', names)
 		self.assertIn('nmap', names)
 
+	def exit_status(self, rows, *flags):
+		with mock.patch.object(tools, 'collect', return_value=rows), mock.patch.object(sys, 'argv', ['c', *flags]), \
+				mock.patch('builtins.print'), mock.patch.object(sys, 'exit') as leave:
+			tools.main()
+		return leave.call_args[0][0] if leave.called else 0
+
 	def test_fail_if_behind_sets_the_exit_status(self):
-		for behind, expected in ((True, 1), (False, 0)):
-			rows = [{'tool': 'x', 'pinned': '1', 'latest': '2', 'behind': behind}]
-			with mock.patch.object(tools, 'collect', return_value=rows), mock.patch.object(sys, 'argv', ['c', '--fail-if-behind']), \
-					mock.patch('builtins.print'), mock.patch.object(sys, 'exit') as leave:
-				tools.main()
-				self.assertEqual(leave.called, bool(expected))
+		behind = [{'tool': 'x', 'pinned': '1', 'latest': '2', 'behind': True}]
+		current = [{'tool': 'x', 'pinned': '2', 'latest': '2', 'behind': False}]
+		self.assertEqual(self.exit_status(behind, '--fail-if-behind'), 1)
+		self.assertEqual(self.exit_status(current, '--fail-if-behind'), 0)
+		self.assertEqual(self.exit_status(behind), 0)  # the weekly report never fails the workflow
+
+	def test_the_gate_fails_closed_on_a_missing_pin_or_an_unreadable_latest(self):
+		missing_pin = [{'tool': 'x', 'pinned': None, 'latest': '2', 'behind': False}]
+		unreachable = [{'tool': 'x', 'pinned': '2', 'latest': None, 'behind': False}]
+		self.assertEqual(self.exit_status(missing_pin, '--fail-if-behind'), 1)
+		self.assertEqual(self.exit_status(unreachable, '--fail-if-behind'), 1)
+		self.assertEqual(self.exit_status(missing_pin + unreachable), 0)
+
+	def test_a_renamed_pin_is_found_missing_by_collect(self):
+		with mock.patch.object(tools, 'pinned', side_effect=lambda path, pattern: None if 'NMAPVERSION' in pattern else '1.0'):
+			rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
+		self.assertIsNone(rows['nmap']['pinned'])
 
 	def test_nmap_has_a_checksum_for_the_amd64_rpm_and_for_the_source_tarball(self):
 		dockerfile = open(os.path.join(os.path.dirname(PATH), '..', 'web', 'Dockerfile'), encoding='utf-8').read()

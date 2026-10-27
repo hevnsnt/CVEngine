@@ -1107,6 +1107,19 @@ class StarvationTests(AgentBrokerTestCase):
 			got = next_task(self.t['alice'])[1]['task']
 		self.assertEqual(got['task']['finding']['id'], self.m_linux.pk)
 
+	def test_a_busy_agent_leaves_work_to_a_free_one_for_a_minute_and_then_takes_it(self):
+		"""A heartbeats and holds a task; B is live (it heartbeats) but never polls. B must not hold A's next task for ever."""
+		a = register(self.t['alice'], name='a', capabilities=['remediate:linux'], os=['linux'], max_concurrent=2)
+		register(self.t['alice2'], name='b', capabilities=['remediate:linux'], os=['linux'], max_concurrent=2)
+		queue(self.t['alice'], 'remediate', [self.m_linux.pk])
+		other = extra_match(self, 'web2.a.example', 'Linux 5.15', '192.0.2.77')
+		queue(self.t['alice'], 'remediate', [other.pk])
+		first = next_task(self.t['alice'])[1]['task']
+		self.assertTrue(first)
+		self.assertIsNone(next_task(self.t['alice'])[1].get('task'))  # a fresh task is left to the free agent
+		AgentTask.objects.filter(status='queued').update(created_at=timezone.now() - broker.DEFER_FOR - timedelta(seconds=1))
+		self.assertTrue(next_task(self.t['alice'])[1]['task'])  # a minute later the busy agent takes it
+
 	def test_an_agents_candidates_come_from_its_own_projects_agents(self):
 		register(self.t['bob'], scope={'projects': ['proj-b']}, name='bobs')
 		register(self.t['alice'], name='alices')

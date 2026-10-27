@@ -38,7 +38,7 @@ ID_LIKE=debian
 HOME_URL="https://www.ubuntu.com/"
 '''
 DPKG = 'bash\t5.1-6ubuntu1.1\tamd64\tbash\tii \nlibssl3\t3.0.2-0ubuntu1.10\tamd64\topenssl\tii \nopenssl\t3.0.2-0ubuntu1.10\tamd64\topenssl\tii \n' \
-	'oldpkg\t1.0\tamd64\toldpkg\trc \nattr\t1:2.5.1-1build1\tamd64\tattr\tii \n'
+	'oldpkg\t1.0\tamd64\toldpkg\trc \nheld\t2.0\tamd64\theld\thi \nattr\t1:2.5.1-1build1\tamd64\tattr\tii \n'
 RPM = 'curl\t(none)\t7.76.1-26.el9\tx86_64\tcurl-7.76.1-26.el9.src.rpm\t1700000500\nkernel-core\t0\t5.14.0-362.el9\tx86_64\tkernel-5.14.0-362.el9.src.rpm\t1700000900\n' \
 	'gpg-pubkey\t(none)\t5a6340b3-6229229e\t(none)\t(none)\t1600000000\nbind\t32\t9.16.23-1.el9\tx86_64\tbind-9.16.23-1.el9.src.rpm\t1700000100\n'
 APK = 'openssl-3.1.4-r0 x86_64 {openssl} (Apache-2.0) [installed]\nlibssl3-3.1.4-r0 x86_64 {openssl} (Apache-2.0) [installed]\nbusybox-1.36.1-r15 x86_64 {busybox} (GPL-2.0-only) [installed]\n'
@@ -135,7 +135,7 @@ class ReportTests(SimpleTestCase):
 		self.assertNotIn('0123456789abcdef0123456789abcdef', json.dumps(data))  # only ever the hash
 		names = {(p['n'], p['v'], p['e']) for p in data['packages']}
 		self.assertEqual(names, {('bash', '5.1-6ubuntu1.1', 'dpkg'), ('libssl3', '3.0.2-0ubuntu1.10', 'dpkg'), ('openssl', '3.0.2-0ubuntu1.10', 'dpkg'),
-			('attr', '1:2.5.1-1build1', 'dpkg')})  # the removed "rc" package is not installed
+			('held', '2.0', 'dpkg'), ('attr', '1:2.5.1-1build1', 'dpkg')})  # the removed "rc" package is not installed; a held ("hi") one is, and is often the stale one
 		libssl = next(p for p in data['packages'] if p['n'] == 'libssl3')
 		self.assertEqual((libssl['a'], libssl['s']), ('amd64', 'openssl'))
 		self.assertNotIn('s', next(p for p in data['packages'] if p['n'] == 'bash'))
@@ -519,7 +519,7 @@ class ParserTests(SimpleTestCase):
 		self.assertNotIn('comment', parsed)
 
 	def test_package_listings(self):
-		self.assertEqual([p['n'] for p in self.script.parse_dpkg(DPKG)], ['bash', 'libssl3', 'openssl', 'attr'])
+		self.assertEqual([p['n'] for p in self.script.parse_dpkg(DPKG)], ['bash', 'libssl3', 'openssl', 'held', 'attr'])
 		rpms, newest = self.script.parse_rpm(RPM)
 		self.assertEqual((sorted(p['n'] for p in rpms), newest), (['bind', 'curl', 'kernel-core'], 1700000900))
 		self.assertEqual({p['n']: p['v'] for p in rpms}['bind'], '32:9.16.23-1.el9')

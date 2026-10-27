@@ -25,6 +25,27 @@ class SettingsError(Exception):
         self.status, self.message = status, message
 
 
+METADATA_NAMES = frozenset({'metadata.google.internal', 'metadata', 'instance-data', 'instance-data.ec2.internal'})
+
+
+def ai_url_blocked(url):
+    """Whether an AI server URL points at a link-local or cloud metadata address. Local and private servers (LM Studio, Ollama, vLLM on this
+    machine, the LAN or a tailnet) are allowed on purpose, but nothing legitimate listens on 169.254.0.0/16 (the metadata services of the
+    clouds) or fe80::/10, and a request there would hand out the host's cloud credentials."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    host = (urlsplit(url.strip()).hostname or '').lower().rstrip('.')
+    if host in METADATA_NAMES:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if getattr(ip, 'ipv4_mapped', None):
+        ip = ip.ipv4_mapped
+    return ip.is_link_local or ip in ipaddress.ip_network('fd00:ec2::/32')
+
+
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
@@ -103,6 +124,8 @@ def ai_put(request):
     cfg.base_url = _text(data, 'base_url', cfg.base_url)
     if cfg.base_url and not re.match(r'^https?://', cfg.base_url.strip(), re.I):
         raise SettingsError(400, 'the server URL must start with http:// or https://')
+    if cfg.base_url and ai_url_blocked(cfg.base_url):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
     if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)

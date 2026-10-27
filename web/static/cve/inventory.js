@@ -273,7 +273,7 @@ async function reportsSection(project) {
             render: (r) => {
               if (r.matched) return r.host;
               const cell = el("div", "dlg-tools");
-              if (r.claimed_host) cell.append(el("span", "note", `wanted ${r.claimed_host}, which another machine already reports for`));
+              if (r.claimed_host) cell.append(el("span", "note", r.claim_blocked ? `wanted ${r.claimed_host}, but ${r.claim_blocked}` : `wanted ${r.claimed_host}, which another machine already reports for`));
               const to = text("", { placeholder: "host it is", "aria-label": `Host that ${r.hostname || "this machine"} is` });
               cell.append(
                 to,

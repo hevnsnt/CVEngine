@@ -272,6 +272,35 @@ class EvaluatorTests(Fixture):
 			saved_searches.evaluate(s)
 		sent.assert_called_once_with(mock.ANY, ['b.example.test'], [], 2, False)
 
+	def test_an_alert_no_channel_could_deliver_is_tried_again_at_the_next_check(self):
+		self.notifications()
+		self.host('a.example.test', '198.51.100.70', port=7100)
+		s = self.saved(query='port:7100')
+		saved_searches.evaluate(s)
+		self.host('b.example.test', '198.51.100.71', port=7100)
+		s.refresh_from_db()
+		before = dict(s.matched)
+		with mock.patch('cveFeed.saved_searches.notify.saved_search', return_value=None):  # every channel failed
+			out = saved_searches.evaluate(s)
+		s.refresh_from_db()
+		self.assertEqual((out['status'], out['alerted'], s.last_status, s.matched, s.last_alert_at), ('alert_failed', False, 'alert_failed', before, None))
+		self.assertIsNotNone(s.next_run_at)
+		with mock.patch('cveFeed.saved_searches.notify.saved_search', return_value=True) as sent:
+			out = saved_searches.evaluate(SavedSearch.objects.get(pk=s.pk))
+		self.assertEqual((out['status'], out['alerted'], out['new']), ('ok', True, ['b.example.test']))  # the same alert, now delivered
+		sent.assert_called_once()
+
+	def test_no_channel_at_all_is_not_a_failure_and_the_baseline_moves_on(self):
+		self.host('a.example.test', '198.51.100.70', port=7100)
+		s = self.saved(query='port:7100')
+		saved_searches.evaluate(s)
+		self.host('b.example.test', '198.51.100.71', port=7100)
+		s.refresh_from_db()
+		with mock.patch('cveFeed.saved_searches.notify.saved_search', return_value=False):
+			out = saved_searches.evaluate(s)
+		s.refresh_from_db()
+		self.assertEqual((out['status'], s.last_status, len(s.matched)), ('ok', 'ok', 2))
+
 	def test_an_owner_who_lost_access_is_switched_off_not_run(self):
 		self.host('a.example.test', '198.51.100.80', port=5432)
 		s = self.saved()
@@ -370,6 +399,18 @@ class DueTests(Fixture):
 		for s in (later, off):
 			s.refresh_from_db()
 			self.assertIsNone(s.last_run_at)
+
+	def test_changing_the_frequency_moves_the_next_check(self):
+		now = timezone.now()
+		s = self.saved(frequency='weekly', last_run_at=now - timedelta(hours=2), next_run_at=now + timedelta(days=7))
+		url = f'/api/v1/projects/ssp/saved-searches/{s.pk}'
+		self.assertEqual(call(self.token, 'PATCH', url, {'frequency': 'hourly'})[0], 200)
+		s.refresh_from_db()
+		self.assertLessEqual(s.next_run_at, now + timedelta(seconds=5))  # an hour after a check made two hours ago: due now, not in a week
+		self.assertEqual(call(self.token, 'PATCH', url, {'frequency': 'daily'})[0], 200)
+		s.refresh_from_db()
+		self.assertGreater(s.next_run_at, now + timedelta(hours=20))
+		self.assertEqual(call(self.token, 'PATCH', url, {'name': 'renamed'})[0], 200)  # an edit that is not about the rhythm leaves it alone
 
 	def test_the_next_run_follows_the_frequency(self):
 		now = timezone.now()

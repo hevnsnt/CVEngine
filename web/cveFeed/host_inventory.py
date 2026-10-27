@@ -11,6 +11,7 @@ added as a target (a name its organization excluded is refused either way).
 """
 import ipaddress
 import logging
+import os
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
@@ -211,19 +212,38 @@ def has_live_report(project, name, exclude_pk, now):
         pk=exclude_pk).exists()
 
 
-def _claim_host(project, inv, host, now):
+def corroborates(project, name, host, source_ip=''):
+    """Whether a report that names the host ``name`` is also at one of that host's addresses: the report lists one of them, or it came from
+    one. A name is only the reporter's word, so a token holder must not be able to speak for any scanned host by reporting its name; an
+    address the scanner saw is the second witness. A host with no address to compare (none known, or only CDN or shared ones) has nothing
+    to contradict the name, so it passes. ``CVENGINE_INVENTORY_NAME_ONLY=1`` turns the check off, for an estate whose hosts are scanned at an
+    address (a load balancer or NAT) that neither the report nor its source ever shows: the administrator then adopts or trusts by name."""
+    if os.environ.get('CVENGINE_INVENTORY_NAME_ONLY', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        return True
+    seen = {a for a in _current(project).filter(name__iexact=name, ip_addresses__is_cdn=False).values_list('ip_addresses__address', flat=True)
+            if a and not is_shared_address(a)}
+    if not seen:
+        return True
+    return bool(seen & ({a for a in host.get('ips') or []} | ({source_ip} if source_ip else set())))
+
+
+def _claim_host(project, inv, host, now, source_ip=''):
     """Tie the report to the project host it describes, when it may. A report never takes a host that another machine's fresh
     report already speaks for (that needs an administrator, who adopts it), never moves an established match on an address alone, and
     never overrides an administrator's choice. A claim that is refused is kept as ``claimed_host`` for the administrator to see."""
     name, basis = find_host(project, host)
     claimed = dict(inv.details or {})
     claimed.pop('claimed_host', None)
+    claimed.pop('claim_blocked', None)
     inv.details = claimed
     if not name or name == inv.host or (inv.host and (inv.match_basis == 'adopted' or basis == 'ip')):
         return
     if has_live_report(project, name, inv.pk, now):
         inv.details = {**claimed, 'claimed_host': name}
         return
+    if basis == 'name' and not corroborates(project, name, host, source_ip):
+        inv.details = {**claimed, 'claimed_host': name, 'claim_blocked': 'none of the reported addresses is an address the scanner saw for that host'}
+        return  # an administrator can adopt it if it is right
     inv.host, inv.match_basis = name, basis
 
 
@@ -249,7 +269,7 @@ def _store(project, report, token_id, source_ip, now):
         inv, outcome = HostInventory(project=project, key=key), 'new'
     before_packages, before_os, before_host = inv.packages, _os_summary(inv.os_info or {}), inv.host
     _assign(inv, report, now, token_id, source_ip)
-    _claim_host(project, inv, report['host'], now)
+    _claim_host(project, inv, report['host'], now, source_ip)
     if outcome == 'new':
         _prune_unmatched(project, now)
         if HostInventory.objects.filter(project=project).count() >= MAX_MACHINES_PER_PROJECT:
@@ -287,7 +307,7 @@ def ingest(project, report, token_id=None, source_ip='', now=None):
 def adopt(inv, name):
     """Tie an unmatched report to the project host ``name`` by hand (an administrator's decision, kept across later reports)."""
     inv.host, inv.match_basis = name.lower(), 'adopted'
-    inv.details = {k: v for k, v in (inv.details or {}).items() if k != 'claimed_host'}
+    inv.details = {k: v for k, v in (inv.details or {}).items() if k not in ('claimed_host', 'claim_blocked')}
     inv.save(update_fields=['host', 'match_basis', 'details'])
     apply_to_scan_data(inv, inv.project, timezone.now())
 
@@ -337,7 +357,7 @@ def brief(inv, days, now=None):
             'os': {'family': inv.os_family, 'name': inv.os_name, 'version': inv.os_version, 'build': inv.os_build,
                    'kernel': inv.os_kernel, 'arch': inv.os_arch, 'pretty': (inv.os_info or {}).get('pretty', '')},
             'packages': inv.package_count, 'reported_at': inv.reported_at.isoformat(), 'age_hours': int((now - inv.reported_at).total_seconds() // 3600),
-            'stale': is_stale(inv, days, now), 'stale_after_days': days, 'claimed_host': (inv.details or {}).get('claimed_host'), 'script': f'{inv.script_name} {inv.script_version}'.strip()}
+            'stale': is_stale(inv, days, now), 'stale_after_days': days, 'claimed_host': (inv.details or {}).get('claimed_host'), 'claim_blocked': (inv.details or {}).get('claim_blocked'), 'script': f'{inv.script_name} {inv.script_version}'.strip()}
 
 
 def _package_rows(inv, params, limit):

@@ -28,6 +28,7 @@ const FREQUENCIES = [
 const CHANNEL_LABEL = { slack: "Slack", discord: "Discord", telegram: "Telegram", lark: "Lark" };
 const STATUS_NOTE = {
   too_broad: ["too broad", "failed"],
+  alert_failed: ["alert not delivered, will retry", "failed"],
   error: ["error", "failed"],
   disabled: ["switched off", "failed"],
 };
