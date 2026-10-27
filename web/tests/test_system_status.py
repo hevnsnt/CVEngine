@@ -132,6 +132,13 @@ class SystemStatusTests(TestCase):
 		self.assertTrue(any('late-task' in p for p in data['problems']))
 		self.assertTrue(any('waiting in the work queues' in n for n in data['notes']))
 
+	def test_a_silent_beat_is_the_one_problem_instead_of_every_schedule_being_late(self):
+		silent = dict(HEALTH, beat={'state': 'silent', 'seconds_since_tick': 900})
+		_, data = self.run_status(self.t_root, health=silent)
+		self.assertTrue(any('celery beat has not ticked for 15 minutes' in p for p in data['problems']))
+		self.assertFalse(any('late-task' in p for p in data['problems']))
+		self.assertEqual(data['system']['schedules']['beat']['state'], 'silent')
+
 	def test_a_healthy_instance_says_ok(self):
 		healthy = dict(HEALTH, schedules=[{'name': 'x', 'next_due_state': 'estimated'}])
 		usage = type('Usage', (), {'total': 100 << 30, 'used': 40 << 30, 'free': 60 << 30})()  # not this machine's real disk

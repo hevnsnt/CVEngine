@@ -1,6 +1,7 @@
 """Durable operator pause for scanner dispatch and active scanner processes."""
 import fcntl
 import os
+import time
 from contextlib import contextmanager
 
 from celery import Task
@@ -46,7 +47,34 @@ class PauseAwareTask(Task):
         return super().__call__(*args, **kwargs)
 
 
+BEAT_HEARTBEAT_KEY = 'cvengine:beat:heartbeat'
+_beat = {'at': 0.0}
+
+
+def beat_heartbeat():
+    """Epoch seconds of beat's last tick, or None when it never wrote one (cannot be told, or Redis is down). Lets a status page tell a
+    beat that is not running from a schedule whose last_run_at is merely flushed to the database only every few minutes."""
+    try:
+        from reNgine import resources
+        value = resources.get_store().r.get(BEAT_HEARTBEAT_KEY)
+        return float(value) if value else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class PauseAwareScheduler(DatabaseScheduler):
+    def tick(self, *args, **kwargs):
+        wait = super().tick(*args, **kwargs)
+        now = time.time()
+        if now - _beat['at'] >= 15:  # a tick can come every few seconds; the heartbeat needs no more than this
+            _beat['at'] = now
+            try:
+                from reNgine import resources
+                resources.get_store().r.set(BEAT_HEARTBEAT_KEY, f'{now:.0f}', ex=3600)
+            except Exception:  # noqa: BLE001 - bookkeeping must never stop the scheduler
+                pass
+        return wait
+
     def is_due(self, entry):
         if getattr(entry, 'task', '') not in PAUSE_EXEMPT_TASKS and pause_requested():
             return False, 5
