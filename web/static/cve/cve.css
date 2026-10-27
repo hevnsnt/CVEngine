@@ -1483,3 +1483,23 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .how-stamp a{color:var(--ink);text-decoration:underline;text-underline-offset:2px}
 .how-link{display:inline-block;margin-top:10px;font:600 13px var(--font);color:var(--ink);text-decoration:underline;text-underline-offset:2px}
 @media (min-width:720px){.how-nums{grid-template-columns:repeat(4,minmax(0,1fr))}}
+/* Suppliers: host cards and the technology search */
+.supplier-list{display:grid;gap:18px}
+.supplier{border-top:1px solid var(--line);padding-top:14px}
+.supplier-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-bottom:8px}
+.supplier-head h3{margin:0;font-size:16px}
+.supplier-actions{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.supplier-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr))}
+.supplier-card .card-head{margin-bottom:8px}
+.supplier-tech{margin-bottom:8px}
+.chip.hit{background:var(--ink);color:var(--on-ink)}
+.chip.facet{border:0;cursor:pointer}
+.supplier-facets{margin-bottom:10px}
+.supplier-more{margin-top:8px;font-size:13px}
+.supplier-more summary{cursor:pointer;color:var(--muted)}
+.supplier-more h4{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.supplier-kv{display:grid;grid-template-columns:minmax(0,max-content) minmax(0,1fr);gap:2px 12px;margin:0;font:500 12px var(--mono)}
+.supplier-kv dt{color:var(--muted)}
+.supplier-kv dd{margin:0;overflow-wrap:anywhere}
+.supplier-finding{border-top:1px solid var(--line);padding:8px 0}
+.supplier-finding .card-head{justify-content:flex-start}

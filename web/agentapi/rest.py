@@ -11,6 +11,7 @@ from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import services as svc
+from agentapi import suppliers
 from agentapi import system_status
 from agentapi import authcheck
 from agentapi import reports
@@ -246,6 +247,22 @@ ROUTES = [
      lambda r, c, slug, **k: svc.set_runzero(c, slug, _body(r))),
     ('POST', r'projects/(?P<slug>[-\w]+)/runzero/sync', 'Queue a runZero sync of this project now',
      lambda r, c, slug, **k: (svc.run_runzero_sync(c, slug), 202)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers', "The project's third-party suppliers (never owned hosts): tier, domains, last checked, open findings by severity, host card count; can_edit says whether you may add or remove",
+     lambda r, c, slug, **k: suppliers.list_suppliers(c, slug, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/suppliers', 'Add a supplier: {name, domains: [exact names to check], tier: critical|high|normal, contact?, notes?}; a domain that is one of the project\'s own targets, an address, a wildcard or a private name is refused (organization admin or App Admin)',
+     lambda r, c, slug, **k: (suppliers.add_supplier(c, slug, _body(r)), 201)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/hosts', 'Supplier host cards (response headers and banners, certificate, technology stack with versions, last checked); ?tech=php,node.js filters by technology (any term, matched in name and version and in the Server and X-Powered-By banners), ?supplier=<id>, ?tier=',
+     lambda r, c, slug, **k: suppliers.search_hosts(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/technologies', 'The technologies the suppliers run, most widespread first, with suppliers, hosts and versions seen',
+     lambda r, c, slug, **k: suppliers.list_technologies(c, slug)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/findings', 'Supplier posture findings (certificate, email authentication, headers, exposed pages, known CVEs for announced versions); ?status=open|accepted|resolved|all, ?supplier=, ?severity=, ?category=tls|email|web|exposed|cve',
+     lambda r, c, slug, **k: suppliers.list_supplier_findings(c, slug, r.GET)),
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/suppliers/findings/(?P<finding_id>\d+)', 'Accept a supplier finding or open it again: {status: accepted|open, note?} (organization admin or App Admin); resolved is set by the checks',
+     lambda r, c, slug, finding_id, **k: suppliers.set_finding_status(c, slug, finding_id, _body(r))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/(?P<supplier_id>\d+)/summary', 'A plain-text message about one supplier to copy and send (the technology it announces, ?tech= asks about those first, and its open findings with what to ask). Nothing is sent',
+     lambda r, c, slug, supplier_id, **k: suppliers.supplier_summary(c, slug, supplier_id, r.GET)),
+    ('DELETE', r'projects/(?P<slug>[-\w]+)/suppliers/(?P<supplier_id>\d+)', 'Remove a supplier with its host cards and findings (organization admin or App Admin)',
+     lambda r, c, slug, supplier_id, **k: suppliers.remove_supplier(c, slug, supplier_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/auth-credentials', 'Stored sign-ins (headers and cookie the scanners send) of the project, masked: names only, never a value (App Admin or organization admin; target_id=)',
      lambda r, c, slug, **k: authcheck.list_credentials(c, slug, r.GET)),
     ('PUT', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/auth-credential', 'Create or replace the stored sign-in of a target or of one host of it: {label, host?, headers: [{name, secret}], cookie_secret?, origins?, expires_at?}; values are write-only (App Admin or organization admin)',
