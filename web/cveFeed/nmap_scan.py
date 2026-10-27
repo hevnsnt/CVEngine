@@ -246,8 +246,12 @@ def persist_inventory(inventory, source='nmap', org_id=None):
             # everything nmap said, not just the first CPE: the OS CPE carries the distro release, and "table" means the service
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
-                          'method': rec.get('method', ''), 'tunnel': rec.get('tunnel', ''), 'hostname': rec.get('hostname', ''),
-                          'devicetype': rec.get('devicetype', ''), 'confidence': rec.get('confidence', '')}
+                          'method': rec.get('method', '')}
+            for key in ('tunnel', 'hostname', 'devicetype', 'confidence'):  # only what this run stated: a service that dropped TLS is not still "ssl"
+                if rec.get(key):
+                    port.extra[key] = rec[key]
+                else:
+                    port.extra.pop(key, None)
             if rec.get('tls'):
                 port.tls = rec['tls']  # the certificate ssl-cert read, in the same place bbot's TLS facts go
             kept_scripts = _reviewed_scripts(rec.get('scripts'))

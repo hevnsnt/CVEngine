@@ -59,6 +59,13 @@ def edge_of(sub, project_id=None, observations=None, route_headers=None):
     return {'fronted': bool(providers), 'providers': sorted(providers)[:6], 'basis': basis[:6]}
 
 
+def edge_for(sub, project_id):
+    """``edge_of`` with what the stored probe results and the front page's response headers add: the answer the probe planner and the match
+    triage need without building the whole context."""
+    root = _root_route(sub, project_id)
+    return edge_of(sub, project_id, _probe_rows(project_id, sub.name.lower()), ((root.evidence or {}).get('headers') if root else None) or {})
+
+
 def _root_route(sub, project_id):
     from cveFeed.models import RouteAuth
     rows = RouteAuth.objects.filter(project_id=project_id, host=sub.name.lower(), path='/', retired_at__isnull=True).order_by('checked_at')

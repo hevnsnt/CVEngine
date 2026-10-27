@@ -219,7 +219,7 @@ def unaddressable(sub, cve=None):
     description = ' '.join(str(getattr(cve, name, '') or '') for name in ('title', 'original_description')).lower() if cve else ''
     if re.search(r'\blocal(?:ly)?\b', description) and re.search(r'\b(kernel|driver|module|hardware|nic|kvm)\b', description):
         return ('This advisory needs the host\'s own kernel, driver or hardware state; no network probe can read it. Install the host '
-                'inventory reporter on the machine (Settings, Agents) so its kernel and patch level are known.')
+                'inventory reporter on the machine so its kernel and patch level are known.')
     return ''
 
 
@@ -752,7 +752,7 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
     for sub, leads in todo[:max_hosts()]:
         if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
             break
-        edge = host_context.edge_of(sub, project)['fronted']
+        edge = host_context.edge_for(sub, project)['fronted']
         plan = plan_for_host(sub, leads, edge_fronted=edge)
         assets = {asset_key(sub.name, e): e for e in plan}
         covered = set() if force else ledger.fresh(SERVICE, assets, project)

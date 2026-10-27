@@ -190,6 +190,19 @@ class AgentApiTests(TestCase):
 		port = data['results'][0]['ips'][0]['ports'][0]
 		self.assertEqual((port['number'], port['product'], port['version']), (443, 'nginx', '1.18.0'))
 
+	def test_the_host_record_carries_probe_results_and_wordpress_state_of_its_own_project_only(self):
+		from cveFeed.models import ProbeObservation
+		ProbeObservation.objects.create(project=self.pa, domain=self.da, host='www.a.example', probe='error-page', kind='version', product='nginx',
+			version='1.24.0', outcome='found', source='body:nginx-error-page', confidence=0.95)
+		ProbeObservation.objects.create(project=self.pa, domain=self.da, host='www.a.example', probe='wpscan', kind='wordpress', product='WordPress',
+			outcome='challenged', evidence={'state': 'blocked', 'reason': 'the edge challenged the scanner'})
+		ProbeObservation.objects.create(project=self.pb, domain=self.db, host='www.a.example', probe='error-page', kind='version', product='nginx',
+			version='9.9.9', outcome='found')  # another project that happens to scan the same name
+		host = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/hosts')[1]['results'][0]
+		self.assertEqual([(p['product'], p['version'], p['outcome']) for p in host['probes']], [('nginx', '1.24.0', 'found')])
+		self.assertEqual(host['wordpress']['status']['state'], 'blocked')
+		self.assertNotIn('9.9.9', json.dumps(host))
+
 	def test_remediation_workflow(self):
 		base = '/api/v1/projects/proj-a'
 		status, data = call(self.t_alice, 'GET', f'{base}/work')
@@ -429,7 +442,8 @@ class AgentApiTests(TestCase):
 				mock.patch('cveFeed.validation.run_validation', return_value={'ran': 1, 'reused': 0}) as checks, \
 				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
 			validate_match_on_demand(job_id)
-		self.assertEqual(checks.call_args.kwargs['selected_kinds'], {'nmap_sv'})
+		# the model's choice, plus the identity probes (nginx next to ingress-nginx or nginx-ui) that always accompany a plan when one applies
+		self.assertEqual(checks.call_args.kwargs['selected_kinds'], {'nmap_sv', 'fact_probe'})
 		job = OnDemandValidation.objects.get(pk=job_id)
 		self.assertEqual(job.result['plan']['source'], 'ai')
 		self.assertEqual(TriageCall.objects.filter(kind='validation_plan', project=self.pa).count(), 1)

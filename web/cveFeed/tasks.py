@@ -594,10 +594,6 @@ def validate_match_on_demand(request_id):
         template = validation.resolve_template(match.cve_entry.cve_id)
         available_checks, plan_notes = validation.plan_checks(subject, row.signature, template)
         available_checks = [check for check in available_checks if check]
-        if not any(check['kind'] == 'fact_probe' for check in available_checks):
-            from cveFeed import probes
-            plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
-                              'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
         planning = activity.log('confirm', f'Validation request #{job.pk}: choosing permitted checks for {cve_id}',
                                 project=job.project_id, cve_id=cve_id, status='running', **detail)
         from cveFeed import host_context
@@ -620,6 +616,10 @@ def validate_match_on_demand(request_id):
             plan_notes.append('No permitted template covers this CVE; an AI draft requires reviewed positive fixture evidence before host execution.')
         if not checks:
             plan_notes.append(plan['reason'])
+        if not any(check['kind'] == 'fact_probe' for check in available_checks):
+            from cveFeed import probes
+            plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
+                              'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
         # Refresh only this finding's planned checks, not other hosts that share its signature.
         for check in checks:
             ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()

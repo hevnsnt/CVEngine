@@ -330,7 +330,7 @@ def _probe_plan(finding, evidence):
     lead = {'name': finding.matched_product, 'source': finding.source}
     if finding.source == 'port' and evidence.get('port') and evidence.get('ip'):
         lead.update(ip=evidence['ip'], port=evidence['port'])
-    edge = host_context.edge_of(sub, sub.target_domain.project_id)['fronted']
+    edge = host_context.edge_for(sub, sub.target_domain.project_id)['fronted']
     if finding.matched_version:
         # the version is stated, and nmap_sv or the front page already re-read it: only the probes that tell look-alike products apart add anything
         return probes.plan_for_host(sub, [lead], edge_fronted=edge, wanted=probes.IDENTITY_PROBES)
