@@ -96,6 +96,20 @@ const hyName = (check) => {
   const rest = area ? word.slice(area.length).trim() : word;
   return area ? `${HY_PREFIX[area]}${rest ? ` ${rest}` : ""}` : word.charAt(0).toUpperCase() + word.slice(1);
 };
+// The longest-open critical or high item (stats keys oldest_open_days / _kind / _id, null when nothing qualifies). Hidden until the server sends it.
+const OLDEST_KIND = { cve: ["CVE match", "matches", ""], scanner: ["Scanner finding", "vulns", "?type=scanner"], hygiene: ["Hygiene issue", "hygiene", ""] };
+function paintOldest(s) {
+  const tile = $("n-oldest");
+  if (!tile) return;
+  const days = s.oldest_open_days;
+  tile.hidden = days == null;
+  if (days == null) return;
+  setNum("s-oldest_open_days", days);
+  const kind = OLDEST_KIND[s.oldest_open_kind];
+  $("s-oldest_note").textContent = kind ? `a ${kind[0].toLowerCase()}` : "";
+  if (kind && slug) tile.href = `/cve/${encodeURIComponent(slug)}/${kind[1]}/${kind[2]}`;
+  tile.classList.toggle("old", days >= 30);
+}
 // Scan coverage: the share of hosts a scan has looked at. The host search already counts every temperature, so one request answers it.
 let coverageAt = 0;
 async function paintCoverage() {
@@ -167,6 +181,7 @@ async function pollStats() {
       setNum("s-scans_queued", s.scans_queued);
     }
     paintCoverage();
+    paintOldest(s);
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
     $("m-exposed").style.width = `${pct}%`;
     const top = Math.max(s.tiers.fire, s.tiers.smoke, s.tiers.ice, 1);

@@ -1458,3 +1458,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .strip a{flex:1 1 170px}
 .strip a.wide{flex:2 1 300px}
 @media (max-width:719px){.strip a{flex-basis:140px}.strip a.wide{flex-basis:100%}}
+.strip a#n-oldest.old b{color:var(--fire-ink)}
