@@ -28,6 +28,28 @@ def serialize(job):
             'finished_at': job.finished_at.isoformat() if job.finished_at else None}
 
 
+ORPHAN_AFTER_MINUTES = 10  # a queued row older than this whose Celery task no longer exists does not count toward the caps
+
+
+def active_count(project=None):
+    """Host assessments occupying a slot: queued or running, not counting a row that has waited ``ORPHAN_AFTER_MINUTES`` for a task that
+    no longer exists in any queue or worker (a restart took it; cveFeed.reaper queues such a row again, but until then it would
+    hold a slot nothing will ever free). When the broker cannot be asked every active row counts."""
+    rows = HostAssessment._base_manager.filter(status__in=ACTIVE)
+    if project is not None:
+        rows = rows.filter(project=project)
+    total = rows.count()
+    old = list(rows.filter(status='queued', created_at__lt=timezone.now() - timedelta(minutes=ORPHAN_AFTER_MINUTES))
+               .values_list('celery_id', flat=True)[:100])
+    if not old:
+        return total
+    from cveFeed import broker_recovery
+    live = broker_recovery.cached_live_task_ids()
+    if live is None:
+        return total
+    return total - sum(1 for task_id in old if not task_id or task_id not in live)
+
+
 def enqueue(project, sub, *, source='manual', user=None):
     """Accept only a stored host owned by this project; a model cannot supply a new target."""
     from cveFeed.exclusions import is_excluded
@@ -50,9 +72,7 @@ def enqueue(project, sub, *, source='manual', user=None):
     # inside a request would make "20 at once across the installation" mean 20 per user.
     active_scans = ScanHistory._base_manager.filter(Q(scan_status=-1) | Q(scan_status=1,
                                                                           start_scan_date__gte=timezone.now() - timedelta(hours=11)))
-    if HostAssessment._base_manager.filter(status__in=ACTIVE).count() >= 20 or \
-            HostAssessment._base_manager.filter(project=project, status__in=ACTIVE).count() >= 5 or \
-            active_scans.count() >= 20:
+    if active_count() >= 20 or active_count(project) >= 5 or active_scans.count() >= 20:
         raise RuntimeError('host assessment queue is at capacity; retry later')
     try:
         with transaction.atomic():

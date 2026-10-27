@@ -530,6 +530,7 @@ def activity_list(request, actor):
 # django-celery-beat's scheduler writes a task's last_run_at to the database only every three minutes (its sync interval), so a task that
 # runs every minute shows a last run up to three minutes old while it is dispatching on time: a schedule is late only past that and a margin.
 BEAT_FLUSH_SECONDS = 300
+BEAT_SILENT_SECONDS = 120
 
 
 def scheduler_health(request, actor):
@@ -648,7 +649,13 @@ def scheduler_health(request, actor):
                 'deferred': latest_inactive.deferred if latest_inactive else 0,
                 'errors': latest_inactive.errors if latest_inactive else 0,
                 'cursor': latest_inactive.cursor_hoststate_id if latest_inactive else 0}
-    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers,
+    from cveFeed.scan_control import beat_heartbeat
+    ticked = beat_heartbeat()
+    age = int(now.timestamp() - ticked) if ticked else None
+    # beat writes its heartbeat every few seconds: silent for two minutes means it is not running (the schedule rows' last_run_at lags
+    # by minutes even when it is); no heartbeat at all means beat predates it or Redis cannot be read, which proves nothing
+    beat = {'state': 'unknown' if age is None else ('running' if age <= BEAT_SILENT_SECONDS else 'silent'), 'seconds_since_tick': age}
+    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers, 'beat': beat,
             'scanning_paused': pause_requested(), 'assessment_review': review, 'archive_rediscovery': archive,
             'inactive_archive_review': inactive,
             'scheduler_process': 'unknown', 'scheduler_note': 'Last dispatch comes from Beat; this web request cannot inspect its process.',

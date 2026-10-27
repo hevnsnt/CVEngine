@@ -89,6 +89,17 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(client_for(self.member_a), 'GET', 'activity')[0], 403)
 		self.assertEqual(api(admin, 'GET', 'activity?page_size=201')[0], 400)
 
+	def test_scheduler_health_tells_a_running_beat_from_a_silent_or_unknown_one(self):
+		import time
+		inspector = mock.Mock(active_queues=mock.Mock(return_value={}), active=mock.Mock(return_value={}))
+		def beat(value):
+			with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector), \
+					mock.patch('cveFeed.scan_control.beat_heartbeat', return_value=value):
+				return api(client_for(self.root), 'GET', 'health')[1]['beat']
+		self.assertEqual(beat(time.time() - 20)['state'], 'running')
+		self.assertEqual(beat(time.time() - 900)['state'], 'silent')
+		self.assertEqual(beat(None), {'state': 'unknown', 'seconds_since_tick': None})
+
 	def test_scheduler_health_is_app_admin_only_and_never_returns_task_arguments(self):
 		from datetime import timedelta
 		from django_celery_beat.models import IntervalSchedule, PeriodicTask

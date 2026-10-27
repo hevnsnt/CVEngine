@@ -109,8 +109,11 @@ class RedispatchTests(ReaperTests):
 		self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:assess:redispatch:*')])
 		[client.delete(k) for k in client.scan_iter('cvengine:assess:redispatch:*')]
 
+	live = None  # None: the broker cannot be asked, which is what a test without workers sees
+
 	def redispatch(self):
-		with mock.patch('cveFeed.tasks.assess_host.apply_async', return_value=mock.Mock(id='again-1')) as send:
+		with mock.patch('cveFeed.tasks.assess_host.apply_async', return_value=mock.Mock(id='again-1')) as send, \
+				mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=self.live):
 			return reaper.redispatch_queued_assessments(now=NOW), send
 
 	def test_an_assessment_nobody_started_is_queued_again_and_remembers_the_new_message(self):
@@ -134,6 +137,16 @@ class RedispatchTests(ReaperTests):
 		self.assertEqual(self.redispatch()[0], 1)
 		self.assertEqual(self.redispatch()[0], 0)  # a long but healthy queue does not fill with copies
 
+	def test_an_assessment_whose_task_is_still_in_a_queue_or_a_worker_is_not_queued_again(self):
+		waiting = self.assessment('h0.reap.example', 'queued', 1, started=False)
+		lost = self.assessment('h1.reap.example', 'queued', 1, started=False)
+		HostAssessment.objects.filter(pk=waiting.pk).update(celery_id='still-there')
+		HostAssessment.objects.filter(pk=lost.pk).update(celery_id='gone')
+		self.live = {'still-there'}
+		count, send = self.redispatch()
+		self.assertEqual(count, 1)
+		send.assert_called_once_with(args=[lost.pk], queue='discovery_queue')
+
 	def test_a_second_message_for_a_started_assessment_does_nothing(self):
 		from cveFeed.host_assessment import execute
 		job = self.assessment('h0.reap.example', 'running', 1)
@@ -148,3 +161,39 @@ class RedispatchTests(ReaperTests):
 		row = AgentActivity.objects.order_by('-id').first()
 		self.assertEqual(row.status, 'done')
 		self.assertIn('Queued 1 host assessment again', row.message)
+
+
+class CapacityTests(TestCase):
+	"""A queued row whose Celery task no longer exists must not hold a slot toward the caps."""
+
+	setUp_base, assessment = ReaperTests.setUp, ReaperTests.assessment
+
+	def count(self, live, project=None):
+		from cveFeed import broker_recovery, host_assessment
+		broker_recovery._live['at'] = 0.0
+		with mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=live):
+			return host_assessment.active_count(project)
+
+	def setUp(self):
+		self.setUp_base()
+		self.old = self.assessment('h0.reap.example', 'queued', 1, started=False)
+		self.waiting = self.assessment('h1.reap.example', 'queued', 1, started=False)
+		self.young = self.assessment('h2.reap.example', 'queued', 0.01, started=False)
+		self.running = self.assessment('h3.reap.example', 'running', 1)
+		HostAssessment.objects.filter(pk=self.old.pk).update(celery_id='gone')
+		HostAssessment.objects.filter(pk=self.waiting.pk).update(celery_id='alive')
+		HostAssessment.objects.filter(pk=self.young.pk).update(celery_id='not-yet-seen')
+
+	def test_an_old_queued_row_with_no_task_is_not_counted(self):
+		self.assertEqual(self.count({'alive'}), 3)
+		self.assertEqual(self.count({'alive'}, self.project), 3)
+
+	def test_every_row_counts_when_the_broker_cannot_be_asked(self):
+		self.assertEqual(self.count(None), 4)
+
+	def test_an_old_queued_row_with_no_task_id_at_all_is_not_counted(self):
+		HostAssessment.objects.filter(pk=self.waiting.pk).update(celery_id='')
+		self.assertEqual(self.count({'alive'}), 2)
+
+	def test_a_running_row_always_counts(self):
+		self.assertEqual(self.count(set()), 2)  # the young queued row and the running one
