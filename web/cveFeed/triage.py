@@ -18,6 +18,7 @@ only cleaned, structured evidence (see reNgine.ai_providers.build_triage_prompt)
 
 The builders and ``apply_rules`` are pure (duck-typed on the model fields) so they are unit tested without a database.
 """
+import contextvars
 import hashlib
 import json
 import logging
@@ -372,16 +373,34 @@ def _port_for(sub, number):
     return None
 
 
-_CONTEXT_MEMO = {}
+# one host's context is read once while ``track`` runs; outside it nothing is remembered (a long-lived worker must never serve a stale context)
+_CONTEXT_MEMO = contextvars.ContextVar('triage_context_memo', default=None)
+
+
+def _web_evidence(match):
+    """Whether a match was made from something an HTTP response (and so a CDN edge) can speak for: a technology tag, or a port that serves
+    HTTP. An SSH, database or mail port is never the CDN's: its banner is the host's own."""
+    from cveFeed import route_auth
+    if match.source == 'tech':
+        return True
+    if match.source != 'port':
+        return False
+    from startScan.models import Port
+    row = Port.objects.filter(pk=(match.evidence or {}).get('source_id')).values_list('service_name', 'number', 'extra').first()
+    if row is None:
+        return False
+    service, number, extra = (row[0] or '').lower(), row[1], row[2] or {}
+    return number in route_auth.WEB_PORTS or service in route_auth.HTTP_SERVICE_NAMES or extra.get('tunnel') == 'ssl' and 'http' in service
 
 
 def closure_basis(match, context):
-    """The concrete grounds, verified from host metadata, on which a model may clear a match whose version is inside the range: ``different_product``
-    (a probe showed the host runs a look-alike, not the product the advisory names) and ``cdn_edge_only`` (a CDN, WAF or hosting edge answers
-    for the host, so the banner or version came from the edge). Nothing the model says creates one."""
+    """The concrete grounds, verified from host metadata, on which a model may clear a match whose version is inside the range:
+    ``different_product`` (a probe showed the host runs a look-alike, not the product the advisory names) and ``cdn_edge_only`` (a CDN, WAF or
+    hosting edge answers for the host on DNS-level evidence, and the match rests on a web response: the banner or version came from the edge).
+    Nothing the model says, and nothing a response header claims, creates one."""
     from cveFeed import probes
     basis = []
-    if (context.get('edge') or {}).get('fronted') and match.source in ('tech', 'port'):
+    if (context.get('edge') or {}).get('verified') and _web_evidence(match):
         basis.append('cdn_edge_only')
     if match.subdomain is not None and probes.lookalike_conflict(match.subdomain, match):
         basis.append('different_product')
@@ -397,9 +416,13 @@ def attach_host_context(d, match):
     if sub is None or sub.target_domain_id is None:
         return
     try:
-        if sub.pk not in _CONTEXT_MEMO:
-            _CONTEXT_MEMO[sub.pk] = host_context.host_context(sub, sub.target_domain.project_id)
-        context = _CONTEXT_MEMO[sub.pk]
+        memo = _CONTEXT_MEMO.get()
+        if memo is not None and sub.pk in memo:
+            context = memo[sub.pk]
+        else:
+            context = host_context.host_context(sub, sub.target_domain.project_id)
+            if memo is not None:
+                memo[sub.pk] = context
         basis = closure_basis(match, context)
     except Exception:  # noqa: BLE001
         logger.exception('could not read the host context of match %s', match.pk)
@@ -491,11 +514,11 @@ def _fetch(fk, ids):
 
 def track(findings):
     """One host's context is read once per call (a host with fifty matches is one read). See ``_track``."""
-    _CONTEXT_MEMO.clear()
+    token = _CONTEXT_MEMO.set({})
     try:
         return _track(findings)
     finally:
-        _CONTEXT_MEMO.clear()
+        _CONTEXT_MEMO.reset(token)
 
 
 def _track(findings):

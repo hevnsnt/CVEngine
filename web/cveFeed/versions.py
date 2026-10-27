@@ -27,6 +27,8 @@ POWERED_BY_PRODUCTS = {
 }
 
 MAX_COMPONENTS = 8
+EDGE_PRODUCTS = frozenset({'Cloudflare', 'Amazon CloudFront', 'Akamai', 'Fastly', 'Netlify', 'Vercel', 'GitHub Pages', 'Amazon S3',
+                           'AWS Elastic Load Balancing', 'Heroku'})
 MAX_NAME = 40
 # the comment after a product in a Server header names the distribution that built it: "nginx/1.24.0 (Ubuntu)"
 DISTRO_WORDS = (('ubuntu', 'ubuntu'), ('debian', 'debian'), ('centos', 'centos'), ('red hat', 'rhel'), ('rhel', 'rhel'),
@@ -45,9 +47,15 @@ _TOKEN = re.compile(r"([A-Za-z][A-Za-z0-9_.+-]*)(?:/([^\s()]+))?|\(([^)]{0,80})\
 _JETTY = re.compile(r"\bJetty\((\d[\w.-]{0,30})\)")
 
 
+_STATED = re.compile(r"[vV]?(\d[A-Za-z0-9.+_-]{0,30})")
+
+
 def _version(text):
-    found = VERSION.match(text or '')
-    return found.group(0).rstrip('.') if found else ''
+    """The version a text states, or ''. A bare major ("Drupal 10", "PHP/8") is no version: it parses as (10,) and would sit inside every
+    "before 10.2" range as if it had been read, so it is left as an unstated version. A leading "v" (Perl/v5.16.3) is not part of it."""
+    found = _STATED.match(text or '')
+    number = found.group(1).rstrip('.') if found else ''
+    return number if '.' in number else ''
 
 
 def _stored(name, version):
@@ -87,15 +95,16 @@ def parse_server_header(value):
             version = ''
         else:
             product = SERVER_PRODUCTS.get(key) or (MODULE_PRODUCTS.get(key) if components or jetty else None)
-        if not product and version and components and re.match(r'^[A-Za-z][A-Za-z0-9_]{1,30}$', token):
-            product = token  # an unlisted module that states a version: "mod_foo/1.2"
+        if not product and version and components and re.match(r'^mod_[a-z0-9_]{1,26}$', key):
+            product = token  # an Apache module that states a version: "mod_foo/1.2"
+        # any other name after the web server is the host's own say-so ("nginx/1.25.3 Log4j/2.14.1 Struts/2.3.30"): it is not a technology
         if not product:
             continue
         seen.add(key)
         number = _version(version)
         components.append({'name': _stored(product, number), 'product': product, 'version': number})
-        if len(components) >= MAX_COMPONENTS:
-            break
+        if product in EDGE_PRODUCTS or len(components) >= MAX_COMPONENTS:
+            break  # what follows an edge's name describes the edge's own answer, not the software behind it
     return {'components': components, 'distro': distro}
 
 

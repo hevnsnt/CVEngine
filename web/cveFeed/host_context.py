@@ -35,14 +35,20 @@ def _names_of(sub):
 
 
 def edge_of(sub, project_id=None, observations=None, route_headers=None):
-    """``{'fronted', 'providers', 'basis'}``: whether a CDN, WAF or hosting edge answers for this host and what says so (its CNAME, the
-    CDN flag on the host or an address, a WAF fingerprint, edge-only response headers, a probe that saw only an edge page)."""
+    """``{'fronted', 'verified', 'providers', 'basis'}``: whether a CDN, WAF or hosting edge answers for this host and what says so (its CNAME,
+    the CDN flag on the host or an address, a WAF fingerprint, edge-only response headers, a probe that saw only an edge page). ``fronted`` is
+    for the model's information. ``verified`` is true only on DNS-level evidence (the CNAME, the host's own name, a CDN flag on an address):
+    a response header or a page is the scanned host's own say-so, and one ``cf-ray`` header must not be able to clear its CVE matches."""
     from cveFeed import hosting, versions
     providers, basis = set(), []
     ips = list(sub.ip_addresses.all())
-    info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=sub.webserver or '',
-                            reverse_pointers=[ip.reverse_pointer for ip in ips if ip.reverse_pointer], cdn_name=sub.cdn_name or '',
-                            is_cdn=bool(sub.is_cdn or any(ip.is_cdn for ip in ips)))
+    pointers = [ip.reverse_pointer for ip in ips if ip.reverse_pointer]
+    flagged = bool(sub.is_cdn or any(ip.is_cdn for ip in ips))
+    info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=sub.webserver or '', reverse_pointers=pointers, cdn_name=sub.cdn_name or '',
+                            is_cdn=flagged)
+    dns_info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver='', reverse_pointers=pointers, cdn_name=sub.cdn_name or '',
+                                is_cdn=flagged)
+    verified = bool(dns_info['shared_ip'] and dns_info['provider'])
     if info['shared_ip'] and info['provider']:
         providers.add(info['provider'])
         basis += info['evidence'][:2]
@@ -56,7 +62,7 @@ def edge_of(sub, project_id=None, observations=None, route_headers=None):
         if row.outcome in ('edge', 'challenged') and row.product:
             providers.add(row.product[:60])
             basis.append(f'probe {row.probe}: {row.outcome}')
-    return {'fronted': bool(providers), 'providers': sorted(providers)[:6], 'basis': basis[:6]}
+    return {'fronted': bool(providers), 'verified': verified, 'providers': sorted(providers)[:6], 'basis': basis[:6]}
 
 
 def edge_for(sub, project_id):
@@ -126,14 +132,19 @@ def _os(sub, names):
     return {'guesses': guesses[:3], 'reported_by_other_tools': facts}
 
 
+TAILSCALE_FACTS = ('os', 'client_version', 'tags', 'update_available')  # never the device name, its addresses or the signed-in user
+
+
 def _tailscale(project_id, host):
-    """What Tailscale said about the device this host is (a tailnet device is a target named by its tailnet address), or None."""
+    """What Tailscale said about the device this host is (a tailnet device is a target named by its tailnet address), or None: only the
+    operating system, client version, tags, whether an update is available and whether it is online. Its name, hostname, addresses and the
+    login of its owner stay out of a prompt (no host names or addresses, and a person's login is personal data)."""
     from cveFeed.models import TailscaleDevice
     row = TailscaleDevice.objects.filter(project_id=project_id, domain__name=host, departed_at__isnull=True).first()
     if row is None:
         return None
-    facts = {k: _s(v if not isinstance(v, (list, dict)) else json.dumps(v, default=str), 100) for k, v in list((row.facts or {}).items())[:15]
-             if isinstance(v, (str, int, float, bool, list))}
+    facts = {k: _s(json.dumps(v, default=str) if isinstance(v, (list, dict)) else v, 100) for k, v in (row.facts or {}).items()
+             if k in TAILSCALE_FACTS and v not in (None, '', [])}
     return {'online': row.online, **facts}
 
 

@@ -50,7 +50,7 @@ def _versioned(name, version):
     if not name:
         return ""
     found = VERSION.match(version or "")
-    return f"{name}:{found.group(0)}" if found else name
+    return f"{name}:{found.group(0)}" if found and "." in found.group(0) else name  # a bare major ("Drupal 10") is no version
 
 
 def _parse_products(value, table, source):

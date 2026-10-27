@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import timedelta
 
 from django.utils import timezone
@@ -37,15 +38,36 @@ PARTIAL_SERVICE = 'wpscan-partial'  # a run that finished but could not check vu
 PROBE_SERVICE = 'wp-probe'
 DEFAULT_TIMEOUT = 15 * 60
 DEFAULT_MAX_SITES = 20
-# WPScan 4: plugins are no longer enumerated by default, so the tokens are explicit. ap and at list every plugin and theme the site shows
-# (with versions, no API token needed); tt timthumbs; cb config backups; dbe database exports; u1-10 the first author ids. vp and vt only
-# report vulnerable ones and need the API, so they cannot give versions without a token.
-ENUMERATE = 'ap,at,tt,cb,dbe,u1-10'
+# WPScan 4: plugins are no longer enumerated by default, so the tokens are explicit. ap and at list the plugins and themes the site's own pages
+# reference (with versions, no API token needed); cb config backups; dbe database exports; u1-10 the first author ids. vp and vt only report
+# vulnerable ones and need the API, so they cannot give versions without a token. tt (timthumbs, 2,568 requests alone) is opt-in
+# (CVENGINE_WPSCAN_TIMTHUMBS=1). Plugin and theme detection are set to passive explicitly: in WPScan 4 they fall back to the global
+# --detection-mode, and mixed with "ap" asks for every plugin and theme slug WPScan knows (about 170,000 requests), which no run survives.
+ENUMERATE = 'ap,at,cb,dbe,u1-10'
 MAX_OUTPUT = 8 * 1024 * 1024
-# --throttle waits between requests (and runs WPScan on one thread): gentle on the site and on its WAF. --plugins-detection stays passive for
-# "ap": with mixed or aggressive WPScan asks for every plugin it knows, tens of thousands of requests.
-FLAGS = ['--format', 'json', '--no-banner', '--random-user-agent', '--throttle', '250', '--request-timeout', '30', '--connect-timeout', '15',
-         '--detection-mode', 'mixed', '--disable-tls-checks', '--enumerate', ENUMERATE]
+THROTTLE_MS = 100  # --throttle waits between requests (and runs WPScan on one thread): gentle on the site and on its WAF
+DEFAULT_STAGE_SECONDS = 60 * 60
+
+
+def timthumbs():
+    return os.environ.get('CVENGINE_WPSCAN_TIMTHUMBS', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def stage_seconds():
+    try:
+        return max(60, int(os.environ.get('CVENGINE_WPSCAN_STAGE_SECONDS', DEFAULT_STAGE_SECONDS)))
+    except ValueError:
+        return DEFAULT_STAGE_SECONDS
+
+
+def wpscan_args(timeout):
+    """The WPScan options for one site. ``--max-scan-duration`` ends the scan 30 seconds before the process would be killed, so a slow site
+    still gives a partial report instead of nothing."""
+    return ['--format', 'json', '--no-banner', '--random-user-agent', '--throttle', str(THROTTLE_MS), '--request-timeout', '30',
+            '--connect-timeout', '15', '--detection-mode', 'mixed', '--plugins-detection', 'passive', '--themes-detection', 'passive',
+            '--disable-tls-checks', '--enumerate', ENUMERATE + (',tt' if timthumbs() else ''), '--max-scan-duration', str(max(30, timeout - 30))]
+
+
 OK_EXIT_CODES = (0, 5)  # 5 means "vulnerabilities found"; 1 bad option, 2 interrupted, 3 unexpected exception, 4 the scan did not finish
 # severity of WPScan's "interesting findings" by their type; unlisted types are informational
 INTERESTING_SEVERITY = {'config_backup': 3, 'db_export': 3, 'debug_log': 2, 'upload_directory_listing': 1, 'multisite': 0, 'xmlrpc': 1,
@@ -53,7 +75,9 @@ INTERESTING_SEVERITY = {'config_backup': 3, 'db_export': 3, 'debug_log': 2, 'upl
 CVE_PART = re.compile(r'^(?:CVE-)?(\d{4}-\d{4,})$', re.I)
 NOT_WORDPRESS = re.compile(r'not seem to be running wordpress', re.I)
 BLOCKED = re.compile(r'\b(?:403|429|503|forbidden|blocked|waf|firewall|captcha|challenge|access denied|too many requests)\b', re.I)
-VULN_DATA = {'checked': 'checked', 'no_token': 'not checked: no API token', 'exhausted': 'not checked: API token budget exhausted'}
+VULN_DATA = {'checked': 'checked', 'no_token': 'not checked: no API token', 'exhausted': 'not checked: API token budget exhausted',
+             'error': 'not checked: the WPScan API returned an error'}
+BUDGET_ERROR = re.compile(r'limit|quota|exhaust|too many|requests', re.I)
 # any of these in a technology name says the host runs (or is hosted for) WordPress
 WP_TECH = re.compile(r'^(wordpress|woocommerce|wp ?engine|elementor|wpml|yoast|wp-)', re.I)
 WP_URL = r'/wp-(content|includes|json|login\.php|admin)|/xmlrpc\.php'
@@ -196,22 +220,29 @@ def _read_report(path):
 
 def run_wpscan_process(url, token, timeout=None):
     """Run WPScan on one site and return its parsed JSON report. The token travels in the environment. Raises on a timeout, a bad exit
-    code or unreadable output. Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (the
-    site is up and is not WordPress, or nothing readable), ``Blocked`` (an edge refused or challenged WPScan) or a ``RuntimeError``."""
+    code or unreadable output. Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (WPScan
+    says the site is up and is not WordPress), ``Blocked`` (an edge refused or challenged WPScan) or a ``RuntimeError`` (including no report at
+    all). A report that has results despite the abort is returned, marked ``cvengine_partial``."""
     env = {k: v for k, v in os.environ.items() if k != 'WPSCAN_API_TOKEN'}
     if token:
         env['WPSCAN_API_TOKEN'] = token
     with tempfile.TemporaryDirectory(prefix='wpscan-') as tmp:
         out = os.path.join(tmp, 'report.json')
-        proc = subprocess.run([WPSCAN_BIN, '--url', url, *FLAGS, '-o', out], env=env, timeout=timeout or wpscan_timeout(),
+        limit = timeout or wpscan_timeout()
+        proc = subprocess.run([WPSCAN_BIN, '--url', url, *wpscan_args(limit), '-o', out], env=env, timeout=limit,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if proc.returncode == 4:
-            reason = str((_read_report(out) or {}).get('scan_aborted') or '')
-            if reason and not NOT_WORDPRESS.search(reason):
-                if BLOCKED.search(reason):
-                    raise Blocked(_redact(reason, token))
-                raise RuntimeError(_redact(reason, token))
-            raise NotWordPress('not running WordPress, or not reachable')
+            report = _read_report(out)
+            if report is None:
+                raise RuntimeError('WPScan did not finish and wrote no report')  # not "not WordPress": nothing was read
+            reason = str(report.get('scan_aborted') or '')
+            if any(report.get(k) for k in ('version', 'plugins', 'themes', 'interesting_findings')):
+                return {**report, 'cvengine_partial': reason[:120] or 'the scan did not finish'}  # what it read before it stopped
+            if NOT_WORDPRESS.search(reason):
+                raise NotWordPress('WPScan says the site is up and is not running WordPress')
+            if BLOCKED.search(reason):
+                raise Blocked(_redact(reason, token))
+            raise RuntimeError(_redact(reason or 'the scan did not finish', token))
         if proc.returncode not in OK_EXIT_CODES:
             raise RuntimeError(_redact((proc.stderr or '').strip().splitlines()[-1] if proc.stderr else f'exit {proc.returncode}', token))
         report = _read_report(out)
@@ -321,12 +352,15 @@ def components(report):
 
 
 def vulnerability_data(report, token):
-    """Whether WPScan could check vulnerability data: ``checked``, ``no_token`` or ``exhausted`` (the API refused or has no requests left)."""
+    """Whether WPScan could check vulnerability data: ``checked``, ``no_token``, ``exhausted`` (the API says its limit is reached) or ``error``
+    (any other API error: the token may be fine, so it is not given up)."""
     api = report.get('vuln_api') or {}
     if not token:
         return 'no_token'
-    if api.get('error') or (isinstance(api.get('requests_remaining'), int) and api['requests_remaining'] < 0):
+    if isinstance(api.get('requests_remaining'), int) and api['requests_remaining'] < 0:
         return 'exhausted'
+    if api.get('error'):
+        return 'exhausted' if BUDGET_ERROR.search(str(api['error'])) else 'error'
     return 'checked'
 
 
@@ -427,6 +461,8 @@ def state_of(rows):
     detect_row = next((r for r in rows if r.probe == 'wordpress-detect'), None)
     base = {'detected_how': detect_row.source if detect_row and detect_row.outcome == 'found' else '',
             'probe': detect_row.outcome if detect_row else '', 'hint': ((detect_row.evidence or {}).get('hint') if detect_row else '') or ''}
+    if scan is not None and (scan.evidence or {}).get('state') == 'not_wordpress' and base['detected_how']:
+        return {**base, 'state': 'failed', 'reason': 'WPScan could not see WordPress, the probe did', 'scanned_at': scan.observed_at.isoformat()}
     if scan is not None:
         evidence = scan.evidence or {}
         return {**base, 'state': evidence.get('state') or 'failed', 'reason': evidence.get('reason', ''), 'scanned_at': scan.observed_at.isoformat(),
@@ -550,7 +586,10 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
         return {**summary, 'skipped': 'wpscan is not installed'}
     fresh = set() if force else ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
     summary['reused'] = len([h for h in wanted if h in fresh])
-    todo = [h for h in wanted if h not in fresh]
+    history = ledger.last_run(SERVICE, wanted, project)
+    epoch = timezone.now() - timedelta(days=36500)
+    # due first (the fresh ones are not due), positive probes first, then the never-scanned and longest-waiting: a cap cuts only what waits
+    todo = sorted((h for h in wanted if h not in fresh), key=lambda h: (h not in positive, history.get(ledger._norm(h)) or epoch, h))
     for host in todo[max_sites():]:
         record_state(project, domain.id, host, 'waiting', f'over the per-scan limit of {max_sites()} sites; it goes first next time')
     todo = todo[:max_sites()]
@@ -561,12 +600,25 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
                            + ('' if token else ' (no API token: versions, plugins and exposures only)'),
                            project=project, status='running', scan_id=scan.id)
     errors, scanned, token_ok = [], [], bool(token)
-    for host in todo:
+    started = time.monotonic()
+    for index, host in enumerate(todo):
+        if time.monotonic() - started > stage_seconds():
+            for waiting in todo[index:]:
+                record_state(project, domain.id, waiting, 'waiting', 'the WPScan stage used its time budget; it goes first next time')
+            break
         sub, url = by_name[host], _base_of(by_name[host])
         use = token if token_ok else ''
         try:
-            report = runner(url, use)
-        except ValueError as exc:  # NotWordPress (or any ValueError a runner raises): up and not WordPress: nothing to report, and no reason to ask again soon
+            report = _scan_site(runner, url, use, sub, project)
+        except ValueError as exc:  # NotWordPress (or any ValueError a runner raises): WPScan says the site is up and is not WordPress
+            if host in positive or _probe_positive(project, host):
+                # the probe read a WordPress signature and WPScan did not: a WAF served WPScan a decoy page, or it was sent elsewhere. Not "not
+                # WordPress": it stays a candidate that failed, and is asked again at the next scan
+                ledger.record(SERVICE, [host], project, scan, 'failed')
+                record_state(project, domain.id, host, 'failed', 'WPScan could not see WordPress, the probe did: the site may serve WPScan a '
+                             'different page than it serves other visitors')
+                errors.append(f'{host}: WPScan could not see WordPress')
+                continue
             ledger.record(SERVICE, [host], project, scan)
             record_state(project, domain.id, host, 'not_wordpress', str(exc))
             errors.append(f'{host}: {exc}')
@@ -589,11 +641,13 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
         left = remaining_requests(report)
         if data == 'exhausted' or (left is not None and left <= 0):
             token_ok = False
-        partial = data == 'exhausted'  # a token that could not be used: asked again soon. Without any token a run cannot be more complete
+        # a token that could not be used, an API error or a scan cut short: asked again soon. Without any token a run cannot be more complete
+        partial = data in ('exhausted', 'error') or bool(report.get('cvengine_partial'))
         service = PARTIAL_SERVICE if partial else SERVICE
         ledger.record(service, [host], project, scan)
         record_state(project, domain.id, host, 'scanned', '', version=(report.get('version') or {}).get('number') or '',
                      findings=len(_vuln_rows(report, url)), new_findings=new, plugins=versioned, vulnerability_data=VULN_DATA[data],
+                     **({'cut_short': report['cvengine_partial']} if report.get('cvengine_partial') else {}),
                      next_scan=(timezone.now() + timedelta(seconds=ledger.ttl(service))).date().isoformat())
         wp_correlation.run_for_host(sub)
         summary['findings'] += new
@@ -608,6 +662,34 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
     if failed_all:
         summary['error'] = errors[0][:290]
     return summary
+
+
+REDIRECT = re.compile(r'redirects? to:?\s*(https?://[^\s\'"]{1,300})', re.I)
+
+
+def _scan_site(runner, url, token, sub, project):
+    """Run WPScan on ``url``. WPScan stops at a main redirect it will not follow (an apex that redirects to www); the redirect is asked once,
+    and only when its target is a name of this host's own group that passes the probe gate (a safe address, not excluded). It never follows
+    redirects to anywhere else and never uses WPScan's own ``--follow-redirect``."""
+    from urllib.parse import urlsplit
+
+    from cveFeed import probes
+    try:
+        return runner(url, token)
+    except (ValueError, Blocked):
+        raise
+    except RuntimeError as exc:
+        found = REDIRECT.search(str(exc))
+        host = (urlsplit(found.group(1)).hostname or '').lower() if found else ''
+        if not host or host not in probes.allowed_names(sub) or host == (urlsplit(url).hostname or '').lower() or not probes._permitted(host, project):
+            raise
+        return runner(found.group(1).rstrip('/.,)'), token)
+
+
+def _probe_positive(project_id, host):
+    """Whether the WordPress probe read a signature on this host (a stored result, for a host the probe skipped this scan as fresh)."""
+    from cveFeed.models import ProbeObservation
+    return ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe='wordpress-detect', kind='wordpress', outcome='found').exists()
 
 
 def _hint(reason, token):

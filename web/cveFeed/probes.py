@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import time
+from datetime import timedelta
 from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
@@ -32,10 +33,11 @@ WEB = '*web'  # a probe that helps with any web product
 MAX_PROBES_PER_HOST = 5
 MAX_REDIRECTS = 2
 REQUEST_GAP = 0.2  # seconds between two requests to one host
-RETRY_DELAYS = (1.0, 3.0)  # an edge that answers a challenge or "try later" is asked again after these pauses, then recorded as challenged
+RETRY_DELAYS = (3.0,)  # a "try later" (429, 503) is asked again once after this pause; a challenge is not asked again at all
 NMAP_TIMEOUT = 150
 PROBE_PATH = '/.cvengine-probe/404'  # a path no site serves: the answer is the server's own error page
 EDGE_STATUSES = (202, 403, 429, 503)
+BODY_SCAN = 64 * 1024  # a response is read for markers in its first 64 KB only: a hostile page cannot make a pattern cost time by being long
 
 # ----------------------------------------------------------------------------- the catalogue (data)
 # A rule reads one response: ``request`` is the index of the request in the probe, ``where`` is body, title or header:<name>, ``regex`` the
@@ -63,7 +65,7 @@ PROBES = (
           'kind': 'version', 'confidence': 0.9, 'source': 'body:jetty-error-page'},
          {'request': 0, 'where': 'title', 'regex': r'IIS (\d+\.\d+) Detailed Error', 'product': 'Microsoft IIS', 'version': 1,
           'kind': 'version', 'confidence': 0.85, 'source': 'title:iis-detailed-error'},
-         {'request': 0, 'where': 'body', 'regex': r'^\s*default backend - 404\s*$', 'product': 'nginx', 'variant': 'kubernetes-ingress',
+         {'request': 0, 'where': 'body', 'regex': r'^[ \t]{0,8}default backend - 404[ \t]{0,8}$', 'product': 'nginx', 'variant': 'kubernetes-ingress',
           'kind': 'identity', 'confidence': 0.8, 'source': 'body:default-backend'},
          {'request': 0, 'where': 'body', 'regex': r'<pre>Cannot GET /', 'product': 'Express', 'variant': 'express', 'kind': 'identity',
           'confidence': 0.8, 'source': 'body:express-404'},
@@ -117,6 +119,7 @@ NMAP_SCRIPTS = {'http': 'http-server-header,http-headers,http-generator,http-tit
                 'ms-sql': 'ms-sql-info', 'smtp': 'banner', 'ftp': 'banner,ftp-anon', 'imap': 'banner', 'pop3': 'banner'}
 # products that only look like another product by name: an advisory for one of these is not an advisory for the base product
 LOOKALIKES = {'nginx': {'ingressnginx', 'nginxingress', 'nginxui', 'nginxproxymanager', 'nginxunit', 'nginxrtmpmodule'}}
+LOOKALIKE_VARIANTS = {'nginx': {'nginx-ui', 'nginx-proxy-manager', 'kubernetes-ingress'}}
 PLAIN_VARIANTS = {'nginx': 'nginx', 'express': 'express', 'next.js': 'next.js'}
 
 
@@ -266,18 +269,30 @@ def challenge_of(response):
     return ''
 
 
+def _permitted(host, project):
+    """The gate every probe request passes, at the first request and at every redirect: a safe address, and not a name the organization
+    excluded for good or an archived host (a redirect must not lead the probe where a scan may not go)."""
+    from cveFeed import route_auth
+    from cveFeed.archive_rediscovery import archived_names
+    from cveFeed.exclusions import is_excluded
+    if not route_auth.host_allowed(host, project):
+        return False
+    return not (project and (is_excluded(project, host) or host.lower().rstrip('.') in archived_names(project)))
+
+
 def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None):
     """One probe GET with browser-like headers, following at most MAX_REDIRECTS redirects that stay inside ``allowed`` (the names of this host's
-    group: apex and www answer for each other) and pass the same safe-address gate. An edge challenge or "try later" is retried after a pause
-    and then returned as it is, with ``challenge`` naming the edge. ``project`` (an id) lets the gate and the pinned transport accept the tailnet
-    address of a device that project's own Tailscale integration imported. Returns the probe dict plus ``final_url`` and ``challenge``."""
+    group: apex and www answer for each other) and pass ``_permitted`` (safe address, exclusions) at every hop. A "try later" (429, 503) is
+    asked again once after a pause; an edge challenge is never retried and never pushed against: it is returned with ``challenge`` naming the
+    edge. ``project`` (an id) lets the gate and the pinned transport accept the tailnet address of a device that project's own Tailscale
+    integration imported. Returns the probe dict plus ``final_url`` and ``challenge``."""
     from cveFeed import route_auth
     probe = probe or route_auth.probe_url
-    current, hops, last = url, 0, None
+    last = None
     for attempt in range(len(RETRY_DELAYS) + 1):
         current, hops = url, 0
         while True:
-            if not route_auth.host_allowed(urlsplit(current).hostname or '', project):
+            if not _permitted(urlsplit(current).hostname or '', project):
                 raise ValueError('probe destination is not allowed')
             response = probe(current, max_bytes=route_auth.MAX_PROBE_BYTES, browser=True, project=project)
             location = response.get('location') or ''
@@ -289,7 +304,7 @@ def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None):
                     continue
             break
         last = {**response, 'final_url': current, 'challenge': challenge_of(response)}
-        if not last['challenge'] and (response.get('status') or 0) not in (429, 503):
+        if last['challenge'] or (response.get('status') or 0) not in (429, 503):
             return last
         if attempt < len(RETRY_DELAYS):
             sleep(RETRY_DELAYS[attempt])
@@ -305,7 +320,7 @@ def _observation(kind, product, version='', variant='', outcome='found', confide
 
 def _where(response, where):
     if where == 'body':
-        return response.get('body') or ''
+        return (response.get('body') or '')[:BODY_SCAN]
     if where == 'title':
         return response.get('title') or ''
     return str((response.get('headers') or {}).get(where.split(':', 1)[1], ''))
@@ -360,7 +375,7 @@ def observations_from_page(response, source_prefix='page'):
 
 def next_version(body):
     """The Next.js version a framework script states (``window.next={version:"14.1.0"}``), or ''."""
-    found = re.search(r'\bnext\s*=\s*\{\s*version\s*:\s*["\'](\d+\.\d+\.\d+[\w.-]{0,20})["\']', body or '')
+    found = re.search(r'\bnext\s{0,8}=\s{0,8}\{\s{0,8}version\s{0,8}:\s{0,8}["\'](\d+\.\d+\.\d+[\w.-]{0,20})["\']', body or '')
     return found.group(1) if found else ''
 
 
@@ -375,7 +390,7 @@ def _wordpress_signals(responses):
         if not response:
             continue
         headers = {k.lower(): v for k, v in (response.get('headers') or {}).items()}
-        body = response.get('body') or ''
+        body = (response.get('body') or '')[:BODY_SCAN]
         link = headers.get('link', '').replace("'", '"')
         if 'rel="https://api.w.org/"' in link:
             signals.append(('header:link-api.w.org', path))
@@ -395,7 +410,7 @@ def _wordpress_signals(responses):
             found = re.search(r'Version (\d+\.\d+(?:\.\d+)?)', body)
             version = version or (found.group(1) if found else '')
         if path == '/':
-            ver = re.search(r'/wp-(?:includes|admin)/[^"\'\s>]+\?ver=(\d+\.\d+(?:\.\d+)?)', body)
+            ver = re.search(r'/wp-(?:includes|admin)/[^"\'\s>]{1,200}\?ver=(\d+\.\d+(?:\.\d+)?)', body)
             if ver and not version:
                 signals.append(('body:core-asset-ver', path))
                 version = ver.group(1)
@@ -619,15 +634,14 @@ def apply_to_subdomain(sub, observations):
 def apply_known(scan):
     """Give this scan's host rows the technologies earlier probes found: hosts are stored once per scan, so a fresh row starts without
     what an earlier probe added. Only observations seen inside the TTL; returns the number of technologies added."""
-    from datetime import timedelta
-
     from cveFeed import ledger
     from cveFeed.models import ProbeObservation
     from startScan.models import Subdomain
     project = scan.domain.project_id
     cutoff = timezone.now() - timedelta(seconds=ledger.ttl(SERVICE) * 4)
     by_host = {}
-    for row in ProbeObservation.objects.filter(project_id=project, outcome='found', observed_at__gte=cutoff):
+    # only what a probe read (not the candidate signals or WPScan's state rows): a hint is never turned into a technology
+    for row in ProbeObservation.objects.filter(project_id=project, outcome='found', observed_at__gte=cutoff, probe__in=list(BY_ID)):
         by_host.setdefault(row.host, []).append({'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant,
                                                  'outcome': row.outcome})
     added = 0
@@ -651,18 +665,25 @@ def recorrelate(sub):
 # ----------------------------------------------------------------------------- identity: a look-alike product is not the advisory's product
 
 def lookalike_conflict(sub, match):
-    """The reason a CVE match names a product that a probe showed this host does not run, or ''. A probe that identified the plain product
-    (plain nginx, with confidence) contradicts an advisory only for a look-alike (ingress-nginx, nginx-ui, Nginx Proxy Manager): the base
-    name is inside the advisory's, but the software is different. Deterministic, and only on a positive identification."""
+    """The reason a CVE match names a product that a probe showed this host does not run, or ''. It applies only when the sighting that made
+    the match is the bare base product (a technology or port named just "nginx"), a probe identified the plain product with confidence, and
+    nothing else on the host (a technology, a port, another probe) says the look-alike itself runs there: a host that really runs nginx-ui
+    behind a plain nginx front is not cleared of an nginx-ui advisory. Deterministic, and only on a positive identification."""
     from cveFeed.correlation import affected_product_tokens, clean_affected
     from cveFeed.models import ProbeObservation
+    from startScan.models import open_ports
     project_id = sub.target_domain.project_id
-    base = next((b for b in LOOKALIKES if b in _token(match.matched_product)), '')
-    if not base:
+    base = _token(match.matched_product)
+    if base not in LOOKALIKES:
         return ''
-    plain = ProbeObservation.objects.filter(project_id=project_id, host=sub.name.lower(), kind='identity', variant=PLAIN_VARIANTS[base],
-                                            outcome='found', confidence__gte=0.7).first()
-    if plain is None:
+    rows = ProbeObservation.objects.filter(project_id=project_id, host=sub.name.lower(), kind='identity')
+    if not rows.filter(variant=PLAIN_VARIANTS[base], outcome='found', confidence__gte=0.7).exists():
+        return ''
+    if rows.filter(variant__in=LOOKALIKE_VARIANTS[base]).exists():
+        return ''
+    seen = [_token(t.name.partition(':')[0]) for t in sub.technologies.all()]
+    seen += [_token(p.product) for ip in sub.ip_addresses.all() for p in open_ports(ip)]
+    if any(token in LOOKALIKES[base] for token in seen):
         return ''
     tokens = {t for item in clean_affected(match.cve_entry.affected) if isinstance(item, dict) for t in affected_product_tokens(item)}
     if tokens and all(t in LOOKALIKES[base] for t in tokens if base in t):
@@ -727,39 +748,41 @@ def summarize(found):
 def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sleep):
     """The pipeline stage: for each host of the scan with unversioned products, run the probes ``plan_for_host`` picks, inside the ledger TTL
     and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
-    from cveFeed import activity, ledger
-    from cveFeed.exclusions import excluded_names, normalize
+    from cveFeed import activity, host_context, ledger
+    from cveFeed.nuclei_scan import scan_targets
     from reNgine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
     reused = apply_known(scan)
-    banned = excluded_names(project)
+    allowed, _ips, _ports = scan_targets(scan)  # the same filter every stage uses: excluded, archived and blocked names are not targets
     stats = {'hosts': 0, 'probes': 0, 'versions': 0, 'reused': reused, 'errors': 0}
-    subs = Subdomain.objects.filter(scan_history=scan).prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').order_by('name')
-    todo = []
-    for sub in subs:
-        if banned and normalize(sub.name) in banned:
-            continue
+    subs = Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports', 'waf')
+    due = []
+    for sub in subs.select_related('target_domain').order_by('name'):
         leads = leads_for(sub)
-        if leads:
-            todo.append((sub, leads))
-    if not todo:
-        return stats
-    running = activity.log('run_check', f'Version and identity probes for {len(todo[:max_hosts()])} host(s) of {domain.name}', project=project,
-                           status='running', scan_id=scan.id)
-    from cveFeed import host_context
-    for sub, leads in todo[:max_hosts()]:
-        if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
-            break
-        edge = host_context.edge_for(sub, project)['fronted']
-        plan = plan_for_host(sub, leads, edge_fronted=edge)
+        if not leads:
+            continue
+        plan = plan_for_host(sub, leads, edge_fronted=host_context.edge_for(sub, project)['fronted'])
         assets = {asset_key(sub.name, e): e for e in plan}
         covered = set() if force else ledger.fresh(SERVICE, assets, project)
+        todo = {a: e for a, e in assets.items() if ledger._norm(a) not in covered}
+        if todo:
+            due.append((sub, todo))
+    # hosts with nothing due were dropped above, so the cap below cuts only work that is due: the never-probed and longest-waiting go first
+    history = ledger.last_run(SERVICE, [a for _s, todo in due for a in todo], project)
+    epoch = timezone.now() - timedelta(days=36500)
+    due.sort(key=lambda item: min((history.get(ledger._norm(a)) or epoch) for a in item[1]))
+    due = due[:max_hosts()]
+    if not due:
+        return stats
+    running = activity.log('run_check', f'Version and identity probes for {len(due)} host(s) of {domain.name}', project=project,
+                           status='running', scan_id=scan.id)
+    for sub, todo in due:
+        if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
+            break
         ran = False
-        for asset, entry in assets.items():
-            if ledger._norm(asset) in covered:
-                continue
+        for asset, entry in todo.items():
             try:
                 found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep)
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; it is retried next time, not recorded as clean
@@ -767,7 +790,7 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
                 ledger.record(SERVICE, [asset], project, scan, 'failed')
                 stats['errors'] += 1
                 continue
-            ledger.record(SERVICE, [asset], project, scan, 'failed' if any(o['outcome'] == 'challenged' for o in found) else 'done')
+            ledger.record(SERVICE, [asset], project, scan)  # a challenged answer is a result too: asked again after the window, not at every scan
             stats['probes'] += 1
             stats['versions'] += sum(1 for o in found if o['kind'] == 'version' and o['outcome'] == 'found')
             ran = True

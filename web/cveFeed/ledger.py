@@ -85,6 +85,19 @@ def fresh(service, assets, project=None):
     return found
 
 
+def last_run(service, assets, project=None):
+    """``{asset: when its latest run of ``service`` finished}`` (any status) for the assets that have one: to run the never-run and the
+    longest-waiting first when a cap cuts the list."""
+    from cveFeed.models import ServiceRun
+    found = {}
+    try:
+        for part in _chunks({_norm(a) for a in assets}):
+            found.update(ServiceRun.objects.filter(service=service, project_id=_pk(project), asset__in=part).values_list('asset', 'finished_at'))
+    except Exception:  # noqa: BLE001 - a ledger failure means "no history": every asset reads as never run
+        logger.exception('ledger: could not read %s', service)
+    return found
+
+
 def record(service, assets, project=None, scan=None, status='done'):
     """Upsert one row per asset with the outcome of this run."""
     from cveFeed.models import ServiceRun
