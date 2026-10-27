@@ -63,7 +63,7 @@ class SbomTests(SimpleTestCase):
 		pinned = re.search(r'(?m)^python-gvm==([0-9.]+)\s*$', requirements).group(1)
 		self.assertEqual(self.by_name['python-gvm']['version'], pinned)
 		self.assertEqual(self.by_name['python-gvm']['properties'][0], {'name': 'cvengine:pinned', 'value': 'true'})
-		images = {n: c for n, c in self.by_name.items() if n.startswith('registry.community.greenbone.net/')}
+		images = {n: c for n, c in self.by_name.items() if n.split('/', 1)[0] == 'registry.community.greenbone.net'}
 		compose = sbom.read('docker-compose.yml')
 		self.assertEqual(set(images), {'registry.community.greenbone.net/community/' + n for n in set(re.findall(
 			r'registry\.community\.greenbone\.net/community/([a-z-]+):', compose))})

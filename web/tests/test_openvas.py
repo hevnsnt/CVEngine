@@ -1027,7 +1027,7 @@ class ComposeTests(SimpleTestCase):
         seen = set()
         for name, service in self.openvas.items():
             image = service['image']
-            self.assertTrue(image.startswith('registry.community.greenbone.net/community/'), name)
+            self.assertTrue(image.split('/')[:2] == ['registry.community.greenbone.net', 'community'], name)
             repo, _, rest = image.rpartition('/')[2].partition(':')
             if repo in programs:
                 seen.add(repo)
