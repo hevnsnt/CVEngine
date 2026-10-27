@@ -5,6 +5,7 @@ One row per cve.now entry, carrying the merged severity, exploitation
 correlation engine matches against the discovered asset inventory.
 """
 from django.db import models
+from django.db.models.functions import Lower
 
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
@@ -1734,3 +1735,92 @@ class OpenvasRun(models.Model):
 
     def __str__(self):
         return f"OpenVAS run {self.pk} ({self.status})"
+
+
+class Supplier(models.Model):
+    """A third party a project depends on and cannot fix for itself (cveFeed.supplier_scan). It is NOT an owned host: it never becomes a
+    target, host or scan input, and nothing the owned-asset flows do (discovery, port scans, assessments, remediation, SLA clocks, stats)
+    reads this table. ``domains`` are the exact names that are checked, never expanded. The checks are passive and polite, run weekly at
+    most per supplier, and store their results as ``SupplierFinding`` rows."""
+
+    TIERS = ("critical", "high", "normal")
+    TIER_CHOICES = [(t, t) for t in TIERS]
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="suppliers")
+    name = models.CharField(max_length=120)
+    tier = models.CharField(max_length=10, choices=TIER_CHOICES, default="normal")
+    domains = models.JSONField(default=list, blank=True)  # the exact names to check: lowercase, validated, never wildcards
+    contact = models.CharField(max_length=300, blank=True, default="")  # who to write to (free text)
+    notes = models.TextField(blank=True, default="")
+    added_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)  # when a sweep last got an answer for this supplier
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [models.UniqueConstraint(Lower("name"), "project", name="uniq_supplier_project_name")]
+
+    def __str__(self):
+        return f"{self.name} ({self.tier})"
+
+
+class SupplierHostCard(models.Model):
+    """The Shodan-style card of one supplier domain: what its public services say about themselves, as of the last check. One row per
+    (supplier, domain), refreshed by each sweep. A section the last check could not read (the certificate, the web page) keeps what the
+    check before it saw, and ``checked_at`` says when the card was last attempted. Everything here is what a browser or a TLS client is
+    given anyway: response headers (never cookies' values), the certificate, the technologies the page and its headers state (the same
+    fingerprinting owned hosts use, ``cveFeed.fingerprint``), and the address and mail facts. ``tech_text`` is the lowercase text the
+    technology search reads."""
+
+    STATES = ("ok", "no_address", "blocked", "unreachable", "challenged", "excluded")
+    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="cards")
+    domain = models.CharField(max_length=255)
+    state = models.CharField(max_length=12, default="ok")
+    addresses = models.JSONField(default=list, blank=True)  # the public addresses the name resolved to
+    http = models.JSONField(default=dict, blank=True)  # status of the front page over https and http, title, server, powered_by, raw response headers
+    tls = models.JSONField(default=dict, blank=True)  # subject, issuer, SANs, validity, key, signature, protocol, cipher, chain error
+    technologies = models.JSONField(default=list, blank=True)  # [{name, version, category, source}]
+    tech_text = models.TextField(blank=True, default="")
+    mail = models.JSONField(default=dict, blank=True)  # whether the name handles mail, and its MX records
+    evidence = models.JSONField(default=dict, blank=True)  # edge in front, challenge, DNS state, notes: whatever else explains the card
+    checked_at = models.DateTimeField(null=True, blank=True)
+    last_ok_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["supplier__name", "domain"]
+        constraints = [models.UniqueConstraint(fields=["supplier", "domain"], name="uniq_supplierhostcard_domain")]
+
+    def __str__(self):
+        return f"{self.domain} ({self.state})"
+
+
+class SupplierFinding(models.Model):
+    """One thing a supplier's public face got wrong, as seen from outside: a "supplier posture" item. One row per (supplier, domain,
+    check). ``status`` is ``open`` while the check still finds it, ``resolved`` (by the sweep) when a later check no longer does, and
+    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence). ``ask`` says what to ask the supplier.
+    Never validated by exploitation: nothing here is ever tested beyond what the supplier's service announces."""
+
+    STATUSES = ("open", "accepted", "resolved")
+    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="findings")
+    domain = models.CharField(max_length=255)
+    check_name = models.CharField(max_length=60)
+    category = models.CharField(max_length=12, default="")  # tls | email | web | cve
+    severity = models.IntegerField(default=0)  # 0 info .. 4 critical, the same scale as hygiene findings
+    title = models.CharField(max_length=300)
+    detail = models.TextField(blank=True, default="")
+    ask = models.TextField(blank=True, default="")  # plain text: what to ask the supplier to do or confirm
+    evidence = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=10, default="open")
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    status_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    status_note = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        ordering = ["-severity", "domain", "check_name"]
+        constraints = [models.UniqueConstraint(fields=["supplier", "domain", "check_name"], name="uniq_supplierfinding_check")]
+        indexes = [models.Index(fields=["supplier", "status"], name="supplierfinding_status_idx")]
+
+    def __str__(self):
+        return f"{self.domain}: {self.title}"

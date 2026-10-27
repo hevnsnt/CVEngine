@@ -123,7 +123,8 @@ classic_queues="send_notif_queue,send_task_notif_queue,send_hackerone_report_que
 # vhost_queue: the slow, polite sweeps for other sites on an address and for applications under subdirectories (one request at a time)
 # udp_queue: the background UDP sweep (nmap -sU waits on silent ports, one IP at a time) likewise
 # openvas_queue: the optional OpenVAS sweep (one GVM task at a time, polled for hours); nothing is queued on it unless the add-on is switched on
-classic_queues+=",query_whois_queue,run_command_queue,query_reverse_whois_queue,query_ip_history_queue,llm_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue"
+# supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
+classic_queues+=",query_whois_queue,run_command_queue,query_reverse_whois_queue,query_ip_history_queue,llm_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue"
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own

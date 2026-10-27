@@ -277,6 +277,7 @@ SECTIONS = {
     'vulns': 'Findings',
     'matches': 'CVE matches',
     'hygiene': 'Hygiene',
+    'suppliers': 'Suppliers',
     'keys': 'API keys',
 }
 

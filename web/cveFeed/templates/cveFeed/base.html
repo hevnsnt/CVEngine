@@ -57,6 +57,7 @@
     <a data-nav="CVE matches" href="{% url 'cve_section' slug 'matches' %}" {% if active == 'matches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-match"/></svg>CVE matches</a>
     <a data-nav="Findings" href="{% url 'cve_section' slug 'vulns' %}" {% if active == 'vulns' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Findings</a>
     <a data-nav="Hygiene" href="{% url 'cve_section' slug 'hygiene' %}" {% if active == 'hygiene' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
+    <a data-nav="Suppliers" href="{% url 'cve_section' slug 'suppliers' %}" {% if active == 'suppliers' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Suppliers</a>
     <p class="rail-h">Work</p>
     <a data-nav="Targets" href="{% url 'cve_section' slug 'targets' %}" {% if active == 'targets' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
     <a data-nav="Scans" href="{% url 'cve_section' slug 'scans' %}" {% if active == 'scans' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Scans</a>
@@ -124,6 +125,7 @@
     <a href="{% url 'cve_section' slug 'activity' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>Activity</a>
     <a href="{% url 'cve_section' slug 'vulns' %}"><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Findings</a>
     <a href="{% url 'cve_section' slug 'hygiene' %}"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
+    <a href="{% url 'cve_section' slug 'suppliers' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Suppliers</a>
     <a href="{% url 'cve_section' slug 'keys' %}"><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
     {% endif %}
     <a href="{% url 'cve_graph' %}"><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>

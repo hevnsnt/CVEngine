@@ -21,6 +21,7 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } f
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -4096,5 +4097,8 @@ pages.keys = async function apiKeys(mount) {
   scopePicker.onchange = draw;
   await draw();
 };
+
+// Third-party suppliers: host cards and the technology search (static/cve/suppliers.js)
+pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL });
 
 pages[kind](root.querySelector("#view"));
