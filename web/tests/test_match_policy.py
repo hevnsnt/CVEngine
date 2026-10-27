@@ -164,7 +164,7 @@ class OperatingSystemTests(unittest.TestCase):
 
 	def test_an_os_cpe_never_matches(self):
 		self.assertEqual(sighting('Ubuntu', '22.04', cpe='cpe:/o:canonical:ubuntu_linux:22.04'), [])
-		self.assertEqual(sighting('anything', '5.15', cpe='cpe:2.3:o:linux:linux_kernel:5.15:*:*:*:*:*:*:*'), [])
+		self.assertEqual(sighting('unknown', '5.15', cpe='cpe:2.3:o:linux:linux_kernel:5.15:*:*:*:*:*:*:*'), [])  # a name that says nothing
 
 	def test_windows_communication_foundation_is_not_windows(self):
 		self.assertEqual(identity('Windows Communication Foundation', '4.8.0', [WINDOWS]), [])
@@ -178,14 +178,14 @@ class OperatingSystemTests(unittest.TestCase):
 
 
 class LocalityRulesTests(unittest.TestCase):
-	def test_a_kernel_cna_record_is_host_only_whatever_its_vector(self):
+	def test_a_kernel_cna_record_with_no_network_vector_is_host_only(self):
 		text = 'In the Linux kernel, the following vulnerability has been resolved: wifi: ath11k: fix a leak'
-		for vector in ('', 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', 'CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H'):
+		for vector in ('', 'CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H'):
 			self.assertTrue(locality.classify(vector, text, '', KERNEL.affected)[0], vector)
 		self.assertTrue(locality.classify('', 'In the Linux kernel, the following vulnerability has been resolved: ksmbd: fix a bug')[0])
 
-	def test_a_record_naming_only_the_kernel_is_host_only(self):
-		self.assertTrue(locality.classify('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', 'A flaw in ksmbd.', '', [{'product': 'linux_kernel'}])[0])
+	def test_a_record_naming_only_the_kernel_is_host_only_without_a_vector(self):
+		self.assertTrue(locality.classify('', 'A flaw in ksmbd.', '', [{'product': 'linux_kernel'}])[0])
 
 	def test_a_windows_component_with_no_vector_and_no_network_is_host_only(self):
 		self.assertTrue(locality.classify('', 'An elevation of privilege vulnerability exists in the Windows kernel.', '', WINDOWS.affected)[0])
@@ -239,7 +239,8 @@ class Fixture(TestCase):
 		self.sub.ip_addresses.add(self.ip)
 
 	def cve(self, entry, **fields):
-		return CVEEntry.objects.create(cve_id=entry.cve_id, kev=True, cvss=9.8, published_at=timezone.now(), affected=entry.affected, **fields)
+		fields.setdefault('kev', True)
+		return CVEEntry.objects.create(cve_id=entry.cve_id, cvss=9.8, published_at=timezone.now(), affected=entry.affected, **fields)
 
 	def tech(self, name):
 		tech = Technology.objects.create(name=name)
@@ -285,7 +286,7 @@ class CorrelationEndToEndTests(Fixture):
 		self.assertEqual([lead['name'] for lead in match_policy.unversioned_products(self.sub)], ['next.js'])
 
 	def test_the_kernel_and_os_cases_never_reach_a_host_from_an_ubuntu_fingerprint(self):
-		kernel = self.cve(KERNEL, original_description='In the Linux kernel, the following vulnerability has been resolved: spi: fix')
+		kernel = self.cve(KERNEL, kev=False, original_description='In the Linux kernel, the following vulnerability has been resolved: spi: fix')
 		self.cve(UBUNTU_PRODUCT)
 		self.cve(WINDOWS)
 		locality.refresh()

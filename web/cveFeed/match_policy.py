@@ -5,7 +5,10 @@ A CVE match is a finding, so it needs hard evidence about *this host*, not a nam
   * the product seen on the host is the same product the advisory names (``correlation.name_matches_token``) and its version is
     inside a bounded affected range of that advisory; or
   * a confirming check (a template hit), a distribution tracker listing the package as affected, a host-reported inventory
-    (source ``host``) or a runZero report of the same CVE (those attach to a match that exists, they do not create one).
+    (source ``host``) or a runZero report of the same CVE (those attach to a match that exists, they do not create one);
+  * one exception, kept deliberately: a version of the same product against a CISA KEV advisory that gives no usable version bound
+    (empty ranges, "unspecified"). Actively exploited and untestable by version, it is kept as a low-confidence match flagged
+    ``evidence.unbounded``: a candidate that needs validation, never an "affected" verdict, and the host is template-tested too.
 
 A product seen *without a version* is not evidence of anything: "nginx" is in hundreds of advisories and most of them do not
 apply to the version the host runs. It stays on the host as a technology or port (metadata is never dropped), and
@@ -15,18 +18,20 @@ nothing to test the host's version against. An operating-system fingerprint ("Ub
 host's own report of its patch level, so it never matches by name either.
 
 This module holds the pure rules and the maintenance step; ``correlation`` applies them while it correlates and ``tasks`` runs
-``close_policy_matches`` after every update, so matches made before the policy existed close with a stored reason. A match a person
-already worked (remediation other than open) or that has a template hit, a distribution "vulnerable" verdict, a runZero report or a
-host-reported source is never closed here.
+``close_policy_matches`` after every update, so matches made before the policy existed close with a stored reason. A match someone took
+a position on (remediation other than open, an assignee, a comment, a manual validation request, an AI "affected" verdict) or that
+has a template hit, a distribution "vulnerable" verdict, a runZero report or a host-reported source is never closed by any
+automatic sweep (``has_standing`` / ``closable``).
 """
 import re
 
-REASON_NO_VERSION = ('Closed automatically: no version evidence. The product was seen without a version, so cvENGINE cannot tell which '
+NO_EVIDENCE = 'Closed automatically: no version evidence'
+REASON_NO_VERSION = (NO_EVIDENCE + '. The product was seen without a version, so cvENGINE cannot tell which '
                      'of its advisories apply; it is kept as a technology on the host (Unverified products) and is matched again '
                      'as soon as a version is identified.')
-REASON_NO_BOUND = ('Closed automatically: no version evidence. The advisory gives no version bound to test this version against, so '
+REASON_NO_BOUND = (NO_EVIDENCE + '. The advisory gives no version bound to test this version against, so '
                    'the product name alone is not evidence that the host is affected.')
-REASON_OS = ('Closed automatically: no version evidence. An operating-system fingerprint is not matched to CVEs by name from outside; '
+REASON_OS = (NO_EVIDENCE + '. An operating-system fingerprint is not matched to CVEs by name from outside; '
              'only the host\'s own inventory report can place its kernel or patch level.')
 
 # an operating system named by a scanner, as a technology or an nmap product: never a CVE match by name
@@ -41,10 +46,14 @@ _NOT_A_LEAD = frozenset({'unknown', 'tcpwrapped'})
 
 
 def is_os_sighting(name, cpe=''):
-    """Whether a scanner's technology or product name (or CPE) names an operating system rather than an application."""
-    if _OS_CPE.match((cpe or '').strip()):
+    """Whether a scanner's technology or product name (or CPE) names an operating system rather than an application. The CPE only
+    speaks when the name says nothing: nmap gives "Microsoft HTTPAPI httpd" and "Linux telnetd" the CPE of the system they run on,
+    but they are applications."""
+    if _OS_NAME.match(re.sub(r'[_\-]+', ' ', (name or '').strip())):
         return True
-    return bool(_OS_NAME.match(re.sub(r'[_\-]+', ' ', (name or '').strip())))
+    from cveFeed.correlation import GENERIC_PRODUCT_TOKENS, GENERIC_WORDS, _norm
+    token = _norm(name)
+    return bool(_OS_CPE.match((cpe or '').strip())) and (not token or token in GENERIC_PRODUCT_TOKENS | GENERIC_WORDS or token in _NOT_A_LEAD)
 
 
 def hard_version_evidence(in_range, detail=None):
@@ -77,24 +86,56 @@ def sighting_of(match):
     return match.matched_product, evidence.get('cpe') or ''
 
 
+def has_standing(match):
+    """Whether someone or something vouches for this match beyond the name it was made from, so no automatic sweep may close it: a
+    person worked it (remediation other than open, an assignee, a comment, a manual validation request: not the one running right now,
+    which is the very check that re-reads the product identity), the AI confirmed it, a
+    template, a distribution tracker or runZero reported it, or the host reported it itself. (``unworked`` is the queryset form.)"""
+    from cveFeed.models import FindingComment, OnDemandValidation
+    if (match.remediation_status != 'open' or match.assignee_id or match.ai_verdict == 'affected' or match.source == 'host'
+            or _has_other_evidence(match)):
+        return True
+    return (FindingComment.objects.filter(finding_kind='match', finding_id=match.pk).exists()
+            or OnDemandValidation.objects.filter(match=match, source='manual').exclude(status='running').exists())
+
+
+def unworked(qs):
+    """The matches of ``qs`` that nobody vouches for (the queryset form of ``not has_standing``)."""
+    from django.db.models import Exists, OuterRef
+
+    from cveFeed.models import FindingComment, OnDemandValidation
+    return (qs.filter(remediation_status='open', assignee__isnull=True).exclude(source='host')
+            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable').exclude(evidence__has_key='runzero')
+            .exclude(ai_verdict='affected')
+            .exclude(Exists(FindingComment.objects.filter(finding_kind='match', finding_id=OuterRef('pk'))))
+            .exclude(Exists(OnDemandValidation.objects.filter(match=OuterRef('pk'), source='manual').exclude(status='running'))))
+
+
 def no_evidence_reason(match, name, cpe=''):
     """The stored reason to close a correlated (tech or port) match that rests on a name alone, else ''."""
-    if match.source not in ('tech', 'port') or _has_other_evidence(match):
+    if match.source not in ('tech', 'port') or has_standing(match):
         return ''
     if is_os_sighting(name, cpe):
         return REASON_OS
-    if match.version_in_range is True or (match.evidence or {}).get('branch_unlisted'):
+    evidence = match.evidence or {}
+    if match.version_in_range is True or evidence.get('branch_unlisted') or evidence.get('unbounded'):
         return ''
     return REASON_NO_VERSION if not match.matched_version else REASON_NO_BOUND
 
 
-def _closable(qs):
-    """Open, unworked, correlated matches that carry no evidence beyond a name: no template hit, no distribution verdict, no runZero
-    report, and nothing a person did. A row already ruled out (by an earlier pass or by the AI) is left alone."""
-    return (qs.filter(source__in=('tech', 'port'), remediation_status='open')
-            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable')
-            .exclude(evidence__has_key='runzero').exclude(evidence__has_key='branch_unlisted')
+def closable(qs):
+    """Open, unworked, correlated matches that carry no evidence beyond a name (``unworked``, and not a branch-unlisted or unbounded KEV
+    candidate, which are evidence by policy). A row already ruled out (by an earlier pass or by the AI) is left alone."""
+    return (unworked(qs.filter(source__in=('tech', 'port')))
+            .exclude(evidence__has_key='branch_unlisted').exclude(evidence__has_key='unbounded')
             .exclude(ai_verdict='not_affected'))
+
+
+def settle_triage(match_ids, reason, now):
+    """Give the triage rows of just-closed matches the classification the closure means. The closure writes the match's legacy verdict,
+    which every list and count reads, but the triage list and its queues read the row: left alone it keeps saying needs_validation."""
+    from cveFeed.models import Triage
+    Triage.objects.filter(match_id__in=match_ids).update(classification='not_applicable', status='triaged', reason=reason, updated_at=now)
 
 
 def close_policy_matches(limit=5000):
@@ -107,18 +148,24 @@ def close_policy_matches(limit=5000):
 
     from cveFeed import scoring
     from cveFeed.models import CVEMatch
-    unsupported = Q(version_in_range__isnull=True)
-    ids = list(_closable(CVEMatch.objects.filter(unsupported)).order_by('id').values_list('id', flat=True)[:limit])
+    from cveFeed.views import bump_stats_revision
+    ids = list(closable(CVEMatch.objects.filter(version_in_range__isnull=True)).order_by('id').values_list('id', flat=True)[:limit])
     if not ids:
         return 0
     hosts = sorted({h for h in CVEMatch.objects.filter(id__in=ids).values_list('subdomain_id', flat=True) if h})
     now = timezone.now()
     closed = 0
     for reason, selector in ((REASON_NO_VERSION, Q(matched_version='')), (REASON_NO_BOUND, ~Q(matched_version=''))):
-        closed += CVEMatch.objects.filter(id__in=ids).filter(selector).update(
+        # the guard is part of the UPDATE itself: a person or a template may have acted since the ids were read
+        count = closable(CVEMatch.objects.filter(id__in=ids).filter(selector)).update(
             ai_verdict='not_affected', ai_model='deterministic-policy', confidence=0.0, updated_at=now, ai_reason=reason)
+        if count:
+            settle_triage(CVEMatch.objects.filter(id__in=ids, ai_reason=reason, updated_at=now).values('id'), reason, now)
+        closed += count
     for start in range(0, len(hosts), scoring.CHUNK):
         scoring.rescore_subdomain_ids(hosts[start:start + scoring.CHUNK])
+    if closed:
+        bump_stats_revision()
     return closed
 
 

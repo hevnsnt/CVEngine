@@ -8,9 +8,10 @@ finding, a validation or an AI review.
 
 ``classify`` decides from the record alone, in this order:
   1. a Linux kernel record (the kernel CNA's "In the Linux kernel, the following vulnerability has been resolved", or an affected
-     product that is only the kernel): local-only whatever its vector, because the running kernel build and the distribution's
-     backported fixes decide it and no external scan can read them. Only the host's own inventory report can place a kernel;
-  2. the CVSS vector: attack vector Local (AV:L) or Physical (AV:P) is local-only;
+     product that is only the kernel) with no vector: local-only, because the running kernel build and the distribution's backported
+     fixes decide it and no external scan can read them. A kernel flaw that says it is reachable over a network (a network vector, or
+     "remote" in its text: SACK Panic, TIPC) stays remote, and so does one on the CISA KEV list unless its vector is local;
+  2. the CVSS vector: attack vector Local (AV:L) or Physical (AV:P) is local-only; any other vector settles it as not local;
   3. with no vector (older CVE List records carry none): a description that says the attacker must be local, or that is an elevation of
      privilege, a kernel/driver/Win32k flaw, in an operating system, with nothing in it that says it can be reached over a network.
 A record that says "remote", "unauthenticated" or names a network protocol is never classified local by the text rules, and a product that
@@ -22,7 +23,7 @@ from datetime import datetime, timezone as dt_timezone
 from django.utils import timezone
 
 # CVEs classified before this moment are classified again: bump it when ``classify`` changes, so existing records follow the rules
-RULES_AT = datetime(2026, 10, 27, 0, 0, tzinfo=dt_timezone.utc)
+RULES_AT = datetime(2026, 10, 27, 2, 0, tzinfo=dt_timezone.utc)
 
 VECTOR_LOCAL = re.compile(r'(?:^|/)AV:[LP](?:/|$)')
 # SQL form of the same pattern, for the queryset filter in cve_pool and the vector backfill
@@ -66,17 +67,19 @@ def is_linux_kernel_record(description, title='', affected=None):
     return bool(products) and all(LINUX_KERNEL_PRODUCT.match(p) for p in products)
 
 
-def classify(cvss_vector, description, title='', affected=None):
+def classify(cvss_vector, description, title='', affected=None, kev=False):
     """``(local_only, why)`` for one CVE record. ``why`` is empty when it is not local-only."""
-    if is_linux_kernel_record(description, title, affected):
-        return True, ('it is a Linux kernel flaw: the running kernel build and the distribution\'s backported fixes decide it, '
-                      'and only the host can report them')
     vector = cvss_vector or ''
+    text = f'{title or ""} {description or ""}'
     if VECTOR_LOCAL.search(vector):
         return True, 'its CVSS attack vector is local or physical'
     if 'AV:' in vector:  # a vector that says network or adjacent settles it, whatever the wording
         return False, ''
-    text = f'{title or ""} {description or ""}'
+    if is_linux_kernel_record(description, title, affected):
+        if kev or REMOTE.search(text):  # exploited in the wild, or a flaw the record says a remote attacker can reach: not host-only
+            return False, ''
+        return True, ('it is a Linux kernel flaw: the running kernel build and the distribution\'s backported fixes decide it, '
+                      'and only the host can report them')
     if not text.strip() or REMOTE.search(text):
         return False, ''
     products = _products(affected)
@@ -104,15 +107,15 @@ def refresh(limit=20000, chunk=2000):
     done = 0
     while done < limit:
         rows = list(CVEEntry.objects.filter(Q(locality_at__isnull=True) | Q(locality_at__lt=F('synced_at')) | Q(locality_at__lt=RULES_AT))
-                    .only('id', 'cvss_vector', 'original_description', 'title', 'affected', 'local_only')[:chunk])
+                    .only('id', 'cvss_vector', 'original_description', 'title', 'affected', 'local_only', 'kev')[:chunk])
         if not rows:
             break
         now = timezone.now()
         scopes = dict(CVEDetection.objects.filter(cve_entry_id__in=[r.id for r in rows]).values_list('cve_entry_id', 'strategy__scope'))
         for row in rows:
-            row.local_only = classify(row.cvss_vector, row.original_description, row.title, row.affected)[0]
+            row.local_only = classify(row.cvss_vector, row.original_description, row.title, row.affected, row.kev)[0]
             if ('AV:' not in (row.cvss_vector or '') and scopes.get(row.id) in ('external', 'local_only')
-                    and not is_linux_kernel_record(row.original_description, row.title, row.affected)):
+                    and not (is_linux_kernel_record(row.original_description, row.title, row.affected) and not row.kev)):
                 row.local_only = scopes[row.id] == 'local_only'  # the model's reading of a record with no attack vector
             row.locality_at = now
         CVEEntry.objects.bulk_update(rows, ['local_only', 'locality_at'])
@@ -120,30 +123,45 @@ def refresh(limit=20000, chunk=2000):
     return done
 
 
+CLOSE_CHUNK = 2000
+
+
 def close_local_matches():
     """Close every open match of a local-only CVE, the way a rejected CVE's matches are closed, and rescore the hosts they were on.
-    Matches a person already worked keep their remediation state, and so do the ones the host reported itself (source ``host``,
-    cveFeed.inventory_match): those are how a local-only CVE becomes a finding, from the one place that can decide it.
-    Returns how many were closed."""
+    A match somebody vouches for stays (``match_policy.unworked``: worked by a person, a template hit, a distribution verdict, a
+    host's own report): the classification is a guess from the record, and that is evidence about the host. Done in chunks, each
+    guarded again by its own UPDATE. Returns how many were closed."""
     from cveFeed import scoring
+    from cveFeed.match_policy import settle_triage, unworked
     from cveFeed.models import CVEMatch
+    from cveFeed.views import bump_stats_revision
     from startScan.models import Subdomain
-    open_matches = CVEMatch.objects.filter(cve_entry__local_only=True).exclude(source='host').exclude(
+    reason = reason_text('CVSS attack vector local, or a kernel or operating-system elevation of privilege')
+    todo = unworked(CVEMatch.objects.filter(cve_entry__local_only=True)).exclude(
         ai_verdict='not_affected', ai_reason__startswith='Closed automatically:')
-    ids = list(open_matches.values_list('id', flat=True))
-    if not ids:
-        return 0
-    hosts = list(Subdomain.objects.filter(cve_matches__in=ids).values_list('target_domain__project_id', 'name').distinct())
-    closed = CVEMatch.objects.filter(id__in=ids).update(
-        ai_verdict='not_affected', ai_model='deterministic-locality', confidence=0.0, updated_at=timezone.now(),
-        ai_reason=reason_text('CVSS attack vector local, or a kernel or operating-system elevation of privilege'))
+    closed = 0
     by_project = {}
-    for project_id, name in hosts:
-        if project_id:
-            by_project.setdefault(project_id, set()).add(name)
+    while True:
+        ids = list(todo.order_by('id').values_list('id', flat=True)[:CLOSE_CHUNK])
+        if not ids:
+            break
+        now = timezone.now()
+        count = todo.filter(id__in=ids).update(
+            ai_verdict='not_affected', ai_model='deterministic-locality', confidence=0.0, updated_at=now, ai_reason=reason)
+        if not count:
+            break
+        done = CVEMatch.objects.filter(id__in=ids, ai_model='deterministic-locality', updated_at=now)
+        settle_triage(done.values('id'), reason, now)
+        hosts = Subdomain.objects.filter(cve_matches__in=done.values('id')).values_list('target_domain__project_id', 'name').distinct()
+        for project_id, name in hosts:
+            if project_id:
+                by_project.setdefault(project_id, set()).add(name)
+        closed += count
     for project_id, names in by_project.items():
         for start in range(0, len(names), scoring.CHUNK):
             scoring.rescore_quietly(project_id, sorted(names)[start:start + scoring.CHUNK])
+    if closed:
+        bump_stats_revision()
     return closed
 
 
@@ -152,7 +170,7 @@ def apply_scope(cve, scope):
     overridden; ``unclear`` leaves the rule-based classification as it was. Returns True when the flag was set from the model's answer."""
     from cveFeed.models import CVEEntry
     if ('AV:' in (cve.cvss_vector or '') or scope not in ('external', 'local_only')
-            or is_linux_kernel_record(cve.original_description, cve.title, cve.affected)):
+            or (is_linux_kernel_record(cve.original_description, cve.title, cve.affected) and not getattr(cve, 'kev', False))):
         return False
     CVEEntry.objects.filter(pk=cve.pk).update(local_only=(scope == 'local_only'), locality_at=timezone.now())
     return True

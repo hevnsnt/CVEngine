@@ -84,8 +84,12 @@ class FeedAnnouncementTests(TestCase):
 	def test_a_match_without_version_evidence_is_not_announced(self):
 		cve = self.cve(NO_RANGE)
 		auto_fire_new_cves([cve.pk])
-		self.assertEqual(CVEMatch.objects.count(), 0)  # an advisory with no version bound is no evidence, so there is no match at all
+		match = CVEMatch.objects.get()  # a KEV advisory with no bound is kept for a versioned host, but only as a candidate that needs validation
+		self.assertEqual((match.version_in_range, match.evidence.get('unbounded')), (None, True))
 		self.assertEqual(self.slack(), [])
+		not_kev = CVEEntry.objects.create(cve_id='CVE-2099-63', kev=False, cvss=9.8, published_at=timezone.now(), affected=NO_RANGE)
+		auto_fire_new_cves([not_kev.pk])
+		self.assertEqual(list(CVEMatch.objects.values_list('cve_entry_id', flat=True)), [cve.pk])  # no bound and not KEV: no evidence at all
 
 	def test_the_message_is_sent_after_the_confirmation_not_before(self):
 		AIProviderSettings.objects.create(auto_fire=True, enabled=True)
