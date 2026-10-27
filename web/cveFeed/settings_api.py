@@ -12,7 +12,7 @@ import yaml
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
-from cveFeed import tailscale_admin
+from cveFeed import openvas_admin, tailscale_admin
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import EngineType, Notification, Proxy, VulnerabilityReportSetting
 
@@ -699,6 +699,10 @@ ROUTES = [
     ('DELETE', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_delete(r, project_id)),
     ('POST', r'tailscale/(?P<project_id>\d+)/test', lambda r, project_id, **k: tailscale_admin.tailscale_test(r, project_id)),
     ('POST', r'tailscale/(?P<project_id>\d+)/sync', lambda r, project_id, **k: tailscale_admin.tailscale_sync_now(r, project_id)),
+    ('GET', r'openvas', lambda r, **k: openvas_admin.openvas_get(r)), ('PUT', r'openvas', lambda r, **k: openvas_admin.openvas_put(r)),
+    ('POST', r'openvas/test', lambda r, **k: openvas_admin.openvas_test(r)),
+    ('PUT', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_put(r, project_id)),
+    ('DELETE', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_delete(r, project_id)),
     ('GET', r'ip_allowlist', lambda r, **k: ip_allowlist_get(r)), ('PUT', r'ip_allowlist', lambda r, **k: ip_allowlist_put(r)),
     ('POST', r'ip_allowlist/entries', lambda r, **k: ip_allowlist_entry_create(r)),
     ('DELETE', r'ip_allowlist/entries/(?P<entry_id>\d+)', lambda r, entry_id, **k: ip_allowlist_entry_delete(r, int(entry_id))),

@@ -157,6 +157,10 @@ By default every request is anonymous. For an application the owner may test, an
 
 **Findings.** A finding saved from a signed-in request carries the tag `seen-while-authenticated` (also `seen_while_authenticated` in the findings API), its activity line says so, and a route's `authenticated` evidence is marked `seen_while_authenticated`. Every stored request, response, curl command and extracted value of a signed-in result has the header values, the cookie and cookie values, the part of a value after its scheme word (`Bearer abc` gives `abc`) and their URL, JSON and base64 forms replaced with `[redacted]` before it is saved, and the same applies to error text. Signed-in nuclei runs have their own ledger keys (`nuclei-auth`, 24 hours, `CVENGINE_TTL_NUCLEI_AUTH`; `route-auth-signed`, 24 hours, `CVENGINE_TTL_ROUTE_AUTH_SIGNED`) that include the credential's revision, so a replaced credential is used at once.
 
+### OpenVAS (optional)
+
+With the optional OpenVAS add-on switched on (Settings > OpenVAS, [OpenVAS](OPENVAS.md)), a background sweep on its own `openvas_queue` runs Greenbone's scanner against the hosts an App Admin listed for an opted-in project, one GVM task at a time, each host once a week, and stores what names a CVE. It is not a scan stage: it runs beside the pipeline, and after CVE correlation of a scan its findings are carried onto that scan's host rows from the stored observations (`openvas_scan.carry_forward`, a no-op while the add-on is off). Only a quality of detection of 80 or more is hard evidence (a CVE match with `template_result` `vulnerable`); a lower one is stored as an unconfirmed finding. While the add-on is off nothing is scheduled and nothing runs.
+
 ## AI review every three hours
 
 With an AI model connected, cvENGINE reviews each project's inventory, matched CVEs, findings, scans, and recent activity every three hours and queues the most useful due action: triage, validation, a discovery on a stored target, or an assessment of a host missing a core stage. One action per project per run, at most 100 model calls and 20 actions per review. The server rechecks scope, exclusions, active scans, the pause switch, and queue caps first, and the model never supplies a target or a command.
@@ -336,6 +340,7 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Validation of every CVE match (fire first), change re-tests | every 5 minutes |
 | Cloud storage exposure sweep ([details](#cloud-storage-exposure)) | daily at 01:38 UTC |
 | Other sites on an address (`vhost_sweep`), applications under subdirectories (`subdir_apps_sweep`) | hourly at :27, and every 30 minutes at :13 and :43, on `vhost_queue` |
+| OpenVAS sweep (one step: poll or start a GVM task; only while the add-on is switched on; [OpenVAS](OPENVAS.md)) | every 15 minutes |
 | Background full port scan, paced deep nuclei | every 10 minutes, one host per run |
 | Background UDP scan (queued by the full port scan's firing) | every 10 minutes, one IP at a time for up to 8 minutes, each IP once a week |
 | AI review and capacity tuning | every 3 hours |

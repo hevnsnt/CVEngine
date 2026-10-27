@@ -38,7 +38,7 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 | | |
 | --- | --- |
 | **Discover** | Subdomains, certificates, IPs, and ports with [bbot](https://github.com/blacklanternsecurity/bbot) and [naabu](https://github.com/projectdiscovery/naabu), plus a certificate transparency watch and weekly deep sweeps |
-| **Understand** | [nmap](https://nmap.org) service and OS fingerprints, web routes and their sign-in state, exposed databases, firewalls, WordPress, and email and DNS hygiene |
+| **Understand** | [nmap](https://nmap.org) service and OS fingerprints, web routes and their sign-in state, exposed databases, firewalls, WordPress, and email and DNS hygiene, plus an optional, off-by-default [OpenVAS](docs/OPENVAS.md) scanner add-on |
 | **Prioritize** | Fire, smoke, and ice ratings, a 0 to 100 score per host, and AI triage into confirmed, likely, or needs validation |
 | **Verify** | Read-only validation with [Nuclei](https://github.com/projectdiscovery/nuclei), nmap, and banner probes. **Validate now** on any match |
 | **Search** | [Shodan-style search](docs/SEARCH.md) over your own inventory: `port:3389 -host:vpn`, `tech:"apache tomcat" sev:high` |
@@ -111,7 +111,7 @@ cvENGINE stands on excellent open source work. Full credits and licenses are in 
 
 | | |
 | --- | --- |
-| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner) |
+| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner), and optionally [OpenVAS](docs/OPENVAS.md) from [Greenbone](https://greenbone.github.io/docs/) |
 | **Exploitation intelligence** | [cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
 | **Also** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh), [MailFail](https://github.com/ACK-J/MailFail), [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), [Bugcrowd VRT](https://github.com/bugcrowd/vulnerability-rating-taxonomy), [Ollama](https://github.com/ollama/ollama), [vLLM](https://github.com/vllm-project/vllm), [Model Context Protocol](https://modelcontextprotocol.io) |
 
@@ -148,6 +148,7 @@ Read-only checks, no password lists, and no scanning of loopback, link-local, or
 | [Bug bounty](docs/BUG-BOUNTY.md) and [Front end](docs/FRONTEND.md) | The bounty workbench and the interface |
 | [Host inventory](docs/HOST-INVENTORY.md) | Hosts reporting their own OS, packages and patches with a script |
 | [Tailscale](docs/TAILSCALE.md) | Scanning a tailnet and its Tailscale checks |
+| [OpenVAS](docs/OPENVAS.md) | The optional Greenbone scanner: enabling it, its resource floor and what it imports |
 
 ## Credits and license
 
