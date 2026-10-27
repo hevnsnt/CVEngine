@@ -16,6 +16,7 @@ deploy_current() {
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
+  check_disk || return 1
   "${compose[@]}" build web celery celery-beat || return 1
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
@@ -31,7 +32,8 @@ deploy_current() {
   # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
   # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema
   phase applying verifying
-  verify_serving
+  verify_serving || return 1
+  prune_old_images
 }
 
 # `up -d` can leave a service created but not started (a published port that is already taken, for one): that is a failed update, not a done one.
@@ -71,4 +73,26 @@ verify_serving() {
       return 1
     fi
   fi
+}
+
+# An update builds a new image of a few gigabytes on top of the one it replaces, and a build that runs out of space fails half way, after the
+# files were merged and scanning was paused. Look first: too little room is a plain message and a retry, not a half-applied update. The amount
+# is CVENGINE_UPDATE_MIN_FREE_MB (default 6144). If Docker's directory cannot be found or measured the check says nothing.
+check_disk() {
+  local need=${CVENGINE_UPDATE_MIN_FREE_MB:-6144} root free
+  root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || root=''
+  [ -n "$root" ] && [ -d "$root" ] || root=/var/lib/docker
+  free=$(df -Pm "$root" 2>/dev/null | awk 'NR == 2 {print $4}')
+  [[ $free =~ ^[0-9]+$ ]] || return 0
+  if (( free < need )); then
+    log "only ${free} MB are free where Docker keeps its images ($root); an update needs about ${need} MB for the new image. Free space (docker image prune -a, docker builder prune), then approve again"
+    return 1
+  fi
+}
+
+# The image this update replaced is untagged now and nothing uses it; every update used to leave one behind (a few gigabytes each) until the disk filled.
+# Only after a verified update: until then the old image is the way back. Dangling images only, so nothing that is tagged or in use is touched.
+prune_old_images() {
+  docker image prune -f >/dev/null 2>&1 || log "could not remove the replaced image; it is only taking disk space"
+  return 0
 }

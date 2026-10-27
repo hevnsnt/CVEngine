@@ -18,6 +18,7 @@ if [ -n "${STUB_KILL_ON:-}" ] && [[ " $* " == *"$STUB_KILL_ON"* ]] && [ ! -f "$S
 case " $* " in
   *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
     if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
+  *" info "*) echo "$STUB_DIR";;
   *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
@@ -60,6 +61,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
                     'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
                     'GIT_COMMITTER_EMAIL': 't@t', 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull}
         self.env.pop('CVENGINE_COMPOSE_FILE', None)
+        self.env['CVENGINE_UPDATE_MIN_FREE_MB'] = '1'  # the test disk is not the server's
         origin, self.work, other = self.tmp / 'origin.git', self.tmp / 'work', self.tmp / 'other'
         self.git('init', '--bare', '-b', 'master', str(origin), cwd=self.tmp)
         self.git('clone', str(origin), str(self.work), cwd=self.tmp)
@@ -271,7 +273,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.approve(newest)
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
-        verification = lambda call: 'http.client' in call or 'migrate --check' in call
+        verification = lambda call: any(x in call for x in ('http.client', 'migrate --check', 'image prune', ' info '))
         self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
@@ -357,6 +359,14 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.deployed_marker(), self.new)
         self.assertEqual(self.head(), self.new)
 
+    def publish_deploy_file_again(self):
+        """A further commit on top of the deploy file, for a second update."""
+        other = self.tmp / 'other'
+        (other / 'web' / 'README').write_text('v3\n')
+        self.git('commit', '-am', 'three', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        return self.git('rev-parse', 'HEAD', cwd=other)
+
     def publish_deploy_file(self):
         """Push scripts/update-deploy.sh to the origin as a new commit, as a release that carries it does; returns that commit."""
         other = self.tmp / 'other'
@@ -366,6 +376,26 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.git('commit', '-m', 'the deploy file', cwd=other)
         self.git('push', 'origin', 'master', cwd=other)
         return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def test_too_little_disk_space_stops_the_update_before_anything_is_built_and_says_so(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('MB are free where Docker keeps its images', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.head(), self.prev)  # a failure before the migration returns to the previous version
+
+    def test_a_verified_update_removes_the_image_it_replaced_and_a_failed_one_does_not(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertIn('docker image prune -f', self.calls())
+        (self.stub / 'calls.log').unlink()
+        (self.stub / 'web_not_serving').write_text('')
+        newest = self.publish_deploy_file_again()
+        self.approve(newest)
+        self.assertEqual(self.run_script(CVENGINE_VERIFY_WEB_TRIES='2', CVENGINE_VERIFY_POLL='0').returncode, 1)
+        self.assertNotIn('docker image prune -f', self.calls())
 
     def test_a_web_service_that_never_answers_makes_the_update_a_failure_not_a_success(self):
         # "running" is not "working": the update used to be reported done for a web container that was restarting over and over
