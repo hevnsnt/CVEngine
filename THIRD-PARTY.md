@@ -15,6 +15,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
 | [wafw00f](https://github.com/EnableSecurity/wafw00f) | BSD-3-Clause | Names the web application firewall in front of a web host |
 | [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial licence is needed for managed or hosted use) | WordPress vulnerability scanning |
+| [testssl.sh](https://github.com/testssl/testssl.sh) | GPL-2.0 (run as a separate program, never linked) | Tests the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named TLS vulnerabilities |
 | [Tailscale](https://github.com/tailscale/tailscale) (the `tailscale/tailscale` container image) | BSD-3-Clause | The optional `tailscale` compose service that joins a tailnet so scans can reach it; read through its local status API |
 | [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot |
 | [node2shell-scanner](https://github.com/assetnote/node2shell-scanner) by Assetnote | MIT | Read-only detection of CVE-2026-111497; vendored (trimmed to its detection core) as `web/cveFeed/vendor/node2shell.py`, with the exact source commit in that file's header |
