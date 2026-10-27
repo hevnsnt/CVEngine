@@ -25,3 +25,6 @@ for index, ip in enumerate(same):
 Subdomain.objects.create(target_domain=domain, name='www.rehearsal.example').ip_addresses.add(other)
 print('SEEDED', Subdomain.objects.filter(target_domain=domain).count(), 'hosts', IpAddress.objects.count(), 'addresses')
 PY
+# more data (5000 CVE matches, half of them with the wording a newer version rewrites) and the schema the update starts from
+dc exec -T web python3 manage.py shell < "$GITHUB_WORKSPACE/.github/rehearsal/seed-rich.py"
+"$GITHUB_WORKSPACE/.github/rehearsal/schema.sh" snapshot "$HOME/schema-before.txt"

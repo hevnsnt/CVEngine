@@ -13,8 +13,12 @@ SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
 
 DOCKER_STUB = """#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls.log"
+# the updater is killed (SIGKILL, as a reboot or the OOM killer would) at the first call that matches: it is the shell running the update
+if [ -n "${STUB_KILL_ON:-}" ] && [[ " $* " == *"$STUB_KILL_ON"* ]] && [ ! -f "$STUB_DIR/killed" ]; then touch "$STUB_DIR/killed"; kill -KILL $PPID; exit 137; fi
 case " $* " in
-  *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
+  *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
+    if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
+  *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
@@ -267,7 +271,8 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.approve(newest)
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
-        self.assertEqual(from_file, built_in)
+        verification = lambda call: 'http.client' in call or 'migrate --check' in call
+        self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
         self.approve()
@@ -351,6 +356,69 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 0)
         self.assertEqual(self.deployed_marker(), self.new)
         self.assertEqual(self.head(), self.new)
+
+    def publish_deploy_file(self):
+        """Push scripts/update-deploy.sh to the origin as a new commit, as a release that carries it does; returns that commit."""
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'the deploy file', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def test_a_web_service_that_never_answers_makes_the_update_a_failure_not_a_success(self):
+        # "running" is not "working": the update used to be reported done for a web container that was restarting over and over
+        (self.stub / 'web_not_serving').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_WEB_TRIES='2', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('does not answer', log)
+        self.assertEqual(self.head(), self.new)  # the schema is already the new one: the old code is not put back on it
+        self.assertTrue(self.approved())  # kept: the next run retries
+        self.assertFalse(self.deployed_marker())
+
+    def test_a_migration_still_waiting_after_the_restart_is_applied_and_checked_again(self):
+        (self.stub / 'unmigrated_once').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('migrations waiting; applying them', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.deployed_marker(), self.new)
+
+    def test_a_migration_that_cannot_be_applied_after_the_restart_fails_the_update(self):
+        (self.stub / 'unmigrated').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('still waiting', (self.work / 'web' / '.update-log').read_text())
+        self.assertFalse(self.deployed_marker())
+
+    def killed_then_retried(self, step, deploy_file=False):
+        """Kill the updater when it reaches ``step``, then let the next run finish. Returns the retry's calls."""
+        if deploy_file:
+            self.new = self.publish_deploy_file()
+        self.approve()
+        killed = self.run_script(STUB_KILL_ON=step, CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(killed.returncode, -9, f'the updater was not killed at {step!r}: {killed.returncode}\n{killed.stdout}{killed.stderr}')
+        self.assertTrue(self.approved(), 'a killed update must leave its approval for the retry')
+        before = len(self.calls())
+        retried = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        return self.calls()[before:]
+
+    def assert_converged(self, retry_calls):
+        self.assertEqual(self.head(), self.new)
+        self.assertFalse(self.approved(), (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.deployed_marker(), self.new)
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
+        self.assertTrue(any(' migrate --noinput' in c for c in retry_calls), 'the retry must migrate: ' + str(retry_calls))
+        self.assertTrue(any('--force-recreate' in c for c in retry_calls), 'the retry must recreate the services')
+        self.assertTrue(any('update_scan_pause --release' in c for c in retry_calls), 'scanning must be released again')
 
     def test_the_stack_is_recreated_with_the_overlay_and_env_file_it_was_started_with(self):
         # a host behind its own proxy: the overlay moves the published port and sets limits, the env file holds its settings
@@ -771,6 +839,32 @@ esac
 case " $* " in *" ps -q db "*) echo dbid;; *" count(*) "*) echo 42;; esac
 exit 0
 """
+
+
+# An update killed at each step (a reboot, the OOM killer, a lost session) and then retried must end converged: the new code, the database
+# migrated, the services recreated, scanning released, the approval gone. Once with the steps built into the script (the update that brings
+# the deploy file) and once with scripts/update-deploy.sh (every update after it).
+KILL_STEPS = {
+    'during_the_build': ' build ',
+    'during_the_migration': ' migrate --noinput',
+    # the dangerous one: web/.commit already names the new commit and the files are new, so a run used to answer "already at"
+    'after_the_migration_before_the_restart': 'collectstatic',
+    'while_the_services_are_recreated': '--force-recreate',
+    'right_after_the_files_were_merged': 'up -d --no-recreate db redis',
+}
+
+
+def _killed_update_test(step, deploy_file):
+    def test(self):
+        self.assert_converged(self.killed_then_retried(step, deploy_file))
+    return test
+
+
+for _name, _step in KILL_STEPS.items():
+    for _variant, _deploy_file in (('built_in', False), ('deploy_file', True)):
+        _test = _killed_update_test(_step, _deploy_file)
+        _test.__name__ = f'test_an_update_killed_{_name}_is_finished_by_the_next_run_{_variant}'
+        setattr(ApplyUpdateScriptTests, _test.__name__, _test)
 
 
 @unittest.skipUnless(SCRIPTS.joinpath('upgrade-postgres.sh').is_file(), 'needs the repository scripts directory')
