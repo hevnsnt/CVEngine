@@ -728,10 +728,21 @@ const surfaceCard = (h, openServices) => {
   });
   return box;
 };
+// "14 of 22 applicable checks done" (cveFeed.check_coverage): only the checks that apply to this host are counted; the ones still due are named.
+const coverageLine = (c) => {
+  if (!c) return "";
+  if (c.paused) return `no checks apply while the host is ${c.paused}`;
+  if (!c.applicable) return "no check applies yet";
+  const due = (c.checks || []).filter((x) => x.state === "due").map((x) => x.label);
+  const shown = due.slice(0, 4).join(", ") + (due.length > 4 ? ` and ${due.length - 4} more` : "");
+  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "");
+};
 const hostOverview = (h) => {
   const http = h.http || {};
   const hosting = h.hosting || {};
   const rows = [];
+  const coverage = coverageLine(h.check_coverage);
+  if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
     const note = [hosting.kind, hosting.shared_ip ? "shared address" : "", hosting.infrastructure].filter(Boolean).join(", ");
     rows.push({ label: "Hosting", value: note ? `${hosting.provider} (${note})` : hosting.provider });
