@@ -10,7 +10,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import correlation, ledger, slow_web, subdir_apps, vhost_scan
-from cveFeed.models import CVEEntry, CVEMatch, HostArchive, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun
+from cveFeed.models import BountyEngagement, BountyProgram, CVEEntry, CVEMatch, HostArchive, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Technology
@@ -356,6 +356,13 @@ class GateTests(SubdirFixture, TestCase):
         ScanControl.objects.create(pk=1, paused=True)
         summary = self.run_subdirs()
         self.assertIn('paused', summary['skipped'])
+        self.assertEqual(self.site.calls, [])
+
+    def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_asks_nothing(self):
+        program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
+        BountyEngagement.objects.create(project=self.project, program=program, status='active', automated_ok=False)
+        summary = self.run_subdirs()
+        self.assertIn('automated testing', summary['skipped'])
         self.assertEqual(self.site.calls, [])
 
     def test_a_pause_that_arrives_mid_sweep_stops_it_and_the_host_stays_due(self):

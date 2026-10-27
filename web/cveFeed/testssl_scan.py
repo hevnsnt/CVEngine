@@ -391,6 +391,9 @@ def sweep(project_id, runner=None, resolve=None):
     summary = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     if runner is None and not installed():
         return {**summary, 'skipped': 'testssl.sh is not installed'}
+    from cveFeed.conductor import bounty_blocked_projects
+    if project_id in bounty_blocked_projects():
+        return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
     resolve = resolve or _address
     owner = f'testssl-{os.getpid()}'
     with resources.redis_claim(f'cvengine:testssl:{project_id}', owner, 300) as holder:

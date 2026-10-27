@@ -412,6 +412,9 @@ def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
     stop = stop or (lambda: resources.global_pause_requested(fail_closed=True))
     if stop():
         return {**summary, 'skipped': 'scanning is paused: the addresses stay due'}
+    from cveFeed.conductor import bounty_blocked_projects
+    if project_id in bounty_blocked_projects():
+        return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
     targets = scope_targets(project_id)
     if not targets:
         return {**summary, 'skipped': 'the project has no domain target to give a name scope'}

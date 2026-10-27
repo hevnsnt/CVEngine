@@ -8,7 +8,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import hygiene, testssl_scan
-from cveFeed.models import CVEEntry, CVEMatch, HygieneFinding, ProbeObservation, ServiceRun
+from cveFeed.models import BountyEngagement, BountyProgram, CVEEntry, CVEMatch, HygieneFinding, ProbeObservation, ServiceRun
 from startScan.models import Subdomain
 from tests.test_route_auth import RouteFixture
 
@@ -280,6 +280,13 @@ class SweepTests(RouteFixture, TestCase):
     def test_a_host_the_organization_excluded_is_not_tested(self):
         with mock.patch('targetApp.target_types.scannable_hosts', return_value=[]):
             self.assertEqual(self.sweep()['tested'], 0)
+        self.assertEqual(self.calls, [])
+
+    def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_is_not_tested(self):
+        program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
+        BountyEngagement.objects.create(project=self.project, program=program, status='active', automated_ok=False)
+        out = self.sweep()
+        self.assertIn('automated testing', out['skipped'])
         self.assertEqual(self.calls, [])
 
     def test_nothing_runs_while_scanning_is_paused(self):
