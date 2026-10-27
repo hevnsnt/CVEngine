@@ -22,6 +22,7 @@ export const FILTERS = [
     example: 'banner:"Authentication disabled"',
   },
   { name: "os", hint: "operating system", example: "os:ubuntu" },
+  { name: "proto", hint: "an open port over tcp or udp", example: "proto:udp", values: ["tcp", "udp"] },
   { name: "ip", hint: "an address or a CIDR range", example: "ip:10.0.0.0/24" },
   { name: "host", hint: "part of a host name", example: "host:staging" },
   { name: "cve", hint: "hosts matched by a CVE", example: "cve:CVE-2026-1101" },

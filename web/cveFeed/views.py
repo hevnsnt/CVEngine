@@ -22,7 +22,7 @@ from rolepermissions.decorators import has_permission_decorator
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
 from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_temperature
-from startScan.models import open_ports
+from startScan.models import OPEN_PORT_STATES, open_services
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
 
 logger = logging.getLogger(__name__)
@@ -732,7 +732,7 @@ def node_detail(node_id):
         if not s:
             return None
         first = DiscoveryEvent.objects.filter(scan_id=s.scan_history_id, host__iexact=s.name).order_by('id').first()
-        ports = [f'{p.number} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_ports(ip)]
+        ports = [f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_services(ip)]
         matches = list(CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage'))
         vulns = Vulnerability.objects.filter(subdomain=s).order_by('-severity')[:8]
         from agentapi.services import _host_heat
@@ -762,7 +762,7 @@ def node_detail(node_id):
         return {'kind': 'ip', 'title': ip.address, 'link': _ip_href(first, ip.address) if first else '', 'rows': _kv(
             ('Hosts', [(h.name, _host_href(h.target_domain.project.slug, h.name)) if h.target_domain_id and h.target_domain.project_id
                        else (h.name, '') for h in shown]),
-            ('Open ports', ', '.join(f'{p.number} {p.product}'.strip() for p in open_ports(ip))),
+            ('Open ports', ', '.join(f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product}'.strip() for p in open_services(ip))),
             ('OS guess', ip.os_guess), ('Reverse pointer', ip.reverse_pointer),
             ('Full port scan', f'{timezone.localtime(ip.full_scanned_at):%Y-%m-%d %H:%M} ({ip.full_scan_ports} open)'
              if ip.full_scanned_at else 'never'),
@@ -871,7 +871,7 @@ def api_discovery(request):
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips).distinct().count()},
+        'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()},
     })
 
 

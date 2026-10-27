@@ -16,7 +16,7 @@ from datetime import datetime, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -282,6 +282,12 @@ def _runzero(problems):
     return {'interval_hours': runzero_sync.interval_hours(), 'projects': rows}
 
 
+def _udp_scan(problems):
+    """The background UDP sweep: on or off, whether the worker can run it (a worker without raw sockets says so), and what it holds."""
+    from cveFeed import udp_scan
+    return udp_scan.status(problems)
+
+
 def _work():
     """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
     from cveFeed import conductor
@@ -340,6 +346,7 @@ def _system(user, problems, notes):
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['ai'] = _probe(problems, 'ai', _ai)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
+    out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
     out['tools'] = _probe(problems, 'tools', _tools)
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:

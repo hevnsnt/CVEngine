@@ -166,7 +166,7 @@ def _persist_bbot_http(result, ctx, subdomains):
 			continue
 		summary = {k: rec[k] for k in ('url', 'status', 'title', 'webserver', 'content_type', 'location') if rec[k]}
 		ips = list(sub.ip_addresses.all())
-		ports = [p for ip in ips for p in ip.ports.filter(number=rec['port'])]
+		ports = [p for ip in ips for p in ip.ports.filter(number=rec['port'], protocol__in=('', 'tcp'))]
 		if not ports and ips:
 			port, _ = update_or_create_port(port_number=rec['port'], service_name='https' if rec['url'].startswith('https') else 'http',
 				description='', ip=ips[0])

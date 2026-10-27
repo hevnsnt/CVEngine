@@ -41,7 +41,14 @@ NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
 # selected explicitly", so there is no flag that turns them off while keeping -sV. Their output is hidden from the
 # console but still written to -oX, which is exactly what this module parses. None of them have been reviewed the way
 # NSE_SCRIPTS has, so persist_inventory drops anything -sV smuggled in before it is ever stored, searched or shown.
-NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS)
+# The UDP sweep (cveFeed.udp_scan) adds five scripts, each reviewed as read-only: snmp-sysdescr (one SNMP GET of sysDescr and the uptime
+# with the default community "public": a reply is proof that community works), snmp-info (the SNMPv3 engine ID, the probe -sV sends),
+# ntp-info (the time and the "readvar" variables: version, system, processor), upnp-info (one SSDP M-SEARCH: the server string and
+# device description) and ipmi-version (one Get Channel Authentication Capabilities request: the IPMI version and the
+# authentication types offered, no login). ntp-monlist is deliberately absent: nmap files it under "intrusive" and says the
+# target records the request. Together with nbstat above (UDP 137) they only run on UDP ports whose service matches.
+UDP_NSE_SCRIPTS = ('snmp-sysdescr', 'snmp-info', 'ntp-info', 'upnp-info', 'ipmi-version')
+NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS) | frozenset(UDP_NSE_SCRIPTS)
 
 
 def _reviewed_scripts(scripts):
@@ -196,7 +203,7 @@ def persist_inventory(inventory, source='nmap', org_id=None):
     seen on one IP's 443 onto every IP's 443."""
     from cveFeed.host_inventory import keeps_reported_os
     from startScan.ip_rows import get_or_create_ip
-    from startScan.models import IpAddress, Port
+    from startScan.models import TCP_PROTOCOLS, IpAddress, Port
     ports_written = hosts_with_os = 0
     now = timezone.now()
     for host in inventory:
@@ -222,12 +229,14 @@ def persist_inventory(inventory, source='nmap', org_id=None):
         for rec in host.get('ports', []):
             if not rec.get('number'):
                 continue
-            port = ip_obj.ports.filter(number=rec['number']).order_by('id').first()
+            protocol = 'udp' if rec.get('protocol') == 'udp' else 'tcp'  # UDP 161 and TCP 161 are two services: two rows
+            same_protocol = ('udp',) if protocol == 'udp' else TCP_PROTOCOLS
+            port = ip_obj.ports.filter(number=rec['number'], protocol__in=same_protocol).order_by('id').first()
             if port is not None and port.ports.exclude(pk=ip_obj.pk).exists():
                 ip_obj.ports.remove(port)  # a row shared with other IPs by older code: give this IP its own
                 port = None
             if port is None:
-                port = Port(number=rec['number'], service_name=rec.get('service_name') or None)
+                port = Port(number=rec['number'], protocol=protocol, service_name=rec.get('service_name') or None)
             elif rec.get('service_name'):
                 port.service_name = rec['service_name']
             if port.pk and rec.get('product') and rec['product'] != port.product:

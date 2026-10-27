@@ -1185,7 +1185,7 @@ def update_or_create_port(port_number, service_name=None, description=None, ip=N
 	# Several Port rows can share a number (service enrichment stores product and version per row), so
 	# take the oldest instead of get(), which raised MultipleObjectsReturned and then hid it.
 	if ip is not None:
-		port = ip.ports.filter(number=port_number).order_by('id').first()
+		port = ip.ports.filter(number=port_number, protocol__in=('', 'tcp')).order_by('id').first()  # the callers (bbot, httpx) find TCP services
 	else:
 		port = Port.objects.filter(number=port_number).order_by('id').first()
 	if port is None:

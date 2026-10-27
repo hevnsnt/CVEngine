@@ -146,11 +146,11 @@ def _check_notes(strategy, mode):
 
 
 def _open_ports(match):
-    from startScan.models import open_ports
+    from startScan.models import open_services
     out = set()
     if match.subdomain_id:
         for ip in match.subdomain.ip_addresses.all():
-            out.update(p.number for p in open_ports(ip))
+            out.update(p.number for p in open_services(ip))
     return sorted(out)[:50]
 
 

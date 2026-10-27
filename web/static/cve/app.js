@@ -718,7 +718,7 @@ const surfaceCard = (h, openServices) => {
     if (!ip.ports.length) chips.append(el("span", "note", "No open ports recorded"));
     ip.ports.forEach((p) => {
       const b = el("button", "svc-chip", null, { type: "button", title: "Open in Services" });
-      b.append(el("b", "", String(p.number)), el("span", "", [p.product || p.service, p.version].filter(Boolean).join(" ") || p.protocol || "tcp"));
+      b.append(el("b", "", p.protocol === "udp" ? `${p.number}/udp` : String(p.number)), el("span", "", [p.product || p.service, p.version].filter(Boolean).join(" ") || p.protocol || "tcp"));
       b.onclick = openServices;
       chips.append(b);
     });
@@ -2395,7 +2395,7 @@ const pages = {
       run: async (progress) => {
         const { rows, truncated } = await collectAll((page, size) => api("GET", `${base}/search?${query({ q: q.value, sort: sortBy.value, page, page_size: size })}`), progress);
         const kept = heatFilter === "all" ? rows : rows.filter((h) => (h.heat || "unscanned") === heatFilter);
-        const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => p.number)))];
+        const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => (p.protocol === "udp" ? `${p.number}/udp` : p.number))))];
         const columns = [
           { label: "Host", value: (h) => h.host },
           { label: "Also answers to", value: (h) => (h.aliases || []).join(" ") },
@@ -2918,6 +2918,8 @@ const pages = {
         const reports = runzeroReports(ip.runzero);
         if (reports) S.services.append(reports);
         S.services.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
+        if ((ip.udp_unanswered || []).length)
+          S.services.append(el("div", "note", `UDP ${ip.udp_unanswered.join(", ")}: no answer (open or filtered, not counted as open)`));
         ip.ports.forEach((p) => {
           const card = el("div", "svc");
           const top = el("div", "svc-top");
