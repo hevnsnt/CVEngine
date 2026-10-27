@@ -14,6 +14,7 @@ SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
 DOCKER_STUB = """#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls.log"
 case " $* " in
+  *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
@@ -297,14 +298,59 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse(self.approved())
         self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
 
+    def mark_deployed(self, sha):
+        state = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update'
+        state.mkdir(exist_ok=True)
+        (state / 'deployed-commit').write_text(sha + '\n')
+
+    def deployed_marker(self):
+        state = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update'
+        marker = state / 'deployed-commit'
+        return marker.read_text().strip() if marker.exists() else None
+
     def test_files_and_build_already_at_the_approved_commit_rebuild_nothing(self):
         self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
         (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.mark_deployed(self.new)
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse([c for c in self.calls() if ' build ' in c])
         self.assertFalse(self.approved())
+
+    def test_an_interrupted_deploy_is_not_reported_as_already_done(self):
+        # the files and web/.commit are at the new commit (the deploy writes the marker before it builds) but the run stopped before
+        # the migration: nothing on record says the deploy finished, so the approval deploys it instead of answering "already at"
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertTrue([c for c in calls if ' build ' in c])
+        self.assertTrue([c for c in calls if ' migrate --noinput' in c])
+        self.assertIn('deploying it again', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.deployed_marker(), self.new)
+        self.assertFalse(self.approved())
+
+    def test_a_recorded_deploy_is_still_redone_when_the_database_has_migrations_waiting(self):
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.mark_deployed(self.new)
+        (self.stub / 'unmigrated').write_text('')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertTrue([c for c in calls if ' migrate --noinput' in c])
+        self.assertTrue([c for c in calls if '--force-recreate web' in c])
+        self.assertIn('migrate --check', '\n'.join(calls))
+
+    def test_a_successful_update_records_that_the_deploy_finished(self):
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.deployed_marker(), self.new)
+        self.assertEqual(self.head(), self.new)
 
     def test_the_stack_is_recreated_with_the_overlay_and_env_file_it_was_started_with(self):
         # a host behind its own proxy: the overlay moves the published port and sets limits, the env file holds its settings
