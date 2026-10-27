@@ -63,7 +63,7 @@ class Net:
             return got
         if method == 'HEAD':
             return Response(404)
-        if urlsplit(url).hostname.endswith('storage.googleapis.com'):
+        if urlsplit(url).hostname == 'storage.googleapis.com':
             return xml(404, GCS_MISSING)
         return xml(404, S3_NOSUCH)
 
