@@ -61,7 +61,8 @@ class AgentApiTests(TestCase):
 		cls.cve = CVEEntry.objects.create(
 			cve_id='CVE-2099-1', kev=True, cvss=9.8, title='nginx bug', published_at=now,
 			affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
-		cls.match = CVEMatch.objects.create(cve_entry=cls.cve, subdomain=sub, confidence=0.9, matched_product='nginx', matched_version='1.18.0')
+		cls.match = CVEMatch.objects.create(cve_entry=cls.cve, subdomain=sub, confidence=0.9, matched_product='nginx', matched_version='1.18.0',
+			version_in_range=True)
 		other = Subdomain.objects.create(name='www.b.example', target_domain=cls.db)
 		cls.match_b = CVEMatch.objects.create(cve_entry=cls.cve, subdomain=other, confidence=0.9)
 
@@ -548,6 +549,7 @@ class AgentApiTests(TestCase):
 		self.match.matched_product = 'AWS Service -'
 		self.match.matched_version = ''
 		self.match.save(update_fields=['matched_product', 'matched_version'])
+		CVEMatch.objects.filter(pk=self.match_b.pk).update(matched_version='1.19.0', version_in_range=True)  # a match the policy keeps
 		with mock.patch('cveFeed.triage.run_triage') as ai, mock.patch('cveFeed.validation.run_validation') as checks:
 			first = reconcile_invalid_correlations(limit=1)
 			second = reconcile_invalid_correlations(limit=1)

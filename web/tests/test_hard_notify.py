@@ -84,7 +84,7 @@ class FeedAnnouncementTests(TestCase):
 	def test_a_match_without_version_evidence_is_not_announced(self):
 		cve = self.cve(NO_RANGE)
 		auto_fire_new_cves([cve.pk])
-		self.assertEqual(CVEMatch.objects.get().version_in_range, None)
+		self.assertEqual(CVEMatch.objects.count(), 0)  # an advisory with no version bound is no evidence, so there is no match at all
 		self.assertEqual(self.slack(), [])
 
 	def test_the_message_is_sent_after_the_confirmation_not_before(self):

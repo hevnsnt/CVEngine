@@ -410,12 +410,13 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     """
     from cveFeed.correlation import candidate_subdomains, close_rejected, correlate_subdomains, cve_pool
     from startScan.models import Subdomain, ScanHistory
-    from cveFeed import activity
+    from cveFeed import activity, match_policy
 
     close_rejected()  # a CVE rejected since the last run stops being a finding
     from cveFeed import locality
     locality.refresh()  # new or changed CVEs: which are only usable from the host itself
     locality.close_local_matches()  # ...never a finding, so any open match on one is closed
+    match_policy.close_policy_matches()  # a product seen without a version is a lead, not a match: close what the old rules made
     cve_by_id, index = cve_pool(cve_limit)
     scan = None
     if scan_history_id:
@@ -463,7 +464,7 @@ def auto_fire_new_cves(new_cve_pks=None):
     if not cves:
         return {"fired": 0} if cfg else {"skipped": "auto-fire disabled"}
     since = timezone.now()
-    correlate_hot_cves(cves)
+    leads = correlate_hot_cves(cves)
     fired = 0
     if cfg:
         from cveFeed import hit_batch
@@ -479,7 +480,7 @@ def auto_fire_new_cves(new_cve_pks=None):
                 raise
         try:
             for cve in cves:
-                fire_for_cve(cve, max_hosts=cfg.auto_fire_max_scans, correlated=True, test_dispatcher=dispatch)
+                fire_for_cve(cve, max_hosts=cfg.auto_fire_max_scans, correlated=True, test_dispatcher=dispatch, leads=leads.get(cve.id, ()))
                 fired += 1
         finally:
             hit_batch.leave(batch)  # the last test to finish (or this, if none were queued) sends the one message
@@ -1295,6 +1296,8 @@ def author_cve_detections():
     from cveFeed import locality
     locality.refresh(limit=100000)
     out['local_closed'] = locality.close_local_matches()  # a CVE the model just judged local-only is never a finding
+    from cveFeed import match_policy
+    out['no_evidence_closed'] = match_policy.close_policy_matches()
     out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
     return out
 

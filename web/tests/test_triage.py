@@ -263,7 +263,7 @@ class TriageDbBase(TestCase):
 @mock.patch('cveFeed.activity.log', return_value=None)
 class SignatureCacheTests(TriageDbBase):
 	def test_generic_vendor_fingerprint_closes_candidate_without_provider_call(self, _log):
-		m = self.match('a.tr.test', version='', in_range=None)
+		m = self.match('a.tr.test')
 		m.matched_product = 'AWS Service -'
 		m.save(update_fields=['matched_product'])
 		provider = self.provider(reply('likely'))
@@ -364,7 +364,7 @@ class SignatureCacheTests(TriageDbBase):
 
 	def test_the_verdict_is_stored_for_correlation_but_never_clears_hard_evidence(self, _log):
 		from cveFeed.correlation import _seedable
-		self.match('a.tr.test', version='', in_range=None)
+		self.match('a.tr.test')
 		self.run_all(provider=self.provider(reply('likely_false_positive')))
 		stored = MatchVerdict.objects.get()
 		self.assertEqual(stored.ai_verdict, 'uncertain')
@@ -387,7 +387,7 @@ class SignatureCacheTests(TriageDbBase):
 		self.assertIn('the version found is inside the affected range', row.hard_evidence)
 
 	def test_unparseable_reply_is_retriable_error_not_cached_verdict(self, _log):
-		m = self.match('a.tr.test', version='', in_range=None)
+		m = self.match('a.tr.test')
 		self.run_all(provider=self.provider('I refuse sk-ant-SHOULD-NOT-LEAK'))
 		row = Triage.objects.get()
 		m.refresh_from_db()
@@ -404,7 +404,7 @@ class SignatureCacheTests(TriageDbBase):
 		self.assertTrue(CVEMatch.objects.filter(pk=m.pk).exists())  # never deleted
 
 	def test_prior_invalid_cached_verdict_is_reassessed_once(self, _log):
-		self.match('a.tr.test', version='', in_range=None)
+		self.match('a.tr.test')
 		self.run_all(provider=self.provider(reply('likely')))
 		TriageVerdict.objects.update(invalid_output=True, classification='needs_validation', reason='unparseable model reply')
 		provider = self.provider(reply('likely_false_positive'))
@@ -419,7 +419,7 @@ class SignatureCacheTests(TriageDbBase):
 class NoProviderTests(TriageDbBase):
 	def test_rows_are_not_triaged_never_confirmed(self, _log):
 		self.match('a.tr.test')
-		self.match('b.tr.test', version='', in_range=None)
+		self.match('b.tr.test', version='1.19.0')
 		stats = self.run_all(provider=False)  # the configured one: none is configured
 		self.assertEqual((stats['not_triaged'], stats['asked']), (2, 0))
 		self.assertEqual(set(Triage.objects.values_list('status', flat=True)), {'not_triaged'})
@@ -444,7 +444,7 @@ class NoProviderTests(TriageDbBase):
 class CapTests(TriageDbBase):
 	def many(self, n):
 		for i in range(n):
-			self.match(f'h{i}.tr.test', version=f'1.{i}.0', in_range=None)
+			self.match(f'h{i}.tr.test', version=f'1.{i}.0')
 
 	def test_per_run_cap_leaves_the_rest_pending(self, _log):
 		self.many(150)
@@ -508,7 +508,7 @@ class SignatureChangeTests(TriageDbBase):
 		self.assertEqual(Triage.objects.count(), 1)
 
 	def test_template_hit_changes_the_signature_and_confirms_on_the_floor(self, _log):
-		m = self.match('a.tr.test', version='', in_range=None)
+		m = self.match('a.tr.test')
 		self.run_all(provider=self.provider(reply('likely_false_positive')))
 		self.assertEqual(Triage.objects.get().classification, 'needs_validation')
 		CVEMatch.objects.filter(pk=m.pk).update(template_result='vulnerable', template_id='cve-2099-1')

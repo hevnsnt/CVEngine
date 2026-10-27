@@ -7,15 +7,22 @@ driver. Such a CVE stays in the catalogue (and its record says how to check a ho
 finding, a validation or an AI review.
 
 ``classify`` decides from the record alone, in this order:
-  1. the CVSS vector: attack vector Local (AV:L) or Physical (AV:P) is local-only;
-  2. with no vector (older CVE List records carry none): a description that says the attacker must be local, or that is an elevation of
+  1. a Linux kernel record (the kernel CNA's "In the Linux kernel, the following vulnerability has been resolved", or an affected
+     product that is only the kernel): local-only whatever its vector, because the running kernel build and the distribution's
+     backported fixes decide it and no external scan can read them. Only the host's own inventory report can place a kernel;
+  2. the CVSS vector: attack vector Local (AV:L) or Physical (AV:P) is local-only;
+  3. with no vector (older CVE List records carry none): a description that says the attacker must be local, or that is an elevation of
      privilege, a kernel/driver/Win32k flaw, in an operating system, with nothing in it that says it can be reached over a network.
 A record that says "remote", "unauthenticated" or names a network protocol is never classified local by the text rules, and a product that
 is not an operating system or client component (Exchange, SharePoint, a web application) is never classified local by its wording alone.
 """
 import re
+from datetime import datetime, timezone as dt_timezone
 
 from django.utils import timezone
+
+# CVEs classified before this moment are classified again: bump it when ``classify`` changes, so existing records follow the rules
+RULES_AT = datetime(2026, 10, 27, 0, 0, tzinfo=dt_timezone.utc)
 
 VECTOR_LOCAL = re.compile(r'(?:^|/)AV:[LP](?:/|$)')
 # SQL form of the same pattern, for the queryset filter in cve_pool and the vector backfill
@@ -33,10 +40,12 @@ REMOTE = re.compile(
     r'\b(?:remote(?:ly)?|unauthenticated|over (?:the )?(?:network|internet|http|https|lan)|network[- ]based|network attacker|'
     r'via (?:a )?(?:network|http|https|web|crafted (?:http|request|packet|url))|crafted (?:http|request|packet|url|web)|'
     r'web (?:server|application|interface|page|console)|\bhttps?\b|smb|rdp|dns|ftp|ssh|ldap|snmp|api request)\b', re.I)
+KERNEL_CNA = re.compile(r'^\s*in the linux kernel,? the following vulnerability has been (?:resolved|fixed)', re.I)
+LINUX_KERNEL_PRODUCT = re.compile(r'^(?:linux(?:[ _]kernel)?|kernel)$', re.I)
 # products whose flaws are decided on the machine: an operating system, a kernel, a driver
 OS_PRODUCT = re.compile(
-    r'^(?:microsoft )?(?:windows(?: (?:server|10|11|8\.1|8|7|vista|xp|rt|nt)\b.*)?|win32k|linux(?: kernel)?|macos|mac os x?|os x|ios|ipados|'
-    r'tvos|watchos|android|freebsd|openbsd|netbsd|solaris|aix|hp-ux|kernel|xnu)$', re.I)
+    r'^(?:microsoft )?(?:windows(?:[ _](?:server|10|11|8\.1|8|7|vista|xp|rt|nt|kernel|gdi|common log file system)\b.*)?|win32k|'
+    r'linux(?:[ _]kernel)?|macos|mac os x?|os x|ios|ipados|tvos|watchos|android|freebsd|openbsd|netbsd|solaris|aix|hp-ux|kernel|xnu)$', re.I)
 
 
 def _products(affected):
@@ -49,8 +58,19 @@ def _products(affected):
     return names
 
 
+def is_linux_kernel_record(description, title='', affected=None):
+    """A Linux kernel CVE: written by the kernel CNA, or naming nothing but the kernel as its product."""
+    if KERNEL_CNA.search(description or '') or KERNEL_CNA.search(title or ''):
+        return True
+    products = _products(affected)
+    return bool(products) and all(LINUX_KERNEL_PRODUCT.match(p) for p in products)
+
+
 def classify(cvss_vector, description, title='', affected=None):
     """``(local_only, why)`` for one CVE record. ``why`` is empty when it is not local-only."""
+    if is_linux_kernel_record(description, title, affected):
+        return True, ('it is a Linux kernel flaw: the running kernel build and the distribution\'s backported fixes decide it, '
+                      'and only the host can report them')
     vector = cvss_vector or ''
     if VECTOR_LOCAL.search(vector):
         return True, 'its CVSS attack vector is local or physical'
@@ -65,6 +85,8 @@ def classify(cvss_vector, description, title='', affected=None):
         return True, 'the record says it needs local access or is a kernel or driver flaw in the operating system'
     if PRIVESC.search(text) and is_os:
         return True, 'it is an elevation of privilege in an operating system, which needs code already running on the host'
+    if is_os:  # an operating-system component with no vector and nothing in its text that says a network reaches it
+        return True, 'it is a flaw in an operating-system component that nothing in the record says a network can reach'
     return False, ''
 
 
@@ -81,7 +103,7 @@ def refresh(limit=20000, chunk=2000):
     from cveFeed.models import CVEDetection, CVEEntry
     done = 0
     while done < limit:
-        rows = list(CVEEntry.objects.filter(Q(locality_at__isnull=True) | Q(locality_at__lt=F('synced_at')))
+        rows = list(CVEEntry.objects.filter(Q(locality_at__isnull=True) | Q(locality_at__lt=F('synced_at')) | Q(locality_at__lt=RULES_AT))
                     .only('id', 'cvss_vector', 'original_description', 'title', 'affected', 'local_only')[:chunk])
         if not rows:
             break
@@ -89,7 +111,8 @@ def refresh(limit=20000, chunk=2000):
         scopes = dict(CVEDetection.objects.filter(cve_entry_id__in=[r.id for r in rows]).values_list('cve_entry_id', 'strategy__scope'))
         for row in rows:
             row.local_only = classify(row.cvss_vector, row.original_description, row.title, row.affected)[0]
-            if 'AV:' not in (row.cvss_vector or '') and scopes.get(row.id) in ('external', 'local_only'):
+            if ('AV:' not in (row.cvss_vector or '') and scopes.get(row.id) in ('external', 'local_only')
+                    and not is_linux_kernel_record(row.original_description, row.title, row.affected)):
                 row.local_only = scopes[row.id] == 'local_only'  # the model's reading of a record with no attack vector
             row.locality_at = now
         CVEEntry.objects.bulk_update(rows, ['local_only', 'locality_at'])
@@ -128,7 +151,8 @@ def apply_scope(cve, scope):
     """The model's scope decision for a CVE (``external`` or ``local_only``). A CVSS attack vector settles the matter and is never
     overridden; ``unclear`` leaves the rule-based classification as it was. Returns True when the flag was set from the model's answer."""
     from cveFeed.models import CVEEntry
-    if 'AV:' in (cve.cvss_vector or '') or scope not in ('external', 'local_only'):
+    if ('AV:' in (cve.cvss_vector or '') or scope not in ('external', 'local_only')
+            or is_linux_kernel_record(cve.original_description, cve.title, cve.affected)):
         return False
     CVEEntry.objects.filter(pk=cve.pk).update(local_only=(scope == 'local_only'), locality_at=timezone.now())
     return True
