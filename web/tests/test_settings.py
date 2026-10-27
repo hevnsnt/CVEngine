@@ -62,14 +62,14 @@ class SettingsApiTests(TestCase):
 			self.assertEqual(send(self.c, 'PUT', 'ai', bad)[0], 400, bad)
 		self.assertEqual(AIProviderSettings.objects.get().plan_daily_total, 500)
 
-	def test_all_nuclei_templates_is_off_until_a_superuser_turns_it_on(self):
-		self.assertFalse(send(self.c, 'GET', 'scan_policy')[1]['nuclei_all_templates'])
-		self.assertEqual(send(client_for(self.admin), 'PUT', 'scan_policy', {'nuclei_all_templates': True})[0], 403)
+	def test_all_nuclei_templates_is_on_until_a_superuser_turns_it_off(self):
+		self.assertTrue(send(self.c, 'GET', 'scan_policy')[1]['nuclei_all_templates'])
+		self.assertEqual(send(client_for(self.admin), 'PUT', 'scan_policy', {'nuclei_all_templates': False})[0], 403)
 		self.assertEqual(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': 'yes'})[0], 400)
-		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
-		from dashboard.models import AuditLog
-		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='on').exists())
 		self.assertFalse(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': False})[1]['nuclei_all_templates'])
+		from dashboard.models import AuditLog
+		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='off').exists())
+		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
 
 	def test_a_stored_ai_key_is_never_kept_for_a_different_address_or_provider(self):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})

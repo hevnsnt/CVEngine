@@ -81,12 +81,15 @@ function selectOf(options, value) {
 function button(label, onClick, cls = "btn") {
   const b = el("button", cls, label, { type: "button" });
   b.onclick = async () => {
+    const idle = b.textContent;
     b.disabled = true;
+    b.textContent = "Working…";
     try {
       await onClick();
     } catch (err) {
       toast(err.message, true);
     }
+    b.textContent = idle;
     b.disabled = false;
   };
   return b;
@@ -883,7 +886,7 @@ const sections = {
   async engines(m) {
     const policy = await api("GET", "scan_policy");
     const everything = check(
-      "Let scans run every Nuclei template that is installed, not only the read-only ones",
+      "Let scans run every Nuclei template that is installed (turn off to run only the read-only ones)",
       policy.nuclei_all_templates,
     );
     const policyCard = card(
@@ -891,7 +894,7 @@ const sections = {
       el(
         "p",
         "note",
-        "By default only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host) run. Turn this on to run the whole template library Nuclei ships, including checks that send other requests. Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
+        "By default scans run the whole template library Nuclei ships, including checks that send requests other than plain reads. Turn this off to run only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host). Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
       ),
       everything.wrap,
       button("Save", async () => {
