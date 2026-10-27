@@ -453,7 +453,7 @@ class AgentActivity(models.Model):
     target, writing / running / validating a check. Global entries (project null) are visible to every member."""
 
     KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes",
-             "remediation", "saved_search")
+             "remediation", "saved_search", "runzero")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
     status = models.CharField(max_length=10, default="done")  # running | done | failed
@@ -1369,6 +1369,27 @@ class ProjectSettings(models.Model):
         """The effective {severity: days} of ``project``: the defaults with its own overrides on top."""
         row = cls.objects.filter(project=project).first()
         return {**DEFAULT_SLA_DAYS, **{k: v for k, v in ((row.sla_days if row else None) or {}).items() if k in DEFAULT_SLA_DAYS}}
+
+
+class RunZeroSync(models.Model):
+    """The runZero integration of one project (cveFeed.runzero_sync): whether unknown runZero addresses are imported as targets, which
+    runZero search limits that, and how the last sync went. One row per project, created when first needed. The token itself is an
+    ApiCredential; nothing here is secret."""
+
+    DEFAULT_SEARCH = "alive:true"
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="runzero_sync")
+    import_enabled = models.BooleanField(default=False)
+    search = models.CharField(max_length=300, default=DEFAULT_SEARCH)  # runZero inventory search that limits what is imported
+    status = models.CharField(max_length=10, blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)  # when the current or last run began (a stale "running" is not honoured)
+    last_sync_at = models.DateTimeField(null=True, blank=True)  # when the last run finished, whether it worked or not
+    last_ok_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    counts = models.JSONField(default=dict, blank=True)  # what the last good run did: assets, matched_hosts, imported, skipped ...
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"runZero sync for {self.project_id}"
 
 
 class CVEDetection(models.Model):

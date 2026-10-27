@@ -33,6 +33,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
 | [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran |
 | [wpscan.com API](https://wpscan.com/) | WordPress vulnerability data for WPScan, with your own token |
+| [runZero Export API](https://help.runzero.com/docs/exporting-asset-data/) | Asset inventory (OS, hardware, tags, CVE reports) read with your own Export API token from `console.runzero.com`; no runZero code is bundled |
 | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope of bug bounty programs, read at run time |
 | [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for report categories and priority |
 

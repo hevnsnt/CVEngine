@@ -676,6 +676,26 @@ const factLine = (facts) => {
   const f = facts || {};
   return [f.os, f.computer_name, f.fqdn || f.dns_domain || f.domain].filter(Boolean).join("  ·  ");
 };
+// What runZero (asset inventory) says about an address, stored by the scheduled sync; blank when it has no record of it.
+const runzeroLine = (rz) => {
+  if (!rz) return "";
+  const when = rz.last_seen ? `last seen ${new Date(rz.last_seen).toLocaleDateString()}` : "";
+  const tags = (rz.tags || []).length ? `tags ${rz.tags.join(", ")}` : "";
+  return [rz.type, rz.hw, rz.site ? `site ${rz.site}` : "", tags, when].filter(Boolean).join("  ·  ");
+};
+// runZero's own CVE reports for an address: extra evidence next to ours, never a confirmed finding.
+const runzeroReports = (rz) => {
+  const vulns = (rz && rz.vulns) || [];
+  if (!vulns.length) return null;
+  const box = el("details", "nse");
+  box.append(el("summary", "", `runZero reports (${vulns.length})`));
+  box.append(el("p", "note", "runZero's own scan lists these CVEs for this address. They are evidence, not a confirmed finding: a CVE cvENGINE also matched on the same port is ranked higher."));
+  vulns.forEach((v) => {
+    const line = [v.cve, v.port ? `${v.port}/${v.transport || "tcp"}` : "", v.severity, v.cvss3 != null ? `CVSS ${v.cvss3}` : "", v.name].filter(Boolean).join("  ·  ");
+    box.append(el("div", "note", line));
+  });
+  return box;
+};
 // The top of the host page, Shodan-style: who hosts it, what answers on the web, what the operating system is
 // Shodan-style surface summary: every address with the services that answer on it, as chips that open the Services tab.
 const surfaceCard = (h, openServices) => {
@@ -712,8 +732,11 @@ const hostOverview = (h) => {
     const note = [hosting.kind, hosting.shared_ip ? "shared address" : "", hosting.infrastructure].filter(Boolean).join(", ");
     rows.push({ label: "Hosting", value: note ? `${hosting.provider} (${note})` : hosting.provider });
   } else if (hosting.infrastructure) rows.push({ label: "Hosting", value: hosting.infrastructure });
-  const systems = [...new Set(h.ips.map((ip) => ip.os || (ip.facts || {}).os).filter(Boolean))];
+  const runzeroOs = (ip) => ip.runzero && [ip.runzero.os, ip.runzero.os_version].filter(Boolean).join(" ");
+  const systems = [...new Set(h.ips.map((ip) => ip.os || (ip.facts || {}).os || runzeroOs(ip)).filter(Boolean))];
   if (systems.length) rows.push({ label: "Operating system", value: systems.join(", ") });
+  const inventory = [...new Set(h.ips.map((ip) => runzeroLine(ip.runzero)).filter(Boolean))];
+  if (inventory.length) rows.push({ label: "runZero", value: inventory.join("; ") });
   const identities = [...new Set(h.ips.map((ip) => factLine(ip.facts)).filter(Boolean))];
   if (identities.length) rows.push({ label: "Windows identity", value: identities.join("; ") });
   if (http.webserver) rows.push({ label: "Web server", value: http.webserver });
@@ -2713,6 +2736,10 @@ const pages = {
         S.services.append(el("div", "ip-line", ip.address + (ip.os ? `  ·  ${ip.os}` : "")));
         const identity = factLine(ip.facts);
         if (identity) S.services.append(el("div", "note", identity));
+        const inventory = runzeroLine(ip.runzero);
+        if (inventory) S.services.append(el("div", "note", `runZero: ${inventory}`));
+        const reports = runzeroReports(ip.runzero);
+        if (reports) S.services.append(reports);
         S.services.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
         ip.ports.forEach((p) => {
           const card = el("div", "svc");
@@ -3660,18 +3687,76 @@ pages.keys = async function apiKeys(mount) {
   const list = el("div", "grid");
   mount.append(list);
   let data = { results: [], can_edit: false };
+  let runzero = null; // the runZero sync status of the selected project; null for an organization or when the caller is not an admin
   let requestVersion = 0;
   const selectedScope = () => scopes.find((s) => s.value === scopePicker.value);
+
+  const runzeroPath = (scope) => `${scope.path.replace(/\/api-keys$/, "")}/runzero`;
+
+  function runzeroPanel(rz) {
+    const scope = selectedScope();
+    const box = el("div", "runzero-sync");
+    const line = rz.last_sync_at
+      ? `${rz.last_error ? "Last sync failed" : "Last sync"} ${fmtDateTime(rz.last_sync_at)} ${zoneLabel()}`
+      : "Not synced yet";
+    box.append(el("p", "note", rz.state === "running" ? "Syncing now" : line));
+    if (rz.last_error) box.append(el("p", "msg err", rz.last_error));
+    const c = rz.counts || {};
+    if (rz.last_ok_at && c.assets != null) {
+      const bits = [`${c.assets} assets read`, `${c.matched_hosts} hosts matched`, `${c.updated_hosts} updated`];
+      if (c.cve_reports) bits.push(`${c.cve_reports} CVE reports`);
+      if (c.imported != null) bits.push(`${c.imported} targets imported`);
+      if (c.truncated) bits.push("list was cut at the size limit");
+      box.append(el("p", "note", bits.join(", ")));
+      const skipped = Object.entries(c.skipped || {}).map(([why, n]) => `${n} ${why.replace(/_/g, " ")}`);
+      if (skipped.length) box.append(el("p", "note", `Not imported: ${skipped.join(", ")}`));
+    }
+    box.append(el("p", "note", `Syncs every ${rz.interval_hours} hours.`));
+    if (!data.can_edit) return box;
+    const importBox = el("input", "", null, { type: "checkbox", id: "rz-import" });
+    importBox.checked = rz.import_enabled;
+    const search = uiText(rz.search, { spellcheck: "false", autocomplete: "off", maxlength: "300" });
+    const importRow = el("label", "note");
+    importRow.append(importBox, ` Add runZero addresses cvENGINE does not know as targets (at most ${rz.import_max} per sync, through the same checks as Add targets)`);
+    const save = el("button", "btn sm ghost", "Save import settings", { type: "button" });
+    save.onclick = async () => {
+      try {
+        await api("PUT", runzeroPath(scope), { import_enabled: importBox.checked, search: search.value });
+        toast("runZero settings saved");
+        draw();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    const now = el("button", "btn sm", "Sync now", { type: "button" });
+    now.disabled = rz.state === "running";
+    now.onclick = async () => {
+      now.disabled = true;
+      try {
+        await api("POST", `${runzeroPath(scope)}/sync`, {});
+        toast("runZero sync queued");
+        setTimeout(draw, 4000);
+      } catch (err) {
+        toast(err.message, true);
+        now.disabled = false;
+      }
+    };
+    const actions = el("div", "actions");
+    actions.append(save, now);
+    box.append(importRow, field("runZero search that limits the import", search), actions);
+    return box;
+  }
 
   function openEditor(svc) {
     const scope = selectedScope();
     if (!scope) return;
-    dialog(`Configure ${svc.label}`, (body, close) => {
-      body.append(el("p", "note", scope.kind === "org"
+    dialog(`${svc.retired ? "Remove" : "Configure"} ${svc.label}`, (body, close) => {
+      if (svc.retired) body.append(el("p", "note", svc.retired));
+      else body.append(el("p", "note", scope.kind === "org"
         ? `Organization ${scope.name}: this key will apply to its current and future projects unless each has an override.`
         : `Project ${scope.name}: this key applies only to this project.`));
       if (svc.scope === "org") body.append(el("p", "note", "This project currently inherits the organization key. Enter a new value to override it."));
-      const inputs = svc.fields.map((f) => {
+      const inputs = (svc.retired ? [] : svc.fields).map((f) => {
         const input = uiText("", {
           type: f.secret ? "password" : "text",
           autocomplete: "off",
@@ -3699,6 +3784,7 @@ pages.keys = async function apiKeys(mount) {
         }
       };
       const save = el("button", "btn", "Save", { type: "button" });
+      save.style.display = svc.retired ? "none" : "";
       save.onclick = async () => {
         save.disabled = true;
         try {
@@ -3744,6 +3830,7 @@ pages.keys = async function apiKeys(mount) {
   function paint() {
     list.textContent = "";
     data.results
+      .filter((v) => !(v.retired && !v.configured))
       .filter((v) => (show.value === "set" ? v.configured : show.value === "unset" ? !v.configured : true))
       .forEach((svc) => {
         const card = el("div", `card keytile${svc.configured ? " on" : ""}`);
@@ -3755,9 +3842,16 @@ pages.keys = async function apiKeys(mount) {
             : badge("not set", "queued"),
         );
         card.append(top);
-        if (!svc.used_in_scans) card.append(el("p", "note", "No scan module uses this key yet. It is stored for later."));
+        if (svc.retired) card.append(el("p", "note", svc.retired));
+        else if (svc.used_by_sync) card.append(el("p", "note", "Read by the scheduled runZero sync, not during a scan."));
+        else if (!svc.used_in_scans) card.append(el("p", "note", "No scan module uses this key yet. It is stored for later."));
+        if (svc.service === "runzero" && svc.configured && runzero) card.append(runzeroPanel(runzero));
         if (!data.can_edit) card.append(el("p", "note", "Audit role: read only."));
-        else {
+        else if (svc.retired) {
+          const b = el("button", "btn sm ghost", "Remove", { type: "button" });
+          b.onclick = () => openEditor(svc);
+          card.append(b);
+        } else {
           const b = el("button", `btn sm${svc.configured ? " ghost" : ""}`, svc.configured ? "Edit" : "Configure", { type: "button" });
           b.onclick = () => openEditor(svc);
           card.append(b);
@@ -3771,6 +3865,7 @@ pages.keys = async function apiKeys(mount) {
     const request = ++requestVersion;
     if (!scope) {
       data = { results: [], can_edit: false };
+      runzero = null;
       scopeNote.textContent = "Select a project or an organization before viewing or changing its keys.";
       show.refresh();
       paint();
@@ -3783,6 +3878,8 @@ pages.keys = async function apiKeys(mount) {
       const next = await api("GET", scope.path);
       if (request !== requestVersion) return;
       data = { ...next, can_edit: scope.kind === "org" || next.can_edit };
+      runzero = scope.kind === "project" ? await api("GET", runzeroPath(scope)).catch(() => null) : null;
+      if (request !== requestVersion) return;
       show.refresh();
       paint();
     } catch (error) {

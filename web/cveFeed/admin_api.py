@@ -309,21 +309,20 @@ def orgs_update(request, actor, org_id):
 
 def org_api_credentials_list(request, actor, org_id):
     """What services are configured for this organization, never the secrets themselves."""
-    from cveFeed.api_credentials import SERVICES, credential_summary, used_in_scans
+    from cveFeed.api_credentials import SERVICES, service_entry
     org = _need_org(actor, org_id)
     rows = {c.service: c for c in ApiCredential.objects.filter(org=org)}
-    return {'results': [
-        {'service': service, 'label': label, 'fields': [{'name': n, 'label': d, 'secret': s} for n, d, s in fields],
-         'configured': service in rows, 'used_in_scans': used_in_scans(service), 'set': credential_summary(rows[service]) if service in rows else {}}
-        for service, (label, fields, _) in SERVICES.items()]}
+    return {'results': [service_entry(service, label, fields, rows.get(service)) for service, (label, fields, _) in SERVICES.items()]}
 
 
 def org_api_credential_set(request, actor, org_id, service):
     """Save (or update) this organization's key for ``service``. A blank field keeps what was stored."""
-    from cveFeed.api_credentials import SERVICES
+    from cveFeed.api_credentials import RETIRED, SERVICES
     org = _need_org(actor, org_id)
     if service not in SERVICES:
         raise AdminError(404, f'unknown service {service!r}')
+    if service in RETIRED:
+        raise AdminError(410, RETIRED[service])
     data = _body(request)
     _, fields, _ = SERVICES[service]
     cred = ApiCredential.objects.filter(org=org, service=service).first() or ApiCredential(org=org, service=service)
