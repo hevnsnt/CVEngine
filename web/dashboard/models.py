@@ -249,9 +249,9 @@ class SystemTimings(models.Model):
 class ScanPolicy(models.Model):
 	"""Single-row App Admin setting for what the scanners may run (Settings > Scan engines)."""
 	id = models.AutoField(primary_key=True)
-	# Off: only Nuclei templates whose own text is a read-only check run. On: every template Nuclei ships may run
-	# (the AI-written ones always stay read-only).
-	nuclei_all_templates = models.BooleanField(default=False)
+	# On (the default): every template Nuclei ships may run (the AI-written ones always stay read-only). Off: only Nuclei templates
+	# whose own text is a read-only check run.
+	nuclei_all_templates = models.BooleanField(default=True, db_default=True)
 
 	@classmethod
 	def current(cls):

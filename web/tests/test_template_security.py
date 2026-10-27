@@ -68,6 +68,8 @@ class GeneratedDestinationTests(TestCase):
 
 class TemplateExecutionBoundaryTests(DatabaseTestCase):
     def setUp(self):
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(nuclei_all_templates=False)  # the restricted policy: only read-only templates run
         self.scratch = tempfile.TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
         self.installed = Path(self.scratch.name) / 'installed'

@@ -45,7 +45,11 @@ http:
 
 
 class AllTemplatesSettingTests(TestCase):
-	"""Settings > Scan engines can let every installed Nuclei template run; off, only read-only ones do."""
+	"""Settings > Scan engines can let every installed Nuclei template run (the default); off, only read-only ones do."""
+	def setUp(self):
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=False)  # these tests start from the restricted policy and switch it on
+
 	def library(self, directory):
 		with open(os.path.join(directory, 'safe.yaml'), 'w') as output:
 			output.write(GET_TEMPLATE)
@@ -63,7 +67,7 @@ class AllTemplatesSettingTests(TestCase):
 				try:
 					snapshots.append(nuclei_scan.approved_templates())
 					self.assertEqual(snapshots[0][2], 1)
-					ScanPolicy.objects.create(nuclei_all_templates=True)
+					ScanPolicy.objects.update(nuclei_all_templates=True)
 					snapshots.append(nuclei_scan.approved_templates())
 					self.assertEqual(snapshots[1][2], 2)
 					self.assertTrue(os.path.isfile(os.path.join(snapshots[1][0], 'write.yaml')))
@@ -83,7 +87,7 @@ class AllTemplatesSettingTests(TestCase):
 			path = os.path.join(directory, 'write.yaml')
 			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory):
 				self.assertIn('not read-only', validation.approved_template(path)[1])
-				ScanPolicy.objects.create(nuclei_all_templates=True)
+				ScanPolicy.objects.update(nuclei_all_templates=True)
 				text, problem = validation.approved_template(path)
 				self.assertEqual(problem, '')
 				self.assertIn('POST', text)
@@ -95,7 +99,7 @@ class AllTemplatesSettingTests(TestCase):
 			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch('cveFeed.validation.resolve_template',
 				return_value=(os.path.join(directory, 'safe.yaml'), '')):
 				before = nuclei_scan.cve_service('CVE-2099-1')
-				ScanPolicy.objects.create(nuclei_all_templates=True)
+				ScanPolicy.objects.update(nuclei_all_templates=True)
 				self.assertNotEqual(nuclei_scan.cve_service('CVE-2099-1'), before)
 
 	def test_a_database_error_leaves_the_read_only_policy_in_force(self):
@@ -104,7 +108,8 @@ class AllTemplatesSettingTests(TestCase):
 
 
 class ReadOnlyTemplateTests(unittest.TestCase):
-	def test_broad_pass_uses_snapshot_of_only_approved_templates(self):
+	@mock.patch('cveFeed.validation.all_templates_allowed', return_value=False)  # the restricted policy an App Admin can choose
+	def test_broad_pass_uses_snapshot_of_only_approved_templates(self, _restricted):
 		import shutil
 		with tempfile.TemporaryDirectory() as directory:
 			with open(os.path.join(directory, 'safe.yaml'), 'w') as output:
@@ -366,6 +371,8 @@ class PlanTests(unittest.TestCase):
 
 class TemplateResolutionTests(TestCase):
 	def setUp(self):
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=False)  # the restricted policy: only read-only templates run
 		self.installed, self.generated = tempfile.mkdtemp(), tempfile.mkdtemp()
 		patches = [mock.patch.object(templategen, 'TEMPLATES_ROOT', self.installed), mock.patch.object(templategen, 'GENERATED_DIR', self.generated)]
 		for p in patches:
