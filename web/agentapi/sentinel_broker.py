@@ -182,11 +182,27 @@ def decode_enrollment_blob(raw):
     return data
 
 
+SENTINEL_CLIENT_REPO = 'https://github.com/hevnsnt/cvengine-sentinel'
+
+
 def generate_enrollment_blob(ctx, slug):
-    """``generate_enrollment``'s own payload, plus the same data packaged as one opaque ``blob`` string (see above). Used
-    by ``?format=blob`` on ``GET/POST projects/{slug}/sentinels/enroll`` and by the Sentinels page's Provision button."""
+    """``generate_enrollment``'s own payload, plus the same data packaged as one opaque ``blob`` string (see above), plus a
+    ``setup`` block of ready-to-run steps. Used by ``?format=blob`` on ``GET/POST projects/{slug}/sentinels/enroll``, by
+    the Sentinels page's Provision button, and by the ``generate_sentinel_enrollment`` MCP tool: the ``setup`` block
+    exists so an agent with only Docker and shell access to a target machine, and no other context on Sentinels, can
+    provision one from this response alone, without reading documentation first."""
     payload = generate_enrollment(ctx, slug)
-    return {**payload, 'blob': encode_enrollment_blob(payload)}
+    blob = encode_enrollment_blob(payload)
+    setup = {
+        'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
+        'configure': f"cp .env.example .env && printf 'CVENGINE_SENTINEL_BLOB=%s\\n' '{blob}' >> .env",
+        'run': 'docker compose up -d',
+        'verify': 'docker compose logs -f',
+        'note': (f'The blob is single-use and expires at {payload["expires_at"]}; run these four steps once, in order, '
+                 'on the target machine (needs Docker and outbound HTTPS to this server, nothing else). A restarted '
+                 'container reuses its already-issued token from the sentinel-state volume and never needs the blob again.'),
+    }
+    return {**payload, 'blob': blob, 'setup': setup}
 
 
 def consume_enrollment(raw):

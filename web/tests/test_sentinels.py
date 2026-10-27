@@ -350,6 +350,14 @@ class McpToolTests(SentinelBase):
         err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
         self.assertFalse(err, out)
         self.assertIn('enrollment_token', out)
+        # The MCP tool returns the blob and ready-to-run setup steps, not just the raw fields, so an agent with only
+        # Docker and shell access to a target machine can provision a Sentinel from this response alone.
+        self.assertIn('blob', out)
+        self.assertEqual(sentinels.decode_enrollment_blob(out['blob'])['enrollment_token'], out['enrollment_token'])
+        for key in ('clone', 'configure', 'run', 'verify'):
+            self.assertIn(key, out['setup'])
+        self.assertIn('cvengine-sentinel', out['setup']['clone'])
+        self.assertIn(out['blob'], out['setup']['configure'])
 
         err, out = tool_call(self.t['dana'], 'list_sentinel_tasks', {'project': 'sen-a'})
         self.assertFalse(err, out)

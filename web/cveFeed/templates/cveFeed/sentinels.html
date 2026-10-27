@@ -16,7 +16,7 @@
   </div>
   <div class="card">
     <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
-    <p class="note" style="margin-bottom:6px">Needs the admin role in the project (or App Admin). Clicking Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, and packages it into one opaque blob. Clone this repository onto the machine that will scan, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in <code>sentinel/.env</code>, and run <code>docker compose -f sentinel/docker-compose.yml up -d</code>; see <code>sentinel/README.md</code>.</p>
+    <p class="note" style="margin-bottom:6px">Needs the admin role in the project (or App Admin). Clicking Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, and packages it into one opaque blob. On the machine that will scan, clone <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code>, and run <code>docker compose up -d</code>; see that repository's <code>README.md</code> (or its <code>AGENTS.md</code> if an AI agent is doing the provisioning).</p>
     <div class="field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
     <button class="btn" type="button" id="enroll-go">Provision</button>
     <div id="enroll-out" class="msg ok" style="display:none" role="status"></div>

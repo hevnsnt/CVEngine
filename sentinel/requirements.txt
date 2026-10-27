@@ -1,2 +1,0 @@
-# Minimal on purpose: the Sentinel client is a small daemon, not the main application. Pinned to the same version web/requirements.txt pins.
-requests==2.34.2

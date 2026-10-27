@@ -4,8 +4,7 @@
   python3 scripts/generate_sbom.py [--output cvengine.sbom.cdx.json]
 
 It lists what a build is made of, read from the files that pin it: the scanner tools, the base image and the apt packages (web/Dockerfile), the Python
-packages (web/requirements.txt), the service images (docker-compose.yml), and the Sentinel client image's own nmap/naabu/nuclei pins and Python
-dependencies (sentinel/Dockerfile, sentinel/requirements.txt). Nothing is downloaded and the output is reproducible: the
+packages (web/requirements.txt) and the service images (docker-compose.yml). Nothing is downloaded and the output is reproducible: the
 same commit gives the same document (the timestamp is the commit's). A component that is not pinned to an exact version (a floating
 image tag, a version range, nuclei's templates) is listed with `cvengine:pinned` = `false` so a reader can see what the bill cannot vouch
 for. What the finished image really contains (what the apt packages pull in, and the base image's own packages) is not in this file: scan the built
@@ -72,45 +71,6 @@ def tools(dockerfile):
     if base:
         out.append(component(base.group(1), base.group(2), f'pkg:docker/{base.group(1)}@{base.group(2)}', kind='container',
                              pinned=False, note='a tag, not a digest: the operating system packages are those of the day the image was built'))
-    return out
-
-
-def sentinel_image_tools(dockerfile):
-    """The Sentinel client image's own nmap/naabu/nuclei pins (sentinel/Dockerfile). Kept equal to the main image's
-    pins on purpose (scripts/check_tool_versions.py's parity check fails the gate if they ever drift), but listed as
-    their own components (a distinct ``?image=sentinel`` purl qualifier, so the bom-ref never collides with the main
-    image's identical pin) since they ship in a separate image with its own build."""
-    nmap, nuclei, naabu = arg(dockerfile, 'NMAPVERSION'), arg(dockerfile, 'NUCLEI_VERSION'), arg(dockerfile, 'NAABU_VERSION')
-    return [
-        component('nmap (Sentinel image)', nmap, f'pkg:generic/nmap@{nmap}?image=sentinel',
-                  hashes=[arg(dockerfile, 'NMAP_SHA256'), arg(dockerfile, 'NMAP_RPM_SHA256_AMD64')],
-                  note="the Sentinel client image's own nmap pin, kept equal to the main image's", url='https://nmap.org'),
-        component('nuclei (Sentinel image)', nuclei, GOMOD.format('nuclei/v3', nuclei) + '?image=sentinel',
-                  note="the Sentinel client image's own nuclei pin, kept equal to the main image's",
-                  url='https://github.com/projectdiscovery/nuclei'),
-        component('naabu (Sentinel image)', naabu, GOMOD.format('naabu/v2', naabu) + '?image=sentinel',
-                  note="the Sentinel client image's own naabu pin, kept equal to the main image's",
-                  url='https://github.com/projectdiscovery/naabu'),
-    ]
-
-
-def sentinel_python_packages(requirements):
-    """sentinel/requirements.txt: the Sentinel client's own, deliberately minimal Python dependencies. Reads the same
-    way ``python_packages`` reads web/requirements.txt, with a distinct purl qualifier so a dependency pinned to the
-    same version in both (``requests``, by design) does not collide with the main app's own bom-ref."""
-    out = []
-    for line in requirements.splitlines():
-        line = line.split('#', 1)[0].strip()
-        if not line or line.startswith('-'):
-            continue
-        match = re.match(r'([A-Za-z0-9_.-]+)\s*(==|>=|<=|~=|<|>|!=)?\s*([^\s;]*)', line)
-        if not match:
-            continue
-        name, operator, rest = match.groups()
-        exact = operator == '==' and re.fullmatch(r'[0-9][\w.+!-]*', rest or '')
-        purl = f'pkg:pypi/{name.lower().replace("_", "-")}' + (f'@{rest}' if exact else '') + '?image=sentinel'
-        out.append(component(f'{name} (Sentinel image)', rest if exact else None, purl, kind='library', pinned=bool(exact),
-                             note="the Sentinel client's own dependency (sentinel/requirements.txt)" if exact else f'range {line}'))
     return out
 
 
@@ -182,9 +142,7 @@ def commit_time():
 def build():
     version = read('web/.version').strip()
     dockerfile = read('web/Dockerfile')
-    components = (tools(dockerfile) + apt_packages(dockerfile) + python_packages(read('web/requirements.txt')) +
-                 service_images(read('docker-compose.yml')) + sentinel_image_tools(read('sentinel/Dockerfile')) +
-                 sentinel_python_packages(read('sentinel/requirements.txt')))
+    components = tools(dockerfile) + apt_packages(dockerfile) + python_packages(read('web/requirements.txt')) + service_images(read('docker-compose.yml'))
     components.sort(key=lambda c: (c['type'], c['name'].lower()))
     app = {'type': 'application', 'bom-ref': 'cvengine', 'name': 'cvENGINE', 'version': version,
            'licenses': [{'license': {'id': 'GPL-3.0-only'}}], 'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/hevnsnt/CVEngine'}]}

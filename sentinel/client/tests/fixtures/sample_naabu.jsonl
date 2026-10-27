@@ -1,5 +1,0 @@
-{"ip": "192.0.2.10", "port": 22}
-{"ip": "192.0.2.10", "port": 80}
-{"ip": "198.51.100.20", "port": 443}
-not-json-noise, ignored by the parser
-{"host": "203.0.113.5", "port": 8080}
