@@ -1266,6 +1266,13 @@ def update_nuclei_templates():
     tail = (proc.stdout + proc.stderr).strip().splitlines()[-1:] or [""]
     from cveFeed.templategen import invalidate_template_index
     invalidate_template_index()
+    try:  # system_status judges the refresh on this, not on the age of the files (they only change when a release is published)
+        from django.core.cache import cache
+        from django.utils import timezone
+        from agentapi.system_status import TEMPLATE_REFRESH_KEY
+        cache.set(TEMPLATE_REFRESH_KEY, {'at': timezone.now().isoformat(), 'ok': proc.returncode == 0, 'result': tail[0][:200]}, None)
+    except Exception:  # noqa: BLE001 - recording the outcome never fails the refresh
+        logger.warning("could not record the nuclei template refresh", exc_info=True)
     if proc.returncode == 0:
         activity.log("feed", "Updated the nuclei templates", detail_line=tail[0][:200])
     else:

@@ -8,6 +8,7 @@ whole server, not a project, so for anyone else it is left out and ``system_note
 
 Every probe is wrapped, so one that fails or times out turns into ``{"error": ...}`` and a line in ``problems`` instead of failing
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
+import re
 import shutil
 import time
 from datetime import datetime, timezone as dt_timezone
@@ -184,12 +185,16 @@ def _ai():
             'validation_attempts_today': today}
 
 
-TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without one means it is failing
+TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without a successful one means it is failing
+TEMPLATE_REFRESH_KEY = 'nuclei_templates_refresh'  # written by the cveFeed.tasks.update_nuclei_templates worker task, read here
 _VERSION_CACHE = {}
+_VERSION_LINE = re.compile(r'\d+\.\d+')
 
 
 def _tool_version(argv):
-    """First line of ``<tool> -version`` output, cached for ten minutes; None when the tool is missing or slow."""
+    """The version line of ``<tool> -version``, cached for ten minutes; None when the tool is missing or slow. A tool may print a
+    warning of its own first (nuclei does, on a Go release its JSON library has not caught up with): the first line that is not a
+    warning and carries a version number, else the first line that is not a warning."""
     import subprocess
     now = time.monotonic()
     cached = _VERSION_CACHE.get(argv)
@@ -197,12 +202,46 @@ def _tool_version(argv):
         return cached[1]
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        text = ((proc.stdout or '') + (proc.stderr or '')).strip().splitlines()
-        value = next((line.strip()[:120] for line in text if line.strip()), None)
+        lines = [line.strip() for line in ((proc.stdout or '') + (proc.stderr or '')).splitlines() if line.strip()]
+        lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
+        value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
     except (OSError, subprocess.SubprocessError):
         value = None
     _VERSION_CACHE[argv] = (now, value)
     return value
+
+
+def _template_refresh():
+    """What the last ``nuclei -update-templates`` run said, as the worker recorded it: ``{'at', 'ok', 'result'}`` or None."""
+    from django.core.cache import cache
+    try:
+        record = cache.get(TEMPLATE_REFRESH_KEY)
+    except Exception:  # noqa: BLE001 - a cache that is down must not take the status with it
+        return None
+    return record if isinstance(record, dict) and record.get('at') else None
+
+
+def _template_problem(templates):
+    """The status line for stale nuclei templates, or ''. The template files only change when a new release is published, so their age
+    says nothing about whether the refresh works; it is judged on the refresh's own last run when there is one, and on the files only
+    when no run has been recorded and none has been dispatched for a day and a half either."""
+    refresh = templates.get('last_refresh')
+    if refresh:
+        try:
+            hours = (timezone.now() - datetime.fromisoformat(refresh['at'])).total_seconds() / 3600
+        except (KeyError, TypeError, ValueError):
+            hours = None
+        if hours is not None and not refresh.get('ok'):
+            return f"nuclei templates: the last refresh failed ({str(refresh.get('result') or 'no detail')[:100]})"
+        if hours is not None and hours > TEMPLATE_STALE_HOURS:
+            return f'nuclei templates: no successful refresh for {int(hours)} hours'
+        return ''
+    age, dispatched = templates.get('age_hours'), templates.get('last_refresh_dispatch')
+    if age is None or age <= TEMPLATE_STALE_HOURS:
+        return ''
+    if dispatched and (timezone.now() - datetime.fromisoformat(dispatched)).total_seconds() / 3600 <= TEMPLATE_STALE_HOURS:
+        return ''  # the refresh was dispatched recently and has not reported yet (right after an update): not a failure
+    return f'nuclei templates: not refreshed for {int(age)} hours'
 
 
 def _tools():
@@ -216,9 +255,11 @@ def _tools():
     except OSError:
         updated = None
     last_run = PeriodicTask.objects.filter(task='update_nuclei_templates').values_list('last_run_at', flat=True).first()
-    return {'nuclei_templates': {'updated_at': _iso(updated),
+    refresh = _template_refresh()
+    return {'nuclei_templates': {'updated_at': _iso(updated),  # when the template files last changed: nothing changes between releases
                                  'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
-                                 'last_refresh_dispatch': _iso(last_run)},
+                                 'last_refresh_dispatch': _iso(last_run),
+                                 'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
                          'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
 
@@ -292,9 +333,9 @@ def _system(user, problems, notes):
     out['ai'] = _probe(problems, 'ai', _ai)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['tools'] = _probe(problems, 'tools', _tools)
-    age = ((out['tools'] or {}).get('nuclei_templates') or {}).get('age_hours')
-    if age is not None and age > TEMPLATE_STALE_HOURS:
-        problems.append(f'nuclei templates: not refreshed for {int(age)} hours')
+    problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
+    if problem:
+        problems.append(problem)
     queues = out['queues']
     if isinstance(queues, dict) and queues.get('waiting_total'):
         notes.append(f"{queues['waiting_total']} message(s) waiting in the work queues")
