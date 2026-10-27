@@ -9,7 +9,7 @@ Two jobs, one pass:
   CVE match cvENGINE already found on that host and port, they never create a match and never confirm one.
 * Import, off until the project turns it on. Addresses runZero knows and cvENGINE does not are added as targets through the same
   code as Add targets (``agentapi.services.add_entries``), so exclusions, the private-range policy and organization uniqueness all
-  apply. Names are imported only when they sit under a domain the organization already has: a name on a network is claimed by
+  apply. A public address is imported only inside a network the organization already has as a target (a CIDR block or address). Names are imported only when they sit under a domain the organization already has: a name on a network is claimed by
   whoever runs that device, so it is never trusted as a scope decision.
 
 A sync never raises: its outcome (or the reason it failed) is recorded on ``RunZeroSync`` and in the activity feed.
@@ -150,9 +150,45 @@ def _corroborate_matches(project, ips):
             evidence = dict(match.evidence or {})
             if evidence.get('runzero') or match.cve_entry.cve_id not in runzero.reported_cves(ip, evidence.get('port')):
                 continue
-            match.confidence, match.evidence = runzero.boosted(match.confidence), {**evidence, 'runzero': True}
+            match.confidence, match.evidence = runzero.boosted(match.confidence), {**evidence, 'runzero': True, 'confidence_before': match.confidence}
             match.save(update_fields=['confidence', 'evidence', 'updated_at'])
             changed += 1
+    return changed
+
+
+def _forget_absent(project, present):
+    """Remove runZero's block from the project's addresses runZero no longer lists: an asset that left the inventory must not keep describing
+    the host (its OS, its CVE reports) for ever. Returns how many were cleared."""
+    from startScan.models import IpAddress
+    stale = IpAddress.objects.filter(org_id=project.org_id, fingerprint__has_key='runzero', ip_addresses__target_domain__project=project
+                                     ).exclude(address__in=list(present)).distinct()
+    cleared = 0
+    for ip in stale:
+        fingerprint = dict(ip.fingerprint or {})
+        fingerprint.pop('runzero', None)
+        ip.fingerprint = fingerprint
+        ip.save(update_fields=['fingerprint'])
+        cleared += 1
+    return cleared
+
+
+def _retract_matches(project):
+    """Take back the confidence boost of a match whose CVE runZero no longer reports for the host (the report went away, or the asset left
+    the inventory): the evidence it was boosted by is gone. Returns how many were retracted."""
+    from cveFeed.models import CVEMatch
+    changed = 0
+    boosted = CVEMatch.objects.filter(subdomain__target_domain__project=project, source='port', evidence__runzero=True).select_related('cve_entry')
+    for match in boosted.distinct():
+        evidence = dict(match.evidence or {})
+        reported = any(match.cve_entry.cve_id in runzero.reported_cves(ip, evidence.get('port')) for ip in match.subdomain.ip_addresses.all())
+        if reported:
+            continue
+        before = evidence.pop('confidence_before', None)
+        evidence.pop('runzero', None)
+        match.confidence = before if isinstance(before, (int, float)) else max(0.0, round(match.confidence - runzero.BOOST, 2))
+        match.evidence = evidence
+        match.save(update_fields=['confidence', 'evidence', 'updated_at'])
+        changed += 1
     return changed
 
 
@@ -167,7 +203,9 @@ def _enrich(project, by_ip, reports):
         mine = by_address.get(ip.address, [])
         kept += len(mine)
         updated += _store(ip, _block(by_ip[ip.address], mine))
-    return len(known), updated, kept, _corroborate_matches(project, known)
+    forgotten = _forget_absent(project, by_ip)
+    _retract_matches(project)
+    return len(known), updated + forgotten, kept, _corroborate_matches(project, known)
 
 
 # --- importing targets ---------------------------------------------------------------------------------------------
@@ -192,10 +230,38 @@ def _existing(project, names):
     return have
 
 
+def _owned_networks(project):
+    """The networks the organization already has as targets (a CIDR block or a single address): the proof that it may scan inside them."""
+    import ipaddress
+
+    from targetApp.models import org_domains
+    from targetApp.target_types import CIDR, IP, classify_target
+    networks = []
+    for name in org_domains(project).values_list('name', flat=True):
+        if classify_target(name) in (CIDR, IP):
+            try:
+                networks.append(ipaddress.ip_network(name.strip(), strict=False))
+            except ValueError:
+                continue
+    return networks
+
+
+def _may_import(address, networks):
+    """A public address is imported only inside a network the organization already owns as a target: an inventory search such as ``alive:true``
+    can hold third-party addresses (a partner's range, a cloud address a device talked to), and nobody authorized scanning those. An address
+    that is not a public one (a private or tailnet range) is only here because the operator's policy already allows scanning that range."""
+    import ipaddress
+    ip = ipaddress.ip_address(address)
+    if not ip.is_global:
+        return True
+    return any(ip.version == net.version and ip in net for net in networks)
+
+
 def _import_candidates(project, assets):
     """``(entries, skipped)``: new IPs and in-scope names worth adding (at most the import cap), and why the others were not."""
     from targetApp.target_types import DOMAIN, classify_target, is_scannable_ip
     skipped = {}
+    networks = _owned_networks(project)
 
     def skip(reason, count=1):
         skipped[reason] = skipped.get(reason, 0) + count
@@ -207,7 +273,10 @@ def _import_candidates(project, assets):
                 continue
             seen.add(address)
             if is_scannable_ip(address):
-                wanted.append(address)
+                if _may_import(address, networks):
+                    wanted.append(address)
+                else:
+                    skip('not_owned')  # a public address outside every network the organization has as a target
             else:
                 skip('blocked')  # loopback, link-local or, unless CVENGINE_ALLOW_PRIVATE_TARGETS is set, a private range
         for name in asset['names']:
@@ -272,7 +341,9 @@ def _run(project, row, token):
         reports, reports_cut = client.fetch_vulnerabilities('')
     matched, updated, kept, corroborated = _enrich(project, by_ip, reports)
     counts = {'assets': len(assets), 'matched_hosts': matched, 'updated_hosts': updated, 'cve_reports': kept,
-              'corroborated_matches': corroborated, 'truncated': assets_cut or reports_cut}
+              'corroborated_matches': corroborated, 'truncated': assets_cut or reports_cut or client.quota_low}
+    if client.quota_low:
+        counts['quota_low'] = True  # runZero's daily quota is nearly spent: the sync stopped early and the next one carries on
     if row.import_enabled:
         chosen = assets if not row.search else client.fetch_assets(row.search)[0]
         counts['imported'], counts['skipped'] = _import(project, chosen)

@@ -51,6 +51,33 @@ class HijackTests(MatchBase):
 		match.refresh_from_db()
 		self.assertEqual((match.evidence['inventory_id'], match.ai_verdict, match.confidence), (victim.id, '', 0.6))
 
+	def test_a_report_that_only_names_a_scanned_host_with_unrelated_addresses_is_parked_for_an_administrator(self):
+		"""A token holder cannot speak for any scanned host by reporting its name: an address the scanner saw is the second witness."""
+		self.scanned('web01.example.test', ['192.0.2.10'])
+		stranger, outcome = host_inventory.ingest(self.project, schema.validate(report(host=machine('c', ips=['203.0.113.77']))), source_ip='198.51.100.200')
+		self.assertEqual((outcome, stranger.host, stranger.match_basis), ('new', '', ''))
+		self.assertEqual(stranger.details['claimed_host'], 'web01.example.test')
+		self.assertIn('none of the reported addresses', stranger.details['claim_blocked'])
+		self.assertIn('none of the reported addresses', host_inventory.brief(stranger, 14)['claim_blocked'])
+		with mock.patch.dict(os.environ, {'CVENGINE_INVENTORY_NAME_ONLY': '1'}):  # the operator's switch for an estate scanned behind a load balancer
+			again, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('c', ips=['203.0.113.77']))), source_ip='198.51.100.200')
+		self.assertEqual(again.host, 'web01.example.test')
+
+	def test_the_name_alone_is_enough_when_an_address_corroborates_it(self):
+		self.scanned('web01.example.test', ['192.0.2.10'])
+		by_list, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('d', ips=['192.0.2.10']))))
+		self.assertEqual((by_list.host, by_list.match_basis), ('web01.example.test', 'name'))
+		self.scanned('web02.example.test', ['192.0.2.20'])
+		by_source, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('e', hostname='web02', fqdn='web02.example.test', ips=['203.0.113.78']))),
+			source_ip='192.0.2.20')  # the report came from the host's own address
+		self.assertEqual((by_source.host, by_source.match_basis), ('web02.example.test', 'name'))
+
+	def test_a_host_with_no_comparable_address_has_nothing_to_contradict_the_name(self):
+		self.scanned('web01.example.test', ['192.0.2.10'])
+		IpAddress.objects.filter(address='192.0.2.10').update(is_cdn=True)  # a CDN address says nothing about who runs the machine
+		anyone, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('f', ips=['203.0.113.79']))))
+		self.assertEqual(anyone.host, 'web01.example.test')
+
 	def test_a_patched_report_from_another_machine_cannot_take_over_and_close_a_real_finding(self):
 		victim, match = self.victim()
 		attacker = host_inventory.ingest(self.project, schema.validate(report(host=machine('b', ips=['203.0.113.9']), packages=SUDO)))[0]

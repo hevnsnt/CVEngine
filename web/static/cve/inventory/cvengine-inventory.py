@@ -121,7 +121,7 @@ def parse_os_release(text):
 def parse_dpkg(text):
     for line in lines(text):
         parts = line.split('\t')
-        if len(parts) >= 5 and parts[4].startswith('ii'):
+        if len(parts) >= 5 and parts[4][1:2] == 'i':
             yield {'n': parts[0], 'v': parts[1], 'e': 'dpkg', 'a': parts[2], 's': parts[3]}
 
 
@@ -349,7 +349,7 @@ def runtime(fam):
     kernels = []
     for line in lines(run(['dpkg-query', '-W', '-f=${Package}\t${db:Status-Abbrev}\n', 'linux-image-[0-9]*'])):
         name, _, state = line.partition('\t')
-        if state.startswith('ii'):
+        if state[1:2] == 'i':  # "ii" installed, "hi" installed and held: a held package is often the stale one
             kernels.append(re.sub(r'^linux-image-', '', name))
     if not kernels:
         kernels = [k for k in lines(run(['rpm', '-q', 'kernel-core', 'kernel', '--qf', '%{VERSION}-%{RELEASE}.%{ARCH}\n'])) if 'not installed' not in k]

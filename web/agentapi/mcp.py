@@ -394,7 +394,9 @@ def call_tool(ctx, name, arguments):
 
 
 def handle_message(ctx, msg):
-    """Handle one JSON-RPC message; returns a response dict, or None for notifications."""
+    """Handle one JSON-RPC message; returns a response dict, or None for notifications and for a client's own responses."""
+    if isinstance(msg, dict) and msg.get('jsonrpc') == '2.0' and 'method' not in msg and ('result' in msg or 'error' in msg):
+        return None  # a response to a request this server never made (it has no server-to-client requests): accepted, 202, nothing to answer
     if not isinstance(msg, dict) or msg.get('jsonrpc') != '2.0' or 'method' not in msg:
         return _rpc_error(msg.get('id') if isinstance(msg, dict) else None, -32600, 'invalid request')
     method, rpc_id, params = msg['method'], msg.get('id'), msg.get('params', {})
@@ -419,6 +421,8 @@ def handle_message(ctx, msg):
     if method == 'tools/call':
         if not isinstance(params.get('name'), str) or not isinstance(params.get('arguments', {}), dict):
             return _rpc_error(rpc_id, -32602, 'tool name must be a string and arguments an object')
+        if params['name'] not in BY_NAME:
+            return _rpc_error(rpc_id, -32602, f"unknown tool {params['name'][:80]!r}")  # the spec: an unknown tool is a protocol error
         try:
             data = call_tool(ctx, params.get('name'), params.get('arguments'))
             return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': json.dumps(data, default=str)}], 'isError': False,
@@ -468,11 +472,40 @@ def _nesting_exceeds(value, limit):
     return False
 
 
+def _internal_error(ctx, message):
+    """handle_message, with an uncaught exception answered as the JSON-RPC internal error instead of an HTML 500 page."""
+    try:
+        return handle_message(ctx, message)
+    except Exception:  # noqa: BLE001 - the reason stays in the log; the client gets a protocol-level answer
+        logger.exception('MCP request failed')
+        rpc_id = message.get('id') if isinstance(message, dict) else None
+        if not isinstance(rpc_id, (str, int, float, type(None))) or len(str(rpc_id)) > 128:
+            rpc_id = None
+        return _rpc_error(rpc_id, -32603, 'internal error') if isinstance(message, dict) and 'id' in message else None
+
+
+def _origin_refused(request):
+    """The spec's DNS-rebinding guard: a browser sends Origin, and a page on another site must not be able to talk to this endpoint with
+    the visitor's credentials. A request with no Origin (every MCP client that is not a web page) passes; one whose Origin is not this
+    site's own host is refused."""
+    from urllib.parse import urlsplit
+    origin = request.META.get('HTTP_ORIGIN')
+    if not origin:
+        return False
+    host = (urlsplit(origin).netloc or '').lower()
+    return host != request.get_host().lower()
+
+
 def endpoint(request):
     if request.method != 'POST':
         response = JsonResponse({'error': 'POST JSON-RPC messages to this endpoint'}, status=405)
         response['Allow'] = 'POST'
         return response
+    if _origin_refused(request):
+        return JsonResponse(_rpc_error(None, -32600, 'Origin not allowed'), status=403)
+    version = request.META.get('HTTP_MCP_PROTOCOL_VERSION')
+    if version and version not in SUPPORTED_VERSIONS:
+        return JsonResponse(_rpc_error(None, -32600, f'unsupported MCP-Protocol-Version; use one of {", ".join(SUPPORTED_VERSIONS)}'), status=400)
     too_large = lambda: JsonResponse(_rpc_error(None, -32600, 'Request body exceeds 256 KiB'), status=413)
     try:
         length = int(request.META.get('CONTENT_LENGTH') or 0)
@@ -504,9 +537,9 @@ def endpoint(request):
         item_limit = (MAX_RESPONSE_BYTES - MAX_BATCH_ITEMS - 2) // max(1, len(payload))
         responses = []
         for message in payload:
-            response = handle_message(ctx, message)
+            response = _internal_error(ctx, message)
             if response is not None:
                 responses.append(_bounded_result(response, item_limit))
         return HttpResponse(b'[' + b','.join(responses) + b']', content_type='application/json') if responses else HttpResponse(status=202)
-    response = handle_message(ctx, payload)
+    response = _internal_error(ctx, payload)
     return HttpResponse(_bounded_result(response, MAX_RESPONSE_BYTES), content_type='application/json') if response is not None else HttpResponse(status=202)

@@ -32,12 +32,13 @@ Linux and macOS:
 Windows (PowerShell 5.1 or 7):
 
 ```powershell
-$env:CVENGINE_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Token' -AsSecureString)).Password; Invoke-WebRequest https://cvengine.example.test/staticfiles/cve/inventory/cvengine-inventory.ps1 -OutFile cvengine-inventory.ps1
+$env:CVENGINE_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Token' -AsSecureString)).Password; curl.exe -fsS --cacert ca.crt https://cvengine.example.test/staticfiles/cve/inventory/cvengine-inventory.ps1 -o cvengine-inventory.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\cvengine-inventory.ps1 -Server https://cvengine.example.test -Project my-project -CaFile .\ca.crt
 ```
 
-`ca.crt` is the installer's certificate authority (`secrets/certs/ca.crt` on the server). Leave the option out when the server has a publicly
-trusted certificate. A Python 3.6+ script, `cvengine-inventory.py`, reports the same thing on Linux and macOS with the standard library only.
+`ca.crt` is the installer's certificate authority (`secrets/certs/ca.crt` on the server). On Windows the script is fetched with `curl.exe`
+(Windows 10 1803 and later), because `Invoke-WebRequest` would not trust a private CA; with a publicly trusted certificate use
+`Invoke-WebRequest <url> -OutFile cvengine-inventory.ps1` and leave `-CaFile` out. A Python 3.6+ script, `cvengine-inventory.py`, reports the same thing on Linux and macOS with the standard library only.
 
 The scripts live in `scripts/inventory/` and are served at `/staticfiles/cve/inventory/` (copies in `web/static/cve/inventory/`; `make
 inventory-sync` refreshes them, and a test fails if they differ).
@@ -80,6 +81,8 @@ Choices that are worth knowing:
 - **The machine id** (`/etc/machine-id`, the IOKit platform UUID, the registry `MachineGuid`) is sent only as
   `sha256("cvengine-inventory-v1:" + id)`. systemd's `machine-id(5)` says the raw id "should be considered confidential" and must not be used
   directly by applications, which should hash it with an application-specific key.
+
+On Debian and Ubuntu a package that is installed but held (`apt-mark hold`, dpkg status `hi`) is reported like any other: held packages are often the stale ones.
 
 **Never collected:** passwords, keys, tokens, certificates, shell or PowerShell history, environment variables, event or system logs, file
 contents other than the OS metadata above, user accounts, network shares, browser data, process command lines (a listening socket's process
@@ -196,7 +199,7 @@ confirmed against the spec before relying on it.
 
 In order, within the report's own project, against the hosts of the current inventory:
 
-1. **Name.** The report's FQDN, then its host name, equals a scanned name.
+1. **Name.** The report's FQDN, then its host name, equals a scanned name, **and an address backs it up**: the report lists one of the scanned host's addresses, or it came from one. A name is only the reporter's word, so without that second witness the report is held as unmatched (the dialog shows the host it wanted and why) for an administrator to adopt. A host with no address to compare (none known, or only CDN or shared ones) passes on its name. An estate whose hosts are scanned at an address that neither the report nor its source ever shows (a load balancer or NAT in front) can set `CVENGINE_INVENTORY_NAME_ONLY=1` to accept the name alone.
 2. **Address.** A scanned host resolves to the report's addresses (never a CDN address; names on the same addresses are one host, shown under
    the project's own target name). The host with the most addresses in common wins.
 3. **Short name.** The host name is the first label of exactly one scanned name.

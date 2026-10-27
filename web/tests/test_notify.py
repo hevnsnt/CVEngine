@@ -50,6 +50,14 @@ class NotifyTests(TestCase):
 			CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, version_in_range=True)
 		return entry
 
+	def test_send_says_whether_any_channel_took_the_message(self):
+		self.enable(send_interesting_notif=True, send_vuln_notif=False)
+		self.assertIs(notify._send('x', 'send_interesting_notif'), True)
+		self.assertFalse(notify._send('x', 'send_vuln_notif'))  # this kind of event is switched off: nothing was tried
+		with mock.patch.object(notify, 'CHANNEL_SENDERS', {'slack': 'send_slack_message'}), \
+				mock.patch('reNgine.common_func.send_slack_message', side_effect=RuntimeError('down')):
+			self.assertIsNone(notify._send('x', 'send_interesting_notif'))  # tried, and every channel failed
+
 	# --- settings gate ---------------------------------------------------------------------
 	def test_nothing_is_sent_without_settings_or_with_everything_off(self):
 		scan = self.scan()

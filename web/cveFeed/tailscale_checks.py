@@ -4,7 +4,7 @@ HygieneFinding rows (check names start with ``ts_``) and resolves the ones that 
 
 Every rule states a fact the data proves and gives its severity with the reason. Nothing here guesses: a flag a source did not report
 is unknown and produces no finding. Where a rule rests on a published claim rather than on Tailscale's own documentation, the finding
-says so (the tailworm.com assessment of October 2026 is a single researcher's report that Tailscale has not confirmed).
+says so (the tailworm.com assessment of October 2026 is a single researcher's report; Tailscale has acknowledged it and merged fixes for several findings, but as of 2026-10-27 had shipped no numbered release or advisory for them).
 """
 import ipaddress
 import re
@@ -276,9 +276,9 @@ def evaluate_policy(policy, host, tailnet=''):
         out.append(_finding(
             'ssh_accept_broad', MEDIUM, 'Tailscale SSH accept rules are broad or allow root',
             (f'{len(ssh)} Tailscale SSH rule{"s" if len(ssh) != 1 else ""} accept without a re-authentication check and either allow login as root or accept '
-             'every member. The tailworm.com assessment (a single researcher\'s report that Tailscale has not confirmed) says an approved '
+             'every member. The tailworm.com assessment (a single researcher\'s report that Tailscale has acknowledged, with fixes merged but no numbered release yet) says an approved '
              'session can also forward unix sockets as root through tailscaled, and recommends per-pair SSH rules.',
-             'medium: it widens who can open a root-capable session; the forwarding claim is unconfirmed, the rule scope is not'),
+             'medium: it widens who can open a root-capable session; the forwarding fix is not in a numbered release yet, the rule scope is'),
             'give each SSH rule a specific source and destination, avoid root and autogroup:member on accept rules, and use "check" for '
             'privileged destinations.', {'tailnet': tailnet, 'rules': ssh[:EVIDENCE_RULES]}, REF_SSH))
     tags = _broad_tag_owners(policy)

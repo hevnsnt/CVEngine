@@ -635,6 +635,32 @@ class AgentApiTests(TestCase):
 		self.assertEqual(rpc(self.t_alice, 'nope')[1]['error']['code'], -32601)
 		self.assertEqual(call(self.t_alice, 'GET', '/mcp/')[0], 405)
 
+	def mcp_post(self, body, **headers):
+		from django.test import Client
+		response = Client().post('/mcp/', json.dumps(body), content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.t_alice}', **headers)
+		return response.status_code, (response.json() if response.content else None)
+
+	def test_mcp_follows_the_transport_rules_of_the_spec(self):
+		message = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}
+		# a browser page of another site: refused. No Origin (every MCP client) and this site's own Origin: fine
+		self.assertEqual(self.mcp_post(message, HTTP_ORIGIN='https://evil.example.test')[0], 403)
+		self.assertEqual(self.mcp_post(message)[0], 200)
+		self.assertEqual(self.mcp_post(message, HTTP_ORIGIN='http://testserver')[0], 200)
+		# a protocol version the server does not speak: 400; a supported one or none: fine
+		self.assertEqual(self.mcp_post(message, HTTP_MCP_PROTOCOL_VERSION='1999-01-01')[0], 400)
+		self.assertEqual(self.mcp_post(message, HTTP_MCP_PROTOCOL_VERSION='2025-06-18')[0], 200)
+		# a client's own response or error to something the server never asked: accepted with 202 and no body
+		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'result': {}}), (202, None))
+		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'error': {'code': -1, 'message': 'x'}}), (202, None))
+
+	def test_an_unknown_tool_is_a_protocol_error_and_a_crash_is_a_json_rpc_error(self):
+		status, data = rpc(self.t_alice, 'tools/call', {'name': 'no_such_tool', 'arguments': {}})
+		self.assertEqual((status, data['error']['code']), (200, -32602))
+		with mock.patch('agentapi.mcp.call_tool', side_effect=RuntimeError('database exploded with a secret path /var/x')):
+			status, data = rpc(self.t_alice, 'tools/call', {'name': 'list_projects', 'arguments': {}}, rpc_id=9)
+		self.assertEqual((status, data['id'], data['error']['code']), (200, 9, -32603))
+		self.assertNotIn('secret path', json.dumps(data))
+
 	def _tool(self, token, name, args=None):
 		status, data = rpc(token, 'tools/call', {'name': name, 'arguments': args or {}})
 		content = data['result']['content'][0]['text']
@@ -657,8 +683,7 @@ class AgentApiTests(TestCase):
 		self.assertEqual((err, msg), (True, 'audit role is read only'))
 		err, msg = self._tool(self.t_ro, 'add_target', {'project': 'proj-a', 'value': 'x.example'})
 		self.assertEqual((err, msg), (True, 'this token is read only'))
-		err, msg = self._tool(self.t_alice, 'no_such_tool')
-		self.assertTrue(err)
+		self.assertEqual(rpc(self.t_alice, 'tools/call', {'name': 'no_such_tool', 'arguments': {}})[1]['error']['code'], -32602)  # a protocol error, not a tool result
 
 	def test_an_over_long_assets_argument_is_refused_not_ground_through(self):
 		err, data = self._tool(self.t_alice, 'get_remediation_work',

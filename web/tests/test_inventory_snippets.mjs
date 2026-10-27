@@ -16,7 +16,9 @@ test('each platform gets one command with the server and the project, and no tok
       'sh cvengine-inventory.sh --server https://cvengine.example.test --project proj-a --token-file cvengine-inventory.token --ca-file ca.crt',
   );
   assert.match(s.python, /python3 cvengine-inventory\.py --server https:\/\/cvengine\.example\.test --project proj-a --token-file cvengine-inventory\.token --ca-file ca\.crt$/);
-  assert.match(s.windows, /^\$env:CVENGINE_TOKEN = \[System\.Net\.NetworkCredential\]::new\('', \(Read-Host 'Token' -AsSecureString\)\)\.Password; Invoke-WebRequest https:\/\/cvengine\.example\.test\/staticfiles\/cve\/inventory\/cvengine-inventory\.ps1/);
+  assert.match(s.windows, /^\$env:CVENGINE_TOKEN = \[System\.Net\.NetworkCredential\]::new\('', \(Read-Host 'Token' -AsSecureString\)\)\.Password; curl\.exe -fsS --cacert ca\.crt https:\/\/cvengine\.example\.test\/staticfiles\/cve\/inventory\/cvengine-inventory\.ps1 -o cvengine-inventory\.ps1; /);
+  // a publicly trusted certificate needs no CA file, and Invoke-WebRequest is fine there
+  assert.match(snippets({...base, privateCa: false}).windows, /Invoke-WebRequest https:\/\/cvengine\.example\.test\/staticfiles\/cve\/inventory\/cvengine-inventory\.ps1 -OutFile/);
   assert.match(s.windows, /-Server https:\/\/cvengine\.example\.test -Project proj-a -CaFile \.\\ca\.crt$/);
   assert.equal(SCRIPT_PATH, '/staticfiles/cve/inventory/');
 });
