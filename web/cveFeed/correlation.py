@@ -796,14 +796,19 @@ def _carry_remediation(fresh):
     earlier = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
                                        subdomain__name__in=names).exclude(remediation_status="open")
                .exclude(subdomain_id__in=list(hosts)).select_related("subdomain").order_by("id"))
-    latest = {}
+    latest, by_host = {}, {}
     for m in earlier:  # oldest first, so the newest decision wins
         latest[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product)] = m
+        by_host[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name)] = m
     if not latest:
         return
     for match in fresh:
         domain_id, name = hosts.get(match.subdomain_id, (None, None))
-        before = latest.get((match.cve_entry_id, domain_id, name, match.source, match.matched_product))
+        # The same product by the same name first. When the match is now made under another product string or source (the advisory's
+        # name changed in a feed update, the product is now seen on another port, a CPE where a banner was) it is still the same CVE on
+        # the same host, and a person's decision about that must not be lost to a different label.
+        before = (latest.get((match.cve_entry_id, domain_id, name, match.source, match.matched_product))
+                  or by_host.get((match.cve_entry_id, domain_id, name)))
         if before is not None:
             match.remediation_status, match.remediation_note = before.remediation_status, before.remediation_note
             match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
