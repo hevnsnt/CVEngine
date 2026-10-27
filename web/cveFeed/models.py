@@ -567,6 +567,39 @@ class HostLabel(models.Model):
         return f"{self.host}: {self.label}"
 
 
+class ProbeObservation(models.Model):
+    """One fact a version or identity probe (cveFeed.probes) found, or looked for and did not find, about a host: a product's version,
+    which of several look-alike products runs there, the edge in front of it, whether it is WordPress. One row per
+    (project, host, probe, port, kind, product); a repeat updates it. ``outcome`` says whether the probe found the fact, found that the host
+    hides it (``hidden``: the product answers and states no version), saw only a CDN or WAF edge (``edge``), was refused by the edge
+    (``challenged``) or found nothing of the kind (``absent``). Never a guess: a version is stored only when the response states it."""
+
+    OUTCOMES = ("found", "hidden", "edge", "challenged", "absent")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase
+    probe = models.CharField(max_length=48)
+    kind = models.CharField(max_length=16)  # version | identity | edge | wordpress | wp-plugin | wp-theme
+    product = models.CharField(max_length=120, blank=True, default="")
+    version = models.CharField(max_length=100, blank=True, default="")
+    variant = models.CharField(max_length=60, blank=True, default="")  # identity: nginx, ingress-nginx, nginx-ui ...
+    port = models.IntegerField(default=0)  # 0: not specific to one port
+    url = models.CharField(max_length=500, blank=True, default="")  # the path or URL that answered, host name removed
+    outcome = models.CharField(max_length=12, default="found")
+    confidence = models.FloatField(default=0.0)
+    source = models.CharField(max_length=48, blank=True, default="")  # header:server, body:regex, nmap:-sV, wpscan ...
+    evidence = models.JSONField(default=dict, blank=True)
+    first_seen = models.DateTimeField(default=timezone.now)
+    observed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "probe", "port", "kind", "product"], name="uniq_probeobs_host_probe_port_kind_product")]
+        indexes = [models.Index(fields=["project", "host"], name="probeobs_proj_host_idx")]
+
+    def __str__(self):
+        return f"{self.host}: {self.probe} {self.product} {self.version}".strip()
+
+
 class HostProfile(models.Model):
     """Editable asset information for one host of a project: who owns it, what it is for and how much it matters.
     One row per (project, host); the host name is stored lowercase. Never read by a scanner."""

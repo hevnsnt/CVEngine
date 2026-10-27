@@ -94,6 +94,19 @@ class SystemStatusTests(TestCase):
 		self.assertEqual(alpha['open_findings_total'], 0)
 		self.assertEqual(set(alpha['open_findings']), {'critical', 'high', 'medium', 'low', 'info'})
 
+	def test_wordpress_counts_are_per_project_and_say_why_hosts_were_not_scanned(self):
+		from cveFeed.models import ProbeObservation
+
+		def state(project, domain, host, name, **evidence):
+			ProbeObservation.objects.create(project=project, domain=domain, host=host, probe='wpscan', kind='wordpress', product='WordPress',
+				outcome='found' if name == 'scanned' else 'hidden', evidence={'state': name, **evidence})
+		state(self.pa, self.da, 'www.alpha.example', 'scanned', findings=3)
+		state(self.pa, self.da, 'blog.alpha.example', 'blocked', reason='the edge challenged the scanner')
+		state(self.pb, self.db, 'www.beta.example', 'failed')
+		_, data = self.get(self.t_member)
+		self.assertEqual(data['projects'][0]['wordpress'], {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}, 'thorough': {}})
+		self.assertEqual([p['slug'] for p in data['projects']], ['alpha'])  # the other project's WordPress host is not counted or shown
+
 	def test_an_app_admin_sees_every_project_and_the_infrastructure(self):
 		status, data = self.run_status(self.t_root)
 		self.assertEqual(status, 200)

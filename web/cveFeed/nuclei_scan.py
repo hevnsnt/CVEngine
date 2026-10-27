@@ -494,7 +494,7 @@ def tech_name_from(line):
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
         name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
     name = (name or '').strip()[:100]
-    version = next((str(v) for v in line.get('extracted-results') or [] if v and str(v)[0].isdigit()), '')
+    version = next((str(v).lstrip('vV') for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or ''))), '')
     return f'{name}:{version[:30]}' if name and version else name
 
 

@@ -142,7 +142,7 @@ RUN printf 'config:\n  modules:\n    shodan_dns:\n      api_key: build-check\n' 
     bbot -t example.com -p subdomain-enum /tmp/keys.yml --current-preset 2>&1 | grep -q 'api_key: build-check' && \
     ! grep -q 'Error parsing' /tmp/bbot-check.txt && rm -f /tmp/keys.yml /tmp/bbot-check.txt
 
-# WPScan, run only against WordPress sites a scan has already fingerprinted (see docs/CONFIGURATION.md for its licence).
+# WPScan, run against every host that shows any sign of WordPress, quick pass in the scan and a thorough pass in the background (see docs/CONFIGURATION.md for its licence).
 # Pinned; its vulnerability metadata is fetched now and refreshed by WPScan itself while it runs.
 ARG WPSCAN_VERSION=4.1.0
 RUN apt-get update -y && \

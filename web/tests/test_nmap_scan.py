@@ -60,6 +60,7 @@ class ParseXmlTests(TestCase):
 			'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh',
 			'product': 'OpenSSH', 'version': '8.9', 'service_extra': 'Ubuntu', 'ostype': '',
 			'cpe': '', 'cpes': [], 'method': '', 'scripts': {}, 'banner': '',
+			'tunnel': '', 'hostname': '', 'devicetype': '', 'confidence': '', 'tls': {},
 		}])
 
 

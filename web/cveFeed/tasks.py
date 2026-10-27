@@ -35,6 +35,14 @@ def review_inactive_hosts(run_id=None):
     return run_page(run_id)
 
 
+@app.task(name='wpscan_thorough', bind=False, queue='wpscan_queue')
+def wpscan_thorough(project_id):
+    """The thorough WPScan pass (plugins and themes in mixed mode, hours per site) for one project: see ``wpscan_scan.run_thorough``. It has a
+    queue of its own so a pass that takes hours never holds up the feed workers."""
+    from cveFeed import wpscan_scan
+    return wpscan_scan.run_thorough(project_id)
+
+
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
 def sync_tailscale():
     """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""
@@ -596,7 +604,9 @@ def validate_match_on_demand(request_id):
         available_checks = [check for check in available_checks if check]
         planning = activity.log('confirm', f'Validation request #{job.pk}: choosing permitted checks for {cve_id}',
                                 project=job.project_id, cve_id=cve_id, status='running', **detail)
-        plan, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, available_checks, template)
+        from cveFeed import host_context
+        host = host_context.clipped(host_context.host_context(match.subdomain, job.project_id, focus=match.matched_product))
+        plan, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, available_checks, template, host=host)
         selected = set(plan['check_kinds'])
         checks = [check for check in available_checks if check['kind'] in selected]
         plans = [plan]
@@ -614,6 +624,10 @@ def validate_match_on_demand(request_id):
             plan_notes.append('No permitted template covers this CVE; an AI draft requires reviewed positive fixture evidence before host execution.')
         if not checks:
             plan_notes.append(plan['reason'])
+        if not any(check['kind'] == 'fact_probe' for check in available_checks):
+            from cveFeed import probes
+            plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
+                              'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
         # Refresh only this finding's planned checks, not other hosts that share its signature.
         for check in checks:
             ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()
@@ -631,7 +645,7 @@ def validate_match_on_demand(request_id):
             second_step = activity.log('confirm', f'Validation request #{job.pk}: reviewing observations and choosing the next check',
                                        project=job.project_id, cve_id=cve_id, status='running', **detail)
             second, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, remaining, template,
-                                                    provider=provider, observations=observations)
+                                                    provider=provider, observations=observations, host=host)
             next_kinds = set(second['check_kinds'])
             plans.append(second)
             activity.settle(second_step, 'done', f'Validation request #{job.pk}: {second["reason"]}',

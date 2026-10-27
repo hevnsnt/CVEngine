@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 24, 'naabu': 7 * 24, 'nuclei': 24,
                      'nuclei-deep-target': 7 * 24, 'nuclei-deep-host': 7 * 24, 'bbot': 7 * 24,
-                     'ct-watch': 24, 'hygiene': 24, 'bbot-deep': 7 * 24, 'route-auth': 7 * 24, 'retest': 24, 'validate': 24, 'archive-urls': 7 * 24}
+                     'ct-watch': 24, 'hygiene': 24, 'bbot-deep': 7 * 24, 'route-auth': 7 * 24, 'retest': 24, 'validate': 24, 'archive-urls': 7 * 24,
+                     'wpscan': 7 * 24, 'wpscan-partial': 24, 'wpscan-thorough': 30 * 24, 'wpscan-thorough-partial': 24, 'wp-probe': 24, 'probe': 72}
 CLAIM_TTL = 180  # seconds; refreshed while held, so a crashed worker frees its assets within minutes
 CHUNK = 500
 KEY_PREFIX = 'cvengine:svc'
@@ -81,6 +82,19 @@ def fresh(service, assets, project=None):
     except Exception:  # noqa: BLE001 - a ledger failure means "scan it again"
         logger.exception('ledger: could not read %s', service)
         return set()
+    return found
+
+
+def last_run(service, assets, project=None):
+    """``{asset: when its latest run of ``service`` finished}`` (any status) for the assets that have one: to run the never-run and the
+    longest-waiting first when a cap cuts the list."""
+    from cveFeed.models import ServiceRun
+    found = {}
+    try:
+        for part in _chunks({_norm(a) for a in assets}):
+            found.update(ServiceRun.objects.filter(service=service, project_id=_pk(project), asset__in=part).values_list('asset', 'finished_at'))
+    except Exception:  # noqa: BLE001 - a ledger failure means "no history": every asset reads as never run
+        logger.exception('ledger: could not read %s', service)
     return found
 
 

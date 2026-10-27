@@ -18,6 +18,7 @@ only cleaned, structured evidence (see reNgine.ai_providers.build_triage_prompt)
 
 The builders and ``apply_rules`` are pure (duck-typed on the model fields) so they are unit tested without a database.
 """
+import contextvars
 import hashlib
 import json
 import logging
@@ -82,7 +83,9 @@ def hard_evidence(kind, facts):
             raise_to('confirmed', 'a nuclei template check matched this host')
         if facts.get('distro_status') == 'vulnerable':
             raise_to('confirmed', "the distribution's security tracker lists this package release as affected")
-        if facts.get('version_in_range') is True and facts.get('distro_status') != 'patched':
+        if facts.get('version_in_range') is True and facts.get('distro_status') != 'patched' and not facts.get('closure_basis'):
+            # a version inside the range is a floor the model cannot clear, unless host metadata gives it concrete grounds (a different
+            # product than the advisory names, or evidence that is only a CDN edge's answer): then its judgement stands
             raise_to('needs_validation', 'the version found is inside the affected range')
     elif kind == 'nuclei':
         if facts.get('source') == 'nuclei-cve':
@@ -158,7 +161,7 @@ def signature_for(kind, fields):
 
 # Signature fields that are not evidence about the asset: advisory text and scores from the CVE feed. When only these, or the
 # decision scheme above, change, the finding is reviewed again but keeps what was proven about it until the new verdict lands.
-NON_ASSET_FIELDS = ('intelligence',)
+NON_ASSET_FIELDS = ('intelligence', 'context', 'closure_basis')  # what probes and edges said: a new probe result re-asks the question, it does not erase the record
 
 
 def evidence_key_for(kind, fields, review_nonce=''):
@@ -370,12 +373,78 @@ def _port_for(sub, number):
     return None
 
 
+# one host's context is read once while ``track`` runs; outside it nothing is remembered (a long-lived worker must never serve a stale context)
+_CONTEXT_MEMO = contextvars.ContextVar('triage_context_memo', default=None)
+
+
+def _web_evidence(match):
+    """Whether a match was made from something an HTTP response (and so a CDN edge) can speak for: a technology tag, or a port that serves
+    HTTP. An SSH, database or mail port is never the CDN's: its banner is the host's own."""
+    from cveFeed import route_auth
+    if match.source == 'tech':
+        return True
+    if match.source != 'port':
+        return False
+    from startScan.models import Port
+    row = Port.objects.filter(pk=(match.evidence or {}).get('source_id')).values_list('service_name', 'number', 'extra').first()
+    if row is None:
+        return False
+    service, number, extra = (row[0] or '').lower(), row[1], row[2] or {}
+    return number in route_auth.WEB_PORTS or service in route_auth.HTTP_SERVICE_NAMES or extra.get('tunnel') == 'ssl' and 'http' in service
+
+
+def closure_basis(match, context):
+    """The concrete grounds, verified from host metadata, on which a model may clear a match whose version is inside the range:
+    ``different_product`` (a probe showed the host runs a look-alike, not the product the advisory names) and ``cdn_edge_only`` (a CDN, WAF or
+    hosting edge answers for the host on DNS-level evidence, and the match rests on a web response: the banner or version came from the edge).
+    Nothing the model says, and nothing a response header claims, creates one."""
+    from cveFeed import match_policy, probes
+    basis = []
+    if match_policy.has_standing(match):
+        return basis  # a person, a template, a distribution tracker or the host itself vouches for it: no inference from the edge clears it
+    if (context.get('edge') or {}).get('verified') and _web_evidence(match):
+        basis.append('cdn_edge_only')
+    if match.subdomain is not None and probes.lookalike_conflict(match.subdomain, match):
+        basis.append('different_product')
+    return basis
+
+
+def attach_host_context(d, match):
+    """Give a CVE match's description the host's metadata for the model (``host_context``), the verified closure grounds and, when probes or
+    an edge said anything, a digest in the signature so the question is asked again when they change. A host nothing was probed on keeps
+    its signature. Never fatal: without it the finding is judged on its own evidence, as before."""
+    from cveFeed import host_context
+    sub = match.subdomain
+    if sub is None or sub.target_domain_id is None:
+        return
+    try:
+        memo = _CONTEXT_MEMO.get()
+        if memo is not None and sub.pk in memo:
+            context = memo[sub.pk]
+        else:
+            context = host_context.host_context(sub, sub.target_domain.project_id)
+            if memo is not None:
+                memo[sub.pk] = context
+        basis = closure_basis(match, context)
+    except Exception:  # noqa: BLE001
+        logger.exception('could not read the host context of match %s', match.pk)
+        return
+    d['host_context'] = host_context.clipped(context)
+    d['facts']['closure_basis'] = basis
+    digest = host_context.signal_digest(context)
+    if digest:
+        d['signature_fields']['context'] = digest
+    if basis:
+        d['signature_fields']['closure_basis'] = basis
+
+
 def describe(finding):
     """The description of a model instance of any triaged kind, with its signature: a dict with kind, facts, payload, signature,
     severity, priority, project_id, domain_id, host, first_seen."""
     from cveFeed.models import CVEMatch, HygieneFinding, RouteAuth
     if isinstance(finding, CVEMatch):
         d = describe_cve_match(finding)
+        attach_host_context(d, finding)
         sub = finding.subdomain
         domain = sub.target_domain if sub else None
         base = {'project_id': domain.project_id if domain else None, 'domain_id': domain.pk if domain else None,
@@ -446,6 +515,15 @@ def _fetch(fk, ids):
 
 
 def track(findings):
+    """One host's context is read once per call (a host with fifty matches is one read). See ``_track``."""
+    token = _CONTEXT_MEMO.set({})
+    try:
+        return _track(findings)
+    finally:
+        _CONTEXT_MEMO.reset(token)
+
+
+def _track(findings):
     """Make sure each finding has a Triage row carrying the signature of its current evidence, and mark it seen now. A row whose
     evidence changed is reset (verdict detached, classification cleared, validation plan dropped), the stale legacy verdict of a CVE
     match is cleared with it, and the hosts are rescored so a stale AI bonus goes. A row whose asset evidence is unchanged and whose
@@ -698,7 +776,8 @@ def _apply(verdict, group):
         # that stands on its version: the model's "not applicable" cannot overrule that, while a version outside the range, a patched
         # distribution package or an unknown range is the model's to judge (an end-of-life release no advisory lists is protected like a range).
         if match and classification in ('likely_false_positive', 'not_applicable') and match.distro_status != 'patched' \
-                and (match.version_in_range is True or (match.evidence or {}).get('branch_unlisted')):
+                and (match.version_in_range is True or (match.evidence or {}).get('branch_unlisted')) \
+                and not d['facts'].get('closure_basis'):
             classification = 'needs_validation'
             reason = ('AI suggested the match may be inapplicable, but the recorded version is inside the advisory\'s affected range '
                       'for the same product (or older than every branch it fixes), so there is no supported evidence to close it. '
@@ -843,7 +922,7 @@ def run_triage(pairs, provider=False, scan_id=None):
         state['run'] += 1
         rep_d = group[0][1]
         try:
-            answer = triage_finding(state['provider'], rep_d['kind'], rep_d['payload'])
+            answer = triage_finding(state['provider'], rep_d['kind'], rep_d['payload'], *([rep_d['host_context']] if rep_d.get('host_context') else []))
         except AIProviderError as exc:
             _finish_call(claim, 'failed')
             diagnostic = _error_diagnostic(exc, 'ai_triage', group, state['provider'], claim)

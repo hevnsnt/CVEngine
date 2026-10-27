@@ -16,7 +16,7 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 
-from cveFeed import fingerprint
+from cveFeed import fingerprint, versions
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,11 @@ PER_REQUEST_GAP = 0.2  # seconds between two requests to the same host
 CONNECT_TIMEOUT, READ_TIMEOUT = 3, 6
 PROBE_TOTAL_SECONDS = 20  # wall-clock budget for one probe: the per-read timeouts alone let a host that trickles bytes hold a worker thread for good
 ROUTE_SAMPLE_BYTES = 64 * 1024
+MAX_PROBE_BYTES = 256 * 1024  # the most a version probe may ask for (a JavaScript bundle names its framework version deep inside)
+# what an ordinary browser sends. Some CDNs answer an obvious scanner request with a challenge page instead of the site, so the version
+# probes (never the route check) present as a browser; the headers say nothing a browser would not, and no cookie or credential is sent.
+BROWSER_HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+                   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9'}
 MAX_PATH_LENGTH = 200
 CHUNK = 500
 STATIC_EXT = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.map', '.pdf', '.xml', '.txt')
@@ -117,7 +122,9 @@ def web_bases(sub):
                 continue
             service, product = (port.service_name or '').lower(), (port.product or '').lower()
             if port.number in WEB_PORTS or service in HTTP_SERVICE_NAMES or 'http' in product:
-                https = 'https' in service or 'ssl' in service or WEB_PORTS.get(port.number) == 'https'
+                # nmap names a TLS web service "http" with tunnel="ssl", so the service name alone sends 8444 or 10443 a plain-HTTP request
+                https = ('https' in service or 'ssl' in service or WEB_PORTS.get(port.number) == 'https'
+                         or (getattr(port, 'extra', None) or {}).get('tunnel') == 'ssl')
                 found.add(('https' if https else 'http', port.number))
     order = sorted(found, key=lambda sp: (0 if sp[1] == 443 else 1 if sp[1] == 80 else 2, sp[1], sp[0]))
     return [_base(scheme, host, port) for scheme, port in order[:MAX_BASES_PER_HOST]]
@@ -197,7 +204,10 @@ def classify(probe):
             evidence[key] = str(probe[field])[:100]
     page_url = probe.get('url', '')
     scripts, local = fingerprint.script_sources(body, page_url) if (urlparse(page_url).path or '/') == '/' else ([], [])
-    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts)
+    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts,
+                                      headers=probe.get('headers'))
+    if probe.get('headers') and (urlparse(page_url).path or '/') == '/':
+        evidence['headers'] = probe['headers']  # the root page's kept response headers: host metadata for the AI and the host page
     if local:
         evidence['local_scripts'] = local  # read by run_route_auth, which removes it before anything is stored
     if found:
@@ -294,7 +304,7 @@ def _read_scripts(result, probe, scan_id):
         evidence['fingerprint_names'] = [f['name'] for f in found]
 
 
-def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None):
+def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False):
     """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
@@ -303,7 +313,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
 
     if method not in ('GET', 'HEAD'):
         raise ValueError('route probes are read-only: GET or HEAD')
-    max_bytes = min(int(max_bytes), ROUTE_SAMPLE_BYTES)
+    max_bytes = min(int(max_bytes), MAX_PROBE_BYTES)
     if max_bytes < 0:
         raise ValueError('invalid probe byte limit')
     if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) == 127 for c in url):
@@ -328,6 +338,8 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         authority += f':{port}'
     request_headers = {'User-Agent': 'CVEngine route check', 'Accept': 'text/html,*/*;q=0.5',
                        'Accept-Encoding': 'identity', 'Host': authority}
+    if browser:
+        request_headers.update(BROWSER_HEADERS)
     request_headers.update({key.title(): value for key, value in (headers or {}).items()})
     path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
@@ -373,7 +385,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
                 'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
                 'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
                 'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
-                'powered_by': response.getheader('X-Powered-By', '')}
+                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items())}
     except (OSError, http.client.HTTPException):
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget') from None
