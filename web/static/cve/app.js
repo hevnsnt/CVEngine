@@ -18,6 +18,7 @@ import {
   text as uiText,
 } from "/staticfiles/cve/ui.js";
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
+import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -933,6 +934,8 @@ function renderFinding(d, cfg, row) {
   head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
   const detailAge = agingOf(row || {});
   if (d.severity) head.append(badge(d.severity, d.severity));
+  // from the machine's own inventory report, not from an outside scan: the only way a local-only CVE becomes a finding
+  if (d.host_reported) head.append(Object.assign(badge("Reported by the host", "success"), { title: "Found in this host's own inventory report (installed software and patch level), not by an outside scan" }));
   if (d.assessment_status === "closed_not_applicable") head.append(badge(/local-only/.test(d.assessment_reason || "") ? "Closed: local-only vulnerability" : "Closed: invalid product match", "ice"));
   head.append(aiBadge(d.ai, { project, kind: d.kind, id: d.id }));
   const vb = validationBadge({ validation_status: d.validation.status });
@@ -2327,7 +2330,9 @@ const pages = {
       galleryBtn.setAttribute("aria-pressed", String(galleryOn));
       if (galleryOn) paintGallery();
     }
-    metaTools.append(fresh.node, galleryBtn, csv, bulk.toggle);
+    const inventoryBtn = el("button", "new-toggle", "Host inventory", { type: "button", title: "Have hosts report their own OS, packages and patches" });
+    inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
+    metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
     side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, metaRow, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
@@ -2509,8 +2514,9 @@ const pages = {
       if (h.excluded) head.append(badge("Excluded: never scanned", "smoke"));
       if (h.archived) head.append(badge("Archived: history retained", "queued"));
       if (h.pinned) head.append(badge("Pinned", "success"));
+      if (h.inventory) head.append(inventoryBadge(h.inventory));
       const S = {};
-      ["overview", "services", "web", "findings", "changes", "manage"].forEach((k) => (S[k] = el("div", `host-tab host-tab-${k}`)));
+      ["overview", "services", "web", "findings", "inventory", "changes", "manage"].forEach((k) => (S[k] = el("div", `host-tab host-tab-${k}`)));
       const OV = { main: el("div", "host-col"), side: el("div", "host-col") };
       S.overview.append(OV.main, OV.side);
       const tabBtns = {};
@@ -2800,10 +2806,12 @@ const pages = {
       if (ALL) S.manage.append(assetInfoReadOnly(h));
       else S.manage.append(assetInfo(h), hostActions(h));
       foldTabs();
-      const tabLabels = { overview: "Overview", services: "Services", web: "Web", findings: "Findings", changes: "History", manage: "Manage" };
+      const loadInventory = renderHostInventory(S.inventory, { h, project: projectOf(h), readOnly: ALL });
+      const tabLabels = { overview: "Overview", services: "Services", web: "Web", findings: "Findings", inventory: "Inventory", changes: "History", manage: "Manage" };
       const findingCount = (h.vulns || []).length;
       const openTab = (name) => {
         hostTab = name;
+        if (name === "inventory") loadInventory();
         Object.entries(S).forEach(([k, box]) => (box.hidden = k !== name));
         Object.entries(tabBtns).forEach(([k, b]) => b.setAttribute("aria-selected", String(k === name)));
       };
@@ -2816,6 +2824,7 @@ const pages = {
       });
       setTabCount("services", portTotal);
       setTabCount("findings", h.vuln_count ?? findingCount);
+      if (h.inventory) setTabCount("inventory", h.inventory.packages);
       pane.append(tabBar, ...Object.values(S));
       openTab(hostTab in S ? hostTab : "overview");
     }
@@ -3093,7 +3102,7 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), projChip(m)],
+        meta: [badge(m.cve.tier, m.cve.tier), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });

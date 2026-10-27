@@ -35,6 +35,7 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.993, and Go 1.2
 | `GeneratedTemplate`, `AutoFireRun` | AI-drafted nuclei templates and auto-fire runs |
 | `HostState`, `AssetChange` | Each host's snapshot, and the change log built from comparing snapshots |
 | `HostProfile`, `HostLabel`, `HostExclusion`, `HostAssessment` | Owner and criticality, detection chips, exclusions, and rescans |
+| `HostInventory`, `HostInventoryReport` | What a host reported about itself with the reporter script, one row per machine, and its summarised report history ([HOST-INVENTORY.md](HOST-INVENTORY.md)) |
 | `ServiceRun` | The last finished run of each scanner on each asset |
 | `AgentActivity`, `AIUsage` | The activity feed, and the AI call ledger ([AI-USAGE.md](AI-USAGE.md)) |
 

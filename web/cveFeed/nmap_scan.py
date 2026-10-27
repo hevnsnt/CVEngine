@@ -192,6 +192,7 @@ def persist_inventory(inventory, source='nmap', org_id=None):
     here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
     Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
     seen on one IP's 443 onto every IP's 443."""
+    from cveFeed.host_inventory import keeps_reported_os
     from startScan.ip_rows import get_or_create_ip
     from startScan.models import IpAddress, Port
     ports_written = hosts_with_os = 0
@@ -201,7 +202,7 @@ def persist_inventory(inventory, source='nmap', org_id=None):
         if not ip_addr:
             continue
         ip_obj, _ = get_or_create_ip(ip_addr, org_id)
-        if host.get('os_guess'):
+        if host.get('os_guess') and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
             ip_obj.last_seen = now

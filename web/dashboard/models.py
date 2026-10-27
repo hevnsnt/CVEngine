@@ -223,6 +223,10 @@ class ApiToken(models.Model):
 	revoked = models.BooleanField(default=False)
 	# Hosts, IPs or CIDRs this agent has registered as its responsibility (narrows /work).
 	assets = models.JSONField(default=list, blank=True)
+	# "full": acts as its user everywhere. "inventory": a host reporter's token (cveFeed.host_inventory); it can post one project's
+	# inventory reports and do nothing else, so a token left on a server is worth little if it leaks.
+	scope = models.CharField(max_length=12, default='full')
+	project = models.ForeignKey('Project', null=True, blank=True, on_delete=models.CASCADE, related_name='+')  # the one project an inventory token reports to
 
 	def __str__(self):
 		return f'{self.name} ({self.prefix}...) for {self.user}'

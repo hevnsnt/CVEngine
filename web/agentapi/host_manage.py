@@ -188,8 +188,8 @@ def host_group_names(project, name):
 def _purge(project, name, subtree=False):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
     it). Returns the counts."""
-    from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, HostLabel, HostProfile, HostState, HygieneFinding,
-                                RouteAuth, TlsCertificate, Triage)
+    from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, HostInventory, HostLabel, HostProfile, HostState,
+                                HygieneFinding, RouteAuth, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
     counts = {}
@@ -209,6 +209,7 @@ def _purge(project, name, subtree=False):
             ('states', HostState, {'project': project}), ('labels', HostLabel, {'project': project}),
             ('routes', RouteAuth, {'project': project}), ('changes', AssetChange, {'project': project}),
             ('profiles', HostProfile, {'project': project}), ('triage', Triage, {'project': project}),
+            ('inventories', HostInventory, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
             ('events', DiscoveryEvent, {'domain__project': project})):

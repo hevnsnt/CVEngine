@@ -67,6 +67,11 @@ EXEMPT_PATH = re.compile(r'^/(staticfiles|login|logout|mfa|admin)(/|$)')
 # Markdown and sent as JSON; they never reach a shell, a query string or a template. Every other field there (host, project, value,
 # ids) and every other endpoint keeps the full rules.
 BOUNTY_TEXT_PATH = re.compile(r'^/cve/api/bounty/(reports|engagements)(/|$)')
+# A host inventory report (agentapi.inventory) is machine-made data about a computer: its package and service names are whatever that
+# software is called, and a host an attacker controls can name them anything, which must not get the reporter's owner locked out. Its
+# body is not scanned here because it is not free text: cveFeed.inventory_schema allows one fixed shape and cleans every string, and
+# nothing in it reaches a shell, a query or a template. Its address and query string are still checked.
+INVENTORY_PATH = re.compile(r'^/api/v1/projects/[-\w]+/inventory/?$')
 BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediation', 'references', 'evidence', 'response', 'request', 'curl',
                                 'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 
@@ -138,7 +143,7 @@ def _request_pairs(request):
         length = int(request.META.get('CONTENT_LENGTH') or 0)
     except ValueError:
         length = 0
-    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and 0 < length <= MAX_BODY:
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and 0 < length <= MAX_BODY and not INVENTORY_PATH.match(request.path):
         if ctype == 'application/json':
             try:
                 pairs.extend(_strings(json.loads(request.body.decode('utf-8', 'replace'))))

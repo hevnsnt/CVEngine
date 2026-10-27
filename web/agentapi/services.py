@@ -1170,7 +1170,30 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'vuln_count': sum(1 for v in vulns if v.severity != 0), 'info_count': sum(1 for v in vulns if v.severity == 0),
             'cve_matches': cve_count,
             'labels': list(labels),
-            'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded)}
+            'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
+            'inventory': _host_inventory(sub, others, shared)}
+
+
+def _host_inventory(sub, others, shared):
+    """The brief of the newest host inventory report tied to this host or one of its names, or None."""
+    found = (shared or {}).get('inventories') or {}
+    names = [sub.name.lower(), *(o.name.lower() for o in others)]
+    return next((found[(sub.target_domain.project_id if sub.target_domain else None, n)] for n in names
+                 if (sub.target_domain.project_id if sub.target_domain else None, n) in found), None)
+
+
+def _inventories_for(project, subs, others):
+    """``{(project id, lowercase host): brief}`` of the host inventory reports tied to a page of hosts (and their other names): one
+    query, newest report of each host first."""
+    from cveFeed import host_inventory
+    from cveFeed.models import HostInventory
+    wanted = {s.name.lower() for s in subs} | {o.name.lower() for rows in others.values() for o in rows}
+    pids = _pids_of(project, subs)
+    days = {pid: host_inventory.stale_days_of(pid) for pid in pids}
+    out = {}
+    for inv in HostInventory.objects.filter(project_id__in=pids, host__in=wanted).order_by('reported_at', 'id'):
+        out[(inv.project_id, inv.host)] = host_inventory.brief(inv, days[inv.project_id])
+    return out
 
 
 def _rdp_screenshot_field(sub, shot):
@@ -1346,6 +1369,7 @@ def _hosts_page(project, qs, params, extra=None):
     labels = _labels_for(project, subs)
     profiles, excluded = _profiles_for(project, subs)
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
+    shared['inventories'] = _inventories_for(project, subs, others)
     rows = []
     for sub in subs:
         key = (_pid_of(project, sub), sub.name.lower())
@@ -1362,8 +1386,10 @@ def host_group(project, sub):
     """The single-host view of ``sub``: its name's other current rows folded in, whichever row was asked for."""
     profiles, excluded = _profiles_for(project, [sub])
     key = (project.id, sub.name.lower())
-    return _host(sub, _name_siblings(project, [sub])[sub.id], _labels_for(project, [sub]).get(key, ()),
-                 profiles.get(key), key in excluded, _roots_for(project, [sub]).get(key), _shared_for(project, [sub]))
+    others = _name_siblings(project, [sub])
+    shared = {**_shared_for(project, [sub]), 'inventories': _inventories_for(project, [sub], others)}
+    return _host(sub, others[sub.id], _labels_for(project, [sub]).get(key, ()),
+                 profiles.get(key), key in excluded, _roots_for(project, [sub]).get(key), shared)
 
 
 def _mark_zombies(project, page):
@@ -2389,7 +2415,8 @@ def _match(m):
     cve['tier'] = match_temperature(cve['tier'], m.cve_entry.cvss, m.ai_verdict, m.distro_status)  # rated as it applies to this host
     return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None,
             'product': m.matched_product, 'version': m.matched_version, 'in_affected_range': m.version_in_range,
-            'confidence': m.confidence, 'source': m.source, 'ai_verdict': m.ai_verdict, 'ai_reason': m.ai_reason,
+            'confidence': m.confidence, 'source': m.source, 'host_reported': m.source == 'host',
+            'ai_verdict': m.ai_verdict, 'ai_reason': m.ai_reason,
             'assessment_status': ('closed_not_applicable' if m.ai_verdict == 'not_affected' and
                                   (m.ai_reason or '').startswith('Closed automatically:')
                                   else 'candidate'),
@@ -2512,6 +2539,8 @@ def _finding_row(kind, obj):
         cve, sub = obj.cve_entry, obj.subdomain
         title, host = cve.cve_id, sub.name if sub else None
         note = ' '.join(filter(None, [obj.matched_product, obj.matched_version])) or ''
+        if obj.source == 'host':
+            note += ' (reported by the host)'
         status = 'ruled out' if obj.ai_verdict == 'not_affected' else obj.remediation_status
         extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160)}
     elif kind == 'scanner':
@@ -2914,7 +2943,13 @@ def _how_found_match(m):
     ev = m.evidence or {}
     steps = []
     found = ' '.join(x for x in (m.matched_product, m.matched_version or '(no version)') if x)
-    if m.source == 'port':
+    if m.source == 'host':
+        steps.append(_kv('Observed', f'{found}, reported by the host itself' + (f' ({ev["component"]})' if ev.get('component') and ev['component'] != m.matched_product else '')))
+        steps.append(_kv('Found by', 'the host inventory report' + (f' of {ev["reported_at"][:10]}' if ev.get('reported_at') else '')
+                         + ('; a flaw only usable from the host itself, so no external scan can see it' if ev.get('scope') == 'local' else '')))
+        if ev.get('purl'):
+            steps.append(_kv('Package', ev['purl']))
+    elif m.source == 'port':
         where = f'{ev.get("ip")}:{ev.get("port")}' if ev.get('ip') else ''
         steps.append(_kv('Observed', f'{found} on {where}'.strip() + (f' ({ev["service_extra"]})' if ev.get('service_extra') else '')))
         steps.append(_kv('Found by', 'nmap service detection of an open port'
@@ -3043,7 +3078,7 @@ def finding_detail(ctx, slug, kind, finding_id):
                          'error': 'Validation failed; see scoped activity and worker diagnostics.' if job.error else ''}
     return {
         'kind': kind, 'id': obj.pk, 'title': title, 'host': host, 'target': target,
-        'assessment_status': assessment_status,
+        'host_reported': kind == 'match' and obj.source == 'host', 'assessment_status': assessment_status,
         'assessment_reason': obj.ai_reason if assessment_status == 'closed_not_applicable' else '',
         'automatic_validation': automatic,
         'severity': SEVERITY_NAMES.get(base) if base is not None else None, 'severity_ai': severity_ai,
@@ -3125,13 +3160,15 @@ MAX_SLA_DAYS = 3650
 
 
 def _project_settings(project, sla):
+    from agentapi.inventory import project_policy
     from cveFeed.models import DEFAULT_SLA_DAYS
-    return {'sla_days': sla, 'sla_defaults': DEFAULT_SLA_DAYS}
+    return {'sla_days': sla, 'sla_defaults': DEFAULT_SLA_DAYS, 'inventory': project_policy(project)}
 
 
 def get_project_settings(ctx, slug):
     """This project's settings: ``sla_days`` (days to fix per severity: critical, high, medium, low), the same for everyone,
-    so a UI's "overdue" is consistent. ``sla_defaults`` is what an unset severity falls back to."""
+    so a UI's "overdue" is consistent. ``sla_defaults`` is what an unset severity falls back to. ``inventory`` is the host inventory
+    policy: ``create_hosts`` (whether a report from an unscanned host adds it as a target) and ``stale_days``."""
     from cveFeed.models import ProjectSettings
     project, _ = get_one_project(ctx, slug)
     return _project_settings(project, ProjectSettings.sla_for(project))
@@ -3140,12 +3177,18 @@ def get_project_settings(ctx, slug):
 def set_project_settings(ctx, slug, body):
     """Change this project's settings. ``sla_days`` is a partial update: send only the severities to change, each a whole
     number of days from 1 to 3650, or ``null`` to go back to the default. Anyone with a write role may change it, like the
-    project's API keys; a read-only token or the audit role may not."""
+    project's API keys; a read-only token or the audit role may not. ``inventory`` ({create_hosts, stale_days}) changes the host
+    inventory policy instead of, or as well as, the SLA."""
     from cveFeed.models import DEFAULT_SLA_DAYS, ProjectSettings
     project, _ = get_one_project(ctx, slug, write=True)
+    if isinstance(body, dict) and 'inventory' in body:  # the host inventory policy (agentapi.inventory), alone or beside sla_days
+        from agentapi.inventory import set_policy
+        set_policy(ctx, project, body['inventory'])
+        if 'sla_days' not in body:
+            return _project_settings(project, ProjectSettings.sla_for(project))
     changes = body.get('sla_days') if isinstance(body, dict) else None
     if not isinstance(changes, dict) or not changes:
-        raise ApiError(400, 'sla_days must be an object naming at least one severity')
+        raise ApiError(400, 'sla_days must be an object naming at least one severity (or inventory, to change the host inventory policy)')
     unknown = [k for k in changes if k not in DEFAULT_SLA_DAYS]
     if unknown:
         raise ApiError(400, f'sla_days severities must be among {", ".join(DEFAULT_SLA_DAYS)}: unknown {", ".join(map(str, unknown))}')
