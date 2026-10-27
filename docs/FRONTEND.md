@@ -30,6 +30,7 @@ Static files are content-versioned and nginx sends `Cache-Control: no-cache` for
 | `/cve/graph/` | Live asset graph. The mouse wheel zooms around the pointer in every browser (0.04x to 6x) and the page does not scroll over it; it stays fitted until you pan or zoom, and **Fit graph** or a double click refits. In All projects, nodes cluster by project and registered domain. Domains and hosts a scan is working on right now carry a pulsing red ring (read every 3 seconds from `GET /cve/api/graph-live`, which lists the running scans, the step each is in, and the hosts they are working on). **SOC mode** (or `?soc=1`) puts the graph over the whole window with a status bar (scans running and queued, hosts on fire and smoke, nodes, a clock) and a **Scanning now** list; everything not being scanned dims while a scan runs. **Full screen** asks the browser for real full screen, **Escape** or **Exit SOC mode** leaves. |
 | `/cve/bounty/` | Bug bounty workbench, for authorized users ([BUG-BOUNTY.md](BUG-BOUNTY.md)) |
 | `/cve/agents/` | API tokens and MCP connection commands |
+| `/cve/sentinels/` | **Sentinels**: scan-stage agents (`kind=scanner`). See below |
 | `/cve/admin/` | Administration: people, organizations, projects, audit log, activity and error log, plus timings and scheduler health for superusers |
 | `/cve/account/` | Your password, two-step sign-in, and a **Display and alerts** card (theme, time zone, desktop notifications) |
 | `/cve/about/` | Version, license, and credits (account menu, About) |
@@ -63,6 +64,10 @@ A project report has, in order:
 6. **Method and validity**: completed scans, the last run of each scanner, and the caveats: version-based findings can be backported fixes, the scan is outside-in and unauthenticated, results are point-in-time, checks are read-only, and AI text is guidance.
 
 Matches the AI ruled out, and findings triage classed as a likely false positive or not applicable, are never listed (the summary says how many). Limits per report: 500 hosts, 1,000 detailed findings, 500 hygiene findings ([CONFIGURATION.md](CONFIGURATION.md#pdf-reports)); the counts always cover everything, and the PDF says what the limits left out, so a very large project is best reported host by host. Banners, titles, response text and finding text come from the hosts that were scanned, so they are escaped and printed as text, and the renderer runs in its own process with no network access and no file access beyond the page it was given.
+
+## Sentinels
+
+`/cve/sentinels/` lists registered Sentinels (name, scope, capabilities, status, live/last heartbeat, and tasks in progress, completed and failed, from `GET /api/v1/agents?kind=scanner`), with **Suspend**/**Revoke** (and **Approve**/**Reinstate** for a pending or suspended one), which call the same `PATCH /api/v1/agents/{id}` the Agents admin surface already uses. A project picker and **Generate enrollment secret** call `POST /api/v1/projects/{slug}/sentinels/enroll` (needs the admin role in the project or its organization) and show the one-time secret and the server's base URL to copy; the page itself never builds or offers a download, since the Sentinel client (the actual Docker package) is a follow-up phase. See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents).
 
 ## Settings and extending
 

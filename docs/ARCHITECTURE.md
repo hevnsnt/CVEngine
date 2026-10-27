@@ -41,6 +41,16 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.993, and Go 1.2
 | `ServiceRun` | The last finished run of each scanner on each asset |
 | `ReportExport` | One requested PDF report: who asked, for what, its state and the random file name, until it expires ([FRONTEND.md](FRONTEND.md#pdf-reports)) |
 | `AgentActivity`, `AIUsage` | The activity feed, and the AI call ledger ([AI-USAGE.md](AI-USAGE.md)) |
+| `Agent`, `AgentTask` | A registered agent (an API token that identified itself, including a Sentinel: `kind='scanner'`) and remediation/validation work leased to one |
+| `SentinelTask`, `SentinelEnrollment` | Scan-stage work (nmap, naabu, a nuclei pass) leased to a Sentinel, and a one-time secret for a Sentinel's first registration ([AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents)) |
+
+## Sentinels
+
+A Sentinel is a scanner a person runs on their own network: it registers itself as an `Agent` (`kind='scanner'`), pulls scan-stage work off a project's queue, runs it, and reports typed, clipped results back. It is exactly as untrusted as any other agent (see [TENANCY.md](TENANCY.md) and [AGENT-API.md](AGENT-API.md#agents-and-assigned-work)): nothing it reports is ever executed or built into a command.
+
+**This phase (foundation) covers identity, registration, enrollment, task queueing and leasing, the dispatch point in the scan pipeline, and the admin UI, for three tools: nmap, naabu, and the two nuclei passes (`nuclei_light`, `nuclei_targeted`).** bbot, testssl, bucket/vhost/UDP sweeps and WPScan are untouched and keep running locally; wiring them for dispatch is a follow-up. The downloadable Sentinel client itself (a Docker image) is also a follow-up, built against the REST/MCP contract this phase ships, rather than in parallel with it, so the two cannot drift apart.
+
+**Dispatch or local**, the one design decision that matters: before a scan stage (nmap's fingerprint pass, naabu's port sweep, a nuclei pass) runs its tool, it asks `agentapi.sentinel_dispatch` whether a live, eligible, in-scope Sentinel exists for the project with free capacity and the right capability. A project with none gets a single cheap existence check and otherwise runs exactly as it did before Sentinels existed, which is the property a dedicated regression test enforces (`tests.test_sentinel_dispatch`). When one exists, the stage creates a `SentinelTask`, waits bounded (`CVENGINE_SENTINEL_DISPATCH_TIMEOUT`, default 90s) for it to be claimed and reported, and on success parses the typed result into the exact shape the local tool's own output already takes, handing it to the exact same persistence function local execution uses (`cveFeed.nmap_scan.persist_inventory`, `cveFeed.naabu_scan.persist_open_ports`, or, for nuclei, a reconstructed result line run through the stage's own untouched per-line loop). On timeout, failure, or no Sentinel, the stage falls back to running the tool locally: the subprocess-invoking code itself (`run_nmap_xml`, `run_naabu`, `stream_nuclei`) is never modified, only called from a different place depending on this one branch.
 
 ## Where the AI is used
 

@@ -69,6 +69,7 @@
     {% endif %}
     <p class="rail-h">Agents</p>
     <a data-nav="API tokens and MCP" href="{% url 'cve_agents' %}" {% if active == 'agents' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens and MCP</a>
+    <a data-nav="Sentinels" href="{% url 'cve_sentinels' %}" {% if active == 'sentinels' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Sentinels</a>
   </nav>
   <details class="acct">
     <summary aria-label="Account menu"><span class="avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span><span class="acct-name">{{ request.user.first_name|default:request.user.username }}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>

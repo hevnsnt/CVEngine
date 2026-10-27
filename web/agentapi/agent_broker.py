@@ -231,6 +231,7 @@ def heartbeat(ctx, body=None):
     now = timezone.now()
     _touch(agent, now)
     reap_expired(now)
+    _sentinel().reap_expired(now)
     release_ineligible(agent)  # a role downgraded, a project left or a limit tightened since the claim ends the lease now, not in four hours
     leases = []
     for task in AgentTask.objects.filter(agent=agent, status__in=('assigned', 'running')).order_by('id'):
@@ -239,8 +240,18 @@ def heartbeat(ctx, body=None):
             if AgentTask.objects.filter(pk=task.pk, agent=agent, status='running', lease_expires_at__gte=now).update(lease_expires_at=lease):
                 task.lease_expires_at = lease
         leases.append({'task_id': task.pk, 'status': task.status, 'lease_expires_at': svc._iso(task.lease_expires_at)})
+    # A Sentinel (kind='scanner') is an Agent like any other: one heartbeat call extends both its remediation/validation
+    # AgentTask leases above and its scan-stage SentinelTask leases here, so leasing never needs a second heartbeat loop.
+    leases.extend(_sentinel().extend_leases(agent, now))
     return {'agent': {'id': agent.pk, 'status': agent.status}, 'server_time': now.isoformat(), 'heartbeat_every_seconds': HEARTBEAT_SECONDS,
             'offline_after_seconds': int(LIVE_WINDOW.total_seconds()), 'leases': leases}
+
+
+def _sentinel():
+    """Lazy import: ``agentapi.sentinel_broker`` imports this module for its shared constants, so importing it back at module
+    load time here would be circular. Called only inside a function body, after both modules have finished loading."""
+    from agentapi import sentinel_broker
+    return sentinel_broker
 
 
 # --- effective rights ---------------------------------------------------------------------------
@@ -452,17 +463,21 @@ def reap_expired(now=None):
 
 
 def release_agent_tasks(agent, reason, actor=None):
-    """Give back every task an agent holds (suspended, revoked, unregistered). Not counted against the task's attempts."""
+    """Give back every task an agent holds (suspended, revoked, unregistered). Not counted against the task's attempts.
+    Also releases any SentinelTask the same agent holds (a Sentinel is an Agent too), so a suspend or revoke takes effect
+    on both queues at once, immediately, with no separate code path a reviewer could miss."""
     held = AgentTask._base_manager.filter(agent=agent, status__in=('assigned', 'running')).select_related('project')
-    return sum(_requeue(t, reason, refund=True, actor=actor, action='agent.task.release', backoff=False) for t in list(held))
+    return (sum(_requeue(t, reason, refund=True, actor=actor, action='agent.task.release', backoff=False) for t in list(held))
+            + _sentinel().release_agent_tasks(agent, reason, actor=actor))
 
 
 def release_ineligible(agent):
-    """After a registration or limit change: give back the tasks the agent may no longer hold."""
+    """After a registration or limit change: give back the tasks (and SentinelTasks) the agent may no longer hold."""
     eff = effective(agent)
     held = AgentTask._base_manager.filter(agent=agent, status__in=('assigned', 'running')).select_related('project')
-    return sum(_requeue(t, 'the agent no longer covers this work', refund=True, action='agent.task.release', backoff=False)
+    return (sum(_requeue(t, 'the agent no longer covers this work', refund=True, action='agent.task.release', backoff=False)
                for t in list(held) if eff.problem or eff.refusal(t))
+            + _sentinel().release_ineligible(agent))
 
 
 def prune_tasks(now=None, days=None):
@@ -896,10 +911,21 @@ def _redacted(out, viewer, agent):
     return out
 
 
+_SENTINEL_STATUS_BUCKET = {'queued': 'queued', 'claimed': 'assigned', 'running': 'running', 'done': 'completed',
+                           'failed': 'failed', 'expired': 'cancelled'}
+
+
 def _counts(agent_ids):
+    """Task counts by bucket (queued/assigned/running/completed/failed/cancelled) for each agent id, from both AgentTask
+    and, for a Sentinel (kind='scanner'), SentinelTask: the one admin surface (list_agents, get_agent) shows both kinds
+    of work without a reader needing to know which queue an agent uses."""
     out = {}
     for agent_id, status, n in AgentTask.objects.filter(agent_id__in=agent_ids).values_list('agent_id', 'status').annotate(n=Count('id')):
         out.setdefault(agent_id, {})[status] = n
+    for agent_id, status, n in _sentinel().task_status_counts(agent_ids):
+        bucket = _SENTINEL_STATUS_BUCKET.get(status, status)
+        bucket_counts = out.setdefault(agent_id, {})
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + n
     return out
 
 
@@ -948,9 +974,11 @@ def get_agent(ctx, agent_id):
     agent = _manageable(ctx.user).filter(pk=svc._int_param(agent_id, 'agent_id')).first()
     if agent is None:
         raise ApiError(404, 'agent not found')
-    recent = _task_rows(AgentTask.objects.filter(agent=agent)).order_by('-id')[:20]
+    # A Sentinel's (kind='scanner') work is SentinelTask, not AgentTask: same admin call, the matching history.
+    recent = (_sentinel().recent_tasks(agent) if agent.kind == 'scanner'
+             else [task_brief(t) for t in _task_rows(AgentTask.objects.filter(agent=agent)).order_by('-id')[:20]])
     return {**agent_dict(agent, detail=True, counts=_counts([agent.pk]).get(agent.pk), viewer=ctx.user), 'warnings': _warnings(agent),
-            'recent_tasks': [task_brief(t) for t in recent]}
+            'recent_tasks': recent}
 
 
 def _clean_limits(value):
