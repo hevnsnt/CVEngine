@@ -1453,3 +1453,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (max-width:719px){.strip a:last-child{grid-column:span 2}}
 .strip a[hidden]{display:none}
 .strip a#n-queue b{color:var(--smoke-ink)}
+.strip a#n-oldest.old b{color:var(--fire-ink)}
