@@ -1107,7 +1107,7 @@ def _merge_group(sub, others):
     address and ports by (address, number, protocol), CVE matches by CVE id and open findings by id, so the counts agree with the
     score and the web routes, which are both read by name."""
     from cveFeed.counts import finding_is_live, match_is_live
-    from startScan.models import open_ports
+    from startScan.models import open_services
     ips, seen_ports = {}, set()
     reasons, seen_reasons = [], set()
     vulns, seen_vulns = {}, set()
@@ -1117,7 +1117,7 @@ def _merge_group(sub, others):
             entry = ips.setdefault(ip.address, {'ip': ip, 'ports': []})
             if ip.full_scanned_at and (not entry['ip'].full_scanned_at or ip.full_scanned_at > entry['ip'].full_scanned_at):
                 entry['ip'] = ip
-            for p in open_ports(ip):
+            for p in open_services(ip):
                 key = (ip.address, p.number, p.protocol)
                 if key not in seen_ports:
                     seen_ports.add(key)
@@ -1187,7 +1187,10 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                      'facts': (e['ip'].fingerprint or {}).get('facts') or {},
                      'runzero': (e['ip'].fingerprint or {}).get('runzero') or None,  # runZero's view of the address (cveFeed.runzero_sync)
                      'full_scanned_at': e['ip'].full_scanned_at.isoformat() if e['ip'].full_scanned_at else None,
-                     'full_scan_ports': e['ip'].full_scan_ports, 'ports': [
+                     'full_scan_ports': e['ip'].full_scan_ports,
+                     # UDP ports nothing answered on (open or filtered): shown as a note, never as a service
+                     'udp_unanswered': sorted(p.number for p in e['ip'].ports.all() if p.state == 'open|filtered' and p.protocol == 'udp'),
+                     'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
@@ -1498,7 +1501,7 @@ def list_hosts(ctx, slug, params):
     return _mark_zombies(project, _hosts_page(project, qs, params))
 
 
-SEARCH_FIELDS = ('tech', 'banner', 'port', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
+SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
                   'sensitive', 'zombie', 'country')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
@@ -1617,6 +1620,11 @@ def _term_filter(field, value, project=None):
         if not value.isdigit():
             raise ApiError(400, 'port: takes a port number, e.g. port:3306 (use product: or service: for names)')
         return Q(**{ports + 'number': int(value)}) & open_port
+    if field == 'proto':
+        if value.lower() not in ('tcp', 'udp'):
+            raise ApiError(400, 'proto: takes tcp or udp, e.g. proto:udp port:161')
+        same = ('', 'tcp') if value.lower() == 'tcp' else ('udp',)  # a row from before the protocol was recorded is TCP
+        return Q(**{ports + 'protocol__in': same}) & open_port
     if field == 'product':
         return Q(**{ports + 'product__icontains': value}) & open_port
     if field == 'service':
@@ -1702,7 +1710,7 @@ def _archive_reasons(sub, v):
 
 def _why_matched(sub, terms):
     """What each positive term matched on this host, for the results list (read from the page's prefetched rows)."""
-    from startScan.models import open_ports
+    from startScan.models import open_services
     reasons = []
     for neg, field, value, _quoted in terms:
         if neg:
@@ -1733,9 +1741,11 @@ def _why_matched(sub, terms):
                 reasons.append(f'OS {ip.os_guess}')
             if field == 'country' and ip.geo_iso and (has(ip.geo_iso.iso) or has(ip.geo_iso.name)):
                 reasons.append(f'country {ip.geo_iso.name or ip.geo_iso.iso}')
-            for p in open_ports(ip):
-                label = f'port {p.number} {" ".join(x for x in (p.product, p.version) if x) or p.service_name or ""}'.strip()
+            for p in open_services(ip):
+                label = f'port {p.number}{"/udp" if p.protocol == "udp" else ""} {" ".join(x for x in (p.product, p.version) if x) or p.service_name or ""}'.strip()
                 if field == 'port' and str(p.number) == value:
+                    reasons.append(label)
+                elif field == 'proto' and (p.protocol or 'tcp') == v:
                     reasons.append(label)
                 elif field in (None, 'product') and has(p.product):
                     reasons.append(label)

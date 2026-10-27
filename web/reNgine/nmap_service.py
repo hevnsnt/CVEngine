@@ -135,13 +135,13 @@ def _service_record(port):
     }
 
 
-def _scanned_tcp_ports(nmaprun):
-    """The set of TCP port numbers a run actually probed, from its <scaninfo services="1,3-4,6-7,...">; None when the report
+def _scanned_ports(nmaprun, protocol="tcp"):
+    """The set of ``protocol`` port numbers a run actually probed, from its <scaninfo services="1,3-4,6-7,...">; None when the report
     does not say. Used to tell "closed since last time" (probed, not reported open) from "not looked at"."""
     ports = set()
     found = False
     for info in _as_list((nmaprun or {}).get("scaninfo")):
-        if not isinstance(info, dict) or info.get("@protocol", "tcp") != "tcp":
+        if not isinstance(info, dict) or info.get("@protocol", "tcp") != protocol:
             continue
         found = True
         for part in str(info.get("@services", "")).split(","):
@@ -149,6 +149,10 @@ def _scanned_tcp_ports(nmaprun):
             if lo.isdigit() and (not hi or hi.isdigit()):
                 ports.update(range(int(lo), int(hi or lo) + 1))
     return ports if found and ports else None
+
+
+def _scanned_tcp_ports(nmaprun):
+    return _scanned_ports(nmaprun, "tcp")
 
 
 def _extraports_states(host):
@@ -162,11 +166,13 @@ def extract_nmap_inventory(nmap_results):
 
     Each host dict: {"ip", "os_guess", "os_accuracy", "ports": [service_record], "status", "extraports", "scanned"}:
     ``status`` is the host state (up/down), ``extraports`` the states of the unlisted ports and ``scanned`` the TCP ports
-    the run probed (None when unknown), so a caller can close ports that were probed and not found open.
+    the run probed and ``scanned_udp`` the UDP ports (None when unknown), so a caller can close ports that were probed and not found
+    open.
     Ports without a numeric id are dropped.
     """
     run = (nmap_results or {}).get("nmaprun", {})
     scanned = _scanned_tcp_ports(run)
+    scanned_udp = _scanned_ports(run, "udp")
     hosts = _as_list(run.get("host"))
     inventory = []
     for host in hosts:
@@ -191,5 +197,6 @@ def extract_nmap_inventory(nmap_results):
             "status": (host.get("status") or {}).get("@state", "up") if isinstance(host.get("status"), dict) else "up",
             "extraports": _extraports_states(host),
             "scanned": scanned,
+            "scanned_udp": scanned_udp,
         })
     return inventory

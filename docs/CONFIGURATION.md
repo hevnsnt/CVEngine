@@ -47,6 +47,10 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_DEEP_SWEEP_MAX` | `50` | Apex domains the daily sweep queues for deep discovery. |
 | `CVENGINE_FULLSCAN` | `1` | `0` turns off the background full port scan. |
 | `CVENGINE_FULLSCAN_INTERVAL_MIN`, `_BATCH`, `_INVESTIGATE_MAX` | `10`, `1`, `50` | Minutes between sweeps (1 or more, read once when the schedule is created), IPs per sweep (1 to 20), and new ports fingerprinted per sweep (1 to 1000). |
+| `CVENGINE_UDPSCAN` | `1` | The slow background UDP scan is on by default. `0`, `false`, `no` or `off` turns it off ([Pipeline](PIPELINE.md)). It is queued by the full port scan's firing but has its own switch, so it runs even with `CVENGINE_FULLSCAN=0`. |
+| `CVENGINE_UDPSCAN_PORTS` | `53,67,68,69,123,137,161,500,514,623,1194,1812,1813,1900,4500,5060,5353,11211` | The UDP ports to scan, comma separated, at most 64. A list that is empty, not numbers or out of range is ignored (with a warning in the worker log) and the default is used. |
+| `CVENGINE_UDPSCAN_MAX_RATE`, `CVENGINE_UDPSCAN_HOST_TIMEOUT_MIN` | `20`, `20` | Packets per second nmap may send (1 to 1000) and minutes before it gives up on one address (1 to 120). |
+| `CVENGINE_TTL_UDP_SCAN` | `168` | Hours before an IP is UDP-scanned again. A failed scan is asked again after 24 hours (`CVENGINE_TTL_UDP_SCAN_FAILED`). |
 | `CVENGINE_NAABU` | `1` | Anything other than `1`, `true`, `yes`, or `on` (an empty value too) turns off the naabu full-port discovery that runs ahead of nmap by default (see [Pipeline](PIPELINE.md)). |
 | `CVENGINE_NAABU_BIN`, `CVENGINE_NAABU_RATE` | `naabu`, `1000` | The binary and packets per second (100 to 5000). |
 | `CVENGINE_HYGIENE_RDAP` | `1` | `0` skips the registry lookups that check whether SPF includes and DMARC report domains are registered. |

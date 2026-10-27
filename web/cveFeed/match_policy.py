@@ -209,7 +209,7 @@ def unversioned_leads(technologies, ports):
 def unversioned_products(subdomain):
     """The unverified products of one host (a ``Subdomain``): see ``unversioned_leads``. This is what a version probe or an AI
     investigation starts from to find the missing version; the host page shows the same list."""
-    from startScan.models import open_ports
+    from startScan.models import open_services
     technologies = [(t.id, t.name) for t in subdomain.technologies.all()]
-    ports = [(ip.address, port) for ip in subdomain.ip_addresses.all() for port in open_ports(ip)]
+    ports = [(ip.address, port) for ip in subdomain.ip_addresses.all() for port in open_services(ip)]
     return unversioned_leads(technologies, ports)

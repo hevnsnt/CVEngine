@@ -34,6 +34,7 @@ Use the slug `_all` to search every project you can see.
 | Filter | Matches | Example |
 | --- | --- | --- |
 | `port:` | An **open** port number | `port:3306` |
+| `proto:` | Hosts with an open port over `tcp` or `udp`. A UDP port counts only when it answered, never when it stayed silent (`open\|filtered`). | `proto:udp` |
 | `product:` | Software nmap saw on a port | `product:openssh` |
 | `service:` | Service name on a port | `service:ssh` |
 | `tech:` | Everything a host runs: technologies, `Server` and `X-Powered-By` headers, product and version, banners, script output, page titles, cookie names, route fingerprints | `tech:php` |
@@ -49,7 +50,7 @@ Use the slug `_all` to search every project you can see.
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 
-`port:` takes a number only. Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
+`port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
 
 `tech:` also reads what the Internet Archive saw on the host in the past (a `.php` page, `/wp-content/`). Those hits are labelled **seen in web archive**, because they are history, not what runs today.
 
@@ -62,6 +63,8 @@ port:3389                              every host with Remote Desktop open
 port:22 port:2222                      SSH on both the usual and the alternate port
 product:redis                          Redis anywhere, including on odd ports
 os:windows port:445                    Windows hosts with SMB reachable
+proto:udp port:161                     SNMP that answered over UDP (UDP 161 is not TCP 161)
+proto:udp product:memcached            memcached that answers datagrams
 banner:"Anonymous FTP login allowed"   FTP servers that let anyone in
 ```
 

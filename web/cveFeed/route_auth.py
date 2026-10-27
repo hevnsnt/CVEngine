@@ -119,7 +119,7 @@ def web_bases(sub):
             found.add((parsed.scheme, parsed.port or (443 if parsed.scheme == 'https' else 80)))
     for ip in sub.ip_addresses.all():
         for port in ip.ports.all():
-            if (port.state or '') not in ('', 'open'):
+            if (port.state or '') not in ('', 'open') or (getattr(port, 'protocol', '') or '') not in ('', 'tcp'):  # a web service is open TCP
                 continue
             service, product = (port.service_name or '').lower(), (port.product or '').lower()
             if port.number in WEB_PORTS or service in HTTP_SERVICE_NAMES or 'http' in product:
