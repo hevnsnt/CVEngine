@@ -13,6 +13,7 @@ import logging
 import re
 
 from cveFeed import distro as distro_lib
+from cveFeed import match_policy
 from cveFeed import runzero
 
 logger = logging.getLogger(__name__)
@@ -36,11 +37,24 @@ GENERIC_PRODUCT_TOKENS = frozenset({
 })
 
 
+# A technology some scanner stored as a CPE ("cpe:/a:openbsd:openssh:7.2p2") or as a banner token ("OpenSSH_9.6p1 Ubuntu-3ubuntu13.5"):
+# the product and version are in there, not in a name that happens to contain colons or an underscore.
+_CPE_TECH_RE = re.compile(r"^cpe:(?:/a:|2\.3:a:)([^:\s]*):([^:\s]+)(?::([^:\s]+))?", re.IGNORECASE)
+_BANNER_TECH_RE = re.compile(r"^([A-Za-z][\w.+-]*?)_(\d[\w.+~-]*)(?:\s|$)")
+
+
 def split_name_version(tech_name):
-    """reNgine stores tech as 'Name' or 'Name:version' (httpx tech-detect)."""
+    """reNgine stores tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
     if not tech_name:
         return "", ""
     name = tech_name.strip()
+    cpe = _CPE_TECH_RE.match(name)
+    if cpe:
+        version = cpe.group(3) or ""
+        return cpe.group(2).replace("_", " "), version if version[:1].isdigit() else ""
+    banner = _BANNER_TECH_RE.match(name)
+    if banner:
+        return banner.group(1).replace("_", " "), banner.group(2)
     if ":" in name:
         base, _, ver = name.rpartition(":")
         if ver and ver[0].isdigit():
@@ -140,6 +154,7 @@ _WORDS_MAX_TOKENS = 50000
 _WORDS_MAX_RAW = 200
 _WORDS_MAX_WORDS = 8
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_COORDINATE_RE = re.compile(r"^[^\s:/]+(?:[:/][^\s:/]+)*[:/]([^\s:/]+)$")  # group:artifact or vendor/package, never a name with spaces
 
 
 def _norm(value):
@@ -148,7 +163,11 @@ def _norm(value):
     if token and len(text) <= _WORDS_MAX_RAW:
         words = tuple(_WORD_RE.findall(text))
         if 1 < len(words) <= _WORDS_MAX_WORDS and (token in _WORDS or len(_WORDS) < _WORDS_MAX_TOKENS):
-            _WORDS.setdefault(token, set()).add(words)
+            known = _WORDS.setdefault(token, set())
+            known.add(words)
+            artifact = _COORDINATE_RE.match(text)  # "org.apache.logging.log4j:log4j-core" is also just "log4j-core"
+            if artifact:
+                known.add(tuple(_WORD_RE.findall(artifact.group(1))))
     return token
 
 
@@ -187,6 +206,7 @@ PRODUCT_ALIASES = {
     "microsoftiis": {"internetinformationservices", "iis"},
     "iis": {"internetinformationservices"},
     "eximsmtpd": {"exim"},
+    "phpfpm": {"php"},  # PHP's FastCGI process manager is PHP, and its advisories are PHP's
     "iscbind": {"bind"},
     "bind9": {"bind"},
     "nextjs": {"next"},  # the npm package of Next.js is named "next"
@@ -221,23 +241,81 @@ def parse_cpe(cpe):
     return _norm(parts[1]), product, version
 
 
+# Words that may surround a product name without making it another product: "apache http server" is Apache's server, "nginx web
+# server" is nginx. Anything else around a name ("ingress", "ui", "proxy manager", "image resizing", "rails", "plugin") names a
+# different product that merely contains the shorter name, so it must never be matched to it: only the words below are allowed
+# after a name, and everything not listed is a sibling.
+DESCRIPTOR_WORDS = frozenset({'server', 'http', 'https', 'httpd', 'daemon', 'web', 'framework', 'engine', 'project', 'software',
+                              'core', 'cms', 'js', 'application', 'program', 'service', 'services'})
+# an edition, a release channel or a packaging of the same software: "NGINX Open Source" and "NGINX Plus" are nginx, "Grafana OSS",
+# "GitLab CE/EE" and "Splunk Enterprise" are Grafana, GitLab and Splunk. "ADC" is the NetScaler appliance's own name for itself.
+EDITION_WORDS = frozenset({'oss', 'plus', 'ce', 'ee', 'community', 'enterprise', 'edition', 'suite', 'collaboration', 'webmail',
+                           'obsidian', 'cumulative', 'update', 'cache', 'adc', 'lts', 'libs', 'lib', 'devel'})
+# what nmap appends to a product to name the service: "Postfix smtpd", "Dovecot imapd", "Samba smbd", "PostgreSQL DB"
+SERVICE_WORDS = frozenset({'smtpd', 'imapd', 'pop3d', 'smbd', 'sshd', 'db'})
+# words that only mean something together ("data" and "store" alone name nothing)
+TRAILING_PHRASES = (('open', 'source'), ('data', 'center'), ('http', 'proxy'), ('key', 'value', 'store'), ('rest', 'api'),
+                    ('service', 'pack'))
+_EDITION_NUMBER = re.compile(r'^(?:\d+|cu\d+|sp\d+|r\d+)$')  # 2016, "Cumulative Update 14" or CU14, SP1, R2
+_TRAILER_WORDS = DESCRIPTOR_WORDS | EDITION_WORDS | SERVICE_WORDS | {w for phrase in TRAILING_PHRASES for w in phrase}
+# a vendor in front of the product ("apache tomcat", "f5 nginx"): the same product named the way its vendor does
+VENDOR_PREFIX_WORDS = frozenset({'apache', 'microsoft', 'oracle', 'gnu', 'eclipse', 'f5', 'ibm', 'google', 'cisco', 'vmware', 'adobe',
+                                 'atlassian', 'red', 'hat', 'redhat', 'aws', 'amazon', 'palo', 'alto', 'networks', 'fortinet',
+                                 'mikrotik', 'jfrog', 'citrix', 'twitter'})
+
+
 def name_matches_token(tech_token, product_token):
-    """A discovered tech token plausibly refers to an affected product token."""
+    """A discovered tech token names the same product as an affected product token: the same name, or one of them is the other
+    plus only descriptive words, an edition or the vendor ("apache http server" for "apache", "nginx open source" for "nginx", "apache
+    tomcat" for "tomcat"). A shorter name never stands for a longer, different product: "nginx" is not "ingress-nginx" or "nginx ui",
+    "php" is not "phpmyadmin", "cloudflare" is not a plugin that works with it."""
     if (len(tech_token) < _MIN_TOKEN or len(product_token) < _MIN_TOKEN
             or tech_token in GENERIC_PRODUCT_TOKENS or product_token in GENERIC_PRODUCT_TOKENS):
         return False
     if tech_token == product_token:
         return True
-    # a shorter name matches a longer one only as whole words: "apache" in "apache http server", "tomcat" in "apache tomcat",
-    # never "cms" in "datocms", "php" in "phpmyadmin" or "java" in "javascript"
     for tech_words in _WORDS.get(tech_token) or ((tech_token,),):
         for product_words in _WORDS.get(product_token) or ((product_token,),):
             inner, outer = (tech_words, product_words) if len(tech_words) <= len(product_words) else (product_words, tech_words)
-            if inner == outer or not _word_run_ok(inner):
+            if not _word_run_ok(inner):
                 continue
-            if any(outer[i:i + len(inner)] == inner for i in range(len(outer) - len(inner) + 1)):
+            if outer == inner * (len(outer) // len(inner)):  # the same name, or repeated as in "symfony/symfony"
+                return True
+            if _core(tech_words) == _core(product_words) and _word_run_ok(_core(tech_words)):  # "F5 NGINX" and "NGINX Open Source"
+                return True
+            if any(_same_product_around(outer[:i], outer[i + len(inner):])
+                   for i in range(len(outer) - len(inner) + 1) if outer[i:i + len(inner)] == inner):
                 return True
     return False
+
+
+def _same_product_around(before, after):
+    """Whether the words around a shared name only describe it (see DESCRIPTOR_WORDS), give its edition or name its vendor."""
+    return all(w in VENDOR_PREFIX_WORDS or w in DESCRIPTOR_WORDS for w in before) and _trailer_ok(after)
+
+
+def _core(words):
+    """The words of a name without its leading vendor and its trailing descriptors or edition (always at least one word left)."""
+    if words[0] not in VENDOR_PREFIX_WORDS and words[-1] not in _TRAILER_WORDS and not _EDITION_NUMBER.match(words[-1]):
+        return words  # the usual case, and this runs for every candidate of a lookup
+    start = 0
+    while start < len(words) - 1 and words[start] in VENDOR_PREFIX_WORDS:
+        start += 1
+    end = next(i for i in range(start + 1, len(words) + 1) if _trailer_ok(words[i:]))
+    return words[start:end]
+
+
+def _trailer_ok(words):
+    i = 0
+    while i < len(words):
+        phrase = next((p for p in TRAILING_PHRASES if words[i:i + len(p)] == p), None)
+        if phrase:
+            i += len(phrase)
+        elif words[i] in DESCRIPTOR_WORDS or words[i] in EDITION_WORDS or words[i] in SERVICE_WORDS or _EDITION_NUMBER.match(words[i]):
+            i += 1
+        else:
+            return False
+    return True
 
 
 def _word_run_ok(words):
@@ -267,11 +345,28 @@ def confidence_for(ver, in_range, kev):
 
 class ProductIndex(dict):
     """token -> set of CVEEntry ids, with a memo of the fuzzy token -> candidate ids lookups so a product seen on many
-    hosts is resolved once. Built by build_product_index and never mutated afterwards (the memo relies on that)."""
+    hosts is resolved once, and a word -> product tokens map so a lookup compares a name only with the products that share a word
+    with it (not with all of them). Built by build_product_index and never mutated afterwards (the memo and the map rely on that)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.memo = {}
+        self._by_word = None
+
+    def candidate_tokens(self, token):
+        """The product tokens that can name the same product as ``token``: a match needs every word of the shorter name inside the
+        longer one, so the two always share a word. A token that is itself a product token is always a candidate."""
+        if self._by_word is None:
+            self._by_word = {}
+            for product_token in self:
+                for words in _WORDS.get(product_token) or ((product_token,),):
+                    for word in words:
+                        self._by_word.setdefault(word, set()).add(product_token)
+        found = {token} if token in self else set()
+        for words in _WORDS.get(token) or ((token,),):
+            for word in words:
+                found |= self._by_word.get(word, set())
+        return found
 
 
 MAX_AFFECTED_ITEMS = 500
@@ -307,15 +402,20 @@ def build_product_index(cves):
     return index
 
 
+def _candidate_tokens(token, product_index):
+    """The product tokens worth comparing with ``token`` (all of them for a plain dict index)."""
+    return product_index.candidate_tokens(token) if hasattr(product_index, "candidate_tokens") else product_index
+
+
 def _fuzzy_ids(token, product_index):
     """CVE ids whose product/package token plausibly names ``token`` (memoized per index)."""
     memo = getattr(product_index, "memo", None)
     if memo is not None and token in memo:
         return memo[token]
     ids = set()
-    for product_token, found in product_index.items():
+    for product_token in _candidate_tokens(token, product_index):
         if name_matches_token(token, product_token):
-            ids |= found
+            ids |= product_index[product_token]
     if memo is not None:
         memo[token] = ids
     return ids
@@ -349,14 +449,6 @@ def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
         if alias in tokens and (alias not in _ALIAS_VENDOR or _vendor_ok(item, *_ALIAS_VENDOR[alias])):
             return True
     return False
-
-
-def _names_exactly(item, token, aliases=(), cpe_product=None):
-    """Whether one affected entry names the discovered product itself, not a longer name that merely contains it."""
-    tokens = affected_product_tokens(item)
-    if token in tokens or (cpe_product and cpe_product in tokens):
-        return True
-    return any(a in tokens and (a not in _ALIAS_VENDOR or _vendor_ok(item, *_ALIAS_VENDOR[a])) for a in aliases)
 
 
 def _bounded(rng):
@@ -419,12 +511,8 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor)]
         if not hit:
             continue
-        # When the advisory names the product itself ("jquery"), the entries that only contain its name ("jquery-rails", a Ruby gem
-        # versioned 4.x, "org.webjars.npm:jquery") are repackagings or wrappers with their own version numbers: jQuery 3.5.1 is not
-        # inside the gem's "fixed 4.4.0". Only the entries that name the product exactly are tested.
-        exact = [(i, item) for i, item in hit if _names_exactly(item, token, aliases, cpe_product)]
-        if exact:
-            hit = exact
+        # Every hit names the same product (see name_matches_token): a wrapper or repackaging with its own version numbers
+        # ("jquery-rails", "ingress-nginx") is another product and was never a hit, so its ranges are never compared.
         in_range, matched_product = None, name
         if ver is not None:
             in_range, unknown = False, False
@@ -459,16 +547,6 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if details is not None and cve.id not in details and hit:
             details[cve.id] = {"affected_index": hit[0][0], "range": {}}
         yield cve, matched_product, in_range
-
-
-def _has_version_ranges(cve, token):
-    """Whether any affected entry naming this product carries a real version range (so a version-less sighting cannot be
-    placed in or out of it). Advisories without ranges name the product only, and a host running it stays a candidate."""
-    aliases = tuple(PRODUCT_ALIASES.get(token, ()))
-    for item in (cve.affected or []):
-        if _item_hits(item, token, aliases) and any(_bounded(r) for r in (item.get("ranges") or [])):
-            return True
-    return False
 
 
 def _is_ice(cve):
@@ -507,12 +585,22 @@ def port_distro(port):
 
 def _record_matches(subdomain, name, version, token, source, product_index,
                     cve_by_id, min_confidence, scan_history, rows=None, cpe="", distro=None, fix_lookup=None, evidence=None,
-                    corroborated=()):
+                    corroborated=(), leads=None):
     """Work out the CVEMatch rows for one discovered product on a subdomain and append them to ``rows``
-    (written in a batch by ``save_matches``). Returns the number of matches found."""
+    (written in a batch by ``save_matches``). Returns the number of matches found. ``leads``, when given, is a dict that receives
+    ``{cve.id: {(domain id, host name)}}`` for the CVEs a product seen without a version could be about."""
     if not version and cpe:  # nmap sometimes names the version only in the CPE
         version = (parse_cpe(cpe) or ("", "", ""))[2]
     ver = parse_version(version)
+    if match_policy.is_os_sighting(name, cpe):
+        return 0  # an operating system fingerprint is decided by the host's own report, not by its name
+    if ver is None:
+        # A product seen without a version is a lead (match_policy.unversioned_products), never a match: naming a product says nothing
+        # about which of its advisories apply.
+        if leads is not None:
+            for cve, _product, _in_range in _match_candidates(name, None, token, product_index, cve_by_id, cpe=cpe):
+                leads.setdefault(cve.id, set()).add((subdomain.target_domain_id, subdomain.name))
+        return 0
     found = 0
     details = {}
     for cve, matched_product, in_range in _match_candidates(
@@ -520,8 +608,15 @@ def _record_matches(subdomain, name, version, token, source, product_index,
         confidence = confidence_for(ver, in_range, cve.kev)
         if confidence < min_confidence or confidence <= 0.0:
             continue
-        if ver is None and in_range is None and _is_ice(cve) and _has_version_ranges(cve, token):
-            continue  # a cold CVE with a version range, and no version to test against it: noise, not a lead
+        unbounded = False
+        if not match_policy.hard_version_evidence(in_range, details.get(cve.id)):
+            # The advisory gives no version bound to test this version against: product-wide, so no evidence. The host is still a lead
+            # (a template test needs no version), and an actively exploited (KEV) CVE is kept as a candidate that needs validation.
+            if leads is not None:
+                leads.setdefault(cve.id, set()).add((subdomain.target_domain_id, subdomain.name))
+            if not cve.kev:
+                continue
+            unbounded = True
         status, fixed = distro_lib.NO_DATA, ""
         if distro and distro.get("distro") and in_range is True:
             # Upstream says in range; the distro may have backported the fix. Never dropped: a patched match is kept,
@@ -542,7 +637,8 @@ def _record_matches(subdomain, name, version, token, source, product_index,
             "version_in_range": in_range, "confidence": confidence,
             "scan_history_id": scan_history.id if scan_history else subdomain.scan_history_id,
             "distro_status": status, "distro_fixed_version": fixed[:64],
-            "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}), **({"runzero": True} if reported else {}),
+            "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}), **({"unbounded": True} if unbounded else {}),
+                         **({"runzero": True} if reported else {}),
                          **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {})},
         })
         found += 1
@@ -554,6 +650,12 @@ def signature_of(obj):
     return (getattr(obj, "cve_entry_id"), obj.matched_product, obj.matched_version, obj.version_in_range, obj.source)
 
 
+# the stored reasons of a deterministic closure (this module, cveFeed.locality, cveFeed.match_policy): a verdict that starts with one
+# was reached on the evidence alone, so it is reusable and a person's or the AI's later answer does not replace it
+AUTO_CLOSED = ('Closed automatically: invalid product correlation', 'Closed automatically: local-only',
+               match_policy.NO_EVIDENCE)
+
+
 def invalid_identity_reason(match):
     """A reason to close this *candidate correlation*, never a claim that the host lacks backend software.
 
@@ -561,24 +663,27 @@ def invalid_identity_reason(match):
     produced the match is compared with the advisory's named products, using the same aliases as
     candidate generation. Conflicting positive evidence prevents automatic closure.
     """
-    if match.source == 'host':  # the host reported the version itself: no banner to second-guess, and a local-only CVE is what it is for
-        return ''
+    if match.template_result == 'vulnerable' or match.distro_status == 'vulnerable' or match_policy.has_standing(match):
+        return ''  # a check found it, or a person or the host vouches for it: no name comparison closes that
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
-    if (match.template_result == 'vulnerable' or match.distro_status == 'vulnerable'
-            or match.version_in_range is True):
-        return ''
+    # The sighting the match was made from, not the product the advisory names: a match in range stores the advisory's own name, which
+    # always matches itself, so only the original sighting can show that a different product was linked (an "nginx" fingerprint
+    # against ingress-nginx's ranges).
+    name, cpe = match_policy.sighting_of(match)
+    reason = match_policy.no_evidence_reason(match, name, cpe)
+    if reason:
+        return reason
     affected = clean_affected(match.cve_entry.affected)
     if not any(isinstance(item, dict) and affected_product_tokens(item) for item in affected):
         return ''
-    token = _norm(match.matched_product)
+    token = _norm(name)
     if not token:
         return ''
     cve = match.cve_entry
     index = build_product_index([cve])
-    if any(_match_candidates(match.matched_product, None, token, index, {cve.pk: cve},
-                             cpe=(match.evidence or {}).get('cpe') or '')):
+    if any(_match_candidates(name, None, token, index, {cve.pk: cve}, cpe=cpe)):
         return ''
     if token in GENERIC_PRODUCT_TOKENS:
         basis = 'the recorded fingerprint is a generic cloud or service label, not the affected product'
@@ -597,24 +702,29 @@ def close_invalid_correlation(match, reason=None):
     reason = reason or invalid_identity_reason(match)
     if not reason:
         return False
-    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(('Closed automatically: invalid product correlation',
-                                                                               'Closed automatically: local-only')):
+    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(AUTO_CLOSED):
         return False
     pairs = triage.track([match])
     if not pairs:
         return False
     row, _ = pairs[0]
-    verdict, _ = TriageVerdict.objects.update_or_create(kind='cve_match', signature=row.signature, defaults={
-        'classification': 'not_applicable', 'reason': reason, 'model_classification': '', 'model_reason': '',
-        'overridden': False, 'model': 'deterministic-correlation', 'invalid_output': False})
+    # A verdict is shared by every host with the same evidence. One reached by comparing names is only about this sighting, and a
+    # version inside the affected range is the evidence another host with the same product and version stands on: it never leaves this row.
+    shared = match.version_in_range is not True
+    verdict = None
+    if shared:
+        verdict, _ = TriageVerdict.objects.update_or_create(kind='cve_match', signature=row.signature, defaults={
+            'classification': 'not_applicable', 'reason': reason, 'model_classification': '', 'model_reason': '',
+            'overridden': False, 'model': 'deterministic-correlation', 'invalid_output': False})
     row.verdict, row.status, row.classification, row.reason = verdict, 'triaged', 'not_applicable', reason
     row.save(update_fields=['verdict', 'status', 'classification', 'reason', 'updated_at'])
     CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='not_affected', ai_reason=reason, ai_model='deterministic-correlation',
                                                confidence=0.0, updated_at=timezone.now())
     match.ai_verdict, match.ai_reason, match.ai_model, match.confidence = 'not_affected', reason, 'deterministic-correlation', 0.0
-    MatchVerdict.objects.update_or_create(cve_entry=match.cve_entry, matched_product=match.matched_product,
-        matched_version=match.matched_version, version_in_range=match.version_in_range, source=match.source,
-        defaults={'ai_verdict': 'not_affected', 'ai_reason': reason, 'ai_model': 'deterministic-correlation'})
+    if shared:
+        MatchVerdict.objects.update_or_create(cve_entry=match.cve_entry, matched_product=match.matched_product,
+            matched_version=match.matched_version, version_in_range=match.version_in_range, source=match.source,
+            defaults={'ai_verdict': 'not_affected', 'ai_reason': reason, 'ai_model': 'deterministic-correlation'})
     activity.log('confirm', f'{match.cve_entry.cve_id}: invalid product correlation closed for this asset',
                  project=row.project_id, cve_id=match.cve_entry.cve_id, match_id=match.pk,
                  finding_id=row.pk, decision='closed_not_applicable', reason=reason)
@@ -629,11 +739,12 @@ def _seedable(verdict, row):
     """The stored verdict a new or moved match may start from: never a clearing one (not_affected) for a version in the affected range
     that no distribution has patched, whose evidence the verdict was not reached on (the signature does not carry the distro result)."""
     if verdict and verdict.ai_verdict == "not_affected":
+        if row["evidence"].get("unbounded") and (verdict.ai_reason or '').startswith(match_policy.NO_EVIDENCE):
+            return None  # closed for lack of a version bound before the KEV exception: the candidate is wanted now
         if row["version_in_range"] is True and row["distro_status"] != distro_lib.PATCHED:
             return None
         if (row["version_in_range"] is not False and row["distro_status"] != distro_lib.PATCHED
-                and not (verdict.ai_reason or '').startswith(('Closed automatically: invalid product correlation',
-                                                              'Closed automatically: local-only'))):
+                and not (verdict.ai_reason or '').startswith(AUTO_CLOSED)):
             return None
     return verdict
 
@@ -776,11 +887,14 @@ def close_stale(current, covered):
         return set()
     stale_keep, hosts = [], set()
     for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).only(
-            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "template_result"):
+            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "template_result",
+            "remediation_status", "version_in_range"):
         if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
             continue
         if m.template_result == 'vulnerable':
             continue  # a template hit is evidence of the vulnerability itself: not seeing the product's banner again does not retire it
+        if m.remediation_status != 'open' and m.version_in_range is None:
+            continue  # worked by a person before the evidence policy, with no version behind it: their decision stands, it is not ours to close
         if m.ai_verdict == 'not_affected' and (m.ai_reason or '').startswith('Closed automatically:'):
             continue
         stale_keep.append(m)
@@ -801,7 +915,7 @@ def close_stale(current, covered):
 
 
 def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidence=0.0, scan_history=None, rows=None,
-                              fix_lookup=None):
+                              fix_lookup=None, leads=None):
     """The CVEMatch rows for one subdomain, appended to ``rows`` (a new list when omitted). Returns the rows.
 
     Two deterministic sources are correlated against the CVE product index:
@@ -820,7 +934,8 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
             continue
         _record_matches(
             subdomain, name, version, token, "tech",
-            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id})
+            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id},
+            leads=leads)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_ports
@@ -837,7 +952,8 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                 distro=port_distro(port), fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
                 evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number,
                           "service_extra": (port.service_extra or "")[:255], "cpe": (port.cpe or "")[:255],
-                          "method": ((port.extra or {}).get("method") or "")})
+                          "method": ((port.extra or {}).get("method") or "")},
+                leads=leads)
     return rows
 
 
@@ -849,8 +965,9 @@ def correlate_subdomain(subdomain, product_index, cve_by_id, min_confidence=0.0,
 
 
 def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.0, scan_history=None, batch=500,
-                         fix_lookup=None):
-    """Correlate an iterable of subdomains, writing the matches ``batch`` hosts at a time.
+                         fix_lookup=None, leads=None):
+    """Correlate an iterable of subdomains, writing the matches ``batch`` hosts at a time. ``leads`` (a dict) receives the
+    hosts that run a CVE's product with no version found (see ``_record_matches``).
     Returns (hosts walked, matches recorded)."""
     hosts = matches = 0
     rows, ids = [], set()
@@ -859,7 +976,7 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
     for sub in subdomains:
         hosts += 1
         ids.add(sub.id)
-        collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup)
+        collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup, leads)
         if hosts % batch == 0:
             matches += save_matches(rows, covered=(ids, pool))
             rows, ids = [], set()
@@ -911,7 +1028,9 @@ def local_pool():
 
 
 def _index_hit(token, product_index):
-    return any(name_matches_token(token, product_token) for product_token in product_index)
+    """Whether any product of the index can be ``token``: by name, or by an alias (nmap's "Apache httpd" is the advisory's "HTTP Server")."""
+    return (any(name_matches_token(token, product_token) for product_token in _candidate_tokens(token, product_index))
+            or any(alias in product_index for alias in PRODUCT_ALIASES.get(token, ())))
 
 
 def latest_scan_q(prefix=""):

@@ -1147,6 +1147,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'screenshot': bool(sub.screenshot_path),
             'technologies': sorted(techs),
             'technology_details': details,
+            # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
+            'unverified_products': _unverified_products(sub, others, ips),
             # what the web archive says the host ran at some point: historical evidence, never a current technology
             'archived_technologies': [{'name': n, 'urls': i.get('count', 0), 'examples': (i.get('sample') or [])[:3]}
                                       for n, i in sorted(archived.items())],
@@ -1199,6 +1201,14 @@ def _inventories_for(project, subs, others):
     for inv in HostInventory.objects.filter(project_id__in=pids, host__in=wanted).order_by('reported_at', 'id'):
         out[(inv.project_id, inv.host)] = host_inventory.brief(inv, days[inv.project_id])
     return out
+
+
+def _unverified_products(sub, others, ips):
+    """The host's products that no version was found for, from its technologies and the open ports already gathered for the record."""
+    from cveFeed import match_policy
+    technologies = [(t.id, t.name) for row in [sub, *others] for t in row.technologies.all() if t.name]
+    ports = [(address, port) for address, entry in ips.items() for port in entry['ports']]
+    return match_policy.unversioned_leads(technologies, ports)[:50]
 
 
 def _rdp_screenshot_field(sub, shot):

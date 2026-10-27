@@ -31,6 +31,7 @@ A tier describes a CVE in general. What matters to you is how hot it is on **you
 
 - **A match inherits its CVE's tier.** A fire CVE on one of your hosts is a fire match.
 - **A confirmed smoke becomes fire.** If triage rates the match confirmed or likely and the CVSS is 7.0 or higher, it reads as fire.
+- **A match needs a version.** A tier says how dangerous a CVE is, not whether it applies. A host running a product with no version found has no match at all, whatever the tier, until a version is identified: it is listed as an *unverified product*, not counted in heat or the score. The one tier-driven exception is a CISA KEV advisory that gives no version bound, kept for a host running that product at a known version as a low-confidence candidate that needs validation. Fire and smoke CVEs are template-tested on both kinds of host. See [Match](PIPELINE.md#cve-intelligence).
 - **A distribution patch makes it ice.** If the host's distribution backported the fix, the match is ice however dangerous the CVE is. See [distro backports](PIPELINE.md#cve-intelligence).
 - **A host takes its hottest signal.** A host's heat is the hottest of its CVE matches and its open findings (critical and high findings read as fire, medium as smoke, low as ice). A host with nothing is clean, and one nothing has probed yet is not scanned.
 

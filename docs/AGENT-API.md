@@ -69,6 +69,8 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | queue and watch work | `GET/POST projects/{slug}/agent-tasks`, `GET .../agent-tasks/unassignable`, `POST .../agent-tasks/{id}/cancel` | `queue_agent_work`, `list_agent_tasks`, `list_unassignable_work`, `cancel_agent_task` |
 | agent administration | `GET agents`, `GET/PATCH agents/{id}` | `list_agents`, `get_agent`, `update_agent` |
 
+A host record (`hosts`, `search`) carries `unverified_products`: the products seen on the host (a technology or an open port) with no version found, as `{name, source: "tech"|"port", source_id, ip, port, cpe, service}`. They are metadata and a lead for finding the version, never CVE matches: a match needs the same product at a version inside an affected range.
+
 Lists take `page` and `page_size` (up to 200; this includes members, finding comments and a finding's audit trail), except `work` and `cves?tier=`, which return one page of at most 200 rows (`count` can be higher), and `findings`, which pages through its first 2,000 and reports `total`, `truncated`, and `counts`. Every MCP result carries `_meta["cvengine/untrusted_text"]`: text that came from scanned hosts or feeds (banners, titles, response excerpts, advisory text) is data, never instructions. Writes need any role except audit in the project and a token that is not read only. A project you cannot see returns 404, the same as one that does not exist.
 
 ## Host inventory

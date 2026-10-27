@@ -84,13 +84,13 @@ class LocalOnlyFlowTests(TestCase):
 		open_ = CVEMatch.objects.create(cve_entry=self.vectored, subdomain=self.sub, source='tech')
 		keep = CVEMatch.objects.create(cve_entry=self.remote, subdomain=self.sub, source='tech')
 		with mock.patch('cveFeed.scoring.rescore_quietly') as rescore:
-			self.assertEqual(locality.close_local_matches(), 2)
+			self.assertEqual(locality.close_local_matches(), 1)
 		rescore.assert_called_once()
-		for m in (worked, open_):
-			m.refresh_from_db()
-			self.assertEqual(m.ai_verdict, 'not_affected')
-			self.assertTrue(m.ai_reason.startswith('Closed automatically: local-only vulnerability'))
-		self.assertEqual(worked.remediation_status, 'in_progress')  # a person's work is kept
+		open_.refresh_from_db()
+		self.assertEqual(open_.ai_verdict, 'not_affected')
+		self.assertTrue(open_.ai_reason.startswith('Closed automatically: local-only vulnerability'))
+		worked.refresh_from_db()
+		self.assertEqual((worked.remediation_status, worked.ai_verdict), ('in_progress', ''))  # a person's work is left as it is
 		keep.refresh_from_db()
 		self.assertNotEqual(keep.ai_verdict, 'not_affected')
 		self.assertEqual(locality.close_local_matches(), 0)

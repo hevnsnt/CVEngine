@@ -693,11 +693,16 @@ def _apply(verdict, group):
         if row.validation_status == 'hit' and rank(classification) < rank('confirmed'):
             classification, reason = 'confirmed', row.reason or reason
         match = matches_by_id.get(row.match_id) if row.match_id else None
-        if match and classification in ('likely_false_positive', 'not_applicable') and not (
-                match.version_in_range is False or match.distro_status == 'patched'):
+        # A match is only ever made on hard evidence (the same product, its version inside a bounded range), and a name-only or
+        # wrong-product candidate was already closed on its own (correlation.invalid_identity_reason), so what is left here is a match
+        # that stands on its version: the model's "not applicable" cannot overrule that, while a version outside the range, a patched
+        # distribution package or an unknown range is the model's to judge (an end-of-life release no advisory lists is protected like a range).
+        if match and classification in ('likely_false_positive', 'not_applicable') and match.distro_status != 'patched' \
+                and (match.version_in_range is True or (match.evidence or {}).get('branch_unlisted')):
             classification = 'needs_validation'
-            reason = ('AI suggested the match may be inapplicable, but the recorded product identity still matches the advisory '
-                      'and there is no supported evidence to close this candidate. ' + reason)[:700]
+            reason = ('AI suggested the match may be inapplicable, but the recorded version is inside the advisory\'s affected range '
+                      'for the same product (or older than every branch it fixes), so there is no supported evidence to close it. '
+                      + reason)[:700]
         row.verdict, row.status, row.classification, row.reason = verdict, 'triaged', classification, reason
         row.hard_evidence = hard_evidence(d['kind'], d['facts'])[1]
         row.updated_at = now

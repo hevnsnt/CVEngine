@@ -761,7 +761,8 @@ const hostOverview = (h) => {
 const technologyTable = (h) => {
   const details = h.technology_details || [];
   const archived = h.archived_technologies || [];
-  if (!details.length && !archived.length) return null;
+  const unverified = h.unverified_products || [];
+  if (!details.length && !archived.length && !unverified.length) return null;
   const box = el("div", "tech-table");
   if (details.length) {
     box.append(el("h3", "sec", `Technologies (${details.length})`));
@@ -773,6 +774,16 @@ const technologyTable = (h) => {
       line.append(el("span", "note", t.source ? `seen via ${t.source}` : ""));
       box.append(line);
     });
+  }
+  if (unverified.length) {
+    box.append(el("h3", "sec", `Unverified products (${unverified.length})`));
+    box.append(el("p", "note", "Seen without a version, so they are not matched to CVEs yet: a product name alone does not say which of its advisories apply. A version found later turns them into matches."));
+    const chips = el("div", "host-labels");
+    unverified.forEach((u) => {
+      const where = u.source === "port" ? `port ${u.port}${u.ip ? ` on ${u.ip}` : ""}` : "web fingerprint";
+      chips.append(el("span", "chip", u.name, { title: `Seen via ${where}` }));
+    });
+    box.append(chips);
   }
   if (archived.length) {
     box.append(el("h3", "sec", "Seen in the web archive"));
