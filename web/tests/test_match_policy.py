@@ -385,7 +385,7 @@ class ExistingDataCleanupTests(Fixture):
 		self.assertEqual(self._verdict(wrong), 'not_affected')
 		self.assertEqual(self._verdict(right), '')
 		wrong.refresh_from_db()
-		self.assertIn('invalid product correlation', wrong.ai_reason)
+		self.assertIn('different product', wrong.ai_reason)
 
 	def test_an_os_fingerprint_match_closes_through_the_identity_sweep(self):
 		windows = self.cve(WINDOWS)

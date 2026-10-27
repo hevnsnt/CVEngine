@@ -587,10 +587,10 @@ def validate_match_on_demand(request_id):
             correlation.close_invalid_correlation(match, invalid_reason)
             result = {'check_state': 'no_check', 'checks': {'ran': 0, 'reused': 0}, 'ai_state': 'not_needed',
                       'assessment_status': 'closed_not_applicable', 'assessment_reason': invalid_reason,
-                      'check_notes': ['The recorded product fingerprint does not support this CVE correlation.']}
+                      'check_notes': ['The product recorded for this host is not the software this advisory covers.']}
             OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
                 status='completed', result=result, finished_at=timezone.now())
-            activity.settle(progress, 'done', f'Validation request #{job.pk}: invalid product correlation closed for {cve_id}',
+            activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(invalid_reason)})',
                             check_state='no_check', ai_state='not_needed', assessment_status='closed_not_applicable')
             return result
         row = triage.track(triage.with_cves([match]))[0][0]
