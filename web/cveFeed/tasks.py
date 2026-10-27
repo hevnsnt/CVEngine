@@ -82,6 +82,15 @@ def openvas_sweep():
     return openvas_scan.tick()
 
 
+@app.task(name='supplier_sweep', bind=False, queue='supplier_queue')
+def supplier_sweep():
+    """Daily: the passive posture checks of every project's due third-party suppliers (TLS, email authentication, security headers, banners), a few
+    requests per second at most, each supplier once a week (see ``cveFeed.supplier_scan``). A supplier is not an owned host: this never
+    scans, enumerates or assesses anything. It has a queue of its own so a slow, deliberately paced sweep never holds up the feed workers."""
+    from cveFeed import supplier_scan
+    return supplier_scan.sweep_all()
+
+
 @app.task(name='openvas_check', bind=False, queue='cve_feed_queue')
 def openvas_check():
     """Settings > OpenVAS' Test connection: only a worker has the sidecar's socket (the web container has none), so the page asks here. No

@@ -340,13 +340,16 @@ def _project_kw(project):
     return {} if project is None else {'project': project}
 
 
-def probe_tls(host, port, project=None):
-    """Read the certificate and TLS posture of ``host:port``. ``project`` may authorise a tailnet device of its own."""
+def probe_tls(host, port, project=None, addresses=None):
+    """Read the certificate and TLS posture of ``host:port``. ``project`` may authorise a tailnet device of its own. ``addresses`` (numeric
+    ``(family, sockaddr)`` pairs a caller already vetted, as ``pinned_transport.resolve`` returns them) replaces the lookup, so the third-party
+    supplier checks connect only to the addresses they admitted themselves."""
     kw = _project_kw(project)
-    try:
-        addresses = pinned_transport.resolve(host, port, **kw)
-    except (OSError, ValueError):
-        return None
+    if addresses is None:
+        try:
+            addresses = pinned_transport.resolve(host, port, **kw)
+        except (OSError, ValueError):
+            return None
     info = _fetch_cert(host, port, addresses=addresses, **kw)
     if info:
         info['chain_error'] = _chain_error(host, port, addresses=addresses, **kw)

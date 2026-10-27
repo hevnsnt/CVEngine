@@ -82,6 +82,9 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_BUCKETS`, `CVENGINE_BUCKETS_GUESS` | `1`, `1` | `0` turns off the cloud storage exposure sweep ([PIPELINE.md](PIPELINE.md#cloud-storage-exposure)), or only its name guesses (permutations of a target's domain label). |
 | `CVENGINE_BUCKETS_RPS`, `CVENGINE_BUCKETS_MAX_PER_SWEEP` | `2`, `100` | Requests per second across all workers (0.1 to 5), and buckets checked per project per daily sweep (1 to 1000). A bucket takes one to four requests. |
 | `CVENGINE_TTL_BUCKETS`, `CVENGINE_TTL_BUCKETS_FAILED` | `168`, `24` | Hours before a checked bucket is checked again, and before one that gave no answer is asked again. |
+| `CVENGINE_SUPPLIERS` | `1` | `0`, `false`, `no` or `off` turns off the daily third-party supplier checks (host cards and posture findings; [Pipeline](PIPELINE.md#third-party-suppliers)). Suppliers can still be listed. |
+| `CVENGINE_SUPPLIERS_MAX_PER_PROJECT`, `CVENGINE_SUPPLIERS_MAX_DOMAINS`, `CVENGINE_SUPPLIERS_MAX_REQUESTS` | `50`, `10`, `600` | Suppliers one project may list (1 to 500), exact names one supplier may list (1 to 25), and requests one daily sweep may make across all projects (50 to 5000; a certificate read counts as three). A supplier that does not fit waits for the next sweep. |
+| `CVENGINE_TTL_SUPPLIER`, `CVENGINE_TTL_SUPPLIER_FAILED` | `168`, `24` | Hours before a supplier is checked again, and before one that answered nothing is asked again. |
 
 ## AI limits
 
