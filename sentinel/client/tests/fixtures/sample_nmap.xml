@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -Pn -sV -O -oX - -iL targets.txt" version="7.993">
+<host starttime="0" endtime="0"><status state="up" reason="user-set"/>
+<address addr="192.0.2.10" addrtype="ipv4"/>
+<hostnames></hostnames>
+<ports>
+<port protocol="tcp" portid="22">
+<state state="open" reason="syn-ack"/>
+<service name="ssh" product="OpenSSH" version="8.9" extrainfo="Ubuntu Linux" method="probed" conf="10"/>
+</port>
+<port protocol="tcp" portid="80">
+<state state="open" reason="syn-ack"/>
+<service name="http" product="nginx" version="1.25.3" method="probed" conf="10"/>
+</port>
+<port protocol="tcp" portid="9999">
+<state state="closed" reason="reset"/>
+</port>
+</ports>
+<os>
+<osmatch name="Linux 5.X" accuracy="95" line="12345"/>
+</os>
+</host>
+<host starttime="0" endtime="0"><status state="up" reason="user-set"/>
+<address addr="198.51.100.20" addrtype="ipv4"/>
+<ports>
+<port protocol="tcp" portid="443">
+<state state="open" reason="syn-ack"/>
+<service name="https" product="Apache httpd" version="2.4.58" method="probed" conf="10"/>
+</port>
+</ports>
+</host>
+</nmaprun>

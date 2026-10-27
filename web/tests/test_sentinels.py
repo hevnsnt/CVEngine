@@ -1,4 +1,5 @@
 """Sentinels: identity, enrollment, scan-stage task queueing/leasing, dispatch-or-local, the admin surface."""
+import base64
 from datetime import timedelta
 
 from django.contrib.auth.models import User
@@ -131,6 +132,33 @@ class EnrollmentTests(SentinelBase):
         token = create_token(bob, 'bob')[1]
         status, _ = call(token, 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
         self.assertIn(status, (403, 404))
+
+    def test_format_blob_packages_the_same_payload_and_still_bootstraps(self):
+        # The provisioning blob (the Sentinels page's Provision button, and CVENGINE_SENTINEL_BLOB): generate_enrollment's
+        # own contract is unchanged, ?format=blob only adds one opaque {blob} string alongside it.
+        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob')
+        self.assertEqual(status, 201)
+        self.assertIn('blob', out)
+        self.assertIn('enrollment_token', out)  # the plain fields are still there: this is presentation, not a new contract
+        decoded = sentinels.decode_enrollment_blob(out['blob'])
+        self.assertEqual(decoded, {'enrollment_token': out['enrollment_token'], 'server_url': out['server_url'],
+                                   'expires_at': out['expires_at'], 'project': out['project']})
+        status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap',
+                            {'enrollment_token': decoded['enrollment_token'], 'name': 'blob-sentinel'})
+        self.assertEqual(status, 201)
+        self.assertIn('token', boot)
+
+    def test_decode_enrollment_blob_rejects_anything_that_is_not_base64_json(self):
+        for bad in ('not-base64-at-all-!!!', base64.b64encode(b'"just a json string, not an object"').decode(), '', '   '):
+            with self.assertRaises(ValueError):
+                sentinels.decode_enrollment_blob(bad)
+
+    def test_encode_decode_blob_round_trips(self):
+        payload = {'enrollment_token': 'senr_abc', 'server_url': 'https://cve.example', 'expires_at': '2030-01-01T00:00:00Z',
+                   'project': 'sen-a'}
+        blob = sentinels.encode_enrollment_blob(payload)
+        self.assertEqual(sentinels.decode_enrollment_blob(blob), payload)
+        base64.b64decode(blob, validate=True)  # standard base64, no custom framing
 
 
 class TenancyTests(SentinelBase):

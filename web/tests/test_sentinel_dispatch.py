@@ -170,9 +170,8 @@ class NucleiDispatchTests(DispatchBase):
 
     def test_light_pass_a_finding_with_no_name_links_nothing(self):
         # cveFeed.nuclei_scan.tech_name_from names a technology from info.name (or, for the real tech-detect template,
-        # its matcher-name, which a Sentinel's typed result never carries: see this PR's report for that gap). A
-        # Sentinel that reports no name for a light-pass finding correctly links nothing, same as a local nuclei line
-        # nuclei_scan would have skipped for the same reason.
+        # its matcher-name). A Sentinel that reports no name and no matcher_name for a light-pass finding correctly
+        # links nothing, same as a local nuclei line nuclei_scan would have skipped for the same reason.
         self.make_sentinel(['nuclei_light'])
         result = {'outcome': 'done', 'findings': [{'template_id': 'tech-detect', 'name': '', 'severity': 'info',
                    'host': 'www.example.test', 'matched_at': 'https://www.example.test/', 'description': '', 'tags': [],
@@ -181,6 +180,25 @@ class NucleiDispatchTests(DispatchBase):
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
             light_result = nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
         self.assertEqual(light_result['hosts'], 0)
+
+    def test_light_pass_tech_detect_finding_with_matcher_name_links_the_same_technology_a_local_run_would(self):
+        # tech-detect is named by its matcher, not by info.name (cveFeed.nuclei_scan.tech_name_from): a Sentinel-reported
+        # finding must carry matcher_name through to the reconstructed nuclei line's 'matcher-name' for this to work,
+        # exactly as a locally-run nuclei -jsonl line already supplies it.
+        self.make_sentinel(['nuclei_light'])
+        result = {'outcome': 'done', 'findings': [{'template_id': 'tech-detect', 'name': '', 'severity': 'info',
+                   'host': 'www.example.test', 'matched_at': 'https://www.example.test/', 'description': '', 'tags': [],
+                   'extracted_results': [], 'matcher_name': 'jquery'}]}
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            light_result = nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
+        self.assertEqual(light_result['hosts'], 1)
+        self.assertEqual(light_result['techs'], {'www.example.test': ['jquery']})
+        sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
+        self.assertIn('jquery', [t.name for t in sub.technologies.all()])
+        # The same name a local nuclei run's tech_name_from would have produced, from the equivalent raw line.
+        local_line = {'template-id': 'tech-detect', 'matcher-name': 'jquery', 'info': {'name': ''}, 'extracted-results': []}
+        self.assertEqual(nuclei_scan.tech_name_from(local_line), 'jquery')
 
     def test_targeted_pass_sentinel_findings_land_in_vulnerability_rows_via_the_unchanged_local_loop(self):
         """run_targeted_nuclei's own template-group loop calls run_nuclei -> _run_nuclei, which persists through

@@ -3,10 +3,13 @@
 
   python3 scripts/check_tool_versions.py [--json] [--fail-if-behind]
 
-Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml and the nuclei version the CI smoke
-test downloads). This compares each pin with the newest release: nmap, WPScan, nuclei (the image and the CI smoke test), naabu, bbot, tzdata,
-wafw00f, python-gvm, the Go toolchain and, when the Tailscale profile is present, its sidecar image. The Greenbone images of the OpenVAS add-on have no
-version tags to compare (only the moving tags stable and community, pinned by digest in docker-compose.yml); docs/OPENVAS.md says how to update them. Nuclei's templates are not pinned: they refresh at runtime.
+Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml, sentinel/Dockerfile and the nuclei
+version the CI smoke test downloads). This compares each pin with the newest release: nmap, WPScan, nuclei (the web image, the Sentinel image and
+the CI smoke test), naabu (the web image and the Sentinel image), bbot, tzdata, wafw00f, python-gvm, the Go toolchain and, when the Tailscale
+profile is present, its sidecar image. The Greenbone images of the OpenVAS add-on have no version tags to compare (only the moving tags stable and
+community, pinned by digest in docker-compose.yml); docs/OPENVAS.md says how to update them. Nuclei's templates are not pinned: they refresh at
+runtime. sentinel/Dockerfile's nmap/naabu/nuclei pins are also checked against web/Dockerfile's own for equality (see --fail-if-behind): a Sentinel
+is meant to run the exact same tool versions a local scan would, so the two files drifting apart is itself a failure, not just staleness.
 Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind, a pin cannot be found in its file or a newest
 version cannot be read (the gate fails closed: a renamed pin or an unreachable site must not pass a release; the weekly report, which
 runs without the flag, shows such a row as "?" and never calls it behind). The weekly workflow (.github/workflows/tool-releases.yml) turns "behind" into an issue; the release workflows use --fail-if-behind."""
@@ -99,6 +102,11 @@ TOOLS = [
      GO_PROXY.format('github.com/projectdiscovery/nuclei/v3'), latest_go_module, True, False),
     ('naabu', 'web/Dockerfile', r'ARG NAABU_VERSION=([0-9.]+)', GO_PROXY.format('github.com/projectdiscovery/naabu/v2'),
      latest_go_module, True, False),
+    ('nmap (Sentinel image)', 'sentinel/Dockerfile', r'ARG NMAPVERSION=([0-9.]+)', 'https://nmap.org/dist/', latest_nmap, False, False),
+    ('nuclei (Sentinel image)', 'sentinel/Dockerfile', r'ARG NUCLEI_VERSION=([0-9.]+)',
+     GO_PROXY.format('github.com/projectdiscovery/nuclei/v3'), latest_go_module, True, False),
+    ('naabu (Sentinel image)', 'sentinel/Dockerfile', r'ARG NAABU_VERSION=([0-9.]+)',
+     GO_PROXY.format('github.com/projectdiscovery/naabu/v2'), latest_go_module, True, False),
     ('bbot', 'web/Dockerfile', r'ARG BBOT_VERSION=([0-9.]+)', 'https://pypi.org/pypi/bbot/json', latest_pypi, True, False),
     ('tzdata (bbot)', 'web/Dockerfile', r'ARG TZDATA_VERSION=([0-9.]+)', 'https://pypi.org/pypi/tzdata/json', latest_pypi, True, False),
     ('wafw00f', 'web/requirements.txt', r'(?m)^wafw00f==([0-9.]+)', 'https://pypi.org/pypi/wafw00f/json', latest_pypi, True, False),
@@ -111,6 +119,20 @@ TOOLS = [
 ]
 
 
+# A Sentinel is meant to run the exact tool versions a local scan would (see docs/ARCHITECTURE.md#sentinels), so these
+# three must read the same version from both Dockerfiles, not just each be individually up to date.
+PARITY = [('nmap', 'ARG NMAPVERSION=([0-9.]+)'), ('nuclei', 'ARG NUCLEI_VERSION=([0-9.]+)'), ('naabu', 'ARG NAABU_VERSION=([0-9.]+)')]
+
+
+def parity_rows():
+    rows = []
+    for name, pattern in PARITY:
+        web, sentinel = pinned('web/Dockerfile', pattern), pinned('sentinel/Dockerfile', pattern)
+        rows.append({'tool': f'{name} (web/sentinel pin parity)', 'pinned': web, 'latest': sentinel,
+                     'behind': web != sentinel or web is None})
+    return rows
+
+
 def collect(get=fetch):
     rows, cache = [], {}
     for label, path, pattern, url, read, as_json, optional in TOOLS:
@@ -121,6 +143,7 @@ def collect(get=fetch):
             cache[url] = safely(get, url, as_json)
         answer = cache[url]
         rows.append(compare(label, have, read(answer) if answer else None))
+    rows.extend(parity_rows())
     return rows
 
 
