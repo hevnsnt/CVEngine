@@ -188,10 +188,16 @@ def _ip_is_banable(ip):
     return not _in(parsed, trusted_proxies())
 
 
+def _stored(text, limit):
+    """Attacker-supplied text as it is kept: truncated, and without NUL bytes, which Postgres refuses in text. A strike for a NUL byte
+    carries one in its sample, so without this the insert failed and the very request that earned a strike never counted."""
+    return str(text).replace('\x00', '')[:limit]
+
+
 def _audit(user, action, target, **detail):
     from dashboard.models import AuditLog
     AuditLog.objects.create(actor=user, actor_name=getattr(user, 'username', '') or 'anonymous', action=action,
-                            target=target[:300], detail=detail)
+                            target=_stored(target, 300), detail={k: _stored(v, 600) if isinstance(v, str) else v for k, v in detail.items()})
 
 
 def record_and_maybe_ban(request, hits, ip, user):
@@ -201,7 +207,7 @@ def record_and_maybe_ban(request, hits, ip, user):
     from dashboard.models import AbuseBan, AbuseStrike
     for category, weight, field, sample in hits[:5]:
         AbuseStrike.objects.create(user=user, username=getattr(user, 'username', '') if user else '', ip=ip, weight=weight,
-                                   category=category, field=field[:80], sample=sample[:200], path=request.path[:200])
+                                   category=category, field=_stored(field, 80), sample=_stored(sample, 200), path=_stored(request.path, 200))
     since = timezone.now() - WINDOW
     who = Q(ip=ip) if ip else Q(pk__in=[])
     if user:
@@ -209,7 +215,7 @@ def record_and_maybe_ban(request, hits, ip, user):
     total = AbuseStrike.objects.filter(who, created_at__gte=since).aggregate(t=Sum('weight'))['t'] or 0
     if total < _threshold():
         return False
-    reason = f'{hits[0][0]} in "{hits[0][2]}" ({total} strike points in {int(WINDOW.total_seconds() // 60)} min)'
+    reason = _stored(f'{hits[0][0]} in "{hits[0][2]}" ({total} strike points in {int(WINDOW.total_seconds() // 60)} min)', 300)
     if user and user.is_superuser:
         _audit(user, 'abuse.superuser_flagged', user.username, reason=reason, ip=ip)
         return False

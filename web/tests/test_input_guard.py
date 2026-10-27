@@ -112,6 +112,18 @@ class GuardMiddlewareTests(TestCase):
 		self.assertEqual(Client().get('/login/', REMOTE_ADDR='8.8.4.4').status_code, 403)  # the address is blocked everywhere
 		self.assertNotEqual(Client().get('/login/', REMOTE_ADDR='8.8.8.8').status_code, 403)
 
+	def test_a_nul_byte_payload_is_counted_and_ban_text_never_carries_it(self):
+		"""Postgres refuses a NUL byte in text, so a strike whose sample held one used to fail to save: the request was rejected but
+		never counted, and a flood of them never reached a ban."""
+		_, tok = create_token(self.user, 't')
+		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.example\x00b'})
+		self.assertEqual(response.status_code, 403)  # null_byte is worth 3 strikes, enough on its own
+		strike = AbuseStrike.objects.get(username='mallory', category='null_byte')
+		self.assertNotIn('\x00', strike.sample + strike.field + strike.path)
+		self.user.refresh_from_db()
+		self.assertFalse(self.user.is_active)
+		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4').exists())
+
 	def test_private_addresses_are_never_ip_banned(self):
 		_, tok = create_token(self.user, 't')
 		post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id'}, ip='192.168.1.50')
