@@ -4,7 +4,23 @@
 # in the very update that delivers it. The update script itself is the copy already on the host and only changes on the next update.
 # Not run on its own: it uses the update script's COMPOSE, STATE_HELPER, phase and log, and sets DEPLOY_STAGE for its rollback decision.
 
+# The proxy shows its friendly maintenance page (config/nginx/maintenance.html) for as long as this flag file exists. It is set after the
+# build, which keeps the running site untouched, and before the database changes, because from then until the new web service answers the
+# old code runs on a new schema or nothing runs at all, and a visitor would get an error page. It is always removed when the deploy ends,
+# failed or not: a failed update must not claim "back soon", and a retry sets it again. A host that was stopped mid-update can leave it
+# behind; `rm config/nginx/state/maintenance` (or the next update, or make up) clears it.
+MAINTENANCE_FLAG=config/nginx/state/maintenance
+maintenance_on() { mkdir -p "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && : >"$MAINTENANCE_FLAG" 2>/dev/null || log "could not set the maintenance flag; visitors may see an error page while the update runs"; }
+maintenance_off() { rm -f "$MAINTENANCE_FLAG" 2>/dev/null || true; }
+
 deploy_current() {
+  local status=0
+  deploy_steps || status=$?
+  maintenance_off
+  return "$status"
+}
+
+deploy_steps() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
   local services=(web celery celery-beat) listed
@@ -18,6 +34,7 @@ deploy_current() {
   phase applying "$DEPLOY_STAGE"
   check_disk || return 1
   "${compose[@]}" build web celery celery-beat || return 1
+  maintenance_on
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1

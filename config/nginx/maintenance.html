@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Rebuilding cvENGINE</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f4f4f5;
+        --card: #ffffff;
+        --ink: #0a0a0b;
+        --muted: #55555c;
+        --line: #dcdce0;
+        --fire: #ff5a00;
+        --paper: #e8f1fb;
+        --paper-line: #8fb4de;
+        --skin-a: #f1c9a5;
+        --skin-b: #b98259;
+        --shirt-a: #2e2e32;
+        --shirt-b: #4a5a78;
+        --bubble: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0a0a0b;
+          --card: #151517;
+          --ink: #f4f4f5;
+          --muted: #a4a4ac;
+          --line: #2b2b30;
+          --paper: #17283d;
+          --paper-line: #4f78a8;
+          --bubble: #1f1f23;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.5 Inter,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 16px;
+      }
+      main {
+        width: 100%;
+        max-width: 760px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--fire);
+        border-radius: 10px;
+        padding: 28px 28px 24px;
+      }
+      .brand {
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        font-size: 14px;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+      .brand b {
+        color: var(--fire);
+      }
+      h1 {
+        margin: 6px 0 8px;
+        font-size: clamp(26px, 5vw, 36px);
+        line-height: 1.15;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+        max-width: 56ch;
+      }
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        margin: 18px 0 6px;
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 10px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .pulse {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--fire);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+
+      /* the scene */
+      .ink {
+        stroke: var(--ink);
+      }
+      .hat {
+        fill: var(--fire);
+      }
+      .sheet {
+        fill: var(--paper);
+        stroke: var(--paper-line);
+      }
+      .trace {
+        stroke: var(--paper-line);
+        fill: none;
+        stroke-width: 2;
+        stroke-linecap: round;
+      }
+      .draw {
+        stroke: var(--fire);
+        fill: none;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-dasharray: 220;
+        stroke-dashoffset: 220;
+        animation: draw 6s ease-in-out infinite;
+      }
+      .draw.two {
+        animation-delay: 2.2s;
+        stroke-dasharray: 160;
+        stroke-dashoffset: 160;
+      }
+      .gear {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: spin 9s linear infinite;
+      }
+      .gear.rev {
+        animation-direction: reverse;
+        animation-duration: 6s;
+      }
+      .bob-a {
+        transform-box: fill-box;
+        transform-origin: 50% 100%;
+        animation: bob 3s ease-in-out infinite;
+      }
+      .bob-b {
+        transform-box: fill-box;
+        transform-origin: 50% 100%;
+        animation: bob 3s ease-in-out 1.5s infinite;
+      }
+      .point {
+        transform-box: fill-box;
+        transform-origin: 0% 50%;
+        animation: point 3s ease-in-out infinite;
+      }
+      .talk {
+        opacity: 0;
+      }
+      .t1 {
+        animation: say 12s linear 0s infinite;
+      }
+      .t2 {
+        animation: say 12s linear 3s infinite;
+      }
+      .t3 {
+        animation: say 12s linear 6s infinite;
+      }
+      .t4 {
+        animation: say 12s linear 9s infinite;
+      }
+      .bubble {
+        fill: var(--bubble);
+        stroke: var(--line);
+        stroke-width: 1.5;
+      }
+      .words {
+        fill: var(--ink);
+        font:
+          600 15px Inter,
+          system-ui,
+          sans-serif;
+      }
+
+      /* on a phone the speech bubbles would shrink to unreadable, so the same lines are shown as text under the picture */
+  .caption { display: none; position: relative; height: 26px; margin: 0 0 6px; font-weight: 600; }
+  .caption span { position: absolute; inset: 0; opacity: 0; }
+  .caption .t1, .caption .t2, .caption .t3, .caption .t4 { animation-name: say; }
+  @media (max-width: 560px) {
+    .talk { display: none; }
+    .caption { display: block; }
+    main { padding: 22px 18px 20px; }
+  }
+  @keyframes draw {
+        0% {
+          stroke-dashoffset: 220;
+        }
+        45%,
+        80% {
+          stroke-dashoffset: 0;
+        }
+        100% {
+          stroke-dashoffset: -220;
+        }
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes bob {
+        0%,
+        100% {
+          transform: rotate(0deg);
+        }
+        50% {
+          transform: rotate(-2.5deg);
+        }
+      }
+      @keyframes point {
+        0%,
+        100% {
+          transform: rotate(-8deg);
+        }
+        50% {
+          transform: rotate(10deg);
+        }
+      }
+      @keyframes say {
+        0% {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        4%,
+        21% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        25%,
+        100% {
+          opacity: 0;
+          transform: translateY(0);
+        }
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 0.3;
+          transform: scale(0.8);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.1);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .gear,
+        .bob-a,
+        .bob-b,
+        .point,
+        .pulse {
+          animation: none;
+        }
+        .draw {
+          animation: none;
+          stroke-dashoffset: 0;
+        }
+        .t1 {
+          animation: none;
+          opacity: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="brand"><b>cv</b>ENGINE</div>
+      <h1>We are rebuilding cvENGINE.</h1>
+      <p>
+        A new version is going in right now. Back soon. This page reloads by
+        itself the moment the site answers, and scans pick up where they left
+        off.
+      </p>
+
+      <svg
+        viewBox="0 0 760 330"
+        role="img"
+        aria-label="Two engineers in hard hats study a blueprint and talk it over"
+      >
+        <!-- gears -->
+        <g class="ink" fill="none" stroke-width="3">
+          <g transform="translate(70 62)"><g class="gear">
+            <circle r="22" fill="var(--fire)" stroke="none" />
+            <circle r="8" fill="var(--card)" stroke="none" />
+            <path
+              d="M0-30V-22M0 22V30M-30 0H-22M22 0H30M-21-21L-15-15M15 15L21 21M-21 21L-15 15M15-15L21-21"
+              stroke-width="7"
+              stroke-linecap="round"
+            />
+          </g></g>
+          <g transform="translate(112 92)"><g class="gear rev">
+            <circle r="14" fill="var(--muted)" stroke="none" />
+            <circle r="5" fill="var(--card)" stroke="none" />
+            <path
+              d="M0-19V-14M0 14V19M-19 0H-14M14 0H19M-13-13L-10-10M10 10L13 13M-13 13L-10 10M10-10L13-13"
+              stroke-width="5"
+              stroke-linecap="round"
+            />
+          </g></g>
+          <g transform="translate(712 252)"><g class="gear rev">
+            <circle r="18" fill="var(--muted)" stroke="none" />
+            <circle r="6" fill="var(--card)" stroke="none" />
+            <path
+              d="M0-25V-18M0 18V25M-25 0H-18M18 0H25M-17-17L-13-13M13 13L17 17M-17 17L-13 13M13-13L17-17"
+              stroke-width="6"
+              stroke-linecap="round"
+            />
+          </g></g>
+        </g>
+
+        <!-- floor and table -->
+        <line
+          x1="30"
+          y1="296"
+          x2="730"
+          y2="296"
+          stroke="var(--line)"
+          stroke-width="3"
+        />
+        <rect
+          x="215"
+          y="228"
+          width="330"
+          height="14"
+          rx="3"
+          fill="var(--ink)"
+          opacity="0.85"
+        />
+        <rect
+          x="240"
+          y="242"
+          width="10"
+          height="54"
+          fill="var(--ink)"
+          opacity="0.85"
+        />
+        <rect
+          x="510"
+          y="242"
+          width="10"
+          height="54"
+          fill="var(--ink)"
+          opacity="0.85"
+        />
+
+        <!-- blueprint on the table -->
+        <path
+          class="sheet"
+          d="M235 228 L265 178 L495 178 L525 228 Z"
+          stroke-width="2"
+        />
+        <path
+          class="trace"
+          d="M275 196H485M270 206H490M262 216H498M330 180L305 226M380 178V228M430 178L455 226"
+        />
+        <path
+          class="draw"
+          d="M310 214 C 330 184, 370 184, 392 206 S 450 222, 470 192"
+        />
+        <path class="draw two" d="M300 190 H350 V208 H300 Z" />
+        <circle cx="430" cy="196" r="9" class="trace" />
+
+        <!-- engineer on the left -->
+        <g class="bob-a">
+          <rect
+            x="120"
+            y="164"
+            width="76"
+            height="132"
+            rx="26"
+            fill="var(--shirt-a)"
+          />
+          <circle
+            cx="158"
+            cy="132"
+            r="30"
+            fill="var(--skin-a)"
+            stroke="var(--ink)"
+            stroke-width="3"
+          />
+          <path
+            class="hat"
+            d="M126 126 C 128 94, 188 94, 190 126 Z"
+            stroke="var(--ink)"
+            stroke-width="3"
+          />
+          <rect
+            x="120"
+            y="122"
+            width="76"
+            height="9"
+            rx="4"
+            class="hat"
+            stroke="var(--ink)"
+            stroke-width="3"
+          />
+          <circle cx="148" cy="138" r="3" fill="var(--ink)" />
+          <circle cx="168" cy="138" r="3" fill="var(--ink)" />
+          <path
+            d="M150 150 Q158 156 166 150"
+            fill="none"
+            stroke="var(--ink)"
+            stroke-width="3"
+            stroke-linecap="round"
+          />
+          <g class="point">
+            <rect
+              x="184"
+              y="188"
+              width="70"
+              height="14"
+              rx="7"
+              fill="var(--shirt-a)"
+            />
+            <circle
+              cx="256"
+              cy="195"
+              r="8"
+              fill="var(--skin-a)"
+              stroke="var(--ink)"
+              stroke-width="2"
+            />
+          </g>
+        </g>
+
+        <!-- engineer on the right -->
+        <g class="bob-b">
+          <rect
+            x="564"
+            y="164"
+            width="76"
+            height="132"
+            rx="26"
+            fill="var(--shirt-b)"
+          />
+          <circle
+            cx="602"
+            cy="132"
+            r="30"
+            fill="var(--skin-b)"
+            stroke="var(--ink)"
+            stroke-width="3"
+          />
+          <path
+            class="hat"
+            d="M570 126 C 572 94, 632 94, 634 126 Z"
+            stroke="var(--ink)"
+            stroke-width="3"
+          />
+          <rect
+            x="564"
+            y="122"
+            width="76"
+            height="9"
+            rx="4"
+            class="hat"
+            stroke="var(--ink)"
+            stroke-width="3"
+          />
+          <circle cx="592" cy="138" r="3" fill="var(--ink)" />
+          <circle cx="612" cy="138" r="3" fill="var(--ink)" />
+          <path
+            d="M594 150 Q602 155 610 150"
+            fill="none"
+            stroke="var(--ink)"
+            stroke-width="3"
+            stroke-linecap="round"
+          />
+          <rect
+            x="520"
+            y="188"
+            width="70"
+            height="14"
+            rx="7"
+            fill="var(--shirt-b)"
+          />
+          <circle
+            cx="518"
+            cy="195"
+            r="8"
+            fill="var(--skin-b)"
+            stroke="var(--ink)"
+            stroke-width="2"
+          />
+        </g>
+
+        <!-- what they say, one line at a time -->
+        <g class="talk t1">
+          <path
+            class="bubble"
+            d="M82 40h222a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H190l-20 20 2-20H82a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
+          />
+          <text class="words" x="92" y="72">Are the new tables lined up?</text>
+        </g>
+        <g class="talk t2">
+          <path
+            class="bubble"
+            d="M432 40h226a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H600l2 20-22-20H432a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
+          />
+          <text class="words" x="442" y="72">Checking the blueprint.</text>
+        </g>
+        <g class="talk t3">
+          <path
+            class="bubble"
+            d="M82 40h222a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H190l-20 20 2-20H82a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
+          />
+          <text class="words" x="92" y="72">Hand me the big wrench.</text>
+        </g>
+        <g class="talk t4">
+          <path
+            class="bubble"
+            d="M432 40h226a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H600l2 20-22-20H432a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
+          />
+          <text class="words" x="442" y="72">Almost there. Back soon.</text>
+        </g>
+      </svg>
+
+      <div class="caption" aria-hidden="true">
+    <span class="t1">Are the new tables lined up?</span>
+    <span class="t2">Checking the blueprint.</span>
+    <span class="t3">Hand me the big wrench.</span>
+    <span class="t4">Almost there. Back soon.</span>
+  </div>
+  <div class="status">
+        <span class="pulse" aria-hidden="true"></span
+        ><span id="state" role="status">Checking again every few seconds.</span>
+      </div>
+    </main>
+    <script>
+      // nginx answers every path with this page (status 503) while an update is applied, so a request for the same address tells us when
+      // the real site is back: anything that is not a 5xx, a redirect to the sign-in page included, means reload.
+      (function () {
+        var state = document.getElementById("state");
+        var wait = 4000;
+        function check() {
+          fetch(location.pathname + "?up=" + Date.now(), {
+            cache: "no-store",
+            redirect: "manual",
+            credentials: "same-origin",
+          })
+            .then(function (res) {
+              if (res.type === "opaqueredirect" || res.status < 500) {
+                state.textContent = "Back. Reloading.";
+                location.reload();
+                return;
+              }
+              again();
+            })
+            .catch(again);
+        }
+        function again() {
+          wait = Math.min(wait + 1000, 10000);
+          setTimeout(check, wait);
+        }
+        setTimeout(check, wait);
+      })();
+    </script>
+  </body>
+</html>
