@@ -51,6 +51,7 @@ RUN apt-get update -y && \
     cargo \
     cmake \
     curl \
+    fonts-dejavu-core \
     gcc \
     git \
     jq \

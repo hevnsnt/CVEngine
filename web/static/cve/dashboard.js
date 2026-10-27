@@ -5,6 +5,7 @@ import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.j
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
+import { reportButton } from "/staticfiles/cve/report-export.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -920,4 +921,11 @@ setInterval(pollScanning, 3000);
       toggle.setAttribute("aria-pressed", String(on));
       graph.setPods(on);
     });
+}
+
+// --- PDF report ----------------------------------------------------------------------------------
+// A report is about one project, so the button is offered once a project is selected (not in the combined All projects view).
+if (slug && slug !== "_all") {
+  const head = document.querySelector(".page-head");
+  if (head) head.append(reportButton({ slug }));
 }

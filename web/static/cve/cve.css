@@ -1459,3 +1459,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .strip a.wide{flex:2 1 300px}
 @media (max-width:719px){.strip a{flex-basis:140px}.strip a.wide{flex-basis:100%}}
 .strip a#n-oldest.old b{color:var(--fire-ink)}
+.report-export{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+.report-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.report-switch input{margin:0;min-width:16px;min-height:16px}
+.report-status{min-height:1em}

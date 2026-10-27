@@ -3,11 +3,11 @@
 
   python3 scripts/generate_sbom.py [--output cvengine.sbom.cdx.json]
 
-It lists what a build is made of, read from the files that pin it: the scanner tools and the base image (web/Dockerfile), the Python
+It lists what a build is made of, read from the files that pin it: the scanner tools, the base image and the apt packages (web/Dockerfile), the Python
 packages (web/requirements.txt) and the service images (docker-compose.yml). Nothing is downloaded and the output is reproducible: the
 same commit gives the same document (the timestamp is the commit's). A component that is not pinned to an exact version (a floating
 image tag, a version range, nuclei's templates) is listed with `cvengine:pinned` = `false` so a reader can see what the bill cannot vouch
-for. What the finished image really contains (the operating system packages of the base image) is not in this file: scan the built
+for. What the finished image really contains (what the apt packages pull in, and the base image's own packages) is not in this file: scan the built
 image for that, for example `syft cvengine/web:latest -o cyclonedx-json`. The release workflow attaches this file to every release."""
 import json
 import re
@@ -74,6 +74,22 @@ def tools(dockerfile):
     return out
 
 
+def apt_packages(dockerfile):
+    """The operating system packages the Dockerfile asks apt for by name (not what they pull in, and not the version: apt installs the
+    base release's current one, so they are listed unpinned). A package that is installed and purged in the same build is left out."""
+    text = dockerfile.replace('\\\n', ' ')
+    names = set()
+    for match in re.finditer(r'apt-get install\s+([^&|;)\n]*)', text):
+        names.update(word for word in match.group(1).split() if not word.startswith('-') and re.fullmatch(r'[a-z0-9][a-z0-9+.-]*', word))
+    for match in re.finditer(r'apt-get purge\s+([^&|;)\n]*)', text):
+        names.difference_update(match.group(1).split())
+    base = re.search(r'(?m)^FROM ubuntu:([\w.-]+)', dockerfile)
+    distro = f'ubuntu-{base.group(1)}' if base else 'ubuntu'
+    return [component(name, None, f'pkg:deb/ubuntu/{name}?distro={distro}', kind='library', pinned=False,
+                      note='installed with apt-get in web/Dockerfile; the version is the base release\'s on the day the image was built')
+            for name in sorted(names)]
+
+
 def python_packages(requirements):
     out = []
     for line in requirements.splitlines():
@@ -118,7 +134,7 @@ def commit_time():
 def build():
     version = read('web/.version').strip()
     dockerfile = read('web/Dockerfile')
-    components = tools(dockerfile) + python_packages(read('web/requirements.txt')) + service_images(read('docker-compose.yml'))
+    components = tools(dockerfile) + apt_packages(dockerfile) + python_packages(read('web/requirements.txt')) + service_images(read('docker-compose.yml'))
     components.sort(key=lambda c: (c['type'], c['name'].lower()))
     app = {'type': 'application', 'bom-ref': 'cvengine', 'name': 'cvENGINE', 'version': version,
            'licenses': [{'license': {'id': 'GPL-3.0-only'}}], 'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/hevnsnt/CVEngine'}]}

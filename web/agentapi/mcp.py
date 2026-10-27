@@ -13,6 +13,7 @@ from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
+from agentapi import reports
 from agentapi import services as svc
 from agentapi import system_status
 from agentapi import authcheck
@@ -202,6 +203,13 @@ TOOLS = [
                           'heat': {'type': 'string', 'enum': ['all', 'fire', 'smoke', 'ice']}, 'severity': {'type': 'string'},
                           'status': {'type': 'string', 'enum': ['actionable', 'all']}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_findings(c, a.get('project'), a), False),
+    ('export_report', 'Queue a PDF report of a project, or of one host of it: cover, executive summary (fire, smoke and ice counts, severity, top risks), host table, one section per finding (evidence with the exact command that proved it, remediation, status, assignee, notes), TLS and email hygiene, and a method and validity page. Open findings only unless include_closed is true. Returns the report id, its status and a status_url and (once done) a download_url on the REST API; poll with get_report. Reports expire after 24 hours by default and only the user who asked can download one. Not a write: a read-only token may ask.',
+     _schema({'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name, for a report on that host only'},
+              'include_closed': {'type': 'boolean', 'description': 'also list fixed and accepted-risk findings (default false)'}}, ['project']),
+     lambda c, a: reports.export_report(c, a.get('project'), {k: v for k, v in a.items() if k != 'project'})[0], False),
+    ('get_report', 'The state of a report you asked for with export_report: queued, running, done, failed or expired, with its size and what the caps left out. When done, download_url is the REST path to GET (application/pdf, same bearer token).',
+     _schema({'project': SLUG, 'report_id': {'type': 'string'}}, ['project', 'report_id']),
+     lambda c, a: reports.report_status(c, a.get('project'), str(a['report_id'])), False),
     ('list_vulnerabilities', 'Scanner findings. severity: info|low|medium|high|critical, or actionable (everything but info); open: true|false.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'open': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_vulnerabilities(c, a.get('project'), a), False),

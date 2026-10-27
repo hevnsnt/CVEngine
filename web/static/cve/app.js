@@ -20,6 +20,7 @@ import {
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
+import { reportButton } from "/staticfiles/cve/report-export.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -2695,6 +2696,11 @@ const pages = {
       const assessBody = el("div", "note", "Checking for an existing assessment…");
       assessBox.append(assessHead, assessBody);
       S.manage.append(assessBox);
+      // a PDF of this host: findings with evidence and remediation status, built in the background and downloaded when ready
+      const reportBox = el("div", "why");
+      reportBox.append(el("h3", "sec", "PDF report"), el("p", "note", "Open findings, the evidence and the exact checks that showed them, remediation text and who is on it."));
+      if (projectOf(h)) reportBox.append(reportButton({ slug: projectOf(h), host: h.host }));
+      S.manage.append(reportBox);
       const assessPath = `${baseOf(projectOf(h))}/host-assessments`;
       let pollToken = 0;
       const drawAssessment = (job) => {

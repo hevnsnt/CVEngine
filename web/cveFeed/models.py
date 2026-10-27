@@ -1640,3 +1640,35 @@ class AuthCredential(models.Model):
 
     def __str__(self):
         return f"{self.label} for {self.host or self.domain_id}"
+
+
+class ReportExport(models.Model):
+    """One requested PDF report (cveFeed.report_export): who asked for what, how it went, and the random file name it was written to.
+
+    The file lives under the report directory and is served only by an authenticated view to the user who asked, until ``expires_at``.
+    ``token`` is the id a client sees; ``filename`` is a second random value that never leaves the server."""
+
+    STATUSES = ("queued", "running", "done", "failed")
+    token = models.CharField(max_length=64, unique=True)
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    requested_by = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500, blank=True, default="")  # empty: the whole project
+    include_closed = models.BooleanField(default=False)  # also list fixed and accepted-risk findings
+    status = models.CharField(max_length=10, default="queued")
+    filename = models.CharField(max_length=80, blank=True, default="")
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    summary = models.JSONField(default=dict, blank=True)  # what the report holds and what the caps left out
+    error = models.CharField(max_length=200, blank=True, default="")
+    celery_id = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "expires_at"], name="reportexport_status_exp_idx"),
+                   models.Index(fields=["requested_by", "created_at"], name="reportexport_user_created_idx")]
+        ordering = ["-id"]
+
+    def __str__(self):
+        return f"report {self.pk} {self.project_id} {self.host or 'project'} [{self.status}]"
