@@ -65,3 +65,8 @@ class ToolVersionCheckTests(SimpleTestCase):
 					mock.patch('builtins.print'), mock.patch.object(sys, 'exit') as leave:
 				tools.main()
 				self.assertEqual(leave.called, bool(expected))
+
+	def test_nmap_has_a_checksum_for_the_amd64_rpm_and_for_the_source_tarball(self):
+		dockerfile = open(os.path.join(os.path.dirname(PATH), '..', 'web', 'Dockerfile'), encoding='utf-8').read()
+		for name in ('NMAP_SHA256', 'NMAP_RPM_SHA256_AMD64'):
+			self.assertRegex(dockerfile, rf'(?m)^ARG {name}=[0-9a-f]{{64}}$')

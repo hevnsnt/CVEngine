@@ -3,7 +3,7 @@
 Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The current release runs PostgreSQL 18, which cannot open a version 12 data directory, so the data is dumped and loaded into a new volume. The old volume is not converted or deleted. A fresh install needs none of this.
 
 1. Back up the database, then `git pull`. Do not use the in-app updater or automatic deployment until the move is done.
-2. `make up`. It moves the database to PostgreSQL 18, keeps a dump in `backups/`, then rebuilds and starts everything. The first build takes a while because nmap is compiled. For a development install, run `scripts/upgrade-postgres.sh --dev` and then `docker compose -f docker-compose.dev.yml up -d --build`.
+2. `make up`. It moves the database to PostgreSQL 18, keeps a dump in `backups/`, then rebuilds and starts everything. The first build takes a while on an arm64 machine because nmap is compiled there (an x86-64 build installs the official nmap binary instead). For a development install, run `scripts/upgrade-postgres.sh --dev` and then `docker compose -f docker-compose.dev.yml up -d --build`.
 3. When you have checked the data, remove the old volume: `docker volume rm <project>_postgres_data` (the project is `COMPOSE_PROJECT_NAME` in `.env`, default `rengine`).
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.

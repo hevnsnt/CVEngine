@@ -114,6 +114,18 @@ jobs:
       - name: 🏗️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: 📋 Bill of materials
+        if: matrix.arch == 'amd64'
+        run: python3 scripts/generate_sbom.py --output "$RUNNER_TEMP/cvengine.sbom.cdx.json"
+
+      - name: 📋 Keep the bill of materials
+        if: matrix.arch == 'amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/cvengine.sbom.cdx.json
+          retention-days: 30
+
       - name: 🏷️ Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
