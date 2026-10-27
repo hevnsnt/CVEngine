@@ -1,5 +1,6 @@
 """Version and identity probes: what they read, what they record, how they are planned without an AI, and the gates they keep."""
 from unittest import mock
+from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase, TestCase
 
@@ -227,7 +228,7 @@ class PlanTests(RouteFixture, TestCase):
         self.assertIn('error-page', ids)
         self.assertIn('nginx-variants', ids)
         self.assertLessEqual(len(plan), probes.MAX_PROBES_PER_HOST)
-        self.assertTrue(all(p['target']['base'].startswith('https://www.rt.test') for p in plan if p['family'] == 'http'))
+        self.assertTrue(all(urlsplit(p['target']['base']).hostname == 'www.rt.test' for p in plan if p['family'] == 'http'))
 
     def test_a_version_found_removes_the_lead(self):
         _scan, sub = self.host(technologies=('nginx:1.24.0',))

@@ -163,7 +163,8 @@ class StageTests(RouteFixture, TestCase):
 
     def test_every_site_failing_is_an_error_and_a_non_wordpress_site_is_not(self):
         out = self.go(runner=mock.Mock(side_effect=RuntimeError('boom')))
-        self.assertIn('boom', out['error'])
+        self.assertIn('WPScan failed', out['error'])
+        self.assertNotIn('boom', out['error'])  # the raw reason goes to the worker log and the host record, not into the activity feed
         ServiceRun.objects.all().delete()
         out = self.go(runner=mock.Mock(side_effect=ValueError('not running WordPress')))
         self.assertNotIn('error', out)

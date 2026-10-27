@@ -676,7 +676,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
                 continue
             ledger.record(SERVICE, [host], project, scan)
             record_state(project, domain.id, host, 'not_wordpress', str(exc))
-            errors.append(f'{host}: {exc}')
+            errors.append(f'{host}: not running WordPress')
             continue
         except Blocked as exc:
             ledger.record(SERVICE, [host], project, scan, 'failed')
@@ -687,7 +687,8 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
             logger.warning('wpscan failed for %s: %s', host, _redact(str(exc), token))
             ledger.record(SERVICE, [host], project, scan, 'failed')
             record_state(project, domain.id, host, 'failed', _redact(str(exc), token))
-            errors.append(f'{host}: {_redact(str(exc), token)}')
+            activity.diagnostic(f'WPScan on {host}', _redact(str(exc), token))  # the raw text goes to the worker log, not the feed
+            errors.append(f'{host}: WPScan failed (see the host page)')
             continue
         new, techs = persist_report(scan, sub, url, report)
         titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project)
@@ -796,7 +797,7 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
                 record_thorough(project_id, domain_id, host, 'failed', reason)
                 ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')
                 summary['failed'] += 1
-                activity.settle(running, 'failed', message=f'Thorough WPScan pass failed on {host}: {reason[:200]}')
+                activity.settle(running, 'failed', message=activity.diagnostic(f'Thorough WPScan pass on {host}', reason))
                 continue
             new, _techs = persist_report(scan, sub, url, report)
             titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project_id)
