@@ -80,13 +80,26 @@ jobs:
         run: "$GITHUB_WORKSPACE/.github/rehearsal/install-base.sh overlay"
       - name: Put data in it
         run: "$GITHUB_WORKSPACE/.github/rehearsal/seed.sh"
-      - name: Approve and apply with scripts/apply-update.sh (the in-app path)
+      - name: Approve; the host watcher applies it (the in-app path, started the way cron starts it)
         run: |
           cd "$HOME/cvengine"
           git --git-dir="$HOME/origin.git" update-ref refs/heads/master "$(cat "$HOME/candidate.sha")"
           cp "$HOME/candidate.sha" web/.update-approved
           printf 'master\n' > web/.update-branch
-          scripts/apply-update.sh
+          # cron starts scripts/update-watch.sh with a bare environment; so does this (no PATH beyond the system's, no login shell)
+          nohup env -i PATH=/usr/bin:/bin HOME="$HOME" scripts/update-watch.sh 5400 >"$HOME/watcher.log" 2>&1 &
+          watcher=$!
+          for _ in $(seq 1 540); do
+            [ -e web/.update-approved ] || break
+            kill -0 "$watcher" 2>/dev/null || break
+            sleep 10
+          done
+          kill "$watcher" 2>/dev/null || true
+          if [ -e web/.update-approved ]; then
+            echo "::error::The approval is still waiting after 90 minutes: the watcher did not apply the update"
+            cat "$HOME/watcher.log" || true
+            exit 1
+          fi
       - name: The updated install works, keeps its data and still uses the overlay
         run: "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh overlay"
       - name: Turn on Redis authentication (make redis-auth) and check again
@@ -94,6 +107,50 @@ jobs:
           cd "$HOME/cvengine"
           make redis-auth
           "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
+      - name: A second update, applied by the scripts the first one installed
+        run: |
+          cd "$HOME/cvengine"
+          second="$HOME/second"
+          rm -rf "$second"
+          git clone -q "$HOME/origin.git" "$second"
+          git -C "$second" config user.name rehearsal
+          git -C "$second" config user.email rehearsal@example.invalid
+          echo "rehearsal: the second update" > "$second/docs/.rehearsal-second-update"
+          git -C "$second" add -A
+          git -C "$second" commit -q -m "A change that only the second update brings"
+          git -C "$second" push -q origin HEAD:master
+          git -C "$second" rev-parse HEAD > "$HOME/candidate.sha"
+          cp "$HOME/candidate.sha" web/.update-approved
+          printf 'master\n' > web/.update-branch
+          # The conductor starts scans of the seeded (unreachable) targets as soon as the first update restarts the stack, and such a scan can
+          # take far longer than this rehearsal waits. What is being rehearsed is how the second update is applied, not how long a scan takes:
+          # stop what runs now, the way an operator's "Stop all scans" does, then let the update wait for whatever is left.
+          . "$GITHUB_WORKSPACE/.github/rehearsal/lib.sh"
+          dc exec -T web python3 manage.py shell -c "from cveFeed.scan_control import abort_running_scans; print(abort_running_scans(None), 'scans stopped')"
+          # exit 3 is "waiting: scans are running, approval kept": the host watcher calls it again a minute later, so this does too
+          for attempt in $(seq 1 60); do
+            status=0
+            scripts/apply-update.sh || status=$?
+            [ "$status" = 3 ] || break
+            sleep 30
+          done
+          if [ "$status" != 0 ]; then
+            echo "::group::what the update was waiting for"
+            dc exec -T web python3 manage.py shell -c "from startScan.models import ScanHistory; [print(s.id, s.scan_status, s.start_scan_date, s.domain) for s in ScanHistory._base_manager.filter(scan_status=1)]" || true
+            echo "::endgroup::"
+            echo "::error::the second update ended with status $status"; exit 1
+          fi
+          [ ! -e web/.update-approved ] || { echo "::error::the second update did not clear its approval"; exit 1; }
+          "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
+      - name: Approving the same commit again does nothing
+        run: |
+          cd "$HOME/cvengine"
+          before=$(docker images -q --no-trunc | sort | md5sum)
+          cp "$HOME/candidate.sha" web/.update-approved
+          printf 'master\n' > web/.update-branch
+          scripts/apply-update.sh
+          grep -q 'already at' "$(python3 scripts/update-state.py directory)/update.log" || { echo "::error::the update log does not say 'already at'"; exit 1; }
+          [ "$before" = "$(docker images -q --no-trunc | sort | md5sum)" ] || { echo "::error::an update that was already applied built an image"; exit 1; }
       - name: Logs
         if: failure()
         run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"

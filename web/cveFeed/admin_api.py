@@ -527,6 +527,11 @@ def activity_list(request, actor):
     return {'count': count, 'page': page, 'page_size': page_size, 'results': rows}
 
 
+# django-celery-beat's scheduler writes a task's last_run_at to the database only every three minutes (its sync interval), so a task that
+# runs every minute shows a last run up to three minutes old while it is dispatching on time: a schedule is late only past that and a margin.
+BEAT_FLUSH_SECONDS = 300
+
+
 def scheduler_health(request, actor):
     """Bounded, read-only scheduler and worker snapshot for the App Admin.
 
@@ -553,7 +558,7 @@ def scheduler_health(request, actor):
                                          'seconds': 1, 'microseconds': 0.000001}.get(interval.period, 0))
             if seconds:
                 next_due = task.last_run_at + timedelta(seconds=seconds)
-        overdue = bool(next_due and next_due < now - timedelta(seconds=60))
+        overdue = bool(next_due and next_due < now - timedelta(seconds=BEAT_FLUSH_SECONDS))
         schedules.append({'name': task.name, 'task': task.task, 'queue': task.queue or 'default',
                           'last_dispatch': task.last_run_at.isoformat() if task.last_run_at else None,
                           'next_due': next_due.isoformat() if next_due else None,

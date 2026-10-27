@@ -8,6 +8,16 @@ Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The 
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.
 
+## Upgrading to 1.2
+
+An update applies the migrations (it rolls back if one fails) and ends every session once, so everyone signs in again. Three protections are new-install only, because an update cannot switch them on without recreating services:
+
+- **Redis password.** New installs generate `REDIS_PASSWORD` and every service uses it. On an older install Redis stays open to the Docker network until you run `make redis-auth` when scanning is idle. It recreates Redis, web, the workers, and the proxy, and queued tasks are lost.
+- **Secret-encryption key.** New installs generate `CVENGINE_FIELD_KEY` in `.env`. An older install keeps reading its stored secrets with the key derived from `web/secret` until you run `make rotate-field-key`, which re-encrypts them under a new key and keeps the old one as `CVENGINE_FIELD_KEY_PREVIOUS` until you have a backup taken after the rotation. Back up `.env` and keep it apart from database dumps.
+- **Certificate authority key.** An authority made by an older version keeps an unencrypted `ca.key`. To replace it, delete `ca.key` and `ca.crt` in `secrets/certs` and run `make certs`. Browsers then need the new `ca.crt`.
+
+The in-app updater of a server installed before v1.2.0 has no watcher, so Approve does nothing there until you run `cd /opt/cvengine && git pull --ff-only && sudo scripts/install-updater.sh` once ([UPDATES.md](UPDATES.md)). On an install with its own Compose overlay, update with `scripts/update.sh` or the in-app updater, never `make up`.
+
 ## Accepted host names
 
 The current release accepts only the host of `DOMAIN_NAME`, loopback (for health checks), and the names in `CVENGINE_ALLOWED_HOSTS`. Any other name gets **400 Bad Request** on every page. Before you update:
