@@ -421,6 +421,19 @@ class GatingTests(Fixture, TestCase):
         with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('203.0.113.5', 443))]):
             self.assertEqual([(h, ip) for h, ip, _d in ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False)], [('www.rt.test', '203.0.113.5')])
 
+    def test_a_name_that_does_not_resolve_at_all_is_dropped_by_the_real_vetting(self):
+        """No injected resolver: a name with no DNS answer (NXDOMAIN) must be skipped exactly like one that resolves somewhere
+        prohibited, never handed to gvmd as a bare name or an empty address."""
+        import socket
+        with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(-2, 'Name or service not known')):
+            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
+
+    def test_a_name_with_no_address_family_cvengine_understands_is_dropped(self):
+        """A getaddrinfo answer with no usable family, or an empty answer set, never produces a target: pinned_transport.resolve
+        raises for both, and due() skips the host rather than letting an empty or missing address reach gvmd."""
+        with mock.patch('socket.getaddrinfo', return_value=[]):
+            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
+
     def test_the_sidecar_is_never_given_a_tailnet_address(self):
         for ip in ('100.64.0.7', '100.127.255.254', 'fd7a:115c:a1e0::7'):
             self.assertTrue(ov.refuse_address(ip), ip)
