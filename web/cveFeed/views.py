@@ -385,6 +385,14 @@ def project_page(request, slug, section):
     """Targets, scans, hosts, vulnerabilities and matches: shells that the page script fills from /api/v1. The reserved slug
     ``_all`` is the same shell over every project the caller may see (read-only; the script reads /api/v1/projects/_all/...)."""
     from dashboard.models import Project
+    if section == 'keys':
+        # the keys now live in Settings > API keys (App Admins) and Administration (organization admins); an old link lands there
+        from tenancy.roles import is_admin_anywhere
+        if request.user.is_superuser:
+            return redirect('/cve/settings/#keys')
+        if is_admin_anywhere(request.user):
+            return redirect('/cve/admin/')
+        raise Http404
     if slug == ALL_PROJECTS:
         from tenancy.roles import user_best_role
         if not user_best_role(request.user):
