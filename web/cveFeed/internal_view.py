@@ -2,21 +2,41 @@
 
 A host is internal when its name is an address inside a network its project declared internal (``cveFeed.models.InternalRange``) that this
 server may not scan itself (``targetApp.target_types.sentinel_only_target``): only a Sentinel inside the network scans it. The table of
-those addresses is read for every project that declared a range and kept for ``CACHE_SECONDS`` per process, so a list page asks a
-dictionary, not the database, once per row. Only an address of the caller's own rows is ever looked up, so the table leaks nothing.
+those addresses is read for every project that declared a range and kept per process, so a list page asks a dictionary, not the database, once per
+row. It is dropped when a range is declared or removed and when a host named by an address is added or removed (``connect``), and rebuilt at the
+latest after ``CACHE_SECONDS``, so the number of queries a page makes never depends on how long ago it was last asked. Only an address of the caller's own rows is ever looked up, so the table leaks nothing.
 """
 import ipaddress
 import time
 
 from django.db.models import Q
 
-CACHE_SECONDS = 30
+CACHE_SECONDS = 300
 _IP_LITERAL = r'^[0-9a-fA-F:.]+$'
 _cache = {'at': 0.0, 'table': {}}
 
 
 def invalidate():
     _cache['at'] = 0.0
+
+
+def connect():
+    """Drop the table whenever what it is built from changes: an internal range, or a host or target whose name is an address."""
+    import re
+
+    from django.db.models.signals import post_delete, post_save
+
+    from cveFeed.models import InternalRange
+    from startScan.models import Subdomain
+    from targetApp.models import Domain
+    literal = re.compile(_IP_LITERAL)
+
+    def drop(sender, instance=None, **kwargs):
+        if sender is InternalRange or literal.match(str(getattr(instance, 'name', '') or '')):
+            invalidate()
+    for model in (InternalRange, Domain, Subdomain):
+        post_save.connect(drop, sender=model, weak=False, dispatch_uid=f'internal-view-{model.__name__}-save')
+        post_delete.connect(drop, sender=model, weak=False, dispatch_uid=f'internal-view-{model.__name__}-delete')
 
 
 def _load():

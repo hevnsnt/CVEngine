@@ -304,6 +304,40 @@
         }
       }
 
+      /* the engineers' banter: one random exchange at a time, a line every 2 seconds */
+      .banter { position: absolute; inset: 0; pointer-events: none; }
+      .say {
+        position: absolute;
+        bottom: 77%;
+        max-width: 36%;
+        margin: 0;
+        padding: 9px 13px;
+        border-radius: 14px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        box-shadow: 0 6px 18px -10px rgba(0, 0, 0, 0.35);
+        font: 600 13.5px/1.35 Inter, system-ui, sans-serif;
+        color: var(--ink);
+        opacity: 0;
+        transform: translateY(6px) scale(0.96);
+        transition: opacity 0.25s ease, transform 0.25s ease;
+      }
+      .say::after {
+        content: "";
+        position: absolute;
+        top: 100%;
+        width: 14px;
+        height: 14px;
+        background: var(--card);
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        transform: translateY(-7px) rotate(45deg);
+      }
+      .say-a { left: 14%; transform-origin: 20% 100%; }
+      .say-a::after { left: 22px; }
+      .say-b { right: 14%; text-align: right; transform-origin: 80% 100%; }
+      .say-b::after { right: 22px; }
+      .say.on { opacity: 1; transform: none; }
       /* the scene */
       .faint { fill: none; stroke: var(--faint); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
       .plan-line { fill: none; stroke: var(--plan-line); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
@@ -381,6 +415,12 @@
         }
       }
       @media (max-width: 620px) {
+        .banter { position: static; padding: 10px 6px 4px; }
+        .say { position: static; max-width: none; display: none; text-align: left; transform: none; transition: none; }
+        .say.on { display: block; }
+        .say::after { display: none; }
+        .say-a::before { content: "Left: "; color: var(--muted); }
+        .say-b::before { content: "Right: "; color: var(--muted); }
         .head {
           grid-template-columns: 1fr;
           padding: 24px 20px 18px;
@@ -499,6 +539,7 @@
   <g transform="translate(960 0) scale(-1 1)"><path d="M249.9 194.8 L251.0 195.4 L252.4 196.3 L254.4 197.8 L256.8 199.7 L259.4 201.9 L262.3 204.2 L265.5 206.6 L268.8 209.0 L272.3 211.3 L276.0 213.3 L279.9 215.1 L284.3 216.4 L289.2 216.9 L294.5 216.2 L299.3 214.1 L303.1 211.4 L306.4 208.3 L309.3 204.9 L312.0 201.3 L314.6 197.5 L317.0 193.6 L319.4 189.8 L321.5 186.1 L323.5 182.6 L325.2 179.4 L326.8 176.6 L328.0 174.5 L328.9 173.0 A8.5 8.5 0 0 1 315.1 163.0 L315.1 163.0 L313.6 164.8 L311.9 167.3 L310.0 170.1 L308.0 173.1 L305.8 176.4 L303.6 179.8 L301.2 183.1 L298.8 186.4 L296.5 189.3 L294.2 191.9 L292.1 194.0 L290.4 195.4 L289.4 196.0 L289.5 195.8 L290.0 195.5 L289.8 195.2 L288.8 194.6 L287.2 193.6 L285.2 192.1 L283.1 190.2 L280.8 188.1 L278.5 185.9 L276.2 183.5 L274.0 181.2 L271.8 178.9 L269.8 176.7 L267.7 174.7 L266.1 173.2 A13.5 13.5 0 0 1 249.9 194.8Z" fill="var(--slate-hi)"/><g transform="translate(325.0 163.0) rotate(-60.0)"><ellipse cx="0" cy="0" rx="8.5" ry="7.0" fill="var(--skin-b)"/><ellipse cx="-1.3" cy="-6.1" rx="4.2" ry="2.5" transform="rotate(28 -1.3 -6.1)" fill="var(--skin-b)"/><path d="M0.9 -3.8 Q5.1 -0.9 1.7 3.0" fill="none" stroke="var(--skin-b-sh)" stroke-width="1.1" stroke-linecap="round"/></g></g>
   <path d="M249.9 194.8 L251.0 195.4 L252.4 196.3 L254.4 197.8 L256.8 199.7 L259.4 201.9 L262.3 204.2 L265.5 206.6 L268.8 209.0 L272.3 211.3 L276.0 213.3 L279.9 215.1 L284.3 216.4 L289.2 216.9 L294.5 216.2 L299.3 214.1 L303.1 211.4 L306.4 208.3 L309.3 204.9 L312.0 201.3 L314.6 197.5 L317.0 193.6 L319.4 189.8 L321.5 186.1 L323.5 182.6 L325.2 179.4 L326.8 176.6 L328.0 174.5 L328.9 173.0 A8.5 8.5 0 0 1 315.1 163.0 L315.1 163.0 L313.6 164.8 L311.9 167.3 L310.0 170.1 L308.0 173.1 L305.8 176.4 L303.6 179.8 L301.2 183.1 L298.8 186.4 L296.5 189.3 L294.2 191.9 L292.1 194.0 L290.4 195.4 L289.4 196.0 L289.5 195.8 L290.0 195.5 L289.8 195.2 L288.8 194.6 L287.2 193.6 L285.2 192.1 L283.1 190.2 L280.8 188.1 L278.5 185.9 L276.2 183.5 L274.0 181.2 L271.8 178.9 L269.8 176.7 L267.7 174.7 L266.1 173.2 A13.5 13.5 0 0 1 249.9 194.8Z" fill="var(--denim)"/><g transform="translate(325.0 163.0) rotate(-60.0)"><ellipse cx="0" cy="0" rx="8.5" ry="7.0" fill="var(--skin-a)"/><ellipse cx="-1.3" cy="-6.1" rx="4.2" ry="2.5" transform="rotate(28 -1.3 -6.1)" fill="var(--skin-a)"/><path d="M0.9 -3.8 Q5.1 -0.9 1.7 3.0" fill="none" stroke="var(--skin-a-sh)" stroke-width="1.1" stroke-linecap="round"/></g>
 </svg>
+        <div class="banter" aria-hidden="true"><p class="say say-a" id="say-a"></p><p class="say say-b" id="say-b"></p></div>
       </div>
 
       <div class="foot">
@@ -511,6 +552,43 @@
         <div class="track" aria-hidden="true"><i></i></div>
       </div>
     </main>
+    <script>
+      // The engineers talk it over while the update runs: a random exchange, one line every 2 seconds, alternating between the two of
+      // them, then another exchange (none repeats until most of the others have had their turn). Text is set with textContent.
+      (function () {
+        var EXCHANGES = [["But the user said no mistakes."], ["I don't know what they want. That button has NEVER worked."], ["If the user is so smart, why aren't THEY doing the coding?"], ["Who approved this on a Friday?"], ["It worked on my machine.", "Then we'll ship your machine."], ["Did you back up the database?", "Define \"back up\"."], ["Relax. It's only production."], ["The blueprint says \"TODO: figure this out later\"."], ["Which one of us wrote this?", "Don't answer that."], ["Just turn it off and on again.", "Again?"], ["I see the problem. It's load-bearing spaghetti."], ["This line says \"do not touch\".", "So you touched it.", "So I touched it."], ["The ticket said \"small change\".", "It's never a small change."], ["Who named a variable \"final_final_v2\"?"], ["I'm not saying it's broken. I'm saying it has character."], ["Is that a feature or a bug?", "It's a feature now. Write it down."], ["We should have used a framework.", "We did. That's the problem."], ["The tests are green.", "Do they test anything?", "They're green."], ["I commented it out. Problem solved."], ["Who keeps putting semicolons in the YAML?"], ["Ship it, we'll fix it in the next update.", "This IS the next update."], ["The docs say this is impossible.", "We wrote the docs."], ["Have you tried asking the AI?", "The AI asked me."], ["Hold the wall. I'm deleting the old migration."], ["We renamed the table. Now nothing can find anything."], ["Why is the cache older than me?"], ["Clear the cache.", "Which one?", "All of them. Twice."], ["DNS. It's always DNS.", "It wasn't DNS.", "Okay, it was a little DNS."], ["The comment says \"temporary fix, 2019\"."], ["Measure twice, deploy once.", "Measure never, deploy constantly."], ["Is the server supposed to make that noise?"], ["The logs just say \"oops\"."], ["More logging. Then we'll know exactly how lost we are."], ["Can we blame the intern?", "We are the intern."], ["This function is 900 lines long and called \"helper\"."], ["I found the bug. It's three bugs in a trench coat."], ["Who put a sleep(30) in here?", "That sleep is load-bearing. Leave it."], ["The user wants it faster, cheaper and yesterday.", "Pick two.", "Honestly, pick one."], ["We need a meeting about the meeting."], ["I estimated two minutes.", "In engineer minutes?", "About an hour, yes."], ["Hand me the wrench. The digital one."], ["This config file has tabs AND spaces. Per line."], ["Don't look at the git blame. I'm begging you."], ["Who force-pushed to main?", "Nobody force-pushes here. We have rules.", "The rules are a suggestion box. It's empty."], ["Let's add a feature flag for the feature flag."], ["I rewrote it from scratch. It has all-new bugs."], ["It compiles!", "Ship the party hats."], ["The migration is at 99 percent.", "It's been at 99 percent for a while.", "Percent is a state of mind."], ["Wait, which environment is this?", "If you have to ask, it's production."], ["I put the semicolon back. Nobody touch anything."], ["The scanner found a vulnerability. In the coffee machine.", "Patch that one first."], ["Is this a breaking change?", "Everything is a breaking change if you believe in yourself."], ["The blueprint is upside down.", "That explains the last three releases."], ["Can we just make the button bigger?", "Making the button bigger is how we got here."], ["I asked for requirements. I got a vibe."], ["The vibe says \"make it pop\".", "\"Pop\" is not a unit of measurement."], ["Let's rewrite it in Rust.", "After lunch.", "We're out of lunch. Rewrite it in Bash."], ["The error message just says \"no\".", "At least it's honest."], ["Who wrote a regex for this?", "Now we have two problems and a hard hat."], ["I think the database is sulking.", "Say something nice to it.", "You're doing great, database."], ["It's rebooting. That's basically a hug."], ["Should we tell the user what changed?", "It's in the changelog.", "Nobody reads the changelog.", "I do. That's how I got this job."], ["Hey, this code has tests!", "They're commented out.", "Never mind."], ["Look busy, the user is refreshing the page.", "That's their fortieth refresh."], ["Refreshing does not make me type faster.", "It kind of does. Peer pressure."], ["We need more CPUs.", "We need fewer while loops."], ["Is it plugged in? Is ANYTHING plugged in?"], ["The crane operator says the load is \"probably fine\".", "\"Probably fine\" built this whole building."], ["The new version is mostly the old version, but braver."], ["I added an index. Everything's fast. I am a god.", "You added it to the wrong table.", "I am a god of the wrong table."], ["Let's just add a retry.", "Add a retry to the retry."], ["Who left console.log(\"here\") in production?", "It says \"here\" four thousand times. At least we know where."], ["This is fine. Everything is load-tested.", "By whom?", "By the users. Live. Right now."], ["What does this button do?", "Nobody knows. That's why we're rebuilding."], ["The architect drew a door in the ceiling.", "Must be for the cloud."], ["I'm putting a hard hat on the server. For morale."], ["If it breaks, it's a learning opportunity.", "I've learned so much this week. Please make it stop."], ["Almost done. Just the last thousand bolts."], ["Is this the final version?", "There is no final version. Only the next version."], ["It's coming back up. Look natural."], ["Back soon. We pinky promise."], ["Who unplugged the cloud?"], ["The load balancer is balancing. Just not the load."], ["I fixed it!", "What did you change?", "I don't know. Don't touch it."], ["Did someone say \"quick hotfix\"?", "Those words are banned on site."], ["The backup of the backup is in a folder called \"old\"."], ["Do we have a rollback plan?", "We have a \"roll forward and pray\" plan."], ["This module was written by a man who has since moved to a farm."], ["Which way is up on this flowchart?"], ["The diagram has an arrow pointing to \"magic\"."], ["Who deleted the README?", "It was holding up the whole repo."], ["I'm 80 percent sure this is the right server."], ["Just one more migration.", "You said that four migrations ago."], ["The user says it's urgent.", "Everything is urgent. That's why nothing is."], ["The firewall blocked us.", "Good firewall."], ["Is that error new?", "It's new to me."], ["I upgraded one package and now we need forty-two others."], ["Why does this need a database to say hello?"], ["I asked the linter for help and it filed a complaint."], ["Clock-in time: now. Clock-out time: when it compiles."], ["Someone wrote \"here be dragons\" in the comments.", "They weren't wrong."], ["The ops channel is just a picture of a fire."], ["Can you hear that?", "That's the fans. They're scared."], ["Did we try reading the error?", "Bold strategy. Let's try it."], ["It's not a bug, it's undocumented behavior."], ["The code review was \"looks good to me\" with no comments."], ["Who's on call?", "You are.", "Since when?", "Since you asked."], ["Is this the scaffolding or the building?", "Yes."], ["Stand back, I'm going to try a percent sign."], ["Put it in the backlog.", "The backlog has a backlog."], ["I've seen things. Like a 3,000-line switch statement."], ["Quick, what's the password?", "It's on a sticky note. On the server. In the dark."], ["Who let the cron job run at midnight on New Year's?"], ["This patch fixes everything.", "What does it break?", "Also everything."], ["The progress bar is a vibe, not a promise."], ["We're replacing the engine while the plane is flying."], ["We're also replacing the plane."], ["Okay, who scheduled the update during a scan?", "The scan scheduled itself. It's very proactive."], ["Is the coffee ready?", "Coffee is a blocker. Escalate."], ["Remind me why we didn't just use a spreadsheet."], ["That's not tech debt. That's tech mortgage."], ["I'll refactor it later.", "Famous last words, part 900."]];
+        var EVERY = 2000;
+        var bubbles = [document.getElementById("say-a"), document.getElementById("say-b")];
+        if (!bubbles[0] || !bubbles[1]) return;
+        var recent = [];
+        var queue = [];
+        var speaker = Math.random() < 0.5 ? 0 : 1;
+        function nextExchange() {
+          var pick;
+          do {
+            pick = Math.floor(Math.random() * EXCHANGES.length);
+          } while (recent.indexOf(pick) !== -1);
+          recent.push(pick);
+          if (recent.length > Math.floor(EXCHANGES.length * 0.8)) recent.shift();
+          speaker = Math.random() < 0.5 ? 0 : 1;
+          return EXCHANGES[pick].slice();
+        }
+        function say() {
+          if (!queue.length) queue = nextExchange();
+          var line = queue.shift();
+          var now = bubbles[speaker];
+          var other = bubbles[1 - speaker];
+          other.classList.remove("on");
+          now.classList.remove("on");
+          now.textContent = line;
+          void now.offsetWidth; // restart the pop-in
+          now.classList.add("on");
+          speaker = 1 - speaker;
+        }
+        say();
+        setInterval(say, EVERY);
+      })();
+    </script>
     <script>
       // Alone (nginx answers every path with this page, status 503, while an update is applied): a request for the same address tells us
       // when the real site is back; anything that is not a 5xx, a redirect to the sign-in page included, means reload.
