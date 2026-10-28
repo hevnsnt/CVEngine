@@ -47,7 +47,8 @@ def openvas_get(request):
     links = OpenvasProject.objects.select_related('project').order_by('project__name')
     linked = {link.project_id for link in links}
     return {
-        'enabled': row.enabled, 'username': row.gmp_username, 'password_set': bool(row.gmp_password), 'transport': openvas_scan.transport(),
+        'enabled': row.enabled, 'sentinel_only': row.sentinel_only, 'username': row.gmp_username, 'password_set': bool(row.gmp_password),
+        'transport': openvas_scan.transport(),
         'state': row.state or {}, 'running': OpenvasRun.objects.filter(status='running').exists(),
         'floor': {'min_available_mb': openvas_scan.min_available_mb(), 'max_hosts_per_task': openvas_scan.max_hosts(), 'max_hours': openvas_scan.max_hours(),
                   'confirmed_qod': openvas_scan.CONFIRMED_QOD, 'excluded_families': list(openvas_scan.EXCLUDED_FAMILIES)},
@@ -86,13 +87,15 @@ def openvas_put(request):
         row.gmp_username, row.gmp_password = '', ''
     if 'enabled' in data:
         row.enabled = bool(data['enabled'])
+    if 'sentinel_only' in data:
+        row.sentinel_only = bool(data['sentinel_only'])
     if row.enabled and not (row.gmp_username and row.gmp_password):
         raise _error(400, 'save the GMP login first (`make openvas-user` creates and saves one); the add-on cannot be switched on without it')
     row.updated_by = request.user
     row.save()
     set_schedule(row.enabled)
     audit(request.user, 'openvas.enable' if row.enabled and not was else 'openvas.disable' if was and not row.enabled else 'openvas.update',
-          'openvas', enabled=row.enabled, credentials=bool(row.gmp_username and row.gmp_password))
+          'openvas', enabled=row.enabled, sentinel_only=row.sentinel_only, credentials=bool(row.gmp_username and row.gmp_password))
     return openvas_get(request)
 
 
@@ -286,8 +289,8 @@ def admin_get(request, actor):
         projects = [{'id': p.id, 'name': p.name, 'enabled': bool(links.get(p.id) and links[p.id].enabled), 'last_run': _last_run(p.id)}
                     for p in Project.objects.filter(org_id=org.pk).order_by('name')]
         groups.append({'id': org.pk, 'name': org.name, 'enabled': bool(org_on.get(org.pk)), 'projects': projects})
-    return {'engine': {'enabled': row.enabled, 'can_switch': actor.is_superuser, **engine_status(row)}, 'orgs': groups,
-            'who': 'app_admin' if actor.is_superuser else 'org_admin'}
+    return {'engine': {'enabled': row.enabled, 'sentinel_only': row.sentinel_only, 'can_switch': actor.is_superuser, **engine_status(row)},
+            'orgs': groups, 'who': 'app_admin' if actor.is_superuser else 'org_admin'}
 
 
 def _engine(request, actor, on):
@@ -337,7 +340,7 @@ def admin_put(request, actor):
     managed = roles.managed_org_ids(actor)
     orgs = _flags(data.get('orgs', {}), 'orgs')
     projects = _flags(data.get('projects', {}), 'projects')
-    if 'enabled' in data and not actor.is_superuser:
+    if ('enabled' in data or 'sentinel_only' in data) and not actor.is_superuser:
         raise AdminError(403, 'only an App Admin switches OpenVAS on or off')
     from cveFeed.models import OpenvasSettings
     if not OpenvasSettings.current().enabled and not data.get('enabled') and (any(orgs.values()) or any(projects.values())):
@@ -362,6 +365,12 @@ def admin_put(request, actor):
         audit(actor, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled)
     if 'enabled' in data:
         _engine(request, actor, bool(data['enabled']))
+    if 'sentinel_only' in data:
+        from cveFeed.admin_api import audit
+        row = OpenvasSettings.current()
+        row.sentinel_only, row.updated_by = bool(data['sentinel_only']), actor
+        row.save()
+        audit(actor, 'openvas.update', 'openvas', sentinel_only=row.sentinel_only)
     return admin_get(request, actor)
 
 
