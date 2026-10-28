@@ -332,16 +332,29 @@ def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
 
 
+def _covers(project_slug, org_slug):
+    """The SQL pre-filter for "this Sentinel's declared scope may reach this project": named directly, via its organization,
+    or instance-wide. ``SentinelEff`` then applies the rest (the owner's reach, the administrator's limits)."""
+    named = Q(scope__instance=True) | Q(scope__projects__contains=[project_slug])
+    if org_slug:
+        named |= Q(scope__orgs__contains=[org_slug])
+    return named
+
+
 def eligible_sentinels(project, kind, now=None):
     """Live, active Sentinels whose scope covers ``project`` and who declare capability ``kind``: candidates for dispatch, or
     to claim a queued task. Found in SQL first (same pattern as ``agent_broker._effs_for``), so a call never builds the
     rights of every Sentinel on the instance."""
     now = now or timezone.now()
-    named = Q(scope__projects__contains=[project.slug])
-    if project.org_id:
-        named |= Q(scope__orgs__contains=[project.org.slug])
-    agents = Agent.objects.filter(named, kind='scanner', status='active', token__revoked=False).select_related('token__user')[:CANDIDATES]
+    agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
+                                  token__revoked=False).select_related('token__user')[:CANDIDATES]
     return [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and kind in e.caps]
+
+
+def has_sentinels(project_slug, org_slug):
+    """Whether any Sentinel that has registered (pending, active or suspended, not revoked) covers the project: what decides
+    that the project's Sentinels tab is shown. One cheap query, since the page shell asks it on every project page."""
+    return Agent.objects.filter(_covers(project_slug, org_slug), kind='scanner', token__revoked=False).exclude(status='revoked').exists()
 
 
 def any_scanner_for(project, kind=None):
@@ -824,6 +837,40 @@ def list_tasks(ctx, slug, params):
     if params.get('scan_id'):
         qs = qs.filter(scan_id=svc._int_param(params['scan_id'], 'scan_id'))
     return svc.paginate(qs.select_related('project__org', 'agent').order_by('-id'), params, task_brief)
+
+
+def list_project_sentinels(ctx, slug):
+    """The Sentinels whose scope covers this project, for its Sentinels tab: any role in the project may see that they exist
+    and what they are doing here, but not another tenant's scope or an owner's other work (a scope is reduced to its level).
+    ``manageable`` says whether the caller may suspend, approve or revoke one through ``PATCH agents/{id}``."""
+    project, _ = svc.get_project(ctx, slug)
+    reap_expired()
+    now = timezone.now()
+    agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner',
+                                       token__revoked=False).exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
+    rows = []
+    for agent in agents:
+        eff = SentinelEff(agent, now)
+        if agent.status == 'active' and not eff.problem and project.slug not in eff.projects:
+            continue  # the owner's reach or an administrator's project limit keeps it out of this project
+        rows.append((agent, eff))
+    ids = [a.pk for a, _ in rows]
+    counts = {}
+    for agent_id, status, n in (SentinelTask.objects.filter(project=project, agent_id__in=ids).values_list('agent_id', 'status').annotate(n=Count('id'))):
+        counts.setdefault(agent_id, {})[status] = n
+    manageable = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    out = []
+    for agent, eff in rows:
+        scope = agent.scope or {}
+        level = 'instance' if scope.get('instance') else ('project' if project.slug in (scope.get('projects') or []) else 'org')
+        c = counts.get(agent.pk, {})
+        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note, 'live': eff.live,
+                    'last_seen': svc._iso(agent.last_seen), 'scope_level': level, 'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
+                    'os': agent.os, 'max_concurrent': agent.max_concurrent,
+                    'tasks': {'open': c.get('claimed', 0) + c.get('running', 0), 'queued': c.get('queued', 0), 'completed': c.get('done', 0),
+                              'failed': c.get('failed', 0)},
+                    'manageable': agent.pk in manageable})
+    return {'project': project.slug, 'results': out}
 
 
 def task_status_counts(agent_ids):

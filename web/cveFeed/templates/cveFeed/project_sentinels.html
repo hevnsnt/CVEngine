@@ -1,0 +1,88 @@
+{% extends 'cveFeed/base.html' %}
+{% block title %}CVEngine · Sentinels · {{ project.name }}{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+<h1>Sentinels</h1>
+<p class="sub">{{ project.name }} · scanners that have registered for this project, directly, through its organization or instance-wide. They pull scan work off this project's queue and report back; a scan with no live Sentinel runs locally.</p>
+</div></div>
+
+<div id="section" data-slug="{{ project.slug }}">
+{% csrf_token %}
+<div class="grid main" style="margin-top:0">
+  <div class="card">
+    <h2 style="margin-bottom:8px">Sentinels for this project</h2>
+    <ul class="feed" id="list" style="max-height:none"></ul>
+    <p class="empty" id="none">No Sentinel covers this project. Provision one from the <a href="{% url 'cve_sentinels' %}">Sentinels page</a>.</p>
+  </div>
+  <div class="card">
+    <h2 style="margin-bottom:8px">Recent work here</h2>
+    <ul class="feed" id="tasks" style="max-height:none"></ul>
+    <p class="empty" id="no-tasks">Nothing has been dispatched to a Sentinel for this project yet.</p>
+  </div>
+</div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var slug = document.getElementById('section').dataset.slug;
+  var csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+  function api(method, url, body) {
+    return fetch(url, {method: method, credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: body ? JSON.stringify(body) : undefined})
+      .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, status: r.status, d: d}; }); });
+  }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function when(iso) { return iso ? iso.slice(0, 16).replace('T', ' ') : 'never'; }
+  var LEVEL = {project: 'this project', org: 'its organization', instance: 'the whole instance'};
+
+  var list = document.getElementById('list'), none = document.getElementById('none');
+  function button(label, cls, onclick) { var b = el('button', cls, label); b.type = 'button'; b.addEventListener('click', onclick); return b; }
+  function setStatus(a, status) { return api('PATCH', '/api/v1/agents/' + a.id, {status: status}).then(function (x) { if (!x.ok) alert(x.d.error || 'Could not change this Sentinel.'); load(); }); }
+  function renderList(items) {
+    list.textContent = '';
+    none.style.display = items.length ? 'none' : '';
+    items.forEach(function (a) {
+      var li = el('li'), top = el('div');
+      top.style.display = 'flex'; top.style.justifyContent = 'space-between'; top.style.alignItems = 'center'; top.style.gap = '12px';
+      var left = el('div');
+      left.appendChild(el('span', 'cve-id', a.name));
+      left.appendChild(el('div', 'meta', a.status + (a.status === 'active' ? (a.live ? ' · live' : ' · offline') : '') + ' · seen ' + when(a.last_seen) +
+        ' · covers ' + (LEVEL[a.scope_level] || a.scope_level)));
+      left.appendChild(el('div', 'meta', a.tasks.open + ' running, ' + a.tasks.queued + ' queued, ' + a.tasks.completed + ' done, ' + a.tasks.failed + ' failed here · ' +
+        (a.capabilities.join(', ') || 'no capabilities')));
+      top.appendChild(left);
+      var actions = el('div');
+      if (a.manageable) {
+        if (a.status === 'suspended' || a.status === 'pending') {
+          var act = button(a.status === 'pending' ? 'Approve' : 'Reinstate', 'btn', function () { setStatus(a, 'active'); }); act.style.marginRight = '6px'; actions.appendChild(act);
+        }
+        if (a.status !== 'suspended') {
+          var sus = button('Suspend', 'btn ghost', function () { setStatus(a, 'suspended'); }); sus.style.marginRight = '6px'; actions.appendChild(sus);
+        }
+        actions.appendChild(button('Revoke', 'btn ghost', function () { if (confirm('Revoke ' + a.name + '? This cannot be undone.')) setStatus(a, 'revoked'); }));
+      }
+      top.appendChild(actions);
+      li.appendChild(top);
+      list.appendChild(li);
+    });
+  }
+  var tasks = document.getElementById('tasks'), noTasks = document.getElementById('no-tasks');
+  function renderTasks(items) {
+    tasks.textContent = '';
+    noTasks.style.display = items.length ? 'none' : '';
+    items.forEach(function (t) {
+      var li = el('li');
+      li.appendChild(el('span', 'cve-id', t.kind));
+      li.appendChild(el('div', 'meta', [t.status, t.host, t.agent ? 'by ' + t.agent.name : '', when(t.created)].filter(Boolean).join(' · ')));
+      tasks.appendChild(li);
+    });
+  }
+  function load() {
+    api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinels').then(function (x) { if (x.ok) renderList(x.d.results || []); });
+    api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinel-tasks?page_size=20').then(function (x) { if (x.ok) renderTasks(x.d.results || []); });
+  }
+  load();
+})();
+</script>
+{% endblock %}

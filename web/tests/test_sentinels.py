@@ -637,3 +637,88 @@ class OpenvasResultCleanerTests(SimpleTestCase):
         body['results'] = body['results'] * (sentinels.MAX_OPENVAS_RESULTS + 1)
         with self.assertRaises(ApiError):
             sentinels.clean_result('openvas', body)
+
+
+class ProjectSentinelsTabTests(SentinelBase):
+    """A project's Sentinels tab: which Sentinels cover it (project, organization or instance scope), what is shown, who may act."""
+
+    def reg(self, user, name, **override):
+        """One Sentinel per token (a second PUT on the same token updates the first), so each gets its own."""
+        token = create_token(user, f'tab-{name}')[1]
+        reset_rates({'t': token})
+        return register_sentinel(token, name=name, **override)
+
+    def listing(self, token, slug):
+        return call(self.t[token], 'GET', f'/api/v1/projects/{slug}/sentinels')
+
+    def test_lists_only_sentinels_covering_the_project(self):
+        self.reg(self.root, 'for-a')
+        self.reg(self.root, 'for-b', scope={'projects': ['sen-b']})
+        status, out = self.listing('root', 'sen-a')
+        self.assertEqual(status, 200)
+        self.assertEqual([r['name'] for r in out['results']], ['for-a'])
+        self.assertEqual(out['results'][0]['scope_level'], 'project')
+        self.assertEqual([r['name'] for r in self.listing('root', 'sen-b')[1]['results']], ['for-b'])
+
+    def test_org_and_instance_scope_cover_every_project_they_reach(self):
+        self.reg(self.root, 'org-wide', scope={'orgs': ['one']})
+        self.reg(self.root, 'everywhere', scope={'instance': True})
+        a = {r['name']: r['scope_level'] for r in self.listing('root', 'sen-a')[1]['results']}
+        b = {r['name']: r['scope_level'] for r in self.listing('root', 'sen-b')[1]['results']}
+        self.assertEqual(a, {'org-wide': 'org', 'everywhere': 'instance'})
+        self.assertEqual(b, {'everywhere': 'instance'})
+
+    def test_pending_and_suspended_are_listed_revoked_is_not(self):
+        _, pending = self.reg(self.alice, 'waiting', approve=False)
+        _, sus = self.reg(self.root, 'paused')
+        _, gone = self.reg(self.root, 'gone')
+        Agent.objects.filter(pk=sus['id']).update(status='suspended')
+        Agent.objects.filter(pk=gone['id']).update(status='revoked')
+        names = {r['name']: r['status'] for r in self.listing('root', 'sen-a')[1]['results']}
+        self.assertEqual(names, {'waiting': 'pending', 'paused': 'suspended'})
+
+    def test_hides_the_scope_and_owner_and_says_who_may_manage(self):
+        self.reg(self.root, 'owned-by-root')
+        _, out = self.listing('alice', 'sen-a')
+        row = out['results'][0]
+        self.assertNotIn('scope', row)
+        self.assertNotIn('owner', row)
+        self.assertFalse(row['manageable'])  # a project user cannot administer root's Sentinel
+        self.assertTrue(self.listing('root', 'sen-a')[1]['results'][0]['manageable'])
+        _, mine = self.reg(self.alice, 'alices', approve=False)
+        rows = {r['name']: r['manageable'] for r in self.listing('dana', 'sen-a')[1]['results']}
+        self.assertTrue(rows['alices'])  # the org admin administers a member's Sentinel
+        self.assertFalse(rows['owned-by-root'])
+
+    def test_a_project_the_caller_cannot_see_is_a_404(self):
+        self.reg(self.root, 'for-b', scope={'projects': ['sen-b']})
+        self.assertEqual(self.listing('alice', 'sen-b')[0], 404)
+
+    def test_counts_are_for_this_project_only(self):
+        _, s = self.reg(self.root, 'counted', scope={'orgs': ['one', 'two']})
+        agent = Agent.objects.get(pk=s['id'])
+        SentinelTask.objects.create(project=self.pa, scan=self.scan, kind='nmap', host='a', target={}, status='done', agent=agent)
+        SentinelTask.objects.create(project=self.pb, kind='nmap', host='b', target={}, status='failed', agent=agent)
+        tasks = self.listing('root', 'sen-a')[1]['results'][0]['tasks']
+        self.assertEqual((tasks['completed'], tasks['failed']), (1, 0))
+
+    def test_has_sentinels_and_instance_scope_is_eligible_for_dispatch(self):
+        self.assertFalse(sentinels.has_sentinels('sen-a', 'one'))
+        self.reg(self.root, 'everywhere', scope={'instance': True})
+        self.assertTrue(sentinels.has_sentinels('sen-a', 'one'))
+        self.assertTrue(sentinels.has_sentinels('sen-b', 'two'))
+        self.assertEqual([e.agent.name for e in sentinels.eligible_sentinels(self.pa, 'nmap')], ['everywhere'])
+
+    def test_page_and_nav_link_appear_only_where_a_sentinel_has_checked_in(self):
+        from django.test import Client
+        client = Client()
+        client.force_login(self.root)
+        link = '/cve/sen-a/sentinels/'
+        self.assertNotIn(link, client.get('/cve/sen-a/hosts/').content.decode())
+        self.reg(self.root, 'for-a')
+        self.assertIn(link, client.get('/cve/sen-a/hosts/').content.decode())
+        self.assertNotIn('/cve/sen-b/sentinels/', client.get('/cve/sen-b/hosts/').content.decode())
+        page = client.get(link)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, 'Sentinels for this project')
+        self.assertEqual(client.get('/cve/_all/sentinels/').status_code, 404)

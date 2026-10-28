@@ -280,6 +280,7 @@ SECTIONS = {
     'hygiene': 'Hygiene',
     'suppliers': 'Suppliers',
     'keys': 'API keys',
+    'sentinels': 'Sentinels',
 }
 
 
@@ -302,9 +303,12 @@ def ui_context(request, active, slug=None):
     from dashboard.models import AIProviderSettings
     ai_cfg = AIProviderSettings.objects.first()
     ai_connected = bool(ai_cfg and ai_cfg.enabled)
+    from agentapi.sentinel_broker import has_sentinels
+    here = next((p for p in projects if p['slug'] == current), None) if slug != ALL_PROJECTS else None
     return {'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
             'is_app_admin': request.user.is_superuser,
             'bounty_enabled': _bounty_allowed(request.user),
+            'sentinels_enabled': bool(here and has_sentinels(here['slug'], here['org_slug'])),
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
@@ -388,6 +392,10 @@ def project_page(request, slug, section):
         project = Project.objects.filter(slug=slug).first()
     if not project:
         raise Http404
+    if section == 'sentinels':
+        if slug == ALL_PROJECTS:
+            raise Http404  # a Sentinel's scope is per project; there is no combined view
+        return render(request, 'cveFeed/project_sentinels.html', {'title': SECTIONS[section], 'project': project, **ui_context(request, 'project-sentinels', slug)})
     return render(request, 'cveFeed/section.html', {
         'section': section, 'title': SECTIONS[section], 'project': project, **ui_context(request, section, slug),
     })
