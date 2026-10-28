@@ -213,7 +213,11 @@ async function pollStats() {
     statsNow = s;
     paintMapCount();
     const certNote = $("s-certs_total_note");
-    if (certNote) certNote.textContent = s.certs_total ? `of ${s.certs_total} tracked` : "";
+    if (certNote) {
+      // beside the count, like "of 299 hosts" on the Exposed hosts tile: short enough to fit the narrow tile
+      certNote.textContent = s.certs_total ? `of ${s.certs_total}` : "";
+      certNote.title = s.certs_total ? `${s.certs_total} certificates tracked` : "";
+    }
     paintHygiene(s.hygiene_open);
     const stuck = $("n-queue");
     if (stuck) {
@@ -279,7 +283,7 @@ function hostsHref(name, project) {
 
 const MAP_POOL = 400; // tiles built; the layout below shows as many of the highest-scoring hosts as fill the card in whole rows
 const MAP_GAP = 6;
-const MAP_MIN_SCORE = 30; // hosts that score lower are left off the map (they are still on the Hosts page)
+const MAP_SCORE_OVER = 40; // only hosts that score more than this are on the map (the rest are still on the Hosts page)
 // Tile tiers, richest first: the minimum size each needs. The layout picks the richest tier that holds every host, then stretches the
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
@@ -354,9 +358,9 @@ function paintMapCount() {
     return;
   }
   const live = statsNow.hosts_live;
-  const shown = mapDrawn != null && mapDrawn < mapEligible ? `Top ${mapDrawn} of ${mapEligible} scoring ${MAP_MIN_SCORE}+` : `${mapEligible} scoring ${MAP_MIN_SCORE}+`;
+  const shown = mapDrawn != null && mapDrawn < mapEligible ? `Top ${mapDrawn} of ${mapEligible} scoring over ${MAP_SCORE_OVER}` : `${mapEligible} scoring over ${MAP_SCORE_OVER}`;
   n.textContent = `${shown} · ${live} live`;
-  n.title = `One square per live host that scores ${MAP_MIN_SCORE} or more (a live host resolved to an address or answered over HTTP), highest score first. ${live} hosts are live and ${statsNow.hosts} are in the inventory; the rest are on the Hosts page.`;
+  n.title = `One square per live host that scores more than ${MAP_SCORE_OVER} (a live host resolved to an address or answered over HTTP), highest score first. ${live} hosts are live and ${statsNow.hosts} are in the inventory; the rest are on the Hosts page.`;
 }
 
 // An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
@@ -375,7 +379,7 @@ function paintMapEmpty(shown) {
   box.dataset.key = key;
   if (mapBelow) {
     box.append(
-      el("b", "", `No host scores ${MAP_MIN_SCORE} or more`),
+      el("b", "", `No host scores over ${MAP_SCORE_OVER}`),
       el("p", "", `${mapBelow} live host${mapBelow === 1 ? " scores" : "s score"} lower and ${mapBelow === 1 ? "is" : "are"} left off the map. They are all on the Hosts page.`),
     );
     if (slug) box.append(el("a", "btn ghost sm", "Open hosts", { href: `/cve/${encodeURIComponent(slug)}/hosts/` }));
@@ -436,7 +440,7 @@ function hostName(short, h) {
 
 function drawMap(nodes) {
   const liveHosts = nodes.filter((n) => n.kind === "subdomain");
-  const hosts = liveHosts.filter((h) => (h.score || 0) >= MAP_MIN_SCORE);
+  const hosts = liveHosts.filter((h) => (h.score || 0) > MAP_SCORE_OVER);
   mapEligible = hosts.length;
   mapBelow = liveHosts.length - hosts.length;
   const map = $("map");
