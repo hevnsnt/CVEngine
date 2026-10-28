@@ -579,3 +579,61 @@ class NmapUdpResultCleanerTests(SimpleTestCase):
         from agentapi.services import ApiError
         with self.assertRaises(ApiError):
             sentinels.clean_result('nmap_udp', {'outcome': 'done', 'xml': 'A' * (sentinels.MAX_NMAP_UDP_XML + 1)})
+class OpenvasResultCleanerTests(SimpleTestCase):
+    """``sentinel_broker.clean_result('openvas', ...)``: a Sentinel's reported GVM results, typed and clipped into exactly
+    the shape ``cveFeed.openvas_scan.parse_result`` already produces from a local gvmd session."""
+
+    def _body(self, **over):
+        item = {'oid': '1.3.6.1.4.1.25623.1.0.117721', 'name': 'Apache HTTP Server < 2.4.51 Path Traversal',
+                'family': 'Web application abuses', 'address': '203.0.113.5', 'hostname': 'www.rt.test', 'port': '443/tcp',
+                'severity': 9.8, 'threat': 'Critical', 'qod': 99, 'qod_type': 'remote_active', 'result': 'Installed version: 2.4.49',
+                'summary': 'The product is affected.', 'cvss_vector': 'AV:N/AC:L/Au:N/C:P/I:P/A:P', 'cves': ['CVE-2021-41773'],
+                'urls': ['https://example.test/advisory']}
+        item.update(over)
+        return {'outcome': 'done', 'results': [item], 'scanned_addresses': ['203.0.113.5'], 'without_cve': 1, 'unusable': 0}
+
+    def test_a_well_formed_result_round_trips(self):
+        clean = sentinels.clean_result('openvas', self._body())
+        item = clean['results'][0]
+        self.assertEqual((item['oid'], item['port'], item['port_number'], item['qod'], item['cves']),
+                         ('1.3.6.1.4.1.25623.1.0.117721', '443/tcp', 443, 99, ['CVE-2021-41773']))
+        self.assertEqual((clean['scanned_addresses'], clean['without_cve'], clean['unusable']), (['203.0.113.5'], 1, 0))
+
+    def test_a_result_with_no_oid_or_no_address_is_dropped_not_stored_empty(self):
+        clean = sentinels.clean_result('openvas', self._body(oid=''))
+        self.assertEqual(clean['results'], [])
+        clean = sentinels.clean_result('openvas', self._body(address=''))
+        self.assertEqual(clean['results'], [])
+
+    def test_an_oid_that_is_not_gvms_dotted_numeric_shape_is_dropped(self):
+        clean = sentinels.clean_result('openvas', self._body(oid='; rm -rf / #'))
+        self.assertEqual(clean['results'], [])
+
+    def test_an_invalid_or_unknown_cve_id_never_survives_cleaning(self):
+        clean = sentinels.clean_result('openvas', self._body(cves=['CVE-2021-41773', 'not-a-cve', 'CVE-99-1']))
+        self.assertEqual(clean['results'][0]['cves'], ['CVE-2021-41773'])
+
+    def test_severity_and_qod_are_bounded_to_their_real_ranges(self):
+        clean = sentinels.clean_result('openvas', self._body(severity=99, qod=-5))
+        self.assertEqual((clean['results'][0]['severity'], clean['results'][0]['qod']), (10.0, 0))
+
+    def test_a_malformed_port_string_falls_back_to_general_tcp(self):
+        clean = sentinels.clean_result('openvas', self._body(port='not-a-port'))
+        self.assertEqual((clean['results'][0]['port'], clean['results'][0]['port_number']), ('general/tcp', 0))
+
+    def test_a_non_http_url_is_dropped(self):
+        clean = sentinels.clean_result('openvas', self._body(urls=['javascript:alert(1)', 'https://ok.test/a']))
+        self.assertEqual(clean['results'][0]['urls'], ['https://ok.test/a'])
+
+    def test_oversized_text_is_clipped_not_stored_verbatim(self):
+        evil = 'A' * 5000
+        clean = sentinels.clean_result('openvas', self._body(result=evil, summary=evil))
+        self.assertEqual(len(clean['results'][0]['result']), 2000)
+        self.assertEqual(len(clean['results'][0]['summary']), 1500)
+
+    def test_more_results_than_the_cap_is_rejected_outright(self):
+        from agentapi.services import ApiError
+        body = self._body()
+        body['results'] = body['results'] * (sentinels.MAX_OPENVAS_RESULTS + 1)
+        with self.assertRaises(ApiError):
+            sentinels.clean_result('openvas', body)
