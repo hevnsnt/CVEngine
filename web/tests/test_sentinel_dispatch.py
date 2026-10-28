@@ -1,5 +1,6 @@
 """Dispatch-or-local: the critical regression property (zero Sentinels behaves exactly as before this feature existed),
 plus the three dispatch points actually wired (nmap, naabu, nuclei light/targeted) succeeding and timing out."""
+import time
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -188,17 +189,69 @@ class DispatchActivityLoggingTests(DispatchBase):
         self.assertIn('reported nmap failed for www.example.test', entries[-1].message)
 
     def test_a_timeout_says_it_ran_locally_instead(self):
+        # Never claimed within the (short) overall timeout, so this is the "nobody picked it up" message, not the
+        # "claimed but didn't finish" one - see ClaimTimeoutTests for that distinction.
         self.make_sentinel(['nmap'])
         dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
         entries = self._entries()
         self.assertEqual(entries[-1].status, 'expired')
-        self.assertIn('No Sentinel checked in nmap work for www.example.test in time; it ran locally instead', entries[-1].message)
+        self.assertIn('No Sentinel picked up nmap work for www.example.test in time; it ran locally instead', entries[-1].message)
 
     def test_no_eligible_sentinel_writes_no_activity_at_all(self):
         # any_scanner_for's own cheap existence check short-circuits before anything (including activity) is written,
         # so a project with no Sentinel pays for nothing beyond that one query - matching ZeroSentinelRegressionTests.
         dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
         self.assertEqual(self._entries(), [])
+
+
+class ClaimTimeoutTests(DispatchBase):
+    """The claim timeout (CVENGINE_SENTINEL_CLAIM_TIMEOUT) and the completion timeout (CVENGINE_SENTINEL_DISPATCH_TIMEOUT)
+    are two different budgets: a task nobody claims gives up quickly, but a task a Sentinel has already claimed keeps the
+    full completion budget however long it then takes to run, exactly as before this split existed."""
+
+    def _entries(self):
+        from cveFeed.models import AgentActivity
+        return list(AgentActivity.objects.filter(project=self.project).order_by('id'))
+
+    def test_an_unclaimed_task_gives_up_at_the_short_claim_timeout_not_the_long_completion_one(self):
+        self.make_sentinel(['nmap'])  # eligible, but nothing ever claims the task in this test
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
+            start = time.monotonic()
+            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=10)
+            elapsed = time.monotonic() - start
+        self.assertIsNone(out)
+        self.assertLess(elapsed, 2)  # nowhere near the 10s completion timeout
+        entries = self._entries()
+        self.assertEqual(entries[-1].status, 'expired')
+        self.assertIn('No Sentinel picked up nmap work for www.example.test in time', entries[-1].message)
+        self.assertEqual(SentinelTask.objects.get().status, 'expired')
+
+    def test_once_claimed_a_slow_sentinel_still_gets_the_full_completion_timeout(self):
+        agent = self.make_sentinel(['nmap'])
+        result = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'ports': []}]}
+        calls = {'n': 0}
+        real_sleep = time.sleep  # patching agentapi.sentinel_dispatch.time.sleep patches the module-global time.sleep too
+
+        def real_but_slow_sleep(_seconds):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                SentinelTask.objects.filter(status='queued').update(agent=agent, status='claimed')
+            elif calls['n'] >= 10:  # well past the short claim timeout, still well inside the completion timeout
+                SentinelTask.objects.filter(status='claimed').update(status='done', result=result, finished_at=timezone.now())
+            real_sleep(0.02)
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.05), \
+                mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=real_but_slow_sleep):
+            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
+        self.assertEqual(out, result)
+        self.assertEqual(SentinelTask.objects.get().status, 'done')
+
+    def test_the_claim_timeout_never_waits_longer_than_an_explicit_shorter_completion_timeout(self):
+        self.make_sentinel(['nmap'])
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=90):
+            start = time.monotonic()
+            dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
+            elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2)  # the overall timeout still wins even though the claim timeout is much larger
 
 
 class NucleiDispatchTests(DispatchBase):
