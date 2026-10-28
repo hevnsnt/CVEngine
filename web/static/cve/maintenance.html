@@ -62,6 +62,10 @@
         --shoe: #16161a;
         --shadow: rgba(13, 13, 16, 0.12);
         --steel: #9aa0ab;
+        --rule: #c9ccd3;
+        --lamp: #2f3138;
+        --cup: #e7e4dd;
+        --vest-sh: #e4560a;
       }
       :root[data-theme="dark"] {
         color-scheme: dark;
@@ -85,6 +89,9 @@
         --shoe: #050507;
         --shadow: rgba(0, 0, 0, 0.45);
         --steel: #6d727c;
+        --rule: #8a8f99;
+        --lamp: #4a4c55;
+        --cup: #cfccc4;
       }
       * {
         box-sizing: border-box;
@@ -281,170 +288,68 @@
       }
 
       /* the scene */
-      .faint {
-        fill: none;
-        stroke: var(--faint);
-        stroke-width: 1.4;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-      }
-      .plan-line {
-        fill: none;
-        stroke: var(--plan-line);
-        stroke-width: 1.4;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-      }
-      .draw {
-        stroke-dasharray: 260;
-        stroke-dashoffset: 260;
-        animation: draw 7s ease-in-out infinite;
-      }
-      .draw.d2 {
-        animation-delay: 0.9s;
-      }
-      .draw.d3 {
-        animation-delay: 1.8s;
-      }
-      .draw.d4 {
-        animation-delay: 2.7s;
-      }
+      .faint { fill: none; stroke: var(--faint); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+      .plan-line { fill: none; stroke: var(--plan-line); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+      .draw { stroke-dasharray: 260; stroke-dashoffset: 260; animation: draw 7s ease-in-out infinite; }
+      .draw.d2 { animation-delay: 0.9s; }
+      .draw.d3 { animation-delay: 1.8s; }
+      .draw.d4 { animation-delay: 2.7s; }
       @keyframes draw {
-        0% {
-          stroke-dashoffset: 260;
-        }
-        35%,
-        80% {
-          stroke-dashoffset: 0;
-        }
-        100% {
-          stroke-dashoffset: -260;
-        }
+        0% { stroke-dashoffset: 260; }
+        35%, 80% { stroke-dashoffset: 0; }
+        100% { stroke-dashoffset: -260; }
       }
-      .node {
-        fill: var(--plan-line);
-        animation: glow 3.5s ease-in-out infinite;
-      }
-      .node.n2 {
-        animation-delay: 1.2s;
-      }
-      .node.n3 {
-        animation-delay: 2.4s;
-      }
+      .node { fill: var(--plan-line); animation: glow 3.5s ease-in-out infinite; }
+      .node.n2 { animation-delay: 1.2s; }
+      .node.n3 { animation-delay: 2.4s; }
       @keyframes glow {
-        0%,
-        100% {
-          opacity: 0.45;
-        }
-        50% {
-          opacity: 1;
-        }
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 1; }
       }
-      .pencil {
-        animation: sketch 3.2s ease-in-out infinite;
+      .beamlight { animation: lamp 5s ease-in-out infinite; }
+      @keyframes lamp {
+        0%, 100% { opacity: 0.75; }
+        50% { opacity: 1; }
       }
+      .steam { stroke-dasharray: 22; animation: steam 3.4s ease-in-out infinite; }
+      @keyframes steam {
+        0% { stroke-dashoffset: 22; opacity: 0; }
+        40% { opacity: 1; }
+        100% { stroke-dashoffset: -22; opacity: 0; }
+      }
+      .pencil { animation: sketch 3.2s ease-in-out infinite; }
       @keyframes sketch {
-        0%,
-        100% {
-          transform: translate(0, 0);
-        }
-        25% {
-          transform: translate(7px, -3px);
-        }
-        50% {
-          transform: translate(14px, 1px);
-        }
-        75% {
-          transform: translate(6px, 3px);
-        }
+        0%, 100% { transform: translate(0, 0); }
+        25% { transform: translate(5px, -2px); }
+        50% { transform: translate(10px, 1px); }
+        75% { transform: translate(4px, 2px); }
       }
-      .point {
-        transform-origin: 624px 184px;
-        animation: point 4.5s ease-in-out infinite;
-      }
+      .point { transform-origin: 228px 172px; animation: point 5s ease-in-out infinite; }
       @keyframes point {
-        0%,
-        100% {
-          transform: rotate(0deg);
-        }
-        45%,
-        60% {
-          transform: rotate(5deg);
-        }
+        0%, 100% { transform: rotate(0deg); }
+        45%, 62% { transform: rotate(-4deg); }
       }
-      .nod {
-        transform-origin: 643px 162px;
-        animation: nod 4.5s ease-in-out infinite;
-      }
-      @keyframes nod {
-        0%,
-        100% {
-          transform: rotate(0deg);
-        }
-        50% {
-          transform: rotate(-3deg);
-        }
-      }
-      .look {
-        transform-origin: 171px 162px;
-        animation: look 6s ease-in-out infinite;
-      }
+      .look { transform-origin: 219px 152px; animation: look 6s ease-in-out infinite; }
       @keyframes look {
-        0%,
-        100% {
-          transform: rotate(0deg);
-        }
-        50% {
-          transform: rotate(2.5deg);
-        }
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(3deg); }
       }
-      .blink {
-        transform-box: fill-box;
-        transform-origin: center;
-        animation: blink 5s infinite;
+      .nod { transform-origin: 219px 152px; animation: nod 5s ease-in-out infinite; }
+      @keyframes nod {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(4deg); }
       }
-      .blink.b2 {
-        animation-delay: 1.7s;
-      }
-      @keyframes blink {
-        0%,
-        94%,
-        100% {
-          transform: scaleY(1);
-        }
-        96% {
-          transform: scaleY(0.1);
-        }
-      }
-      .load {
-        transform-origin: 668px 46px;
-        animation: swing 6s ease-in-out infinite;
-      }
+      .load { transform-origin: 300px 56px; animation: swing 6s ease-in-out infinite; }
       @keyframes swing {
-        0%,
-        100% {
-          transform: rotate(1.6deg);
-        }
-        50% {
-          transform: rotate(-1.6deg);
-        }
+        0%, 100% { transform: rotate(1.4deg); }
+        50% { transform: rotate(-1.4deg); }
       }
-      .rise {
-        animation: rise 6s ease-in-out infinite;
-      }
+      .rise { animation: rise 6s ease-in-out infinite; }
       @keyframes rise {
-        0%,
-        100% {
-          transform: translateY(0);
-        }
-        50% {
-          transform: translateY(-8px);
-        }
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-7px); }
       }
-      .beacon {
-        fill: var(--brand);
-        animation: glow 1.6s ease-in-out infinite;
-      }
+      .beacon { fill: var(--brand); animation: glow 1.6s ease-in-out infinite; }
       @media (prefers-reduced-motion: reduce) {
         *,
         *::before,
@@ -493,490 +398,217 @@
       </div>
 
       <div class="stage">
-        <svg
-          viewBox="0 0 800 340"
-          role="img"
-          aria-label="Two engineers in hard hats work over a blueprint on a drafting board while a crane lifts the next piece into place"
-        >
+<svg viewBox="0 0 960 390" role="img" aria-label="Two engineers in hard hats work over a blueprint on a drafting table while a crane lifts the next piece into place">
           <defs>
             <linearGradient id="board" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0" stop-color="var(--plan)" />
               <stop offset="1" stop-color="var(--plan-deep)" />
             </linearGradient>
             <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#fff" stop-opacity="0.14" />
-              <stop offset="0.5" stop-color="#fff" stop-opacity="0" />
+              <stop offset="0" stop-color="#fff" stop-opacity="0.16" />
+              <stop offset="0.45" stop-color="#fff" stop-opacity="0" />
             </linearGradient>
-            <pattern
-              id="plangrid"
-              width="12"
-              height="12"
-              patternUnits="userSpaceOnUse"
-            >
-              <path
-                d="M12 0H0V12"
-                fill="none"
-                stroke="var(--plan-soft)"
-                stroke-width="0.5"
-              />
+            <linearGradient id="beam" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#ffe2c8" stop-opacity="0.32" />
+              <stop offset="1" stop-color="#ffd7b8" stop-opacity="0" />
+            </linearGradient>
+            <radialGradient id="floor" cx="0.5" cy="0.5" r="0.5">
+              <stop offset="0" stop-color="var(--shadow)" />
+              <stop offset="1" stop-color="var(--shadow)" stop-opacity="0" />
+            </radialGradient>
+            <pattern id="plangrid" width="11" height="11" patternUnits="userSpaceOnUse">
+              <path d="M11 0H0V11" fill="none" stroke="var(--plan-soft)" stroke-width="0.5" />
             </pattern>
+            <clipPath id="torso-a"><path d="M202 170C204 161 216 158 226 158C236 158 242 164 243 172L246 214C247 228 245 240 242 250L204 252C201 238 200 222 200 206C200 192 200 180 202 170Z" /></clipPath>
+            <clipPath id="torso-b"><path d="M202 170C204 161 216 158 226 158C236 158 242 164 243 172L246 214C247 228 245 240 242 250L204 252C201 238 200 222 200 206C200 192 200 180 202 170Z" /></clipPath>
           </defs>
 
-          <!-- the build behind: scaffolding around the frame of what is going up, and a tower crane lifting the next piece -->
+          <!-- far left: a tower crane, its load swinging gently over the work -->
           <g class="faint">
-            <path d="M330 300V118M392 300V118M454 300V118M516 300V118" />
-            <path
-              d="M318 300H528M318 250H528M318 200H528M318 150H528M318 118H528"
-            />
-            <path
-              d="M330 300L392 250M392 250L454 300M454 250L516 200M330 200L392 150M454 150L516 118"
-            />
+            <path d="M58 362V44M76 362V44" />
+            <path d="M58 362L76 336L58 310L76 284L58 258L76 232L58 206L76 180L58 154L76 128L58 102L76 76L58 50" />
+            <path d="M20 44H330M20 56H330" />
+            <path d="M32 56L46 44L60 56L74 44L88 56L102 44L116 56L130 44L144 56L158 44L172 56L186 44L200 56L214 44L228 56L242 44L256 56L270 44L284 56L298 44L312 56L326 44" />
+            <path d="M67 44V18L20 44M67 18L318 44" />
           </g>
-          <g class="faint">
-            <path d="M66 300V40M84 300V40" />
-            <path d="M66 300L84 274 L66 248 L84 222 L66 196 L84 170 L66 144 L84 118 L66 92 L84 66 L66 40" />
-            <path d="M10 40H272M10 52H272" />
-            <path d="M22 52L40 40L58 52L76 40L94 52L112 40L130 52L148 40L166 52L184 40L202 52L220 40L238 52L256 40" />
-            <path d="M75 40L75 20L10 40M75 20L262 40" />
-          </g>
-          <rect x="14" y="52" width="22" height="14" rx="2" fill="var(--faint)" />
-          <circle class="beacon" cx="75" cy="18" r="2.6" />
+          <rect x="22" y="56" width="24" height="16" rx="2" fill="var(--faint)" />
+          <circle class="beacon" cx="67" cy="15" r="2.8" />
           <g class="load">
-            <path d="M240 52V84" stroke="var(--steel)" stroke-width="1.2" />
+            <path d="M300 56V84" stroke="var(--steel)" stroke-width="1.2" />
             <g class="rise">
-              <path d="M232 84L240 76L248 84" fill="none" stroke="var(--steel)" stroke-width="1.2" />
-              <rect x="212" y="84" width="56" height="16" rx="2" fill="var(--wood-hi)" />
-              <rect x="212" y="90" width="56" height="3" fill="var(--brand)" />
+              <path d="M292 84L300 76L308 84" fill="none" stroke="var(--steel)" stroke-width="1.2" />
+              <rect x="270" y="84" width="60" height="15" rx="1.5" fill="var(--wood-hi)" />
+              <rect x="270" y="89" width="60" height="2.5" fill="var(--brand)" />
+              <path d="M276 84V99M324 84V99" stroke="var(--wood)" stroke-width="1" />
             </g>
           </g>
 
-          <!-- ground and shadows -->
-          <path
-            d="M40 302H760"
-            stroke="var(--faint)"
-            stroke-width="1.5"
-            stroke-linecap="round"
-          />
-          <ellipse cx="400" cy="304" rx="165" ry="7" fill="var(--shadow)" />
-          <ellipse cx="168" cy="304" rx="44" ry="6" fill="var(--shadow)" />
-          <ellipse cx="640" cy="304" rx="44" ry="6" fill="var(--shadow)" />
-
-          <!-- drafting table: legs, then the tilted board with the blueprint pinned to it -->
-          <g stroke="var(--wood)" stroke-width="7" stroke-linecap="round">
-            <path d="M290 262L268 300M510 262L532 300" />
-            <path d="M282 284H518" stroke-width="5" />
+          <!-- far right: the frame going up, in scaffolding -->
+          <g class="faint">
+            <path d="M800 362V170M846 362V150M892 362V150M938 362V170" />
+            <path d="M790 362H948M790 320H948M790 278H948M790 236H948M790 194H948M800 170H938" />
+            <path d="M800 320L846 278M846 320L892 278M892 278L938 236M800 236L846 194M892 194L938 170" />
           </g>
-          <g transform="translate(262 112) skewX(-6)">
-            <rect
-              x="0"
-              y="0"
-              width="296"
-              height="146"
-              rx="5"
-              fill="var(--wood)"
-            />
-            <rect
-              x="7"
-              y="7"
-              width="282"
-              height="132"
-              rx="3"
-              fill="url(#board)"
-            />
-            <rect
-              x="7"
-              y="7"
-              width="282"
-              height="132"
-              rx="3"
-              fill="url(#plangrid)"
-            />
-            <!-- the drawing: a service wiring diagram that keeps drawing itself in -->
-            <rect
-              class="plan-line draw"
-              x="26"
-              y="26"
-              width="64"
-              height="38"
-              rx="3"
-            />
-            <rect
-              class="plan-line draw d2"
-              x="124"
-              y="22"
-              width="70"
-              height="46"
-              rx="3"
-            />
-            <rect
-              class="plan-line draw d3"
-              x="228"
-              y="30"
-              width="44"
-              height="30"
-              rx="3"
-            />
-            <path class="plan-line draw d2" d="M90 45H124M194 45H228" />
-            <path
-              class="plan-line draw d3"
-              d="M159 68V92H60V110M159 92H250V110"
-            />
-            <circle class="plan-line draw d4" cx="60" cy="118" r="9" />
-            <path class="plan-line draw d4" d="M240 110H262V126H240Z" />
-            <path
-              class="plan-line"
-              d="M140 36H178M140 44H170M140 52H176"
-              opacity="0.6"
-            />
-            <circle class="node" cx="90" cy="45" r="2.6" />
-            <circle class="node n2" cx="159" cy="92" r="2.6" />
-            <circle class="node n3" cx="228" cy="45" r="2.6" />
-            <!-- title block -->
-            <rect
-              x="196"
-              y="100"
-              width="82"
-              height="30"
-              rx="2"
-              fill="none"
-              stroke="var(--plan-soft)"
-            />
-            <path d="M196 112H278M232 112V130" stroke="var(--plan-soft)" />
-            <text
-              x="202"
-              y="109"
-              fill="var(--plan-line)"
-              font-family="ui-monospace, Menlo, monospace"
-              font-size="6"
-              letter-spacing="1"
-            >
-              CVENGINE
-            </text>
-            <text
-              x="238"
-              y="124"
-              fill="var(--plan-line)"
-              font-family="ui-monospace, Menlo, monospace"
-              font-size="6"
-              letter-spacing="0.5"
-              opacity="0.8"
-            >
-              REV NEXT
-            </text>
-            <rect
-              x="7"
-              y="7"
-              width="282"
-              height="132"
-              rx="3"
-              fill="url(#sheen)"
-            />
-            <circle cx="16" cy="16" r="2.4" fill="var(--brand)" />
-            <circle cx="280" cy="16" r="2.4" fill="var(--brand)" />
+          <g fill="var(--faint)" opacity="0.55">
+            <rect x="806" y="324" width="36" height="34" rx="1" /><rect x="852" y="324" width="36" height="34" rx="1" /><rect x="898" y="324" width="36" height="34" rx="1" />
+            <rect x="806" y="282" width="36" height="34" rx="1" /><rect x="852" y="282" width="36" height="34" rx="1" />
           </g>
-          <!-- pencil tray -->
-          <path d="M244 258H560L556 266H246Z" fill="var(--wood-hi)" />
-          <rect
-            x="300"
-            y="254"
-            width="40"
-            height="3"
-            rx="1.5"
-            fill="var(--brand)"
-          />
-          <rect
-            x="350"
-            y="254"
-            width="26"
-            height="3"
-            rx="1.5"
-            fill="var(--steel)"
-          />
 
-          <!-- engineer on the left: drafting, pencil to the plan -->
-          <g>
-            <path
-              d="M156 236L150 296"
-              stroke="var(--navy)"
-              stroke-width="15"
-              stroke-linecap="round"
-            />
-            <path
-              d="M178 236L188 296"
-              stroke="var(--navy-hi)"
-              stroke-width="15"
-              stroke-linecap="round"
-            />
-            <path
-              d="M140 298Q140 290 150 290H162Q166 300 160 302H142Z"
-              fill="var(--shoe)"
-            />
-            <path
-              d="M180 298Q180 290 190 290H200Q206 300 200 302H182Z"
-              fill="var(--shoe)"
-            />
-            <!-- back arm, holding a rolled plan -->
-            <path
-              d="M150 182Q138 206 142 230"
-              stroke="var(--navy)"
-              stroke-width="12"
-              stroke-linecap="round"
-              fill="none"
-            />
-            <rect
-              x="124"
-              y="214"
-              width="9"
-              height="52"
-              rx="4.5"
-              transform="rotate(-14 128 240)"
-              fill="var(--plan)"
-            />
-            <rect
-              x="124"
-              y="214"
-              width="9"
-              height="6"
-              rx="3"
-              transform="rotate(-14 128 240)"
-              fill="var(--plan-line)"
-              opacity="0.7"
-            />
-            <circle cx="142" cy="232" r="5.5" fill="var(--skin-a)" />
-            <!-- body: jacket with reflective bands -->
-            <path
-              d="M144 184Q146 170 162 168H180Q196 170 198 186L194 242H146Z"
-              fill="var(--navy-hi)"
-            />
-            <path
-              d="M146 214H196"
-              stroke="var(--reflect)"
-              stroke-width="4"
-              opacity="0.9"
-            />
-            <path d="M145 226H195" stroke="var(--brand)" stroke-width="3" />
-            <path d="M171 170V242" stroke="var(--navy)" stroke-width="1.4" />
-            <!-- front arm to the board, with the pencil -->
-            <path
-              d="M190 182Q214 196 238 198L268 194"
-              stroke="var(--navy-hi)"
-              stroke-width="12"
-              stroke-linecap="round"
-              fill="none"
-            />
+          <!-- floor -->
+          <path d="M16 362H944" stroke="var(--faint)" stroke-width="1.4" stroke-linecap="round" />
+          <ellipse cx="478" cy="364" rx="190" ry="9" fill="url(#floor)" />
+          <ellipse cx="226" cy="363" rx="54" ry="7" fill="url(#floor)" />
+          <ellipse cx="734" cy="363" rx="54" ry="7" fill="url(#floor)" />
+
+          <!-- drafting table: trestle legs, tray, the tilted board with a parallel rule, and a lamp -->
+          <g stroke="var(--wood)" stroke-linecap="round" fill="none">
+            <path d="M378 268L352 360M598 268L624 360" stroke-width="7" />
+            <path d="M362 330H612" stroke-width="5" />
+            <path d="M352 360H372M604 360H624" stroke-width="5" />
+          </g>
+          <g transform="translate(352 140) skewX(-6.6)">
+            <rect x="0" y="0" width="266" height="122" rx="4" fill="var(--wood)" />
+            <rect x="6" y="6" width="254" height="110" rx="2.5" fill="url(#board)" />
+            <rect x="6" y="6" width="254" height="110" rx="2.5" fill="url(#plangrid)" />
+            <g transform="translate(4 2) scale(0.88 0.8)">
+              <rect class="plan-line draw" x="26" y="26" width="64" height="38" rx="3" />
+              <rect class="plan-line draw d2" x="124" y="22" width="70" height="46" rx="3" />
+              <rect class="plan-line draw d3" x="228" y="30" width="44" height="30" rx="3" />
+              <path class="plan-line draw d2" d="M90 45H124M194 45H228" />
+              <path class="plan-line draw d3" d="M159 68V92H60V110M159 92H250V110" />
+              <circle class="plan-line draw d4" cx="60" cy="118" r="9" />
+              <path class="plan-line draw d4" d="M240 110H262V126H240Z" />
+              <path class="plan-line" d="M140 36H178M140 44H170M140 52H176" opacity="0.6" />
+              <circle class="node" cx="90" cy="45" r="2.6" />
+              <circle class="node n2" cx="159" cy="92" r="2.6" />
+              <circle class="node n3" cx="228" cy="45" r="2.6" />
+              <rect x="196" y="100" width="82" height="30" rx="2" fill="none" stroke="var(--plan-soft)" />
+              <path d="M196 112H278M232 112V130" stroke="var(--plan-soft)" />
+              <text x="202" y="109" fill="var(--plan-line)" font-family="ui-monospace, Menlo, monospace" font-size="6" letter-spacing="1">CVENGINE</text>
+              <text x="238" y="124" fill="var(--plan-line)" font-family="ui-monospace, Menlo, monospace" font-size="6" letter-spacing="0.5" opacity="0.8">REV NEXT</text>
+            </g>
+            <rect x="6" y="6" width="254" height="110" rx="2.5" fill="url(#sheen)" />
+            <!-- parallel rule on its wires -->
+            <path d="M2 107H264" stroke="var(--steel)" stroke-width="0.6" opacity="0.7" />
+            <rect x="8" y="104" width="250" height="5" rx="1" fill="var(--rule)" />
+            <rect x="8" y="104" width="250" height="1.4" fill="#fff" opacity="0.5" />
+            <circle cx="12" cy="10" r="2.2" fill="var(--brand)" />
+            <circle cx="254" cy="10" r="2.2" fill="var(--brand)" />
+          </g>
+          <path class="beamlight" d="M410 100L444 106L540 258L372 258Z" fill="url(#beam)" />
+          <path d="M334 262H608L604 271H338Z" fill="var(--wood-hi)" />
+          <rect x="392" y="258" width="44" height="3.4" rx="1.7" fill="var(--brand)" />
+          <rect x="444" y="258" width="28" height="3.4" rx="1.7" fill="var(--steel)" />
+          <path d="M570 248H586L584 262H572Z" fill="var(--cup)" /><path d="M586 252C592 252 592 259 585 259" fill="none" stroke="var(--cup)" stroke-width="2" />
+          <path class="steam" d="M576 244C573 238 580 234 577 228" fill="none" stroke="var(--faint)" stroke-width="1.4" stroke-linecap="round" />
+          <!-- lamp: clamp, two arms, shade -->
+          <g fill="none" stroke="var(--lamp)" stroke-width="3" stroke-linecap="round">
+            <path d="M368 138L386 104L422 90" />
+          </g>
+          <circle cx="386" cy="104" r="3" fill="var(--lamp)" />
+          <rect x="362" y="134" width="12" height="7" rx="1.5" fill="var(--lamp)" />
+          <path d="M414 82L446 92L440 106L408 96Z" fill="var(--lamp)" />
+          <path d="M412 100L440 108" stroke="#ffd7b8" stroke-width="2" stroke-linecap="round" />
+
+          <!-- engineer, left: drafts the change with a pencil, the rolled plans under his arm -->
+          <g class="eng-a">
+            <!-- legs and boots -->
+            <path d="M206 250L224 251C222 290 218 322 216 352L203 352C202 320 202 286 206 250Z" fill="var(--navy)" />
+            <path d="M222 250L243 248C245 290 245 322 243 352L230 352C229 322 227 288 222 250Z" fill="var(--navy-hi)" />
+            <path d="M222 250L230 250C230 290 231 322 232 352L230 352C229 322 227 288 222 250Z" fill="var(--navy)" opacity="0.6" />
+            <path d="M232 300Q236 302 241 300" fill="none" stroke="var(--navy)" stroke-width="1.4" />
+            <path d="M201 350H218C224 351 228 355 228 362H200Z" fill="var(--shoe)" />
+            <path d="M229 350H245C253 350 259 355 259 362H229Z" fill="var(--shoe)" />
+            <!-- back arm and the rolled plans -->
+            <path d="M205 172C199 188 198 206 201 222L212 222C210 206 211 190 216 176Z" fill="var(--navy)" />
+            <g transform="rotate(-36 238 244)">
+              <rect x="206" y="239" width="62" height="10" rx="5" fill="var(--plan)" />
+              <ellipse cx="208" cy="244" rx="2.6" ry="5" fill="var(--plan-line)" opacity="0.85" />
+              <rect x="240" y="239" width="3" height="10" fill="var(--brand)" />
+            </g>
+            <path d="M201 222L212 222C219 230 226 236 234 239L230 248C220 245 208 236 201 222Z" fill="var(--navy)" />
+            <path d="M230 237C236 237 241 241 240 246C237 250 231 250 228 247Z" fill="var(--skin-a)" />
+            <!-- jacket with reflective bands -->
+            <path d="M202 170C204 161 216 158 226 158C236 158 242 164 243 172L246 214C247 228 245 240 242 250L204 252C201 238 200 222 200 206C200 192 200 180 202 170Z" fill="var(--navy-hi)" />
+            <g clip-path="url(#torso-a)">
+              <path d="M196 160C206 186 208 222 210 256H196Z" fill="var(--navy)" />
+              <rect x="190" y="212" width="70" height="5" fill="var(--reflect)" />
+              <rect x="190" y="221" width="70" height="3" fill="var(--brand)" />
+              <path d="M226 158V256" stroke="var(--navy)" stroke-width="1.2" />
+            </g>
+            <path d="M213 160L224 168L234 161" fill="none" stroke="var(--navy)" stroke-width="2" stroke-linejoin="round" />
+            <!-- drawing arm -->
+            <path d="M228 166C242 168 258 184 268 200L258 210C247 196 236 186 224 182Z" fill="var(--navy-hi)" />
+            <path d="M258 210L268 200C287 201 307 199 322 197L324 207C307 211 286 213 262 213Z" fill="var(--navy-hi)" />
+            <path d="M315 198L317 208.5" stroke="var(--reflect)" stroke-width="3" />
             <g class="pencil">
-              <circle cx="272" cy="194" r="5.5" fill="var(--skin-a)" />
-              <path
-                d="M272 194L286 186"
-                stroke="var(--brand)"
-                stroke-width="3"
-                stroke-linecap="round"
-              />
-              <path
-                d="M286 186L290 184"
-                stroke="var(--ink)"
-                stroke-width="2"
-                stroke-linecap="round"
-              />
+              <path d="M321 196C327 194 333 196 335 200C336 204 332 208 326 209C323 209 321 207 321 205Z" fill="var(--skin-a)" />
+              <path d="M327 202Q331 203 334 205" fill="none" stroke="var(--skin-a-sh)" stroke-width="1" />
+              <path d="M328 204L346 212" stroke="var(--brand)" stroke-width="2.6" stroke-linecap="round" />
+              <path d="M346 212L350 214" stroke="var(--ink)" stroke-width="1.8" stroke-linecap="round" />
             </g>
             <!-- head -->
             <g class="look">
-              <rect
-                x="164"
-                y="152"
-                width="13"
-                height="16"
-                rx="4"
-                fill="var(--skin-a-sh)"
-              />
-              <circle cx="171" cy="146" r="15" fill="var(--skin-a)" />
-              <path
-                d="M158 148Q157 156 163 160"
-                fill="none"
-                stroke="var(--hair)"
-                stroke-width="3"
-                stroke-linecap="round"
-              />
-              <ellipse
-                class="blink"
-                cx="179"
-                cy="146"
-                rx="1.6"
-                ry="1.9"
-                fill="var(--ink)"
-              />
-              <path
-                d="M178 154Q181 155.5 184 153.5"
-                fill="none"
-                stroke="var(--skin-a-sh)"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              />
-              <path
-                d="M155 141Q156 124 172 123Q188 124 189 141Z"
-                fill="var(--hat)"
-              />
-              <path
-                d="M163 129Q170 125 178 126"
-                fill="none"
-                stroke="var(--hat-hi)"
-                stroke-width="2.4"
-                stroke-linecap="round"
-              />
-              <path d="M172 123V141" stroke="var(--hat-sh)" stroke-width="2" />
-              <path
-                d="M151 141H196Q198 144 194 145H152Q149 144 151 141Z"
-                fill="var(--hat-sh)"
-              />
+              <path d="M213 147H225L226 162H211Z" fill="var(--skin-a-sh)" />
+              <path d="M200 140C197 124 205 110 219 110C226 110 231 114 233 119L222 120C214 121 209 127 208 134C207 140 205 145 202 147Z" fill="var(--hair)" />
+              <path d="M206 128C206 116 214 111 222 112C230 113 234 119 234 126L237 133C237.5 134 236.5 135 235 135H234C234 140 233 144 229 146C226 148 222 149 218 149C212 149 207 145 206 138Z" fill="var(--skin-a)" />
+              <ellipse cx="212" cy="132" rx="3" ry="4" fill="var(--skin-a-sh)" />
+              <path d="M226.5 127.5H230" stroke="var(--ink)" stroke-width="1.6" stroke-linecap="round" />
+              <path d="M225 123.5Q228 122 231 123.5" fill="none" stroke="var(--hair)" stroke-width="1.3" stroke-linecap="round" />
+              <path d="M203 123C203 108 213 100 223 100C234 100 241 108 241 121Z" fill="var(--hat)" />
+              <path d="M222 100C226 105 228 113 228 122" fill="none" stroke="var(--hat-sh)" stroke-width="2.4" />
+              <path d="M210 112C213 106 218 103 223 103" fill="none" stroke="var(--hat-hi)" stroke-width="2.4" stroke-linecap="round" />
+              <path d="M199 121H246C249 121 250 124 247 125L201 126C198 126 197 122 199 121Z" fill="var(--hat-sh)" />
             </g>
           </g>
 
-          <!-- engineer on the right: hi-vis vest, tablet in hand, pointing at the plan -->
-          <g>
-            <path
-              d="M630 236L622 296"
-              stroke="var(--slate)"
-              stroke-width="15"
-              stroke-linecap="round"
-            />
-            <path
-              d="M652 236L660 296"
-              stroke="var(--slate-hi)"
-              stroke-width="15"
-              stroke-linecap="round"
-            />
-            <path
-              d="M606 298Q606 290 616 290H628Q632 300 626 302H608Z"
-              fill="var(--shoe)"
-            />
-            <path
-              d="M650 298Q650 290 660 290H672Q676 300 670 302H652Z"
-              fill="var(--shoe)"
-            />
-            <path
-              d="M616 186Q618 170 634 168H652Q668 170 670 186L666 242H620Z"
-              fill="var(--slate-hi)"
-            />
-            <path
-              d="M620 184Q624 172 634 170L640 242H622Z"
-              fill="var(--vest)"
-            />
-            <path
-              d="M666 184Q662 172 652 170L646 242H664Z"
-              fill="var(--vest)"
-            />
-            <path
-              d="M621 212H639M647 212H665"
-              stroke="var(--reflect)"
-              stroke-width="4"
-            />
-            <path
-              d="M621 224H639M647 224H665"
-              stroke="var(--reflect)"
-              stroke-width="2"
-              opacity="0.8"
-            />
-            <!-- back arm holding the tablet -->
-            <path
-              d="M662 184Q676 204 662 222"
-              stroke="var(--slate-hi)"
-              stroke-width="12"
-              stroke-linecap="round"
-              fill="none"
-            />
-            <rect
-              x="642"
-              y="206"
-              width="26"
-              height="34"
-              rx="3"
-              transform="rotate(10 655 223)"
-              fill="var(--wood)"
-            />
-            <rect
-              x="645"
-              y="209"
-              width="20"
-              height="26"
-              rx="1.5"
-              transform="rotate(10 655 223)"
-              fill="var(--plan)"
-            />
-            <path
-              d="M648 222H660M648 228H656"
-              transform="rotate(10 655 223)"
-              stroke="var(--plan-line)"
-              stroke-width="1.4"
-              stroke-linecap="round"
-            />
-            <circle cx="661" cy="224" r="5.5" fill="var(--skin-b)" />
+          <!-- engineer, right: hi-vis vest, checks the plan against the tablet and points at what changes -->
+          <g transform="translate(960 0) scale(-1 1)">
+            <path d="M206 250L224 251C222 290 218 322 216 352L203 352C202 320 202 286 206 250Z" fill="var(--slate)" />
+            <path d="M222 250L243 248C245 290 245 322 243 352L230 352C229 322 227 288 222 250Z" fill="var(--slate-hi)" />
+            <path d="M222 250L230 250C230 290 231 322 232 352L230 352C229 322 227 288 222 250Z" fill="var(--slate)" opacity="0.6" />
+            <path d="M232 300Q236 302 241 300" fill="none" stroke="var(--slate)" stroke-width="1.4" />
+            <path d="M201 350H218C224 351 228 355 228 362H200Z" fill="var(--shoe)" />
+            <path d="M229 350H245C253 350 259 355 259 362H229Z" fill="var(--shoe)" />
+            <!-- shirt and vest -->
+            <path d="M202 170C204 161 216 158 226 158C236 158 242 164 243 172L246 214C247 228 245 240 242 250L204 252C201 238 200 222 200 206C200 192 200 180 202 170Z" fill="var(--slate-hi)" />
+            <g clip-path="url(#torso-b)">
+              <path d="M196 160C206 186 208 222 210 256H196Z" fill="var(--slate)" />
+              <path d="M200 162H221L223 256H198Z" fill="var(--vest)" />
+              <path d="M231 160C238 162 244 168 245 178L248 256H229Z" fill="var(--vest)" />
+              <path d="M198 162C204 186 206 220 208 256H198Z" fill="var(--vest-sh)" />
+              <rect x="190" y="210" width="70" height="5" fill="var(--reflect)" />
+              <rect x="190" y="222" width="70" height="2.5" fill="var(--reflect)" opacity="0.8" />
+              <path d="M214 162V256M236 162V256" stroke="var(--reflect)" stroke-width="3" opacity="0.9" />
+            </g>
+            <!-- arm holding the tablet -->
+            <path d="M205 172C200 188 200 204 203 218L214 218C211 204 212 190 216 176Z" fill="var(--slate-hi)" />
+            <g transform="rotate(-24 246 196)">
+              <rect x="233" y="179" width="26" height="34" rx="3" fill="var(--wood)" />
+              <rect x="236" y="182" width="20" height="27" rx="1.5" fill="var(--plan)" />
+              <path d="M239 190H252M239 196H249M239 202H251" stroke="var(--plan-line)" stroke-width="1.3" stroke-linecap="round" />
+            </g>
+            <path d="M203 218L214 218C222 212 232 205 240 200L246 207C236 214 224 222 208 228Z" fill="var(--slate-hi)" />
+            <ellipse cx="243" cy="205" rx="5" ry="4.5" fill="var(--skin-b)" />
             <!-- pointing arm -->
             <g class="point">
-              <path
-                d="M624 184Q598 190 572 178"
-                stroke="var(--slate-hi)"
-                stroke-width="12"
-                stroke-linecap="round"
-                fill="none"
-              />
-              <circle cx="566" cy="176" r="5.5" fill="var(--skin-b)" />
-              <path
-                d="M562 174L552 170"
-                stroke="var(--skin-b)"
-                stroke-width="3.6"
-                stroke-linecap="round"
-              />
+              <path d="M228 166C244 168 260 176 272 184L266 194C252 188 238 184 224 182Z" fill="var(--slate-hi)" />
+              <path d="M266 194L272 184C290 184 308 180 326 176L328 186C312 190 292 194 268 196Z" fill="var(--slate-hi)" />
+              <path d="M325 175C331 174 335 177 336 180L347 179C349.5 179 349.5 183.5 347 183.5L335 185C331 188 327 188 325 186Z" fill="var(--skin-b)" />
             </g>
             <!-- head -->
             <g class="nod">
-              <rect
-                x="636"
-                y="152"
-                width="13"
-                height="16"
-                rx="4"
-                fill="var(--skin-b-sh)"
-              />
-              <circle cx="643" cy="146" r="15" fill="var(--skin-b)" />
-              <path
-                d="M656 147Q658 156 652 160"
-                fill="none"
-                stroke="var(--hair)"
-                stroke-width="3"
-                stroke-linecap="round"
-              />
-              <ellipse
-                class="blink b2"
-                cx="635"
-                cy="146"
-                rx="1.6"
-                ry="1.9"
-                fill="var(--ink)"
-              />
-              <path
-                d="M636 154Q633 155.5 630 153.5"
-                fill="none"
-                stroke="var(--skin-b-sh)"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              />
-              <path
-                d="M627 141Q628 124 644 123Q660 124 661 141Z"
-                fill="var(--hat-b)"
-              />
-              <path
-                d="M650 128Q644 125 636 127"
-                fill="none"
-                stroke="#fff"
-                stroke-width="2.4"
-                stroke-linecap="round"
-                opacity="0.9"
-              />
-              <path d="M628 135H660" stroke="var(--brand)" stroke-width="3" />
-              <path
-                d="M618 141H663Q665 144 662 145H620Q616 144 618 141Z"
-                fill="var(--hat-b-sh)"
-              />
+              <path d="M213 147H225L226 162H211Z" fill="var(--skin-b-sh)" />
+              <path d="M206 128C206 116 214 111 222 112C230 113 234 119 234 126L237 133C237.5 134 236.5 135 235 135H234C234 140 233 144 229 146C226 148 222 149 218 149C212 149 207 145 206 138Z" fill="var(--skin-b)" />
+              <path d="M207 136C209 144 213 149 219 149C225 149 231 147 233.5 141L234 136C231 142 226 145 220 145C214 145 210 141 207 136Z" fill="var(--hair)" />
+              <path d="M205 132C204 124 206 117 211 114L214 122C210 125 208 129 207 134Z" fill="var(--hair)" />
+              <ellipse cx="212" cy="132" rx="3" ry="4" fill="var(--skin-b-sh)" />
+              <path d="M226.5 127.5H230" stroke="var(--ink)" stroke-width="1.6" stroke-linecap="round" />
+              <path d="M225 123.5Q228 122 231 123.5" fill="none" stroke="var(--hair)" stroke-width="1.3" stroke-linecap="round" />
+              <path d="M203 123C203 108 213 100 223 100C234 100 241 108 241 121Z" fill="var(--hat-b)" />
+              <path d="M204 116H241" stroke="var(--brand)" stroke-width="3" />
+              <path d="M210 110C213 105 218 103 223 103" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" />
+              <path d="M199 121H246C249 121 250 124 247 125L201 126C198 126 197 122 199 121Z" fill="var(--hat-b-sh)" />
             </g>
           </g>
         </svg>
