@@ -16,7 +16,8 @@ States, per check and host:
   ``CVENGINE_TTL_<KIND>`` override; a check that has no ledger kind is judged by its scan stage, ``STAGE_TTL_HOURS``).
 * ``due``: it applies and never ran, ran longer ago than its window, or its last attempt failed.
 
-``coverage`` returns ``{done, applicable, paused, checks: [{id, label, state, last_run, ttl_hours, detail}]}``; the single-host view also
+``coverage`` returns ``{done, applicable, paused, internal, checks: [{id, label, state, last_run, ttl_hours, detail}]}`` (``internal`` is the declared
+network of a host inside one, else null: such a host is judged by what the internal scan runs, see "hosts inside a declared internal network"); the single-host view also
 carries ``units`` (the addresses, ports or CVEs a check is judged on). ``done`` of ``applicable`` is the "NN of NNN applicable checks done"
 the host page shows.
 
@@ -100,7 +101,7 @@ class HostFacts:
 
     def __init__(self, name, project_id, *, scan_id=None, target_name='', target_is_domain=False, addresses=(), techs=(), web_bases=(),
                  http_up=False, http_url='', excluded=False, shared_platform=False, hot_cves=(), unversioned=0, probe_rows=(), root=None,
-                 target=None):
+                 target=None, internal=''):
         self.name = (name or '').strip().lower().rstrip('.')
         self.project_id = project_id
         self.scan_id = scan_id
@@ -118,12 +119,13 @@ class HostFacts:
         self.unversioned = int(unversioned or 0)
         self.probe_rows = list(probe_rows)
         self.root = root
+        self.internal = internal or ''  # the declared internal network (cidr) the host is inside, else ''
         self._scannable = None
         self._inside = None
 
     @classmethod
     def from_rows(cls, sub, others, project_id):
-        from cveFeed import route_auth
+        from cveFeed import internal_view, route_auth
         from startScan.models import open_services
         from targetApp.target_types import DOMAIN, classify_target
         rows = [sub, *others]
@@ -149,7 +151,8 @@ class HostFacts:
         return cls(sub.name, project_id, scan_id=sub.scan_history_id, target=domain, target_name=domain.name if domain else '',
                    target_is_domain=bool(domain) and classify_target(domain.name) == DOMAIN, addresses=addresses.values(),
                    techs={t.name for row in rows for t in row.technologies.all() if t.name}, web_bases=bases,
-                   http_up=any((row.http_status or 0) > 0 for row in rows), http_url=sub.http_url or '')
+                   http_up=any((row.http_status or 0) > 0 for row in rows), http_url=sub.http_url or '',
+                   internal=internal_view.network_of(project_id, sub.name) or '')
 
     @property
     def is_target(self):
@@ -205,6 +208,7 @@ class Evidence:
         self.openvas_heat = {}    # (project id, host) -> fire | smoke | ice | clean | unscanned, for the page's hosts of an opted-in project
         self.credentials = {}  # project id -> stored sign-ins
         self.facts = {}        # Subdomain id -> HostFacts built while loading
+        self.sentinels = {}    # project id -> whether a live internal Sentinel exists (read lazily, only for internal hosts)
 
     def add_ledger(self, service, project_id, asset, when, status='done'):
         kind = service.split(':')[0]
@@ -675,6 +679,65 @@ def plan_correlation(h, ev):
     return [Unit(h.name, ev.stage_runs(h.scan_id, 'cve_correlation'))]
 
 
+# --------------------------------------------------------------------------------------- hosts inside a declared internal network
+#
+# A host whose name is an address inside a network its project declared internal is scanned only by ``cveFeed.internal_scan``, through a
+# Sentinel inside the network. Most checks run from this server and have no route there, so they do not apply; the ones the internal scan
+# runs are judged from what it recorded (the same ledger kinds and scan stages as for any host).
+
+INTERNAL_REASON = ('the internal scan does not run this check: it runs from this server, which has no route into an internal network, '
+                   'and it has no Sentinel path yet')
+
+
+def _internal_address(h):
+    return h.addresses.get(h.name) or Addr(h.name)
+
+
+def plan_internal_nmap(h, ev):
+    return [Unit(h.name, ev.ledger_runs(('nmap-fast',), h.project_id, h.name))]
+
+
+def plan_internal_udp(h, ev):
+    return [Unit(h.name, ev.ledger_runs(('udp-scan', 'udp-scan-failed'), None, _udp_asset(_internal_address(h))))]
+
+
+def plan_internal_nuclei_tech(h, ev):
+    return _one(h, ev, ('nuclei-light',))
+
+
+def plan_internal_nuclei(h, ev):
+    return _one(h, ev, ('nuclei',))
+
+
+def plan_internal_testssl(h, ev):
+    ports = _tls_numbers(h, starttls=True)
+    if not ports:
+        return 'no TLS service'
+    return [Unit(f'{h.name}:{n}', ev.ledger_runs(('testssl', 'testssl-failed'), h.project_id, f'{h.name}:{n}')) for n in ports]
+
+
+def plan_internal_wpscan(h, ev):
+    state = _wordpress(h)
+    if state is None and not any(t.lower().startswith('wordpress') for t in h.techs):
+        return 'no sign of WordPress'
+    if state is not None and state['state'] == 'not_wordpress':
+        return 'WPScan found no WordPress'
+    return _one(h, ev, ('wpscan', 'wpscan-partial'))
+
+
+# check id -> the rule for an internal host; every other check does not apply to one (``INTERNAL_REASON``)
+INTERNAL_PLANS = {
+    'nmap': plan_internal_nmap,
+    'udp': plan_internal_udp,
+    'nuclei-tech': plan_internal_nuclei_tech,
+    'nuclei': plan_internal_nuclei,
+    'tls-audit': plan_internal_testssl,
+    'wpscan': plan_internal_wpscan,
+    'cve-correlation': plan_correlation,
+    'openvas': plan_openvas,
+}
+
+
 CHECKS = (
     Check('discovery', 'Subdomain discovery (bbot)', plan_discovery, kinds=('bbot',), stages=('bbot_discovery',)),
     Check('deep-discovery', 'Weekly deep discovery', plan_deep_discovery, kinds=('bbot-deep',), sweeps=('deep-apex',)),
@@ -733,9 +796,9 @@ EXCLUDED = {
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
         'asset_changes': 'the change log of the scan, bookkeeping only',
-        'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; per-host coverage of internal hosts is not judged yet',
-        'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; per-host coverage of internal hosts is not judged yet',
-        'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; per-host coverage of internal hosts is not judged yet',
+        'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the testssl ledger kind, which the tls-audit check judges for an internal host',
+        'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
+        'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the udp-scan ledger kind, which the udp check judges for an internal host',
     },
 }
 
@@ -775,6 +838,18 @@ def _judge(check, units, now):
     return 'due', last, f'last run {_age(now - last)} ago, repeats every {_ttl_label(check.ttl_hours())}'
 
 
+def _sentinel_online(h, ev):
+    """Whether a live Sentinel inside the host's internal network could take its work now (one read per project of the page): a check that
+    never ran for want of one is not "never run" for any other reason."""
+    state = ev.sentinels.get(h.project_id)
+    if state is None:
+        from cveFeed import internal_view
+        from dashboard.models import Project
+        project = Project.objects.select_related('org').filter(pk=h.project_id).first()
+        state = ev.sentinels[h.project_id] = bool(project) and internal_view._sentinel_state(project)['state'] == 'online'
+    return state
+
+
 def coverage(h, ev, rich=False, paused=''):
     """``{'done', 'applicable', 'paused', 'checks': [...]}`` for one host. ``paused`` (``excluded`` or ``archived``) makes every check not
     apply: an excluded host is never scanned and an archived one has left scan scheduling."""
@@ -782,11 +857,19 @@ def coverage(h, ev, rich=False, paused=''):
     rows, done, applicable = [], 0, 0
     for check in CHECKS:
         entry = {'id': check.id, 'label': check.label, 'state': 'not_applicable', 'last_run': None, 'ttl_hours': check.ttl_hours(), 'detail': ''}
-        plan = f'the host is {paused}' if paused else check.plan(h, ev)
+        if paused:
+            plan = f'the host is {paused}'
+        elif h.internal:
+            rule = INTERNAL_PLANS.get(check.id)
+            plan = rule(h, ev) if rule else INTERNAL_REASON
+        else:
+            plan = check.plan(h, ev)
         if isinstance(plan, str):
             entry['detail'] = plan
         else:
             state, last, detail = _judge(check, plan, ev.now)
+            if h.internal and state == 'due' and not last and not _sentinel_online(h, ev):
+                detail = f'{detail}; no Sentinel inside the network is online' if detail else 'no Sentinel inside the network is online'
             entry.update(state=state, last_run=last.isoformat() if last else None, detail=detail)
             applicable += 1
             done += state == 'done'
@@ -794,7 +877,7 @@ def coverage(h, ev, rich=False, paused=''):
                 entry['units'] = [{'unit': u.label, 'state': 'done' if u.fresh(ev.now) else 'due',
                                    'last_run': u.last().isoformat() if u.last() else None} for u in plan]
         rows.append(entry)
-    return {'done': done, 'applicable': applicable, 'paused': paused, 'checks': rows}
+    return {'done': done, 'applicable': applicable, 'paused': paused, 'internal': h.internal or None, 'checks': rows}
 
 
 def for_host(ev, sub, others, project_id, *, excluded=False, shared_platform=False, hot_cves=(), unversioned=0, probe_rows=(), root=None, rich=False):

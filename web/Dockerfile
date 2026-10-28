@@ -136,10 +136,12 @@ RUN python3 -m venv /opt/bbot-venv && \
     ln -s /opt/bbot-venv/bin/bbot /usr/local/bin/bbot
 # Fail the build when this bbot no longer reads the way cvENGINE passes it API keys (a preset file listed after the named presets,
 # which must still load every module of the default scan). bbot 3.x rejects a config file after -c and ignores all but the last -p,
-# and both used to make scans quietly find nothing; this check is offline and runs no scan.
+# and both used to make scans quietly find nothing. It runs no scan, but bbot installs the dependencies of the modules it loads before the dry run
+# stops, so this is also what bakes gowitness and its Chromium into the image (screenshots need them) instead of fetching them in a running worker.
 RUN printf 'config:\n  modules:\n    shodan_dns:\n      api_key: build-check\n' > /tmp/keys.yml && \
-    bbot -t example.com -p subdomain-enum web /tmp/keys.yml -rf safe --force --dry-run -v 2>&1 | tee /tmp/bbot-check.txt | \
+    bbot -t example.com -p subdomain-enum web web-screenshots /tmp/keys.yml -rf safe --force --dry-run -v 2>&1 | tee /tmp/bbot-check.txt | \
         grep -q 'Loading [0-9]* scan modules:.*shodan_dns' && \
+    grep -q 'gowitness' /tmp/bbot-check.txt && \
     bbot -t example.com -p subdomain-enum /tmp/keys.yml --current-preset 2>&1 | grep -q 'api_key: build-check' && \
     ! grep -q 'Error parsing' /tmp/bbot-check.txt && rm -f /tmp/keys.yml /tmp/bbot-check.txt
 

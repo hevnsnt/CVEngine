@@ -86,7 +86,7 @@ class BbotParseTests(unittest.TestCase):
 		self.assertIn('--json', cmd)
 		# one -p with both presets: bbot's -p takes a list and a repeated -p replaces the earlier one, which dropped subdomain-enum
 		self.assertEqual(cmd.count('-p'), 1)
-		self.assertEqual(cmd[cmd.index('-p') + 1:cmd.index('-p') + 3], ['subdomain-enum', 'web'])
+		self.assertEqual(cmd[cmd.index('-p') + 1:cmd.index('-p') + 4], ['subdomain-enum', 'web', 'web-screenshots'])  # screenshots in the default mode
 		self.assertEqual(cmd[cmd.index('-rf') + 1], 'safe')
 		self.assertIn('--force', cmd)
 		self.assertNotIn('kitchen-sink', cmd)

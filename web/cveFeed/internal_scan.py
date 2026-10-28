@@ -108,6 +108,7 @@ def sweep():
 
 def _nmap(scan, project, ip, org_id, dispatch):
     """Fingerprint ``ip`` through an internal Sentinel and store what it found; an ``error`` when none answered."""
+    from cveFeed import ledger
     from cveFeed.nmap_scan import persist_inventory
     result = dispatch(project, 'nmap', {'addresses': [ip]}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
@@ -115,13 +116,14 @@ def _nmap(scan, project, ip, org_id, dispatch):
     inventory = [{'ip': h['ip'], 'os_guess': h.get('os_guess', ''), 'os_accuracy': None, 'ports': h.get('ports', [])}
                  for h in result.get('hosts', []) if h.get('ip') == ip]
     totals = persist_inventory(inventory, org_id=org_id)
+    ledger.record('nmap-fast', [ip], project.id, scan)  # what the check coverage of the host reads
     return {'hosts': len(inventory), **totals}
 
 
 def _testssl(scan, project, domain, ip, dispatch):
     """A TLS audit of each TLS port nmap found open on ``ip``, through an internal Sentinel; findings and CVE evidence are stored by the
     same functions the external sweep uses."""
-    from cveFeed import testssl_scan
+    from cveFeed import ledger, testssl_scan
     from startScan.models import IpAddress, Subdomain, open_ports
     sub = Subdomain.objects.filter(scan_history=scan, name=ip).select_related('target_domain').first()
     ip_obj = IpAddress.objects.filter(address=ip).first()
@@ -133,12 +135,15 @@ def _testssl(scan, project, domain, ip, dispatch):
                           scan=scan, internal=True)
         evaluated = testssl_scan.evaluate((result or {}).get('items') or [], where) if result is not None else None
         if evaluated is None or not evaluated.tested:
+            if result is not None:  # a Sentinel answered and the test did not complete: a failed run; no answer at all is not a run
+                ledger.record(testssl_scan.FAILED_SERVICE, [where], project.id, scan)
             failed += 1
             continue
         testssl_scan.record_observations(project.id, domain.id, ip, number, evaluated, ip)
         testssl_scan.store(domain, ip, number, evaluated, where)
         if sub is not None:
             testssl_scan.run_for_host(sub)
+        ledger.record(testssl_scan.SERVICE, [where], project.id, scan)
         tested += 1
         issues += len(evaluated.findings)
     out = {'tested': tested, 'failed': failed, 'issues': issues}
@@ -149,7 +154,7 @@ def _testssl(scan, project, domain, ip, dispatch):
 
 def _udp(scan, project, ip, dispatch):
     """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw nmap XML is parsed and stored by the external sweep's own functions."""
-    from cveFeed import nmap_scan, udp_scan
+    from cveFeed import ledger, nmap_scan, udp_scan
     from startScan.models import IpAddress
     result = dispatch(project, 'nmap_udp', {'address': ip}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
@@ -157,8 +162,11 @@ def _udp(scan, project, ip, dispatch):
     host = next((h for h in nmap_scan.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
     ip_obj = IpAddress.objects.filter(address=ip).first()
     if host is None or ip_obj is None:
+        if ip_obj is not None:
+            ledger.record(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip_obj)])
         return {'error': 'the Sentinel reported nothing for the address'}
     outcome = udp_scan.record_run(ip_obj, host)
+    ledger.record(udp_scan.SERVICE, [udp_scan.asset_of(ip_obj)])
     return {'open': len(outcome['open']), 'changed': len(outcome['changed'])}
 
 

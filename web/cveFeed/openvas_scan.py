@@ -1027,7 +1027,7 @@ def dispatch_to_sentinel(link, batch):
     from cveFeed import activity
     from cveFeed.models import OpenvasRun
     hosts = {ip: host for host, ip, _domain in batch}
-    task = SentinelTask.objects.create(project=link.project, kind='openvas', ips=sorted(hosts),
+    task = SentinelTask.objects.create(project=link.project, kind='openvas', ips=sorted(hosts), host=', '.join(sorted(set(hosts.values())))[:500],
                                        target={'hosts': hosts, 'excluded_families': list(EXCLUDED_FAMILIES), 'max_hours': budget_hours(len(hosts)),
                                     'preferences': task_preferences()})
     try:

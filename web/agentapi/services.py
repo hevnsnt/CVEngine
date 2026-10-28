@@ -1204,7 +1204,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
-            'screenshot': bool(sub.screenshot_path),
+            'screenshot': bool(sub.screenshot_path), 'screenshot_note': _screenshot_note(sub, http),
             'technologies': sorted(techs),
             'technology_details': details,
             # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
@@ -1301,6 +1301,16 @@ def _unverified_products(sub, others, ips):
     technologies = [(t.id, t.name) for row in [sub, *others] for t in row.technologies.all() if t.name]
     ports = [(address, port) for address, entry in ips.items() for port in entry['ports']]
     return match_policy.unversioned_leads(technologies, ports)[:50]
+
+
+def _screenshot_note(sub, http):
+    """Why a host has no front-page screenshot, in a line for the host page (empty when it has one). Screenshots are taken by discovery
+    (bbot's gowitness) of a host that answers over HTTP; a host found before that was on, or that never answered, has none."""
+    if sub.screenshot_path:
+        return ''
+    if not (http.get('url') or http.get('status')):
+        return 'None: no web page has answered on this host, so there is nothing to capture.'
+    return 'None yet: screenshots are taken when a host is discovered, and this one has not been rediscovered since; rescan the host to take one.'
 
 
 def _rdp_screenshot_field(sub, shot):

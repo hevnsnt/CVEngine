@@ -507,7 +507,7 @@ class StoredHostTests(TestCase):
 		rows = self.rows()
 		www = rows['www.alpha.example.test']
 		coverage = www['check_coverage']
-		self.assertEqual(set(coverage), {'done', 'applicable', 'paused', 'checks'})
+		self.assertEqual(set(coverage), {'done', 'applicable', 'paused', 'internal', 'checks'})
 		self.assertEqual(coverage['paused'], '')
 		self.assertEqual(coverage['done'], sum(c['state'] == 'done' for c in coverage['checks']))
 		self.assertEqual(coverage['applicable'], sum(c['state'] != 'not_applicable' for c in coverage['checks']))

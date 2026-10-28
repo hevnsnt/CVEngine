@@ -7,10 +7,12 @@ module existed - that is the single most important property here, and it is what
 ``tests.test_sentinel_dispatch`` proves. If there is one, a ``SentinelTask`` is created and this module waits for it to
 finish, under two different budgets: a short claim timeout (``_claim_timeout``, default 8s) for any Sentinel to even pick
 the task up, and only once one has, the much longer completion timeout (``_dispatch_timeout``, default 90s) for it to
-finish the work. A Sentinel that was going to take the task at all almost always claims it within its own poll interval,
-so this means a quiet, offline or already-saturated Sentinel costs a scan stage single-digit seconds, not the full
-completion budget, before falling back locally - while a Sentinel that did pick the work up keeps the full budget to
-actually run it. On success its typed, clipped result is parsed into the *same shape* the local tool's own output already
+finish the work. A Sentinel with a free slot almost always claims it within its own poll interval, so one that is quiet or
+offline costs a scan stage single-digit seconds, not the full completion budget, before falling back locally - while a
+Sentinel that did pick the work up keeps the full budget (counted from when it claimed the task, not from when it was
+created) to actually run it. **A Sentinel at its concurrency limit is not a missing one**: when every live, eligible Sentinel
+is busy the task waits in the queue for a slot, under its own wait budget (``_queue_timeout``) separate from both, and the stage
+falls back only when that runs out or the last live Sentinel goes away. On success its typed, clipped result is parsed into the *same shape* the local tool's own output already
 takes and handed to the *same persistence function* local execution uses (``cveFeed.nmap_scan.persist_inventory``,
 ``cveFeed.naabu_scan.persist_open_ports``, or - for nuclei - a reconstructed result line fed through the untouched
 ``cveFeed.nuclei_scan._run_nuclei`` loop via its own ``stream`` seam). On timeout, failure or no Sentinel, the caller falls
@@ -38,20 +40,51 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
 DEFAULT_CEILING = 900
+# Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
+PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60}
+DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
 
-def _dispatch_timeout(kind=None):
+def _dispatch_timeout(kind=None, targets=0):
     """Seconds a stage waits for a dispatched Sentinel task to *finish* once a Sentinel has claimed it, before falling back to running
-    the tool locally: ``COMPLETION_CEILING`` for the kind. ``CVENGINE_SENTINEL_DISPATCH_TIMEOUT``, when set, replaces every ceiling with
-    that one number (an operator who wants scans never to wait long, and the tests)."""
+    the tool locally: ``COMPLETION_CEILING`` for the kind, plus ``PER_TARGET_SECONDS`` for each target beyond the first (so a chunk of many
+    addresses is not held to the budget of one), and for OpenVAS the instance's own ``CVENGINE_OPENVAS_MAX_HOURS``.
+    ``CVENGINE_SENTINEL_DISPATCH_TIMEOUT``, when set, replaces every ceiling with that one number (an operator who wants scans never to wait
+    long, and the tests)."""
     raw = os.environ.get('CVENGINE_SENTINEL_DISPATCH_TIMEOUT')
     if raw:
         try:
             return max(1, int(raw))
         except ValueError:
             pass
-    return COMPLETION_CEILING.get(kind, DEFAULT_CEILING)
+    if kind == 'openvas':
+        from cveFeed import openvas_scan
+        return openvas_scan.max_hours() * 3600 + 600  # the task's own deadline, plus time to report
+    base = COMPLETION_CEILING.get(kind, DEFAULT_CEILING)
+    return base + PER_TARGET_SECONDS.get(kind, 0) * max(0, int(targets or 0) - 1)
+
+
+def _queue_timeout(kind=None):
+    """CVENGINE_SENTINEL_QUEUE_TIMEOUT: seconds a stage waits for a free slot when every live, eligible Sentinel is at its concurrency limit (default
+    300), before the work runs locally instead. It starts when the task is created and is separate from the claim budget (a Sentinel with a free
+    slot) and the completion budget (counted from the claim)."""
+    try:
+        return max(1, int(os.environ.get('CVENGINE_SENTINEL_QUEUE_TIMEOUT', str(DEFAULT_QUEUE_SECONDS))))
+    except ValueError:
+        return DEFAULT_QUEUE_SECONDS
+
+
+def budgets():
+    """The dispatch budgets as one object, for the Sentinels page: what each wait is, in seconds."""
+    return {'claim_seconds': _claim_timeout(), 'queue_seconds': _queue_timeout(),
+            'completion_seconds': {kind: _dispatch_timeout(kind) for kind in COMPLETION_CEILING},
+            'per_target_seconds': dict(PER_TARGET_SECONDS), 'lease_seconds': int(_run_lease_seconds())}
+
+
+def _run_lease_seconds():
+    from agentapi import sentinel_broker
+    return sentinel_broker.RUN_LEASE.total_seconds()
 
 
 def _claim_timeout():
@@ -98,18 +131,24 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from cveFeed import activity
-    if not sentinel_broker.any_scanner_for(project, kind, internal):
+    capacity = sentinel_broker.capacity_state(project, kind, internal)
+    if capacity['state'] == 'none':
         return None
-    timeout = _dispatch_timeout(kind) if timeout is None else timeout
+    targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
+    timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
     task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
                                        ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
     label = _label(host, ips)
-    entry = activity.log('run_check', f'Handed {kind} work for {label} to a Sentinel', project=project, status='running',
-                         scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk)
-    deadline = time.monotonic() + timeout
-    claim_deadline = time.monotonic() + min(_claim_timeout(), timeout)
+    busy = capacity['state'] == 'busy'
+    entry = activity.log('run_check', (f'Queued {kind} work for {label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one' if busy
+                                       else f'Handed {kind} work for {label} to a Sentinel'),
+                         project=project, status='running', scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk)
+    started = time.monotonic()
+    queue_budget = _queue_timeout(kind)
+    claim_deadline = started + (queue_budget if busy else min(_claim_timeout(), timeout))
+    run_deadline = None  # set once a Sentinel holds the task: the completion budget counts from the claim, not from the queueing
     never_claimed = False
-    last_reap = time.monotonic()
+    last_reap = started
     while True:
         task.refresh_from_db()
         if task.status in ('done', 'failed', 'expired'):
@@ -118,14 +157,26 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         if now - last_reap >= REAP_EVERY:  # a Sentinel that stopped heartbeating loses its lease here, not only when something else asks
             sentinel_broker.reap_expired()
             last_reap = now
+            if task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none':
+                never_claimed = True  # the last live Sentinel went away while the task waited: nothing will take it
+                sentinel_broker.expire(task, 'no live Sentinel is left to take the task; the stage fell back to local execution')
+                break
+        if task.status in ('claimed', 'running') and run_deadline is None:
+            run_deadline = now + timeout
         if task.status == 'queued' and now >= claim_deadline:
+            if (not busy and now < started + queue_budget
+                    and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'busy'):
+                busy, claim_deadline = True, started + queue_budget  # another stage took the free slot first: wait for the next one
+                continue
             never_claimed = True
-            sentinel_broker.expire(task, 'no Sentinel claimed the task in time; the stage fell back to local execution')
+            sentinel_broker.expire(task, ('no Sentinel slot freed up in time; the stage fell back to local execution' if busy
+                                          else 'no Sentinel claimed the task in time; the stage fell back to local execution'))
             break
-        if now >= deadline:
+        if run_deadline is not None and now >= run_deadline:
             sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
             break
-        time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, min(claim_deadline, deadline) - now)))
+        horizon = run_deadline if run_deadline is not None else claim_deadline
+        time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, horizon - now)))
     sentinel = task.agent.name if task.agent_id else None
     if task.status == 'done':
         activity.settle(entry, 'done', message=f'Sentinel {sentinel} checked in {kind} work for {label}' if sentinel
@@ -135,7 +186,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         activity.settle(entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
                         else f'A Sentinel reported {kind} failed for {label}: {reason}'))
     elif never_claimed:
-        activity.settle(entry, 'expired', message=f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead')
+        activity.settle(entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; it ran locally instead' if busy
+                                                   else f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead'))
     else:  # claimed, but not reported back before the completion timeout
         activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
     if redact_target is not None:

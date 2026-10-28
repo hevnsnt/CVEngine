@@ -16,6 +16,7 @@ from agentapi import inventory
 from agentapi import reports
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
+from agentapi import sentinel_dispatch
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -414,6 +415,8 @@ TOOLS = [
     ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',
      _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]}}, ['self_update']),
      lambda c, a: sentinel_settings.set_defaults(c.user, {'self_update': a.get('self_update')}), True),
+    ('get_sentinel_dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (a Sentinel with a free slot), queue_seconds (a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) and per_target_seconds for each target beyond the first. A Sentinel row (list_sentinels, get_sentinel) carries slots {max, in_use, free, by_kind}, and get_sentinel queued_for_it (tasks waiting that it could take, by kind).',
+     _schema(), lambda c, a: sentinel_dispatch.budgets(), False),
     ('get_agent', 'One agent with its effective rights and recent tasks.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
     ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), disabled_kinds, max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null clears the server value; the most recent change wins, here or on the Sentinel), and update=now asks its host updater to update it now.',

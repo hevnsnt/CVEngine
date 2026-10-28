@@ -778,6 +778,45 @@ class LiveOverviewTests(SentinelBase):
         self.assertEqual([t['status'] for t in busy_row['recent']], ['failed', 'done'])
         self.assertEqual(busy_row['recent'][0]['error'], 'timed out')
 
+    def test_every_task_row_names_its_task_host_project_and_how_it_ended(self):
+        token = create_token(self.dana, 'rows')[1]
+        _, row = register_sentinel(token, name='rows')
+        now = timezone.now()
+        Agent.objects.filter(pk=row['id']).update(last_seen=now)
+        agent = Agent.objects.get(pk=row['id'])
+        gvm = {'hosts': {'93.184.216.5': 'oceanx.example', '93.184.216.6': 'hc.oceanx.example'}}
+        live = SentinelTask.objects.create(project=self.pa, kind='openvas', target=gvm, ips=sorted(gvm['hosts']), status='running', agent=agent,
+                                           claimed_at=now - timedelta(minutes=9), accepted_at=now - timedelta(minutes=9))
+        ended = {}
+        for name, status, error, result in (('stopped', 'failed', 'gvmd reports the task as "Stopped"', {}), ('cancelled', 'expired', 'cancelled by a person', {}),
+                                            ('lost', 'expired', 'lease expired', {}), ('broke', 'failed', 'timed out', {}), ('partial', 'done', '', {'partial': True}),
+                                            ('whole', 'done', '', {})):
+            ended[name] = SentinelTask.objects.create(project=self.pa, kind='nmap', host=f'{name}.example', target={}, status=status, agent=agent, error=error,
+                                                      result=result, claimed_at=now - timedelta(minutes=30), finished_at=now - timedelta(minutes=5))
+        out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]
+        mine = {r['name']: r for r in out['results']}['rows']
+        current = mine['current'][0]
+        self.assertEqual((current['id'], current['label'], current['project'], current['project_name']), (live.pk, 'hc.oceanx.example, oceanx.example', 'sen-a', self.pa.name))
+        outcomes = {t['id']: t['outcome'] for t in mine['recent']}
+        self.assertEqual(outcomes[ended['stopped'].pk], 'stopped before it finished')
+        for name, words in (('cancelled', 'cancelled by an administrator'), ('lost', 'lost (the Sentinel stopped answering)')):
+            self.assertEqual(sentinels.task_outcome(ended[name]), words)  # an expired task has no Sentinel any more, so it is not in a Sentinel's own history
+        self.assertEqual(outcomes[ended['broke'].pk], 'failed')
+        self.assertEqual(outcomes[ended['partial'].pk], 'completed at its time budget (partial)')
+        self.assertEqual(outcomes[ended['whole'].pk], 'completed')
+        self.assertEqual(mine['recent'][0]['label'] != '', True)
+        self.assertEqual(mine['version_label'], 'unknown (built without the updater)')
+        Agent.objects.filter(pk=row['id']).update(info={'version': 'abc123def456'})
+        again = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['rows']
+        self.assertEqual((again['version'], again['version_label']), ('abc123def456', 'abc123def456'))
+
+    def test_an_openvas_task_names_its_hosts_when_it_is_dispatched(self):
+        from cveFeed import openvas_scan as ov
+        from cveFeed.models import OpenvasProject
+        link = OpenvasProject.objects.create(project=self.pa, enabled=True)
+        run = ov.dispatch_to_sentinel(link, [('www.rt.test', '93.184.216.5', 1)])
+        self.assertEqual(run.sentinel_task.host, 'www.rt.test')
+
     def test_another_tenants_sentinel_and_work_stay_out_of_view(self):
         _, mine = register_sentinel(self.t['dana'], name='mine')
         _, theirs = register_sentinel(self.t['root'], name='theirs', scope={'projects': ['sen-b']})
