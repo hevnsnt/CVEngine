@@ -169,7 +169,7 @@ function paintInternal(x) {
   num("in-findings", x.findings);
   num("in-matches", x.matches);
   $("in-hosts").querySelector("small").textContent = x.hosts ? `${x.hosts_live} live` : "";
-  $("in-last").textContent = x.last_scan_at ? `last scan ${ago(x.last_scan_at)}` : "never scanned";
+  $("in-last").textContent = x.last_scan_at ? `scanned ${ago(x.last_scan_at)}` : "never scanned";
   const list = $("in-nets");
   list.textContent = "";
   (x.networks || []).forEach((n) => {

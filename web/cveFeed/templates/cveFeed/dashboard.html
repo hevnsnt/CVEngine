@@ -30,7 +30,7 @@
     <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span><small id="s-certs_total_note"></small></a>
   </nav>
   <section class="internal" id="n-internal" hidden aria-label="Internal networks">
-    <div class="cell-head"><span class="eyebrow">Internal networks</span><span class="eyebrow" id="in-last"></span></div>
+    <div class="cell-head"><span class="eyebrow">Internal</span><span class="eyebrow" id="in-last"></span></div>
     <div class="in-nums">
       <a id="in-hosts" title="Hosts inside a network declared internal. Only a Sentinel inside that network scans them." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?internal=1"{% endif %}><b>-</b><span>Internal hosts</span><small></small></a>
       <a id="in-findings" title="Open scanner findings of low severity or worse on internal hosts" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner&internal=1"{% endif %}><b>-</b><span>Findings</span></a>
