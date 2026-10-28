@@ -177,14 +177,18 @@ function networks(rows) {
   t.append(thead);
   const body = el("tbody");
   rows.forEach((n) => {
-    const tr = el("tr", n.last_error ? "err" : "");
+    const error = n.last_discovery_error || n.last_error;
+    const tr = el("tr", error ? "err" : "");
     const net = el("td");
     net.append(el("b", "mono", n.cidr));
     if (n.description) net.append(el("span", "note", n.description));
+    // the last live-host sweep of the range (a server too old to sweep has only the last internal scan)
     const last = el("td");
-    if (n.last_scan_at) last.append(el("span", "", "", { "data-ago": n.last_scan_at }));
+    const when = n.last_discovery_at || n.last_scan_at;
+    if (when) last.append(el("span", "", "", { "data-ago": when }));
     else last.append(el("span", "note", "never"));
-    if (n.last_error) last.append(el("span", "msg err", n.last_error));
+    if (n.last_discovery_at && n.last_discovery_hosts != null) last.append(el("span", "note", `${n.last_discovery_hosts} live ${n.last_discovery_hosts === 1 ? "host" : "hosts"} found`));
+    if (error) last.append(el("span", "msg err", error));
     const inside = el("td");
     const st = (n.sentinel && n.sentinel.state) || "none";
     inside.append(badge(st === "online" ? `${n.sentinel.online} online` : st === "offline" ? "offline" : "none", st === "online" ? "success" : st === "offline" ? "failed" : ""));
@@ -231,7 +235,7 @@ function section(g, reload, details) {
   const chips = el("span", "chips");
   chips.append(el("span", "chip", g.sentinels.length ? `${live} of ${g.sentinels.length} checking in` : "no Sentinel"));
   if (g.networks.length) chips.append(el("span", "chip", `${g.networks.length} internal ${g.networks.length === 1 ? "network" : "networks"}`));
-  const failing = g.networks.filter((n) => n.last_error).length;
+  const failing = g.networks.filter((n) => n.last_discovery_error || n.last_error).length;
   if (failing) chips.append(badge(`${failing} failing`, "failed"));
   sum.append(chips);
   box.append(sum);

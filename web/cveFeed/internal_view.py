@@ -13,11 +13,11 @@ from django.db.models import Q
 
 CACHE_SECONDS = 300
 _IP_LITERAL = r'^[0-9a-fA-F:.]+$'
-_cache = {'at': 0.0, 'table': {}}
+_cache = {'at': None, 'table': {}}  # 'at' is None until built: the monotonic clock starts at boot, so 0 is not "long ago"
 
 
 def invalidate():
-    _cache['at'] = 0.0
+    _cache['at'] = None
 
 
 def connect():
@@ -60,7 +60,7 @@ def _load():
 
 def table():
     now = time.monotonic()
-    if now - _cache['at'] > CACHE_SECONDS:
+    if _cache['at'] is None or now - _cache['at'] > CACHE_SECONDS:
         _cache.update(at=now, table=_load())
     return _cache['table']
 
@@ -107,7 +107,7 @@ def _sentinel_state(project):
 
 def declared_networks():
     """Every internal network a project the caller can see declared, oldest project first: its organization and project, the
-    addresses in it, the last internal scan that finished, the error of the latest one when it failed, and the state of the Sentinels
+    addresses in it, the last internal scan that finished, the error of the latest one when it failed, the last live-host sweep of the range, and the state of the Sentinels
     inside it. The ``networks`` of ``summary`` and the organization groups of the Sentinels page."""
     from cveFeed.models import InternalRange
     from dashboard.models import Project
@@ -130,7 +130,9 @@ def declared_networks():
         out.append({'org': project.org.slug if project.org_id else None, 'project': project.slug, 'cidr': rng.cidr, 'description': rng.description,
                     'hosts': len(names), 'last_scan_at': last.isoformat() if last else None,
                     'last_error': (latest[1] or 'the last internal scan failed') if latest and latest[0] == FAILED_TASK else '',
-                    'sentinel': sentinels[rng.project_id]})
+                    'sentinel': sentinels[rng.project_id],
+                    'last_discovery_at': rng.last_discovery_at.isoformat() if rng.last_discovery_at else None,
+                    'last_discovery_hosts': rng.last_discovery_hosts, 'last_discovery_error': rng.last_discovery_error})
     return out
 
 

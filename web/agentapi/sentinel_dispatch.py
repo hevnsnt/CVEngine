@@ -36,7 +36,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600}
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
 DEFAULT_CEILING = 900
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
@@ -330,7 +330,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
 # --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
 
-def wrap_wpscan_runner(project, scan=None, timeout=None):
+def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
     """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter, or the literal,
     unwrapped ``run_wpscan_process`` when no Sentinel is eligible (so ``runner is run_wpscan_process`` identity checks,
     and every other local behaviour, are unaffected). The project's WPScan API token travels with the dispatched task -
@@ -340,6 +340,18 @@ def wrap_wpscan_runner(project, scan=None, timeout=None):
     by the exact same ``cveFeed.wpscan_scan._classify`` a local run's own exit code and report go through, so a
     dispatched site ends up ``NotWordPress``/``Blocked``/a normal report exactly as a local one would."""
     from cveFeed.wpscan_scan import run_wpscan_process
+    if internal:  # a site inside a declared internal network: only a Sentinel inside it may run WPScan, and there is no local fallback
+        from urllib.parse import urlsplit
+
+        def internal_runner(url, token):
+            from cveFeed.wpscan_scan import _classify
+            host = urlsplit(url).hostname or ''
+            result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, host=host, ips=[host], scan=scan, timeout=timeout,
+                                      internal=True, redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
+            if result is None:
+                raise RuntimeError('no Sentinel inside the network ran WPScan (one must declare network:internal and wpscan and cover this project)')
+            return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
+        return internal_runner
     if not any_scanner_for(project, 'wpscan'):
         return run_wpscan_process
 

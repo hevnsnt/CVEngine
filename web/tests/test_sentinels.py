@@ -474,6 +474,30 @@ class McpToolTests(SentinelBase):
         self.assertFalse(err, out)
         self.assertEqual(out['status'], 'suspended')
 
+    def test_setup_lines_follow_the_network_and_size_chosen(self):
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a', 'network': 'internal', 'profile': 'light'})
+        self.assertFalse(err, out)
+        setup = out['setup']
+        self.assertEqual((setup['network'], setup['profile']), ('internal', 'light'))
+        self.assertIn('CVENGINE_SENTINEL_NETWORK=internal', setup['configure'])
+        self.assertIn('COMPOSE_PROFILES=\\n', setup['configure'])  # light: no OpenVAS profile
+        self.assertIn('./setup.sh --light --internal --blob', setup['configure_alternative'])
+        self.assertIn('private network', setup['note'])
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
+        self.assertEqual((out['setup']['network'], out['setup']['profile']), ('external', 'full'))
+        self.assertIn('COMPOSE_PROFILES=openvas', out['setup']['configure'])
+
+    def test_rest_takes_the_same_choices_and_refuses_a_bad_one_before_creating_a_secret(self):
+        from agentapi.models import SentinelEnrollment
+        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=internal&profile=light')
+        self.assertEqual(status, 201, out)
+        self.assertEqual((out['setup']['network'], out['setup']['profile']), ('internal', 'light'))
+        before = SentinelEnrollment.objects.count()
+        for query in ('network=lan', 'profile=huge'):
+            status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&{query}')
+            self.assertEqual(status, 400, out)
+        self.assertEqual(SentinelEnrollment.objects.count(), before)
+
     def test_enrollment_and_list_tasks_tools_over_mcp(self):
         err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
         self.assertFalse(err, out)
@@ -784,7 +808,8 @@ class LiveOverviewTests(SentinelBase):
     def test_an_organization_lists_its_internal_networks_with_the_last_discovery_and_its_error(self):
         from cveFeed import internal_view
         from cveFeed.models import InternalRange
-        InternalRange.objects.create(project=self.pa, cidr='10.20.0.0/24', description='office')
+        InternalRange.objects.create(project=self.pa, cidr='10.20.0.0/24', description='office', last_discovery_at=timezone.now(),
+                                     last_discovery_hosts=3, last_discovery_error='')
         inside = Domain.objects.create(name='10.20.0.9', project=self.pa, insert_date=timezone.now())
         ScanHistory.objects.create(domain=inside, scan_type=self.scan.scan_type, start_scan_date=timezone.now(), scan_status=0,
                                    results_dir='/tmp', tasks=['internal_pipeline'], error_message='no internal Sentinel answered')
@@ -794,6 +819,8 @@ class LiveOverviewTests(SentinelBase):
         self.assertEqual([(n['cidr'], n['project'], n['hosts'], n['last_scan_at'], n['last_error']) for n in nets],
                          [('10.20.0.0/24', 'sen-a', 1, None, 'no internal Sentinel answered')])
         self.assertEqual(nets[0]['sentinel']['state'], 'none')
+        self.assertEqual((nets[0]['last_discovery_hosts'], nets[0]['last_discovery_error']), (3, ''))
+        self.assertIsNotNone(nets[0]['last_discovery_at'])
 
     def test_a_pending_sentinel_says_so_instead_of_idle(self):
         register_sentinel(self.t['alice'], name='waiting', approve=False)
