@@ -243,7 +243,7 @@ const MAP_MIN_SCORE = 30; // hosts that score lower are left off the map (they a
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
-  { name: "rich", size: "xl", w: 150, h: 104 },
+  { name: "rich", size: "xl", w: 124, h: 92 },
   { name: "card", size: "xl", w: 92, h: 64 },
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
