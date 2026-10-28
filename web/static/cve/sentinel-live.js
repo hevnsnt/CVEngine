@@ -35,7 +35,7 @@ function orbFor(s) {
   const busy = s.state === "working" && s.current.length > 1 ? "solving" : ORB_STATE[s.state] || "breathing";
   let o = orbs.get(s.id);
   if (!o) {
-    o = thinkingOrb({ state: busy, size: 56 });
+    o = thinkingOrb({ state: busy, size: 64 });
     orbs.set(s.id, o);
   }
   o.setState(busy, `${s.name}: ${WORDS[s.state] || s.state}`);
