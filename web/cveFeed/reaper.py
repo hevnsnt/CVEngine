@@ -1,4 +1,4 @@
-"""Expire host-assessment, validation and activity-feed jobs that will never finish.
+"""Expire host-assessment, validation, scan and activity-feed jobs that will never finish.
 
 A worker killed mid-task (restart, out-of-memory, a lost broker message) leaves its job "queued" or "running" for good: it holds the
 host's or finding's only active slot and counts toward the per-project and global caps, so one bad restart can stop a project's
@@ -7,7 +7,15 @@ check it described has long since finished. Every 15 minutes (tasks.reap_stuck_j
 with the reason. A finishing worker only ever updates a row still "running", so a late result is dropped, never mixed in. A
 failed validation job is due again at once (next_attempt_at) while it has attempts left, so the sweep can queue it afresh. While
 scanning is paused, queued jobs are waiting on purpose and are left alone; only running ones are expired.
-"""
+
+A ``ScanHistory`` row and a running ``HostAssessment`` are not in the hours-based table above: a scan is not a capacity-limited slot
+the way a validation or assessment job is, so it never used to be expired at all, and scripts/apply-update.sh's drain wait
+(``running_scans``) counts any ``scan_status=1`` row with no age limit of its own - a scan orphaned by a worker restart (its Celery
+task gone, nothing left to ever finish it) would otherwise block every later update indefinitely, as happened on a live install (a
+worker restart at the scan's start left it "running" with a dead task; the next update waited over five hours for it). Rather than
+wait for an hours-scale timeout, ``expire_orphaned_running`` asks the broker directly (the same check ``redispatch_queued_assessments``
+already uses) whether a still-running scan's or assessment's Celery task exists anywhere, and closes it out within one reaper tick
+once it is both past a short grace period and provably dead - the row is never closed just because the broker could not be asked."""
 import os
 from datetime import timedelta
 
@@ -75,6 +83,42 @@ def redispatch_queued_assessments(now=None):
         HostAssessment._base_manager.filter(pk=job.pk, status='queued').update(celery_id=task.id)
         queued += 1
     return queued
+
+
+STALE_RUNNING_GRACE_SECONDS = 120  # a scan or assessment this young may not have its celery id recorded yet: never judged by the broker alone
+
+
+def expire_orphaned_running(now=None, live=None):
+    """Close a ``ScanHistory`` or ``HostAssessment`` row stuck "running" because the worker that held it was killed (a worker or
+    update restart) before it could finish or requeue it: closed as soon as the broker can say its Celery task exists nowhere (not
+    queued, held unacknowledged, reserved, active or scheduled), rather than waiting for the hours-scale ``LIMITS`` above. ``live``
+    (``broker_recovery.live_task_ids()``, injectable for tests) is None when that cannot be told - no Redis broker, a queue too
+    long to read, no worker answered - and then nothing here is closed; the hours-based expiry above is the fallback. Returns
+    ``{'<Model>': n}``."""
+    now = now or timezone.now()
+    if live is None:
+        from cveFeed import broker_recovery
+        live = broker_recovery.live_task_ids()
+    if live is None:
+        return {}
+    cutoff = now - timedelta(seconds=STALE_RUNNING_GRACE_SECONDS)
+    counts = {}
+    from startScan.models import ScanHistory
+    message = 'expired: the worker running this scan is gone (a restart or update) and no Celery task for it remains'
+    dead = [s.pk for s in ScanHistory.objects.filter(scan_status=1, start_scan_date__lt=cutoff).only('pk', 'celery_ids')
+            if not set(s.celery_ids) & live]
+    if dead:
+        n = ScanHistory.objects.filter(pk__in=dead, scan_status=1).update(scan_status=0, stop_scan_date=now, error_message=message[:290])
+        if n:
+            counts['ScanHistory'] = n
+    from cveFeed.models import HostAssessment
+    dead_ha = [a.pk for a in HostAssessment._base_manager.filter(status='running', started_at__lt=cutoff).only('pk', 'celery_id')
+               if not a.celery_id or a.celery_id not in live]
+    if dead_ha:
+        n = HostAssessment._base_manager.filter(pk__in=dead_ha, status='running').update(status='failed', finished_at=now, error=message)
+        if n:
+            counts['HostAssessment'] = n
+    return counts
 
 
 def reap(now=None):

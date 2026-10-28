@@ -349,6 +349,15 @@ class TestsslDispatchTests(DispatchBase):
 
 
 class NucleiDispatchTests(DispatchBase):
+    def setUp(self):
+        super().setUp()
+        # This class's whole point is to prove what a Sentinel does with a dispatched target; the resolve gate
+        # ResolvableTargetsTests exercises directly is not what these tests are about, and example.test (RFC 2606)
+        # never resolves in a sandboxed test run, so every target here is simply treated as resolvable.
+        patcher = mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_light_pass_sentinel_finding_creates_a_technology_link_via_the_unchanged_local_loop(self):
         """run_light_nuclei's own loop turns each result line into a Technology link (cveFeed.nuclei_scan.tech_name_from);
         a Sentinel's reconstructed line goes through that exact, untouched loop, same as a locally-run nuclei line would."""
@@ -444,6 +453,80 @@ class NucleiDispatchTests(DispatchBase):
         vuln = Vulnerability.objects.get(name='Deep sweep hit')
         self.assertEqual(vuln.template_id, 'cve-2024-0001')
         self.assertEqual(vuln.severity, 4)  # NUCLEI_SEVERITY_MAP['critical']
+
+
+class ResolvableTargetsTests(DispatchBase):
+    """A host with no resolvable IP must not be handed to a Sentinel: dispatching it would waste the Sentinel's time on
+    something it cannot reach either, and - because the stage that calls this marks its whole chunk scanned once the
+    call returns, not target by target - would make a host that was never actually reached look checked."""
+
+    def test_an_ip_literal_is_always_resolvable_with_no_lookup(self):
+        with mock.patch('socket.getaddrinfo', side_effect=AssertionError('an IP literal must never be looked up')):
+            self.assertEqual(dispatch.resolvable_targets(['203.0.113.5']), ['203.0.113.5'])
+
+    def test_a_name_that_resolves_is_kept_one_that_does_not_is_dropped(self):
+        def fake(host, *a, **k):
+            if host == 'dead.example.test':
+                import socket
+                raise socket.gaierror(-2, 'Name or service not known')
+            return [(2, 1, 6, '', ('203.0.113.9', 0))]
+        with mock.patch('socket.getaddrinfo', side_effect=fake):
+            kept = dispatch.resolvable_targets(['live.example.test', 'dead.example.test', '198.51.100.3'])
+        self.assertEqual(kept, ['live.example.test', '198.51.100.3'])
+
+    def test_a_host_port_target_is_judged_by_its_bare_host(self):
+        with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=lambda h, t: h == 'live.example.test'):
+            kept = dispatch.resolvable_targets(['live.example.test:8443', 'dead.example.test:8443'])
+        self.assertEqual(kept, ['live.example.test:8443'])
+
+    def test_order_and_duplicates_are_preserved(self):
+        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
+            self.assertEqual(dispatch.resolvable_targets(['b.example.test', 'a.example.test', 'b.example.test']),
+                             ['b.example.test', 'a.example.test', 'b.example.test'])
+
+    def test_each_distinct_host_is_looked_up_once(self):
+        calls = []
+
+        def fake(host, timeout):
+            calls.append(host)
+            return True
+        with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=fake):
+            dispatch.resolvable_targets(['a.example.test', 'a.example.test:8443', 'a.example.test:9443'])
+        self.assertEqual(calls, ['a.example.test'])  # one lookup for the one host, however many ports it appears with
+
+    def test_wrap_nuclei_stream_never_dispatches_an_unresolvable_target(self):
+        self.make_sentinel(['nuclei_light'])
+        sub = Subdomain.objects.create(scan_history=self.scan, name='gone.example.test')
+        sub.ip_addresses.add(IpAddress.objects.create(address='198.51.100.4'))
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+        with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=lambda h, t: h != 'gone.example.test'), \
+                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
+            sent.return_value = {'outcome': 'done', 'findings': []}
+            import tempfile
+            with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+                f.write('www.example.test\ngone.example.test\n')
+                path = f.name
+            list(stream(path))
+        self.assertEqual(sent.call_args.args[2]['targets'], ['www.example.test'])
+
+    def test_a_chunk_that_resolves_nowhere_falls_back_to_the_real_local_stream_not_a_pointless_dispatch(self):
+        self.make_sentinel(['nuclei_light'])
+        calls = []
+
+        def local_stream(path, **kwargs):
+            calls.append(path)
+            return iter([])
+        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream):
+            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+            with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=False), \
+                    mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
+                import tempfile
+                with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+                    f.write('gone.example.test\n')
+                    path = f.name
+                list(stream(path))
+        sent.assert_not_called()
+        self.assertEqual(calls, [path])
 
 
 class WpscanDispatchTests(DispatchBase):
