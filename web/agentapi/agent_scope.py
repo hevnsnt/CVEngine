@@ -106,13 +106,14 @@ def clean_host_pattern(raw):
 
 
 def clean_scope(value):
-    """``{orgs, projects, hosts}`` from a registration body, each a de-duplicated list. Unknown keys are an error, so a typo does not
-    quietly widen or narrow what an agent covers."""
+    """``{orgs, projects, hosts, instance}`` from a registration body, the lists de-duplicated. Unknown keys are an error, so a
+    typo does not quietly widen or narrow what an agent covers. ``instance`` (a bool, default ``False``) means every
+    organization and project on this server, present and future; ``authorise`` below only ever lets a superuser keep it set."""
     if value is None:
-        return {'orgs': [], 'projects': [], 'hosts': []}
+        return {'orgs': [], 'projects': [], 'hosts': [], 'instance': False}
     if not isinstance(value, dict):
-        raise ScopeError('scope must be an object with orgs, projects and hosts')
-    extra = set(value) - {'orgs', 'projects', 'hosts'}
+        raise ScopeError('scope must be an object with orgs, projects, hosts and instance')
+    extra = set(value) - {'orgs', 'projects', 'hosts', 'instance'}
     if extra:
         raise ScopeError(f'unknown scope key(s): {", ".join(sorted(str(k)[:20] for k in extra))}')
     out = {}
@@ -131,12 +132,17 @@ def clean_scope(value):
         if pattern not in hosts:
             hosts.append(pattern)
     out['hosts'] = hosts
+    if 'instance' in value and not isinstance(value['instance'], bool):
+        raise ScopeError('scope.instance must be true or false')
+    out['instance'] = bool(value.get('instance', False))
     return out
 
 
 def authorise(user, scope):
-    """The organizations and projects of ``scope`` that ``user`` may not claim, as ``(orgs, projects)`` name lists. An unknown name and
-    one the user cannot reach look the same, so a registration never reveals what another tenant has."""
+    """The organizations and projects of ``scope`` that ``user`` may not claim, as ``(orgs, projects, bad_instance)``: the first two
+    are name lists, the third is ``True`` only when ``scope.instance`` is set and ``user`` is not a superuser. An unknown name and
+    one the user cannot reach look the same, so a registration never reveals what another tenant has; ``scope.instance`` is the
+    one exception that must say plainly who may hold it, since it is not a name to hide but the whole server."""
     from dashboard.models import Org, Project
     allowed_projects = roles.allowed_project_ids(user)
     org_ids = None if user.is_superuser else roles.user_org_ids(user)
@@ -150,17 +156,22 @@ def authorise(user, scope):
         project = Project.objects.filter(slug=slug).first()
         if not project or (allowed_projects is not None and project.pk not in allowed_projects):
             bad_projects.append(slug)
-    return bad_orgs, bad_projects
+    bad_instance = bool(scope.get('instance')) and not user.is_superuser
+    return bad_orgs, bad_projects, bad_instance
 
 
 def project_slugs_in_scope(user, scope, limit_projects=None):
-    """The slugs of the projects the agent may work in: the projects of its organizations plus the ones it names, kept to what ``user``
-    can reach now, and to the administrator's project limit when there is one. An agent that names no organization or project covers none:
-    a host list alone narrows where it may act, it does not pick a project."""
+    """The slugs of the projects the agent may work in: every project ``user`` can reach when ``scope.instance`` is set, else the
+    projects of its organizations plus the ones it names, kept to what ``user`` can reach now, and to the administrator's project
+    limit when there is one. An agent that names no organization or project and holds no instance scope covers none: a host list
+    alone narrows where it may act, it does not pick a project."""
     from dashboard.models import Project
+    allowed = roles.allowed_project_ids(user)
+    if scope.get('instance'):
+        slugs = set((Project.objects.all() if allowed is None else Project.objects.filter(pk__in=allowed)).values_list('slug', flat=True))
+        return slugs & set(limit_projects) if limit_projects is not None else slugs
     if not scope.get('orgs') and not scope.get('projects'):
         return set()
-    allowed = roles.allowed_project_ids(user)
     qs = Project.objects.all() if allowed is None else Project.objects.filter(pk__in=allowed)
     wanted = Project.objects.none()
     if scope.get('orgs'):

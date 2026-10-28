@@ -112,7 +112,8 @@ def bootstrap(body):
             raise ApiError(400, f'max_concurrent must be a whole number from 1 to {broker.MAX_CONCURRENT_CAP}')
         fields['max_concurrent'] = max_concurrent
     scope = {'orgs': [enrollment.org.slug] if enrollment.org_id else [],
-              'projects': [enrollment.project.slug] if enrollment.project_id else [], 'hosts': []}
+              'projects': [enrollment.project.slug] if enrollment.project_id else [], 'hosts': [],
+              'instance': not enrollment.org_id and not enrollment.project_id}
     user = enrollment.created_by
     token, raw_token = create_token(user, f'sentinel:{name}'[:100])
     status, note = broker._initial_status(user)
@@ -132,6 +133,26 @@ def _hash_enrollment(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _create_enrollment(ctx, project=None, org=None):
+    """The actual ``SentinelEnrollment`` row and its payload, shared by the project, organization and instance enrollment
+    entry points below: each does its own role check first, then hands this the row (or rows) it is scoped to, or
+    neither for an instance-wide one."""
+    raw = ENROLLMENT_PREFIX + secrets.token_urlsafe(32)
+    expires_at = timezone.now() + ENROLLMENT_TTL
+    enrollment = SentinelEnrollment.objects.create(token_hash=_hash_enrollment(raw), prefix=raw[:10], project=project, org=org,
+                                                   created_by=ctx.user, expires_at=expires_at)
+    scope = 'project' if project else ('org' if org else 'instance')
+    label = project.slug if project else (org.slug if org else 'the whole instance')
+    audit.record(ctx.user, 'sentinel.enroll.generate', f'{scope} enrollment for {label}',
+                org=(project.org_id if project else (org.pk if org else None)), enrollment_id=enrollment.pk)
+    out = {'enrollment_token': raw, 'server_url': _server_url(), 'expires_at': svc._iso(expires_at), 'scope': scope}
+    if project:
+        out['project'] = project.slug
+    if org:
+        out['org'] = org.slug
+    return out
+
+
 def generate_enrollment(ctx, slug):
     """An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel's first
     ``register``/bootstrap call. Returns the registration payload a client needs: the secret and the server's own base
@@ -140,12 +161,29 @@ def generate_enrollment(ctx, slug):
     project, role = svc.get_one_project(ctx, slug, write=True)
     if role != roles.ADMIN:
         raise ApiError(403, 'generating a Sentinel enrollment needs the admin role in this project or organization')
-    raw = ENROLLMENT_PREFIX + secrets.token_urlsafe(32)
-    expires_at = timezone.now() + ENROLLMENT_TTL
-    enrollment = SentinelEnrollment.objects.create(token_hash=_hash_enrollment(raw), prefix=raw[:10], project=project,
-                                                   created_by=ctx.user, expires_at=expires_at)
-    audit.record(ctx.user, 'sentinel.enroll.generate', f'enrollment for {project.slug}', org=project.org_id, enrollment_id=enrollment.pk)
-    return {'enrollment_token': raw, 'server_url': _server_url(), 'expires_at': svc._iso(expires_at), 'project': project.slug}
+    return _create_enrollment(ctx, project=project)
+
+
+def generate_org_enrollment(ctx, slug):
+    """An admin of this organization, or an App Admin, generates a one-time enrollment secret that scopes a Sentinel to
+    every project of the organization, present and future: ``agentapi.agent_scope.project_slugs_in_scope`` resolves
+    ``scope.orgs`` dynamically, so a project the organization gains after the Sentinel enrolled is covered too, with
+    no new enrollment needed."""
+    from dashboard.models import Org
+    org = Org.objects.filter(slug=slug).first()
+    if org is None:
+        raise ApiError(404, 'organization not found')
+    if not roles.can_manage_org(ctx.user, org.pk):
+        raise ApiError(403, 'generating an organization-wide Sentinel enrollment needs the admin role in this organization')
+    return _create_enrollment(ctx, org=org)
+
+
+def generate_instance_enrollment(ctx):
+    """App Admin only: a one-time enrollment secret that scopes a Sentinel to every organization and project on this
+    instance, present and future. The widest scope a Sentinel can hold, so only a superuser may generate one."""
+    if not ctx.user.is_superuser:
+        raise ApiError(403, 'generating an instance-wide Sentinel enrollment needs the App Admin role')
+    return _create_enrollment(ctx)
 
 
 def _server_url():
@@ -185,13 +223,12 @@ def decode_enrollment_blob(raw):
 SENTINEL_CLIENT_REPO = 'https://github.com/hevnsnt/cvengine-sentinel'
 
 
-def generate_enrollment_blob(ctx, slug):
-    """``generate_enrollment``'s own payload, plus the same data packaged as one opaque ``blob`` string (see above), plus a
-    ``setup`` block of ready-to-run steps. Used by ``?format=blob`` on ``GET/POST projects/{slug}/sentinels/enroll``, by
-    the Sentinels page's Provision button, and by the ``generate_sentinel_enrollment`` MCP tool: the ``setup`` block
-    exists so an agent with only Docker and shell access to a target machine, and no other context on Sentinels, can
-    provision one from this response alone, without reading documentation first."""
-    payload = generate_enrollment(ctx, slug)
+def _with_blob_and_setup(payload):
+    """``payload`` (from ``_create_enrollment``) plus the same data packaged as one opaque ``blob`` string (see above), plus
+    a ``setup`` block of ready-to-run steps. Shared by the project, organization and instance blob entry points below,
+    and by the ``generate_sentinel_enrollment`` MCP tool: the ``setup`` block exists so an agent with only Docker and
+    shell access to a target machine, and no other context on Sentinels, can provision one from this response alone,
+    without reading documentation first."""
     blob = encode_enrollment_blob(payload)
     setup = {
         'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
@@ -203,6 +240,38 @@ def generate_enrollment_blob(ctx, slug):
                  'container reuses its already-issued token from the sentinel-state volume and never needs the blob again.'),
     }
     return {**payload, 'blob': blob, 'setup': setup}
+
+
+def generate_enrollment_blob(ctx, slug):
+    """``generate_enrollment``'s own payload, packaged with a blob and setup steps; see ``_with_blob_and_setup``. Used by
+    ``?format=blob`` on ``GET/POST projects/{slug}/sentinels/enroll`` and the Sentinels page's Provision button."""
+    return _with_blob_and_setup(generate_enrollment(ctx, slug))
+
+
+def generate_org_enrollment_blob(ctx, slug):
+    """``generate_org_enrollment``'s own payload, packaged with a blob and setup steps; see ``_with_blob_and_setup``. Used
+    by ``?format=blob`` on ``GET/POST orgs/{slug}/sentinels/enroll`` and the Sentinels page's Provision button."""
+    return _with_blob_and_setup(generate_org_enrollment(ctx, slug))
+
+
+def generate_instance_enrollment_blob(ctx):
+    """``generate_instance_enrollment``'s own payload, packaged with a blob and setup steps; see ``_with_blob_and_setup``.
+    Used by ``?format=blob`` on ``GET/POST sentinels/enroll`` and the Sentinels page's Provision button."""
+    return _with_blob_and_setup(generate_instance_enrollment(ctx))
+
+
+def generate_enrollment_for(ctx, project=None, org=None):
+    """The ``generate_sentinel_enrollment`` MCP tool's single entry point: at most one of ``project``/``org`` may be given
+    (a 400 if both are), dispatching to the project, organization or (neither given) instance-wide blob generator. Kept
+    here, not in ``agentapi.mcp``, so the one piece of request-shape validation this tool needs lives beside the three
+    functions it dispatches to."""
+    if project and org:
+        raise ApiError(400, 'give at most one of project or org (neither means instance-wide)')
+    if project:
+        return generate_enrollment_blob(ctx, project)
+    if org:
+        return generate_org_enrollment_blob(ctx, org)
+    return generate_instance_enrollment_blob(ctx)
 
 
 def consume_enrollment(raw):

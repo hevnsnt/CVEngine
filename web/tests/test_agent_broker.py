@@ -941,6 +941,51 @@ class PureTests(TestCase):
 			with self.assertRaises(s.ScopeError, msg=bad):
 				s.clean_host_pattern(bad)
 
+	def test_clean_scope_instance_flag(self):
+		from agentapi import agent_scope as s
+		self.assertEqual(s.clean_scope(None), {'orgs': [], 'projects': [], 'hosts': [], 'instance': False})
+		self.assertEqual(s.clean_scope({'instance': True}), {'orgs': [], 'projects': [], 'hosts': [], 'instance': True})
+		with self.assertRaises(s.ScopeError):
+			s.clean_scope({'instance': 'yes'})  # must be a bool, not a truthy string
+		with self.assertRaises(s.ScopeError):
+			s.clean_scope({'instance': True, 'extra': 1})  # unknown key still rejected
+
+
+class ScopeAuthoriseAndResolveTests(TestCase):
+	"""Pure-ish unit coverage of agent_scope.authorise and project_slugs_in_scope for the instance-wide flag: no HTTP
+	layer involved, just the role-checking and project-resolution logic the REST/MCP entry points sit on top of."""
+
+	@classmethod
+	def setUpTestData(cls):
+		now = timezone.now()
+		cls.org1, cls.org2 = Org.objects.create(name='One', slug='scope-one'), Org.objects.create(name='Two', slug='scope-two')
+		cls.pa = Project.objects.create(name='A', slug='scope-a', insert_date=now, org=cls.org1)
+		cls.pb = Project.objects.create(name='B', slug='scope-b', insert_date=now, org=cls.org2)
+		cls.dana = User.objects.create_user('scope_dana', password='x')
+		OrgMembership.objects.create(user=cls.dana, org=cls.org1, role='admin')
+		cls.root = User.objects.create_user('scope_root', password='x')
+		cls.root.is_superuser = True
+		cls.root.save()
+
+	def test_authorise_flags_instance_only_for_non_superuser(self):
+		from agentapi import agent_scope as s
+		bad_orgs, bad_projects, bad_instance = s.authorise(self.dana, s.clean_scope({'instance': True}))
+		self.assertEqual((bad_orgs, bad_projects), ([], []))
+		self.assertTrue(bad_instance)  # dana is an org admin, not a superuser
+		bad_orgs, bad_projects, bad_instance = s.authorise(self.root, s.clean_scope({'instance': True}))
+		self.assertEqual((bad_orgs, bad_projects, bad_instance), ([], [], False))
+
+	def test_project_slugs_in_scope_instance_covers_everything_reachable(self):
+		from agentapi import agent_scope as s
+		self.assertEqual(s.project_slugs_in_scope(self.root, s.clean_scope({'instance': True})), {'scope-a', 'scope-b'})
+		# A project created after the scope dict was built is still covered: resolution is dynamic, not frozen.
+		pc = Project.objects.create(name='C', slug='scope-c', insert_date=timezone.now(), org=self.org2)
+		self.assertIn('scope-c', s.project_slugs_in_scope(self.root, s.clean_scope({'instance': True})))
+
+	def test_non_instance_scope_with_nothing_named_covers_no_projects(self):
+		from agentapi import agent_scope as s
+		self.assertEqual(s.project_slugs_in_scope(self.root, s.clean_scope(None)), set())
+
 
 def extra_match(world, name, os_guess, address, cve=None):
 	"""One more open match on a new host of project A, so a test can queue as many tasks as it needs."""
