@@ -130,6 +130,59 @@ class NmapDispatchTests(DispatchBase):
         self.assertEqual(result['fast']['ports'], 1)
 
 
+UDP_XML = '''<?xml version="1.0"?>
+<nmaprun><host>
+<address addr="192.0.2.10" addrtype="ipv4"/>
+<ports><port protocol="udp" portid="123">
+<state state="open"/><service name="ntp" product="NTP" version="4.2.8"/>
+</port>
+<port protocol="udp" portid="161">
+<state state="open|filtered"/><service name="snmp"/>
+</port></ports>
+</host></nmaprun>'''
+
+
+class NmapUdpDispatchTests(DispatchBase):
+    """``try_nmap_udp``: unlike every other dispatched kind, the Sentinel's report is nmap's own raw XML, parsed by the
+    exact same ``cveFeed.nmap_scan.parse_xml`` a local ``-sU`` run's own XML already goes through, so UDP's
+    ``open|filtered`` state (which a local run also produces) survives a Sentinel round-trip unchanged."""
+
+    def test_a_live_eligible_sentinel_reports_raw_xml_parsed_by_the_same_function_a_local_run_uses(self):
+        self.make_sentinel(['nmap_udp'])
+        result = {'outcome': 'done', 'xml': UDP_XML}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            host = dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
+        self.assertIsNotNone(host)
+        self.assertEqual({p['number']: p['state'] for p in host['ports']}, {123: 'open', 161: 'open|filtered'})
+        self.assertEqual(next(p for p in host['ports'] if p['number'] == 123)['product'], 'NTP')
+
+    def test_no_eligible_sentinel_is_a_no_op(self):
+        host = dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
+        self.assertIsNone(host)
+        self.assertFalse(SentinelTask.objects.filter(kind='nmap_udp').exists())
+
+    def test_timeout_falls_back_to_none_and_marks_the_task_expired(self):
+        self.make_sentinel(['nmap_udp'])
+        host = dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=0.2)
+        self.assertIsNone(host)
+        self.assertEqual(SentinelTask.objects.get(kind='nmap_udp').status, 'expired')
+
+    def test_a_sentinel_reported_failure_returns_none(self):
+        self.make_sentinel(['nmap_udp'])
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                        side_effect=_answer_queued_task({'outcome': 'error', 'error': 'no raw socket'}, status='failed')):
+            host = dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
+        self.assertIsNone(host)
+
+    def test_a_host_absent_from_the_report_is_none(self):
+        self.make_sentinel(['nmap_udp'])
+        other_host_xml = UDP_XML.replace('192.0.2.10', '192.0.2.99')
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                        side_effect=_answer_queued_task({'outcome': 'done', 'xml': other_host_xml})):
+            host = dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
+        self.assertIsNone(host)
+
+
 class NaabuDispatchTests(DispatchBase):
     def test_a_live_eligible_sentinel_supplies_ports_without_a_local_naabu_call(self):
         self.make_sentinel(['naabu'])

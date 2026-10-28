@@ -50,6 +50,20 @@ class ParseXmlTests(TestCase):
 	def test_unparseable_xml_is_empty_not_a_crash(self):
 		self.assertEqual(nmap_scan.parse_xml('<not xml'), [])
 
+	def test_an_entity_expansion_payload_is_refused_not_expanded(self):
+		# This function now also reads XML a Sentinel reported (agentapi.sentinel_dispatch.try_nmap_udp), not only this
+		# process's own nmap subprocess, so a billion-laughs-style payload must fail safe (a custom ENTITY is refused
+		# outright, real nmap output never declares one), same as any other malformed report - never expand, never
+		# crash the pipeline.
+		bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
+				']><nmaprun><host><address addr="&lol2;" addrtype="ipv4"/></host></nmaprun>')
+		self.assertEqual(nmap_scan.parse_xml(bomb), [])
+
+	def test_an_external_entity_is_refused_not_fetched(self):
+		xxe = ('<?xml version="1.0"?><!DOCTYPE nmaprun [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+			  '<nmaprun><host><address addr="&xxe;" addrtype="ipv4"/></host></nmaprun>')
+		self.assertEqual(nmap_scan.parse_xml(xxe), [])
+
 	def test_valid_report_extracts_host_os_and_service(self):
 		inventory = nmap_scan.parse_xml(FAST_XML)
 		self.assertEqual(len(inventory), 1)
