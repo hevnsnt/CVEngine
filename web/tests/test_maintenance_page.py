@@ -1,7 +1,7 @@
 import os
 import re
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -56,7 +56,10 @@ class MaintenancePageTests(SimpleTestCase):
 
 	def test_an_administrator_waiting_for_an_update_gets_the_scene_and_is_sent_back_to_the_live_page(self):
 		bar = read('web', 'static', 'cve', 'updatebar.js')
-		self.assertIn('new URL("maintenance.html", import.meta.url)', bar)
+		watch = read('web', 'static', 'cve', 'sitewatch.js')
+		self.assertIn('new URL("maintenance.html", import.meta.url)', watch)
+		self.assertIn('veil.srcdoc = scene', watch)  # shown from memory: during the outage nothing can serve the file
+		self.assertIn('manageVeil()', bar)
 		self.assertIn('location.replace("/cve/")', bar)
 		self.assertNotIn('location.reload()', bar)
 		self.assertIn('.update-veil', read('web', 'static', 'cve', 'cve.css'))
@@ -64,3 +67,28 @@ class MaintenancePageTests(SimpleTestCase):
 		page = read('web', 'static', 'cve', 'maintenance.html')
 		self.assertIn('window.top !== window', page)
 		self.assertIn('e.origin === location.origin', page)
+
+
+class SiteWatchTests(SimpleTestCase):
+	def test_every_page_watches_for_the_site_going_away(self):
+		base = read('web', 'cveFeed', 'templates', 'cveFeed', 'base.html')
+		self.assertIn("cve/sitewatch.js", base)
+		self.assertLess(base.index("cve/sitewatch.js"), base.index("{% if request.user.is_superuser %}<script type=\"module\" src=\"{% asset 'cve/updatebar.js' %}"))
+
+	def test_a_page_opened_before_the_approval_still_follows_the_update(self):
+		bar = read('web', 'static', 'cve', 'updatebar.js')
+		self.assertIn('setTimeout(recheck, RECHECK_MS)', bar)
+
+
+class AliveTests(TestCase):
+	def test_alive_answers_with_a_tiny_uncached_reply(self):
+		from django.contrib.auth.models import User
+		from django.test import Client
+		client = Client()
+		client.force_login(User.objects.create_superuser('alive', password='x'))
+		response = client.get('/cve/api/alive')
+		self.assertEqual((response.status_code, response.json()), (200, {'ok': True}))
+		self.assertEqual(response['Cache-Control'], 'no-store')
+		# any answer below 500 means the site is up, a refusal for someone without a project included (sitewatch.js)
+		client.force_login(User.objects.create_user('alive-no-project', password='x'))
+		self.assertLess(client.get('/cve/api/alive').status_code, 500)
