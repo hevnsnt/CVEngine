@@ -186,20 +186,28 @@ class CacheInvalidationTests(World):
 
     def test_declaring_or_removing_a_range_drops_it(self):
         internal_view.table()
-        self.assertEqual(internal_view._cache['at'] > 0, True)
+        self.assertIsNotNone(internal_view._cache['at'])
         row = self.declare()
-        self.assertEqual(internal_view._cache['at'], 0.0)
+        self.assertIsNone(internal_view._cache['at'])
         internal_view.table()
         row.delete()
-        self.assertEqual(internal_view._cache['at'], 0.0)
+        self.assertIsNone(internal_view._cache['at'])
 
     def test_adding_a_host_named_by_an_address_drops_it_and_a_named_host_does_not(self):
         self.declare()
         Domain.objects.create(name='10.20.0.5', project=self.pa, insert_date=timezone.now())
-        self.assertEqual(internal_view._cache['at'], 0.0)
+        self.assertIsNone(internal_view._cache['at'])
         self.assertTrue(internal_view.is_internal(self.pa.id, '10.20.0.5'))
         Domain.objects.create(name='www.example.test', project=self.pa, insert_date=timezone.now())
-        self.assertGreater(internal_view._cache['at'], 0)  # a name that is not an address changes nothing about it
+        self.assertIsNotNone(internal_view._cache['at'])  # a name that is not an address changes nothing about it
+
+    def test_a_machine_up_for_less_than_the_cache_time_still_builds_the_table(self):
+        """The monotonic clock starts at boot: a fresh table must build whatever it reads, not wait for 300 seconds of uptime."""
+        self.declare()
+        internal_view.invalidate()
+        Domain.objects.create(name='10.20.0.5', project=self.pa, insert_date=timezone.now())
+        with mock.patch('time.monotonic', return_value=12.0):
+            self.assertTrue(internal_view.is_internal(self.pa.id, '10.20.0.5'))
 
     def test_the_table_is_not_rebuilt_by_the_clock_inside_a_few_minutes(self):
         internal_view.table()

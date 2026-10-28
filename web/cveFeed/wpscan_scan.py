@@ -621,10 +621,14 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
     return results
 
 
-def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
+def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, internal=False):
     """The pipeline stage: probe for WordPress, then WPScan every host that shows any sign of it (and every grouped name that probes
     positive), positive probes first. Never silent: every candidate gets a recorded state. Returns a summary dict; ``error`` is set only when
-    every attempted site failed."""
+    every attempted site failed.
+
+    ``internal`` is the run for a host inside a declared internal network (``cveFeed.internal_scan``): WPScan runs only through a Sentinel inside
+    it with no local fallback, the sites are the ones the Sentinel-run technology pass already tagged as WordPress (this server sends no probe of
+    its own, to the site or to its plugin pages), and no thorough pass is queued (it would run from here)."""
     from cveFeed import activity, ledger, probes, wp_correlation
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -632,14 +636,14 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
     real_runner = runner is None
     if real_runner:
         from agentapi import sentinel_dispatch
-        runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan)
+        runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan, internal=internal)
     allowed, _ips, _ports = _scan_targets(scan)
     subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports'))
     by_name = {s.name.lower(): s for s in subs}
     signals = candidate_signals(scan, subs)
     for host, found in signals.items():
         record_signals(project, domain.id, host, found)
-    probed = detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force)
+    probed = {} if internal else detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force)
     positive = {h for h, o in probed.items() if o['outcome'] == 'found'}
     for host in sorted(h for h, o in probed.items() if o['outcome'] == 'absent' and h not in signals):
         record_state(project, domain.id, host, 'not_wordpress', 'the probe found no WordPress signature')
@@ -704,7 +708,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
             errors.append(f'{host}: WPScan failed (see the host page)')
             continue
         new, techs = persist_report(scan, sub, url, report)
-        titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project)
+        titles = {} if internal else plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project)
         versioned = record_components(project, domain.id, host, report, titles)
         data = 'exhausted' if token and not use else vulnerability_data(report, use)  # a site run after the budget ran out has no vulnerability data
         left = remaining_requests(report)
@@ -723,7 +727,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
         summary['technologies'] += techs
         scanned.append(host)
     summary['scanned'] = len(scanned)
-    summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned else 0
+    summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned and not internal else 0
     failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
     message = (f'WPScan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
                + ('; the API token budget ran out, so later sites were scanned without vulnerability data' if token and not token_ok else '')

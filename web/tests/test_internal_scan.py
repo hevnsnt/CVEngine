@@ -261,3 +261,67 @@ class UdpStageTests(StageTests):
         scan, out, kinds = self.run_scan({'nmap': NMAP_RESULT, 'nmap_udp': {'xml': ''}})
         self.assertEqual(out['status'], SUCCESS)
         self.assertFalse(Port.objects.filter(protocol='udp').exists())
+
+
+class WpscanTests(Base):
+    """WPScan for an internal host: through a Sentinel inside the network, only where the Sentinel-run technology pass tagged WordPress."""
+
+    def run_scan(self, tagged=True, wp_runner=None, wpscan_answer=None, **kwargs):
+        from startScan.models import Subdomain, Technology
+        scan = self.queued_scan()
+        calls = []
+
+        def dispatch(project, kind, target, **kw):
+            if kind == 'nmap' and tagged:
+                sub = Subdomain.objects.get(scan_history=scan, name='10.20.0.7')
+                sub.technologies.add(Technology.objects.create(name='WordPress'))
+            return NMAP_RESULT if kind == 'nmap' else None
+
+        def fake_dispatch_or_none(project, kind, target, **kw):
+            calls.append((kind, target, kw))
+            return wpscan_answer
+        with mock.patch('cveFeed.tasks.correlate_cves'), mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', side_effect=fake_dispatch_or_none), \
+                mock.patch('cveFeed.probes.run_http_probe') as probe, mock.patch('cveFeed.wpscan_scan.plugin_titles') as titles, \
+                mock.patch('cveFeed.wpscan_scan.run_wpscan_process') as local, mock.patch('cveFeed.wpscan_scan.queue_thorough') as thorough:
+            out = internal_scan.run(scan.id, dispatch=dispatch, nuclei_stream=lambda kind: iter_none, provider=None, wp_runner=wp_runner, **kwargs)
+        return scan, out, calls, {'probe': probe, 'titles': titles, 'local': local, 'thorough': thorough}
+
+    def test_a_site_tagged_wordpress_is_scanned_through_the_runner_and_stored_with_nothing_sent_from_this_server(self):
+        from startScan.models import Vulnerability
+        from tests.test_wpscan import REPORT
+        urls = []
+
+        def runner(url, token):
+            urls.append(url)
+            return REPORT
+        scan, out, _calls, mocks = self.run_scan(wp_runner=runner)
+        self.assertEqual(out['status'], SUCCESS, out)
+        self.assertEqual(urls, ['https://10.20.0.7'])
+        self.assertTrue(Vulnerability.objects.filter(scan_history=scan, name__startswith='WordPress').exists())
+        mocks['probe'].assert_not_called()  # no WordPress probe from here
+        mocks['titles'].assert_not_called()  # no plugin page lookups from here
+        mocks['thorough'].assert_not_called()  # a thorough pass would run from here
+        mocks['local'].assert_not_called()
+
+    def test_a_host_with_no_sign_of_wordpress_is_not_scanned(self):
+        scan, out, calls, _mocks = self.run_scan(tagged=False, wp_runner=mock.Mock(side_effect=AssertionError('must not run')))
+        self.assertEqual(out['status'], SUCCESS, out)
+        self.assertEqual(calls, [])
+
+    def test_the_real_runner_hands_the_site_to_an_internal_sentinel_with_its_address_so_an_outside_one_cannot_take_it(self):
+        from tests.test_wpscan import REPORT
+        scan, out, calls, mocks = self.run_scan(wpscan_answer={'report': REPORT, 'returncode': 0, 'stderr_tail': ''})
+        self.assertEqual(out['status'], SUCCESS, out)
+        kind, target, kw = calls[0]
+        self.assertEqual((kind, target['url']), ('wpscan', 'https://10.20.0.7'))
+        self.assertTrue(kw['internal'])
+        self.assertEqual(kw['ips'], ['10.20.0.7'])
+        mocks['local'].assert_not_called()
+
+    def test_with_no_sentinel_answering_nothing_runs_locally_and_the_site_is_recorded_as_failed(self):
+        from cveFeed.models import ProbeObservation
+        scan, out, calls, mocks = self.run_scan(wpscan_answer=None)
+        self.assertEqual(out['status'], SUCCESS, out)  # a WordPress site without a Sentinel answer does not fail the whole scan
+        self.assertEqual(len(calls), 1)
+        mocks['local'].assert_not_called()
+        self.assertTrue(ProbeObservation.objects.filter(project_id=self.pa.id, host='10.20.0.7', kind='wordpress').exists())

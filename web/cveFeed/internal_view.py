@@ -13,11 +13,11 @@ from django.db.models import Q
 
 CACHE_SECONDS = 300
 _IP_LITERAL = r'^[0-9a-fA-F:.]+$'
-_cache = {'at': 0.0, 'table': {}}
+_cache = {'at': None, 'table': {}}  # 'at' is None until built: the monotonic clock starts at boot, so 0 is not "long ago"
 
 
 def invalidate():
-    _cache['at'] = 0.0
+    _cache['at'] = None
 
 
 def connect():
@@ -60,7 +60,7 @@ def _load():
 
 def table():
     now = time.monotonic()
-    if now - _cache['at'] > CACHE_SECONDS:
+    if _cache['at'] is None or now - _cache['at'] > CACHE_SECONDS:
         _cache.update(at=now, table=_load())
     return _cache['table']
 
