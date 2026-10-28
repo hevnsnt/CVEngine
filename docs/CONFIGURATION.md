@@ -91,7 +91,8 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_SENTINEL_DISPATCH_TIMEOUT` | `90` | Seconds a scan stage (nmap, naabu, a nuclei pass) waits for a dispatched `SentinelTask` to be claimed and reported before falling back to running the tool locally (see [ARCHITECTURE.md](ARCHITECTURE.md#sentinels)). A project with no Sentinel registered pays none of this: dispatch is a single existence check, not a wait. |
+| `CVENGINE_SENTINEL_CLAIM_TIMEOUT` | `8` | Seconds a scan stage waits for *any* Sentinel to claim a dispatched `SentinelTask` before giving up and falling back to running the tool locally. Short on purpose: a Sentinel that is going to take the work at all almost always claims it within its own poll interval, so a quiet, offline or saturated Sentinel costs single-digit seconds, not the full completion timeout below. |
+| `CVENGINE_SENTINEL_DISPATCH_TIMEOUT` | `90` | Seconds a scan stage waits for a dispatched `SentinelTask` to be *reported* once a Sentinel has claimed it, before falling back to running the tool locally (see [ARCHITECTURE.md](ARCHITECTURE.md#sentinels)). Does not apply until the task is claimed - see `CVENGINE_SENTINEL_CLAIM_TIMEOUT` above. A project with no Sentinel registered pays none of this: dispatch is a single existence check, not a wait. |
 
 See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) for the enrollment secret's 30-minute expiry (not yet configurable) and `CVENGINE_AGENT_TASK_RETENTION_DAYS`, which also governs how long a finished `SentinelTask` is kept.
 
