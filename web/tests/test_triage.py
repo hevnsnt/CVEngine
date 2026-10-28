@@ -733,3 +733,31 @@ class LocalChecksTests(TriageDbBase):
 		self.assertFalse(triage.suggest_local_checks(row, provider=provider))
 		row.refresh_from_db()
 		self.assertEqual(row.local_checks, {})
+
+
+class SweepActivityTests(TriageDbBase):
+	def test_a_successful_sweep_logs_one_settled_activity_line_with_counts(self):
+		self.match('a.tr.test')
+		stats = triage.sweep(self.project.id, provider=self.provider())
+		from cveFeed.models import AgentActivity
+		entries = list(AgentActivity.objects.filter(project=self.project, kind='run_check').order_by('id'))
+		self.assertEqual(len(entries), 1)
+		self.assertEqual(entries[0].status, 'done')
+		self.assertIn(f'Triaged {stats["rows"]} finding', entries[0].message)
+		self.assertIn(f'{stats["asked"]} asked', entries[0].message)
+
+	def test_nothing_due_logs_nothing(self):
+		from cveFeed.models import AgentActivity
+		triage.sweep(self.project.id, provider=self.provider())
+		self.assertEqual(AgentActivity.objects.count(), 0)
+
+	def test_a_sweep_failure_settles_the_activity_line_failed_and_still_raises(self):
+		self.match('a.tr.test')
+		from cveFeed.models import AgentActivity
+		with mock.patch('cveFeed.triage.run_triage', side_effect=RuntimeError('boom')):
+			with self.assertRaises(RuntimeError):
+				triage.sweep(self.project.id, provider=self.provider())
+		entries = list(AgentActivity.objects.filter(project=self.project, kind='run_check').order_by('id'))
+		self.assertEqual(len(entries), 1)
+		self.assertEqual(entries[0].status, 'failed')
+		self.assertIn('Triage sweep failed', entries[0].message)

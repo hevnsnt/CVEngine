@@ -178,11 +178,30 @@ class AgentApiTests(TestCase):
 			self.assertEqual((status, data['status']), (202, 'queued'))
 			scan = ScanHistory.objects.get(pk=data['scan_id'])
 			self.assertEqual(scan.domain_id, self.da.id)
+			self.assertEqual(scan.initiated_by_id, self.alice.id)  # who asked for this scan is on the record, not just that it ran
 			queued.assert_called_once_with(scan.id, 'standard')
 			# engine_id is optional, but a bogus one is still rejected
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': 99999})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.db.id})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id})[0], 202)
+
+	def test_deleting_the_initiating_user_keeps_the_scan_not_cascades_it_away(self):
+		from startScan.models import ScanHistory
+		temp = User.objects.create_user('temp-initiator', password='x')
+		scan = ScanHistory.objects.create(domain=self.da, scan_type=self.engine, start_scan_date=timezone.now(),
+			scan_status=2, results_dir='/tmp', initiated_by=temp)
+		temp.delete()
+		scan.refresh_from_db()
+		self.assertIsNone(scan.initiated_by_id)  # who ran it is forgotten, but the scan and its findings are not deleted with them
+
+	def test_discover_target_also_records_who_asked_for_it(self):
+		from startScan.models import ScanHistory
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+			status, data = call(self.t_alice, 'POST', f'/api/v1/projects/proj-a/targets/{self.da.id}/discover', {})
+			self.assertEqual(status, 202)
+			scan = ScanHistory.objects.get(pk=data['scan_id'])
+			self.assertEqual(scan.initiated_by_id, self.alice.id)
+			queued.assert_called_once()
 
 	def test_inventory_hosts_with_ports(self):
 		status, data = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/hosts')
@@ -1089,6 +1108,8 @@ class BulkDiscoveryTests(TestCase):
 		lines = AgentActivity.objects.filter(kind='discovery', message__startswith='Queued')
 		self.assertEqual(lines.count(), 1)
 		self.assertIn('12 targets', lines[0].message)
+		from startScan.models import ScanHistory
+		self.assertEqual(set(ScanHistory.objects.filter(domain__project=project).values_list('initiated_by_id', flat=True)), {user.id})
 
 
 class ListSummaryTests(TestCase):

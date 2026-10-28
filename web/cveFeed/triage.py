@@ -1029,7 +1029,10 @@ def backfill(project_id, limit=BACKFILL_LIMIT):
 def sweep(project_id=None, provider=False, limit=None):
     """Triage the rows that still wait: pending (over a cap earlier, or new), error (a provider failure) and, when a provider is now
     configured, not_triaged; oldest first, within the caps. Rows whose evidence changed since are reset by ``track`` first, so they
-    are judged on what they hold now."""
+    are judged on what they hold now. One ``run_check`` activity line per call (scoped to ``project_id``, or instance-wide when it is
+    ``None``) makes this periodic pass visible on the Activity page, settled 'done' with the counts or 'failed' with the reason -
+    previously an unhandled exception here only reached the worker log (``cveFeed.tasks.triage_pending``'s own catch-all), invisible
+    anywhere a person would actually look for it."""
     from cveFeed.models import Triage
     if project_id is not None:
         backfill(project_id)
@@ -1043,4 +1046,14 @@ def sweep(project_id=None, provider=False, limit=None):
     rows = list(qs.order_by('updated_at', 'id')[:limit or cap('TRIAGE_MAX_PER_RUN') * 5])
     if not rows:
         return {'rows': 0}
-    return run_triage(track(load_findings(rows)), provider=provider)
+    from cveFeed import activity
+    running = activity.log('run_check', f'Triaging {len(rows)} waiting finding{"s" if len(rows) != 1 else ""}', project=project_id, status='running')
+    try:
+        stats = run_triage(track(load_findings(rows)), provider=provider)
+    except Exception as exc:
+        activity.settle(running, 'failed', message=activity.diagnostic('Triage sweep', str(exc)))
+        raise
+    activity.settle(running, 'done', message=(
+        f'Triaged {stats["rows"]} finding{"s" if stats["rows"] != 1 else ""}: {stats["asked"]} asked, {stats["cached"]} from a stored '
+        f'verdict, {stats["queued"]} queued, {stats["not_triaged"]} not triaged, {stats["errors"]} error(s)'))
+    return stats
