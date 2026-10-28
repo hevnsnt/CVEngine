@@ -1021,6 +1021,20 @@ class HostHeatTests(TestCase):
 		self.assertEqual(heat, {'hot.heat.example': 'fire', 'cold.heat.example': 'unscanned'})
 		subs = {n['label']: n for n in graph_payload(domain.id)['nodes'] if n['kind'] == 'subdomain'}
 		self.assertEqual(subs['hot.heat.example']['heat'], 'fire')
+
+		# a light-only nuclei pass (the common case: the AI-targeted pass is gated on there being something worth
+		# targeting) must read 'scanned', not 'unscanned' - this is the same ScanActivity-name lookup as heat, in
+		# the graph's own node status.
+		from scanEngine.models import EngineType
+		from startScan.models import ScanActivity, ScanHistory
+		light = Subdomain.objects.create(name='light.heat.example', target_domain=domain, http_status=200)
+		engine = EngineType.objects.create(engine_name='heat-light', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=now, scan_status=2)
+		light.scan_history = scan
+		light.save(update_fields=['scan_history'])
+		ScanActivity.objects.create(scan_of=scan, name='nuclei_light_scan', status=2, time=now)
+		subs = {n['label']: n for n in graph_payload(domain.id)['nodes'] if n['kind'] == 'subdomain'}
+		self.assertEqual(subs['light.heat.example']['status'], 'scanned')
 		# the hover card's compact summary rides on the node: no extra request, worst CVE and its tier
 		info = subs['hot.heat.example']['info']
 		self.assertEqual((info['cves'], info['top_cve'], info['top_tier']), (1, 'CVE-2099-7', 'fire'))
@@ -1703,6 +1717,20 @@ class HostSearchTests(TestCase):
 		self.assertEqual(self.search('', heat='fire')['facets']['heat'], {'fire': 1, 'smoke': 0, 'ice': 1, 'clean': 1, 'unscanned': 1})
 		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&heat=bogus')
 		self.assertEqual(status, 400)
+
+	def test_a_light_only_nuclei_pass_counts_as_scanned_not_unscanned(self):
+		# Most hosts only ever get the light pass (the AI-targeted pass is gated on there being something worth
+		# targeting), so this is the common real-world case, not an edge case: it must read 'clean', not 'unscanned'.
+		from startScan.models import ScanActivity, ScanHistory
+		from scanEngine.models import EngineType
+		from agentapi.services import _host_heat
+		sub = Subdomain.objects.get(name='db.srch.example')
+		engine = EngineType.objects.create(engine_name='e-light', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=sub.target_domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+		sub.scan_history = scan
+		sub.save(update_fields=['scan_history'])
+		ScanActivity.objects.create(scan_of=scan, name='nuclei_light_scan', status=2, time=timezone.now())
+		self.assertEqual(_host_heat(sub), 'clean')
 
 	def test_the_search_is_an_mcp_tool(self):
 		status, data = rpc(self.tok, 'tools/call', {'name': 'search_hosts', 'arguments': {'project': 'srch-a', 'q': 'port:3306'}})
