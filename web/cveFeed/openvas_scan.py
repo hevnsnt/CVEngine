@@ -210,6 +210,24 @@ def bootstrap(connection=None, token=None):
     return row.gmp_username
 
 
+def ensure_login():
+    """The saved GMP login, made when there is none: the first time the add-on runs, the community containers' default login is replaced by a
+    generated one (``bootstrap``) with nobody typing anything. Raises ``OpenvasError`` while gvmd is not up yet or when its default login was
+    changed by hand; the caller records that and tries again at the next check."""
+    from cveFeed.models import OpenvasSettings
+    row = OpenvasSettings.current()
+    if row.gmp_username and row.gmp_password:
+        return row
+    try:
+        bootstrap()
+    except OpenvasError:
+        row = OpenvasSettings.current()  # another worker may have made it a moment ago
+        if row.gmp_username and row.gmp_password:
+            return row
+        raise
+    return OpenvasSettings.current()
+
+
 def _text(element, path, default=''):
     found = element.find(path) if element is not None else None
     return (found.text or '').strip() if found is not None and found.text else default
@@ -385,6 +403,50 @@ def due(project_id, hosts, resolve=None, blocked=None):
     order = [r[1] for r in rows if r[1] not in failed]
     keyed = {item[0]: item for item in found}
     return [keyed[host] for host in order if host in keyed]
+
+
+AUTO_WINDOW = 40  # the hosts of an opted-in project that is not limited to a list, looked at in one step: the stalest first
+
+
+def candidate_hosts(project_id, limit=AUTO_WINDOW):
+    """The hosts of a project the sweep may look at next when nobody listed any: every name the project's scans found, minus the excluded
+    ones, the ones scanned within a week and the ones that failed within three days, never-scanned first. ``due`` then vets this short list
+    like any other (a name that fails the vetting is not dropped for good: the sweep marks it failed, so it is asked again in three days)."""
+    from cveFeed import exclusions, ledger
+    from startScan.models import Subdomain
+    from targetApp.models import Domain
+    names = set(Subdomain.objects.filter(target_domain__project_id=project_id).values_list('name', flat=True).distinct()[:5000])
+    names |= set(Domain.objects.filter(project_id=project_id).values_list('name', flat=True))
+    names = sorted({n.strip().lower() for n in names if n and '*' not in n})
+    rows = ledger.stale_first(SERVICE, [(0, n, project_id) for n in exclusions.drop_excluded(project_id, names)])
+    failed = ledger.fresh(FAILED_SERVICE, [r[1] for r in rows], project_id)
+    return [r[1] for r in rows if r[1] not in failed][:limit]
+
+
+def sweep_links():
+    """The ``OpenvasProject`` rows the sweep works through: the projects opted in one by one, and every project of an opted-in organization
+    (a row is made for those, disabled, to keep the GVM target of its host set)."""
+    from django.db.models import Q
+    from cveFeed.models import OpenvasOrg, OpenvasProject
+    from dashboard.models import Project
+    org_ids = set(OpenvasOrg.objects.filter(enabled=True).values_list('org_id', flat=True))
+    if org_ids:
+        have = set(OpenvasProject.objects.values_list('project_id', flat=True))
+        for project in Project.objects.filter(org_id__in=org_ids).exclude(pk__in=have):
+            OpenvasProject.objects.get_or_create(project=project)
+    return OpenvasProject.objects.filter(Q(enabled=True) | Q(project__org_id__in=org_ids)).select_related('project').order_by('project_id')
+
+
+def next_batch(link, resolve=None, blocked=None):
+    """``[(host, ip, domain_id)]`` due for this project: the listed hosts when someone limited it to a list, else its own hosts."""
+    if link.hosts:
+        return due(link.project_id, link.hosts, resolve=resolve, blocked=blocked)[:max_hosts()]
+    names = candidate_hosts(link.project_id)
+    vetted = due(link.project_id, names, resolve=resolve, blocked=blocked)
+    kept = {host for host, _ip, _domain in vetted}
+    from cveFeed import ledger
+    ledger.record(FAILED_SERVICE, [n for n in names if n not in kept], link.project_id)
+    return vetted[:max_hosts()]
 
 
 # ----------------------------------------------------------------------------- targets and tasks
@@ -730,6 +792,8 @@ def check_now(session_factory=None):
     from cveFeed.models import OpenvasSettings
     row = OpenvasSettings.current()
     try:
+        if session_factory is None:
+            ensure_login()
         with (session_factory or session)() as gmp:
             state = check(gmp)
     except OpenvasError as exc:
@@ -807,7 +871,7 @@ def tick(session_factory=None, resolve=None, blocked=None):
     """One step of the sweep (every 15 minutes, queue ``openvas_queue``): poll the running task, or start the next due batch. Returns what it
     did, or ``{'skipped': reason}``."""
     from cveFeed import activity, ledger
-    from cveFeed.models import OpenvasProject, OpenvasRun, OpenvasSettings
+    from cveFeed.models import OpenvasRun, OpenvasSettings
     from reNgine import resources
     row = OpenvasSettings.current()
     if not row.enabled:
@@ -817,6 +881,8 @@ def tick(session_factory=None, resolve=None, blocked=None):
         if holder is not True:
             return {'skipped': 'another OpenVAS step is running'}
         try:
+            if session_factory is None:
+                ensure_login()
             with (session_factory or session)() as gmp:
                 run = OpenvasRun.objects.filter(status='running').first()
                 if run is not None:
@@ -829,8 +895,8 @@ def tick(session_factory=None, resolve=None, blocked=None):
                     return {'skipped': 'scanning is paused'}
                 if not state['guard']['ok']:
                     return {'skipped': state['guard']['reason']}
-                for link in OpenvasProject.objects.filter(enabled=True).select_related('project').order_by('project_id'):
-                    batch = due(link.project_id, link.hosts or [], resolve=resolve, blocked=blocked)[:max_hosts()]
+                for link in sweep_links():
+                    batch = next_batch(link, resolve=resolve, blocked=blocked)
                     if not batch:
                         continue
                     started = start(gmp, link, batch)

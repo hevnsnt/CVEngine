@@ -72,6 +72,11 @@ web/.update-mode.tmp
 web/.update-log
 web/.update-lock
 web/.update-requeue.json
+web/.openvas-wanted
+web/.openvas-wanted.tmp
+web/.openvas-applied
+web/.openvas-applied.tmp
+web/.openvas-log
 backups/
 dump.rdb
 

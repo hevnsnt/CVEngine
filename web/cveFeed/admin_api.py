@@ -22,6 +22,7 @@ from django.utils.text import slugify
 from dashboard.models import (ApiCredential, AuditLog, Org, OrgMembership, Project, ProjectMembership, SystemTimings,
                               UserProfile)
 from tenancy import audit as audit_trail, roles
+from cveFeed import openvas_admin
 
 
 class AdminError(Exception):
@@ -755,6 +756,8 @@ ROUTES = [
     ('GET', r'activity', activity_list),
     ('GET', r'health', scheduler_health),
     ('GET', r'scan-control', scan_control_get), ('POST', r'scan-control', scan_control_set),
+    ('GET', r'openvas', lambda r, actor, **k: openvas_admin.admin_get(r, actor)), ('PUT', r'openvas', lambda r, actor, **k: openvas_admin.admin_put(r, actor)),
+    ('POST', r'openvas/check', lambda r, actor, **k: openvas_admin.admin_check(r, actor)),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]
 
