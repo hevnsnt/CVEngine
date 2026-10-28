@@ -45,6 +45,18 @@ class GraphOverviewTests(TestCase):
         self.assertEqual((root['targets'], root['hosts'], root['findings'], root['cve_candidates']), (2, 2, 1, 1))
         self.assertEqual(root['assessed'], 0)
 
+    def test_a_light_only_nuclei_pass_counts_the_host_as_assessed(self):
+        # Most hosts only ever get the light pass (the AI-targeted pass is gated on there being something worth
+        # targeting), so a host must count as assessed from that alone, not only once a targeted pass also ran.
+        from scanEngine.models import EngineType
+        from startScan.models import ScanActivity, ScanHistory
+        engine = EngineType.objects.create(engine_name='graph-light', yaml_configuration='x')
+        scan = ScanHistory.objects.create(domain=self.extra.target_domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+        self.extra.scan_history = scan
+        self.extra.save(update_fields=['scan_history'])
+        ScanActivity.objects.create(scan_of=scan, name='nuclei_light_scan', status=2, time=timezone.now())
+        self.assertEqual(groups(self.project.slug)['projects'][0]['roots'][0]['assessed'], 1)
+
     def test_http_scope_and_lazy_host_page(self):
         client = client_for(self.viewer)
         overview = client.get('/cve/api/graph-overview?project=_all')

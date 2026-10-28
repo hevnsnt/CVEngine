@@ -2,6 +2,7 @@
 from django.db.models import Count, Q  # noqa: F401
 
 from cveFeed.counts import LIVE_HOST_Q
+from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 
 from targetApp.target_types import apex_domain
 
@@ -67,7 +68,7 @@ def groups(project_slug=None):
     live_of = names_by_domain(current.filter(LIVE_HOST_Q))
     assessed_of = names_by_domain(current.filter(
         scan_history__scan_status=2,
-        scan_history__scanactivity__name__in=('nuclei_scan', 'nuclei_targeted_scan'),
+        scan_history__scanactivity__name__in=NUCLEI_SCAN_ACTIVITY_NAMES,
         scan_history__scanactivity__status=2))
     from startScan.models import Vulnerability
     from cveFeed.models import CVEMatch
@@ -133,7 +134,7 @@ def hosts(project_slug, root, page=1, q=''):
     matched = set(CVEMatch.objects.filter(subdomain_id__in=ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED)
                   .values_list('subdomain_id', flat=True))
     scanned = set(ScanActivity.objects.filter(scan_of_id__in=[r.scan_history_id for r in rows if r.scan_history_id],
-                  name__in=('nuclei_scan', 'nuclei_targeted_scan'), status=2).values_list('scan_of_id', flat=True))
+                  name__in=NUCLEI_SCAN_ACTIVITY_NAMES, status=2).values_list('scan_of_id', flat=True))
     archived = set(HostState.objects.filter(project=project, host__in=[r.name for r in rows], archived_at__isnull=False)
                    .values_list('host', flat=True))
     return {'project': project.slug, 'root': root, 'count': names, 'page': page, 'page_size': HOST_PAGE,

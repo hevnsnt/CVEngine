@@ -16,6 +16,7 @@ from typing import Optional
 from django.utils import timezone
 
 from cveFeed.counts import RUNNING_WINDOW
+from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from tenancy import roles
 
 logger = logging.getLogger(__name__)
@@ -1063,7 +1064,7 @@ def _heat_reasons(sub):
     return sorted(reasons, key=lambda r: rank.get(r['temp'], 3))
 
 
-NUCLEI_STAGES = ('nuclei_scan', 'nuclei_targeted_scan')  # a finished targeted pass (or an older blanket one) means nuclei ran
+NUCLEI_STAGES = NUCLEI_SCAN_ACTIVITY_NAMES  # see cveFeed.discovery.NUCLEI_SCAN_ACTIVITY_NAMES: the one shared list of stage names that mean "nuclei ran"
 
 
 def _host_heat(sub, reasons=None):
