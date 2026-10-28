@@ -51,8 +51,9 @@ QUEUE = 'openvas_queue'
 BEAT_NAME = 'cvengine-openvas-sweep'
 CONFIRMED_QOD = 80
 FRESH_DAYS = 21  # an observation older than this is not carried onto a new scan's host row
-DEFAULT_MAX_HOSTS = 4  # hosts in one task
-DEFAULT_MAX_HOURS = 12
+DEFAULT_MAX_HOSTS = 1  # hosts in one task: a run is slow (hours per host), so one host per task keeps what a stop or a failure costs to one host
+DEFAULT_MAX_HOURS = 24  # the time budget PER HOST: a task of n hosts gets n times this; when it runs out, what was found so far is kept
+DEFAULT_MAX_CHECKS = 4  # NVTs run at a time against a host (Greenbone's own default); CVENGINE_OPENVAS_MAX_CHECKS
 DEFAULT_MIN_AVAILABLE_MB = 3072
 DEFAULT_COST_MB = 1500
 DEFAULT_SOCKET = '/run/gvmd/gvmd.sock'
@@ -72,7 +73,7 @@ CONFIG_NAME = 'cvENGINE safe scan'
 # the scanner skip any remaining NVT whose category is destructive, denial, kill-host or flood.
 EXCLUDED_FAMILIES = ('Denial of Service', 'Brute force attacks')
 DEFAULT_LOGIN = ('admin', 'admin')  # what Greenbone's community containers create; replaced by ``bootstrap``
-TASK_PREFERENCES = {'max_checks': '2', 'max_hosts': '1'}  # two NVTs at a time against one host at a time: slow on purpose
+TASK_PREFERENCES = {'max_checks': str(DEFAULT_MAX_CHECKS), 'max_hosts': '1'}  # the defaults; see task_preferences()
 
 ACTIVE = ('New', 'Requested', 'Queued', 'Running', 'Processing', 'Stop Requested')
 LOST = ('Delete Requested', 'Ultimate Delete Requested')
@@ -99,7 +100,19 @@ def max_hosts():
 
 
 def max_hours():
+    """The time budget per host, in hours."""
     return _env_int('CVENGINE_OPENVAS_MAX_HOURS', DEFAULT_MAX_HOURS)
+
+
+def budget_hours(hosts):
+    """The budget of a task of ``hosts`` hosts: ``max_hours()`` for each."""
+    return max_hours() * max(1, int(hosts))
+
+
+def task_preferences():
+    """GVM task preferences: ``max_checks`` NVTs at a time (``CVENGINE_OPENVAS_MAX_CHECKS``, 1 to 10) against one host at a time. Fewer is gentler on the
+    target and slower: at 2 a host took about a day, at 4 (Greenbone's default) about half that."""
+    return {'max_checks': str(min(10, _env_int('CVENGINE_OPENVAS_MAX_CHECKS', DEFAULT_MAX_CHECKS))), 'max_hosts': '1'}
 
 
 def min_available_mb():
@@ -390,17 +403,26 @@ def own_addresses():
     return _own['addresses']
 
 
-def refuse_address(ip):
-    """Whether OpenVAS must not be given this address even though a scanner could reach it from the celery container. The sidecar has no
-    tailscale interface, so a tailnet address would leave by the Docker host's default route: never. A documentation range (RFC 5737, RFC 3849)
-    is nobody's host, and this instance's own address is never a target of its own scanner. Everything else is ``is_scannable_ip``'s decision."""
+def refuse_reason(ip):
+    """Why OpenVAS must not be given this address even though a scanner could reach it from the celery container, or ``None``. The sidecar has
+    no tailscale interface, so a tailnet address would leave by the Docker host's default route: never. A documentation range (RFC 5737,
+    RFC 3849) is nobody's host, and this instance's own address is never a target of its own scanner. Everything else is
+    ``is_scannable_ip``'s decision."""
     try:
         address = ipaddress.ip_address(ip)
     except ValueError:
-        return True
+        return 'not a valid address'
     if address.compressed in own_addresses():
-        return True
-    return any(address.version == net.version and address in net for net in _TAILNET + _DOCUMENTATION)
+        return 'this cvENGINE server'
+    if any(address.version == net.version and address in net for net in _TAILNET):
+        return 'a tailnet address'
+    if any(address.version == net.version and address in net for net in _DOCUMENTATION):
+        return 'a documentation address range'
+    return None
+
+
+def refuse_address(ip):
+    return refuse_reason(ip) is not None
 
 
 def shared_infrastructure(sub, ip):
@@ -426,57 +448,167 @@ def _latest_row(project_id, host):
             .order_by('-scan_history_id').first())
 
 
-def due(project_id, hosts, resolve=None, blocked=None):
-    """``[(host, ip, domain_id)]`` of the opted-in ``hosts`` that are due: vetted, not excluded or archived, not scanned within a week and
-    not failed within three days, never-scanned first. Vetting is the same as for every other scanner (``scannable_hosts``,
-    ``pinned_transport.resolve``) plus the OpenVAS-only refusals of ``refuse_address`` (documentation ranges, this instance's own address, the
-    tailnet) and of ``shared_infrastructure`` (a CDN, a SaaS or PaaS front shared with other customers); a host that fails any is dropped silently,
-    like a name that stopped resolving. One host per address."""
-    from cveFeed import exclusions, ledger
-    from targetApp.target_types import scannable_hosts
-    resolve = resolve or _address
-    names = exclusions.drop_excluded(project_id, [h.strip().lower() for h in hosts if str(h).strip()])
-    allowed = scannable_hosts(names, resolver=blocked, project=project_id)
-    found, by_ip = [], set()
-    for host in allowed:
-        sub = _latest_row(project_id, host)
-        if sub is None:
-            continue  # not a host of this project (any more): never scan a name the project does not own
-        try:
-            ip = resolve(host, project_id)
-        except (ValueError, OSError):
-            continue
-        if refuse_address(ip) or ip in by_ip or shared_infrastructure(sub, ip):
-            continue
-        by_ip.add(ip)
-        found.append((host, ip, sub.target_domain_id))
-    rows = ledger.stale_first(SERVICE, [(0, host, project_id) for host, _ip, _d in found])
-    failed = ledger.fresh(FAILED_SERVICE, [r[1] for r in rows], project_id)
-    order = [r[1] for r in rows if r[1] not in failed]
-    keyed = {item[0]: item for item in found}
-    return [keyed[host] for host in order if host in keyed]
+def _names(items):
+    return {str(h).strip().lower() for h in (items or ()) if str(h).strip()}
 
 
-AUTO_WINDOW = 40  # the hosts of an opted-in project that is not limited to a list, looked at in one step: the stalest first
+HOT = ('fire', 'smoke')  # the heats OpenVAS is spent on: a run is slow (hours per host), so it goes where it matters
+HOT_WINDOW = 500  # hot-looking names looked at in one step, per project
+EPOCH_DAYS = 36500
 
 
-def candidate_hosts(project_id, limit=AUTO_WINDOW):
-    """The hosts of a project the sweep may look at next when nobody listed any: every name the project's scans found, minus the excluded
-    ones, the ones scanned within a week and the ones that failed within three days, never-scanned first. ``due`` then vets this short list
-    like any other (a name that fails the vetting is not dropped for good: the sweep marks it failed, so it is asked again in three days)."""
-    from cveFeed import exclusions, ledger
+def hot_names(project_id, limit=HOT_WINDOW):
+    """The names of a project's hosts that may be Fire or Smoke: a CVE match rated smoke or hotter that nobody ruled out or closed, or an open
+    finding rated medium or above, on any of the project's scans. A short list to look at: ``host_heat`` decides exactly, from the latest row
+    of each name, by the rules the host card uses."""
+    from cveFeed.models import CVEMatch
+    from cveFeed.threat import match_heat_rank_expr
+    from startScan.models import Vulnerability
+    closed = ('fixed', 'accepted_risk')
+    names = set(CVEMatch.objects.filter(subdomain__target_domain__project_id=project_id).exclude(ai_verdict='not_affected')
+                .exclude(remediation_status__in=closed).annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank__gte=2)
+                .values_list('subdomain__name', flat=True).distinct()[:limit])
+    names |= set(Vulnerability.objects.filter(target_domain__project_id=project_id, open_status=True, severity__gte=2)
+                 .exclude(remediation_status__in=closed).values_list('subdomain__name', flat=True).distinct()[:limit])
+    return _names(names)
+
+
+def host_heat(project_id, names):
+    """``{name: (heat, (fire reasons, smoke reasons))}`` for each of ``names`` that is a host of the project: the host card's own colour (its
+    CVE matches as they apply to it and its open findings, hottest first), read from the latest stored row of the name."""
+    from agentapi import services
     from startScan.models import Subdomain
-    from targetApp.models import Domain
-    names = set(Subdomain.objects.filter(target_domain__project_id=project_id).values_list('name', flat=True).distinct()[:5000])
-    names |= set(Domain.objects.filter(project_id=project_id).values_list('name', flat=True))
-    names = sorted({n.strip().lower() for n in names if n and '*' not in n})
-    from targetApp.target_types import internal_networks, sentinel_only_target
+    wanted = sorted(_names(names))
+    if not wanted:
+        return {}
+    rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=wanted).order_by('name', '-scan_history_id').distinct('name')
+            .prefetch_related('cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage'))
+    out = {}
+    for sub in rows:
+        reasons = services._heat_reasons(sub)
+        out[sub.name.lower()] = (services._host_heat(sub, reasons),
+                                 (sum(1 for r in reasons if r['temp'] == 'fire'), sum(1 for r in reasons if r['temp'] == 'smoke')))
+    return out
+
+
+def _days(when):
+    days = (timezone.now() - when).days
+    return 'today' if days < 1 else f'{days} day{"s" if days != 1 else ""} ago'
+
+
+def _stored_address(sub):
+    addresses = [ip.address for ip in sub.ip_addresses.all() if ip.address]
+    return sorted(addresses, key=lambda a: ':' in a)[0] if addresses else ''
+
+
+def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=None, internal=False):
+    """Decide, host by host, what OpenVAS may scan next. Returns ``(ready, verdicts)``: ``ready`` is ``[(host, ip, domain_id)]`` in scan order,
+    ``verdicts`` is ``{host: {'heat', 'ready', 'reason', 'retry'}}`` for every candidate (``reason`` says why a host is not ready, in the words
+    people read; ``retry`` marks one whose address could not be had, asked again in three days).
+
+    A host is refused when: it is not a host of the project; it is excluded or archived; (with ``gate``) it is not Fire or Smoke, unless
+    ``forced`` names it; it is on a CDN or a platform other tenants share, or at an address that is not the project's to test (documentation
+    ranges, this server, the tailnet), or the same address as a host already chosen; it was scanned within a week or failed within three days.
+    ``forced`` lifts only the heat gate, never the ownership refusals. Order: Fire before Smoke, then the most fire reasons, then the most smoke
+    reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address (no DNS): the explanation
+    shown to people. The real selection passes ``_address``. ``internal`` selects the project's declared internal networks, whose names are their
+    own address and which only a Sentinel inside can reach."""
+    from cveFeed import exclusions, hosting, ledger
+    from targetApp.target_types import internal_networks, scannable_hosts, sentinel_only_target
+    names = sorted(_names(candidates))
+    forced = _names(forced)
     nets = internal_networks(project_id)
+    verdicts = {}
+
+    def refuse(host, heat, reason, retry=False):
+        verdicts[host] = {'heat': heat, 'ready': False, 'reason': reason, 'retry': retry}
+
     if nets:  # a declared internal network has its own batch (``internal_batch``); the external one must not mark it failed
-        names = [n for n in names if not sentinel_only_target(n, project_id, nets)]
-    rows = ledger.stale_first(SERVICE, [(0, n, project_id) for n in exclusions.drop_excluded(project_id, names)])
-    failed = ledger.fresh(FAILED_SERVICE, [r[1] for r in rows], project_id)
-    return [r[1] for r in rows if r[1] not in failed][:limit]
+        names = [n for n in names if bool(sentinel_only_target(n, project_id, nets)) == internal]
+    elif internal:
+        names = []
+    kept = set(exclusions.drop_excluded(project_id, names))
+    heats = host_heat(project_id, names)
+    scanned = ledger.last_run(SERVICE, names, project_id)
+    failed_at = ledger.last_run(FAILED_SERVICE, names, project_id)
+    fresh = ledger.fresh(SERVICE, names, project_id)
+    fresh_failed = ledger.fresh(FAILED_SERVICE, names, project_id)
+    passed = []
+    for host in names:
+        heat = heats.get(host, ('', (0, 0)))[0]
+        sub = _latest_row(project_id, host) if host in heats else None
+        if sub is None:
+            refuse(host, heat, 'not a host of this project')
+        elif host not in kept:
+            refuse(host, heat, 'excluded from scanning')
+        elif gate and host not in forced and heat not in HOT:
+            refuse(host, heat, f'not Fire or Smoke ({heat or "unknown"}): OpenVAS is only spent on hosts on fire or smoke')
+        elif _platform_reason(sub):
+            refuse(host, heat, _platform_reason(sub))
+        elif host in fresh_failed:
+            refuse(host, heat, f'could not be scanned {_days(failed_at[host])}; asked again after three days')
+        elif host in fresh:
+            refuse(host, heat, f'scanned {_days(scanned[host])}; due again after a week')
+        else:
+            passed.append((host, sub, heat))
+    chosen, by_ip = [], {}
+    for host, sub, heat in passed:
+        if internal:
+            ip = host
+        elif not scannable_hosts([host], resolver=blocked, project=project_id):
+            refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range, or it does not resolve to a public address)')
+            continue
+        else:
+            try:
+                ip = resolve(host, project_id) if resolve else _stored_address(sub)
+            except (ValueError, OSError):
+                refuse(host, heat, 'the name does not resolve to an address a scanner may use', retry=True)
+                continue
+            if not ip:
+                refuse(host, heat, 'no address is recorded for the host yet')
+                continue
+        why = None if internal else (refuse_reason(ip) or ('a platform other tenants share (its address)' if _shared_address(ip) else None))
+        if why:
+            refuse(host, heat, f'{why}: not the project\'s to test')
+        elif ip in by_ip:
+            refuse(host, heat, f'the same address as {by_ip[ip]}')
+        else:
+            by_ip[ip] = host
+            chosen.append((host, ip, sub.target_domain_id))
+    rank = {'fire': 0, 'smoke': 1}
+    epoch = timezone.now() - timedelta(days=EPOCH_DAYS)
+
+    def order(item):
+        host = item[0]
+        heat, (fire, smoke) = heats.get(host, ('', (0, 0)))
+        return (rank.get(heat, 2), -fire, -smoke, scanned.get(host) or epoch, host)
+    chosen.sort(key=order)
+    for host, _ip, _domain in chosen:
+        verdicts[host] = {'heat': heats[host][0], 'ready': True, 'reason': None, 'retry': False}
+    return chosen, verdicts
+
+
+def _platform_reason(sub):
+    """Why a stored host row is a platform other tenants share (a CDN edge, a SaaS or PaaS front such as Microsoft 365's autodiscover), or ``None``."""
+    from cveFeed import hosting
+    verdict = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=sub.webserver or '', cdn_name=sub.cdn_name or '', is_cdn=bool(sub.is_cdn))
+    if not verdict['shared_ip']:
+        return None
+    provider = verdict['provider'] or 'a provider'
+    return (f'a CDN edge ({provider}): not the project\'s to test' if verdict['kind'] == 'cdn'
+            else f'a third-party platform ({provider}) shared with other customers: not the project\'s to test')
+
+
+def _shared_address(ip):
+    from cveFeed import hosting
+    return bool(hosting.shared_by_address([ip]))
+
+
+def due(project_id, hosts, resolve=None, blocked=None):
+    """``[(host, ip, domain_id)]`` of ``hosts`` that are due, whatever their heat: vetted (the same gate as every other scanner,
+    ``scannable_hosts`` and ``pinned_transport.resolve``, plus ``assess``'s ownership refusals), not excluded or archived, not scanned within a
+    week and not failed within three days, never-scanned first, one host per address. ``next_batch`` adds the heat gate."""
+    return assess(project_id, hosts, gate=False, resolve=resolve or _address, blocked=blocked)[0]
 
 
 def sweep_links():
@@ -493,48 +625,79 @@ def sweep_links():
     return OpenvasProject.objects.filter(Q(enabled=True) | Q(project__org_id__in=org_ids)).select_related('project').order_by('project_id')
 
 
-def auto_hosts():
-    """CVENGINE_OPENVAS_AUTO_HOSTS=1 lets a project with no host list scan the names its scans found. Off by default: OpenVAS is an intrusive
-    scanner, so a host is scanned only when someone chose it (``OpenvasProject.hosts``), and what a project's scans happened to find
-    (autodiscover names on a mail provider, API gateways, a CDN) is not that choice."""
-    return os.environ.get('CVENGINE_OPENVAS_AUTO_HOSTS', '').strip().lower() in ('1', 'true', 'yes')
+def links_for(project_ids):
+    """The ``OpenvasProject`` rows (saved or not) of the opted-in projects among ``project_ids``, without creating any: what a read-only page shows."""
+    from django.db.models import Q
+    from cveFeed.models import OpenvasOrg, OpenvasProject
+    from dashboard.models import Project
+    org_ids = set(OpenvasOrg.objects.filter(enabled=True).values_list('org_id', flat=True))
+    have = {l.project_id: l for l in OpenvasProject.objects.filter(project_id__in=project_ids).select_related('project')}
+    out = [l for l in have.values() if l.enabled or l.project.org_id in org_ids]
+    out += [OpenvasProject(project=p) for p in Project.objects.filter(pk__in=project_ids, org_id__in=org_ids).exclude(pk__in=have)]
+    return sorted(out, key=lambda l: l.project_id)
+
+
+def overview(project_ids, limit=12):
+    """The OpenVAS queue for the Sentinels page, over the projects the viewer may read: the run in progress, the hosts due next in scan order
+    and the hosts that are not due, each with the reason in plain words (Fire or Smoke only; never a CDN or a shared platform; scanned three days
+    ago). ``None`` while the add-on is off. The per-project explanation is cached for a minute: the page polls."""
+    from django.core.cache import cache
+    from cveFeed.models import OpenvasRun, OpenvasSettings
+    if not OpenvasSettings.current().enabled:
+        return None
+    run = OpenvasRun.objects.filter(status='running', project_id__in=project_ids).select_related('project').first()
+    rows = []
+    for link in links_for(project_ids):
+        found = cache.get_or_set(f'openvas-explain:{link.project_id}', lambda link=link: explain(link)[:100], 60)
+        rows += [{**r, 'project': link.project.slug} for r in found]
+    ready = [r for r in rows if r['ready']]
+    refused = [r for r in rows if not r['ready']]
+    return {'running': ({'run': run.pk, 'project': run.project.slug, 'hosts': sorted(run.hosts.values()), 'progress': run.progress, 'status': run.gvm_status,
+                         'started_at': run.started_at.isoformat(), 'budget_hours': budget_hours(len(run.hosts)), 'via': 'sentinel' if run.sentinel_task_id else 'local'}
+                        if run else None),
+            'hosts_per_task': max_hosts(), 'budget_hours_per_host': max_hours(), 'max_checks': int(task_preferences()['max_checks']),
+            'next': ready[:limit], 'not_due': refused[:limit], 'counts': {'next': len(ready), 'not_due': len(refused)}}
 
 
 def next_batch(link, resolve=None, blocked=None):
-    """``[(host, ip, domain_id)]`` due for this project: the hosts someone chose. A project with no host list has none unless
-    ``CVENGINE_OPENVAS_AUTO_HOSTS`` is on, and then its own hosts (still vetted)."""
-    if link.hosts:
-        return due(link.project_id, link.hosts, resolve=resolve, blocked=blocked)[:max_hosts()]
-    if not auto_hosts():
-        return []
-    names = candidate_hosts(link.project_id)
-    vetted = due(link.project_id, names, resolve=resolve, blocked=blocked)
-    kept = {host for host, _ip, _domain in vetted}
+    """``[(host, ip, domain_id)]`` for the next OpenVAS task of this project: its hosts that are Fire or Smoke (Fire first), plus the hosts
+    someone listed (still gated by heat unless the list marks them forced), vetted by ``assess``. Nothing else is ever scanned: a host nobody
+    listed and that is not hot is not a candidate, and a host that turns Fire or Smoke becomes one by itself. A name whose address could not be
+    had is marked failed so it is asked again in three days, not at every tick."""
     from cveFeed import ledger
-    ledger.record(FAILED_SERVICE, [n for n in names if n not in kept], link.project_id)
-    return vetted[:max_hosts()]
+    explicit, forced = _names(link.hosts), _names(link.forced_hosts)
+    ready, verdicts = assess(link.project_id, hot_names(link.project_id) | explicit | forced, forced, resolve=resolve or _address, blocked=blocked)
+    retry = [host for host, v in verdicts.items() if v['retry']]
+    if retry:
+        ledger.record(FAILED_SERVICE, retry, link.project_id)
+    return ready[:max_hosts()]
 
 
 def internal_batch(link):
     """``[(host, ip, domain_id)]`` of the project's targets inside a network it declared internal that are due for OpenVAS: only such an
-    address (``target_types.sentinel_only_target``: this server may not scan it), not excluded, not scanned within a week and not failed
-    within three days, never-scanned first, one per address, limited to the project's host list when it has one. Always a batch of its own,
-    never mixed with the vetted external one: a Sentinel inside the network is the only one that can reach it."""
-    from cveFeed import exclusions, ledger
-    from targetApp.models import Domain
-    from targetApp.target_types import internal_networks, sentinel_only_target
-    nets = internal_networks(link.project_id)
-    if not nets:
+    address (``target_types.sentinel_only_target``: this server may not scan it), Fire or Smoke like any other host, not excluded, not scanned within
+    a week and not failed within three days. Always a batch of its own, never mixed with the vetted external one: a Sentinel inside the network is
+    the only one that can reach it."""
+    from targetApp.target_types import internal_networks
+    if not internal_networks(link.project_id):
         return []
-    names = {d.name.strip().lower(): d.id for d in Domain.objects.filter(project_id=link.project_id)
-             if sentinel_only_target(d.name, link.project_id, nets)}
-    if link.hosts:
-        wanted = {str(h).strip().lower() for h in link.hosts}
-        names = {n: i for n, i in names.items() if n in wanted}
-    kept = exclusions.drop_excluded(link.project_id, sorted(names))
-    rows = ledger.stale_first(SERVICE, [(0, n, link.project_id) for n in kept])
-    failed = ledger.fresh(FAILED_SERVICE, [r[1] for r in rows], link.project_id)
-    return [(n, n, names[n]) for n in (r[1] for r in rows) if n not in failed][:max_hosts()]
+    forced = _names(link.forced_hosts)
+    ready, _verdicts = assess(link.project_id, hot_names(link.project_id) | _names(link.hosts) | forced, forced, internal=True)
+    return ready[:max_hosts()]
+
+
+def explain(link):
+    """What the sweep would do with each of the project's candidate hosts right now and why, without any DNS: ``[{'host', 'heat', 'ready',
+    'reason'}]``, ready hosts first in scan order, then the refused ones by name. For the Settings page, the host record and the Sentinels page,
+    so nobody has to guess why a host is or is not due."""
+    explicit, forced = _names(link.hosts), _names(link.forced_hosts)
+    candidates = hot_names(link.project_id) | explicit | forced
+    out = {}
+    for internal in (False, True):
+        ready, verdicts = assess(link.project_id, candidates, forced, internal=internal)
+        order = {host: i for i, (host, _ip, _d) in enumerate(ready)}
+        out.update({host: {'host': host, **v, 'order': order.get(host)} for host, v in verdicts.items()})
+    return sorted(out.values(), key=lambda r: (r['order'] is None, r['order'] if r['order'] is not None else 0, r['host']))
 
 
 # ----------------------------------------------------------------------------- targets and tasks
@@ -579,7 +742,7 @@ def start(gmp, link, batch):
         raise OpenvasError('another OpenVAS task is already running') from None
     try:
         task = gmp.create_task(f'cvengine-run-{run.pk}', config_id, target_id, scanner.get('id'), comment='cvENGINE weekly sweep',
-                               preferences=TASK_PREFERENCES)
+                               preferences=task_preferences())
         run.task_id = task.get('id') or ''
         run.save(update_fields=['task_id'])
         gmp.start_task(run.task_id)
@@ -822,13 +985,14 @@ def import_results(run, gmp, status_xml):
     return _apply_import(run, items, scanned, no_cve, unusable)
 
 
-def _apply_import(run, items, scanned, no_cve, unusable):
+def _apply_import(run, items, scanned, no_cve, unusable, partial=False):
     """Observations, findings, evidence and resolutions for each host of ``run``, from already-fetched, already-parsed
     results (``items``, in ``parse_result``'s own shape) and the set of addresses gvmd actually scanned. The one storage
     path for a task cvENGINE ran itself and one a Sentinel ran against its own sidecar and reported back: neither knows or
-    cares which produced ``items``. Returns the run summary."""
+    cares which produced ``items``. ``partial`` is a scan stopped at its time budget: what it found is kept, but it says nothing about
+    what it did not get to, so no earlier finding is resolved by it. Returns the run summary."""
     summary = {'results': len(items), 'without_cve': no_cve, 'unusable': unusable, 'hosts_scanned': 0, 'hosts_not_scanned': 0, 'findings': 0,
-               'evidence': 0, 'resolved': 0, 'not_in_batch': 0}
+               'evidence': 0, 'resolved': 0, 'not_in_batch': 0, 'partial': bool(partial)}
     names = []
     for address, host in run.hosts.items():
         if not any(_same_address(address, s) for s in scanned):
@@ -839,7 +1003,7 @@ def _apply_import(run, items, scanned, no_cve, unusable):
             summary['hosts_not_scanned'] += 1
             continue
         found = [i for i in items if i['cves'] and _same_address(i['address'], address)]
-        record_observations(run.project_id, sub.target_domain_id, host, found, scanned_now=True)
+        record_observations(run.project_id, sub.target_domain_id, host, found, scanned_now=not partial)
         findings, evidence, resolved = apply_observations(sub)
         summary['hosts_scanned'] += 1
         summary['findings'] += findings
@@ -864,7 +1028,8 @@ def dispatch_to_sentinel(link, batch):
     from cveFeed.models import OpenvasRun
     hosts = {ip: host for host, ip, _domain in batch}
     task = SentinelTask.objects.create(project=link.project, kind='openvas', ips=sorted(hosts),
-                                       target={'hosts': hosts, 'excluded_families': list(EXCLUDED_FAMILIES), 'max_hours': max_hours()})
+                                       target={'hosts': hosts, 'excluded_families': list(EXCLUDED_FAMILIES), 'max_hours': budget_hours(len(hosts)),
+                                    'preferences': task_preferences()})
     try:
         with transaction.atomic():  # the same "one task at a time" lock start() uses for a local run
             run = OpenvasRun.objects.create(project=link.project, status='running', sentinel_task=task, hosts=hosts)
@@ -902,7 +1067,7 @@ def poll_sentinel(run):
                              project=run.project_id, status='running')
         try:
             summary, names = _apply_import(run, result.get('results') or [], set(result.get('scanned_addresses') or []),
-                                           result.get('without_cve', 0), result.get('unusable', 0))
+                                           result.get('without_cve', 0), result.get('unusable', 0), partial=bool(result.get('partial')))
         except Exception as exc:  # noqa: BLE001
             finish(run, 'failed', f'the Sentinel-reported results could not be imported ({type(exc).__name__})')
             ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
@@ -911,8 +1076,8 @@ def poll_sentinel(run):
         gone = [h for h in run.hosts.values() if h not in names]
         ledger.record(SERVICE, names, run.project_id)
         ledger.record(FAILED_SERVICE, gone, run.project_id)
-        finish(run, 'done', summary=summary)
-        activity.settle(entry, 'done', message=(f'OpenVAS (Sentinel): {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
+        finish(run, 'done', error=('stopped at its time budget; the results found so far were kept' if summary['partial'] else ''), summary=summary)
+        activity.settle(entry, 'done', message=(f'OpenVAS (Sentinel){" stopped at its time budget" if summary["partial"] else ""}: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
                                                 f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')))
         return {'run': run.pk, 'status': 'done', **summary}
     # failed or expired: the Sentinel never finished it. A later tick retries, locally or on a Sentinel. The hosts are marked failed (asked again in
@@ -980,6 +1145,29 @@ def _stop(gmp, run, status, why):
     return {'run': run.pk, 'status': status, 'error': why}
 
 
+def _out_of_budget(run, gmp):
+    """The task ran past its time budget: stop it and keep what it found. With no result at all it failed like before (the hosts are asked
+    again in three days); with some, they are imported as a partial scan (nothing earlier is resolved by it) and the hosts count as scanned."""
+    from cveFeed import activity, ledger
+    hours = budget_hours(len(run.hosts))
+    try:
+        items, no_cve, unusable = fetch_results(gmp, run.task_id)
+    except Exception:  # noqa: BLE001 - gvmd would not say: nothing to keep
+        items, no_cve, unusable = [], 0, 0
+    stopped = _stop(gmp, run, 'failed', f'the task ran for more than {hours} hours')
+    if not items:
+        ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
+        return stopped
+    summary, names = _apply_import(run, items, {i['address'] for i in items}, no_cve, unusable, partial=True)
+    gone = [h for h in run.hosts.values() if h not in names]
+    ledger.record(SERVICE, names, run.project_id)
+    ledger.record(FAILED_SERVICE, gone, run.project_id)
+    finish(run, 'done', error=f'stopped at the {hours} hour budget; the results found so far were kept', summary=summary)
+    activity.log('run_check', f'OpenVAS: stopped at the {hours} hour budget; kept {summary["findings"]} finding(s) of {summary["hosts_scanned"]} host(s)',
+                 project=run.project_id)
+    return {'run': run.pk, 'status': 'done', **summary}
+
+
 def poll(run, gmp, now=None):
     """One step of the running task: update it, stop it when scanning is paused, memory is critical or it ran too long, import it when Done."""
     from cveFeed import activity, ledger
@@ -1004,9 +1192,8 @@ def poll(run, gmp, now=None):
             return _stop(gmp, run, 'stopped', 'scanning is paused: the hosts stay due')
         if memory_critical():
             return _stop(gmp, run, 'stopped', 'memory ran critically low: the hosts stay due')
-        if now - run.started_at > timedelta(hours=max_hours()):
-            ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
-            return _stop(gmp, run, 'failed', f'the task ran for more than {max_hours()} hours')
+        if now - run.started_at > timedelta(hours=budget_hours(len(run.hosts))):
+            return _out_of_budget(run, gmp)
         return {'run': run.pk, 'status': 'running', 'gvm_status': word, 'progress': run.progress}
     if word == 'Done':
         entry = activity.log('run_check', f'OpenVAS: importing the results of {len(run.hosts)} host(s)', project=run.project_id, status='running')

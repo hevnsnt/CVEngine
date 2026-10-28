@@ -309,10 +309,26 @@ class ApplicabilityTests(SimpleTestCase):
 		host = facts()
 		self.assertEqual(state_of(host, 'openvas')[0], 'not_applicable')
 		ev = cc.Evidence(NOW)
-		ev.openvas = {1: {'other.example.test'}}
+		ev.openvas = {1: set()}  # opted in, but the host is not hot
 		self.assertEqual(state_of(host, 'openvas', ev)[0], 'not_applicable')
-		ev.openvas = {1: {host.name}}
+		self.assertIn('not Fire or Smoke', state_of(host, 'openvas', ev)[1]['detail'])
+		for heat in ('clean', 'ice', 'unscanned'):
+			ev.openvas_heat = {(1, host.name): heat}
+			self.assertEqual(state_of(host, 'openvas', ev)[0], 'not_applicable', heat)
+		for heat in ('fire', 'smoke'):
+			ev.openvas_heat = {(1, host.name): heat}
+			self.assertEqual(state_of(host, 'openvas', ev)[0], 'due', heat)
+		ev.openvas_heat = {(1, host.name): 'clean'}
+		ev.openvas_forced = {1: {host.name}}  # forced whatever its heat
 		self.assertEqual(state_of(host, 'openvas', ev)[0], 'due')
+
+	def test_openvas_never_applies_to_a_cdn_or_shared_platform_even_when_hot_or_forced(self):
+		host = facts()
+		host.shared_platform = True
+		ev = cc.Evidence(NOW)
+		ev.openvas, ev.openvas_forced, ev.openvas_heat = {1: set()}, {1: {host.name}}, {(1, host.name): 'fire'}
+		self.assertEqual(state_of(host, 'openvas', ev)[0], 'not_applicable')
+		self.assertIn('shared', state_of(host, 'openvas', ev)[1]['detail'])
 
 	def test_excluded_and_archived_hosts_have_no_applicable_check(self):
 		host = facts(ports=[port(443, 'https')], web_bases=['https://www.example.test'], http_up=True)

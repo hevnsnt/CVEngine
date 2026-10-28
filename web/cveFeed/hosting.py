@@ -33,6 +33,10 @@ PLATFORM_SUFFIXES = (
     ("windows.net", "Microsoft", "saas"), ("sharepoint.com", "Microsoft SharePoint", "saas"), ("azure-api.net", "Azure API Management", "saas"),
     ("googlehosted.com", "Google Workspace", "saas"), ("ghs.google.com", "Google Workspace", "saas"),
     ("mimecast.com", "Mimecast", "saas"), ("pphosted.com", "Proofpoint", "saas"),
+    ("atlassian.net", "Atlassian Cloud", "saas"), ("jira.com", "Atlassian Cloud", "saas"), ("bitbucket.io", "Bitbucket", "paas"),
+    ("gitlab.io", "GitLab Pages", "paas"), ("my.salesforce.com", "Salesforce", "saas"), ("force.com", "Salesforce", "saas"),
+    ("okta.com", "Okta", "saas"), ("oktapreview.com", "Okta", "saas"), ("freshdesk.com", "Freshdesk", "saas"),
+    ("service-now.com", "ServiceNow", "saas"), ("slack.com", "Slack", "saas"), ("notion.site", "Notion", "paas"),
 )
 # Server header (lowercase, first word) -> (provider, kind)
 SERVER_PLATFORMS = {

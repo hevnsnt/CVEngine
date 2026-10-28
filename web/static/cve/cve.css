@@ -1652,11 +1652,29 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .sl-host,.sl-tail{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
 .sl-when{font:500 11px var(--mono);color:var(--muted);white-space:nowrap}
 .sl-foot{margin:0;font:500 11.5px var(--mono);color:var(--muted)}
+.sl-org{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+.sl-org:first-of-type{margin-top:4px}
+.sl-org>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.sl-org>summary::-webkit-details-marker{display:none}
+.sl-org>summary::before{content:"";width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s}
+.sl-org[open]>summary::before{transform:rotate(45deg)}
+.sl-org-head h3{margin:0;font:700 15px/1.2 var(--font);letter-spacing:-.01em}
+.sl-org>.note{margin:-4px 0 10px}
+.sl-nets{margin-bottom:14px;overflow-x:auto;width:0;min-width:100%} /* scrolls inside itself; never widens the column on a phone */
+.sl-nets h4{margin:0 0 6px;font:600 10.5px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.sl-net-table{width:100%;border-collapse:collapse;font-size:13px}
+.sl-net-table th{text-align:left;font:600 10.5px var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.sl-net-table td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.sl-net-table td>.note,.sl-net-table td>.msg{display:block;margin:2px 0 0;font-size:12px}
+.sl-net-table td.num{font-variant-numeric:tabular-nums}
+.sl-net-table tr.err td:first-child{box-shadow:inset 3px 0 0 var(--fire)}
+.sl-state .badge{vertical-align:1px;margin-left:4px}
+.sl-net-table td.mono{white-space:nowrap}
 @media (max-width:640px){.sl-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.sl-r{grid-template-columns:auto auto minmax(0,1fr) auto}.sl-when{display:none}}
 
 /* ---- live dashboard: the internal networks group, shown only when a project declared one ---- */
-.internal{display:flex;flex-direction:column;gap:10px;padding:12px 18px 14px;border-top:1px solid var(--line);background:var(--surface)}
-.internal[hidden]{display:none}
+section.internal{display:flex;flex-direction:column;gap:10px;padding:12px 18px 14px;border-top:1px solid var(--line);background:var(--surface)}
+section.internal[hidden]{display:none}
 .in-nums{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .in-nums a{display:flex;flex-direction:column;gap:1px;padding:8px 10px;border:1px dashed var(--line-2);border-radius:var(--r);text-decoration:none;color:inherit;min-width:0}
 @media (hover:hover) and (pointer:fine){.in-nums a:hover{border-style:solid;border-color:var(--ink)}}

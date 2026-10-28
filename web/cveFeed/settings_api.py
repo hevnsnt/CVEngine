@@ -630,6 +630,7 @@ ROUTES = [
     ('GET', r'openvas', lambda r, **k: openvas_admin.openvas_get(r)), ('PUT', r'openvas', lambda r, **k: openvas_admin.openvas_put(r)),
     ('POST', r'openvas/test', lambda r, **k: openvas_admin.openvas_test(r)),
     ('PUT', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_put(r, project_id)),
+    ('GET', r'openvas/projects/(?P<project_id>\d+)/queue', lambda r, project_id, **k: openvas_admin.project_queue(r, project_id)),
     ('DELETE', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_delete(r, project_id)),
     ('GET', r'ip_allowlist', lambda r, **k: ip_allowlist_get(r)), ('PUT', r'ip_allowlist', lambda r, **k: ip_allowlist_put(r)),
     ('POST', r'ip_allowlist/entries', lambda r, **k: ip_allowlist_entry_create(r)),

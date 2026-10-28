@@ -32,11 +32,46 @@ def link_dict(link):
     from cveFeed.models import OpenvasRun
     last = OpenvasRun.objects.filter(project=link.project).order_by('-id').first()
     return {
-        'project': {'id': link.project_id, 'name': link.project.name, 'slug': link.project.slug}, 'enabled': link.enabled, 'hosts': list(link.hosts or []),
+        'project': {'id': link.project_id, 'name': link.project.name, 'slug': link.project.slug}, 'enabled': link.enabled, 'hosts': list(link.hosts or []), 'forced_hosts': list(link.forced_hosts or []),
         'last_run': ({'status': last.status, 'gvm_status': last.gvm_status, 'progress': last.progress, 'error': last.error, 'summary': last.summary,
                       'started_at': last.started_at.isoformat(), 'finished_at': last.finished_at.isoformat() if last.finished_at else None}
                      if last else None),
     }
+
+
+def sentinel_readiness():
+    """Each Sentinel that can run OpenVAS, or that should be able to: ``{id, name, live, internal, declares, ready, reason}``. ``declares`` is the
+    ``openvas`` capability (a Sentinel declares it only while its own GVM stack can scan); ``reason`` is what its GVM stack says when it is not
+    ready (still syncing its feeds, no scan configuration, no login), or why this Sentinel does not scan (a light profile, a disabled kind)."""
+    from agentapi.models import Agent
+    from agentapi.sentinel_broker import INTERNAL_CAPABILITY, SentinelEff
+    from django.utils import timezone
+    now = timezone.now()
+    out = []
+    for agent in Agent.objects.filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:100]:
+        eff = SentinelEff(agent, now)
+        reported = (agent.info or {}).get('openvas') or {}
+        declares = 'openvas' in (eff.caps if not eff.problem else agent.capabilities or [])
+        if eff.problem:
+            reason = eff.problem
+        elif agent.status != 'active':
+            reason = f'the Sentinel is {agent.status}'
+        elif declares:
+            reason = ''
+        else:
+            reason = reported.get('reason') or ('its profile is light, or OpenVAS is turned off on it' if not reported else 'not ready')
+        out.append({'id': agent.pk, 'name': agent.name, 'live': bool(eff.live), 'internal': INTERNAL_CAPABILITY in (agent.capabilities or []),
+                    'declares': declares, 'ready': bool(eff.live and declares and agent.status == 'active'), 'reason': clean_text(reason, 200)})
+    return out
+
+
+def latest_run():
+    """The newest OpenVAS run of any project, for the Settings page."""
+    from cveFeed.models import OpenvasRun
+    last = OpenvasRun.objects.order_by('-id').first()
+    return ({'status': last.status, 'progress': last.progress, 'error': last.error, 'summary': last.summary, 'hosts': sorted(last.hosts.values()),
+             'via': 'sentinel' if last.sentinel_task_id else 'local', 'started_at': last.started_at.isoformat(),
+             'finished_at': last.finished_at.isoformat() if last.finished_at else None} if last else None)
 
 
 def openvas_get(request):
@@ -49,7 +84,9 @@ def openvas_get(request):
     return {
         'enabled': row.enabled, 'sentinel_only': row.sentinel_only, 'username': row.gmp_username, 'password_set': bool(row.gmp_password),
         'transport': openvas_scan.transport(),
-        'state': row.state or {}, 'running': OpenvasRun.objects.filter(status='running').exists(),
+        'state': {} if row.sentinel_only else (row.state or {}),  # Sentinel-only never opens a local GMP session: a stale local-engine error says nothing
+        'sentinels': sentinel_readiness(), 'last_run': latest_run(),
+        'running': OpenvasRun.objects.filter(status='running').exists(),
         'floor': {'min_available_mb': openvas_scan.min_available_mb(), 'max_hosts_per_task': openvas_scan.max_hosts(), 'max_hours': openvas_scan.max_hours(),
                   'confirmed_qod': openvas_scan.CONFIRMED_QOD, 'excluded_families': list(openvas_scan.EXCLUDED_FAMILIES)},
         'links': [link_dict(link) for link in links],
@@ -107,17 +144,17 @@ def _project(project_id):
     return project
 
 
-def _hosts(data, project, current):
+def _hosts(data, project, current, key='hosts'):
     """The cleaned host list: ``current`` when the key is absent. Each entry must be a host the project already has (a name or address the
     scans found or a person added: OpenVAS never scans something the project does not own) and must pass the same gate as every other
     scanner (not excluded, not archived, not resolving to a prohibited range)."""
-    if 'hosts' not in data:
+    if key not in data:
         return current
-    value = data['hosts']
+    value = data[key]
     if isinstance(value, str):
         value = re.split(r'[\s,]+', value)
     if not isinstance(value, list):
-        raise _error(400, 'hosts must be a list')
+        raise _error(400, f'{key} must be a list')
     out = []
     for item in value:
         item = clean_text(item, 253).lower()
@@ -153,12 +190,25 @@ def project_put(request, project_id):
     project = _project(project_id)
     link = OpenvasProject.objects.filter(project=project).first() or OpenvasProject(project=project)
     link.hosts = _hosts(data, project, link.hosts or [])
+    link.forced_hosts = [h for h in _hosts(data, project, link.forced_hosts or [], 'forced_hosts')]
     if 'enabled' in data:
         link.enabled = bool(data['enabled'])
     link.updated_by = request.user
     link.save()
-    audit(request.user, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled, hosts=len(link.hosts))
+    audit(request.user, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled, hosts=len(link.hosts),
+          forced=len(link.forced_hosts))
     return link_dict(link)
+
+
+def project_queue(request, project_id):
+    """What the sweep would do with each candidate host of one project right now, and why (``openvas_scan.explain``): Fire or Smoke hosts and the
+    listed ones, in scan order, then the ones that are not due with the reason."""
+    from cveFeed import openvas_scan
+    from cveFeed.models import OpenvasProject
+    project = _project(project_id)
+    link = OpenvasProject.objects.filter(project=project).first() or OpenvasProject(project=project)
+    return {'project': project.slug, 'enabled': link.enabled, 'hosts_per_task': openvas_scan.max_hosts(), 'budget_hours_per_host': openvas_scan.max_hours(),
+            'candidates': openvas_scan.explain(link)[:200]}
 
 
 def project_delete(request, project_id):

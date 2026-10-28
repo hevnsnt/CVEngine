@@ -200,7 +200,9 @@ class Evidence:
         self.stages = {}       # (scan id, stage name) -> [(status, time)]
         self.archived = set()  # (project id, host)
         self.blocked = set()   # project ids the bug bounty gate keeps out of the background sweeps
-        self.openvas = {}      # project id -> hosts opted in to OpenVAS (only while the add-on is on)
+        self.openvas = {}      # project id -> hosts someone listed for OpenVAS, for each project opted in (only while the add-on is on)
+        self.openvas_forced = {}  # project id -> the listed hosts scanned whatever their heat
+        self.openvas_heat = {}    # (project id, host) -> fire | smoke | ice | clean | unscanned, for the page's hosts of an opted-in project
         self.credentials = {}  # project id -> stored sign-ins
         self.facts = {}        # Subdomain id -> HostFacts built while loading
 
@@ -340,8 +342,12 @@ def load(entries, now=None):
         project_id__in=pids, host__in=names, archived_at__isnull=False).values_list('project_id', 'host')}
     ev.blocked = set(bounty_blocked_projects()) & set(pids)
     if OpenvasSettings.objects.filter(enabled=True).exists():
-        for project_id, hosts in OpenvasProject.objects.filter(project_id__in=pids, enabled=True).values_list('project_id', 'hosts'):
+        from cveFeed import openvas_scan
+        for project_id, hosts, forced in OpenvasProject.objects.filter(project_id__in=pids, enabled=True).values_list('project_id', 'hosts', 'forced_hosts'):
             ev.openvas[project_id] = {str(x).strip().lower() for x in (hosts or [])}
+            ev.openvas_forced[project_id] = {str(x).strip().lower() for x in (forced or [])}
+            on_page = {h.name for h in ev.facts.values() if h.project_id == project_id}
+            ev.openvas_heat.update({(project_id, name): heat for name, (heat, _n) in openvas_scan.host_heat(project_id, on_page).items()})
     for cred in AuthCredential.objects.filter(project_id__in=pids).select_related('domain').defer('secret'):
         ev.credentials.setdefault(cred.project_id, []).append(cred)
     if ev.credentials:
@@ -630,11 +636,15 @@ def plan_certificates(h, ev):
 
 
 def plan_openvas(h, ev):
-    hosts = ev.openvas.get(h.project_id)
-    if hosts is None:
+    """OpenVAS is slow (hours per host), so it is spent only on hosts on fire or smoke, unless someone forced the host, and never on a CDN or a
+    platform other customers share (``openvas_scan.assess`` decides the same way, and says why a host that is ready is not chosen yet)."""
+    if ev.openvas.get(h.project_id) is None:
         return 'the OpenVAS add-on is off, or this project did not opt in'
-    if h.name not in hosts:
-        return 'the host is not on the project\'s OpenVAS list'
+    heat = ev.openvas_heat.get((h.project_id, h.name))
+    if heat not in ('fire', 'smoke') and h.name not in ev.openvas_forced.get(h.project_id, ()):
+        return f'not Fire or Smoke ({heat or "unknown"}): OpenVAS is only spent on hosts on fire or smoke'
+    if h.shared_platform or (h.addresses and all(a.is_cdn for a in h.addresses.values())):
+        return 'a CDN or a platform shared with other customers: not the project\'s to test'
     return _one(h, ev, ('openvas', 'openvas-failed'))
 
 

@@ -105,39 +105,54 @@ def _sentinel_state(project):
             'last_seen': seen.isoformat() if seen else None}
 
 
+def declared_networks():
+    """Every internal network a project the caller can see declared, oldest project first: its organization and project, the
+    addresses in it, the last internal scan that finished, the error of the latest one when it failed, the last live-host sweep of the range, and the state of the Sentinels
+    inside it. The ``networks`` of ``summary`` and the organization groups of the Sentinels page."""
+    from cveFeed.models import InternalRange
+    from dashboard.models import Project
+    from reNgine.definitions import FAILED_TASK, SUCCESS_TASK
+    from startScan.models import ScanHistory
+    projects = {p.pk: p for p in Project.objects.filter(pk__in=InternalRange.objects.values('project_id')).select_related('org')}
+    if not projects:
+        return []
+    tbl = table()
+    out, sentinels = [], {}
+    for rng in InternalRange.objects.filter(project_id__in=projects).order_by('project_id', 'cidr'):
+        project = projects[rng.project_id]
+        entry = tbl.get(rng.project_id, {'names': {}})
+        names = sorted(n for n, cidr in entry['names'].items() if cidr == str(ipaddress.ip_network(rng.cidr, strict=False)))
+        scans = ScanHistory.objects.filter(domain__project_id=rng.project_id, domain__name__in=names, tasks__contains=['internal_pipeline'])
+        last = scans.filter(scan_status=SUCCESS_TASK).order_by('-start_scan_date').values_list('start_scan_date', flat=True).first() if names else None
+        latest = scans.filter(scan_status__in=(SUCCESS_TASK, FAILED_TASK)).order_by('-start_scan_date').values_list('scan_status', 'error_message').first() if names else None
+        if rng.project_id not in sentinels:
+            sentinels[rng.project_id] = _sentinel_state(project)
+        out.append({'org': project.org.slug if project.org_id else None, 'project': project.slug, 'cidr': rng.cidr, 'description': rng.description,
+                    'hosts': len(names), 'last_scan_at': last.isoformat() if last else None,
+                    'last_error': (latest[1] or 'the last internal scan failed') if latest and latest[0] == FAILED_TASK else '',
+                    'sentinel': sentinels[rng.project_id],
+                    'last_discovery_at': rng.last_discovery_at.isoformat() if rng.last_discovery_at else None,
+                    'last_discovery_hosts': rng.last_discovery_hosts, 'last_discovery_error': rng.last_discovery_error})
+    return out
+
+
 def summary():
     """The ``internal`` object of ``/cve/api/stats``: the caller's declared internal networks (each with its host count, last internal scan
     and the state of the Sentinels inside it) and the internal share of the headline numbers. ``has`` is false when no visible project
     declared a network, so the page can leave the group out. The headline totals elsewhere in the payload still include internal hosts;
     these are the subset."""
     from cveFeed import counts
-    from cveFeed.models import InternalRange
-    from dashboard.models import Project
-    from startScan.models import ScanHistory, Vulnerability
-    projects = {p.pk: p for p in Project.objects.filter(pk__in=InternalRange.objects.values('project_id')).select_related('org')}
-    if not projects:
+    from startScan.models import Vulnerability
+    networks = declared_networks()
+    if not networks:
         return {'has': False, 'networks': [], 'hosts': 0, 'hosts_live': 0, 'findings': 0, 'matches': 0, 'last_scan_at': None, 'sentinels_online': 0}
-    tbl = table()
-    networks, sentinels, last_overall = [], {}, None
-    for rng in InternalRange.objects.filter(project_id__in=projects).order_by('project_id', 'cidr'):
-        project = projects[rng.project_id]
-        entry = tbl.get(rng.project_id, {'names': {}})
-        names = sorted(n for n, cidr in entry['names'].items() if cidr == str(ipaddress.ip_network(rng.cidr, strict=False)))
-        last = (ScanHistory.objects.filter(domain__project_id=rng.project_id, domain__name__in=names, tasks__contains=['internal_pipeline'], scan_status=2)
-                .order_by('-start_scan_date').values_list('start_scan_date', flat=True).first()) if names else None
-        if rng.project_id not in sentinels:
-            sentinels[rng.project_id] = _sentinel_state(project)
-        if last and (last_overall is None or last > last_overall):
-            last_overall = last
-        networks.append({'project': project.slug, 'cidr': rng.cidr, 'description': rng.description, 'hosts': len(names),
-                         'last_scan_at': last.isoformat() if last else None, 'sentinel': sentinels[rng.project_id],
-                         'last_discovery_at': rng.last_discovery_at.isoformat() if rng.last_discovery_at else None,
-                         'last_discovery_hosts': rng.last_discovery_hosts, 'last_discovery_error': rng.last_discovery_error})
+    last_overall = max((n['last_scan_at'] for n in networks if n['last_scan_at']), default=None)  # all UTC isoformat, so the strings sort as times
+    sentinels = {n['project']: n['sentinel'] for n in networks}
     reps = counts.host_reps().filter(internal_q())
     return {'has': True, 'networks': networks, 'hosts': reps.count(), 'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
             'findings': counts.actionable_findings(Vulnerability.objects.filter(internal_q('subdomain__'))).count(),
             'matches': counts.exposed_matches().filter(internal_q('subdomain__')).count(),
-            'last_scan_at': last_overall.isoformat() if last_overall else None,
+            'last_scan_at': last_overall,
             'sentinels_online': sum(1 for s in sentinels.values() if s['state'] == 'online')}
 
 

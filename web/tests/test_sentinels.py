@@ -788,6 +788,40 @@ class LiveOverviewTests(SentinelBase):
         status, out = call(self.t['alice'], 'GET', '/api/v1/sentinels/live')
         self.assertEqual((status, out['results']), (200, []))
 
+    def test_each_sentinel_says_which_organizations_it_covers(self):
+        tokens = {n: create_token(self.root, n)[1] for n in ('everywhere', 'org-one', 'two-projects')}  # one Sentinel per token
+        register_sentinel(tokens['everywhere'], name='everywhere', scope={'instance': True})
+        register_sentinel(tokens['org-one'], name='org-one', scope={'orgs': ['one']})
+        register_sentinel(tokens['two-projects'], name='two-projects', scope={'projects': ['sen-a', 'sen-b']})
+        status, out = call(self.t['root'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual(status, 200)
+        cover = {r['name']: (r['scope_level'], r['orgs']) for r in out['results']}
+        self.assertEqual(cover, {'everywhere': ('instance', []), 'org-one': ('org', ['one']), 'two-projects': ('project', ['one', 'two'])})
+        self.assertLessEqual({('one', 'One'), ('two', 'Two')}, {(o['slug'], o['name']) for o in out['orgs']})  # an App Admin sees every org
+
+    def test_organizations_outside_the_callers_tenancy_are_not_named(self):
+        register_sentinel(self.t['dana'], name='mine', scope={'orgs': ['one']})
+        status, out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual([o['slug'] for o in out['orgs']], ['one'])
+        self.assertNotIn('Two', str(out['orgs']))
+
+    def test_an_organization_lists_its_internal_networks_with_the_last_discovery_and_its_error(self):
+        from cveFeed import internal_view
+        from cveFeed.models import InternalRange
+        InternalRange.objects.create(project=self.pa, cidr='10.20.0.0/24', description='office', last_discovery_at=timezone.now(),
+                                     last_discovery_hosts=3, last_discovery_error='')
+        inside = Domain.objects.create(name='10.20.0.9', project=self.pa, insert_date=timezone.now())
+        ScanHistory.objects.create(domain=inside, scan_type=self.scan.scan_type, start_scan_date=timezone.now(), scan_status=0,
+                                   results_dir='/tmp', tasks=['internal_pipeline'], error_message='no internal Sentinel answered')
+        internal_view.invalidate()
+        status, out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')
+        nets = {o['slug']: o['networks'] for o in out['orgs']}['one']
+        self.assertEqual([(n['cidr'], n['project'], n['hosts'], n['last_scan_at'], n['last_error']) for n in nets],
+                         [('10.20.0.0/24', 'sen-a', 1, None, 'no internal Sentinel answered')])
+        self.assertEqual(nets[0]['sentinel']['state'], 'none')
+        self.assertEqual((nets[0]['last_discovery_hosts'], nets[0]['last_discovery_error']), (3, ''))
+        self.assertIsNotNone(nets[0]['last_discovery_at'])
+
     def test_a_pending_sentinel_says_so_instead_of_idle(self):
         register_sentinel(self.t['alice'], name='waiting', approve=False)
         status, out = call(self.t['alice'], 'GET', '/api/v1/sentinels/live')
