@@ -1945,6 +1945,7 @@ class TriageApiTests(TestCase):
 		self.assertEqual(status, 200)
 		self.assertEqual((d['kind'], d['host'], d['target'], d['severity']), ('match', 'www.a.example', 'a.example', 'critical'))
 		self.assertEqual(d['why_it_matters'], 'attackers get a foothold')
+		self.assertEqual(d['confidence'], self.match.confidence)
 		self.assertEqual(d['ai']['classification'], 'needs_validation')
 		self.assertTrue(d['ai']['overridden'])
 		self.assertEqual((d['ai']['model_classification'], d['ai']['model_reason']), ('likely_false_positive', 'because'))  # the model's own words
