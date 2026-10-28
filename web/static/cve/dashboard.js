@@ -186,10 +186,6 @@ async function pollStats() {
     paintOldest(s);
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
     $("m-exposed").style.width = `${pct}%`;
-    const top = Math.max(s.tiers.fire, s.tiers.smoke, s.tiers.ice, 1);
-    ["fire", "smoke", "ice"].forEach((t) => {
-      $(`b-${t}`).style.width = `${Math.round((100 * s.tiers[t]) / top)}%`;
-    });
   } catch (_) {
     /* keep last values */
   }
@@ -247,7 +243,7 @@ const MAP_MIN_SCORE = 30; // hosts that score lower are left off the map (they a
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
-  { name: "rich", size: "xl", w: 96, h: 104 },
+  { name: "rich", size: "xl", w: 132, h: 104 },
   { name: "card", size: "xl", w: 92, h: 64 },
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
@@ -262,7 +258,8 @@ function fitTier(W, H, n, t) {
     if (th < t.h) continue;
     const aspect = tw / th;
     const shape = aspect >= 0.9 && aspect <= 2 ? 1 : 0.6; // prefer tiles that are not slivers
-    const score = Math.min(tw, 210) * Math.min(th, 150) * (n / (c * r)) * shape;
+    // width counts for more than height: a wider tile shows the whole host name and CVE instead of cutting it off
+    const score = Math.min(tw, 200) ** 1.5 * Math.min(th, 150) * (n / (c * r)) * shape;
     if (!best || score > best.score) best = { cols: c, rows: r, tw, th, score };
   }
   return best;
