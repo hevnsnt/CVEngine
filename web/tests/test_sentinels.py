@@ -142,7 +142,7 @@ class EnrollmentTests(SentinelBase):
         self.assertIn('enrollment_token', out)  # the plain fields are still there: this is presentation, not a new contract
         decoded = sentinels.decode_enrollment_blob(out['blob'])
         self.assertEqual(decoded, {'enrollment_token': out['enrollment_token'], 'server_url': out['server_url'],
-                                   'expires_at': out['expires_at'], 'project': out['project']})
+                                   'expires_at': out['expires_at'], 'scope': 'project', 'project': out['project']})
         status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap',
                             {'enrollment_token': decoded['enrollment_token'], 'name': 'blob-sentinel'})
         self.assertEqual(status, 201)
@@ -159,6 +159,89 @@ class EnrollmentTests(SentinelBase):
         blob = sentinels.encode_enrollment_blob(payload)
         self.assertEqual(sentinels.decode_enrollment_blob(blob), payload)
         base64.b64decode(blob, validate=True)  # standard base64, no custom framing
+
+
+class OrgAndInstanceEnrollmentTests(SentinelBase):
+    """Enrollment scoped wider than one project: an organization (every project of it, present and future) or,
+    App Admin only, the whole instance (every organization and project, present and future)."""
+
+    def test_org_admin_can_generate_org_enrollment_and_bootstrap_resolves_to_org_scope(self):
+        status, out = call(self.t['dana'], 'POST', '/api/v1/orgs/one/sentinels/enroll')
+        self.assertEqual(status, 201)
+        self.assertEqual(out['scope'], 'org')
+        self.assertEqual(out['org'], 'one')
+        self.assertNotIn('project', out)
+        status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'org-sentinel'})
+        self.assertEqual(status, 201)
+        agent = Agent.objects.get(pk=boot['id'])
+        self.assertEqual(agent.scope['orgs'], ['one'])
+        self.assertEqual(agent.scope['projects'], [])
+        self.assertFalse(agent.scope['instance'])
+        # A project created in org1 after enrollment is covered too: scope.orgs resolves dynamically at claim time.
+        from agentapi import agent_scope
+        Project.objects.create(name='New', slug='sen-new', insert_date=timezone.now(), org=self.org1)
+        self.assertIn('sen-new', agent_scope.project_slugs_in_scope(agent.token.user, agent.scope))
+
+    def test_another_orgs_admin_cannot_generate_org_enrollment(self):
+        bob = User.objects.create_user('s_bob3', password='x')
+        OrgMembership.objects.create(user=bob, org=self.org2, role='admin')
+        token = create_token(bob, 'bob3')[1]
+        status, _ = call(token, 'POST', '/api/v1/orgs/one/sentinels/enroll')
+        self.assertEqual(status, 403)
+
+    def test_plain_project_member_cannot_generate_org_enrollment(self):
+        status, _ = call(self.t['alice'], 'POST', '/api/v1/orgs/one/sentinels/enroll')
+        self.assertEqual(status, 403)
+
+    def test_unknown_org_is_404(self):
+        status, _ = call(self.t['dana'], 'POST', '/api/v1/orgs/does-not-exist/sentinels/enroll')
+        self.assertEqual(status, 404)
+
+    def test_superuser_can_generate_instance_enrollment_and_bootstrap_resolves_to_every_project(self):
+        status, out = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll')
+        self.assertEqual(status, 201)
+        self.assertEqual(out['scope'], 'instance')
+        self.assertNotIn('project', out)
+        self.assertNotIn('org', out)
+        status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'instance-sentinel'})
+        self.assertEqual(status, 201)
+        agent = Agent.objects.get(pk=boot['id'])
+        self.assertTrue(agent.scope['instance'])
+        from agentapi import agent_scope
+        self.assertEqual(agent_scope.project_slugs_in_scope(agent.token.user, agent.scope), {'sen-a', 'sen-b'})
+
+    def test_org_admin_cannot_generate_instance_enrollment(self):
+        status, _ = call(self.t['dana'], 'POST', '/api/v1/sentinels/enroll')
+        self.assertEqual(status, 403)
+
+    def test_org_and_instance_blob_formats_round_trip(self):
+        status, out = call(self.t['dana'], 'POST', '/api/v1/orgs/one/sentinels/enroll?format=blob')
+        self.assertEqual(status, 201)
+        decoded = sentinels.decode_enrollment_blob(out['blob'])
+        self.assertEqual(decoded['scope'], 'org')
+        self.assertEqual(decoded['org'], 'one')
+        status, out = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll?format=blob')
+        self.assertEqual(status, 201)
+        decoded = sentinels.decode_enrollment_blob(out['blob'])
+        self.assertEqual(decoded['scope'], 'instance')
+        self.assertNotIn('org', decoded)
+        self.assertNotIn('project', decoded)
+
+    def test_mcp_tool_rejects_both_project_and_org_given(self):
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a', 'org': 'one'})
+        self.assertTrue(err, out)
+
+    def test_mcp_tool_generates_org_and_instance_enrollments(self):
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'org': 'one'})
+        self.assertFalse(err, out)
+        self.assertEqual(out['scope'], 'org')
+        self.assertIn('blob', out)
+        err, out = tool_call(self.t['root'], 'generate_sentinel_enrollment', {})
+        self.assertFalse(err, out)
+        self.assertEqual(out['scope'], 'instance')
+        self.assertIn('blob', out)
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {})
+        self.assertTrue(err, out)  # dana is an org admin, not a superuser
 
 
 class TenancyTests(SentinelBase):

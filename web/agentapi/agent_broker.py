@@ -137,7 +137,9 @@ def _parse_registration(body, creating):
 
 
 def _authorise(user, scope):
-    bad_orgs, bad_projects = scope_lib.authorise(user, scope)
+    bad_orgs, bad_projects, bad_instance = scope_lib.authorise(user, scope)
+    if bad_instance:
+        raise ApiError(403, 'scope.instance (every organization and project on this server) needs the App Admin role')
     if bad_orgs or bad_projects:
         parts = [f'{label}: {", ".join(names[:10])}' for label, names in (('organizations', bad_orgs), ('projects', bad_projects)) if names]
         raise ApiError(403, f'you cannot claim responsibility for {"; ".join(parts)} (not found, or your account has no access)')
