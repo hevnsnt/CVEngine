@@ -37,6 +37,14 @@ def discovery_timeout():
 
 QUEUED, RUNNING, FAILED, SUCCESS, ABORTED = -1, 1, 0, 2, 3
 
+# The ScanActivity ``name`` values that mean "nuclei ran against this host's scan": the current light and AI-targeted
+# passes (see ``run_light_nuclei``/``run_targeted_nuclei`` below), plus the retired single-stage name kept so an old
+# scan's history still counts. Every "has this host been nuclei'd at all" query across the app (heat, the graph
+# overview, the host list page, the live graph) reads this one tuple, so a stage rename never again drops silently out
+# of only some of them - which is exactly how it drifted the first time (the light pass's own stage name was missing
+# from every one of these for a release, undercounting "unscanned" hosts that had, in fact, had a light pass run).
+NUCLEI_SCAN_ACTIVITY_NAMES = ('nuclei_scan', 'nuclei_light_scan', 'nuclei_targeted_scan')
+
 
 RECOMMENDED_ENGINE = 'CVEngine Recommended'
 
