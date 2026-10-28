@@ -766,6 +766,7 @@ const hostOverview = (h) => {
   if (http.powered_by) rows.push({ label: "Powered by", value: http.powered_by });
   if (http.title) rows.push({ label: "Page title", value: http.title });
   if (http.url) rows.push({ label: "Front page", value: `${http.url}${http.status ? ` (HTTP ${http.status})` : ""}` });
+  if (h.screenshot_note) rows.push({ label: "Screenshot", value: h.screenshot_note });
   if (http.redirect_to) rows.push({ label: "Redirects to", value: http.redirect_to });
   if (http.cname) rows.push({ label: "CNAME", value: http.cname });
   const countries = [...new Set(h.ips.map((ip) => ip.country).filter(Boolean))];

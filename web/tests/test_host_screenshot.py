@@ -140,3 +140,20 @@ class HostScreenshotThumbnailTests(HostScreenshotTests):
 		with self.settings(MEDIA_ROOT=self.media_root):
 			resp = client_for(self.member_a).get(f'/cve/{self.project_b.slug}/hosts/{sub.id}/screenshot/?size=thumb')
 		self.assertEqual(resp.status_code, 404)
+
+
+class ScreenshotNoteTests(TestCase):
+	"""The host page says why a host has no screenshot instead of showing nothing."""
+
+	def test_each_reason_and_none_when_there_is_a_shot(self):
+		from types import SimpleNamespace
+
+		from agentapi import services
+		has = SimpleNamespace(screenshot_path='x/screenshots/a.jpeg')
+		none = SimpleNamespace(screenshot_path='')
+		self.assertEqual(services._screenshot_note(has, {}), '')
+		self.assertIn('no web page has answered', services._screenshot_note(none, {}))
+		later = services._screenshot_note(none, {'url': 'https://www.a.example/', 'status': 301})
+		self.assertTrue(later.startswith('None yet'))
+		self.assertIn('rescan', later)
+		self.assertTrue(services._screenshot_note(none, {'status': 200}).startswith('None yet'))

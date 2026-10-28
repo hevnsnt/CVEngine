@@ -888,8 +888,13 @@ def agent_dict(agent, detail=False, counts=None, viewer=None):
     if agent.kind == 'scanner':  # cheap (stored JSON only), so the list shows a Sentinel that cannot update itself
         from agentapi import sentinel_settings
         out['version'] = (agent.info or {}).get('version')
+        out['version_label'] = out['version'] or 'unknown (built without the updater)'  # a Sentinel installed with plain docker compose reports the build's commit; one with neither says so
         out['self_update'] = sentinel_settings.effective(agent)['self_update']
         out['updater'] = sentinel_settings.updater_state(agent)
+        # slots: its concurrency limit, what it holds now and by kind (stored rows only, so the list stays cheap)
+        held = counts.get('_held_by_kind', {})
+        limit = min(agent.max_concurrent, (agent.limits or {}).get('max_concurrent') or agent.max_concurrent)
+        out['slots'] = {'max': limit, 'in_use': sum(held.values()), 'free': max(0, limit - sum(held.values())), 'by_kind': held}
     if detail:
         if agent.kind == 'scanner':
             out['settings'] = sentinel_settings.detail(agent)
@@ -897,6 +902,8 @@ def agent_dict(agent, detail=False, counts=None, viewer=None):
         eff = effective(agent, now)
         out['effective'] = {'capabilities': sorted(eff.caps), 'projects': sorted(eff.projects), 'max_concurrent': eff.max_concurrent,
                             'can_receive_work': not eff.problem and bool(eff.projects) and bool(eff.caps), 'problem': eff.problem}
+        if agent.kind == 'scanner':
+            out['queued_for_it'] = _sentinel().queued_for(agent)  # what waits in the queue that this Sentinel could take, by kind
     return _redacted(out, viewer, agent)
 
 
@@ -936,6 +943,8 @@ def _counts(agent_ids):
         bucket = _SENTINEL_STATUS_BUCKET.get(status, status)
         bucket_counts = out.setdefault(agent_id, {})
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + n
+    for agent_id, kinds in _sentinel().slot_usage(agent_ids).items():  # the tasks a Sentinel holds now, by kind, for its slots
+        out.setdefault(agent_id, {})['_held_by_kind'] = kinds
     return out
 
 

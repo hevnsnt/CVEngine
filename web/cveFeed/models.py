@@ -1721,13 +1721,14 @@ class OpenvasSettings(models.Model):
 
 
 class OpenvasProject(models.Model):
-    """A project's opt-in to OpenVAS scanning. Off by default, and ``hosts`` (the hosts to scan, each one already a host of the project) is
-    empty by default: nothing is scanned that an App Admin did not name. ``target_id`` is the GVM target last made for this host set, kept
+    """A project's opt-in to OpenVAS scanning. Off by default. The project's hosts that are Fire or Smoke are scanned by themselves; ``hosts`` (each
+    one already a host of the project) adds hosts someone named, still gated by heat unless the host is also in ``forced_hosts``. ``target_id`` is the GVM target last made for this host set, kept
     so an unchanged set reuses it."""
 
     project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="openvas_link")
     enabled = models.BooleanField(default=False)
     hosts = models.JSONField(default=list, blank=True)
+    forced_hosts = models.JSONField(default=list, blank=True)  # the listed hosts an administrator chose to scan whatever their heat (OpenVAS otherwise only scans Fire or Smoke)
     target_id = models.CharField(max_length=40, blank=True, default="")
     target_key = models.CharField(max_length=64, blank=True, default="")  # hash of the address set the target was made for
     updated_at = models.DateTimeField(auto_now=True)

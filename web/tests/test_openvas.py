@@ -337,6 +337,7 @@ class Fixture(GvmdFixture, RouteFixture):
 
     def setUp(self):
         super().setUp()
+        mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '2'}).start()  # the shipped default is one host per task (HeatGateTests); these tests batch two
         self.scan_obj = self.scan(names=('www.rt.test',), ip='93.184.216.5')
         self.scan(names=('api.rt.test',), ip='93.184.216.6')
         self.scan(names=('db.rt.test',), ip='93.184.214.7')
@@ -344,7 +345,8 @@ class Fixture(GvmdFixture, RouteFixture):
         self.settings = OpenvasSettings.current()
         self.settings.enabled, self.settings.gmp_username, self.settings.gmp_password = True, self.gvmd.user, self.gvmd.password
         self.settings.save()
-        self.link = OpenvasProject.objects.create(project=self.project, enabled=True, hosts=['www.rt.test', 'api.rt.test'])
+        self.link = OpenvasProject.objects.create(project=self.project, enabled=True, hosts=['www.rt.test', 'api.rt.test'],
+                                                 forced_hosts=['www.rt.test', 'api.rt.test'])  # listed and forced: the heat gate has its own tests (HeatGateTests)
         self.store = resources.MemoryStore()
         mock.patch('reNgine.resources.memory_state', lambda *a, **k: dict(self.memory_state)).start()
         mock.patch('reNgine.resources.get_store', lambda: self.store).start()
@@ -533,7 +535,7 @@ class SweepTests(Fixture, TestCase):
         self.assertEqual(target['port_list'], '33d0cd82-57c6-11e1-8ed1-406186ea4fc5')
         task = next(iter(self.gvmd.tasks.values()))
         self.assertEqual(task['config'], next(i for i, c in self.gvmd.configs.items() if c['name'] == 'cvENGINE safe scan'))
-        self.assertEqual((task['prefs'], task['status']), ({'max_checks': '2', 'max_hosts': '1'}, 'Requested'))
+        self.assertEqual((task['prefs'], task['status']), ({'max_checks': '4', 'max_hosts': '1'}, 'Requested'))
         run = OpenvasRun.objects.get()
         self.assertEqual((run.status, run.project_id, run.task_id), ('running', self.project.id, next(iter(self.gvmd.tasks))))
         self.assertEqual(run.hosts, {'93.184.216.5': 'www.rt.test', '93.184.216.6': 'api.rt.test'})
@@ -569,7 +571,7 @@ class SweepTests(Fixture, TestCase):
         old = OpenvasRun.objects.get().target_id
         self.finish_task([LOG], 'Stopped')
         self.tick()
-        OpenvasProject.objects.filter(pk=self.link.pk).update(hosts=['www.rt.test', 'api.rt.test', 'db.rt.test'])
+        OpenvasProject.objects.filter(pk=self.link.pk).update(hosts=['www.rt.test', 'api.rt.test', 'db.rt.test'], forced_hosts=['www.rt.test', 'api.rt.test', 'db.rt.test'])
         self.tick()
         self.assertEqual(len(self.gvmd.sent('create_target')), 2)
         self.assertNotIn(old, self.gvmd.targets)
@@ -621,10 +623,10 @@ class SweepTests(Fixture, TestCase):
 
     def test_a_task_that_runs_too_long_is_stopped_and_not_retried_at_once(self):
         self.tick()
-        OpenvasRun.objects.update(started_at=timezone.now() - timedelta(hours=13))
+        OpenvasRun.objects.update(started_at=timezone.now() - timedelta(hours=49))  # two hosts at 24 hours each
         out = self.tick()
         self.assertEqual(out['status'], 'failed')
-        self.assertIn('more than 12 hours', OpenvasRun.objects.get().error)
+        self.assertIn('more than 48 hours', OpenvasRun.objects.get().error)
         self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 2)
 
     def test_the_polled_status_is_kept(self):
@@ -900,7 +902,7 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertEqual(task.project_id, self.project.id)
         self.assertEqual(set(run.hosts.values()), {'www.rt.test', 'api.rt.test'})
         self.assertEqual(task.target['excluded_families'], list(ov.EXCLUDED_FAMILIES))
-        self.assertEqual(task.target['max_hours'], ov.max_hours())
+        self.assertEqual(task.target['max_hours'], ov.budget_hours(2))
         self.assertEqual(sorted(task.target['hosts'].values()), ['api.rt.test', 'www.rt.test'])
 
     def test_while_a_sentinel_task_is_in_flight_tick_only_polls_it_and_never_opens_a_local_session(self):
@@ -1524,36 +1526,6 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertEqual(covered, {self.project.pk, later.pk})
         self.assertNotIn(self.other.pk, covered)
 
-    @mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'})
-    def test_a_project_with_no_list_scans_its_own_hosts_never_another_projects(self):
-        OpenvasProject.objects.create(project=self.project, enabled=True)
-        link = OpenvasProject.objects.get(project=self.project)
-        batch = ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual({h for h, _ip, _d in batch}, {'www.rt.test', 'api.rt.test', 'db.rt.test'})
-        foreign = Domain.objects.create(name='other.test', project=self.other, insert_date=timezone.now())
-        Subdomain.objects.create(name='x.other.test', target_domain=foreign, scan_history=self.scan_obj)
-        self.assertNotIn('x.other.test', {h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)})
-
-    @mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'})
-    def test_hosts_that_fail_the_vetting_are_asked_again_in_three_days_not_every_tick(self):
-        OpenvasProject.objects.create(project=self.project, enabled=True)
-        link = OpenvasProject.objects.get(project=self.project)
-        ov.next_batch(link, resolve=self.resolve, blocked=lambda h: h == 'db.rt.test')
-        self.assertNotIn('db.rt.test', ov.candidate_hosts(self.project.id))
-        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='db.rt.test').exists())
-
-    def test_a_project_with_no_list_scans_nothing_unless_automatic_selection_is_on(self):
-        OpenvasProject.objects.create(project=self.project, enabled=True)
-        link = OpenvasProject.objects.get(project=self.project)
-        self.assertEqual(ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False), [])
-        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'}):
-            self.assertTrue(ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False))
-
-    def test_a_listed_host_set_still_limits_a_project(self):
-        OpenvasProject.objects.create(project=self.project, enabled=True, hosts=['www.rt.test'])
-        link = OpenvasProject.objects.get(project=self.project)
-        self.assertEqual([h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)], ['www.rt.test'])
-
     def test_only_an_app_admin_may_set_sentinel_only(self):
         self.switch_on()
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'sentinel_only': True})[0], 403)
@@ -1679,7 +1651,8 @@ class InternalNetworkTests(Fixture, TestCase):
         self.addCleanup(self.env.stop)
         InternalRange.objects.create(project=self.project, cidr='10.20.0.0/24')
         self.inside = Domain.objects.create(name='10.20.0.7', project=self.project, insert_date=timezone.now())
-        self.link.hosts = []  # the whole project, not a list
+        Subdomain.objects.create(name='10.20.0.7', target_domain=self.inside, scan_history=self.scan_obj)
+        self.link.hosts, self.link.forced_hosts = [], ['10.20.0.7']  # the whole project, not a list; the internal host is forced past the heat gate
         self.link.save()
 
     def sentinel(self, capabilities):
@@ -1697,12 +1670,13 @@ class InternalNetworkTests(Fixture, TestCase):
         self.assertEqual(ov.internal_batch(self.link), [])
         from cveFeed.models import InternalRange
         InternalRange.objects.create(project=self.project, cidr='10.20.0.0/24')
-        self.link.hosts = ['www.rt.test']
+        self.link.hosts, self.link.forced_hosts = ['www.rt.test'], []  # not forced, not hot: nothing
         self.link.save()
         self.assertEqual(ov.internal_batch(self.link), [])
 
-    @mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'})
     def test_an_outside_sentinel_is_never_given_the_internal_batch(self):
+        self.link.hosts, self.link.forced_hosts = ['www.rt.test'], ['10.20.0.7', 'www.rt.test']
+        self.link.save()
         self.sentinel(['openvas'])
         self.tick()
         run = OpenvasRun.objects.get()
@@ -1728,3 +1702,296 @@ class InternalNetworkTests(Fixture, TestCase):
         task = OpenvasRun.objects.get().sentinel_task
         self.assertEqual(sb.effective(outside).refusal(task), ('capability', sb.INTERNAL_CAPABILITY))
         self.assertIsNone(sb.effective(inside).refusal(task))
+
+
+class HeatGateTests(Fixture, TestCase):
+    """OpenVAS is slow (hours per host): it is spent only on hosts on fire or smoke, Fire first, never on what the project does not own."""
+
+    def setUp(self):
+        super().setUp()
+        mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()  # the shipped default
+        self.link.hosts, self.link.forced_hosts = [], []
+        self.link.save()
+        self.kev = CVEEntry.objects.create(cve_id='CVE-2024-0001', title='Exploited', published_at=timezone.now(), cvss=9.8, kev=True)
+        self.high = CVEEntry.objects.create(cve_id='CVE-2024-0002', title='High', published_at=timezone.now(), cvss=7.5)  # smoke
+        self.low = CVEEntry.objects.create(cve_id='CVE-2024-0003', title='Low', published_at=timezone.now(), cvss=3.1)  # ice
+
+    def heat(self, host, cve, **kw):
+        sub = Subdomain.objects.filter(name=host).order_by('-scan_history_id').first()
+        return CVEMatch.objects.update_or_create(cve_entry=cve, subdomain=sub, matched_product='x', defaults={'confidence': 0.9, 'matched_version': '1', **kw})[0]
+
+    def batch(self, **kw):
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        return [h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)]
+
+    def test_a_project_with_no_hot_host_scans_nothing_and_a_listed_clean_host_is_still_gated(self):
+        self.assertEqual(self.batch(), [])
+        self.link.hosts = ['www.rt.test']
+        self.link.save()
+        self.assertEqual(self.batch(), [])
+
+    def test_a_host_that_turns_fire_or_smoke_becomes_due_by_itself_and_leaves_when_it_cools(self):
+        match = self.heat('api.rt.test', self.high)
+        self.assertEqual(self.batch(), ['api.rt.test'])  # smoke, nobody listed it
+        self.heat('www.rt.test', self.low)  # ice does not count
+        self.assertEqual(self.batch(), ['api.rt.test'])
+        match.remediation_status = 'fixed'
+        match.save()
+        self.assertEqual(self.batch(), [])  # cooled to clean
+
+    def test_ice_clean_and_unscanned_are_never_scanned(self):
+        self.heat('www.rt.test', self.low)
+        for host in ('www.rt.test', 'api.rt.test', 'db.rt.test'):
+            self.link.hosts = [host]
+            self.link.save()
+            self.assertEqual(self.batch(), [], host)
+        self.assertEqual({h: v[0] for h, v in ov.host_heat(self.project.id, ['www.rt.test', 'db.rt.test']).items()}['www.rt.test'], 'ice')
+
+    def test_fire_before_smoke_then_the_most_reasons_then_the_longest_waiting(self):
+        from cveFeed import ledger
+        self.heat('www.rt.test', self.high)
+        self.heat('api.rt.test', self.kev)
+        self.heat('db.rt.test', self.high)
+        self.heat('db.rt.test', CVEEntry.objects.create(cve_id='CVE-2024-0004', title='Another', published_at=timezone.now(), cvss=8.0))
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        ready, _v = ov.assess(self.project.id, ov.hot_names(self.project.id), resolve=self.resolve, blocked=lambda h: False)
+        self.assertEqual([h for h, _ip, _d in ready], ['api.rt.test', 'db.rt.test', 'www.rt.test'])  # fire; then smoke with two reasons; then smoke
+        self.assertEqual(self.batch(), ['api.rt.test'])  # one host per task by default
+        ledger.record(ov.SERVICE, ['api.rt.test'], self.project.id)
+        self.assertEqual(self.batch(), ['db.rt.test'])
+        self.assertEqual(link.pk, self.link.pk)
+
+    def test_the_stalest_goes_first_among_equals(self):
+        from cveFeed import ledger
+        self.heat('www.rt.test', self.high)
+        self.heat('api.rt.test', self.high)
+        ledger.record(ov.SERVICE, ['www.rt.test'], self.project.id)
+        ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test').update(finished_at=timezone.now() - timedelta(days=30))
+        ledger.record(ov.SERVICE, ['api.rt.test'], self.project.id)
+        ServiceRun.objects.filter(service=ov.SERVICE, asset='api.rt.test').update(finished_at=timezone.now() - timedelta(days=20))
+        ready, _v = ov.assess(self.project.id, ['www.rt.test', 'api.rt.test'], resolve=self.resolve, blocked=lambda h: False)
+        self.assertEqual([h for h, _ip, _d in ready], ['www.rt.test', 'api.rt.test'])
+
+    def test_a_forced_host_is_scanned_whatever_its_heat_but_after_the_hot_ones(self):
+        self.heat('www.rt.test', self.high)
+        self.link.hosts, self.link.forced_hosts = ['db.rt.test'], ['db.rt.test']
+        self.link.save()
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        ready, _v = ov.assess(link.project_id, ov.hot_names(link.project_id) | {'db.rt.test'}, {'db.rt.test'}, resolve=self.resolve, blocked=lambda h: False)
+        self.assertEqual([h for h, _ip, _d in ready], ['www.rt.test', 'db.rt.test'])
+
+    def refused(self, host, **over):
+        """The reason ``assess`` gives for a hot host with the stored address (no DNS)."""
+        self.heat(host, self.kev)
+        ready, verdicts = ov.assess(self.project.id, [host], forced={host}, resolve=over.get('resolve') or (lambda h, p: IPS.get(h, '93.184.216.9')), blocked=lambda h: False)
+        return ready, verdicts[host]
+
+    def test_a_cdn_a_saas_front_and_a_shared_address_are_refused_even_when_hot_and_forced(self):
+        Subdomain.objects.filter(name='www.rt.test').update(is_cdn=True, cdn_name='CloudFront')
+        ready, verdict = self.refused('www.rt.test')
+        self.assertEqual(ready, [])
+        self.assertIn('CDN', verdict['reason'])
+        Subdomain.objects.filter(name='api.rt.test').update(name='vropco.atlassian.net')
+        ready, verdict = self.refused('vropco.atlassian.net')
+        self.assertEqual(ready, [])
+        self.assertIn('third-party platform', verdict['reason'])
+
+    def test_documentation_this_server_and_the_tailnet_are_refused_with_the_reason(self):
+        for ip, text in (('192.0.2.1', 'documentation'), ('100.64.1.1', 'tailnet')):
+            ready, verdict = self.refused('www.rt.test', resolve=lambda h, p, ip=ip: ip)
+            self.assertEqual(ready, [], ip)
+            self.assertIn(text, verdict['reason'], ip)
+        with mock.patch.dict(os.environ, {'CVENGINE_OWN_ADDRESSES': '93.184.216.5'}), mock.patch.dict(ov._own, {'at': 0.0}):
+            ready, verdict = self.refused('www.rt.test')
+        self.assertEqual(ready, [])
+        self.assertIn('this cvENGINE server', verdict['reason'])
+
+    def test_not_a_host_of_the_project_excluded_and_recent_runs_say_why(self):
+        from cveFeed import ledger
+        from cveFeed.models import HostExclusion
+        _r, verdict = ov.assess(self.project.id, ['nobody.rt.test'], resolve=self.resolve)
+        self.assertEqual(verdict['nobody.rt.test']['reason'], 'not a host of this project')
+        self.heat('api.rt.test', self.kev)
+        HostExclusion.objects.create(org=self.project.org, host='api.rt.test', include_subdomains=False)
+        self.assertEqual(ov.assess(self.project.id, ['api.rt.test'], resolve=self.resolve)[1]['api.rt.test']['reason'], 'excluded from scanning')
+        HostExclusion.objects.all().delete()
+        self.heat('www.rt.test', self.kev)
+        ledger.record(ov.SERVICE, ['www.rt.test'], self.project.id)
+        ServiceRun.objects.filter(asset='www.rt.test').update(finished_at=timezone.now() - timedelta(days=3))
+        self.assertEqual(ov.assess(self.project.id, ['www.rt.test'], resolve=self.resolve)[1]['www.rt.test']['reason'], 'scanned 3 days ago; due again after a week')
+        ledger.record(ov.FAILED_SERVICE, ['db.rt.test'], self.project.id)
+        self.heat('db.rt.test', self.kev)
+        self.assertIn('could not be scanned', ov.assess(self.project.id, ['db.rt.test'], resolve=self.resolve)[1]['db.rt.test']['reason'])
+
+    def test_the_explanation_names_the_heat_gate_and_needs_no_dns(self):
+        self.heat('api.rt.test', self.kev)
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        self.link.hosts = ['www.rt.test']
+        self.link.save()
+        with mock.patch('socket.getaddrinfo', side_effect=AssertionError('no DNS')):
+            rows = {r['host']: r for r in ov.explain(OpenvasProject.objects.get(pk=link.pk))}
+        self.assertEqual(rows['api.rt.test']['ready'], True)
+        self.assertEqual(rows['api.rt.test']['order'], 0)
+        self.assertFalse(rows['www.rt.test']['ready'])
+        self.assertIn('not Fire or Smoke', rows['www.rt.test']['reason'])
+
+    def test_a_name_that_does_not_resolve_is_asked_again_in_three_days_not_every_tick(self):
+        self.heat('api.rt.test', self.kev)
+
+        def broken(host, project_id):
+            raise OSError('no answer')
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        self.assertEqual(ov.next_batch(link, resolve=broken, blocked=lambda h: False), [])
+        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='api.rt.test').exists())
+
+    def test_the_cve_of_another_project_never_makes_a_host_hot(self):
+        other = Project.objects.create(name='Theirs', slug='theirs2', insert_date=timezone.now(), org=self.project.org)
+        domain = Domain.objects.create(name='x.test', project=other, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=1, tasks=[], results_dir='x')
+        sub = Subdomain.objects.create(name='x.other.test', target_domain=domain, scan_history=scan)
+        CVEMatch.objects.create(cve_entry=self.kev, subdomain=sub, confidence=0.9, matched_product='x', matched_version='1')
+        self.assertNotIn('x.other.test', ov.hot_names(self.project.id))
+        self.assertIn('x.other.test', ov.hot_names(other.id))
+
+    def test_one_host_per_task_and_the_budget_is_per_host(self):
+        self.assertEqual((ov.max_hosts(), ov.max_hours()), (1, 24))
+        self.assertEqual(ov.budget_hours(1), 24)
+        self.assertEqual(ov.budget_hours(3), 72)
+        self.assertEqual(ov.task_preferences(), {'max_checks': '4', 'max_hosts': '1'})
+        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_CHECKS': '2'}):
+            self.assertEqual(ov.task_preferences()['max_checks'], '2')
+        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_CHECKS': '99'}):
+            self.assertEqual(ov.task_preferences()['max_checks'], '10')
+
+    def test_the_tick_scans_the_hottest_host_alone_with_a_task_of_one(self):
+        self.heat('www.rt.test', self.high)
+        self.heat('api.rt.test', self.kev)
+        out = self.tick()
+        self.assertEqual((out['status'], out['hosts']), ('running', 1))
+        self.assertEqual(OpenvasRun.objects.get().hosts, {'93.184.216.6': 'api.rt.test'})
+
+
+class BudgetTests(Fixture, TestCase):
+    """A task that runs out of its time budget keeps what it found."""
+
+    def setUp(self):
+        super().setUp()
+        mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()
+        self.link.hosts, self.link.forced_hosts = ['www.rt.test'], ['www.rt.test']
+        self.link.save()
+
+    def over_budget(self):
+        self.assertEqual(self.tick()['status'], 'running')
+        run = OpenvasRun.objects.get(status='running')
+        OpenvasRun.objects.filter(pk=run.pk).update(started_at=timezone.now() - timedelta(hours=25))
+        return run
+
+    def test_results_found_before_the_budget_ran_out_are_imported_as_a_partial_scan(self):
+        run = self.over_budget()
+        self.gvmd.add_result(run.task_id, **APACHE)
+        self.gvmd.set_status(run.task_id, 'Running', 60)
+        out = self.tick()
+        self.assertEqual((out['status'], out['partial'], out['findings']), ('done', True, 1))
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'done')
+        self.assertIn('24 hour budget', run.error)
+        self.assertTrue(run.summary['partial'])
+        self.assertTrue(Vulnerability.objects.filter(template_id=f'openvas:{OID_APACHE}').exists())
+        self.assertTrue(ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test', status='done').exists())
+        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())
+
+    def test_a_partial_scan_resolves_nothing_it_did_not_get_to(self):
+        self.run_scan([APACHE, BANNER])  # a complete scan found both
+        ServiceRun.objects.all().delete()
+        run = self.over_budget()
+        self.gvmd.add_result(run.task_id, **APACHE)  # the next one reached only the Apache check
+        self.gvmd.set_status(run.task_id, 'Running', 30)
+        self.assertEqual(self.tick()['partial'], True)
+        self.assertTrue(Vulnerability.objects.filter(template_id=f'openvas:{OID_BANNER}', open_status=True).exists())  # not resolved by a partial scan
+
+    def test_no_result_at_all_is_a_failure_and_the_host_is_asked_again_in_three_days(self):
+        self.over_budget()
+        out = self.tick()
+        self.assertEqual(out['status'], 'failed')
+        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists())
+
+    def test_a_sentinels_partial_result_is_kept_the_same_way(self):
+        from agentapi.models import SentinelTask
+        ServiceRun.objects.all().delete()
+        task = SentinelTask.objects.create(project=self.project, kind='openvas', ips=['93.184.216.5'], status='done',
+                                           target={'hosts': {'93.184.216.5': 'www.rt.test'}},
+                                           result={'results': [_sentinel_item()], 'scanned_addresses': ['93.184.216.5'], 'without_cve': 0, 'unusable': 0, 'partial': True})
+        OpenvasRun.objects.create(project=self.project, status='running', sentinel_task=task, hosts={'93.184.216.5': 'www.rt.test'})
+        out = ov.poll_sentinel(OpenvasRun.objects.get())
+        self.assertEqual((out['status'], out['partial']), ('done', True))
+        self.assertIn('time budget', OpenvasRun.objects.get().error)
+
+    def test_the_sentinel_task_carries_the_budget_and_preferences_the_server_decided(self):
+        from agentapi import sentinel_broker as sb
+        cleaned = sb._clean_openvas_result({'results': [], 'scanned_addresses': [], 'partial': True})
+        self.assertIs(cleaned['partial'], True)
+        self.assertIs(sb._clean_openvas_result({'results': [], 'partial': 'yes'})['partial'], False)
+
+
+class SentinelViewTests(Fixture, TestCase):
+    """With Sentinel-only on, Settings > OpenVAS shows the Sentinels (ready, or why not), the run and the last result, never a stale local-engine error;
+    and with no ready Sentinel nothing is marked failed and no local session is opened."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = User.objects.create_superuser('ovroot', 'r@x.io', 'x')
+        self.owner = User.objects.create_user('ov-owner', password='x')
+        self.settings.sentinel_only = True
+        self.settings.state = {'connected': False, 'error': 'gvmd could not be reached (Socket /run/gvmd/gvmd.sock does not exist): is the openvas profile running?'}
+        self.settings.save()
+
+    def agent(self, name, capabilities, info=None, status='active', seen=True):
+        token, _raw = create_token(self.owner, f'tok-{name}')
+        return Agent.objects.create(token=token, name=name, kind='scanner', status=status, scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=capabilities, info=info or {}, last_seen=timezone.now() if seen else None)
+
+    def page(self):
+        r = client_for(self.root).get('/cve/api/settings/openvas')
+        self.assertEqual(r.status_code, 200)
+        return r.json()
+
+    def test_the_stale_local_engine_error_is_not_shown_and_the_engine_is_sentinel_only(self):
+        data = self.page()
+        self.assertEqual(data['state'], {})
+        self.assertNotIn('is the openvas profile running', json.dumps(data))
+
+    def test_each_sentinel_is_ready_or_says_why_not(self):
+        self.agent('ready-one', ['nmap', 'openvas'], info={'openvas': {'ready': True, 'reason': ''}})
+        self.agent('syncing', ['nmap'], info={'openvas': {'ready': False, 'reason': 'GVM is still syncing its nvt feed(s)'}})
+        self.agent('light', ['nmap'])
+        self.agent('away', ['openvas'], seen=False)
+        rows = {r['name']: r for r in self.page()['sentinels']}
+        self.assertTrue(rows['ready-one']['ready'])
+        self.assertFalse(rows['syncing']['ready'])
+        self.assertIn('still syncing', rows['syncing']['reason'])
+        self.assertIn('light', rows['light']['reason'])
+        self.assertFalse(rows['away']['ready'])  # declares it, but is not checking in
+
+    def test_the_run_and_the_last_result_are_on_the_page(self):
+        self.assertIsNone(self.page()['last_run'])
+        OpenvasRun.objects.create(project=self.project, status='done', hosts={'93.184.216.5': 'www.rt.test'}, summary={'findings': 3, 'partial': True})
+        last = self.page()['last_run']
+        self.assertEqual((last['status'], last['hosts'], last['summary']['findings']), ('done', ['www.rt.test'], 3))
+
+    def test_no_ready_sentinel_means_nothing_runs_locally_and_nothing_is_marked_failed(self):
+        before = self.gvmd.connections
+        self.agent('syncing', ['nmap'], info={'openvas': {'ready': False, 'reason': 'GVM is still syncing'}})  # does not declare openvas
+        for _ in range(3):
+            self.assertIn('skipped', self.tick())
+        self.assertFalse(OpenvasRun.objects.exists())
+        self.assertFalse(ServiceRun.objects.filter(service__in=(ov.SERVICE, ov.FAILED_SERVICE)).exists())  # the hosts simply stay due
+        self.assertEqual(self.gvmd.connections, before)
+
+    def test_a_sentinel_reports_its_gvm_readiness_in_the_heartbeat_info(self):
+        from agentapi import sentinel_settings as ss
+        self.assertEqual(ss.clean_info({'openvas': {'ready': False, 'reason': 'GVM is still syncing\x00 feeds'}})['openvas'],
+                         {'ready': False, 'reason': 'GVM is still syncing feeds'})
+        from agentapi.services import ApiError
+        for bad in ('yes', {'ready': 'yes'}, {'ready': True, 'reason': 5}):
+            with self.assertRaises(ApiError):
+                ss.clean_info({'openvas': bad})

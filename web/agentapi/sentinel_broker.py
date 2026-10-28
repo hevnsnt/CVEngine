@@ -435,18 +435,47 @@ def has_sentinels(project_slug, org_slug):
     return Agent.objects.filter(_covers(project_slug, org_slug), kind='scanner', token__revoked=False).exclude(status='revoked').exists()
 
 
+def capacity_state(project, kind, internal=False, now=None):
+    """``{'state': 'none'|'free'|'busy', 'live': n, 'slots': n, 'free': n}`` for ``kind`` work in ``project``: ``none`` when no live, eligible Sentinel
+    exists (the work cannot go to one), ``free`` when at least one has a slot to take it now, ``busy`` when live eligible Sentinels exist and every
+    one is at its concurrency limit (the work should wait for a slot, not run somewhere else). A Sentinel's slots are its ``max_concurrent``, and
+    a slot is in use while it holds a task (claimed or running), whatever the kind."""
+    now = now or timezone.now()
+    live = [eff for eff in (eligible_sentinels(project, kind, now, internal) if kind else []) if eff.live]
+    if not live:
+        return {'state': 'none', 'live': 0, 'slots': 0, 'free': 0}
+    held = dict(SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES)
+                .values_list('agent_id').annotate(n=Count('id')))
+    slots = sum(e.max_concurrent for e in live)
+    free = sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live)
+    return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
+
+
 def any_scanner_for(project, kind=None, internal=False):
-    """Whether at least one live, eligible Sentinel could take ``kind`` work for ``project`` right now: a cheap existence
-    check so a project with no Sentinels pays for nothing beyond this one query, and the scan pipeline behaves exactly as
-    it did before Sentinels existed (see ``agentapi.sentinel_dispatch``, which gates every dispatch attempt on this)."""
-    now = timezone.now()
-    for eff in eligible_sentinels(project, kind, now, internal) if kind else []:
-        if eff.live:
-            counts = dict(SentinelTask.objects.filter(agent=eff.agent, status__in=SENTINEL_ACTIVE_STATUSES)
-                          .values_list('agent_id').annotate(n=Count('id')))
-            if counts.get(eff.agent.pk, 0) < eff.max_concurrent:
-                return True
-    return False
+    """Whether at least one live, eligible Sentinel exists for ``kind`` work in ``project``, **busy or not**: a cheap existence check so a project
+    with no Sentinels pays for nothing beyond this one query, and the scan pipeline behaves exactly as it did before Sentinels existed (see
+    ``agentapi.sentinel_dispatch``, which gates every dispatch attempt on this). A Sentinel at its concurrency limit still counts: the work
+    waits for a slot there (``sentinel_dispatch`` queues it, with its own wait budget) instead of silently running somewhere else."""
+    return capacity_state(project, kind, internal)['state'] != 'none'
+
+
+def slot_usage(agent_ids):
+    """``{agent_id: {kind: n}}``: the tasks each Sentinel holds now (claimed or running), by kind, for the slots shown with it."""
+    out = {}
+    for agent_id, kind, n in (SentinelTask.objects.filter(agent_id__in=agent_ids, status__in=SENTINEL_ACTIVE_STATUSES)
+                              .values_list('agent_id', 'kind').annotate(n=Count('id'))):
+        out.setdefault(agent_id, {})[kind] = n
+    return out
+
+
+def queued_for(agent, now=None):
+    """``{kind: n}``: tasks waiting in the queue that this Sentinel could take (its projects and capabilities), for the page that shows its queue."""
+    eff = effective(agent, now or timezone.now())
+    if eff.problem:
+        return {}
+    rows = (SentinelTask.objects.filter(status='queued', kind__in=eff.caps, project__slug__in=eff.projects)
+            .values_list('kind').annotate(n=Count('id')))
+    return {kind: n for kind, n in rows}
 
 
 # --- leases (mirrors agent_broker's shape, for SentinelTask) ------------------------------------------------
@@ -835,7 +864,8 @@ def _clean_openvas_result(body):
     scanned_addresses = [ov_clean(a, 60) for a in scanned[:MAX_ADDRESSES] if isinstance(a, str)] if isinstance(scanned, list) else []
     without_cve = _ov_num(body.get('without_cve'), 0, MAX_OPENVAS_RESULTS, int, 0)
     unusable = _ov_num(body.get('unusable'), 0, MAX_OPENVAS_RESULTS, int, 0)
-    return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable}
+    return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
+            'partial': body.get('partial') is True}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
@@ -1028,18 +1058,23 @@ def live_overview(ctx):
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
             'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
-            'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'project': t.project.slug, 'scan_id': t.scan_id,
-                         'since': svc._iso(t.accepted_at or t.claimed_at), 'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],
-            'recent': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'project': t.project.slug, 'finished': svc._iso(t.finished_at),
+            'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
+            'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
+                         'project_name': t.project.name, 'scan_id': t.scan_id, 'since': svc._iso(t.accepted_at or t.claimed_at),
+                         'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],
+            'recent': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
+                        'project_name': t.project.name, 'finished': svc._iso(t.finished_at), 'outcome': task_outcome(t),
                         'seconds': int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None,
                         'error': t.error} for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
                       'failed_24h': st.get('failed_24h', 0), 'average_seconds': int(st['seconds'] / st['timed']) if st.get('timed') else None}})
-    from cveFeed import internal_view
+    from cveFeed import internal_view, openvas_scan
+    from dashboard.models import Project
     networks = internal_view.declared_networks()
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out,
-            'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()]}
+            'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
+            'openvas': openvas_scan.overview(list(Project.objects.values_list('id', flat=True)))}
 
 
 def _visible_orgs(user):
@@ -1066,6 +1101,33 @@ def _coverage(agent, orgs, org_of):
     named = [o for o in scope.get('orgs') or [] if o in orgs]
     via = [org_of[p] for p in scope.get('projects') or [] if p in org_of]
     return {'scope_level': 'org' if named else 'project', 'orgs': sorted(set(named) | set(via))}
+
+
+def task_label(task):
+    """What a task is on, for a card or a history row: the host it names, else the hosts in its target (an OpenVAS task names addresses and the
+    hosts they were chosen for), else its addresses. Never empty text where there is something to show."""
+    if task.host:
+        return task.host[:200]
+    hosts = (task.target or {}).get('hosts')
+    if isinstance(hosts, dict) and hosts:
+        names = sorted({str(v) for v in hosts.values() if v})
+        return ', '.join(names)[:200] or ', '.join(sorted(map(str, hosts)))[:200]
+    return ', '.join(str(i) for i in (task.ips or [])[:3])[:200]
+
+
+def task_outcome(task):
+    """How a finished task ended, in words a person can tell apart: ``completed``, ``completed at its time budget (partial)``, ``cancelled by an
+    administrator``, ``stopped before it finished`` (gvmd or the Sentinel stopped the scan), ``lost (the Sentinel stopped answering)`` or ``failed``."""
+    error = (task.error or '').lower()
+    if task.status == 'done':
+        return 'completed at its time budget (partial)' if (task.result or {}).get('partial') else 'completed'
+    if 'cancelled by a person' in error:
+        return 'cancelled by an administrator'
+    if task.status == 'expired':
+        return 'lost (the Sentinel stopped answering)' if 'released' not in error else 'released by the Sentinel'
+    if 'stopped' in error:
+        return 'stopped before it finished'
+    return 'failed'
 
 
 def task_status_counts(agent_ids):

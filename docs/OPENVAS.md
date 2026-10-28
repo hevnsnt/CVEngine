@@ -22,7 +22,7 @@ Greenbone's container guide gives no hardware figures, so these are cvENGINE's o
 - other scanner jobs are waiting for memory;
 - a scanner was stopped for memory in the last hour.
 
-A task that is already running is **stopped** when free memory falls below the platform's critical floor, when scanning is paused (Pause all scanning), or after `CVENGINE_OPENVAS_MAX_HOURS` (12). A stopped task leaves its hosts due, and a task that ran too long counts as failed (the hosts wait three days).
+A task that is already running is **stopped** when free memory falls below the platform's critical floor, when scanning is paused (Pause all scanning), or after its time budget, `CVENGINE_OPENVAS_MAX_HOURS` (24) per host. A stopped task leaves its hosts due. A task that ran out of its budget keeps the results it had (a partial scan, see below); with none, it counts as failed (the hosts wait three days).
 
 ## Turn it on
 
@@ -38,7 +38,15 @@ Stop it with the **Switch off** button (App Admin) or `make openvas-down`; the d
 
 ## What gets scanned
 
-Only the hosts of the organizations and projects someone chose. OpenVAS is an intrusive scanner, so **a host is scanned only when someone chose it**: the list of hosts on the project (`hosts` on `openvas/projects/{id}`). A project with no list scans nothing. (`CVENGINE_OPENVAS_AUTO_HOSTS=1` restores the old behaviour for an instance that wants it: every name the project's scans found is a candidate, the longest-waiting first. Those names include mail autodiscover, device-enrolment and API-gateway names that point at a vendor's shared addresses, so the choice is the safer default.) Every host, chosen or not, is vetted at every sweep:
+OpenVAS is slow (about 4% an hour on one host with the safest settings, so one host takes between half a day and a day) and intrusive, so it is spent **only where it matters**, and only in the projects someone opted in (a project, or a whole organization):
+
+- **Fire or Smoke only.** A host is scanned only while its heat is Fire or Smoke (the colour on the host card: a CVE match rated hot, or an open finding rated medium or above). Clean, Ice and Unscanned hosts are never scanned. The order is Fire before Smoke, then the host with the most fire reasons, then the most smoke reasons, then the one that has waited longest.
+- **Automatic.** Nobody has to list anything: a host that turns Fire or Smoke becomes due by itself, and one that cools to Clean leaves the queue. The old "every name the project's scans found" fallback (`CVENGINE_OPENVAS_AUTO_HOSTS`) is gone.
+- **Listed and forced.** `hosts` on `openvas/projects/{id}` still adds hosts someone named, but the heat gate still applies to them. `forced_hosts` (a subset the administrator marks) lifts only the heat gate, for a host to be scanned whatever its colour. Forcing never lifts the ownership refusals below.
+- **One host per task**, with a time budget per host (`CVENGINE_OPENVAS_MAX_HOURS`, 24). When the budget runs out the task is stopped and **what it found so far is kept** (a partial scan: the findings are stored, nothing an earlier scan found is closed by it, and the host counts as scanned). A task that found nothing before the budget ran out is a failure like any other.
+- **Why a host is or is not due is shown**: `GET openvas/projects/{id}/queue` (Settings), the Sentinels page (`openvas` in `GET sentinels/live`: the run, the hosts due next in order, and the hosts that are not due with the reason) and the host's check coverage say, in plain words, "not Fire or Smoke (clean)", "a CDN edge", "a third-party platform (Atlassian Cloud) shared with other customers", "a documentation address range", "this cvENGINE server", "scanned 3 days ago", and so on.
+
+Every host, chosen or not, is vetted at every sweep:
 
 - each name must be a host of that project (another project's host is never scanned);
 - hosts excluded for the organization or archived are dropped (`cveFeed.exclusions`), as is any name that resolves to an address a scanner may not be pointed at (`scannable_hosts`, `pinned_transport.resolve`);
@@ -84,15 +92,15 @@ An NVT's text is third-party text. It is stripped of control characters, clipped
 | --- | --- | --- |
 | `CVENGINE_OPENVAS_MIN_AVAILABLE_MB` | `3072` | Free memory required, beside the platform's headroom, to start a scan |
 | `CVENGINE_OPENVAS_COST_MB` | `1500` | What a GVM scan is counted as against the job budget |
-| `CVENGINE_OPENVAS_MAX_HOSTS` | `4` | Hosts in one GVM task |
-| `CVENGINE_OPENVAS_MAX_HOURS` | `12` | A task running longer is stopped |
-| `CVENGINE_OPENVAS_AUTO_HOSTS` | off | `1` lets a project with no host list scan the names its scans found (still vetted); off, only chosen hosts are scanned |
+| `CVENGINE_OPENVAS_MAX_HOSTS` | `1` | Hosts in one GVM task |
+| `CVENGINE_OPENVAS_MAX_HOURS` | `24` | The time budget per host (a task of n hosts gets n times this). A task running longer is stopped and keeps what it found |
+| `CVENGINE_OPENVAS_MAX_CHECKS` | `4` | NVTs run at a time against a host (1 to 10; Greenbone's default is 4). At 2 a host takes about a day, at 4 about half that; lower is gentler on the target |
 | `CVENGINE_OWN_ADDRESSES` | none | Addresses of this instance OpenVAS must never scan, besides what `DOMAIN_NAME` resolves to |
 | `CVENGINE_OPENVAS_SOCKET` | `/run/gvmd/gvmd.sock` | gvmd's unix socket in the celery container |
 | `CVENGINE_OPENVAS_HOST`, `_PORT`, `_CA`, `_CERT`, `_KEY` | none, `9390` | Reach a gvmd by TLS instead of the socket (an external GVM; not exercised here) |
 | `CVENGINE_TTL_OPENVAS`, `CVENGINE_TTL_OPENVAS_FAILED` | `168`, `72` hours | How long a scanned host, and a failed one, stays fresh |
 
-**Sentinel only.** Settings > OpenVAS and Administration > OpenVAS (App Admin only) have a **Sentinel only** switch, off by default. On, a due batch with no eligible Sentinel registered for the `openvas` capability right now is simply left due - tried again at the next tick, never scanned by this server's own `gvmd` sidecar - instead of falling back to it. This is how an install offloads OpenVAS's GVM workload entirely to remote Sentinel machines: with it on and at least one Sentinel registered, `gvmd` on the main server never has to run a scan at all (the sidecar still needs to exist and the add-on still needs to be switched on, since the Sentinel-only choice only decides where a due scan runs, not whether one is due). Turning it on does not stop a scan already running locally; that one finishes normally. See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) and [ARCHITECTURE.md](ARCHITECTURE.md#sentinels) for how a Sentinel takes OpenVAS work instead.
+**Sentinel only.** Settings > OpenVAS and Administration > OpenVAS (App Admin only) have a **Sentinel only** switch, off by default. On, a due batch with no eligible Sentinel registered for the `openvas` capability right now is simply left due - tried again at the next tick, never scanned by this server's own `gvmd` sidecar - instead of falling back to it. This is how an install offloads OpenVAS's GVM workload entirely to remote Sentinel machines: with it on and at least one Sentinel registered, `gvmd` on the main server never has to run a scan at all (the sidecar still needs to exist and the add-on still needs to be switched on, since the Sentinel-only choice only decides where a due scan runs, not whether one is due). Turning it on does not stop a scan already running locally; that one finishes normally. See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) and [ARCHITECTURE.md](ARCHITECTURE.md#sentinels) for how a Sentinel takes OpenVAS work instead. With it on, Settings > OpenVAS does not show the local engine's state (a stale "gvmd could not be reached" from before the switch says nothing): it lists each Sentinel with whether it is ready to scan or why not (still syncing its feeds, no scan configuration, a light profile, not checking in), the run in progress and the last result. A Sentinel reports its GVM readiness in its heartbeat (`info.openvas: {ready, reason}`). When no Sentinel is ready nothing is run locally and nothing is marked failed: the hosts simply stay due. A Sentinel that stops a scan at its time budget reports `partial: true` with the results it had, and they are kept.
 
 ## Images, pins and updating
 

@@ -162,7 +162,7 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version`` and its updater's ``update`` state. Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, its updater's ``update`` state and whether its own GVM stack can scan (``openvas``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -195,6 +195,14 @@ def clean_info(raw):
                     raise ApiError(400, f'updater.{key} must be text')
                 clean[key] = ''.join(c for c in value if c.isprintable())[:limit]
         out['updater'] = clean
+    gvm = raw.get('openvas')
+    if gvm is not None:
+        if not isinstance(gvm, dict) or not isinstance(gvm.get('ready'), bool):
+            raise ApiError(400, 'openvas must be {ready: bool, reason: text}')
+        reason = gvm.get('reason')
+        if reason is not None and not isinstance(reason, str):
+            raise ApiError(400, 'openvas.reason must be text')
+        out['openvas'] = {'ready': gvm['ready'], 'reason': ''.join(c for c in (reason or '') if c.isprintable())[:200]}
     return out
 
 

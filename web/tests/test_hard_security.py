@@ -151,7 +151,7 @@ class PrivateConfigTests(unittest.TestCase):
 
 			def __init__(self, cmd, **kwargs):
 				seen['cmd'] = cmd
-				seen['file_existed'] = os.path.exists(cmd[cmd.index('-p') + 1:][2])
+				seen['file_existed'] = os.path.exists(cmd[cmd.index('-p') + 1:][len(bbot_lib.MODES['standard']['presets'])])  # the key file follows the named presets
 
 			def poll(self):
 				return 0
@@ -180,11 +180,12 @@ class PrivateConfigTests(unittest.TestCase):
 		self.assertNotIn('sk-live-secret', ' '.join(seen['cmd']))
 		self.assertNotIn('csec', ' '.join(seen['cmd']))
 		self.assertTrue(seen['file_existed'])
-		presets = seen['cmd'][seen['cmd'].index('-p') + 1:][:3]
-		self.assertEqual(presets[:2], ['subdomain-enum', 'web'])  # one -p with every preset, the key file last, by absolute path
-		self.assertTrue(os.path.isabs(presets[2]))
+		named = list(bbot_lib.MODES['standard']['presets'])
+		presets = seen['cmd'][seen['cmd'].index('-p') + 1:][:len(named) + 1]
+		self.assertEqual(presets[:-1], named)  # one -p with every preset, the key file last, by absolute path
+		self.assertTrue(os.path.isabs(presets[-1]))
 		self.assertNotIn('-c', seen['cmd'])
-		self.assertFalse(os.path.exists(presets[2]))  # deleted once the run is over
+		self.assertFalse(os.path.exists(presets[-1]))  # deleted once the run is over
 
 
 class EncryptedFieldTests(TestCase):

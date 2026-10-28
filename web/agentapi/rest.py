@@ -12,6 +12,7 @@ from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
+from agentapi import sentinel_dispatch
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -390,7 +391,7 @@ ROUTES = [
      lambda r, c, task_id, **k: broker.report_result(c, task_id, _body(r))),
     ('POST', r'agent/tasks/(?P<task_id>\d+)/release', 'Give a task back to the queue; body {reason}',
      lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
-    ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents)', lambda r, c, **k: broker.list_agents(c, r.GET)),
+    ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents); a Sentinel row carries slots {max, in_use, free, by_kind}', lambda r, c, **k: broker.list_agents(c, r.GET)),
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
     ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null hands one back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
@@ -398,6 +399,8 @@ ROUTES = [
      lambda r, c, **k: sentinel_settings.get_defaults()),
     ('PUT', r'sentinels/defaults', 'App Admin: set the instance-wide Sentinel default {self_update: off|manual|automatic|null}',
      lambda r, c, **k: (svc.require_write_token(c), sentinel_settings.set_defaults(c.user, _body(r)))[1]),
+    ('GET', r'sentinels/dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (for a Sentinel with a free slot), queue_seconds (for a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) plus per_target_seconds for each target beyond the first, and lease_seconds; read only (instance settings CVENGINE_SENTINEL_CLAIM_TIMEOUT, _QUEUE_TIMEOUT, _DISPATCH_TIMEOUT)',
+     lambda r, c, **k: sentinel_dispatch.budgets()),
     ('GET', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Validation and remediation work for agents (status, kind, agent_id, host)',
      lambda r, c, slug, **k: broker.list_tasks(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Queue work for agents: body {kind: validate|remediate, match_ids or tier/host, mode}',

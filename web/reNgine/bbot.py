@@ -20,13 +20,14 @@ DEFAULT_TIMEOUT = 6 * 3600
 # standard (the default): subdomain enumeration plus bbot's quick web preset, limited to modules flagged "safe" (no brute
 # forcing, spidering or other loud modules). bbot 3.x calls the quick web preset "web" (older releases "web-basic"), and
 # it ANDs required flags, so "passive,safe" would drop every active web module and leave nothing for the preset to do.
+# The web-screenshots preset adds gowitness (flagged safe), so every web host gets a front-page screenshot in the default mode, not only in deep.
 # deep: bbot's kitchen-sink preset (everything: subdomain, cloud, code and email enumeration, spidering, web
 # probing, directory and parameter discovery, takeover checks...). It is active: it sends traffic to the
 # target, so it is only for targets you are authorized to test. bbot 3.x has no "allow deadly modules" flag
 # (that belongs to a different tool/version); --force only skips its own precondition warnings.
 MODES = {
     'passive': {'presets': ('subdomain-enum',), 'args': ['-rf', 'passive']},
-    'standard': {'presets': ('subdomain-enum', 'web'), 'args': ['-rf', 'safe', '--force']},
+    'standard': {'presets': ('subdomain-enum', 'web', 'web-screenshots'), 'args': ['-rf', 'safe', '--force']},
     'deep': {'presets': ('kitchen-sink',), 'args': ['--force']},
 }
 MODE_ARGS = {name: m['args'] for name, m in MODES.items()}  # kept for callers that read the extra args
