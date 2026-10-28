@@ -417,6 +417,8 @@ ROUTES = [
      _sentinel_org_enroll),
     ('POST', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization',
      _sentinel_org_enroll),
+    ('GET', r'sentinels/live', 'What every Sentinel you manage is doing right now: {server_time, queued, results: [{name, state: working|idle|offline|pending|suspended, last_seen, current: [task], recent: [task], stats}]}',
+     lambda r, c, **k: sentinels.live_overview(c)),
     ('GET', r'sentinels/enroll', 'App Admin only: a one-time enrollment secret that scopes a Sentinel to every organization and project on this instance, present and future: {enrollment_token, server_url, expires_at, scope: "instance"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
      _sentinel_instance_enroll),
     ('POST', r'sentinels/enroll', 'Same as GET: generates a fresh instance-wide one-time enrollment secret',

@@ -722,3 +722,49 @@ class ProjectSentinelsTabTests(SentinelBase):
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, 'Sentinels for this project')
         self.assertEqual(client.get('/cve/_all/sentinels/').status_code, 404)
+
+
+class LiveOverviewTests(SentinelBase):
+    def _task(self, project, agent, status, **extra):
+        return SentinelTask.objects.create(project=project, kind='nmap', host=f'h.{project.slug}.example', target={}, status=agent and status,
+                                           agent=agent, **extra)
+
+    def test_states_working_idle_and_offline_with_what_each_holds_and_did(self):
+        tokens = {n: create_token(self.dana, n)[1] for n in ('busy', 'quiet', 'gone')}  # one Sentinel per token
+        _, busy = register_sentinel(tokens['busy'], name='busy')
+        _, quiet = register_sentinel(tokens['quiet'], name='quiet')
+        _, gone = register_sentinel(tokens['gone'], name='gone')
+        now = timezone.now()
+        Agent.objects.filter(pk__in=(busy['id'], quiet['id'])).update(last_seen=now)
+        Agent.objects.filter(pk=gone['id']).update(last_seen=now - timedelta(hours=1))
+        agent = Agent.objects.get(pk=busy['id'])
+        self._task(self.pa, agent, 'running', claimed_at=now - timedelta(seconds=40), accepted_at=now - timedelta(seconds=30),
+                   lease_expires_at=now + timedelta(minutes=5))
+        self._task(self.pa, agent, 'done', claimed_at=now - timedelta(minutes=10), accepted_at=now - timedelta(minutes=10),
+                   finished_at=now - timedelta(minutes=8))
+        self._task(self.pa, agent, 'failed', claimed_at=now - timedelta(minutes=5), finished_at=now - timedelta(minutes=4), error='timed out')
+        status, out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual(status, 200)
+        by_name = {r['name']: r for r in out['results']}
+        self.assertEqual({n: r['state'] for n, r in by_name.items()}, {'busy': 'working', 'quiet': 'idle', 'gone': 'offline'})
+        busy_row = by_name['busy']
+        self.assertEqual([(t['kind'], t['status'], t['project']) for t in busy_row['current']], [('nmap', 'running', 'sen-a')])
+        self.assertEqual((busy_row['stats']['done_1h'], busy_row['stats']['failed_1h']), (1, 1))
+        self.assertEqual(busy_row['stats']['average_seconds'], 120)
+        self.assertEqual([t['status'] for t in busy_row['recent']], ['failed', 'done'])
+        self.assertEqual(busy_row['recent'][0]['error'], 'timed out')
+
+    def test_another_tenants_sentinel_and_work_stay_out_of_view(self):
+        _, mine = register_sentinel(self.t['dana'], name='mine')
+        _, theirs = register_sentinel(self.t['root'], name='theirs', scope={'projects': ['sen-b']})
+        self._task(self.pb, Agent.objects.get(pk=theirs['id']), 'running', claimed_at=timezone.now())
+        status, out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual([r['name'] for r in out['results']], ['mine'])
+        self.assertNotIn('h.sen-b.example', str(out))
+        status, out = call(self.t['alice'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual((status, out['results']), (200, []))
+
+    def test_a_pending_sentinel_says_so_instead_of_idle(self):
+        register_sentinel(self.t['alice'], name='waiting', approve=False)
+        status, out = call(self.t['alice'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual([(r['name'], r['state']) for r in out['results']], [('waiting', 'pending')])
