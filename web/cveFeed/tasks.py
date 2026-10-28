@@ -1277,7 +1277,9 @@ def weekly_deep_nuclei():
             run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
                                project=project_id, status='running', scan_id=sub.scan_history_id)
             try:
-                outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service)
+                from agentapi import sentinel_dispatch
+                stream = sentinel_dispatch.wrap_nuclei_stream(sub.scan_history, 'nuclei_deep')
+                outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service, stream=stream)
                 if outcome.get('error'):
                     activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}: {str(outcome["error"])[:180]}')
                     return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
