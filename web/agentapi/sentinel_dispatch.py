@@ -4,8 +4,13 @@ For each of the three stages this phase covers, the pipeline asks here first: is
 project with free capacity and the right capability? If not (the common case today: a project with no Sentinels
 registered), every function below is a no-op and returns at once, so the pipeline runs exactly as it did before this
 module existed - that is the single most important property here, and it is what the regression test in
-``tests.test_sentinel_dispatch`` proves. If there is one, a ``SentinelTask`` is created and this module waits, bounded, for
-it to finish; on success its typed, clipped result is parsed into the *same shape* the local tool's own output already
+``tests.test_sentinel_dispatch`` proves. If there is one, a ``SentinelTask`` is created and this module waits for it to
+finish, under two different budgets: a short claim timeout (``_claim_timeout``, default 8s) for any Sentinel to even pick
+the task up, and only once one has, the much longer completion timeout (``_dispatch_timeout``, default 90s) for it to
+finish the work. A Sentinel that was going to take the task at all almost always claims it within its own poll interval,
+so this means a quiet, offline or already-saturated Sentinel costs a scan stage single-digit seconds, not the full
+completion budget, before falling back locally - while a Sentinel that did pick the work up keeps the full budget to
+actually run it. On success its typed, clipped result is parsed into the *same shape* the local tool's own output already
 takes and handed to the *same persistence function* local execution uses (``cveFeed.nmap_scan.persist_inventory``,
 ``cveFeed.naabu_scan.persist_open_ports``, or - for nuclei - a reconstructed result line fed through the untouched
 ``cveFeed.nuclei_scan._run_nuclei`` loop via its own ``stream`` seam). On timeout, failure or no Sentinel, the caller falls
@@ -24,13 +29,29 @@ DISPATCH_POLL_INTERVAL = 0.5  # seconds between checks while waiting for a dispa
 
 
 def _dispatch_timeout():
-    """CVENGINE_SENTINEL_DISPATCH_TIMEOUT: seconds a stage waits for a dispatched Sentinel task before falling back to
-    running the tool locally. Default 90s: long enough for a Sentinel on an ordinary network to pick up, run and report a
-    single chunk, short enough that a quiet or overloaded Sentinel never meaningfully delays a scan."""
+    """CVENGINE_SENTINEL_DISPATCH_TIMEOUT: seconds a stage waits for a dispatched Sentinel task to *finish* once a
+    Sentinel has claimed it, before falling back to running the tool locally. Default 90s: long enough for a Sentinel on
+    an ordinary network to run and report a single chunk, short enough that a quiet or overloaded Sentinel never
+    meaningfully delays a scan."""
     try:
         return max(1, int(os.environ.get('CVENGINE_SENTINEL_DISPATCH_TIMEOUT', '90')))
     except ValueError:
         return 90
+
+
+def _claim_timeout():
+    """CVENGINE_SENTINEL_CLAIM_TIMEOUT: seconds a stage waits for *any* Sentinel to even claim a dispatched task before
+    giving up on it and falling back to local execution, separate from (and much shorter than) the full completion
+    timeout above. A Sentinel that polls ``next_task`` at all almost always claims new work within its own poll
+    interval, so a task that is still ``queued`` after this short window is one no eligible Sentinel is going to pick
+    up right now (it went offline, hit its concurrency cap, or was never really eligible) - there is no reason to make
+    every scan stage eat the full completion timeout just to find that out. Once a Sentinel has claimed the task, this
+    no longer applies: the work has already left this process, so the stage keeps waiting up to the completion timeout
+    regardless of how long the Sentinel takes to run it. Default 8s."""
+    try:
+        return max(1, int(os.environ.get('CVENGINE_SENTINEL_CLAIM_TIMEOUT', '8')))
+    except ValueError:
+        return 8
 
 
 def any_scanner_for(project, kind):
@@ -65,14 +86,21 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     entry = activity.log('run_check', f'Handed {kind} work for {label} to a Sentinel', project=project, status='running',
                          scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk)
     deadline = time.monotonic() + timeout
+    claim_deadline = time.monotonic() + min(_claim_timeout(), timeout)
+    never_claimed = False
     while True:
         task.refresh_from_db()
         if task.status in ('done', 'failed', 'expired'):
             break
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if task.status == 'queued' and now >= claim_deadline:
+            never_claimed = True
+            sentinel_broker.expire(task, 'no Sentinel claimed the task in time; the stage fell back to local execution')
+            break
+        if now >= deadline:
             sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
             break
-        time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+        time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, min(claim_deadline, deadline) - now)))
     sentinel = task.agent.name if task.agent_id else None
     if task.status == 'done':
         activity.settle(entry, 'done', message=f'Sentinel {sentinel} checked in {kind} work for {label}' if sentinel
@@ -81,7 +109,9 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         reason = (task.error or (task.result or {}).get('error') or 'no reason given')[:180]
         activity.settle(entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
                         else f'A Sentinel reported {kind} failed for {label}: {reason}'))
-    else:  # expired: never claimed, or claimed but not reported back in time
+    elif never_claimed:
+        activity.settle(entry, 'expired', message=f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead')
+    else:  # claimed, but not reported back before the completion timeout
         activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
     return task.result if task.status == 'done' else None
 
