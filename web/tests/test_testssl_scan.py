@@ -4,6 +4,7 @@ import subprocess
 from datetime import timedelta
 from unittest import mock
 
+from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -312,3 +313,40 @@ class SweepTests(RouteFixture, TestCase):
         found = [hygiene.Finding('tls_expired', 4, 'x', host='www.rt.test:443')]
         hygiene.store_findings(self.domain, found, owns=lambda check: not check.startswith(('ts_', 'tlsa_')))
         self.assertEqual(HygieneFinding.objects.get(host='www.rt.test:443', check_name='tlsa_heartbleed').status, 'open')
+
+
+class SentinelDispatchTests(SweepTests):
+    """``sweep()`` offers each target to a Sentinel first (``agentapi.sentinel_dispatch.try_testssl``); its reported items
+    run through the exact same ``evaluate()``/``record_observations``/``store`` path a local run's own items would."""
+
+    def make_sentinel(self, capabilities):
+        from agentapi.auth import create_token
+        from agentapi.models import Agent
+        user = User.objects.create_user(f'sentinel-owner-{capabilities[0]}', password='x')
+        token, _raw = create_token(user, 'sentinel-token')
+        return Agent.objects.create(token=token, name='live-sentinel', kind='scanner', status='active',
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=list(capabilities), last_seen=timezone.now())
+
+    def _answer(self, items):
+        from agentapi.models import SentinelTask
+
+        def fake_sleep(_seconds):
+            task = SentinelTask.objects.filter(status__in=('queued', 'claimed', 'running')).order_by('-id').first()
+            if task:
+                SentinelTask.objects.filter(pk=task.pk).update(status='done', result={'items': items}, finished_at=timezone.now())
+        return fake_sleep
+
+    def test_an_eligible_sentinels_report_is_used_instead_of_the_local_runner(self):
+        self.make_sentinel(['testssl'])
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=self._answer(report(HEARTBLEED))):
+            out = self.sweep()
+        self.assertEqual((out['tested'], out['proven']), (2, 2))
+        self.assertEqual(self.calls, [])  # the local runner never ran at all
+        match = CVEMatch.objects.get(cve_entry=self.cve, subdomain=self.sub, source='testssl', matched_product='TLS service on port 443')
+        self.assertEqual(match.template_result, 'vulnerable')
+
+    def test_with_no_eligible_sentinel_the_sweep_runs_locally_exactly_as_before(self):
+        out = self.sweep()
+        self.assertEqual(out['tested'], 2)
+        self.assertTrue(self.calls)  # the local runner did run

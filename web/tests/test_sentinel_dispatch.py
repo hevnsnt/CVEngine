@@ -254,6 +254,46 @@ class ClaimTimeoutTests(DispatchBase):
         self.assertLess(elapsed, 2)  # the overall timeout still wins even though the claim timeout is much larger
 
 
+class TestsslDispatchTests(DispatchBase):
+    """``try_testssl``: one host:port at a time, never chunked - a Sentinel's raw report items, or ``None`` to fall back
+    to a local ``run_testssl`` call, exactly as every other dispatch point does."""
+
+    def test_no_eligible_sentinel_is_a_no_op(self):
+        out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
+        self.assertIsNone(out)
+        self.assertFalse(SentinelTask.objects.exists())
+
+    def test_a_successful_report_returns_the_raw_items_unparsed(self):
+        self.make_sentinel(['testssl'])
+        items = [{'id': 'heartbleed', 'severity': 'HIGH', 'finding': 'VULNERABLE, exploitable', 'cve': 'CVE-2014-0160'}]
+        result = {'outcome': 'done', 'items': items}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
+        self.assertEqual(out, items)
+        task = SentinelTask.objects.get()
+        self.assertEqual((task.kind, task.target), ('testssl', {'host': 'www.example.test', 'ip': '192.0.2.10', 'port': 443, 'starttls': ''}))
+
+    def test_starttls_is_carried_in_the_target(self):
+        self.make_sentinel(['testssl'])
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                        side_effect=_answer_queued_task({'outcome': 'done', 'items': []})):
+            dispatch.try_testssl(self.project, 'mail.example.test', '192.0.2.20', 25, starttls='smtp', timeout=5)
+        self.assertEqual(SentinelTask.objects.get().target['starttls'], 'smtp')
+
+    def test_timeout_falls_back_to_none(self):
+        self.make_sentinel(['testssl'])
+        out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=0.2)
+        self.assertIsNone(out)
+        self.assertEqual(SentinelTask.objects.get().status, 'expired')
+
+    def test_a_sentinel_reported_failure_returns_none(self):
+        self.make_sentinel(['testssl'])
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                        side_effect=_answer_queued_task({'outcome': 'error', 'error': 'testssl.sh not installed'}, status='failed')):
+            out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
+        self.assertIsNone(out)
+
+
 class NucleiDispatchTests(DispatchBase):
     def test_light_pass_sentinel_finding_creates_a_technology_link_via_the_unchanged_local_loop(self):
         """run_light_nuclei's own loop turns each result line into a Technology link (cveFeed.nuclei_scan.tech_name_from);

@@ -1,6 +1,6 @@
-"""Dispatch-or-local: the one branch the scan pipeline takes before it runs nmap, naabu or nuclei itself.
+"""Dispatch-or-local: the one branch the scan pipeline takes before it runs nmap, naabu, nuclei or testssl.sh itself.
 
-For each of the three stages this phase covers, the pipeline asks here first: is there a live, eligible Sentinel for this
+For each of the stages this phase covers, the pipeline asks here first: is there a live, eligible Sentinel for this
 project with free capacity and the right capability? If not (the common case today: a project with no Sentinels
 registered), every function below is a no-op and returns at once, so the pipeline runs exactly as it did before this
 module existed - that is the single most important property here, and it is what the regression test in
@@ -136,6 +136,20 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
                  for host in result.get('hosts', []) if host.get('ip')]
     totals = persist_inventory(inventory, org_id=org_id)
     return rest, totals
+
+
+# --- testssl: one host:port at a time, the Sentinel's raw report items run through the same local evaluate() -----------
+
+def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None):
+    """A Sentinel's testssl.sh report items for ``host:port`` (raw, in the exact shape ``cveFeed.testssl_scan.evaluate``
+    already reads from a local run), or ``None`` when no Sentinel is eligible, on timeout, or on failure - in which case
+    the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu/nuclei this is never chunked: a testssl
+    run is already one host:port per call, locally or dispatched."""
+    if not any_scanner_for(project, 'testssl'):
+        return None
+    target = {'host': host, 'ip': ip, 'port': port, 'starttls': starttls or ''}
+    result = dispatch_or_none(project, 'testssl', target, host=host, ips=[ip], scan=scan, timeout=timeout)
+    return (result or {}).get('items') if result is not None else None
 
 
 # --- naabu: an injectable runner wrapping cveFeed.naabu_scan.discover's own seam, untouched otherwise ------------------

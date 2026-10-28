@@ -610,8 +610,30 @@ def _clean_nuclei_result(body):
     return {'findings': _clean_findings(body.get('findings') or [])}
 
 
+MAX_TESTSSL_ITEMS = 300  # a testssl.sh run of one host:port is a few dozen tests; well above any real report
+_TESTSSL_SEVERITIES = ('INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'WARN', 'FATAL', 'DEBUG', 'OK')
+
+
+def _clean_testssl_result(body):
+    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.testssl_scan.evaluate`` reads from a
+    locally-run report item (``id``, ``severity``, ``finding``, ``cve``): everything else testssl.sh's own JSON carries is
+    dropped, never stored or interpreted, so a Sentinel-reported item is no richer an attack surface than a local one."""
+    items = body.get('items')
+    if not isinstance(items, list) or len(items) > MAX_TESTSSL_ITEMS:
+        raise ApiError(400, f'items must be a list of at most {MAX_TESTSSL_ITEMS} entries')
+    out = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'].strip():
+            continue
+        severity = item.get('severity')
+        severity = severity.upper() if isinstance(severity, str) and severity.upper() in _TESTSSL_SEVERITIES else ''
+        out.append({'id': _text(item['id'], 60), 'severity': severity, 'finding': _text(item.get('finding'), 600),
+                    'cve': _text(item.get('cve'), 300)})
+    return {'items': out}
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
-             'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result}
+             'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result}
 
 
 def clean_result(kind, body):
