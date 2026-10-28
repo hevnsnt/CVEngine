@@ -36,7 +36,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600}
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
 DEFAULT_CEILING = 900
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 

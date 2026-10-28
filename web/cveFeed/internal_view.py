@@ -130,7 +130,9 @@ def summary():
         if last and (last_overall is None or last > last_overall):
             last_overall = last
         networks.append({'project': project.slug, 'cidr': rng.cidr, 'description': rng.description, 'hosts': len(names),
-                         'last_scan_at': last.isoformat() if last else None, 'sentinel': sentinels[rng.project_id]})
+                         'last_scan_at': last.isoformat() if last else None, 'sentinel': sentinels[rng.project_id],
+                         'last_discovery_at': rng.last_discovery_at.isoformat() if rng.last_discovery_at else None,
+                         'last_discovery_hosts': rng.last_discovery_hosts, 'last_discovery_error': rng.last_discovery_error})
     reps = counts.host_reps().filter(internal_q())
     return {'has': True, 'networks': networks, 'hosts': reps.count(), 'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
             'findings': counts.actionable_findings(Vulnerability.objects.filter(internal_q('subdomain__'))).count(),

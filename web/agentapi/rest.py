@@ -301,6 +301,8 @@ ROUTES = [
      lambda r, c, slug, **k: internal_ranges.list_ranges(c, slug)),
     ('POST', r'projects/(?P<slug>[-\w]+)/internal-ranges', 'Declare a private network (CIDR inside 10/8, 172.16/12, 192.168/16, 100.64/10 or fc00::/7, at most a /16) as internal to this project: {cidr, description}; its addresses may then be added as targets (project administrators only)',
      lambda r, c, slug, **k: (internal_ranges.add_range(c, slug, _body(r)), 201)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/internal-ranges/(?P<range_id>\d+)/discover', 'Sweep a declared internal range for live hosts now (it is also swept weekly): a Sentinel inside the network that declares network:internal and discover reports what answered, and each live address becomes a target (project administrators only)',
+     lambda r, c, slug, range_id, **k: (internal_ranges.discover_now(c, slug, int(range_id)), 202)),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/internal-ranges/(?P<range_id>\d+)', 'Remove a declared internal range (project administrators only)',
      lambda r, c, slug, range_id, **k: internal_ranges.delete_range(c, slug, int(range_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/tailscale', 'The project\'s Tailscale connection: tailnet, device counts, last sync, errors, settings (administrators only; never the credentials)',

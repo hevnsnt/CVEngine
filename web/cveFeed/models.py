@@ -1879,6 +1879,12 @@ class InternalRange(models.Model):
     description = models.CharField(max_length=200, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # The sweep that finds the live hosts of this range (``cveFeed.internal_discovery``): when one last finished, how many hosts it found,
+    # what stopped the last attempt, and where a range too large for one run resumes.
+    last_discovery_at = models.DateTimeField(null=True, blank=True)
+    last_discovery_hosts = models.PositiveIntegerField(null=True, blank=True)
+    last_discovery_error = models.CharField(max_length=200, blank=True, default="")
+    discovery_cursor = models.PositiveIntegerField(default=0)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["project", "cidr"], name="internalrange_project_cidr_uniq")]
