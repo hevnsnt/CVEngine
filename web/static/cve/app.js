@@ -200,6 +200,7 @@ function createList({
   onLoaded,
   skeleton = "table",
   onReset,
+  pageSize = 30, // a number, or a function for a list that asks for more at a time when a filter narrows it
 }) {
   let page = 1;
   let timer = null;
@@ -221,7 +222,7 @@ function createList({
     try {
       const data = await api(
         "GET",
-        `${path}?${query({ ...params(), page, page_size: 30 })}`,
+        `${path}?${query({ ...params(), page, page_size: typeof pageSize === "function" ? pageSize() : pageSize })}`,
       );
       const items = data.results || [];
       lastCount = data.count;
@@ -2207,10 +2208,11 @@ const pages = {
     const rows = el("div", "host-rows");
     const controls = el("div", "list-tools");
     controls.append(q, sortBy);
-    // heat filter: narrows the hosts already loaded; the counts say so when more are still to load
+    // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
     let totalHosts = 0;
+    let heatFacets = null; // {fire, smoke, ice, clean, unscanned, truncated}: counted by the server over every host the search matches
     const heatChips = el("div", "picker heat-chips", null, { role: "group", "aria-label": "Temperature" });
     const chipBtn = new Map();
     HEAT_CHIPS.forEach(([key, label, dot]) => {
@@ -2221,9 +2223,7 @@ const pages = {
         heatFilter = key;
         syncUrl();
         paintHeat();
-        bulk.prune();
-        settleSelection();
-        if (galleryOn) paintGallery();
+        list.reload();
       };
       chipBtn.set(key, b);
       heatChips.append(b);
@@ -2240,26 +2240,15 @@ const pages = {
       else showHost(null);
     }
     function paintHeat() {
-      const n = { all: 0 };
-      byId.forEach((h) => {
-        const k = h.heat || "unscanned";
-        n[k] = (n[k] || 0) + 1;
-        n.all += 1;
-      });
-      const partial = totalHosts > byId.size;
+      const counts = heatFacets || {};
+      const all = HEAT_CHIPS.slice(1).reduce((n, [key]) => n + (counts[key] || 0), 0);
       chipBtn.forEach((b, key) => {
         b.setAttribute("aria-pressed", String(key === heatFilter));
-        b.lastChild.textContent = `${n[key] || 0}${partial && key === "all" ? "+" : ""}`;
+        const n = key === "all" ? all : counts[key] || 0;
+        b.lastChild.textContent = heatFacets ? `${n}${heatFacets.truncated && key === "all" ? "+" : ""}` : "0";
       });
-      let shown = 0;
-      rows.querySelectorAll(".host-row").forEach((r) => {
-        const keep = heatFilter === "all" || r.dataset.heatKey === heatFilter;
-        r.hidden = !keep;
-        if (keep) shown += 1;
-      });
-      countLine.textContent = byId.size
-        ? `${shown} host${shown === 1 ? "" : "s"}${heatFilter !== "all" ? ` ${heatFilter === "unscanned" ? "not scanned" : heatFilter}` : ""}${partial ? ` of ${totalHosts} (load more to include the rest)` : ""}`
-        : "";
+      const kind = heatFilter === "unscanned" ? "not scanned" : heatFilter;
+      countLine.textContent = totalHosts ? `${totalHosts} host${totalHosts === 1 ? "" : "s"}${heatFilter !== "all" ? ` ${kind}` : ""}` : "";
     }
     const views = savedViews({
       page: "hosts",
@@ -3033,10 +3022,12 @@ const pages = {
         settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
       },
       path: `${base}/search`,
-      params: () => ({ q: q.value, sort: sortBy.value }),
+      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}) }),
+      pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
       empty: "No hosts match. Hosts appear as discovery and port scans finish.",
       onLoaded: (data) => {
         totalHosts = data.count || 0;
+        if (data.facets && data.facets.heat) heatFacets = { ...data.facets.heat, truncated: Boolean(data.facets.truncated) };
         paintHeat();
       },
       render: (m, items, reset) => {

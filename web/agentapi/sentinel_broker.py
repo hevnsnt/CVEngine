@@ -889,6 +889,67 @@ def list_project_sentinels(ctx, slug):
     return {'project': project.slug, 'results': out}
 
 
+def _state_of(agent, live, active):
+    """One word for what a Sentinel is doing now: working, idle, offline (active but not heard from), or its approval state."""
+    if agent.status != 'active':
+        return agent.status
+    if not live:
+        return 'offline'
+    return 'working' if active else 'idle'
+
+
+def live_overview(ctx):
+    """What every Sentinel the caller may manage is doing right now, for the Sentinels page: liveness, the task each one holds,
+    its last few finished tasks and how much it has done lately. Hosts and projects come only from tasks the caller's tenancy
+    already lets them read (the scoped ``SentinelTask.objects``), so another tenant's work never shows."""
+    reap_expired()
+    now = timezone.now()
+    agents = list(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES])
+    ids = [a.pk for a in agents]
+    tasks = SentinelTask.objects.filter(agent_id__in=ids).select_related('project', 'agent')
+    held, finished = {}, {}
+    for t in tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES).order_by('claimed_at', 'id'):
+        held.setdefault(t.agent_id, []).append(t)
+    day = now - timedelta(hours=24)
+    hour = now - timedelta(hours=1)
+    stats = {}
+    for t in tasks.filter(finished_at__gte=day, status__in=('done', 'failed')).order_by('-finished_at')[:2000]:
+        row = stats.setdefault(t.agent_id, {'done_1h': 0, 'failed_1h': 0, 'done_24h': 0, 'failed_24h': 0, 'seconds': 0, 'timed': 0})
+        key = 'done' if t.status == 'done' else 'failed'
+        row[f'{key}_24h'] += 1
+        if t.finished_at >= hour:
+            row[f'{key}_1h'] += 1
+        started = t.accepted_at or t.claimed_at
+        if t.status == 'done' and started:
+            row['seconds'] += max(0, (t.finished_at - started).total_seconds())
+            row['timed'] += 1
+    for agent_id in ids:
+        finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
+    queued = SentinelTask.objects.filter(status='queued').count()
+    out = []
+    for agent in agents:
+        eff = SentinelEff(agent, now)
+        mine = held.get(agent.pk, [])
+        st = stats.get(agent.pk, {})
+        seen = agent.last_seen
+        out.append({
+            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
+            'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
+            'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
+            'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
+            'problem': eff.problem or '',
+            'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'project': t.project.slug, 'scan_id': t.scan_id,
+                         'since': svc._iso(t.accepted_at or t.claimed_at), 'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],
+            'recent': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'project': t.project.slug, 'finished': svc._iso(t.finished_at),
+                        'seconds': int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None,
+                        'error': t.error} for t in finished.get(agent.pk, [])],
+            'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
+                      'failed_24h': st.get('failed_24h', 0), 'average_seconds': int(st['seconds'] / st['timed']) if st.get('timed') else None}})
+    return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
+            'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out}
+
+
 def task_status_counts(agent_ids):
     """``(agent_id, status, n)`` rows for ``agent_broker._counts``, which merges them into the one admin task summary
     every agent (remediation/validation or Sentinel) is shown with."""
