@@ -1450,6 +1450,9 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .strip .sev-critical .hy-dot{background:var(--fire)}.strip .sev-high .hy-dot{background:var(--high)}.strip .sev-medium .hy-dot{background:var(--smoke)}
 .strip .hy-none{color:var(--muted)}
 .strip a small{font:500 11px/1.3 var(--mono);color:var(--muted)}
+/* a count beside its total ("3 of 186 tracked"), on the number's own line */
+.strip a .of{display:flex;align-items:baseline;gap:6px;margin:0;min-width:0}
+.strip a .of small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media (min-width:1200px){.strip{grid-template-columns:repeat(6,minmax(0,1fr))}}
 @media (min-width:720px) and (max-width:1199px){.strip{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media (max-width:719px){.strip a:last-child{grid-column:span 2}}

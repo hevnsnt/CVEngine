@@ -496,6 +496,11 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True):
     for x in stale:
         x.status, x.resolved_at = 'resolved', timezone.now()
         x.save(update_fields=['status', 'resolved_at'])
+    if domain.project_id:  # hygiene issues count toward the host score: a new or resolved one moves it now, not at the daily pass
+        from cveFeed import scoring
+        touched = sorted({h.lower() for h, _ in keep} | {x.host.lower() for x in stale})
+        for i in range(0, len(touched), scoring.CHUNK):
+            scoring.rescore_quietly(domain.project_id, touched[i:i + scoring.CHUNK])
     return stale
 
 

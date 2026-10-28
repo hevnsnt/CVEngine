@@ -2784,7 +2784,11 @@ def list_findings(ctx, slug, params):
 
 
 def _host_of(obj):
-    """``(project id, host name)`` of a finding that belongs to a host, else None (a hygiene finding belongs to a domain)."""
+    """``(project id, host name)`` of a finding that belongs to a host, else None. A hygiene finding names its host (the apex
+    domain for the email checks) and the target it was checked under."""
+    if hasattr(obj, 'check_name'):
+        domain = getattr(obj, 'domain', None)
+        return (domain.project_id, obj.host) if domain and domain.project_id and obj.host else None
     sub = getattr(obj, 'subdomain', None)
     domain = getattr(sub, 'target_domain', None) if sub else None
     return (domain.project_id, sub.name) if sub and domain and domain.project_id else None

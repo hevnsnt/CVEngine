@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import changes, correlation, scoring
-from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, RouteAuth
+from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, HygieneFinding, RouteAuth
 from cveFeed.tasks import rescore_all_hosts
 from cveFeed.views import graph_payload
 from dashboard.models import Org, Project, ProjectMembership
@@ -31,6 +31,16 @@ class ScoreHostTests(SimpleTestCase):
 		self.assertEqual(scoring.score_host({}), (0, []))
 		self.assertEqual(total({'public_ip': True}), 10)
 		self.assertEqual(total({'public_ip': False}), 0)
+
+	def test_hygiene_issues_add_the_worst_one_plus_two_per_further_serious_one_capped_at_twenty(self):
+		self.assertEqual(total({'hygiene': [{'severity': 4, 'title': 'Certificate has expired'}]}), 20)
+		self.assertEqual(total({'hygiene': [{'severity': 2, 'title': 'DMARC missing'}]}), 8)
+		self.assertEqual(total({'hygiene': [{'severity': 2, 'title': 'DMARC missing'}, {'severity': 2, 'title': 'SPF soft fail'},
+			{'severity': 1, 'title': 'No CAA record'}]}), 10)
+		self.assertEqual(total({'hygiene': [{'severity': 3, 'title': 'a'}, {'severity': 3, 'title': 'b'}, {'severity': 3, 'title': 'c'},
+			{'severity': 2, 'title': 'd'}]}), 20)
+		self.assertEqual(total({'hygiene': [{'severity': 0, 'title': 'info only'}]}), 0)
+		self.assertEqual(labels({'hygiene': [{'severity': 4, 'title': 'Certificate has expired'}]}), ['Critical hygiene issue Certificate has expired'])
 
 	def test_cve_points_follow_the_worst_match_and_the_ai_bonus_needs_fire(self):
 		self.assertEqual(total({'cves': [{'id': 'CVE-1', 'temp': 'ice'}, {'id': 'CVE-2', 'temp': 'smoke'}]}), 20)
@@ -112,6 +122,22 @@ class RescoreTests(ChangeFixture, TestCase):
 		AssetChange.objects.create(project=self.project, domain=self.domain, host='www.ct.test', kind='host_new',
 			detected_at=now - datetime.timedelta(days=30))
 		HostState.objects.create(project=self.project, domain=self.domain, host='www.ct.test', state={})
+
+	def test_open_hygiene_issues_of_the_host_raise_its_score_and_resolving_them_lowers_it_again(self):
+		from cveFeed.hygiene import Finding, store_findings
+		before, _ = self._fire_score()
+		store_findings(self.domain, [Finding('tls_expired', 4, 'Certificate has expired', host='www.ct.test')])
+		self.rows[1].refresh_from_db()
+		self.assertIn('Critical hygiene issue Certificate has expired', [d['label'] for d in self.rows[1].score_detail])
+		self.assertGreater(self.rows[1].score, before)
+		row = HygieneFinding.objects.get(host='www.ct.test')
+		row.remediation_status = 'accepted_risk'
+		row.save()
+		self.assertNotIn('Critical hygiene issue Certificate has expired', self._fire_score()[1])
+		row.remediation_status = 'open'
+		row.save()
+		store_findings(self.domain, [])  # the next sweep no longer finds it
+		self.assertFalse(any('hygiene' in label for label in self._fire_score()[1]))
 
 	def _fire_score(self):
 		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
