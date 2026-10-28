@@ -256,3 +256,96 @@ class CapacityTests(TestCase):
 
 	def test_a_running_row_always_counts(self):
 		self.assertEqual(self.count(set()), 2)  # the young queued row and the running one
+
+
+class QueuedScanRedispatchTests(ReaperTests):
+	"""A queued discovery scan whose worker message was lost is sent again, and only that one."""
+
+	def setUp(self):
+		super().setUp()
+		from reNgine import resources
+		client = resources.get_store().r
+		self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')])
+		[client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')]
+
+	def queued(self, hours, celery_ids=(), tasks=None):
+		from scanEngine.models import EngineType
+		from startScan.models import ScanHistory
+		engine = EngineType.objects.first() or EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		return ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=NOW - timedelta(hours=hours), scan_status=-1,
+		                                  results_dir='/tmp', celery_ids=list(celery_ids), tasks=tasks)
+
+	def redispatch(self, live):
+		with mock.patch('reNgine.celery.app.send_task') as send:
+			return reaper.redispatch_queued_scans(now=NOW, live=live), send
+
+	def test_a_scan_the_broker_holds_nothing_for_is_sent_again(self):
+		lost = self.queued(2)
+		count, send = self.redispatch(set())
+		self.assertEqual(count, 1)
+		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk], queue='discovery_queue')
+
+	def test_a_scan_with_a_message_in_a_queue_or_a_worker_is_only_waiting_its_turn(self):
+		waiting, lost = self.queued(2), self.queued(2)
+		count, send = self.redispatch({waiting.pk})
+		self.assertEqual(count, 1)
+		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk], queue='discovery_queue')
+
+	def test_nothing_is_sent_when_the_broker_cannot_be_asked(self):
+		self.queued(2)
+		self.assertEqual(self.redispatch(None)[0], 0)  # a long queue after a bulk add must not be doubled on a guess
+
+	def test_young_started_and_paused_cases_are_left_alone(self):
+		self.queued(0.1)                                   # too young
+		self.queued(2, celery_ids=['started-once'])        # a worker has had it
+		self.assertEqual(self.redispatch(set())[0], 0)
+		self.queued(2)
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+		self.assertEqual(self.redispatch(set())[0], 0)
+
+	def test_the_same_scan_is_not_sent_again_for_two_hours(self):
+		self.queued(2)
+		self.assertEqual(self.redispatch(set())[0], 1)
+		self.assertEqual(self.redispatch(set())[0], 0)
+
+	def test_a_scan_of_an_internal_target_goes_to_its_own_task(self):
+		lost = self.queued(2, tasks=['internal_pipeline'])
+		count, send = self.redispatch(set())
+		self.assertEqual(count, 1)
+		send.assert_called_once_with('run_internal_scan', args=[lost.pk], queue='discovery_queue')
+
+	def test_a_second_message_for_a_scan_that_already_ended_runs_nothing(self):
+		from cveFeed import discovery
+		done = self.queued(2)
+		type(done).objects.filter(pk=done.pk).update(scan_status=discovery.SUCCESS)
+		with mock.patch('cveFeed.discovery._run_pipeline') as run:
+			self.assertEqual(discovery.run_pipeline(done.pk)['status'], 'finished')
+			run.assert_not_called()
+
+	def test_the_fifteen_minute_job_sends_them_and_says_so(self):
+		from cveFeed.tasks import reap_stuck_jobs
+		with mock.patch('cveFeed.reaper.redispatch_queued_scans', return_value=2):
+			counts = reap_stuck_jobs()
+		self.assertEqual(counts['ScanHistory:requeued'], 2)
+		self.assertTrue(AgentActivity.objects.filter(message__contains='Queued 2 discovery scans again').exists())
+
+
+class BrokerScanIdTests(ReaperTests):
+	def message(self, task, args, encoded=True):
+		import base64
+		import json
+		body = json.dumps([args, {}, {}])
+		return json.dumps({'body': base64.b64encode(body.encode()).decode() if encoded else body,
+		                   'properties': {'body_encoding': 'base64' if encoded else None}, 'headers': {'task': task, 'id': 'tid'}})
+
+	def test_the_scan_id_is_read_from_a_discovery_message_however_it_is_encoded(self):
+		from cveFeed import broker_recovery as br
+		self.assertEqual(br._scan_refs(self.message('run_bbot_discovery', [42, 'standard'])), [42])
+		self.assertEqual(br._scan_refs(self.message('run_internal_scan', [7], encoded=False)), [7])
+
+	def test_other_tasks_and_malformed_messages_name_no_scan(self):
+		from cveFeed import broker_recovery as br
+		self.assertEqual(br._scan_refs(self.message('assess_host', [42])), [])
+		self.assertEqual(br._scan_refs('not json'), [])
+		self.assertEqual(br._scan_refs(self.message('run_bbot_discovery', [])), [])
+		self.assertEqual(br._scan_refs(self.message('run_bbot_discovery', ['x'])), [])

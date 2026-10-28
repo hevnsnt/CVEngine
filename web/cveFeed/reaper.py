@@ -85,6 +85,51 @@ def redispatch_queued_assessments(now=None):
     return queued
 
 
+REDISPATCH_SCAN_AFTER_MINUTES = 30  # a queued scan the broker holds no message for, this old, is asked for again
+REDISPATCH_SCAN_EVERY_HOURS = 2  # and no more often than this per scan
+
+
+def redispatch_queued_scans(now=None, live=None):
+    """Queue again the discovery scans (``ScanHistory`` rows queued, -1) whose worker message was lost, e.g. in a worker or update restart:
+    the row says queued forever and the dashboard shows "queued, none running" until someone intervenes. A queued scan records no Celery id
+    until it starts, so the broker is asked whether any message still exists for its scan id (``broker_recovery.live_tasks``: a queue, an
+    unacknowledged hold or a worker). Only a scan the broker holds nothing for, and only when that can be told, is sent again: a long queue
+    after a bulk add is waiting its turn and is left alone. A second message is harmless (the domain lock answers 'duplicate', and a finished
+    scan is not run again). The bbot mode is not stored on the row, so a recovered scan runs in the default mode. ``live`` is the scan ids
+    the broker holds (None: cannot be told), injectable for tests. Returns how many were queued again."""
+    from cveFeed import broker_recovery, ledger
+    from cveFeed.discovery import QUEUED
+    from cveFeed.scan_control import pause_requested
+    from reNgine import resources
+    from startScan.models import ScanHistory
+    if pause_requested():  # waiting on purpose
+        return 0
+    now = now or timezone.now()
+    if live is None:
+        found = broker_recovery.live_tasks()
+        live = None if found is None else found[1]
+    if live is None:
+        return 0
+    client = getattr(resources.get_store(), 'r', None)
+    queued = 0
+    for scan in ScanHistory.objects.filter(scan_status=QUEUED, start_scan_date__lt=now - timedelta(minutes=REDISPATCH_SCAN_AFTER_MINUTES)
+                                           ).order_by('id')[:50]:
+        if scan.id in live or scan.celery_ids:
+            continue
+        key = f'cvengine:scan:redispatch:{scan.pk}'
+        try:
+            if client is None or not client.set(key, ledger._owner(), nx=True, ex=REDISPATCH_SCAN_EVERY_HOURS * 3600):
+                continue
+        except Exception:  # noqa: BLE001 - no Redis, no way to rate-limit: leave it
+            continue
+        from reNgine.celery import app
+        # a scan of an internal target (cveFeed.internal_scan) is its own task; sent by name so this module needs no import of it
+        name = 'run_internal_scan' if 'internal_pipeline' in (scan.tasks or []) else 'run_bbot_discovery'
+        app.send_task(name, args=[scan.pk], queue='discovery_queue')
+        queued += 1
+    return queued
+
+
 STALE_RUNNING_GRACE_SECONDS = 120  # a scan or assessment this young may not have its celery id recorded yet: never judged by the broker alone
 
 

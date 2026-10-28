@@ -340,6 +340,8 @@ def run_pipeline(scan_id, *args, **kwargs):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     if scan.scan_status == 3:  # aborted while it waited in the queue
         return {'scan_id': scan_id, 'status': 'aborted'}
+    if scan.scan_status in (FAILED, SUCCESS):  # a second message for a scan that already ended (the reaper may send one again) runs nothing
+        return {'scan_id': scan_id, 'status': 'finished'}
     from targetApp.target_types import sentinel_only_target
     if sentinel_only_target(scan.domain.name, scan.domain.project_id):  # nothing at all runs from this server against a Sentinel-only address
         message = (f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
