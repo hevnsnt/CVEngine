@@ -431,12 +431,13 @@ class AllProjectsPageTests(AllProjectsBase):
 		self.assertEqual(c.get(f'/cve/acme/scans/{scan.id}/').status_code, 200)
 		self.assertEqual(c.get(f'/cve/_all/hosts/{self.data["acme"]["shared"].id}/screenshot/').status_code, 404)
 
-	def test_api_keys_have_a_scope_chooser_on_all_projects(self):
+	def test_api_keys_moved_to_settings(self):
 		html = client_for(self.ann).get('/cve/_all/hosts/').content.decode()
-		self.assertIn('/cve/_all/keys/', html)
-		page = client_for(self.ann).get('/cve/_all/keys/')
-		self.assertEqual(page.status_code, 200)
-		self.assertContains(page, 'choose an authorized project or organization')
+		self.assertNotIn('/cve/_all/keys/', html)  # the side bar page is gone: keys live in Settings > API keys and Administration
+		self.assertNotEqual(client_for(self.ann).get('/cve/_all/keys/').status_code, 200)
+		root = User.objects.create_superuser('keys-root', password='x')
+		page = client_for(root).get('/cve/acme/keys/')
+		self.assertEqual((page.status_code, page['Location']), (302, '/cve/settings/#keys'))
 		_, token = create_token(self.ann, 'key-scope')
 		self.assertEqual(bearer(token, 'PUT', '/api/v1/projects/_all/api-keys/shodan', {'api_key': 'x'})[0], 400)
 
