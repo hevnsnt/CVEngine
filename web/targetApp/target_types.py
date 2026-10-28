@@ -8,6 +8,8 @@ A target the user adds is one of:
 
 Pure Python (no Django) so it is unit testable on its own.
 """
+import contextlib
+import contextvars
 import ipaddress
 import os
 import re
@@ -295,6 +297,31 @@ def in_internal_range(value, networks):
     if any(ip.version == n.version and ip in n for n in _ALWAYS_BLOCKED + _extra_blocked()):
         return False
     return any(ip.version == n.version and ip in n for n in networks)
+
+
+_INTERNAL_SCOPE = contextvars.ContextVar("cvengine_internal_scope", default=False)
+
+
+@contextlib.contextmanager
+def internal_scope():
+    """While active, the scan stages may treat an address of a network the project declared internal as a target (``scan_targets``), and
+    every local scanner refuses to run (``refuse_local``). Used only by ``cveFeed.internal_scan``, whose every step is a Sentinel's."""
+    token = _INTERNAL_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _INTERNAL_SCOPE.reset(token)
+
+
+def internal_scope_active():
+    return _INTERNAL_SCOPE.get()
+
+
+def refuse_local(what):
+    """Raise when ``what`` (a local scanner) is about to run inside ``internal_scope``: an internal scan never executes a tool from this
+    server, so a stage that forgot its Sentinel seam fails loudly instead of connecting to a private address from here."""
+    if _INTERNAL_SCOPE.get():
+        raise RuntimeError(f"{what} must not run from this server for an internal target: only a Sentinel inside the network scans it")
 
 
 def sentinel_only_target(name, project, networks=None):

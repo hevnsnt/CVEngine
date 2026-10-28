@@ -12,6 +12,8 @@ class CveFeedConfig(AppConfig):
         from django.core.exceptions import ImproperlyConfigured
 
         from cveFeed import checks  # noqa: F401 - registers the system checks
+        from cveFeed import internal_view
+        internal_view.connect()
         from cveFeed import templategen
         problem = templategen.templates_dir_problem()
         if problem:

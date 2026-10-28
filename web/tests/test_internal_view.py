@@ -175,3 +175,35 @@ class SearchTests(ViewBase):
 
     def test_a_user_of_another_organization_is_not_offered_the_filter(self):
         self.assertFalse(self.get('/api/v1/projects/ir-b/search', 'other')['has_internal'])
+
+
+class CacheInvalidationTests(World):
+    """The table that says which hosts are internal is dropped when what it is built from changes, so a page never waits on a timer for it."""
+
+    def setUp(self):
+        internal_view.invalidate()
+        self.addCleanup(internal_view.invalidate)
+
+    def test_declaring_or_removing_a_range_drops_it(self):
+        internal_view.table()
+        self.assertEqual(internal_view._cache['at'] > 0, True)
+        row = self.declare()
+        self.assertEqual(internal_view._cache['at'], 0.0)
+        internal_view.table()
+        row.delete()
+        self.assertEqual(internal_view._cache['at'], 0.0)
+
+    def test_adding_a_host_named_by_an_address_drops_it_and_a_named_host_does_not(self):
+        self.declare()
+        Domain.objects.create(name='10.20.0.5', project=self.pa, insert_date=timezone.now())
+        self.assertEqual(internal_view._cache['at'], 0.0)
+        self.assertTrue(internal_view.is_internal(self.pa.id, '10.20.0.5'))
+        Domain.objects.create(name='www.example.test', project=self.pa, insert_date=timezone.now())
+        self.assertGreater(internal_view._cache['at'], 0)  # a name that is not an address changes nothing about it
+
+    def test_the_table_is_not_rebuilt_by_the_clock_inside_a_few_minutes(self):
+        internal_view.table()
+        built = internal_view._cache['at']
+        with mock.patch('time.monotonic', return_value=built + 120):
+            internal_view.table()
+        self.assertEqual(internal_view._cache['at'], built)

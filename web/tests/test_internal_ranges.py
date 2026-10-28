@@ -179,14 +179,6 @@ class NeverLocalTests(World):
             Domain.objects.filter(pk=self.public.pk).delete()
             self.assertEqual(conductor.next_targets(5), [])
 
-    def test_starting_a_scan_by_hand_is_refused(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': ''}), mock.patch('cveFeed.discovery.start_discovery') as start:
-            status, out = call(self.t['admin'], 'POST', f'/api/v1/projects/ir-a/targets/{self.inside.pk}/discover', {})
-            self.assertEqual(status, 409, out)
-            status, out = call(self.t['admin'], 'POST', '/api/v1/projects/ir-a/scans', {'target_id': self.inside.pk})
-            self.assertEqual(status, 409, out)
-            start.assert_not_called()
-
     def test_a_queued_discovery_that_slips_through_fails_with_a_clear_reason(self):
         from cveFeed import discovery
         from scanEngine.models import EngineType

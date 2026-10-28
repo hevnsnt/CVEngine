@@ -355,14 +355,16 @@ def _covers(project_slug, org_slug):
     return named
 
 
-def eligible_sentinels(project, kind, now=None):
+def eligible_sentinels(project, kind, now=None, internal=False):
     """Live, active Sentinels whose scope covers ``project`` and who declare capability ``kind``: candidates for dispatch, or
     to claim a queued task. Found in SQL first (same pattern as ``agent_broker._effs_for``), so a call never builds the
-    rights of every Sentinel on the instance."""
+    rights of every Sentinel on the instance. ``internal`` keeps only Sentinels that declare ``network:internal``: the work is
+    for an address inside a private network, which no other Sentinel can reach."""
     now = now or timezone.now()
     agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                   token__revoked=False).select_related('token__user')[:CANDIDATES]
-    return [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and kind in e.caps]
+    return [e for e in (SentinelEff(a, now) for a in agents)
+            if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
 
 
 def has_sentinels(project_slug, org_slug):
@@ -371,12 +373,12 @@ def has_sentinels(project_slug, org_slug):
     return Agent.objects.filter(_covers(project_slug, org_slug), kind='scanner', token__revoked=False).exclude(status='revoked').exists()
 
 
-def any_scanner_for(project, kind=None):
+def any_scanner_for(project, kind=None, internal=False):
     """Whether at least one live, eligible Sentinel could take ``kind`` work for ``project`` right now: a cheap existence
     check so a project with no Sentinels pays for nothing beyond this one query, and the scan pipeline behaves exactly as
     it did before Sentinels existed (see ``agentapi.sentinel_dispatch``, which gates every dispatch attempt on this)."""
     now = timezone.now()
-    for eff in eligible_sentinels(project, kind, now) if kind else []:
+    for eff in eligible_sentinels(project, kind, now, internal) if kind else []:
         if eff.live:
             counts = dict(SentinelTask.objects.filter(agent=eff.agent, status__in=SENTINEL_ACTIVE_STATUSES)
                           .values_list('agent_id').annotate(n=Count('id')))

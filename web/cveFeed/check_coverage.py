@@ -723,6 +723,8 @@ EXCLUDED = {
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
         'asset_changes': 'the change log of the scan, bookkeeping only',
+        'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; per-host coverage of internal hosts is not judged yet',
+        'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; per-host coverage of internal hosts is not judged yet',
     },
 }
 

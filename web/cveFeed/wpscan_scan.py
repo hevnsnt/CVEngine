@@ -254,6 +254,8 @@ def child_env(token):
 def run_wpscan_process(url, token, timeout=None, thorough=False):
     """Run WPScan on one site and return its parsed JSON report (local execution only - see ``_classify`` for what a
     Sentinel-dispatched run shares with this). The token travels in the environment."""
+    from targetApp.target_types import refuse_local
+    refuse_local('WPScan')
     env = child_env(token)
     with tempfile.TemporaryDirectory(prefix='wpscan-') as tmp:
         out = os.path.join(tmp, 'report.json')
