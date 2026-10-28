@@ -1590,8 +1590,8 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .feed-head .temp[aria-pressed="true"]::before{box-shadow:0 0 0 2px var(--on-ink)}
 
 /* ---- live dashboard: the counters sit under Exposed hosts instead of in a bar of their own ---- */
-.strip.in-cell{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;margin:0;border:0;border-top:1px solid var(--line);border-radius:0;flex:1 1 auto;align-content:start}
-.strip.in-cell a,.strip.in-cell a.wide{flex:none;min-width:0;padding:14px 18px}
+.strip.in-cell{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;margin:0;border:0;border-top:1px solid var(--line);border-radius:0;flex:1 1 auto;align-content:start;background:var(--surface)}
+.strip.in-cell a,.strip.in-cell a.wide{flex:none;min-width:0;padding:14px 18px;border-bottom:1px solid var(--line)}
+.strip.in-cell #n-matches,.strip.in-cell #n-coverage,.strip.in-cell #n-oldest{border-right:1px solid var(--line)}
 .strip.in-cell a.wide{grid-column:1/-1}
-.strip.in-cell a:last-child:nth-child(odd){grid-column:1/-1}
 .cell-stack>a.cell{flex:none}
