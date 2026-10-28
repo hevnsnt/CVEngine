@@ -729,9 +729,18 @@ def resolve_missing(domain, sub, gone, matches, products):
 
 
 def import_results(run, gmp, status_xml):
-    """Import a finished task: observations, findings, evidence and resolutions for each host of the run. Returns the run summary."""
+    """Import a finished local task: fetch its results from gvmd, then store them exactly as a Sentinel-reported run's own
+    results are stored (``_apply_import``, the one path both use). Returns the run summary."""
     items, no_cve, unusable = fetch_results(gmp, run.task_id)
     scanned = scanned_addresses(gmp, status_xml, items)
+    return _apply_import(run, items, scanned, no_cve, unusable)
+
+
+def _apply_import(run, items, scanned, no_cve, unusable):
+    """Observations, findings, evidence and resolutions for each host of ``run``, from already-fetched, already-parsed
+    results (``items``, in ``parse_result``'s own shape) and the set of addresses gvmd actually scanned. The one storage
+    path for a task cvENGINE ran itself and one a Sentinel ran against its own sidecar and reported back: neither knows or
+    cares which produced ``items``. Returns the run summary."""
     summary = {'results': len(items), 'without_cve': no_cve, 'unusable': unusable, 'hosts_scanned': 0, 'hosts_not_scanned': 0, 'findings': 0,
                'evidence': 0, 'resolved': 0, 'not_in_batch': 0}
     names = []
@@ -753,6 +762,65 @@ def import_results(run, gmp, status_xml):
         names.append(host)
     summary['not_in_batch'] = sum(1 for i in items if not any(_same_address(i['address'], a) for a in run.hosts))
     return summary, names
+
+
+# ----------------------------------------------------------------------------- Sentinel dispatch (see docs/AGENT-API.md)
+
+def dispatch_to_sentinel(link, batch):
+    """Hand a due batch to a Sentinel instead of running gvmd locally for it: one ``SentinelTask`` (kind ``openvas``) and
+    one ``OpenvasRun`` that only tracks it (the same unique-running-row cvENGINE's own local run already uses, so a
+    Sentinel-dispatched task and a local one can still never run at once). The Sentinel runs its own GVM stack against
+    this exact host set and the excluded-NVT-family list named in the task's ``target`` - this instance's own
+    ``EXCLUDED_FAMILIES``, never a copy a Sentinel might carry out of date - and reports back when done; the next tick
+    imports the result through the same path (``_apply_import``) a local run's own does."""
+    from agentapi.models import SentinelTask
+    from cveFeed import activity
+    from cveFeed.models import OpenvasRun
+    hosts = {ip: host for host, ip, _domain in batch}
+    task = SentinelTask.objects.create(project=link.project, kind='openvas', ips=sorted(hosts),
+                                       target={'hosts': hosts, 'excluded_families': list(EXCLUDED_FAMILIES), 'max_hours': max_hours()})
+    try:
+        with transaction.atomic():  # the same "one task at a time" lock start() uses for a local run
+            run = OpenvasRun.objects.create(project=link.project, status='running', sentinel_task=task, hosts=hosts)
+    except IntegrityError:
+        task.delete()
+        return None
+    activity.log('run_check', f'Handed an OpenVAS scan of {len(batch)} host(s) to a Sentinel', project=link.project_id, sentinel_task_id=task.pk)
+    return run
+
+
+def poll_sentinel(run):
+    """One step of a Sentinel-dispatched run: ask its ``SentinelTask``'s own status, exactly as ``poll`` asks gvmd's for a
+    local one. No GMP session is opened for this: the Sentinel talks to its own sidecar, never this instance's."""
+    from cveFeed import activity, ledger
+    task = run.sentinel_task
+    task.refresh_from_db()
+    if task.status in ('queued', 'claimed', 'running'):
+        return {'run': run.pk, 'status': 'running', 'sentinel_status': task.status}
+    if task.status == 'done':
+        result = task.result or {}
+        entry = activity.log('run_check', f'OpenVAS: importing the Sentinel-reported results of {len(run.hosts)} host(s)',
+                             project=run.project_id, status='running')
+        try:
+            summary, names = _apply_import(run, result.get('results') or [], set(result.get('scanned_addresses') or []),
+                                           result.get('without_cve', 0), result.get('unusable', 0))
+        except Exception as exc:  # noqa: BLE001
+            finish(run, 'failed', f'the Sentinel-reported results could not be imported ({type(exc).__name__})')
+            ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
+            activity.settle(entry, 'done', message=activity.diagnostic('OpenVAS Sentinel result import', exc))
+            return {'run': run.pk, 'status': 'failed'}
+        gone = [h for h in run.hosts.values() if h not in names]
+        ledger.record(SERVICE, names, run.project_id)
+        ledger.record(FAILED_SERVICE, gone, run.project_id)
+        finish(run, 'done', summary=summary)
+        activity.settle(entry, 'done', message=(f'OpenVAS (Sentinel): {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
+                                                f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')))
+        return {'run': run.pk, 'status': 'done', **summary}
+    # failed or expired: the Sentinel never finished it. The hosts stay due; a later tick retries, locally or on a Sentinel.
+    reason = task.error or (task.result or {}).get('error') or 'the Sentinel did not report a finished scan'
+    ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
+    finish(run, 'failed', clean(reason, 300))
+    return {'run': run.pk, 'status': 'failed'}
 
 
 def carry_forward(scan):
@@ -869,7 +937,22 @@ def poll(run, gmp, now=None):
 
 def tick(session_factory=None, resolve=None, blocked=None):
     """One step of the sweep (every 15 minutes, queue ``openvas_queue``): poll the running task, or start the next due batch. Returns what it
-    did, or ``{'skipped': reason}``."""
+    did, or ``{'skipped': reason}``.
+
+    Enablement is always the two gates every other call site uses - this instance's global switch (``row.enabled``, just
+    above) AND the per-opted-in-project ``OpenvasProject.enabled``/``hosts`` filter below - with nothing in between: there
+    is no organization level and no cascade. A Sentinel never changes that; it only changes *where* an already-due,
+    already-opted-in batch runs. Before opening a local GMP session for a due project, this also asks whether a live,
+    eligible Sentinel (capability ``openvas``) could take that project's work instead - a project with no such Sentinel
+    pays for nothing beyond that one query and behaves exactly as before this existed. Only one GVM task, local or
+    Sentinel-dispatched, ever runs at a time (``OpenvasRun``'s own unique constraint), so a project already running one
+    way is never also started the other.
+
+    ``row.sentinel_only`` (Settings > OpenVAS) refuses the local fallback entirely: when it is set, a due batch with no
+    eligible Sentinel right now is simply left due rather than ever touching this instance's own sidecar - the next tick
+    tries again, same as a batch that failed to vet. It does not touch a local run already in progress (started before
+    the toggle was turned on, or one this process itself is mid-poll of), which is let finish."""
+    from agentapi import sentinel_dispatch
     from cveFeed import activity, ledger
     from cveFeed.models import OpenvasRun, OpenvasSettings
     from reNgine import resources
@@ -880,11 +963,28 @@ def tick(session_factory=None, resolve=None, blocked=None):
     with resources.redis_claim('cvengine:openvas:tick', owner, 600) as holder:
         if holder is not True:
             return {'skipped': 'another OpenVAS step is running'}
+        run = OpenvasRun.objects.select_related('sentinel_task').filter(status='running').first()
+        if run is not None and run.sentinel_task_id:
+            return poll_sentinel(run)
+        if run is None:
+            found_due = False
+            for link in sweep_links():
+                if not sentinel_dispatch.any_scanner_for(link.project, 'openvas'):
+                    continue
+                batch = next_batch(link, resolve=resolve, blocked=blocked)
+                if not batch:
+                    continue
+                found_due = True
+                started = dispatch_to_sentinel(link, batch)
+                if started is not None:
+                    return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'sentinel'}
+            if row.sentinel_only:
+                return {'skipped': ('Sentinel-only mode is on: a due host has no eligible Sentinel right now; it stays due' if found_due
+                                    else 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due')}
         try:
             if session_factory is None:
                 ensure_login()
             with (session_factory or session)() as gmp:
-                run = OpenvasRun.objects.filter(status='running').first()
                 if run is not None:
                     return poll(run, gmp)
                 state = check(gmp)

@@ -16,6 +16,7 @@ never used to build a command.
 import base64
 import binascii
 import json
+import re
 import secrets
 import time
 from datetime import timedelta
@@ -48,6 +49,9 @@ MAX_PORTS_PER_HOST = 500
 MAX_FINDINGS = 100
 MAX_EXTRACTED = 20
 MAX_TAGS = 20
+MAX_OPENVAS_RESULTS = 5000  # matches cveFeed.openvas_scan.MAX_RESULTS: a dispatched GVM task reports no more than one task's own cap
+MAX_OPENVAS_CVES = 50
+MAX_OPENVAS_URLS = 20
 RETENTION_DAYS = broker.RETENTION_DAYS
 
 
@@ -672,9 +676,55 @@ def _clean_wpscan_result(body):
     return {'report': report, 'returncode': returncode, 'stderr_tail': _text(body.get('stderr_tail'), 300)}
 
 
+def _ov_num(value, low, high, cast, default):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return cast(max(low, min(high, value)))
+
+
+def _clean_openvas_result(body):
+    """A GVM task's own results, reshaped by a Sentinel's local run into exactly the dict ``cveFeed.openvas_scan.parse_result``
+    already produces from a local gvmd session, so one import path (``_apply_import``) stores either's output identically. The
+    excluded-NVT-family list a Sentinel must scan with is this instance's own (sent in the task's ``target``, never the
+    Sentinel's own copy), but nothing here re-checks that a Sentinel actually honoured it: a Sentinel is already a trusted,
+    administrator-approved agent, exactly like one reporting nmap or nuclei results."""
+    from cveFeed.openvas_scan import CVE_RE
+    from cveFeed.openvas_scan import clean as ov_clean
+    raw = body.get('results')
+    if not isinstance(raw, list) or len(raw) > MAX_OPENVAS_RESULTS:
+        raise ApiError(400, f'results must be a list of at most {MAX_OPENVAS_RESULTS} entries')
+    results = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        oid, address = item.get('oid'), item.get('address')
+        if not (isinstance(oid, str) and re.fullmatch(r'[0-9.]{3,64}', oid) and isinstance(address, str) and address):
+            continue
+        port = item.get('port') if isinstance(item.get('port'), str) else ''
+        port_match = re.fullmatch(r'(\d{1,5})/(tcp|udp)', port)
+        port, port_number = (port, int(port_match.group(1))) if port_match and 0 < int(port_match.group(1)) < 65536 else ('general/tcp', 0)
+        cves = sorted({v.strip().upper() for v in (item.get('cves') or [])[:MAX_OPENVAS_CVES] if isinstance(v, str) and CVE_RE.match(v.strip().upper())})
+        urls = [ov_clean(u, 500) for u in (item.get('urls') or [])[:MAX_OPENVAS_URLS] if isinstance(u, str) and re.match(r'^https?://', u)]
+        results.append({
+            'oid': ov_clean(oid, 80), 'name': ov_clean(item.get('name'), 300), 'family': ov_clean(item.get('family'), 100),
+            'address': ov_clean(address, 60), 'hostname': ov_clean(item.get('hostname'), 255), 'port': port, 'port_number': port_number,
+            'severity': _ov_num(item.get('severity'), 0.0, 10.0, float, 0.0), 'threat': ov_clean(item.get('threat'), 20),
+            'qod': _ov_num(item.get('qod'), 0, 100, int, 0), 'qod_type': ov_clean(item.get('qod_type'), 40),
+            'result': ov_clean(item.get('result'), 2000), 'summary': ov_clean(item.get('summary'), 1500),
+            'insight': ov_clean(item.get('insight'), 1500), 'impact': ov_clean(item.get('impact'), 1500),
+            'affected': ov_clean(item.get('affected'), 800), 'solution': ov_clean(item.get('solution'), 1500),
+            'solution_type': ov_clean(item.get('solution_type'), 30), 'cvss_vector': ov_clean(item.get('cvss_vector'), 200),
+            'cves': cves, 'urls': urls})
+    scanned = body.get('scanned_addresses')
+    scanned_addresses = [ov_clean(a, 60) for a in scanned[:MAX_ADDRESSES] if isinstance(a, str)] if isinstance(scanned, list) else []
+    without_cve = _ov_num(body.get('without_cve'), 0, MAX_OPENVAS_RESULTS, int, 0)
+    unusable = _ov_num(body.get('unusable'), 0, MAX_OPENVAS_RESULTS, int, 0)
+    return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable}
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
-             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result}
+             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result}
 
 
 def clean_result(kind, body):

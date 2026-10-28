@@ -1705,6 +1705,7 @@ class OpenvasSettings(models.Model):
     The password is encrypted like every other stored secret and never leaves the server: the settings page says only whether it is set."""
 
     enabled = models.BooleanField(default=False)
+    sentinel_only = models.BooleanField(default=False)  # refuse the local gvmd fallback: a due batch with no eligible Sentinel stays due
     gmp_username = models.CharField(max_length=64, blank=True, default="")
     gmp_password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
     state = models.JSONField(default=dict, blank=True)  # the worker's last check: {checked_at, connected, gmp_version, error, feed: {...}}
@@ -1757,6 +1758,9 @@ class OpenvasRun(models.Model):
     STATUSES = ("running", "done", "failed", "stopped")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     status = models.CharField(max_length=10, default="running")
+    sentinel_task = models.ForeignKey("agentapi.SentinelTask", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Null: cvENGINE ran this against its own sidecar. Set: a Sentinel ran it against its own, and this row only tracks the
+    # hand-off and the imported result - see cveFeed.openvas_scan.dispatch_to_sentinel / poll_sentinel.
     task_id = models.CharField(max_length=40, blank=True, default="")
     target_id = models.CharField(max_length=40, blank=True, default="")
     gvm_status = models.CharField(max_length=30, blank=True, default="")  # the task's own status: New, Requested, Queued, Running, Done ...
