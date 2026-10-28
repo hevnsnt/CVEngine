@@ -241,6 +241,7 @@ form.inline .field{margin:0;flex:1 1 220px}
 .badge.critical,.badge.fire,.tier.fire{background:var(--fire);color:var(--on-solid)}
 .badge.high,.badge.failed{background:var(--fire-bg);color:var(--fire-ink);box-shadow:inset 0 0 0 1px var(--ring-fire)}
 .badge.medium,.badge.smoke,.tier.smoke{background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 0 0 0 1px var(--ring-smoke)}
+.badge.internal{background:var(--surface);color:var(--ink);outline:1px dashed currentColor;outline-offset:-1px}
 .badge.running{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
 .badge.running::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--brand);animation:blink 1s infinite}
 /* "Needs validation" is a link: it opens the match and runs Validate now */
@@ -1613,21 +1614,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .map[data-slim="1"] .hx .hx-target{display:none}
 
 /* ---- Sentinels page: live cards with a status orb ---- */
-.orb{position:relative;display:inline-block;flex:none;width:46px;height:46px;border-radius:50%;--o1:var(--ok);--o2:#7fc4a0;--spin:18s;--breathe:5s}
-.orb i{position:absolute;display:block;border-radius:50%;pointer-events:none}
-.orb-glow{inset:-7px;background:radial-gradient(circle,color-mix(in srgb,var(--o1) 45%,transparent) 0,transparent 68%);animation:orb-breathe var(--breathe) ease-in-out infinite}
-.orb-swirl{inset:0;background:conic-gradient(from 0deg,var(--o1),var(--o2),var(--o1) 40%,var(--o2) 70%,var(--o1));filter:blur(3px);animation:orb-spin var(--spin) linear infinite}
-.orb-core{inset:3px;background:radial-gradient(circle at 35% 30%,color-mix(in srgb,var(--o2) 70%,#fff) 0,var(--o1) 55%,color-mix(in srgb,var(--o1) 60%,#000) 100%);box-shadow:inset 0 -4px 8px rgba(0,0,0,.18)}
-.orb-shine{left:11px;top:7px;width:13px;height:8px;background:rgba(255,255,255,.55);filter:blur(2px);transform:rotate(-24deg)}
-.orb-working{--o1:var(--brand);--o2:#ffb27a;--spin:2.6s;--breathe:1.4s}
-.orb-idle{--o1:var(--ok);--o2:#9ad3b3;--spin:22s;--breathe:5s}
-.orb-offline,.orb-suspended{--o1:#8b8b93;--o2:#b9b9c0}
-.orb-offline .orb-glow,.orb-offline .orb-swirl,.orb-suspended .orb-glow,.orb-suspended .orb-swirl{animation:none}
-.orb-offline .orb-glow,.orb-suspended .orb-glow{opacity:.35}
-.orb-pending{--o1:var(--smoke);--o2:#e8c37e;--spin:9s;--breathe:2.4s}
-@keyframes orb-spin{to{transform:rotate(360deg)}}
-@keyframes orb-breathe{0%,100%{transform:scale(.92);opacity:.7}50%{transform:scale(1.12);opacity:1}}
-@media (prefers-reduced-motion:reduce){.orb-glow,.orb-swirl{animation:none!important}}
+.thinking-orb.asleep{opacity:.45;filter:grayscale(1)}
 .sl-sum{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
 .sl-sum div{display:flex;flex-direction:column;gap:2px;padding:10px 14px;background:var(--surface-2)}
 .sl-sum div+div{border-left:1px solid var(--line)}
@@ -1686,3 +1673,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .in-note{grid-column:1/-1;padding-left:16px;font:500 11px var(--mono);color:var(--muted)}
 .internal .cell-head .eyebrow{white-space:nowrap}
 .gn-internal .boundary{stroke:var(--ink);stroke-width:1.2;stroke-dasharray:3 3;opacity:.65;pointer-events:none}
+@keyframes orb-breathe{0%,100%{transform:scale(.92);opacity:.7}50%{transform:scale(1.12);opacity:1}}

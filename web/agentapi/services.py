@@ -1183,7 +1183,9 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     from cveFeed import host_context, subdir_apps
     probe_rows = ((shared or {}).get('probes') or {}).get(host_key) or []
     unverified = _unverified_products(sub, others, ips)
-    row = {'id': sub.id,
+    from cveFeed import internal_view
+    network = internal_view.network_of(sub.target_domain.project_id if sub.target_domain else None, sub.name)
+    row = {'id': sub.id, 'internal': network is not None, 'network': network,
             # what version and identity probes and WPScan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
             'probes': [{'probe': r.probe, 'kind': r.kind, 'product': r.product, 'version': r.version, 'variant': r.variant, 'outcome': r.outcome,
                         'confidence': r.confidence, 'source': r.source, 'observed_at': r.observed_at.isoformat()}
@@ -1546,6 +1548,17 @@ def _host_order(params):
     return ('-score', 'name') if sort == 'score' else ('name',)
 
 
+def _internal_filter(qs, params, prefix=''):
+    """``?internal=1`` keeps only the hosts inside a network their project declared internal, ``?internal=0`` only the others; absent, all."""
+    from cveFeed import internal_view
+    value = str(params.get('internal', '')).strip().lower()
+    if value in ('1', 'true', 'yes', 'only'):
+        return qs.filter(internal_view.internal_q(prefix))
+    if value in ('0', 'false', 'no', 'external'):
+        return qs.exclude(internal_view.internal_q(prefix))
+    return qs
+
+
 def list_hosts(ctx, slug, params):
     """The Shodan-style inventory: hosts with IPs, open ports and service/product/version, highest score first (?sort=name)."""
     from startScan.models import Subdomain
@@ -1556,6 +1569,7 @@ def list_hosts(ctx, slug, params):
         qs = qs.filter(name__icontains=params['q'])
     if params.get('target_id'):
         qs = qs.filter(target_domain_id=_int_param(params['target_id'], 'target_id'))
+    qs = _internal_filter(qs, params)
     qs = _one_per_host(qs, per_project=_is_all(project)).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
         .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     return _mark_zombies(project, _hosts_page(project, qs, params))
@@ -1951,7 +1965,7 @@ def search_hosts(ctx, slug, params):
     except (TypeError, ValueError):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
-    qs = search_host_rows(project, terms)
+    qs = _internal_filter(search_host_rows(project, terms), params)
     heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
     search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
     if heat:
@@ -1960,6 +1974,8 @@ def search_hosts(ctx, slug, params):
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
     page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated, **search_facets}
+    from cveFeed import internal_view
+    page['has_internal'] = internal_view.any_visible()  # a project the caller sees declared an internal network: the page offers the scope filter
     return page
 
 
@@ -1990,14 +2006,21 @@ def _vuln(v):
             'assignee': _user_brief(v.assignee), 'comment_count': _comment_count(v, 'vulnerability'),
             'seen_while_authenticated': any(t.name == 'seen-while-authenticated' for t in v.tags.all()),  # an authenticated request saw it (cveFeed.auth_checks)
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
+            'internal': _internal_row(v.target_domain.project_id if v.target_domain_id else None, v.subdomain.name if v.subdomain else ''),
             'triage': _triage_brief(_triage_of(v))}
+
+
+def _internal_row(project_id, host):
+    """Whether a row's host is inside a network its project declared internal (``cveFeed.internal_view``)."""
+    from cveFeed import internal_view
+    return internal_view.is_internal(project_id, host)
 
 
 def list_vulnerabilities(ctx, slug, params):
     from startScan.models import Vulnerability
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'target_domain', 'triage__verdict', 'remediation_by', 'assignee') \
         .prefetch_related('cve_ids', 'tags', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
@@ -2011,6 +2034,7 @@ def list_vulnerabilities(ctx, slug, params):
         qs = qs.filter(open_status=params['open'] == 'true')
     if params.get('classification'):
         qs = qs.filter(triage__classification=params['classification'])
+    qs = _internal_filter(qs, params, 'subdomain__')
     return paginate(qs, params, _tagged(_vuln, lambda v: v.target_domain.project) if everywhere else _vuln)
 
 
@@ -2658,6 +2682,14 @@ def _finding_sources(project, params):
         if params.get('host'):
             qs = qs.filter(host__icontains=params['host'])
         sources['hygiene'] = qs
+    internal = str(params.get('internal', '')).strip().lower()
+    if internal in ('1', 'true', 'yes', 'only', '0', 'false', 'no', 'external'):
+        from cveFeed import internal_view
+        only = internal in ('1', 'true', 'yes', 'only')
+        for key, qs in list(sources.items()):
+            q = (internal_view.internal_q('subdomain__') if key in ('cve', 'scanner')
+                 else internal_view.internal_q('', 'host', 'domain__project_id'))
+            sources[key] = qs.filter(q) if only else qs.exclude(q)
     for key, qs in sources.items():
         if heat != 'all':
             qs = qs.filter(heat_rank=HEAT_FACETS[heat])
@@ -2685,7 +2717,10 @@ def _finding_row(kind, obj):
     else:
         title, host, note = obj.title, obj.host, obj.check_name
         status, extra = ('resolved' if obj.status == 'resolved' else obj.remediation_status), {}
+    project_id = {'cve': lambda o: o.subdomain.target_domain.project_id if o.subdomain else None, 'scanner': lambda o: o.target_domain.project_id,
+                  'hygiene': lambda o: o.domain.project_id}[kind](obj)
     return {'type': kind, 'kind': FINDING_TYPES[kind], 'id': obj.id, 'title': title, 'host': host, 'note': note,
+            'internal': _internal_row(project_id, host or ''),
             'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
             'remediation_note': getattr(obj, 'remediation_note', ''),
             'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
