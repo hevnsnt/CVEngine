@@ -207,3 +207,56 @@ class CredentialTests(SimpleTestCase):
         self.assertIn('wpscan', SERVICES)
         self.assertTrue(used_in_scans('wpscan'))
         self.assertFalse(used_in_scans('runzero'))
+
+
+class SentinelDispatchTests(StageTests):
+    """run_wpscan's own default runner, when none is passed in, is agentapi.sentinel_dispatch.wrap_wpscan_runner - not
+    run_wpscan_process directly. A live, eligible Sentinel's reported outcome must reach the exact same persistence
+    this module already has (findings, CVE links, the Technology row, the ServiceRun row), same as a local run does."""
+
+    def make_sentinel(self):
+        from django.contrib.auth.models import User
+        from django.utils import timezone
+
+        from agentapi.auth import create_token
+        from agentapi.models import Agent
+        user = User.objects.create_user('wpscan-sentinel-owner', password='x')
+        token, _raw = create_token(user, 'wpscan-sentinel-token')
+        return Agent.objects.create(token=token, name='live-wpscan-sentinel', kind='scanner', status='active',
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=['wpscan'], last_seen=timezone.now())
+
+    def _answer_with(self, result):
+        from django.utils import timezone
+
+        from agentapi.models import SentinelTask
+
+        def fake_sleep(_seconds):
+            task = SentinelTask.objects.filter(status__in=('queued', 'claimed', 'running')).order_by('-id').first()
+            if task:
+                SentinelTask.objects.filter(pk=task.pk).update(status='done', result=result, finished_at=timezone.now())
+        return fake_sleep
+
+    def test_no_runner_passed_in_dispatches_to_a_live_sentinel_and_findings_are_saved_the_same_way(self):
+        self.make_sentinel()
+        ApiCredential.objects.create(project=self.project, service='wpscan', value={'api_key': 'secret-token'})
+        result = {'outcome': 'done', 'report': REPORT, 'returncode': 0, 'stderr_tail': ''}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=self._answer_with(result)):
+            out = self.go()  # no runner= kwarg: wpscan_scan.run_wpscan must build its own via wrap_wpscan_runner
+        self.assertEqual((out['scanned'], out['findings']), (1, 4))
+        vuln = Vulnerability.objects.get(name__startswith='WordPress 6.4.2')
+        self.assertEqual((vuln.source, vuln.severity, vuln.subdomain_id), ('wpscan', 3, self.wp.id))
+        from agentapi.models import SentinelTask
+        task = SentinelTask.objects.get(kind='wpscan')
+        self.assertEqual(task.status, 'done')
+        self.assertEqual(task.target['token'], '***')  # the project's API token is scrubbed once the task is done
+
+    def test_no_runner_passed_in_falls_back_locally_when_no_sentinel_claims_in_time(self):
+        self.make_sentinel()
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '0.2'}):
+            out = self.go()  # nothing ever answers the task, so wrap_wpscan_runner's fallback runs run_wpscan_process
+        # wpscan is not installed in the test environment, so the real local fallback fails closed, same as it would
+        # for a local-only project with no Sentinel at all - this proves the fallback path actually ran, not the
+        # Sentinel one, without needing the wpscan binary.
+        self.assertEqual(out['scanned'], 0)
+        self.assertIn('WPScan failed', out['error'])

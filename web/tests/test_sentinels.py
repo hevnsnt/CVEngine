@@ -260,7 +260,8 @@ class TenancyTests(SentinelBase):
 class ScopeAndClaimTests(SentinelBase):
     def setUp(self):
         super().setUp()
-        _, self.agent = register_sentinel(self.t['dana'], name='scoped-sentinel')
+        _, self.agent = register_sentinel(self.t['dana'], name='scoped-sentinel',
+                                          capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'wpscan'])
 
     def _queue(self, project_slug='sen-a', kind='nmap', target=None):
         project = Project.objects.get(slug=project_slug)
@@ -349,6 +350,50 @@ class ScopeAndClaimTests(SentinelBase):
         self.assertEqual(status, 200)
         task.refresh_from_db()
         self.assertEqual(task.status, 'expired')
+
+    def test_wpscan_result_accepted_and_classified_by_the_same_function_a_local_run_uses(self):
+        task = self._queue('sen-a', kind='wpscan', target={'url': 'https://www.a.example/', 'token': 'secret-token'})
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        report = {'version': {'number': '6.4'}, 'plugins': {}, 'themes': {}, 'interesting_findings': []}
+        status, reported = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result',
+                                {'outcome': 'done', 'report': report, 'returncode': 0, 'stderr_tail': ''})
+        self.assertEqual(status, 200)
+        self.assertEqual(reported['task']['status'], 'done')
+        from cveFeed.wpscan_scan import _classify
+        task.refresh_from_db()
+        self.assertEqual(_classify(task.result['report'], task.result['returncode'], task.result['stderr_tail']), report)
+
+    def test_wpscan_result_with_a_non_dict_report_is_rejected(self):
+        task = self._queue('sen-a', kind='wpscan', target={'url': 'https://www.a.example/', 'token': 'secret-token'})
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        status, body = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result',
+                            {'outcome': 'done', 'report': 'not-an-object', 'returncode': 0})
+        self.assertEqual(status, 400)
+
+    def test_wpscan_result_oversized_report_is_rejected(self):
+        # Unit-level, on the broker's own validation, like test_oversized_and_malicious_strings_are_clipped_never_stored_
+        # verbatim above: a report past MAX_WPSCAN_REPORT_BYTES must never be trusted or stored, whatever an HTTP-layer
+        # body-size limit (Django's DATA_UPLOAD_MAX_MEMORY_SIZE, well below this cleaner's own) also does with it in transit.
+        from agentapi.sentinel_broker import ApiError, MAX_WPSCAN_REPORT_BYTES, clean_result
+        huge = {'plugins': {'x' * 100: 'y' * MAX_WPSCAN_REPORT_BYTES}}
+        with self.assertRaises(ApiError):
+            clean_result('wpscan', {'outcome': 'done', 'report': huge, 'returncode': 0})
+
+    def test_wpscan_result_with_no_report_and_a_bad_returncode_defaults_to_failure(self):
+        # A Sentinel that cannot even start wpscan reports no report; a missing/malformed returncode defaults to 1
+        # (not OK_EXIT_CODES), so _classify still raises rather than treating it as a silent success.
+        task = self._queue('sen-a', kind='wpscan', target={'url': 'https://www.a.example/', 'token': 'secret-token'})
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        status, reported = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result',
+                                {'outcome': 'done', 'report': None, 'returncode': 'nonsense'})
+        self.assertEqual(status, 200)
+        self.assertEqual(reported['task']['result']['returncode'], 1)
+        from cveFeed.wpscan_scan import _classify
+        with self.assertRaises(RuntimeError):
+            _classify(reported['task']['result']['report'], reported['task']['result']['returncode'])
 
 
 class AdminSuspendRevokeTests(SentinelBase):

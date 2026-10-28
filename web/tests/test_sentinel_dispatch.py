@@ -11,6 +11,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import nmap_scan, nuclei_scan
+from cveFeed.wpscan_scan import Blocked, NotWordPress, run_wpscan_process
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain
@@ -443,3 +444,75 @@ class NucleiDispatchTests(DispatchBase):
         vuln = Vulnerability.objects.get(name='Deep sweep hit')
         self.assertEqual(vuln.template_id, 'cve-2024-0001')
         self.assertEqual(vuln.severity, 4)  # NUCLEI_SEVERITY_MAP['critical']
+
+
+class WpscanDispatchTests(DispatchBase):
+    """The Sentinel always reports the raw, unclassified process outcome ({report, returncode, stderr_tail}); every
+    test here checks that a dispatched run is classified by the exact same cveFeed.wpscan_scan._classify a local run's
+    own exit code and report go through - NotWordPress and Blocked included - never a duplicated client-side rule."""
+
+    def test_a_live_eligible_sentinel_returns_the_same_report_a_local_run_would(self):
+        self.make_sentinel(['wpscan'])
+        report = {'version': {'number': '6.4'}, 'plugins': {}, 'themes': {}, 'interesting_findings': []}
+        result = {'outcome': 'done', 'report': report, 'returncode': 0, 'stderr_tail': ''}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=5)
+            self.assertIsNot(runner, run_wpscan_process)
+            out = runner('https://www.example.test/', 'secret-token')
+        self.assertEqual(out, report)
+
+    def test_a_sentinel_reported_not_wordpress_raises_the_same_exception_a_local_run_would(self):
+        self.make_sentinel(['wpscan'])
+        report = {'scan_aborted': 'The remote website is up, but does not seem to be running WordPress.'}
+        result = {'outcome': 'done', 'report': report, 'returncode': 4, 'stderr_tail': ''}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=5)
+            with self.assertRaises(NotWordPress):
+                runner('https://www.example.test/', 'secret-token')
+
+    def test_a_sentinel_reported_block_raises_blocked_with_the_token_redacted(self):
+        self.make_sentinel(['wpscan'])
+        report = {'scan_aborted': 'Received a 403 Forbidden response, token secret-token was rejected'}
+        result = {'outcome': 'done', 'report': report, 'returncode': 4, 'stderr_tail': ''}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=5)
+            with self.assertRaises(Blocked) as ctx:
+                runner('https://www.example.test/', 'secret-token')
+        self.assertNotIn('secret-token', str(ctx.exception))
+
+    def test_timeout_falls_back_to_the_real_local_runner(self):
+        self.make_sentinel(['wpscan'])
+        local = mock.Mock(return_value={'version': {'number': '6.4'}})
+        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', local):
+            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
+            out = runner('https://www.example.test/', 'secret-token')
+        local.assert_called_once_with('https://www.example.test/', 'secret-token')
+        self.assertEqual(out, {'version': {'number': '6.4'}})
+
+    def test_no_eligible_sentinel_returns_the_literal_unwrapped_function(self):
+        runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan)
+        self.assertIs(runner, run_wpscan_process)  # identity: wpscan_scan.py checks `runner is run_wpscan_process`
+
+    def test_the_stored_task_target_is_scrubbed_of_the_token_once_the_task_is_done(self):
+        # SentinelTask.target is a plaintext JSONField; the API token must not still be sitting in it once the task
+        # that needed it has finished, failed, or expired - see dispatch_or_none's redact_target.
+        self.make_sentinel(['wpscan'])
+        report = {'version': {'number': '6.4'}, 'plugins': {}, 'themes': {}, 'interesting_findings': []}
+        result = {'outcome': 'done', 'report': report, 'returncode': 0, 'stderr_tail': ''}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=5)
+            runner('https://www.example.test/', 'secret-token')
+        task = SentinelTask.objects.get(kind='wpscan')
+        self.assertEqual(task.target['url'], 'https://www.example.test/')
+        self.assertEqual(task.target['token'], '***')
+        self.assertNotIn('secret-token', str(task.target))
+
+    def test_an_expired_unclaimed_task_is_also_scrubbed_of_the_token(self):
+        self.make_sentinel(['wpscan'])
+        local = mock.Mock(return_value={'version': {'number': '6.4'}})
+        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', local):
+            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
+            runner('https://www.example.test/', 'secret-token')
+        task = SentinelTask.objects.get(kind='wpscan')
+        self.assertEqual(task.status, 'expired')
+        self.assertEqual(task.target['token'], '***')
