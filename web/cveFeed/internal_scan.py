@@ -196,8 +196,8 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False):
         if not nmap.get('error'):
             def stream(kind):
                 return nuclei_stream(kind) if nuclei_stream else sentinel_dispatch.wrap_nuclei_stream(scan, kind, internal=True)
-            _stage(scan, 'TLS audit (internal Sentinel)', 'testssl', lambda: _testssl(scan, project, domain, ip, dispatch), fallback={'tested': 0})
-            _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'udp_scan', lambda: _udp(scan, project, ip, dispatch), fallback={'open': 0})
+            _stage(scan, 'TLS audit (internal Sentinel)', 'internal_testssl', lambda: _testssl(scan, project, domain, ip, dispatch), fallback={'tested': 0})
+            _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'internal_udp_scan', lambda: _udp(scan, project, ip, dispatch), fallback={'open': 0})
             _stage(scan, 'Nuclei HTTP and technology pass (internal Sentinel)', 'nuclei_light_scan',
                    lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light')), fallback={'targets': 0, 'techs': {}})
             _stage(scan, 'Nuclei targeted pass (internal Sentinel)', 'nuclei_targeted_scan',

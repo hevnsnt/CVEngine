@@ -127,7 +127,7 @@ class UsageTests(TestCase):
         response = self.client.get('/cve/setup/')
         self.assertContains(response, 'AI Model Usage')
         self.assertContains(response, 'id="ai-usage"')
-        self.assertContains(response, '/cve/sample-project/keys/')
+        self.assertContains(response, '/cve/settings/#keys')
         cfg = AIProviderSettings.objects.get()
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = timezone.now(), cfg.provider, cfg.model
         cfg.save()

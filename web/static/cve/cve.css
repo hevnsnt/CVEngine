@@ -1673,4 +1673,37 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .in-note{grid-column:1/-1;padding-left:16px;font:500 11px var(--mono);color:var(--muted)}
 .internal .cell-head .eyebrow{white-space:nowrap}
 .gn-internal .boundary{stroke:var(--ink);stroke-width:1.2;stroke-dasharray:3 3;opacity:.65;pointer-events:none}
+
+/* ---- Settings > API keys ---- */
+.ak{display:flex;flex-direction:column;gap:14px;max-width:1100px}
+.ak-head h2{margin:0 0 6px}
+.ak-head>.note{margin:0;max-width:78ch}
+.ak-scope{display:grid;grid-template-columns:minmax(220px,360px) 1fr;gap:4px 18px;align-items:end;margin-top:16px}
+.ak-scope .field{margin:0}
+.ak-scope-note{margin:0 0 10px}
+.ak-body{display:flex;flex-direction:column;gap:18px}
+.ak-body[aria-busy="true"]{opacity:.6}
+.ak-summary{margin:0;font:600 12px var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.ak-summary b{font:700 20px var(--font);letter-spacing:-.03em;color:var(--ink);text-transform:none;margin-right:4px}
+.ak-group h3{margin:0;font-size:15px}
+.ak-group>.note{margin:2px 0 10px}
+.ak-grid{display:grid;align-items:start;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
+.ak-tile{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);min-width:0}
+.ak-tile.on{border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.ak-tile.retired{border-style:dashed}
+.ak-top{display:flex;gap:12px;align-items:flex-start;min-width:0}
+.ak-mark{flex:none;display:grid;place-items:center;width:36px;height:36px;border-radius:9px;background:var(--sunk);font:800 12px var(--mono);letter-spacing:.02em;color:var(--ink-2)}
+.ak-tile.on .ak-mark{background:var(--ok-bg);color:var(--ok-ink)}
+.ak-name{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ak-name b{font-size:14.5px;letter-spacing:-.01em}
+.ak-name .note{margin:0;font-size:12.5px}
+.ak-state{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto}
+.ak-fallback{display:grid;grid-template-columns:auto auto 1fr auto;gap:4px 8px;align-items:center;padding-top:10px;border-top:1px dashed var(--line)}
+.ak-fb-label{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.ak-fallback .note{grid-column:1/-2;margin:0;font-size:12px}
+.ak-fallback .btn{grid-column:4;grid-row:1/3}
+.ak-sync{display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:1px dashed var(--line)}
+.ak-sync .note,.ak-sync .msg{margin:0}
+.ak-check{display:flex;gap:8px;align-items:flex-start}
+@media (max-width:640px){.ak-scope{grid-template-columns:1fr}}
 @keyframes orb-breathe{0%,100%{transform:scale(.92);opacity:.7}50%{transform:scale(1.12);opacity:1}}

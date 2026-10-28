@@ -2,6 +2,7 @@
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
+import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 
 const root = document.getElementById("settings");
 const csrf = root.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -515,7 +516,7 @@ const sections = {
       `${s.organizations} organization${s.organizations === 1 ? "" : "s"} and ${s.projects} project${s.projects === 1 ? "" : "s"}`,
       `${s.targets} target${s.targets === 1 ? "" : "s"}, ${s.hosts} host${s.hosts === 1 ? "" : "s"} and ${s.scans} scan${s.scans === 1 ? "" : "s"} with all their results, files and screenshots`,
       `${s.users} other user${s.users === 1 ? "" : "s"}, memberships and API tokens`,
-      "the AI model settings, API vault, notification, proxy and report settings, IP allowlist and bans",
+      "the AI model settings, API keys, notification, proxy and report settings, IP allowlist and bans",
       "the CVE feed, matches, generated checks, AI activity, audit log, scheduled scans and update settings",
     ].forEach((t) => list.append(el("li", "", t)));
     const keep = el(
@@ -764,50 +765,7 @@ const sections = {
   },
 
   async keys(m) {
-    const s = await api("GET", "keys");
-    const rows = {};
-    const kit = [];
-    [
-      ["netlas", "Netlas API key (WHOIS lookups)"],
-      ["chaos", "Chaos API key (used when no organization or project has its own)"],
-      ["hackerone", "HackerOne API key (bounty submissions)"],
-    ].forEach(([name, label]) => {
-      const input = secret(s[name].has_key);
-      rows[name] = input;
-      kit.push(field(label, input));
-      if (name === "hackerone")
-        kit.push(
-          field(
-            "HackerOne username",
-            (rows.h1user = text(s.hackerone.username || "")),
-          ),
-        );
-    });
-    m.append(
-      card(
-        "API vault",
-        ...kit,
-        button("Save", async () => {
-          const body = {};
-          ["netlas", "chaos"].forEach((n) => {
-            if (rows[n].value) body[n] = { key: rows[n].value };
-          });
-          if (rows.hackerone.value || rows.h1user.value)
-            body.hackerone = {
-              key: rows.hackerone.value,
-              username: rows.h1user.value,
-            };
-          await api("PUT", "keys", body);
-          Object.values(rows).forEach((i) => {
-            if (i.type === "password") {
-              i.value = "";
-              i.placeholder = "saved (leave blank to keep)";
-            }
-          });
-          toast("Saved");
-        }),
-      ),
-    );
+    await apiKeysPanel(m);
   },
 
   async notifications(m) {
@@ -1083,7 +1041,7 @@ const panel = el("div");
 view.append(tabs, panel);
 const labels = {
   ai: "AI model",
-  keys: "API vault",
+  keys: "API keys",
   tailscale: "Tailscale",
   openvas: "OpenVAS",
   notifications: "Notifications",
