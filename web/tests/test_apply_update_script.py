@@ -292,6 +292,43 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if ' up ' in c or 'restart' in c or c.startswith('make')])
         self.assertIn('scan(s) running', (self.work / 'web' / '.update-log').read_text())
 
+    def test_waiting_past_the_drain_limit_forces_the_update_ahead(self):
+        # CVENGINE_UPDATE_DRAIN_SECONDS=0: the very first wait is already past the limit, so the update proceeds at once
+        # instead of exiting 3, the same way it would after really waiting out the default five minutes.
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertTrue([c for c in self.calls() if ' up ' in c or 'restart' in c])
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('forcing ahead', log)
+        self.assertIn('2 scan(s)/job(s)', log)
+
+    def test_the_drain_timer_does_not_restart_on_every_poll(self):
+        # the watcher calls this script again every few seconds while waiting; the drain clock must not reset each time,
+        # or a scan that never finishes would block forever no matter how low the limit is set.
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        first = self.run_script(CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(first.returncode, 3)
+        since_file = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update' / 'draining-since'
+        self.assertTrue(since_file.is_file())
+        recorded = since_file.read_text()
+        second = self.run_script(CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(second.returncode, 3)
+        self.assertEqual(since_file.read_text(), recorded)  # unchanged: still counting from the first wait
+
+    def test_waiting_for_scans_does_not_log_the_err_trap_line(self):
+        # exit 3 is an expected, normal "still waiting" control-flow exit under `set -e`, not a command that actually
+        # failed; the generic ERR-trap narration ("stopped at line N") must not fire for it on every poll.
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        for _ in range(3):
+            self.assertEqual(self.run_script().returncode, 3)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertNotIn('stopped at line', log)
+
     def test_files_pulled_by_hand_but_an_older_build_still_running_are_rebuilt(self):
         # a host without the updater is first brought up to date with `git pull`; the approval must still rebuild the services
         self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)

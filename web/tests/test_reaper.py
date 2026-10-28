@@ -163,6 +163,65 @@ class RedispatchTests(ReaperTests):
 		self.assertIn('Queued 1 host assessment again', row.message)
 
 
+class OrphanedRunningTests(ReaperTests):
+	"""A scan or a running assessment whose Celery task the broker can prove is gone is closed within one reaper tick,
+	well before the hours-scale LIMITS above would ever reach it."""
+
+	def scan(self, celery_ids, hours, status=1):
+		from scanEngine.models import EngineType
+		from startScan.models import ScanHistory
+		engine = EngineType.objects.first() or EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		row = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=NOW - timedelta(hours=hours),
+		                                 scan_status=status, results_dir='/tmp', celery_ids=celery_ids)
+		return row
+
+	def test_a_scan_whose_celery_task_is_gone_is_closed_as_failed(self):
+		dead = self.scan(['gone-1'], hours=1)
+		alive = self.scan(['still-there'], hours=1)
+		none_recorded = self.scan([], hours=1)  # an older worker, or the task died before it could write one
+		counts = reaper.expire_orphaned_running(now=NOW, live={'still-there'})
+		self.assertEqual(counts, {'ScanHistory': 2})
+		for row in (dead, alive, none_recorded):
+			row.refresh_from_db()
+		self.assertEqual(dead.scan_status, 0)
+		self.assertEqual(dead.error_message, 'expired: the worker running this scan is gone (a restart or update) and no Celery task for it remains')
+		self.assertIsNotNone(dead.stop_scan_date)
+		self.assertEqual(alive.scan_status, 1)
+		self.assertEqual(none_recorded.scan_status, 0)
+
+	def test_a_young_scan_is_left_alone_even_with_no_live_task(self):
+		young = self.scan(['gone'], hours=0)  # just started: may not have had time to record a live task
+		self.assertEqual(reaper.expire_orphaned_running(now=NOW, live=set()), {})
+		young.refresh_from_db()
+		self.assertEqual(young.scan_status, 1)
+
+	def test_when_the_broker_cannot_be_asked_nothing_is_closed(self):
+		self.scan(['gone'], hours=1)
+		self.assertEqual(reaper.expire_orphaned_running(now=NOW, live=None), {})
+
+	def test_a_running_assessment_whose_task_is_gone_is_closed_as_failed(self):
+		dead = self.assessment('h0.reap.example', 'running', 1)
+		alive = self.assessment('h1.reap.example', 'running', 1)
+		HostAssessment.objects.filter(pk=dead.pk).update(celery_id='gone')
+		HostAssessment.objects.filter(pk=alive.pk).update(celery_id='still-there')
+		counts = reaper.expire_orphaned_running(now=NOW, live={'still-there'})
+		self.assertEqual(counts, {'HostAssessment': 1})
+		dead.refresh_from_db()
+		alive.refresh_from_db()
+		self.assertEqual((dead.status, alive.status), ('failed', 'running'))
+		self.assertIn('no Celery task for it remains', dead.error)
+
+	def test_the_reaper_task_reports_orphaned_scans_as_a_failure(self):
+		from cveFeed.tasks import reap_stuck_jobs
+		self.scan(['gone'], hours=1)
+		with mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=set()):
+			counts = reap_stuck_jobs()
+		self.assertEqual(counts.get('ScanHistory:orphaned'), 1)
+		row = AgentActivity.objects.filter(message__icontains='Closed scans').order_by('-id').first()
+		self.assertIsNotNone(row)
+		self.assertEqual(row.status, 'failed')
+
+
 class CapacityTests(TestCase):
 	"""A queued row whose Celery task no longer exists must not hold a slot toward the caps."""
 

@@ -21,11 +21,14 @@ This phase dispatches a whole stage (all of a chunk's addresses, or a chunk's nu
 one Sentinel; splitting a stage across multiple Sentinels, or letting several share one project's work, is left to a
 follow-up once there is real-world experience with how many Sentinels a project actually registers.
 """
+import ipaddress
 import os
 import time
 
 MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: everything beyond this in one stage call is scanned locally
 DISPATCH_POLL_INTERVAL = 0.5  # seconds between checks while waiting for a dispatched task to finish
+RESOLVE_WORKERS = 16  # matches targetApp.target_types.blocked_names: one bounded parallel pass, never one lookup per target serially
+RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 
 
 def _dispatch_timeout():
@@ -204,6 +207,43 @@ def wrap_naabu_runner(project, scan, timeout=None):
 
 # --- nuclei (light and targeted): an injectable stream matching cveFeed.nuclei_scan.stream_nuclei's own seam -----------
 
+def _bare_host(target):
+    """The hostname or address inside a nuclei target string built by ``nuclei_scan.build_targets`` (a bare host, a bare
+    IP, or ``host:port`` for a non-default port)."""
+    return target.rsplit(':', 1)[0].strip() if target.count(':') == 1 else target.strip()
+
+
+def _resolves(host, timeout):
+    import socket
+    try:
+        ipaddress.ip_address(host)
+        return True  # a literal address needs no lookup
+    except ValueError:
+        pass
+    try:
+        return bool(socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP))
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+
+
+def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT):
+    """The entries of ``targets`` whose host currently resolves, in order: a Sentinel is never handed a target this
+    process cannot even look up, which would otherwise dispatch work for nothing and - because the stage that sent it
+    marks its whole chunk scanned once the dispatched call returns, not target by target - leave a host that was never
+    actually reached looking checked. A stale or deleted DNS record is the common case here (a host that resolved when
+    it was first discovered may not resolve months later), not a name a tenant never controlled, so this is a plain
+    resolvability check, not ``targetApp.target_types``'s prohibited-range gate: a target already passed that when it
+    was added. One bounded parallel pass, like ``target_types.blocked_names``; never one lookup per target serially."""
+    from concurrent.futures import ThreadPoolExecutor
+    targets = list(targets)
+    if not targets:
+        return []
+    hosts = {t: _bare_host(t) for t in targets}
+    unique = sorted(set(hosts.values()))
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(unique))), thread_name_prefix='sentinel-resolve') as pool:
+        live = dict(zip(unique, pool.map(lambda h: _resolves(h, timeout), unique)))
+    return [t for t in targets if live.get(hosts[t])]
+
 def _finding_to_nuclei_line(finding):
     """One Sentinel-reported nuclei finding, reshaped into the same dict ``reNgine.tasks.parse_nuclei_result`` and
     ``cveFeed.nuclei_scan.host_of`` already read from nuclei's own ``-jsonl`` output. Fields nuclei's full output carries
@@ -236,9 +276,17 @@ def wrap_nuclei_stream(scan, kind, timeout=None):
                 targets = [line.strip() for line in handle if line.strip()]
         except OSError:
             targets = []
+        live = resolvable_targets(targets[:MAX_ADDRESSES])
+        if not live:
+            # every target in this chunk failed to resolve: a Sentinel would be asked to do nothing, and the local
+            # fallback below would too (nuclei cannot reach what cannot be looked up either); run it anyway so the
+            # existing "ran, found nothing" accounting is unchanged for a target that would already have gone through
+            # stream_nuclei with no Sentinel in play.
+            yield from stream_nuclei(targets_file, **kwargs)
+            return
         tags = sorted(kwargs.get('tags') or [])
         severities = list(kwargs.get('severities') or [])
-        payload = {'targets': targets[:MAX_ADDRESSES], 'tags': tags, 'severities': severities}
+        payload = {'targets': live, 'tags': tags, 'severities': severities}
         result = dispatch_or_none(project, kind, payload, ips=[], scan=scan, timeout=timeout)
         if result is None:
             yield from stream_nuclei(targets_file, **kwargs)

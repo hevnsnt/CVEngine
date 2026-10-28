@@ -239,11 +239,6 @@ def engine_status(row):
     from cveFeed import updater
     if not row.enabled:
         return {'state': 'off', 'headline': 'Off', 'detail': '', 'fix': None}
-    if row.sentinel_only:
-        # The local containers are never asked for in this mode (_engine), so a stale host_report() from before
-        # sentinel_only was set - or a GMP connection this host was never going to make - says nothing useful here.
-        return {'state': 'ready', 'headline': 'Sentinel only', 'fix': None,
-                'detail': 'This host never runs OpenVAS itself. A due host with no eligible Sentinel stays due until one is.'}
     seen = row.state or {}
     if seen.get('connected'):
         feed = seen.get('feed') or {}
@@ -299,20 +294,20 @@ def admin_get(request, actor):
 
 
 def _engine(request, actor, on):
-    """Switch the whole add-on on or off: the sweep's beat entry, the containers (through the host's watcher, unless
-    ``sentinel_only`` says never to run them on this host) and, on, a first check that makes the login."""
+    """Switch the whole add-on on or off: the sweep's beat entry, the containers (through the host's watcher) and, on, a first check that makes
+    the login."""
     from cveFeed.admin_api import audit
     from cveFeed.models import OpenvasSettings
     row = OpenvasSettings.current()
     if row.enabled == on:
-        if on and not row.sentinel_only and not (row.state or {}).get('connected'):
+        if on and not (row.state or {}).get('connected'):
             request_containers(True)  # asking again is how a person retries after a failed start
         return
     row.enabled = on
     row.updated_by = actor
     row.save()
     set_schedule(on)
-    request_containers(on and not row.sentinel_only)  # sentinel_only: never ask the host to start the local containers
+    request_containers(on)
     audit(actor, 'openvas.enable' if on else 'openvas.disable', 'openvas', enabled=on)
     if on:
         try:
@@ -368,16 +363,14 @@ def admin_put(request, actor):
         link.enabled, link.updated_by = flag, actor
         link.save()
         audit(actor, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled)
+    if 'enabled' in data:
+        _engine(request, actor, bool(data['enabled']))
     if 'sentinel_only' in data:
-        # Applied before _engine() below: a single request that both switches the engine on and sets sentinel_only
-        # must never ask the host to start the local containers, which it would if _engine() read the old value.
         from cveFeed.admin_api import audit
         row = OpenvasSettings.current()
         row.sentinel_only, row.updated_by = bool(data['sentinel_only']), actor
         row.save()
         audit(actor, 'openvas.update', 'openvas', sentinel_only=row.sentinel_only)
-    if 'enabled' in data:
-        _engine(request, actor, bool(data['enabled']))
     return admin_get(request, actor)
 
 
@@ -388,7 +381,7 @@ def admin_check(request, actor):
     row = OpenvasSettings.current()
     if row.enabled:
         report = host_report()
-        if report and report['want'] == 'on' and report['state'] == 'failed' and not row.sentinel_only:
+        if report and report['want'] == 'on' and report['state'] == 'failed':
             request_containers(True)  # "Try again" after a failed start
         from cveFeed.tasks import openvas_check
         try:

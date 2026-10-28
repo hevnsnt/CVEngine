@@ -1493,12 +1493,17 @@ def prune_asset_changes():
 
 @app.task(name="reap_stuck_jobs", bind=False, queue="cve_feed_queue")
 def reap_stuck_jobs():
-    """Every 15 minutes: fail host assessments, validation jobs and AI activity rows a lost worker left queued or running (cveFeed.reaper)."""
+    """Every 15 minutes: fail host assessments, validation jobs, scans and AI activity rows a lost worker left queued or running (cveFeed.reaper)."""
     from cveFeed import activity, reaper
     counts = reaper.reap()
     if counts:
         activity.log('validate', 'Expired stuck jobs a restarted worker left behind: '
                      + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='failed', **counts)
+    orphaned = reaper.expire_orphaned_running()
+    if orphaned:
+        activity.log('discovery', 'Closed scans/assessments a restarted worker left running with no Celery task behind: '
+                     + ', '.join(f'{n} {key}' for key, n in orphaned.items()), status='failed', **orphaned)
+        counts.update({f'{key}:orphaned': n for key, n in orphaned.items()})
     again = reaper.redispatch_queued_assessments()
     if again:
         activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',

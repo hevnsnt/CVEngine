@@ -19,7 +19,9 @@
 # The Compose layout is the one the running stack was started with, or CVENGINE_COMPOSE_FILES / CVENGINE_COMPOSE_ENV_FILE /
 # CVENGINE_COMPOSE_PROJECT (environment or .env, the settings scripts/update.sh reads); see resolve_layout below. Ordinary updates
 # deliberately keep db/Redis containers running. A PostgreSQL major-version migration requires a separate maintenance operation. An update
-# waits while recorded scans or targeted jobs are running; operators should drain other worker work as well.
+# waits while recorded scans or targeted jobs are running, up to CVENGINE_UPDATE_DRAIN_SECONDS (default 300); past that it proceeds
+#    and interrupts them (cveFeed.reaper.expire_orphaned_running closes out what the restart leaves behind within one reaper tick).
+#    Operators should drain other worker work as well.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -331,15 +333,34 @@ if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
   log "refusing: could not verify active scans; approval kept for retry"
   exit 1
 fi
+DRAIN_SINCE_FILE="$STATE/draining-since"
+# How long a drain wait may run before the update proceeds anyway and interrupts whatever is still running, rather than waiting
+# without end (a scan that outlives this, or was never going to finish because the worker holding it is already gone, used to
+# block every later update): default 5 minutes, an administrator may raise or lower it.
+DRAIN_MAX=${CVENGINE_UPDATE_DRAIN_SECONDS:-300}
 if [[ $RUNNING =~ ^[1-9][0-9]*$ ]]; then
-  if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
-    phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
-    log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
-    printf '%s' "$RUNNING" > "$STATE/last-wait"
+  NOW=$(date +%s)
+  SINCE=$(cat "$DRAIN_SINCE_FILE" 2>/dev/null || true)
+  [[ $SINCE =~ ^[0-9]+$ ]] || { SINCE=$NOW; printf '%s' "$NOW" > "$DRAIN_SINCE_FILE"; }
+  ELAPSED=$((NOW - SINCE))
+  if (( ELAPSED >= DRAIN_MAX )); then
+    log "forcing ahead: $RUNNING scan(s)/job(s) still running after ${ELAPSED}s (over the ${DRAIN_MAX}s drain limit); the update proceeds and interrupts them now (cveFeed.reaper closes out what the restart leaves behind)"
+    phase draining "forcing the update after ${DRAIN_MAX}s: $RUNNING scan(s)/job(s) interrupted" "$RUNNING"
+    rm -f "$DRAIN_SINCE_FILE" "$STATE/last-wait" "$STATE/last-refusal"
+    # falls through to the deploy below: not a refusal, and not another wait
+  else
+    if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
+      phase draining "waiting for $RUNNING scan(s) to finish (forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running)" "$RUNNING"
+      log "waiting: $RUNNING scan(s) running; forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running (approval kept, will retry)"
+      printf '%s' "$RUNNING" > "$STATE/last-wait"
+    fi
+    # This is a normal, expected wait, not a failure the ERR trap should narrate ("stopped at line N") on every poll: the two log
+    # lines above already say why. The trap is restored by the next invocation (a fresh shell), so every later command keeps it.
+    trap - ERR
+    exit 3  # "still waiting": the watcher polls slowly for this; cron treats any status the same
   fi
-  exit 3  # "still waiting": the watcher polls slowly for this; cron treats any status the same
 fi
-rm -f "$STATE/last-wait" "$STATE/last-refusal"
+rm -f "$STATE/last-wait" "$STATE/last-refusal" "$DRAIN_SINCE_FILE"
 
 PREV=$(git rev-parse HEAD)
 SWITCHED=0
