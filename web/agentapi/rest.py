@@ -104,9 +104,9 @@ def _sentinel_enroll(request, ctx, slug, **_):
     return out, 201
 
 
-def _sentinel_org_enroll(request, ctx, slug, **_):
-    out = (sentinels.generate_org_enrollment_blob(ctx, slug) if request.GET.get('format') == 'blob'
-           else sentinels.generate_org_enrollment(ctx, slug))
+def _sentinel_org_enroll(request, ctx, org, **_):
+    out = (sentinels.generate_org_enrollment_blob(ctx, org) if request.GET.get('format') == 'blob'
+           else sentinels.generate_org_enrollment(ctx, org))
     return out, 201
 
 
@@ -407,9 +407,9 @@ ROUTES = [
      _sentinel_enroll),
     ('POST', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this project',
      _sentinel_enroll),
-    ('GET', r'orgs/(?P<slug>[-\w]+)/sentinels/enroll', 'An admin of this organization, or an App Admin, generates a one-time enrollment secret that scopes a Sentinel to every project of the organization, present and future: {enrollment_token, server_url, expires_at, scope: "org"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
+    ('GET', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'An admin of this organization, or an App Admin, generates a one-time enrollment secret that scopes a Sentinel to every project of the organization, present and future: {enrollment_token, server_url, expires_at, scope: "org"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
      _sentinel_org_enroll),
-    ('POST', r'orgs/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization',
+    ('POST', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization',
      _sentinel_org_enroll),
     ('GET', r'sentinels/enroll', 'App Admin only: a one-time enrollment secret that scopes a Sentinel to every organization and project on this instance, present and future: {enrollment_token, server_url, expires_at, scope: "instance"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
      _sentinel_instance_enroll),
