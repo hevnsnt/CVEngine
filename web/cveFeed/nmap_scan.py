@@ -181,15 +181,26 @@ def run_nmap_args(args, label, timeout):
 
 
 def parse_xml(xml_text):
-    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable."""
+    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable.
+
+    This function also reads XML a Sentinel reported (``agentapi.sentinel_dispatch.try_nmap_udp``), not only this
+    process's own nmap subprocess, so an entity-expansion or external-entity payload must fail safe here exactly as it
+    would from any other untrusted input, never expand or fetch anything. A real nmap report never declares a custom
+    ENTITY, so one is refused outright before parsing (it is the one thing ``xmltodict.parse``'s own default entity
+    handling does not stop: that default only blocks an *external* DTD/entity fetch, not an all-internal expansion
+    bomb). No extra dependency: a hardened ``expat`` module here would need ``defusedexpat`` (an old, unmaintained C
+    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all."""
     import xmltodict
 
     from reNgine.nmap_service import extract_nmap_inventory
     if not (xml_text or '').strip():
         return []
+    if '<!ENTITY' in xml_text:
+        logger.warning('refused to parse nmap XML output: it declares a custom ENTITY')
+        return []
     try:
         data = xmltodict.parse(xml_text)
-    except Exception:  # noqa: BLE001 - a truncated/partial XML report must not crash the pipeline
+    except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
         logger.warning('could not parse nmap XML output', exc_info=True)
         return []
     return extract_nmap_inventory(data)

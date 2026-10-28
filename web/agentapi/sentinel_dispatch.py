@@ -152,6 +152,26 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
     return (result or {}).get('items') if result is not None else None
 
 
+# --- nmap -sU: raw XML through the Sentinel, parsed by the exact function a local run's own XML already goes through --
+
+def try_nmap_udp(project, ip_address, scan=None, timeout=None):
+    """The parsed ``nmap -sU`` host record for ``ip_address`` from a Sentinel's raw XML report, or ``None`` when no
+    Sentinel is eligible, on timeout, or on failure - in which case the caller runs the local ``-sU`` scan exactly as
+    before. Unlike every other dispatched kind here, the Sentinel's result is raw XML text, not pre-parsed JSON: UDP's
+    own state vocabulary (``open|filtered``, extraports summarisation) and the NSE script output
+    ``cveFeed.udp_scan.identify`` reads are read correctly only by ``cveFeed.nmap_scan.parse_xml`` (hardened against a
+    custom ENTITY declaration precisely because it now also reads a Sentinel's report, not only this process's own
+    nmap output), so that is the one function - local or dispatched - that ever turns the XML into a record. Never
+    chunked: one address per task, like testssl."""
+    if not any_scanner_for(project, 'nmap_udp'):
+        return None
+    result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
+    if result is None:
+        return None
+    from cveFeed.nmap_scan import parse_xml
+    return next((h for h in parse_xml(result.get('xml') or '') if h.get('ip') == ip_address), None)
+
+
 # --- naabu: an injectable runner wrapping cveFeed.naabu_scan.discover's own seam, untouched otherwise ------------------
 
 def wrap_naabu_runner(project, scan, timeout=None):
