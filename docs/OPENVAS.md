@@ -1,6 +1,6 @@
 # OpenVAS (Greenbone)
 
-OpenVAS is an optional second vulnerability scanner. cvENGINE runs it as a set of Greenbone Community Edition containers next to the stack, talks to its manager (gvmd) over the GMP protocol, and turns its results into findings and CVE evidence. It is **off by default and costs nothing while it is off**: no container, no memory, no queue consumer work and no scheduled task. Turning it on is two decisions by an App Admin: start the compose profile, and switch it on in **Settings > OpenVAS**, then opt each project's hosts in by name.
+OpenVAS is an optional second vulnerability scanner. cvENGINE runs it as a set of Greenbone Community Edition containers next to the stack, talks to its manager (gvmd) over the GMP protocol, and turns its results into findings and CVE evidence. It is **off by default and costs nothing while it is off**: no container, no memory, no queue consumer work and no scheduled task. Turning it on is one decision by an App Admin or an Org Admin: tick the organizations or projects to scan in **Administration > OpenVAS**. Everything else (starting the containers, making the scanner's login, loading the feeds) happens by itself.
 
 OpenVAS finds what nuclei and nmap do not: it runs tens of thousands of network vulnerability tests (version checks, protocol-level checks, default credentials, weak configuration) against every port of a host. It is slow, it is heavy, and its version-based results are often wrong about backported fixes, which is why cvENGINE only treats the high-confidence ones as confirmed (see Results).
 
@@ -26,19 +26,21 @@ A task that is already running is **stopped** when free memory falls below the p
 
 ## Turn it on
 
-1. Add `COMPOSE_PROFILES=openvas` to `.env` (with Tailscale too: `COMPOSE_PROFILES=tailscale,openvas`) so updates keep it, and start it: `make openvas-up` (or `docker compose --profile openvas up -d openvas-gvmd openvas-ospd openvas-openvasd`; Compose starts what they depend on). Recreate the celery container once (`make up`) so it mounts gvmd's socket.
-2. Wait for the feeds. The first start downloads and loads the vulnerability tests, SCAP and CERT data. Settings > OpenVAS shows the state and, until it is ready, the reason: "the NVT feed is synchronising", "the vulnerability tests are not loaded yet (0 in Full and fast)". **No scan starts while the feed is not ready.**
-3. `make openvas-user`. Greenbone's containers create the user `admin` with the password `admin`. This signs in once with that default over gvmd's socket, sets a random password through GMP (so it is never on a command line, where every process can read it), saves it encrypted in cvENGINE and prints only the user name. If you already changed the password, save it with `printf '%s' "$PASSWORD" | docker compose exec -T web python3 manage.py openvas_credentials --username admin` (standard input, never an argument). Do not leave the default password in place.
-4. Settings > OpenVAS: press **Test connection** (it asks a worker, the only container that can reach the socket, and reads the saved login), then switch the add-on on. Switching it on enables the sweep's beat entry (`cvengine-openvas-sweep`, created disabled by migration); switching it off disables it again.
-5. **Opt a project in** and list its hosts. A project scans nothing until it is opted in and has hosts listed.
+An **App Admin** opens **Administration > OpenVAS** (or the Settings tab) and presses **Switch on**. Then App Admins and Org Admins tick the organizations or projects to scan. With nobody typing anything, switching it on does this:
 
-Stop it with `make openvas-down` (the data volumes stay). Nothing else in the stack changes whether it is on or off.
+1. **The containers start.** The web container has no Docker access, so it writes `web/.openvas-wanted`; the **host agent** (`scripts/update-watch.sh`, the same small job that applies updates, installed once with `scripts/install-updater.sh`) sees it within seconds and runs `scripts/openvas-sync.sh`, which checks the host has the free memory the scanner needs and starts the Greenbone services. The page follows it (Starting, then Loading vulnerability tests) and, if the agent is not installed, shows the install command with a Check again button.
+2. **The login is made.** Greenbone's containers create the user `admin` with the password `admin`. The first check the worker runs signs in once with that default over gvmd's socket, sets a random password through GMP (so it is never on a command line, where every process can read it) and saves it encrypted in cvENGINE. Nobody sees or types it. If the default password was already changed by hand, the page says so and you save the one in use with `manage.py openvas_credentials` (below).
+3. **The feeds load.** The first start downloads and loads the vulnerability tests, SCAP and CERT data, which takes from several minutes to hours. The page says "Getting ready" and why. **No scan starts while the feed is not ready**, and scans then begin by themselves.
+
+Who can do what: only an **App Admin** switches the add-on on or off for the instance (the choices are kept when it is off). While it is off nobody can choose anything, and an Org Admin is told an App Admin has to switch it on first. Once it is on, an App Admin sees every organization and an **Org Admin** sees only the organizations they administer and those organizations' projects. Members and auditors cannot use it. Every choice is in the audit log. Ticking an organization covers all its projects, including ones added later; ticking single projects covers just those.
+
+Stop it with the **Switch off** button (App Admin) or `make openvas-down`; the data volumes stay. By hand, the old way still works: `make openvas-up`, `make openvas-user`, then `COMPOSE_PROFILES=openvas` in `.env` keeps the containers across `docker compose` runs on a host that does not use the watcher.
 
 ## What gets scanned
 
-Only hosts an App Admin listed for an opted-in project. The list is checked twice, at save time and at every sweep:
+Only the hosts of the organizations and projects someone chose. A project can still be limited to a list of hosts through the API (`hosts` on `openvas/projects/{id}`); without a list every host of the project is a candidate, the longest-waiting first. Every host is vetted at every sweep:
 
-- each entry must already be a host of that project (an unknown or another project's host is refused);
+- each name must be a host of that project (another project's host is never scanned);
 - hosts excluded for the organization or archived are dropped (`cveFeed.exclusions`), as is any name that resolves to an address a scanner may not be pointed at (`scannable_hosts`, `pinned_transport.resolve`);
 - GVM is given the **numeric address** that was vetted, never a name, so a name re-pointed after it was stored cannot redirect the scan;
 - **tailnet addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) are never given to OpenVAS**, even for a project with a connected tailnet. The scanner containers have no Tailscale interface, so the packets would leave by the Docker host's default route.
@@ -136,7 +138,9 @@ cvENGINE's tests run python-gvm unmodified against a fake gvmd that speaks GMP i
 
 | Settings says | Meaning |
 | --- | --- |
-| Not connected: gvmd could not be reached | The profile is not running, or celery was not recreated to mount the socket volume |
+| Not connected: gvmd could not be reached | The containers are not running yet (the page says Starting for the first minutes), or celery was not recreated to mount the socket volume |
+| Nothing on the host can start it | The updater watcher is not installed or not running: run `make openvas-up` once, or `scripts/install-updater.sh` |
+| The scanner could not be started | The host refused or failed (usually too little free memory); the reason is on the page and in `web/.openvas-log`. Fix it and press Try again |
 | gvmd refused the GMP login | The saved password is not the one gvmd has; run `make openvas-user` or save the right one |
 | No scan can start yet: the vulnerability tests are not loaded | The feed is still loading; wait |
 | Resource guard: memory is short | See What you need; free memory or lower `CVENGINE_OPENVAS_MIN_AVAILABLE_MB` knowingly |

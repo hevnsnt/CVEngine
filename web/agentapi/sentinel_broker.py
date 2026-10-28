@@ -650,9 +650,31 @@ def _clean_nmap_udp_result(body):
     return {'xml': xml}
 
 
+MAX_WPSCAN_REPORT_BYTES = 8 * 1024 * 1024  # matches cveFeed.wpscan_scan.MAX_OUTPUT: a local run's own report is bounded the same way
+
+
+def _clean_wpscan_result(body):
+    """A Sentinel's WPScan run: its raw JSON report (or ``None`` for a run that wrote nothing), the process's exit code
+    and a trailing line of stderr - exactly what ``cveFeed.wpscan_scan._classify`` already reads from a local run, the
+    one function, local or dispatched, that turns a wpscan process's outcome into a report or a classified failure (not
+    WordPress, blocked by an edge, or another error). WPScan's own report routinely carries text from the scanned site
+    (plugin names, readme excerpts); that is exactly as untrusted dispatched as it already is from a local run, and the
+    same storage-time clipping (``cveFeed.wpscan_scan.persist_report`` and the functions beside it) absorbs it either
+    way - only the overall size is bounded here."""
+    report = body.get('report')
+    if report is not None:
+        if not isinstance(report, dict):
+            raise ApiError(400, 'report must be an object or null')
+        if len(json.dumps(report)) > MAX_WPSCAN_REPORT_BYTES:
+            raise ApiError(400, f'report must be at most {MAX_WPSCAN_REPORT_BYTES} bytes')
+    returncode = body.get('returncode')
+    returncode = returncode if isinstance(returncode, int) and not isinstance(returncode, bool) else 1
+    return {'report': report, 'returncode': returncode, 'stderr_tail': _text(body.get('stderr_tail'), 300)}
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
-             'nmap_udp': _clean_nmap_udp_result}
+             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result}
 
 
 def clean_result(kind, body):
