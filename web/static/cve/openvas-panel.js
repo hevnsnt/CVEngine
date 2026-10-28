@@ -11,17 +11,16 @@ function statusCard(data, redraw) {
   const e = data.engine;
   const c = el("div", "card ov-status");
   const head = el("div", "ov-head");
-  head.append(el("h2", "", "OpenVAS scanner"), badge(e.headline, TONE[e.state] || ""));
+  const locked = e.state === "off" && !e.can_switch;
+  head.append(el("h2", "", "OpenVAS scanner"), badge(locked ? "Disabled by App Admin" : e.headline, TONE[e.state] || ""));
   c.append(head);
   if (e.detail) c.append(el("p", "note", e.detail));
-  if (e.state === "off") {
+  if (e.state === "off" && e.can_switch) {
     c.append(
       el(
         "p",
         "note",
-        e.can_switch
-          ? "OpenVAS is a second vulnerability scanner that looks deeper than the built-in checks. While it runs it uses about 4 GB of memory, and it scans slowly on purpose, a few hosts at a time, without denial-of-service or brute-force tests. Switching it on starts it and sets everything up; organization admins can then choose what it scans."
-          : "An App Admin has to switch OpenVAS on first. After that you can choose which of your organizations and projects it scans.",
+        "OpenVAS is a second vulnerability scanner that looks deeper than the built-in checks. While it runs it uses about 4 GB of memory, and it scans slowly on purpose, a few hosts at a time, without denial-of-service or brute-force tests. Switching it on starts it and sets everything up; organization admins can then choose what it scans.",
       ),
     );
   }
@@ -120,6 +119,7 @@ export async function openvasPanel(mount) {
       }
     };
     wrap.append(statusCard(data, redraw));
+    if (!data.engine.enabled && !data.engine.can_switch) return;
     if (!data.orgs.length) {
       wrap.append(el("p", "note", "You do not administer any organization, so there is nothing to choose here."));
     } else {
