@@ -3,7 +3,7 @@
 import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
-import { fmtTime } from "/staticfiles/cve/prefs.js";
+import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 
@@ -178,7 +178,7 @@ function paintInternal(x) {
     li.append(el("i", "in-dot"), el("b", "mono", n.cidr), el("span", "in-state", SENTINEL_WORD[state] || state));
     const scanned = n.last_scan_at ? `last scanned ${ago(n.last_scan_at)}` : "not scanned yet";
     // a quiet network with no live Sentinel has not been looked at: say since when, instead of letting it read as clean
-    const note = state === "online" ? scanned : `not scanned since ${n.last_scan_at ? fmtTime(n.last_scan_at, false) + " " + ago(n.last_scan_at) : "ever"}`;
+    const note = state === "online" ? scanned : n.last_scan_at ? `not scanned since ${fmtDateTime(n.last_scan_at)}` : "never scanned";
     li.append(el("span", "in-note", `${n.hosts} host${n.hosts === 1 ? "" : "s"} · ${note}`));
     if (n.description) li.title = n.description;
     list.append(li);
