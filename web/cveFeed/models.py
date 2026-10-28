@@ -1736,6 +1736,20 @@ class OpenvasProject(models.Model):
         return f"OpenVAS opt-in of project {self.project_id}"
 
 
+class OpenvasOrg(models.Model):
+    """An organization's opt-in to OpenVAS scanning: every project of the organization (the ones it has now and the ones it gets later) is
+    scanned, through the same gate as a single opted-in project. An Org Admin or an App Admin sets it; nothing outside the chosen organizations
+    is scanned."""
+
+    org = models.OneToOneField("dashboard.Org", on_delete=models.CASCADE, related_name="openvas_link")
+    enabled = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    def __str__(self):
+        return f"OpenVAS opt-in of organization {self.org_id}"
+
+
 class OpenvasRun(models.Model):
     """One GVM task cvENGINE started: the batch of hosts it covers, where it stands and what its import found. At most one is ``running``
     at a time (the constraint), which is how the sweep stays one task at a time even across workers and restarts."""

@@ -1555,3 +1555,14 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .fold-sub{color:var(--muted);font-size:12.5px}
 .fold-body{padding:2px 14px 14px;border-top:1px solid var(--line)}
 @media (prefers-reduced-motion:reduce){.fold>summary::before{transition:none}}
+
+/* OpenVAS panel: a status card, then one card per organization with a switch for it and a row per project */
+.ov{display:grid;gap:12px;max-width:720px}
+.ov-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.ov-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.ov-h{margin:8px 0 0}
+.ov-row{display:flex;align-items:flex-start;gap:12px;padding:8px 0;margin:0;font-weight:400;cursor:pointer}
+.ov-row input{width:auto;min-height:0;margin-top:3px}
+.ov-name{display:grid;gap:2px}
+.ov-org-head{padding-top:0}
+.ov-projects{border-top:1px solid var(--line);margin-top:6px;padding:6px 0 0 28px}

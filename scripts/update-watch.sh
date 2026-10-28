@@ -21,6 +21,11 @@ while :; do
     python3 scripts/update-state.py heartbeat >/dev/null 2>&1 || true
     next_beat=$((SECONDS + 15))
   fi
+  # an OpenVAS switch flipped in the app (web/.openvas-wanted newer than the answer): carry it out in the background, so a first start that pulls
+  # several GB neither delays an update nor stops the heartbeat. The script takes its own lock.
+  if [ -f web/.openvas-wanted ] && [ web/.openvas-wanted -nt web/.openvas-applied ]; then
+    setsid nohup scripts/openvas-sync.sh >>web/.openvas-log 2>&1 </dev/null &
+  fi
   pause=2
   if [ -e web/.update-approved ] || [ -L web/.update-approved ]; then
     scripts/apply-update.sh

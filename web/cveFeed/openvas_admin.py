@@ -6,9 +6,17 @@ add-on is deliberately not part of the agent REST API or MCP. The GMP password i
 it is, and a blank field on update keeps the stored value. The Test connection runs in a worker (the web container has no sidecar socket)
 and reads the saved login; no credential is put in a task message.
 """
+import json
+import logging
+import os
 import re
+import time
+
+from django.conf import settings
 
 from cveFeed.tailscale_api import clean_text
+
+logger = logging.getLogger(__name__)
 
 MAX_HOSTS = 200
 _HOST_RE = re.compile(r'^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$')
@@ -173,3 +181,186 @@ def openvas_test(request):
         return openvas_check.delay().get(timeout=40)
     except Exception:  # noqa: BLE001 - no worker answered in time: say so, never fail the page
         return {'connected': False, 'error': 'no worker answered; is the celery container running?', 'feed': None, 'guard': None, 'gmp_version': ''}
+
+
+# ----------------------------------------------------------------------------- the simple page: switch it on, choose what it looks at
+# App Admins and Org Admins use these (the ``/cve/api/admin`` routes). The instance-wide engine is switched on by the first choice anybody
+# makes, and only an App Admin switches it off. Nothing is typed: the GMP login is made by the worker (``openvas_scan.ensure_login``) and
+# the containers are started by the host's watcher (``scripts/openvas-sync.sh``), which the web container asks through a flag file.
+
+WANTED = '.openvas-wanted'  # written here: "on" or "off"
+APPLIED = '.openvas-applied'  # written by scripts/openvas-sync.sh: {"want": "on", "ok": true, "error": "", "at": 1700000000}
+
+
+def _path(name):
+    return os.path.join(settings.BASE_DIR, name)
+
+
+def request_containers(on):
+    """Ask the host's watcher to start (or stop) the Greenbone containers: the web container has no Docker access on purpose. Returns whether the
+    request could be written."""
+    tmp = _path(WANTED + '.tmp')
+    try:
+        with open(tmp, 'w') as f:
+            f.write('on\n' if on else 'off\n')
+        os.replace(tmp, _path(WANTED))
+        return True
+    except OSError:
+        logger.warning('could not write %s', WANTED)
+        return False
+
+
+def host_report():
+    """What the host's watcher did with the last request: ``{want, ok, error, at}``, or ``None`` when it has not answered."""
+    try:
+        with open(_path(APPLIED)) as f:
+            data = json.loads(f.read(2000))
+        return {'want': 'on' if data.get('want') == 'on' else 'off', 'ok': bool(data.get('ok')), 'error': clean_text(data.get('error') or '', 200),
+                'at': float(data.get('at') or 0)}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def engine_status(row):
+    """One plain answer for the page: ``{state, headline, detail}``. ``state`` is off, starting, loading, ready or problem."""
+    from cveFeed import updater
+    if not row.enabled:
+        return {'state': 'off', 'headline': 'Off', 'detail': 'Choose what to scan below and it switches on by itself.'}
+    seen = row.state or {}
+    if seen.get('connected'):
+        feed = seen.get('feed') or {}
+        guard = seen.get('guard') or {}
+        if not feed.get('ready'):
+            return {'state': 'loading', 'headline': 'Getting ready',
+                    'detail': 'Downloading the vulnerability tests. The first time takes from several minutes to a few hours; scans start by themselves when it ends. ' + clean_text(feed.get('reason') or '', 160)}
+        if guard and not guard.get('ok'):
+            return {'state': 'ready', 'headline': 'Ready, waiting for memory', 'detail': clean_text(guard.get('reason') or '', 200)}
+        return {'state': 'ready', 'headline': 'Ready', 'detail': 'Hosts are scanned a few at a time, each once a week.'}
+    report = host_report()
+    if report and report['want'] == 'on' and not report['ok']:
+        return {'state': 'problem', 'headline': 'The scanner could not be started', 'detail': report['error'] or 'The host could not start the containers. See web/.openvas-log on the host.'}
+    error = seen.get('error') or ''
+    if 'default login' in error or 'refused' in error:
+        return {'state': 'problem', 'headline': 'The scanner login needs help', 'detail': error}
+    if not updater.host_updater()['alive'] and not (report and report['want'] == 'on' and report['ok']):
+        return {'state': 'problem', 'headline': 'Nothing on the host can start it',
+                'detail': 'Run "make openvas-up" on the host once, or install the updater (scripts/install-updater.sh) so this page can start it for you.'}
+    return {'state': 'starting', 'headline': 'Starting', 'detail': 'Starting the scanner containers. This takes a minute or two.'}
+
+
+def _last_run(project_id):
+    from cveFeed.models import OpenvasRun
+    last = OpenvasRun.objects.filter(project_id=project_id).order_by('-id').first()
+    if not last:
+        return None
+    return {'status': last.status, 'progress': last.progress, 'error': last.error, 'finished_at': last.finished_at.isoformat() if last.finished_at else None}
+
+
+def admin_get(request, actor):
+    """What this person may aim OpenVAS at (their organizations and those organizations' projects, or everything for an App Admin) and how
+    the scanner is doing."""
+    from cveFeed.models import OpenvasOrg, OpenvasProject, OpenvasSettings
+    from dashboard.models import Org, Project
+    from tenancy import roles
+    row = OpenvasSettings.current()
+    managed = roles.managed_org_ids(actor)
+    org_on = dict(OpenvasOrg.objects.filter(org_id__in=managed).values_list('org_id', 'enabled'))
+    links = {l.project_id: l for l in OpenvasProject.objects.filter(project__org_id__in=managed).select_related('project')}
+    groups = []
+    for org in Org.objects.filter(pk__in=managed).order_by('name'):
+        projects = [{'id': p.id, 'name': p.name, 'enabled': bool(links.get(p.id) and links[p.id].enabled), 'last_run': _last_run(p.id)}
+                    for p in Project.objects.filter(org_id=org.pk).order_by('name')]
+        groups.append({'id': org.pk, 'name': org.name, 'enabled': bool(org_on.get(org.pk)), 'projects': projects})
+    return {'engine': {'enabled': row.enabled, 'can_switch_off': actor.is_superuser, **engine_status(row)}, 'orgs': groups,
+            'who': 'app_admin' if actor.is_superuser else 'org_admin'}
+
+
+def _engine(request, actor, on):
+    """Switch the whole add-on on or off: the sweep's beat entry, the containers (through the host's watcher) and, on, a first check that makes
+    the login."""
+    from cveFeed.admin_api import audit
+    from cveFeed.models import OpenvasSettings
+    row = OpenvasSettings.current()
+    if row.enabled == on:
+        if on and not (row.state or {}).get('connected'):
+            request_containers(True)  # asking again is how a person retries after a failed start
+        return
+    row.enabled = on
+    row.updated_by = actor
+    row.save()
+    set_schedule(on)
+    request_containers(on)
+    audit(actor, 'openvas.enable' if on else 'openvas.disable', 'openvas', enabled=on)
+    if on:
+        try:
+            from cveFeed.tasks import openvas_check
+            openvas_check.delay()
+        except Exception:  # noqa: BLE001 - no broker right now: the sweep makes the login at its next step
+            logger.info('could not queue the first OpenVAS check')
+
+
+def _flags(value, what):
+    from cveFeed.admin_api import AdminError
+    if not isinstance(value, dict):
+        raise AdminError(400, f'{what} must be an object of id: true or false')
+    out = {}
+    for key, flag in value.items():
+        if not str(key).isdigit() or not isinstance(flag, bool):
+            raise AdminError(400, f'{what} must map ids to true or false')
+        out[int(key)] = flag
+    return out
+
+
+def admin_put(request, actor):
+    """Apply a choice: ``{"orgs": {"3": true}, "projects": {"7": false}, "enabled": false}``. Only organizations (and their projects) the person
+    administers can be chosen; only an App Admin may send ``enabled`` (to switch the add-on off for everyone)."""
+    from cveFeed.admin_api import AdminError, _body, audit
+    from cveFeed.models import OpenvasOrg, OpenvasProject
+    from dashboard.models import Org, Project
+    from tenancy import roles
+    data = _body(request)
+    managed = roles.managed_org_ids(actor)
+    orgs = _flags(data.get('orgs', {}), 'orgs')
+    projects = _flags(data.get('projects', {}), 'projects')
+    if 'enabled' in data and not actor.is_superuser:
+        raise AdminError(403, 'only an App Admin switches OpenVAS off for everyone')
+    if any(i not in managed for i in orgs):
+        raise AdminError(403, 'you do not administer one of those organizations')
+    found = {p.pk: p for p in Project.objects.filter(pk__in=projects)}
+    if len(found) != len(projects):
+        raise AdminError(404, 'project not found')
+    if any(p.org_id not in managed for p in found.values()):
+        raise AdminError(403, 'you do not administer the organization of one of those projects')
+    for org in Org.objects.filter(pk__in=orgs):
+        link = OpenvasOrg.objects.filter(org=org).first() or OpenvasOrg(org=org)
+        link.enabled, link.updated_by = orgs[org.pk], actor
+        link.save()
+        audit(actor, 'openvas.org.update', org.slug, org=org.pk, enabled=link.enabled)
+    for pid, flag in projects.items():
+        project = found[pid]
+        link = OpenvasProject.objects.filter(project=project).first() or OpenvasProject(project=project)
+        link.enabled, link.updated_by = flag, actor
+        link.save()
+        audit(actor, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled)
+    if 'enabled' in data:
+        _engine(request, actor, bool(data['enabled']))
+    elif any(orgs.values()) or any(projects.values()):
+        _engine(request, actor, True)
+    return admin_get(request, actor)
+
+
+def admin_check(request, actor):
+    """Look at the scanner now (the page asks while it is starting): makes the login when there is none and reads the feed. A worker does it, since
+    only a worker has gvmd's socket."""
+    from cveFeed.models import OpenvasSettings
+    row = OpenvasSettings.current()
+    if row.enabled:
+        report = host_report()
+        if report and report['want'] == 'on' and not report['ok']:
+            request_containers(True)  # "Try again" after a failed start
+        from cveFeed.tasks import openvas_check
+        try:
+            openvas_check.delay().get(timeout=40)
+        except Exception:  # noqa: BLE001 - no worker answered in time: the status says what is known
+            logger.info('the OpenVAS check did not answer in time')
+    return admin_get(request, actor)

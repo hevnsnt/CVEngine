@@ -17,10 +17,11 @@ from gvm.connections import UnixSocketConnection
 from lxml import etree
 
 from cveFeed import openvas_scan as ov
-from cveFeed.models import CVEEntry, CVEMatch, OpenvasProject, OpenvasRun, OpenvasSettings, ProbeObservation, ScanControl, ServiceRun
+from cveFeed.models import CVEEntry, CVEMatch, OpenvasOrg, OpenvasProject, OpenvasRun, OpenvasSettings, ProbeObservation, ScanControl, ServiceRun
 from dashboard.models import AuditLog, Org, OrgMembership, Project
 from reNgine import resources
 from startScan.models import ScanHistory, Subdomain, Vulnerability
+from targetApp.models import Domain
 from tests.fake_gvmd import FULL_AND_FAST, FakeGvmd
 from tests.test_route_auth import RouteFixture
 from tests.test_settings import send
@@ -1132,3 +1133,174 @@ class DocsTests(SimpleTestCase):
         for path in ('docs/OPENVAS.md', 'web/cveFeed/openvas_scan.py', 'web/cveFeed/openvas_admin.py', 'web/tests/test_openvas.py', 'web/tests/fake_gvmd.py',
                      'scripts/openvas-user.sh', 'docker-compose.yml'):
             self.assertNotIn(chr(0x2014), (ROOT / path).read_text(), path)
+
+
+class AutoSetupTests(GvmdFixture, TestCase):
+    def test_the_first_check_makes_the_login_with_nobody_typing(self):
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            row = ov.ensure_login()
+        self.assertEqual((row.gmp_username, bool(row.gmp_password)), ('admin', True))
+        self.assertNotEqual(gvmd.users['admin'], 'admin')
+
+    def test_a_saved_login_is_left_alone(self):
+        row = OpenvasSettings.current()
+        row.gmp_username, row.gmp_password = 'me', 'kept-password'
+        row.save()
+        with mock.patch.object(ov, 'bootstrap', side_effect=AssertionError('must not touch gvmd')):
+            self.assertEqual(ov.ensure_login().gmp_password, 'kept-password')
+
+    def test_while_gvmd_is_not_up_the_error_is_recorded_not_raised(self):
+        row = OpenvasSettings.current()
+        row.enabled = True
+        row.save()
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path='/nonexistent/gvmd.sock', timeout=1)):
+            state = ov.check_now()
+        self.assertFalse(state['connected'])
+        self.assertIn('could not be reached', state['error'])
+
+
+class ChooseWhatToScanTests(Fixture, TestCase):
+    """Administration > OpenVAS: App Admins and Org Admins pick organizations or projects, nothing is typed."""
+
+    def setUp(self):
+        super().setUp()
+        self.settings.enabled = False
+        self.settings.gmp_username, self.settings.gmp_password = '', ''
+        self.settings.save()
+        self.link.delete()
+        self.root = User.objects.create_superuser('oroot', 'o@x.io', 'x')
+        self.org = self.project.org
+        self.other_org = Org.objects.create(name='Other', slug='other')
+        self.other = Project.objects.create(name='Theirs', slug='theirs', insert_date=timezone.now(), org=self.other_org)
+        self.org_admin = User.objects.create_user('oadmin', password='x')
+        OrgMembership.objects.create(user=self.org_admin, org=self.org, role='admin')
+        self.member = User.objects.create_user('omember', password='x')
+        OrgMembership.objects.create(user=self.member, org=self.org, role='user')
+        wanted = mock.patch('cveFeed.openvas_admin.request_containers').start()
+        self.wanted = wanted
+        mock.patch('cveFeed.tasks.openvas_check.delay').start()
+
+    def call(self, user, method, path='', body=None):
+        client = client_for(user)
+        url = f'/cve/api/admin/openvas{path}'
+        kw = {'content_type': 'application/json'}
+        r = (client.get(url) if method == 'GET' else getattr(client, method.lower())(url, json.dumps(body or {}), **kw))
+        return r.status_code, (r.json() if r.content else None)
+
+    def test_an_org_admin_sees_only_their_organization(self):
+        code, data = self.call(self.org_admin, 'GET')
+        self.assertEqual(code, 200)
+        self.assertEqual([o['name'] for o in data['orgs']], ['R'])
+        self.assertEqual(data['who'], 'org_admin')
+        self.assertFalse(data['engine']['can_switch_off'])
+
+    def test_an_app_admin_sees_every_organization(self):
+        _code, data = self.call(self.root, 'GET')
+        self.assertTrue({'R', 'Other'} <= {o['name'] for o in data['orgs']})
+        self.assertTrue(data['engine']['can_switch_off'])
+
+    def test_a_plain_member_gets_nothing(self):
+        self.assertEqual(self.call(self.member, 'GET')[0], 403)
+        self.assertEqual(self.call(self.member, 'PUT', body={'orgs': {str(self.org.pk): True}})[0], 403)
+
+    def test_choosing_a_project_switches_the_addon_on_and_asks_the_host_to_start_it(self):
+        code, data = self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})
+        self.assertEqual(code, 200)
+        self.assertTrue(OpenvasSettings.current().enabled)
+        self.assertTrue(OpenvasProject.objects.get(project=self.project).enabled)
+        self.wanted.assert_called_with(True)
+        self.assertIn(data['engine']['state'], ('starting', 'problem'))
+        from django_celery_beat.models import PeriodicTask
+        self.assertTrue(PeriodicTask.objects.get(name=ov.BEAT_NAME).enabled)
+
+    def test_choosing_several_organizations_and_projects_at_once(self):
+        body = {'orgs': {str(self.org.pk): True}, 'projects': {}}
+        self.assertEqual(self.call(self.root, 'PUT', body={**body, 'orgs': {str(self.org.pk): True, str(self.other_org.pk): True}})[0], 200)
+        self.assertEqual(set(OpenvasOrg.objects.filter(enabled=True).values_list('org_id', flat=True)), {self.org.pk, self.other_org.pk})
+
+    def test_an_org_admin_cannot_choose_someone_elses_organization_or_project(self):
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'orgs': {str(self.other_org.pk): True}})[0], 403)
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {str(self.other.pk): True}})[0], 404)  # not even visible to them
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {'99999': True}})[0], 404)
+        self.assertFalse(OpenvasOrg.objects.exists() or OpenvasProject.objects.exists())
+        self.assertFalse(OpenvasSettings.current().enabled)
+
+    def test_only_an_app_admin_switches_it_off_for_everyone(self):
+        self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'enabled': False})[0], 403)
+        self.assertTrue(OpenvasSettings.current().enabled)
+        self.assertEqual(self.call(self.root, 'PUT', body={'enabled': False})[0], 200)
+        self.assertFalse(OpenvasSettings.current().enabled)
+        self.wanted.assert_called_with(False)
+        self.assertTrue(OpenvasProject.objects.get(project=self.project).enabled)  # the choices are kept
+
+    def test_a_malformed_choice_is_refused(self):
+        self.assertEqual(self.call(self.root, 'PUT', body={'orgs': {'x': True}})[0], 400)
+        self.assertEqual(self.call(self.root, 'PUT', body={'orgs': {str(self.org.pk): 'yes'}})[0], 400)
+        self.assertEqual(self.call(self.root, 'PUT', body={'orgs': [1]})[0], 400)
+
+    def test_every_choice_is_in_the_audit_log(self):
+        self.call(self.org_admin, 'PUT', body={'orgs': {str(self.org.pk): True}})
+        actions = set(AuditLog.objects.values_list('action', flat=True))
+        self.assertIn('openvas.org.update', actions)
+        self.assertIn('openvas.enable', actions)
+
+    def test_an_opted_in_organization_covers_its_projects_including_new_ones(self):
+        OpenvasOrg.objects.create(org=self.org, enabled=True)
+        later = Project.objects.create(name='Later', slug='later', insert_date=timezone.now(), org=self.org)
+        covered = {link.project_id for link in ov.sweep_links()}
+        self.assertEqual(covered, {self.project.pk, later.pk})
+        self.assertNotIn(self.other.pk, covered)
+
+    def test_a_project_with_no_list_scans_its_own_hosts_never_another_projects(self):
+        OpenvasProject.objects.create(project=self.project, enabled=True)
+        link = OpenvasProject.objects.get(project=self.project)
+        batch = ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)
+        self.assertEqual({h for h, _ip, _d in batch}, {'www.rt.test', 'api.rt.test', 'db.rt.test'})
+        foreign = Domain.objects.create(name='other.test', project=self.other, insert_date=timezone.now())
+        Subdomain.objects.create(name='x.other.test', target_domain=foreign, scan_history=self.scan_obj)
+        self.assertNotIn('x.other.test', {h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)})
+
+    def test_hosts_that_fail_the_vetting_are_asked_again_in_three_days_not_every_tick(self):
+        OpenvasProject.objects.create(project=self.project, enabled=True)
+        link = OpenvasProject.objects.get(project=self.project)
+        ov.next_batch(link, resolve=self.resolve, blocked=lambda h: h == 'db.rt.test')
+        self.assertNotIn('db.rt.test', ov.candidate_hosts(self.project.id))
+        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='db.rt.test').exists())
+
+    def test_a_listed_host_set_still_limits_a_project(self):
+        OpenvasProject.objects.create(project=self.project, enabled=True, hosts=['www.rt.test'])
+        link = OpenvasProject.objects.get(project=self.project)
+        self.assertEqual([h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)], ['www.rt.test'])
+
+
+class HostWatcherTests(SimpleTestCase):
+    def test_the_request_is_one_word_in_a_file_the_host_reads(self):
+        import tempfile
+        from cveFeed import openvas_admin
+        with tempfile.TemporaryDirectory() as tmp, self.settings(BASE_DIR=tmp):
+            self.assertTrue(openvas_admin.request_containers(True))
+            self.assertEqual(Path(tmp, '.openvas-wanted').read_text(), 'on\n')
+            openvas_admin.request_containers(False)
+            self.assertEqual(Path(tmp, '.openvas-wanted').read_text(), 'off\n')
+            self.assertIsNone(openvas_admin.host_report())
+            Path(tmp, '.openvas-applied').write_text('{"want":"on","ok":false,"error":"only 900 MB free","at":1700000000}')
+            self.assertEqual(openvas_admin.host_report()['error'], 'only 900 MB free')
+
+    def test_the_sync_script_accepts_only_on_and_off_and_lists_the_makefile_services(self):
+        script = (ROOT / 'scripts' / 'openvas-sync.sh').read_text()
+        self.assertIn('case $want in on | off) ;; *) exit 0 ;; esac', script)
+        self.assertIn('[ ! -L "$WANTED" ]', script)
+        listed = re.search(r'^SERVICES=\((.*)\)$', script, re.M).group(1).split()
+        makefile = (ROOT / 'Makefile').read_text()
+        self.assertEqual(listed, re.search(r'^OPENVAS_SERVICES\s*:=\s*(.*)$', makefile, re.M).group(1).split())
+        watch = (ROOT / 'scripts' / 'update-watch.sh').read_text()
+        self.assertIn('scripts/openvas-sync.sh', watch)
+        self.assertIn('web/.openvas-wanted', (ROOT / '.gitignore').read_text())
+
+    def test_the_page_has_nothing_to_type_and_builds_no_markup(self):
+        js = (ROOT / 'web' / 'static' / 'cve' / 'openvas-panel.js').read_text()
+        self.assertNotIn('innerHTML', js)
+        self.assertNotIn('type: "password"', js)
+        self.assertNotIn('textarea', js)

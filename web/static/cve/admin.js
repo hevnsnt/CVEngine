@@ -15,6 +15,7 @@ import {
   text,
   toast,
 } from "/staticfiles/cve/ui.js";
+import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 
 const A = "/cve/api/admin";
 const root = document.getElementById("view");
@@ -1021,6 +1022,7 @@ async function healthTab(panel) {
   };
   if (me.is_superuser) defs.timings = { label: "Timings", open: timingsTab };
   if (me.is_superuser) defs.health = { label: "Scheduler health", open: healthTab };
+  defs.openvas = { label: "OpenVAS", open: openvasPanel };
   defs.agents = { label: "Agents", open: agentsTab };
   defs.audit = { label: "Audit log", open: auditTab };
   defs.activity = { label: "Activity and errors", open: activityTab };
