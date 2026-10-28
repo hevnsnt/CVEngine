@@ -885,7 +885,15 @@ def agent_dict(agent, detail=False, counts=None, viewer=None):
            'os': agent.os, 'tools': agent.tools, 'max_concurrent': agent.max_concurrent, 'limits': agent.limits,
            'tasks': {'open': counts.get('assigned', 0) + counts.get('running', 0), 'completed': counts.get('completed', 0),
                      'failed': counts.get('failed', 0)}}
+    if agent.kind == 'scanner':  # cheap (stored JSON only), so the list shows a Sentinel that cannot update itself
+        from agentapi import sentinel_settings
+        out['version'] = (agent.info or {}).get('version')
+        out['self_update'] = sentinel_settings.effective(agent)['self_update']
+        out['updater'] = sentinel_settings.updater_state(agent)
     if detail:
+        if agent.kind == 'scanner':
+            out['settings'] = sentinel_settings.detail(agent)
+            out['update'] = {**((agent.info or {}).get('update') or {}), 'requested_at': svc._iso(agent.update_requested_at)}
         eff = effective(agent, now)
         out['effective'] = {'capabilities': sorted(eff.caps), 'projects': sorted(eff.projects), 'max_concurrent': eff.max_concurrent,
                             'can_receive_work': not eff.problem and bool(eff.projects) and bool(eff.caps), 'problem': eff.problem}
@@ -1013,8 +1021,12 @@ def update_agent(ctx, agent_id, body):
         raise ApiError(403, 'an administrator cannot approve, limit or reinstate their own agent; ask another administrator')
     if not roles.can_manage_credentials(ctx.user, agent.token.user):
         raise ApiError(403, 'this user also belongs to organizations you do not administer; ask an App Admin')
-    if not isinstance(body, dict) or not set(body) & {'status', 'note', 'limits'} or set(body) - {'status', 'note', 'limits'}:
-        raise ApiError(400, 'send status, note and/or limits')
+    if not isinstance(body, dict) or not set(body) & {'status', 'note', 'limits', 'settings', 'update'} or set(body) - {'status', 'note', 'limits', 'settings', 'update'}:
+        raise ApiError(400, 'send status, note, limits, settings and/or update')
+    if ('settings' in body or 'update' in body) and agent.kind != 'scanner':
+        raise ApiError(400, 'settings and updates are managed for Sentinels (kind=scanner) only')
+    if 'update' in body and body['update'] != 'now':
+        raise ApiError(400, 'update must be "now"')
     before = {'status': agent.status, 'limits': agent.limits}
     if 'status' in body:
         if body['status'] not in ADMIN_STATUSES:
@@ -1026,6 +1038,12 @@ def update_agent(ctx, agent_id, body):
         agent.status_note = _text(body['note'], MAX_NOTE)
     agent.status_by = ctx.user
     agent.save()
+    if 'settings' in body:
+        from agentapi import sentinel_settings
+        sentinel_settings.set_managed(agent, body['settings'], ctx.user)
+    if 'update' in body:
+        from agentapi import sentinel_settings
+        sentinel_settings.request_update(agent, ctx.user)
     released = release_agent_tasks(agent, f'the agent is {agent.status}', actor=ctx.user) if agent.status != 'active' else release_ineligible(agent)
     audit.record_for_user(ctx.user, 'agent.status' if 'status' in body else 'agent.limits', agent.token.user, target=agent.name, agent_id=agent.pk,
                           before=before, after={'status': agent.status, 'limits': agent.limits}, note=agent.status_note, released_tasks=released)

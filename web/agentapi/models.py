@@ -29,6 +29,15 @@ class Agent(models.Model):
     status = models.CharField(max_length=10, default='pending')  # pending until an administrator approves it (see agent_broker._initial_status)
     # An administrator's narrowing: {capabilities: [..] | null, projects: [slug] | null, max_concurrent: int | null}.
     limits = models.JSONField(default=dict, blank=True)
+    # A Sentinel's settings (``agentapi.sentinel_broker.SETTINGS``), kept twice so the most recent change wins whichever side made it:
+    # ``managed_settings`` is what an administrator set from cvENGINE, ``reported_settings`` what the Sentinel's own configuration said
+    # (its environment). Each entry is ``{value, at}`` (plus ``by`` when managed); ``at`` is this server's clock when the value last changed.
+    managed_settings = models.JSONField(default=dict, blank=True)
+    # What a Sentinel reports about itself: its client ``version`` and the state of its host-side updater (``update``: status, phase, detail, at).
+    # ``update_requested_at`` is an administrator's "update now"; it clears once the Sentinel reports it is running a different version or a failed attempt.
+    info = models.JSONField(default=dict, blank=True)
+    update_requested_at = models.DateTimeField(null=True, blank=True)
+    reported_settings = models.JSONField(default=dict, blank=True)
     status_note = models.CharField(max_length=200, blank=True, default='')
     status_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     last_seen = models.DateTimeField(null=True, blank=True)
@@ -139,3 +148,19 @@ class SentinelEnrollment(models.Model):
 
     def __str__(self):
         return f'enrollment {self.prefix}... for {self.project or self.org}'
+
+
+class SentinelDefaults(models.Model):
+    """The one row of instance-wide defaults for Sentinels (``pk=1``): what a Sentinel does when neither an administrator nor its own
+    configuration set a value. ``self_update`` is ``off``, ``manual`` (it updates only when an administrator presses Update now) or
+    ``automatic``; empty means "follow the instance's own Automatic or Manual update choice" (``cveFeed.updater.read_mode``)."""
+    self_update = models.CharField(max_length=10, blank=True, default='')
+    changed_by = models.CharField(max_length=150, blank=True, default='')
+    changed_at = models.DateTimeField(null=True, blank=True)
+
+    @classmethod
+    def current(cls):
+        return cls.objects.get_or_create(pk=1)[0]
+
+    def __str__(self):
+        return f'sentinel defaults (self-update: {self.self_update or "follows the instance"})'

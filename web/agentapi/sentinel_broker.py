@@ -27,6 +27,7 @@ from django.utils import timezone
 
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
+from agentapi import sentinel_settings
 from agentapi import services as svc
 from agentapi.auth import create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
@@ -66,13 +67,45 @@ def register(ctx, body):
     """Register the caller's token as a Sentinel: ``agent_broker.register`` with ``kind`` forced to 'scanner'. Fields left out
     keep their value, exactly like any other agent registration."""
     body = {**(body or {}), 'kind': 'scanner'}
-    return broker.register(ctx, body)
+    info = body.pop('info', None)
+    if info is not None:
+        sentinel_settings.clean_info(info)
+    settings = body.pop('settings', None)
+    reported = sentinel_settings.clean_settings(settings) if settings is not None else None  # refused before anything is stored
+    out = broker.register(ctx, body)
+    out = _with_settings(out, reported)
+    if info:
+        agent = Agent.objects.filter(pk=out['id']).first()
+        if agent is not None:
+            sentinel_settings.record_info(agent, info)
+    return out
 
 
 def heartbeat(ctx, body=None):
     """Say the Sentinel is alive. The same call as any agent's: it already extends SentinelTask leases too (see
     ``agent_broker.heartbeat``)."""
-    return broker.heartbeat(ctx, body)
+    info = sentinel_settings.clean_info(body['info']) if isinstance(body, dict) and body.get('info') is not None else None  # refused before anything is stored
+    out = broker.heartbeat(ctx, body)
+    agent = Agent.objects.filter(pk=out['agent']['id']).first()
+    if agent is not None:
+        if info:
+            sentinel_settings.record_info(agent, info)
+            agent.refresh_from_db()
+        out['settings'] = sentinel_settings.reply(agent)  # what the Sentinel should run with: an edit made in cvENGINE reaches it within a heartbeat
+        out['update'] = sentinel_settings.update_reply(agent)
+    return out
+
+
+def _with_settings(out, reported):
+    """``out`` (a registration reply) with this Sentinel's own settings stored when it sent any, and the effective ones added."""
+    agent = Agent.objects.filter(pk=out['id']).first()
+    if agent is None:
+        return out
+    if reported:
+        sentinel_settings.record_reported(agent, reported)
+        agent.refresh_from_db()
+    out['settings'] = {**sentinel_settings.reply(agent), 'detail': sentinel_settings.detail(agent)}
+    return out
 
 
 def identity(ctx):
@@ -111,6 +144,7 @@ def bootstrap(body):
                 fields[key] = clean(body[key])
             except scope_lib.ScopeError as exc:
                 raise ApiError(400, str(exc))
+    settings = sentinel_settings.clean_settings(body['settings']) if body.get('settings') is not None else None
     max_concurrent = body.get('max_concurrent')
     if max_concurrent is not None:
         if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or not 1 <= max_concurrent <= broker.MAX_CONCURRENT_CAP:
@@ -128,7 +162,7 @@ def bootstrap(body):
                           via='enrollment', enrollment_id=enrollment.pk)
     out = broker.agent_dict(agent, detail=True)
     out.update(created=True, token=raw_token, note='Store this token now. It is not shown again.', warnings=broker._warnings(agent))
-    return out
+    return _with_settings(out, settings)
 
 
 # --- enrollment -------------------------------------------------------------------------------------------
