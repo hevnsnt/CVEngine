@@ -11,12 +11,13 @@ from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
+from agentapi import sentinel_settings
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
 from agentapi import authcheck
 from agentapi import reports
-from agentapi import internal_ranges, tailscale
+from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
 from agentapi.auth import create_token
 from tenancy import audit
@@ -391,8 +392,12 @@ ROUTES = [
      lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents)', lambda r, c, **k: broker.list_agents(c, r.GET)),
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
-    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}',
+    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null hands one back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
+    ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, changed_by, changed_at}; self_update applies to every Sentinel with no value of its own (null follows the instance\'s Automatic or Manual update choice)',
+     lambda r, c, **k: sentinel_settings.get_defaults()),
+    ('PUT', r'sentinels/defaults', 'App Admin: set the instance-wide Sentinel default {self_update: off|manual|automatic|null}',
+     lambda r, c, **k: (svc.require_write_token(c), sentinel_settings.set_defaults(c.user, _body(r)))[1]),
     ('GET', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Validation and remediation work for agents (status, kind, agent_id, host)',
      lambda r, c, slug, **k: broker.list_tasks(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Queue work for agents: body {kind: validate|remediate, match_ids or tier/host, mode}',

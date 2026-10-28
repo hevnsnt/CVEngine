@@ -15,6 +15,7 @@ from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import reports
 from agentapi import sentinel_broker as sentinels
+from agentapi import sentinel_settings
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -408,11 +409,16 @@ TOOLS = [
     ('list_agents', 'Registered agents you may see: your own, and for an administrator those of the users they manage. Shows scope, capabilities, last seen, live, and open, completed and failed counts.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'kind': {'type': 'string'}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, a), False),
+    ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now. It applies to every Sentinel with no value of its own.',
+     _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
+    ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',
+     _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]}}, ['self_update']),
+     lambda c, a: sentinel_settings.set_defaults(c.user, {'self_update': a.get('self_update')}), True),
     ('get_agent', 'One agent with its effective rights and recent tasks.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
-    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here.',
+    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), disabled_kinds, max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null clears the server value; the most recent change wins, here or on the Sentinel), and update=now asks its host updater to update it now.',
      _schema({'agent_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': list(broker.ADMIN_STATUSES)}, 'note': {'type': 'string'},
-              'limits': {'type': 'object'}}, ['agent_id']),
+              'limits': {'type': 'object'}, 'settings': {'type': 'object'}, 'update': {'type': 'string', 'enum': ['now']}}, ['agent_id']),
      lambda c, a: broker.update_agent(c, a.get('agent_id'), {k: v for k, v in a.items() if k != 'agent_id'}), True),
     # --- Sentinels: scan-stage agents (kind=scanner). A Sentinel is an Agent, so register_agent/agent_heartbeat/list_agents/
     # get_agent/update_agent above already work for one; the tools below are the matching scan-stage-work verbs (SentinelTask,
