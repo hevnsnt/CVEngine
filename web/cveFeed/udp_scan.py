@@ -26,6 +26,12 @@ host, never from one run, so a host with two addresses keeps what the other addr
 
 It needs raw sockets (nmap -sU does). ``raw_sockets_available`` checks, and when the worker cannot open one the sweep does not run and
 says so: in the activity feed, in the system status, and in ``status()``, never silently.
+
+Before running nmap -sU itself, each address is offered to a live, eligible Sentinel first (``agentapi.sentinel_dispatch.try_nmap_udp``);
+a project with none registered pays one cheap existence check and runs exactly as before. Unlike every other dispatched tool, a
+Sentinel's UDP report travels as nmap's own raw XML, not pre-parsed JSON: UDP's state vocabulary and NSE script output are read
+correctly only by ``cveFeed.nmap_scan.parse_xml``, so that one function - hardened against hostile XML - is the sole place either a
+local or a dispatched run's XML is ever turned into a record.
 """
 import json
 import logging
@@ -509,8 +515,16 @@ def scan_ip(ip, runner=None, pipeline=None):
     running = activity.log('run_check', f'Background UDP scan of {address} ({len(ports())} ports: DNS, NTP, SNMP, IKE and the like)',
                            project=project, status='running')
     try:
-        xml = run([address], nmap_flags(), host_timeout())
-        host = next((h for h in nmap_scan.parse_xml(xml) if h.get('ip') == address), None)
+        host = None
+        if project:
+            from agentapi import sentinel_dispatch
+            from dashboard.models import Project
+            project_obj = Project.objects.filter(pk=project).first()
+            if project_obj is not None:
+                host = sentinel_dispatch.try_nmap_udp(project_obj, address)
+        if host is None:
+            xml = run([address], nmap_flags(), host_timeout())
+            host = next((h for h in nmap_scan.parse_xml(xml) if h.get('ip') == address), None)
         if host is None:
             raise UdpScanError('nmap reported nothing for the address')
         outcome = record_run(ip, host)

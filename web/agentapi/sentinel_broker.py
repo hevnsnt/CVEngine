@@ -632,8 +632,27 @@ def _clean_testssl_result(body):
     return {'items': out}
 
 
+MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU report; generous, still far below a DoS-sized payload
+
+
+def _clean_nmap_udp_result(body):
+    """A Sentinel's ``nmap -sU`` report, kept as raw XML text rather than pre-parsed: UDP's own state vocabulary
+    (``open|filtered``, extraports summarisation, the NSE scripts ``cveFeed.udp_scan.identify`` reads) is read correctly
+    only by ``cveFeed.nmap_scan.parse_xml`` - the exact function a local run's own XML already goes through - so the
+    Sentinel's report is parsed by that same function (hardened against a custom ENTITY declaration) instead of
+    duplicating its logic here. Only the size is bounded; parsing itself, and its safety against malicious XML, is
+    parse_xml's job."""
+    xml = body.get('xml')
+    if not isinstance(xml, str) or not xml.strip():
+        raise ApiError(400, 'xml must be a non-empty string')
+    if len(xml) > MAX_NMAP_UDP_XML:
+        raise ApiError(400, f'xml must be at most {MAX_NMAP_UDP_XML} characters')
+    return {'xml': xml}
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
-             'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result}
+             'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
+             'nmap_udp': _clean_nmap_udp_result}
 
 
 def clean_result(kind, body):

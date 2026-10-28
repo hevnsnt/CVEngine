@@ -510,3 +510,27 @@ class TestsslResultCleanerTests(SimpleTestCase):
         body['items'].append('not-a-dict')
         clean = sentinels.clean_result('testssl', body)
         self.assertEqual(len(clean['items']), 1)
+
+
+class NmapUdpResultCleanerTests(SimpleTestCase):
+    """``sentinel_broker.clean_result('nmap_udp', ...)``: unlike every other kind, the stored result is raw XML text,
+    bounded only by size - parsing it safely is ``cveFeed.nmap_scan.parse_xml``'s job, not the cleaner's."""
+
+    def test_a_well_formed_report_round_trips_untouched(self):
+        xml = '<nmaprun><host><address addr="192.0.2.10" addrtype="ipv4"/></host></nmaprun>'
+        clean = sentinels.clean_result('nmap_udp', {'outcome': 'done', 'xml': xml})
+        self.assertEqual(clean['xml'], xml)
+
+    def test_an_empty_or_missing_xml_is_rejected(self):
+        from agentapi.services import ApiError
+        with self.assertRaises(ApiError):
+            sentinels.clean_result('nmap_udp', {'outcome': 'done', 'xml': ''})
+        with self.assertRaises(ApiError):
+            sentinels.clean_result('nmap_udp', {'outcome': 'done'})
+        with self.assertRaises(ApiError):
+            sentinels.clean_result('nmap_udp', {'outcome': 'done', 'xml': 123})
+
+    def test_an_oversized_report_is_rejected_outright(self):
+        from agentapi.services import ApiError
+        with self.assertRaises(ApiError):
+            sentinels.clean_result('nmap_udp', {'outcome': 'done', 'xml': 'A' * (sentinels.MAX_NMAP_UDP_XML + 1)})
