@@ -27,6 +27,7 @@ urlpatterns = [
     re_path(r'^(?P<slug>[-\w]+)/hosts/(?P<subdomain_id>\d+)/rdp-screenshot/(?P<port>\d+)/$', views.host_rdp_screenshot, name='cve_host_rdp_screenshot'),
     re_path(r'^(?P<slug>[-\w]+)/(?P<section>targets|scans|hosts|changes|activity|vulns|matches|hygiene|suppliers|keys|sentinels)/$', views.project_page, name='cve_section'),
     path('api/feed', views.api_feed, name='cve_api_feed'),
+    path('api/alive', views.api_alive, name='cve_api_alive'),
     path('api/stats', views.api_stats, name='cve_api_stats'),
     path('api/graph', views.api_graph, name='cve_api_graph'),
     path('api/graph-live', views.api_graph_live, name='cve_api_graph_live'),
