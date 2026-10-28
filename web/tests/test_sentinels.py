@@ -3,7 +3,7 @@ import base64
 from datetime import timedelta
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
@@ -465,3 +465,48 @@ class HeartbeatTests(SentinelBase):
         task.refresh_from_db()
         self.assertGreaterEqual(task.lease_expires_at, first_lease)
         self.assertEqual(len(hb['leases']), 1)
+
+
+class TestsslResultCleanerTests(SimpleTestCase):
+    """``sentinel_broker.clean_result('testssl', ...)``: a Sentinel's testssl.sh report, typed and clipped into exactly the
+    four fields ``cveFeed.testssl_scan.evaluate`` reads from a local report item."""
+
+    def _body(self, **over):
+        item = {'id': 'heartbleed', 'severity': 'HIGH', 'finding': 'VULNERABLE, exploitable', 'cve': 'CVE-2014-0160'}
+        item.update(over)
+        return {'outcome': 'done', 'items': [item]}
+
+    def test_a_well_formed_item_round_trips(self):
+        clean = sentinels.clean_result('testssl', self._body())
+        self.assertEqual(clean['items'], [{'id': 'heartbleed', 'severity': 'HIGH', 'finding': 'VULNERABLE, exploitable', 'cve': 'CVE-2014-0160'}])
+
+    def test_an_item_with_no_id_is_dropped(self):
+        self.assertEqual(sentinels.clean_result('testssl', self._body(id=''))['items'], [])
+        self.assertEqual(sentinels.clean_result('testssl', self._body(id='   '))['items'], [])
+
+    def test_an_unknown_severity_word_is_blanked_not_trusted(self):
+        clean = sentinels.clean_result('testssl', self._body(severity='; rm -rf / #'))
+        self.assertEqual(clean['items'][0]['severity'], '')
+
+    def test_severity_is_case_normalized(self):
+        clean = sentinels.clean_result('testssl', self._body(severity='high'))
+        self.assertEqual(clean['items'][0]['severity'], 'HIGH')
+
+    def test_oversized_text_is_clipped_not_stored_verbatim(self):
+        evil = 'A' * 5000
+        clean = sentinels.clean_result('testssl', self._body(finding=evil, cve=evil))
+        self.assertEqual(len(clean['items'][0]['finding']), 600)
+        self.assertEqual(len(clean['items'][0]['cve']), 300)
+
+    def test_more_items_than_the_cap_is_rejected_outright(self):
+        from agentapi.services import ApiError
+        body = self._body()
+        body['items'] = body['items'] * (sentinels.MAX_TESTSSL_ITEMS + 1)
+        with self.assertRaises(ApiError):
+            sentinels.clean_result('testssl', body)
+
+    def test_a_non_dict_item_is_dropped_not_rejected(self):
+        body = self._body()
+        body['items'].append('not-a-dict')
+        clean = sentinels.clean_result('testssl', body)
+        self.assertEqual(len(clean['items']), 1)

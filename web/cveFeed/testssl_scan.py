@@ -10,6 +10,10 @@ longest-waiting first, at most ``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one swe
 Each target is tested at the address ``cveFeed.pinned_transport`` vetted (``--ip``, with ``--nodns none``), so a name that was pointed
 at a prohibited address after it was stored is never contacted.
 
+Before running testssl.sh itself, each target is offered to a live, eligible Sentinel first (``agentapi.sentinel_dispatch.try_testssl``);
+a project with none registered pays one cheap existence check and runs exactly as before. Either way the raw report items run through
+the same ``evaluate()`` below, so a Sentinel's result is read identically to a local run's.
+
 What it records:
 
 * configuration findings (``HygieneFinding``, check names ``tlsa_*``): SSLv2/SSLv3 offered, NULL, anonymous, export, low-strength and
@@ -410,7 +414,10 @@ def sweep(project_id, runner=None, resolve=None):
             running = activity.log('run_check', f'TLS audit of {where} (testssl.sh)', project=project_id, status='running', scan_id=sub.scan_history_id)
             try:
                 ip = resolve(host, port, project_id)
-                items = run_testssl(host, ip, port, starttls, runner=runner)
+                from agentapi import sentinel_dispatch
+                items = sentinel_dispatch.try_testssl(sub.target_domain.project, host, ip, port, starttls, scan=sub.scan_history)
+                if items is None:
+                    items = run_testssl(host, ip, port, starttls, runner=runner)
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TestsslError(_why(items))
