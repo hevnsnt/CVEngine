@@ -918,6 +918,52 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertFalse(OpenvasRun.objects.exists())
 
 
+class SentinelOnlyTests(Fixture, TestCase):
+    """``OpenvasSettings.sentinel_only``: an App Admin's instance-wide choice to never run OpenVAS on this server at all. A
+    due host with no eligible Sentinel right now is simply left due; it is not scanned locally as a fallback, and no local
+    GMP session is even opened to find out whether one would have been possible."""
+
+    def make_sentinel(self, capabilities=('openvas',)):
+        user = User.objects.create_user('sentinel-only-owner', password='x')
+        token, _raw = create_token(user, 'sentinel-only-token')
+        return Agent.objects.create(token=token, name='gvm-sentinel-only', kind='scanner', status='active',
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=list(capabilities), last_seen=timezone.now())
+
+    def test_with_sentinel_only_on_and_no_sentinel_the_batch_stays_due_not_scanned_locally(self):
+        self.settings.sentinel_only = True
+        self.settings.save()
+        before = self.gvmd.connections
+        out = self.tick()
+        self.assertEqual(out, {'skipped': 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due'})
+        self.assertFalse(OpenvasRun.objects.exists())
+        self.assertEqual(self.gvmd.connections, before)  # no local GMP session was opened at all
+
+    def test_with_sentinel_only_on_and_a_sentinel_available_dispatch_still_works(self):
+        self.settings.sentinel_only = True
+        self.settings.save()
+        self.make_sentinel()
+        out = self.tick()
+        self.assertEqual((out['status'], out.get('via')), ('running', 'sentinel'))
+        run = OpenvasRun.objects.get()
+        self.assertIsNotNone(run.sentinel_task_id)
+
+    def test_turning_sentinel_only_on_does_not_abandon_a_run_already_local(self):
+        out = self.tick()  # no sentinel: runs locally
+        self.assertEqual(out['status'], 'running')
+        self.settings.sentinel_only = True
+        self.settings.save()
+        out = self.tick()  # the existing local run is still polled, not abandoned
+        self.assertEqual(out['status'], 'running')
+        self.assertIsNone(OpenvasRun.objects.get().sentinel_task_id)
+
+    def test_default_is_local_or_sentinel_not_sentinel_only(self):
+        self.assertFalse(OpenvasSettings.current().sentinel_only)
+        out = self.tick()
+        self.assertEqual(out['status'], 'running')
+        self.assertIsNone(OpenvasRun.objects.get().sentinel_task_id)
+
+
 class CarryForwardTests(Fixture, TestCase):
     def test_a_later_scans_host_row_gets_the_findings_and_the_evidence(self):
         self.run_scan([APACHE, BANNER])
@@ -1033,7 +1079,7 @@ class SettingsApiTests(Fixture, TestCase):
     def test_it_starts_off_and_says_what_the_floor_is(self):
         status, data = send(self.c, 'GET', 'openvas')
         self.assertEqual(status, 200)
-        self.assertEqual((data['enabled'], data['password_set'], data['links'], data['running']), (False, False, [], False))
+        self.assertEqual((data['enabled'], data['sentinel_only'], data['password_set'], data['links'], data['running']), (False, False, False, [], False))
         self.assertEqual(data['floor']['confirmed_qod'], 80)
         self.assertEqual(data['floor']['excluded_families'], ['Denial of Service', 'Brute force attacks'])
         self.assertEqual(data['transport'], 'socket:/run/gvmd/gvmd.sock')
@@ -1044,6 +1090,14 @@ class SettingsApiTests(Fixture, TestCase):
         self.assertEqual(status, 400)
         self.assertIn('GMP login', data['error'])
         self.assertFalse(OpenvasSettings.current().enabled)
+
+    def test_sentinel_only_can_be_set_through_the_settings_route_too(self):
+        status, data = send(self.c, 'PUT', 'openvas', {'sentinel_only': True})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data['sentinel_only'])
+        self.assertTrue(OpenvasSettings.current().sentinel_only)
+        status, data = send(self.c, 'PUT', 'openvas', {'sentinel_only': False})
+        self.assertFalse(data['sentinel_only'])
 
     def test_the_switch_turns_the_beat_entry_on_and_off_with_it(self):
         from django_celery_beat.models import PeriodicTask
@@ -1427,6 +1481,26 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         OpenvasProject.objects.create(project=self.project, enabled=True, hosts=['www.rt.test'])
         link = OpenvasProject.objects.get(project=self.project)
         self.assertEqual([h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)], ['www.rt.test'])
+
+    def test_only_an_app_admin_may_set_sentinel_only(self):
+        self.switch_on()
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'sentinel_only': True})[0], 403)
+        self.assertFalse(OpenvasSettings.current().sentinel_only)
+        code, data = self.call(self.root, 'PUT', body={'sentinel_only': True})
+        self.assertEqual(code, 200)
+        self.assertTrue(data['engine']['sentinel_only'])
+        self.assertTrue(OpenvasSettings.current().sentinel_only)
+        self.assertIn('openvas.update', set(AuditLog.objects.values_list('action', flat=True)))
+
+    def test_sentinel_only_defaults_to_off_and_round_trips(self):
+        self.switch_on()
+        _code, data = self.call(self.root, 'GET')
+        self.assertFalse(data['engine']['sentinel_only'])
+        self.call(self.root, 'PUT', body={'sentinel_only': True})
+        self.assertEqual(self.call(self.root, 'PUT', body={'orgs': {str(self.org.pk): True}})[0], 200)
+        self.assertTrue(OpenvasSettings.current().sentinel_only)
+        self.call(self.root, 'PUT', body={'sentinel_only': False})
+        self.assertFalse(OpenvasSettings.current().sentinel_only)
 
 
 class HostWatcherTests(SimpleTestCase):

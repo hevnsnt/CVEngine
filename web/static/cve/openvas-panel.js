@@ -62,6 +62,21 @@ function statusCard(data, redraw) {
     );
   }
   if (actions.children.length) c.append(actions);
+  if (e.enabled && e.can_switch) {
+    const id = "ov-sentinel-only";
+    const row = el("label", "ov-row", null, { for: id });
+    const box = el("input", "", null, { type: "checkbox", id });
+    box.checked = e.sentinel_only;
+    box.onchange = async () => {
+      await api("PUT", A, { sentinel_only: box.checked });
+      toast(box.checked ? "A due host with no Sentinel now stays due instead of scanning locally." : "A due host with no Sentinel scans on this server again.");
+      await redraw();
+    };
+    const text = el("span", "ov-name");
+    text.append(el("span", "", "Sentinel only"), el("span", "note", "Never run OpenVAS on this server; a due host with no eligible Sentinel stays due until one is."));
+    row.append(box, text);
+    c.append(row);
+  }
   return c;
 }
 
