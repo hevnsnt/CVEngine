@@ -121,6 +121,8 @@ def command(host, ip, port, starttls, out_path):
 def run_testssl(host, ip, port, starttls=None, runner=None):
     """Run testssl.sh against ``host:port`` at ``ip`` and return its findings, a flat list of ``{id, severity, finding, cve?}``.
     ``runner(args, env, timeout)`` replaces the subprocess in tests. Raises ``TestsslError``."""
+    from targetApp.target_types import refuse_local
+    refuse_local('testssl.sh')
     with tempfile.TemporaryDirectory(prefix='testssl-') as work:
         out = os.path.join(work, 'out.json')
         args = command(host, ip, port, starttls, out)
@@ -334,6 +336,21 @@ def _starttls_of(number):
     return STARTTLS_PORTS.get(number)
 
 
+def tls_ports(ports):
+    """``[(port, starttls)]`` to test for a host whose open ports are ``ports`` (``{number: Port}``): the implicit-TLS and TLS-named ones,
+    the STARTTLS ones, and 443 for a host with no port data."""
+    wanted = []
+    for number, port in sorted(ports.items()):
+        name = (port.service_name or '').lower()
+        if number in IMPLICIT_PORTS or 'ssl' in name or name.startswith('https'):
+            wanted.append((number, None))
+        elif number in STARTTLS_PORTS:
+            wanted.append((number, _starttls_of(number)))
+    if not ports:
+        wanted.append((443, None))
+    return wanted
+
+
 def targets(project_id):
     """``[(host, port, starttls, domain_id)]`` for the project's hosts: the TLS ports nmap found open, and 443 for a host with no port data.
     Names a scanner must not be pointed at (excluded, or resolving to a prohibited range) are dropped."""
@@ -347,16 +364,7 @@ def targets(project_id):
             continue
         seen.add(sub.name)
         ports = {p.number: p for ip in sub.ip_addresses.all() for p in open_ports(ip)}
-        wanted = []
-        for number, port in sorted(ports.items()):
-            name = (port.service_name or '').lower()
-            if number in IMPLICIT_PORTS or 'ssl' in name or name.startswith('https'):
-                wanted.append((number, None))
-            elif number in STARTTLS_PORTS:
-                wanted.append((number, _starttls_of(number)))
-        if not ports:
-            wanted.append((443, None))
-        found += [(sub.name, number, starttls, sub.target_domain_id) for number, starttls in wanted]
+        found += [(sub.name, number, starttls, sub.target_domain_id) for number, starttls in tls_ports(ports)]
     allowed = set(scannable_hosts(sorted({t[0] for t in found}), project=project_id))
     return [t for t in found if t[0] in allowed]
 

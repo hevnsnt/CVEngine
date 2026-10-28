@@ -923,9 +923,11 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, proje
 	if not (validators.ipv4(ip_address) or validators.ipv6(ip_address)):
 		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
 		return None, False
-	from targetApp.target_types import is_scannable_ip
-	# a tailnet device's own address is allowed on the host named by that address; an address a name resolved to never is
-	if not is_scannable_ip(ip_address, project=project_id if subdomain is None or str(subdomain.name) == ip_address else None):
+	from targetApp.target_types import in_internal_range, internal_networks, is_scannable_ip
+	own = project_id if subdomain is None or str(subdomain.name) == ip_address else None
+	# a tailnet device's own address is allowed on the host named by that address; an address a name resolved to never is. Likewise an
+	# address of a network the project declared internal: storing it is only data, and no local scanner is ever aimed at it (they all re-check)
+	if not is_scannable_ip(ip_address, project=own) and not (own and in_internal_range(ip_address, internal_networks(own))):
 		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
 		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
 		return None, False

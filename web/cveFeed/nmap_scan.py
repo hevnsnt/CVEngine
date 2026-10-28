@@ -137,6 +137,8 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
     turn for memory (as heavy job ``kind``, for at most ``wait_timeout`` seconds) and raises reNgine.resources.MemoryKill if it
     had to be stopped to protect the container. ``before_launch`` may raise to revoke a job after memory admission,
     immediately before process creation; it must re-read any authorization state that could change during the wait."""
+    from targetApp.target_types import refuse_local
+    refuse_local('nmap')
     from reNgine import resources
     timeout = HOST_GROUPS_ALLOWED * _minutes(host_timeout) * 60 + PROCESS_TIMEOUT_BUFFER
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:

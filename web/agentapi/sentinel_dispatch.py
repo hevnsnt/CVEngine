@@ -69,9 +69,9 @@ def _claim_timeout():
         return 8
 
 
-def any_scanner_for(project, kind):
+def any_scanner_for(project, kind, internal=False):
     from agentapi import sentinel_broker
-    return sentinel_broker.any_scanner_for(project, kind)
+    return sentinel_broker.any_scanner_for(project, kind, internal)
 
 
 def _label(host, ips):
@@ -82,7 +82,8 @@ def _label(host, ips):
     return f'{n} address{"es" if n != 1 else ""}' if n else 'its target'
 
 
-def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1, redact_target=None):
+def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1, redact_target=None,
+                     internal=False):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
     eligible Sentinel exists for ``project`` right now. Returns the task's typed ``result`` dict on success; ``None`` on
     timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead. The hand-off
@@ -97,7 +98,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from cveFeed import activity
-    if not sentinel_broker.any_scanner_for(project, kind):
+    if not sentinel_broker.any_scanner_for(project, kind, internal):
         return None
     timeout = _dispatch_timeout(kind) if timeout is None else timeout
     task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
@@ -276,13 +277,28 @@ def _finding_to_nuclei_line(finding):
                      'tags': finding.get('tags') or []}}
 
 
-def wrap_nuclei_stream(scan, kind, timeout=None):
+def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` matching ``nuclei_scan.stream_nuclei``'s own
     signature, for ``run_light_nuclei``/``run_targeted_nuclei``'s ``stream`` parameter. Returns the literal, unwrapped
     ``stream_nuclei`` function (not a wrapper around it) when no Sentinel is eligible, so ``_run_nuclei``'s own
     ``stream is stream_nuclei`` identity check, and every other local behaviour, is unaffected."""
     from cveFeed.nuclei_scan import stream_nuclei
     project = scan.domain.project
+    if internal:  # the target is inside a private network: only a Sentinel there can run it, and there is never a local fallback
+        def internal_stream(targets_file, **kwargs):
+            try:
+                with open(targets_file, encoding='utf-8') as handle:
+                    targets = [line.strip() for line in handle if line.strip()]
+            except OSError:
+                targets = []
+            result = dispatch_or_none(project, kind, {'targets': targets[:MAX_ADDRESSES], 'tags': sorted(kwargs.get('tags') or []),
+                                                      'severities': list(kwargs.get('severities') or [])}, ips=[], scan=scan, internal=True,
+                                      timeout=timeout)
+            if result is None:
+                raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
+            for finding in result.get('findings', []):
+                yield _finding_to_nuclei_line(finding)
+        return internal_stream
     if not any_scanner_for(project, kind):
         return stream_nuclei
 

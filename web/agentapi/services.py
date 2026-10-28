@@ -535,19 +535,24 @@ def start_scan(ctx, slug, target_id, engine_id=None):
     if not domain:
         raise ApiError(404, 'target not found')
     _refuse_excluded(project, domain)
-    _refuse_sentinel_only(project, domain)
+    internal = _internal_scan(ctx, project, domain)
+    if internal:
+        return internal
     if engine_id is not None and not EngineType.objects.filter(id=engine_id).exists():
         raise ApiError(404, 'engine not found')
     scan = start_discovery(domain, initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'queued'}
 
 
-def _refuse_sentinel_only(project, domain):
-    """409 when the target is inside a network the project declared internal: this server never scans it, only a Sentinel there does."""
+def _internal_scan(ctx, project, domain):
+    """The response of starting a scan on ``domain`` when it is inside a network the project declared internal: it is queued for a Sentinel
+    inside that network (``cveFeed.internal_scan``), never discovered or scanned from this server; ``None`` for any other target."""
     from targetApp.target_types import sentinel_only_target
-    if sentinel_only_target(domain.name, project.id):
-        raise ApiError(409, f'{domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
-                            'never this server')
+    if not sentinel_only_target(domain.name, project.id):
+        return None
+    from cveFeed import internal_scan
+    scan = internal_scan.start(domain, initiated_by=ctx.user)
+    return {'scan_id': scan.id, 'status': 'queued', 'internal': True}
 
 
 def _refuse_excluded(project, domain):
@@ -656,7 +661,9 @@ def discover_target(ctx, slug, target_id, mode=None):
     if not domain:
         raise ApiError(404, 'target not found')
     _refuse_excluded(project, domain)
-    _refuse_sentinel_only(project, domain)
+    internal = _internal_scan(ctx, project, domain)
+    if internal:
+        return internal
     scan = start_discovery(domain, mode, initiated_by=ctx.user) if mode else start_discovery(domain, initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'started'}
 

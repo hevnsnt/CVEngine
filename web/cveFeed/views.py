@@ -611,6 +611,15 @@ def cached_stats(key='', now=None):
 
 
 @require_GET
+def api_alive(request):
+    """Answers for as long as the web service does, and touches nothing else: every page asks it now and then (static/cve/sitewatch.js)
+    and covers itself with the rebuilding scene when it stops answering, during an update or a restart."""
+    response = JsonResponse({'ok': True})
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@require_GET
 @project_scoped
 def api_stats(request):
     return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''))), **live_scan_counts()})

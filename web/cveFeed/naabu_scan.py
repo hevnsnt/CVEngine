@@ -77,6 +77,8 @@ def parse_output(text):
 def run_naabu(ips, binary=None):
     """Run naabu over ``ips`` and return ``{ip: [open ports]}``. Waits its turn for memory; raises reNgine.resources.MemoryKill if
     stopped to protect the container, subprocess.TimeoutExpired past the time limit and RuntimeError on a failed run."""
+    from targetApp.target_types import refuse_local
+    refuse_local('naabu')
     from reNgine import resources
     binary = binary or naabu_path()
     if not binary:

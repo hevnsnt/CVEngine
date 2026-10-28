@@ -241,6 +241,8 @@ def host_of(line):
 def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
     """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
     reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter)."""
+    from targetApp.target_types import refuse_local
+    refuse_local('nuclei')
     from reNgine import resources
     try:
         with open(targets_file) as f:
@@ -301,9 +303,10 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
 def scan_targets(scan):
     """Hostnames, IPs and (host, port) pairs discovered for ``scan``."""
     from startScan.models import Subdomain, open_ports
-    from targetApp.target_types import blocked_names, is_scannable_ip
+    from targetApp.target_types import blocked_names, internal_scope_active, is_scannable_ip, sentinel_only_target
     from cveFeed.exclusions import excluded_names, normalize
     hostnames, ips, ports = set(), set(), set()
+    internal = internal_scope_active()  # an internal scan (cveFeed.internal_scan) may target the project's own internal addresses: its stream is a Sentinel's
     banned = excluded_names(scan.domain.project_id)  # hosts the organization excluded for good: never a target
     from cveFeed.archive_rediscovery import archived_names
     banned = banned | archived_names(scan.domain.project_id)
@@ -312,11 +315,12 @@ def scan_targets(scan):
     # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
     pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
     for sub in subs:
-        if sub.name in pointing_inside:
+        if sub.name in pointing_inside and not (internal and sentinel_only_target(sub.name, scan.domain.project_id)):
             continue
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():
-            if not is_scannable_ip(ip.address, project=scan.domain.project_id):
+            if not is_scannable_ip(ip.address, project=scan.domain.project_id) and not (
+                    internal and sentinel_only_target(ip.address, scan.domain.project_id)):
                 continue
             ips.add(ip.address)
             for port in open_ports(ip):

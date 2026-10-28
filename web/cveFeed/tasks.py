@@ -1065,6 +1065,24 @@ def run_bbot_discovery(self, scan_id, mode="standard"):
     return run_pipeline(scan_id, mode)
 
 
+@app.task(name="run_internal_scan", bind=True, queue="discovery_queue", acks_late=True, reject_on_worker_lost=True)
+def run_internal_scan(self, scan_id):
+    """Scan an internal target through a Sentinel inside its network, never from this server (see cveFeed.internal_scan)."""
+    from cveFeed import internal_scan
+    from startScan.models import ScanHistory
+    if self.request.id:
+        ScanHistory.objects.filter(pk=scan_id).update(celery_ids=[self.request.id])
+    return internal_scan.run(scan_id)
+
+
+@app.task(name="internal_scan_sweep", bind=False, queue="cve_feed_queue")
+def internal_scan_sweep():
+    """Daily: queue an internal scan of every declared-internal target not scanned inside CVENGINE_INTERNAL_SCAN_DAYS (default 7), in
+    projects where a live network:internal Sentinel could take the work."""
+    from cveFeed import internal_scan
+    return internal_scan.sweep()
+
+
 DEEP_SWEEP_MAX = 50  # apexes queued per run (CVENGINE_DEEP_SWEEP_MAX)
 
 

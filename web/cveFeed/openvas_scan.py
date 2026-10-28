@@ -418,6 +418,10 @@ def candidate_hosts(project_id, limit=AUTO_WINDOW):
     names = set(Subdomain.objects.filter(target_domain__project_id=project_id).values_list('name', flat=True).distinct()[:5000])
     names |= set(Domain.objects.filter(project_id=project_id).values_list('name', flat=True))
     names = sorted({n.strip().lower() for n in names if n and '*' not in n})
+    from targetApp.target_types import internal_networks, sentinel_only_target
+    nets = internal_networks(project_id)
+    if nets:  # a declared internal network has its own batch (``internal_batch``); the external one must not mark it failed
+        names = [n for n in names if not sentinel_only_target(n, project_id, nets)]
     rows = ledger.stale_first(SERVICE, [(0, n, project_id) for n in exclusions.drop_excluded(project_id, names)])
     failed = ledger.fresh(FAILED_SERVICE, [r[1] for r in rows], project_id)
     return [r[1] for r in rows if r[1] not in failed][:limit]
@@ -447,6 +451,28 @@ def next_batch(link, resolve=None, blocked=None):
     from cveFeed import ledger
     ledger.record(FAILED_SERVICE, [n for n in names if n not in kept], link.project_id)
     return vetted[:max_hosts()]
+
+
+def internal_batch(link):
+    """``[(host, ip, domain_id)]`` of the project's targets inside a network it declared internal that are due for OpenVAS: only such an
+    address (``target_types.sentinel_only_target``: this server may not scan it), not excluded, not scanned within a week and not failed
+    within three days, never-scanned first, one per address, limited to the project's host list when it has one. Always a batch of its own,
+    never mixed with the vetted external one: a Sentinel inside the network is the only one that can reach it."""
+    from cveFeed import exclusions, ledger
+    from targetApp.models import Domain
+    from targetApp.target_types import internal_networks, sentinel_only_target
+    nets = internal_networks(link.project_id)
+    if not nets:
+        return []
+    names = {d.name.strip().lower(): d.id for d in Domain.objects.filter(project_id=link.project_id)
+             if sentinel_only_target(d.name, link.project_id, nets)}
+    if link.hosts:
+        wanted = {str(h).strip().lower() for h in link.hosts}
+        names = {n: i for n, i in names.items() if n in wanted}
+    kept = exclusions.drop_excluded(link.project_id, sorted(names))
+    rows = ledger.stale_first(SERVICE, [(0, n, link.project_id) for n in kept])
+    failed = ledger.fresh(FAILED_SERVICE, [r[1] for r in rows], link.project_id)
+    return [(n, n, names[n]) for n in (r[1] for r in rows) if n not in failed][:max_hosts()]
 
 
 # ----------------------------------------------------------------------------- targets and tasks
@@ -978,6 +1004,16 @@ def tick(session_factory=None, resolve=None, blocked=None):
                 started = dispatch_to_sentinel(link, batch)
                 if started is not None:
                     return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'sentinel'}
+            for link in sweep_links():  # a project's declared internal networks: only a Sentinel inside them can scan, never this server
+                if not sentinel_dispatch.any_scanner_for(link.project, 'openvas', internal=True):
+                    continue
+                batch = internal_batch(link)
+                if not batch:
+                    continue
+                found_due = True
+                started = dispatch_to_sentinel(link, batch)
+                if started is not None:
+                    return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'internal sentinel'}
             if row.sentinel_only:
                 return {'skipped': ('Sentinel-only mode is on: a due host has no eligible Sentinel right now; it stays due' if found_due
                                     else 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due')}

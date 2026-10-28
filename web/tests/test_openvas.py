@@ -1593,3 +1593,65 @@ class HostWatcherTests(SimpleTestCase):
         self.assertNotIn('innerHTML', js)
         self.assertNotIn('type: "password"', js)
         self.assertNotIn('textarea', js)
+
+
+class InternalNetworkTests(Fixture, TestCase):
+    """A project's declared internal networks: OpenVAS reaches them only through a Sentinel inside the network, in a batch of their own."""
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed.models import InternalRange
+        from targetApp.models import Domain
+        self.env = mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': ''})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        InternalRange.objects.create(project=self.project, cidr='10.20.0.0/24')
+        self.inside = Domain.objects.create(name='10.20.0.7', project=self.project, insert_date=timezone.now())
+        self.link.hosts = []  # the whole project, not a list
+        self.link.save()
+
+    def sentinel(self, capabilities):
+        user = User.objects.create_user(f'ov-{"-".join(capabilities)}', password='x', is_superuser=True)  # reaches every project
+        token, _raw = create_token(user, f'ov-token-{"-".join(capabilities)}')
+        return Agent.objects.create(token=token, name='-'.join(capabilities), kind='scanner', status='active',
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=list(capabilities), last_seen=timezone.now())
+
+    def test_the_internal_batch_holds_only_the_declared_internal_targets(self):
+        self.assertEqual(ov.internal_batch(self.link), [('10.20.0.7', '10.20.0.7', self.inside.id)])
+
+    def test_nothing_is_due_without_a_declared_range_and_a_listed_host_limits_it(self):
+        self.project.internal_ranges.all().delete()
+        self.assertEqual(ov.internal_batch(self.link), [])
+        from cveFeed.models import InternalRange
+        InternalRange.objects.create(project=self.project, cidr='10.20.0.0/24')
+        self.link.hosts = ['www.rt.test']
+        self.link.save()
+        self.assertEqual(ov.internal_batch(self.link), [])
+
+    def test_an_outside_sentinel_is_never_given_the_internal_batch(self):
+        self.sentinel(['openvas'])
+        self.tick()
+        run = OpenvasRun.objects.get()
+        self.assertNotIn('10.20.0.7', run.hosts)  # the external batch (or local run) never carries it
+
+    def test_an_internal_sentinel_gets_the_internal_batch_alone(self):
+        from cveFeed import ledger
+        ledger.record(ov.SERVICE, ['www.rt.test', 'api.rt.test', 'db.rt.test'], self.project.id)  # the external hosts are not due: their batch goes first
+        self.sentinel(['openvas', 'network:internal'])
+        out = self.tick()
+        self.assertEqual((out.get('status'), out.get('via')), ('running', 'internal sentinel'), out)
+        run = OpenvasRun.objects.get()
+        self.assertEqual(run.hosts, {'10.20.0.7': '10.20.0.7'})
+        self.assertEqual(run.sentinel_task.ips, ['10.20.0.7'])
+        self.assertEqual(self.gvmd.connections, 0)  # no local GMP session
+
+    def test_the_task_for_an_internal_address_can_only_be_claimed_by_an_internal_sentinel(self):
+        from agentapi import sentinel_broker as sb
+        from cveFeed import ledger
+        ledger.record(ov.SERVICE, ['www.rt.test', 'api.rt.test', 'db.rt.test'], self.project.id)
+        outside, inside = self.sentinel(['openvas']), self.sentinel(['openvas', 'network:internal'])
+        self.tick()
+        task = OpenvasRun.objects.get().sentinel_task
+        self.assertEqual(sb.effective(outside).refusal(task), ('capability', sb.INTERNAL_CAPABILITY))
+        self.assertIsNone(sb.effective(inside).refusal(task))

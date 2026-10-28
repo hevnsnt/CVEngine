@@ -1,7 +1,9 @@
 // Sentinels, live: one card per scanner showing whether it is checking in, whether it is taking work and what it is doing right now.
-// The state is drawn as an orb (calm and green when idle, swirling orange when working, grey when offline). Everything comes from
+// The state is drawn as a Thinking Orb (static/cve/thinking-orb.js): its particles work while the Sentinel works, listen while it waits
+// for work, reach out while it waits for approval, and freeze when it is offline or suspended. Everything comes from
 // GET /api/v1/sentinels/live and is set with textContent; the card ages itself every second between polls.
 import { api, button, el, toast } from "/staticfiles/cve/ui.js";
+import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -25,10 +27,21 @@ function span(seconds) {
 const ago = (seconds) => (seconds == null ? "never" : `${span(seconds)} ago`);
 const seconds = (iso) => (iso ? (Date.now() - new Date(iso).getTime()) / 1000 : null);
 
-export function orb(state) {
-  const o = el("span", `orb orb-${state}`, null, { role: "img", "aria-label": WORDS[state] || state });
-  o.append(el("i", "orb-glow"), el("i", "orb-swirl"), el("i", "orb-core"), el("i", "orb-shine"));
-  return o;
+// One orb per Sentinel, kept across refreshes: a card is redrawn every few seconds, its orb is moved into the new card and only told the new
+// state, so it never restarts.
+const orbs = new Map();
+const ORB_STATE = { working: "working", idle: "listening", pending: "connecting", offline: "breathing", suspended: "breathing" };
+function orbFor(s) {
+  const busy = s.state === "working" && s.current.length > 1 ? "solving" : ORB_STATE[s.state] || "breathing";
+  let o = orbs.get(s.id);
+  if (!o) {
+    o = thinkingOrb({ state: busy, size: 64 });
+    orbs.set(s.id, o);
+  }
+  o.setState(busy, `${s.name}: ${WORDS[s.state] || s.state}`);
+  o.setPaused(s.state === "offline" || s.state === "suspended");
+  o.node.classList.toggle("asleep", s.state === "offline" || s.state === "suspended");
+  return o.node;
 }
 
 function task(t) {
@@ -53,7 +66,7 @@ function recent(t) {
 function card(s, reload) {
   const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
   const head = el("header", "sl-head");
-  head.append(orb(s.state));
+  head.append(orbFor(s));
   const title = el("div", "sl-title");
   title.append(el("h3", "", s.name), el("p", "sl-state", WORDS[s.state] || s.state));
   head.append(title);
@@ -136,6 +149,13 @@ export function sentinelLive(mount) {
     mount.append(summary(data));
     const grid = el("div", "sl-grid");
     data.results.forEach((s) => grid.append(card(s, load)));
+    const kept = new Set(data.results.map((s) => s.id));
+    orbs.forEach((o, id) => {
+      if (!kept.has(id)) {
+        o.destroy();
+        orbs.delete(id);
+      }
+    });
     mount.append(grid);
     tick();
   };
