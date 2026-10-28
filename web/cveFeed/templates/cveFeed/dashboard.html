@@ -29,6 +29,15 @@
     <a id="n-oldest" hidden title="How long the longest-open serious item has been waiting: a CVE match with CVSS 7.0 or more, or a high or critical scanner or hygiene finding. Fixed, accepted-risk, ruled-out and resolved items are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}"{% endif %}><b id="s-oldest_open_days">-</b><span>Oldest critical or high, days open</span><small id="s-oldest_note"></small></a>
     <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span><small id="s-certs_total_note"></small></a>
   </nav>
+  <section class="internal" id="n-internal" hidden aria-label="Internal networks">
+    <div class="cell-head"><span class="eyebrow">Internal networks</span><span class="eyebrow" id="in-last"></span></div>
+    <div class="in-nums">
+      <a id="in-hosts" title="Hosts inside a network declared internal. Only a Sentinel inside that network scans them." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?internal=1"{% endif %}><b>-</b><span>Internal hosts</span><small></small></a>
+      <a id="in-findings" title="Open scanner findings of low severity or worse on internal hosts" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner&internal=1"{% endif %}><b>-</b><span>Findings</span></a>
+      <a id="in-matches" title="Exposed CVE matches on internal hosts" {% if slug %}href="{% url 'cve_section' slug 'matches' %}?internal=1"{% endif %}><b>-</b><span>CVE matches</span></a>
+    </div>
+    <ul class="in-nets" id="in-nets" aria-label="Sentinel state per internal network"></ul>
+  </section>
   </div>
 
   <div class="cell" id="c-map">
