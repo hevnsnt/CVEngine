@@ -1502,6 +1502,49 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.call(self.root, 'PUT', body={'sentinel_only': False})
         self.assertFalse(OpenvasSettings.current().sentinel_only)
 
+    def test_switching_on_with_sentinel_only_already_set_never_asks_for_the_local_containers(self):
+        self.call(self.root, 'PUT', body={'sentinel_only': True})
+        self.wanted.reset_mock()
+        code, _data = self.call(self.root, 'PUT', body={'enabled': True})
+        self.assertEqual(code, 200)
+        self.wanted.assert_called_once_with(False)
+
+    def test_setting_sentinel_only_and_switching_on_in_the_same_request_never_asks_either(self):
+        # Both flags in one PUT: sentinel_only must be applied before the engine switch reads it, or the first-ever
+        # enable would still ask the host to start the local containers before sentinel_only takes effect.
+        self.wanted.reset_mock()
+        code, data = self.call(self.root, 'PUT', body={'enabled': True, 'sentinel_only': True})
+        self.assertEqual(code, 200)
+        self.assertTrue(data['engine']['sentinel_only'])
+        self.wanted.assert_called_once_with(False)
+
+    def test_retrying_a_failed_start_does_nothing_once_sentinel_only_is_set(self):
+        from cveFeed import openvas_admin
+        self.switch_on()
+        self.call(self.root, 'PUT', body={'sentinel_only': True})
+        self.wanted.reset_mock()
+        with mock.patch.object(openvas_admin, 'host_report', return_value={'want': 'on', 'state': 'failed', 'error': 'no disk space', 'at': 0}), \
+                mock.patch('cveFeed.tasks.openvas_check.delay') as delay:
+            delay.return_value.get.side_effect = Exception('no worker')
+            code, _data = self.call(self.root, 'POST', path='/check')
+        self.assertEqual(code, 200)
+        self.wanted.assert_not_called()
+
+    def test_switching_off_still_asks_the_host_to_stop_even_with_sentinel_only_set(self):
+        self.switch_on()
+        self.call(self.root, 'PUT', body={'sentinel_only': True})
+        self.wanted.reset_mock()
+        self.assertEqual(self.call(self.root, 'PUT', body={'enabled': False})[0], 200)
+        self.wanted.assert_called_once_with(False)
+
+    def test_engine_status_ignores_a_stale_container_failure_once_sentinel_only_is_set(self):
+        from cveFeed import openvas_admin
+        row = OpenvasSettings(enabled=True, sentinel_only=True)
+        with mock.patch.object(openvas_admin, 'host_report', return_value={'want': 'on', 'state': 'failed', 'error': 'no disk space', 'at': 0}):
+            status = openvas_admin.engine_status(row)
+        self.assertEqual(status['state'], 'ready')
+        self.assertNotIn('could not be started', status['headline'])
+
 
 class HostWatcherTests(SimpleTestCase):
     def test_the_request_is_one_word_in_a_file_the_host_reads(self):
