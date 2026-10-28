@@ -1685,3 +1685,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .in-net.offline .in-state,.in-net.none .in-state{color:var(--smoke-ink);font-weight:600}
 .in-note{grid-column:1/-1;padding-left:16px;font:500 11px var(--mono);color:var(--muted)}
 .internal .cell-head .eyebrow{white-space:nowrap}
+.gn-internal .boundary{stroke:var(--ink);stroke-width:1.2;stroke-dasharray:3 3;opacity:.65;pointer-events:none}
