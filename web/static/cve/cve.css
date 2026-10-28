@@ -1714,7 +1714,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .ss-vline b{font-size:12.5px}
 .ss-detail{flex-basis:100%;margin:0;font-size:12px;overflow-wrap:anywhere}
 .ss-actions{display:flex;gap:6px}
-.ss-dialog{width:min(640px,calc(100vw - 32px))}
+.ss-reset[hidden]{display:none}
 .ss-rows{display:flex;flex-direction:column;gap:2px;margin:12px 0}
 .ss-row{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:12px 0;border-top:1px solid var(--line)}
 .ss-row-head{display:flex;align-items:baseline;gap:10px;min-width:0}
