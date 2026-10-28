@@ -233,9 +233,11 @@ def tier_counts():
 
 
 def live_scan_counts():
-    """Running and queued scans, read fresh on every poll (they are cheap and the first thing a person watches)."""
+    """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
+    the first thing a person watches)."""
     from cveFeed import counts
-    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count()}
+    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count(),
+            'scans_background_running': counts.background_running().count()}
 
 
 def stats_payload():
@@ -882,7 +884,7 @@ def api_discovery(request):
     ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
     return JsonResponse({
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
-                 'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(),
+                 'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': scan.error_message or '',
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
         'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()},

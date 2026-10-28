@@ -53,6 +53,23 @@ def running_scans(qs=None):
     return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - RUNNING_WINDOW)
 
 
+BACKGROUND_WINDOW = timedelta(hours=3)  # a "running" activity line older than this is a casualty of a restart, not work in progress
+BACKGROUND_KINDS = ("run_check", "discovery", "scan", "hygiene", "validate")
+
+
+def background_running(now=None):
+    """The activity lines of background work in progress: a check, sweep, rescan or assessment that runs under a scan record that is
+    no longer running (the weekly deep nuclei pass, a host rescan, an assessment), so it is invisible to ``running_scans``. A line that
+    belongs to a scan ``running_scans`` already counts is left out, so the two never count the same work twice."""
+    from cveFeed.models import AgentActivity
+    now = now or timezone.now()
+    under_a_running_scan = list(running_scans().values_list("id", flat=True))
+    qs = AgentActivity.objects.filter(status="running", kind__in=BACKGROUND_KINDS, created_at__gte=now - BACKGROUND_WINDOW)
+    if under_a_running_scan:
+        qs = qs.exclude(pk__in=AgentActivity.objects.filter(detail__scan_id__in=under_a_running_scan).values("pk"))  # a missing key is not "in": filter first, then exclude by id
+    return qs
+
+
 def stalled_scans(qs=None):
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs

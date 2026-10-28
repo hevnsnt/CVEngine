@@ -3214,6 +3214,7 @@ def finding_detail(ctx, slug, kind, finding_id):
                          'error': 'Validation failed; see scoped activity and worker diagnostics.' if job.error else ''}
     return {
         'kind': kind, 'id': obj.pk, 'title': title, 'host': host, 'target': target,
+        'confidence': obj.confidence if kind == 'match' else None,  # the rules' match score; the detail pane no longer needs the list row for it
         'host_reported': kind == 'match' and obj.source == 'host', 'assessment_status': assessment_status,
         'assessment_reason': obj.ai_reason if assessment_status == 'closed_not_applicable' else '',
         'automatic_validation': automatic,

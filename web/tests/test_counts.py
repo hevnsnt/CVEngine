@@ -200,6 +200,39 @@ class ScanAndCertificateCountTests(CountFixture):
 		second = self.stats()  # inside the cache window
 		self.assertEqual(second['scans_running'], first['scans_running'] + 1)
 
+	def line(self, project, status='running', kind='run_check', age=timedelta(minutes=5), **detail):
+		from cveFeed.models import AgentActivity
+		row = AgentActivity.objects.create(kind=kind, message='work', status=status, project=project, detail=detail)
+		AgentActivity.objects.filter(pk=row.pk).update(created_at=timezone.now() - age)
+		return row
+
+	def test_background_running_counts_work_that_runs_under_a_finished_scan(self):
+		self.assertEqual(self.stats()['scans_background_running'], 0)
+		self.line(self.pa)                                       # a weekly deep pass: no scan record at all
+		self.line(self.pa, scan_id=self.scans[self.da1].id)      # a rescan under a finished scan record
+		self.assertEqual(self.stats()['scans_background_running'], 2)
+
+	def test_background_running_leaves_out_what_the_running_scan_already_counts(self):
+		running = ScanHistory.objects.filter(scan_status=1).order_by('-start_scan_date').first()
+		self.line(self.pa, scan_id=running.id)                   # a stage of a scan scans_running counts
+		self.line(self.pa, scan_id=self.scans[self.da1].id)
+		self.assertEqual(self.stats()['scans_background_running'], 1)
+
+	def test_background_running_ignores_settled_stale_and_ai_lines(self):
+		self.line(self.pa, status='done')
+		self.line(self.pa, status='failed')
+		self.line(self.pa, kind='confirm')                       # the AI engine reading, not scanning
+		self.line(self.pa, age=timedelta(hours=4))               # a casualty of a restart
+		self.assertEqual(self.stats()['scans_background_running'], 0)
+
+	def test_background_running_follows_the_project_filter(self):
+		self.line(self.pa)
+		self.line(self.pb)
+		self.line(self.pb)
+		self.assertEqual(self.stats()['scans_background_running'], 3)
+		self.assertEqual(self.stats('ca')['scans_background_running'], 1)
+		self.assertEqual(self.stats('cb')['scans_background_running'], 2)
+
 	def test_certificates_expiring_agree_and_include_the_expired(self):
 		self.assertEqual(self.stats()['certs_expiring'], 2)
 		self.assertEqual(self.api('projects/_all/certificates', expiring_within='30')['count'], 2)
