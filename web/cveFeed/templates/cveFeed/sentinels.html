@@ -16,12 +16,20 @@
   </div>
   <div class="card">
     <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
-    <p class="note" style="margin-bottom:6px">Needs the admin role in the project (or App Admin). Clicking Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, and packages it into one opaque blob. On the machine that will scan, clone <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code>, and run <code>docker compose up -d</code>; see that repository's <code>README.md</code> (or its <code>AGENTS.md</code> if an AI agent is doing the provisioning).</p>
-    <div class="field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
+    <p class="note" style="margin-bottom:6px">A Sentinel can be scoped to one project, one organization (every project of it, present and future) or, for an App Admin, the whole instance (every organization and project). Whichever scope, Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, packaged into one opaque blob. On the machine that will scan, clone <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code>, and run <code>docker compose up -d</code>; see that repository's <code>README.md</code> (or its <code>AGENTS.md</code> if an AI agent is doing the provisioning).</p>
+    <div class="field"><label for="enroll-scope">Scope</label>
+      <select id="enroll-scope">
+        <option value="project">Project</option>
+        <option value="org">Organization</option>
+        <option value="instance">Instance (everything)</option>
+      </select>
+    </div>
+    <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
+    <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization slug</label><input type="text" id="enroll-org" placeholder="org-slug"></div>
     <button class="btn" type="button" id="enroll-go">Provision</button>
     <div id="enroll-out" class="msg ok" style="display:none" role="status"></div>
     <h2 style="margin:18px 0 8px">What a Sentinel needs</h2>
-    <p class="note">The blob is nothing new: standard base64 of the same JSON <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, project}</code>), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+    <p class="note">The blob is nothing new: standard base64 of the same JSON <code>projects/{slug}/sentinels/enroll</code>, <code>orgs/{slug}/sentinels/enroll</code> or <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, scope}</code>, plus <code>project</code> or <code>org</code> where scope is not instance-wide), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
   </div>
 </div>
 {% endblock %}
@@ -55,7 +63,8 @@
       var top = el('div'); top.style.display = 'flex'; top.style.justifyContent = 'space-between'; top.style.alignItems = 'center'; top.style.gap = '12px';
       var left = el('div');
       left.appendChild(el('span', 'cve-id', a.name));
-      var where = ['orgs', 'projects', 'hosts'].map(function (k) { return (scope[k] || []).length ? k + ': ' + scope[k].slice(0, 3).join(', ') : ''; }).filter(Boolean).join(' · ') || 'no scope declared';
+      var where = scope.instance ? 'instance (everything)' :
+        (['orgs', 'projects', 'hosts'].map(function (k) { return (scope[k] || []).length ? k + ': ' + scope[k].slice(0, 3).join(', ') : ''; }).filter(Boolean).join(' · ') || 'no scope declared');
       left.appendChild(el('div', 'meta', a.status + (a.status === 'active' ? (a.live ? ' · live' : ' · offline') : '') + ' · ' +
         (a.last_seen ? 'seen ' + a.last_seen.slice(0, 16).replace('T', ' ') : 'never seen') + ' · ' + a.tasks.open + ' in progress, ' + a.tasks.completed + ' done, ' + a.tasks.failed + ' failed'));
       left.appendChild(el('div', 'meta', where + ' · ' + (a.capabilities.join(', ') || 'no capabilities')));
@@ -83,17 +92,33 @@
   }
   function load() { api('GET', '/api/v1/agents?kind=scanner&page_size=100').then(function (x) { if (x.ok) renderList(x.d.results || []); }); }
 
-  var enrollProject = document.getElementById('enroll-project'), enrollOut = document.getElementById('enroll-out');
+  var enrollScope = document.getElementById('enroll-scope'), enrollProject = document.getElementById('enroll-project'),
+    enrollProjectField = document.getElementById('enroll-project-field'), enrollOrg = document.getElementById('enroll-org'),
+    enrollOrgField = document.getElementById('enroll-org-field'), enrollOut = document.getElementById('enroll-out');
   api('GET', '/api/v1/projects').then(function (x) {
     (x.d.results || x.d.projects || []).forEach(function (p) { var o = el('option', '', p.name || p.slug); o.value = p.slug; enrollProject.appendChild(o); });
   });
+  enrollScope.addEventListener('change', function () {
+    enrollProjectField.style.display = enrollScope.value === 'project' ? '' : 'none';
+    enrollOrgField.style.display = enrollScope.value === 'org' ? '' : 'none';
+  });
   document.getElementById('enroll-go').addEventListener('click', function () {
-    if (!enrollProject.value) return;
-    api('POST', '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll?format=blob').then(function (x) {
+    var scope = enrollScope.value, url;
+    if (scope === 'project') {
+      if (!enrollProject.value) return;
+      url = '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll?format=blob';
+    } else if (scope === 'org') {
+      if (!enrollOrg.value.trim()) return;
+      url = '/api/v1/orgs/' + enrollOrg.value.trim() + '/sentinels/enroll?format=blob';
+    } else {
+      url = '/api/v1/sentinels/enroll?format=blob';
+    }
+    api('POST', url).then(function (x) {
       enrollOut.style.display = 'block';
       if (x.ok) {
         enrollOut.className = 'msg ok secret-box'; enrollOut.textContent = '';
-        enrollOut.appendChild(el('span', '', 'One-time blob for ' + x.d.project + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Paste this into your Sentinel\'s CVENGINE_SENTINEL_BLOB and run it once; the Sentinel then keeps its own token.'));
+        var label = x.d.scope === 'project' ? x.d.project : x.d.scope === 'org' ? ('organization ' + x.d.org) : 'the whole instance';
+        enrollOut.appendChild(el('span', '', 'One-time blob for ' + label + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Paste this into your Sentinel\'s CVENGINE_SENTINEL_BLOB and run it once; the Sentinel then keeps its own token.'));
         var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); enrollOut.appendChild(code);
         enrollOut.appendChild(el('div', 'meta', 'server_url: ' + x.d.server_url));
       } else {

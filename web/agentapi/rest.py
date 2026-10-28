@@ -104,6 +104,18 @@ def _sentinel_enroll(request, ctx, slug, **_):
     return out, 201
 
 
+def _sentinel_org_enroll(request, ctx, org, **_):
+    out = (sentinels.generate_org_enrollment_blob(ctx, org) if request.GET.get('format') == 'blob'
+           else sentinels.generate_org_enrollment(ctx, org))
+    return out, 201
+
+
+def _sentinel_instance_enroll(request, ctx, **_):
+    out = (sentinels.generate_instance_enrollment_blob(ctx) if request.GET.get('format') == 'blob'
+           else sentinels.generate_instance_enrollment(ctx))
+    return out, 201
+
+
 def _sentinel_bootstrap(request, ctx, **_):
     out = sentinels.bootstrap(_body(request))
     return out, 201
@@ -391,10 +403,18 @@ ROUTES = [
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
-    ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB',
+    ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at, scope: "project"}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB',
      _sentinel_enroll),
     ('POST', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this project',
      _sentinel_enroll),
+    ('GET', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'An admin of this organization, or an App Admin, generates a one-time enrollment secret that scopes a Sentinel to every project of the organization, present and future: {enrollment_token, server_url, expires_at, scope: "org"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
+     _sentinel_org_enroll),
+    ('POST', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization',
+     _sentinel_org_enroll),
+    ('GET', r'sentinels/enroll', 'App Admin only: a one-time enrollment secret that scopes a Sentinel to every organization and project on this instance, present and future: {enrollment_token, server_url, expires_at, scope: "instance"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
+     _sentinel_instance_enroll),
+    ('POST', r'sentinels/enroll', 'Same as GET: generates a fresh instance-wide one-time enrollment secret',
+     _sentinel_instance_enroll),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinel-tasks', 'Scan-stage work dispatched to Sentinels for this project (status, kind, agent_id, scan_id)',
      lambda r, c, slug, **k: sentinels.list_tasks(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/sentinel-tasks/(?P<task_id>\d+)/cancel', 'Cancel a queued or leased SentinelTask',
