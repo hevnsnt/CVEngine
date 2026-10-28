@@ -10,6 +10,7 @@ the Hosts page, search and the graph already read.
 | Open findings: critical/high 25, medium 10, low 3 | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
 | Sensitive data on a route (cveFeed.sensitive.sensitive_score) | worst route | 25 |
+| Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
 | Exposure: any public IP 10 | | 10 |
 | Recency: new or returned in the last 7 days 10, port opened or version changed 5 | | 10 |
 | Zombie host 15, zombie route 5 | | 15 |
@@ -29,6 +30,8 @@ CVE_POINTS = {'fire': 40, 'smoke': 20, 'ice': 5}
 CVE_CAP, AI_BONUS = 50, 10
 FINDING_POINTS = {4: 25, 3: 25, 2: 10, 1: 3}
 FINDING_NAMES = {4: 'Critical', 3: 'High', 2: 'Medium', 1: 'Low'}
+HYGIENE_POINTS = {4: 20, 3: 15, 2: 8, 1: 3}
+HYGIENE_CAP, HYGIENE_EXTRA = 20, 2
 ROUTE_CAP, SENSITIVE_CAP, EXPOSURE_POINTS, RECENCY_CAP, ZOMBIE_CAP = 15, 25, 10, 10, 15
 ADMIN_PATH = re.compile(r'^/(admin|api|actuator|swagger|console|manager)(/|$|\.|\?)', re.I)
 RECENT_NEW_KINDS = ('host_new', 'host_returned')
@@ -86,9 +89,22 @@ def _sensitive_line(routes):
     return [{'label': f'{what} on {worst.get("path") or "/"}', 'points': min(points, SENSITIVE_CAP)}]
 
 
+def _hygiene_lines(issues):
+    issues = sorted((i for i in issues if i.get('severity') in HYGIENE_POINTS), key=lambda i: (-i['severity'], i.get('title') or ''))
+    if not issues:
+        return []
+    worst = issues[0]
+    lines = [{'label': f'{FINDING_NAMES[worst["severity"]]} hygiene issue {worst.get("title") or ""}'.strip(),
+              'points': HYGIENE_POINTS[worst['severity']]}]
+    more = len([i for i in issues[1:] if i['severity'] >= 2])
+    if more:
+        lines.append({'label': f'{more} more hygiene issue{"s" if more != 1 else ""} (medium or worse)', 'points': more * HYGIENE_EXTRA})
+    return _capped(lines, HYGIENE_CAP)
+
+
 def score_host(inputs):
     """``(score, detail)`` for one host. ``inputs``: ``cves`` [{id, temp, ai_verdict}] (matches the AI has not ruled out),
-    ``findings`` [{severity, name}] (open), ``routes`` [{path, auth_state, sensitive_score}], ``public_ip`` bool,
+    ``findings`` [{severity, name}] (open), ``hygiene`` [{severity, title}] (open hygiene findings of the host), ``routes`` [{path, auth_state, sensitive_score}], ``public_ip`` bool,
     ``recent`` [change kinds in the last 7 days], ``zombie_host`` and ``zombie_route`` bools. ``detail`` is the ordered list of
     ``{'label', 'points'}`` that add up to the score (at most 100)."""
     detail = _cve_lines(inputs.get('cves') or [])
@@ -97,6 +113,7 @@ def score_host(inputs):
         worst = max(findings, key=lambda f: FINDING_POINTS[f['severity']] * 10 + f['severity'])
         detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip(),
                        'points': FINDING_POINTS[worst['severity']]})
+    detail += _hygiene_lines(inputs.get('hygiene') or [])
     routes = inputs.get('routes') or []
     detail += _capped(_route_line(routes), ROUTE_CAP)
     detail += _sensitive_line(routes)
@@ -165,7 +182,8 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
     ``scan_id`` when it is given (the scan that was just recorded), else that of the newest finished scan; rows of failed, aborted
     or queued scans are never used. Bounded: 500 names per round of queries. Returns how many hosts were scored."""
     from cveFeed.counts import finding_is_live
-    from cveFeed.models import AssetChange, HostState, RouteAuth
+    from cveFeed.counts import CLOSED
+    from cveFeed.models import AssetChange, HostState, HygieneFinding, RouteAuth
     from startScan.models import Subdomain
     now = now or timezone.now()
     names = sorted({(n or '').strip().lower() for n in names if n})
@@ -175,7 +193,10 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
                   .order_by('name', *row_preference(scan_id)).distinct('name')
                   .prefetch_related('ip_addresses', 'cve_matches__cve_entry', 'vulnerability_set'))
         subs = {s.name.lower(): s for s in newest}
-        routes, recent, zombies = {}, {}, {}
+        routes, recent, zombies, hygiene = {}, {}, {}, {}
+        for h in (HygieneFinding.objects.filter(domain__project_id=project_id, host__in=chunk, status='open', severity__gte=1)
+                  .exclude(remediation_status__in=CLOSED).values('host', 'severity', 'title')):
+            hygiene.setdefault(h['host'].lower(), []).append(h)
         for r in RouteAuth.objects.filter(project_id=project_id, host__in=chunk).values('host', 'path', 'auth_state', 'sensitive_score', 'zombie_since'):
             routes.setdefault(r['host'], []).append(r)
         since = now - timedelta(days=RECENT_DAYS)
@@ -191,7 +212,7 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         for name, sub in subs.items():
             inputs = {'cves': _cve_inputs(sub),
                       'findings': [{'severity': v.severity, 'name': v.name} for v in sub.vulnerability_set.all() if finding_is_live(v)],
-                      'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ())}
+                      'hygiene': hygiene.get(name, []), 'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ())}
             inputs.update(zombies.get(name, {}))
             scores[name] = score_host(inputs)
         rows = []
