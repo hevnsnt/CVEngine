@@ -3,7 +3,7 @@
 import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
-import { fmtTime } from "/staticfiles/cve/prefs.js";
+import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 
@@ -156,6 +156,35 @@ async function paintHygiene(open) {
   }
 }
 
+// Internal networks: hosts inside a range the project declared internal, scanned only by a Sentinel deployed there. The group stays out of
+// the page until one exists (stats.internal.has). A network whose Sentinel is not live is said to be unscanned, never shown as clean.
+const SENTINEL_WORD = { online: "Sentinel online", offline: "Sentinel offline", none: "No Sentinel" };
+function paintInternal(x) {
+  const box = $("n-internal");
+  if (!box) return;
+  box.hidden = !(x && x.has);
+  if (box.hidden) return;
+  const num = (id, n) => ($(id).querySelector("b").textContent = String(n));
+  num("in-hosts", x.hosts);
+  num("in-findings", x.findings);
+  num("in-matches", x.matches);
+  $("in-hosts").querySelector("small").textContent = x.hosts ? `${x.hosts_live} live` : "";
+  $("in-last").textContent = x.last_scan_at ? `scanned ${ago(x.last_scan_at)}` : "never scanned";
+  const list = $("in-nets");
+  list.textContent = "";
+  (x.networks || []).forEach((n) => {
+    const state = (n.sentinel && n.sentinel.state) || "none";
+    const li = el("li", `in-net ${state}`);
+    li.append(el("i", "in-dot"), el("b", "mono", n.cidr), el("span", "in-state", SENTINEL_WORD[state] || state));
+    const scanned = n.last_scan_at ? `last scanned ${ago(n.last_scan_at)}` : "not scanned yet";
+    // a quiet network with no live Sentinel has not been looked at: say since when, instead of letting it read as clean
+    const note = state === "online" ? scanned : n.last_scan_at ? `not scanned since ${fmtDateTime(n.last_scan_at)}` : "never scanned";
+    li.append(el("span", "in-note", `${n.hosts} host${n.hosts === 1 ? "" : "s"} · ${note}`));
+    if (n.description) li.title = n.description;
+    list.append(li);
+  });
+}
+
 async function pollStats() {
   try {
     const s = await get(`/cve/api/stats${projParam ? "?" + projParam : ""}`);
@@ -179,11 +208,13 @@ async function pollStats() {
     const stuck = $("n-queue");
     if (stuck) {
       // the activity feed also shows scans that run under a finished scan record (weekly deep Nuclei, host rescans): those are work, so not stuck
-      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0 && running.size === 0);
+      // background work (weekly deep Nuclei, host rescans, assessments) runs under finished scan records: it is work too, so nothing is stuck
+      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0 && !(s.scans_background_running > 0) && running.size === 0);
       setNum("s-scans_queued", s.scans_queued);
     }
     paintCoverage();
     paintOldest(s);
+    paintInternal(s.internal);
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
     $("m-exposed").style.width = `${pct}%`;
   } catch (_) {

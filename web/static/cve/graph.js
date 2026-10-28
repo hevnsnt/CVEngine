@@ -532,6 +532,17 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       const title = document.createElementNS(NS, "title");
       title.textContent = d.label;
       g.append(ring, c, t, title);
+      if (d.kind === "subdomain" && d.internal) {
+        // a host inside a network its project declared internal (only a Sentinel there scans it): a dashed outer boundary marks it
+        const boundary = document.createElementNS(NS, "circle");
+        boundary.setAttribute("class", "boundary");
+        boundary.setAttribute("r", r + 9);
+        boundary.setAttribute("fill", "none");
+        g.insertBefore(boundary, ring);
+        g.classList.add("gn-internal");
+        title.textContent = `${d.label} (internal${d.network ? `, ${d.network}` : ""})`;
+        g.setAttribute("aria-label", `${g.getAttribute("aria-label")}, internal${d.network ? ` network ${d.network}` : ""}`);
+      }
       if (d.kind === "subdomain") refreshHost(g, d);
       attachPointer(g, node);
       g.addEventListener("keydown", (e) => {
