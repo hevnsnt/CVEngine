@@ -20,6 +20,16 @@
     <p class="empty" id="no-tasks">Nothing has been dispatched to a Sentinel for this project yet.</p>
   </div>
 </div>
+<div class="card" id="ranges-card" style="display:none;margin-top:16px">
+  <h2 style="margin-bottom:8px">Internal networks</h2>
+  <p class="note" style="margin-bottom:8px">A private network (office LAN, VPC, VPN) this project owns. Addresses inside it can be added as targets, and only a Sentinel deployed inside that network scans them (start it with <code>CVENGINE_SENTINEL_NETWORK=internal</code>); this server never does. Project administrators only.</p>
+  <ul class="feed" id="ranges" style="max-height:none"></ul>
+  <p class="empty" id="no-ranges">No internal network declared.</p>
+  <div class="field"><label for="range-cidr">Network (CIDR)</label><input type="text" id="range-cidr" placeholder="10.20.0.0/24" autocomplete="off"></div>
+  <div class="field"><label for="range-desc">Description</label><input type="text" id="range-desc" maxlength="200" placeholder="Head office LAN" autocomplete="off"></div>
+  <button class="btn" type="button" id="range-add">Declare</button>
+  <div id="range-msg" class="msg err" style="display:none" role="status"></div>
+</div>
 </div>
 {% endblock %}
 {% block scripts %}
@@ -82,7 +92,37 @@
     api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinels').then(function (x) { if (x.ok) renderList(x.d.results || []); });
     api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinel-tasks?page_size=20').then(function (x) { if (x.ok) renderTasks(x.d.results || []); });
   }
+  var rangesCard = document.getElementById('ranges-card'), ranges = document.getElementById('ranges'), noRanges = document.getElementById('no-ranges'),
+    rangeMsg = document.getElementById('range-msg'), rangesUrl = '/api/v1/projects/' + encodeURIComponent(slug) + '/internal-ranges';
+  function renderRanges(items) {
+    rangesCard.style.display = '';
+    ranges.textContent = '';
+    noRanges.style.display = items.length ? 'none' : '';
+    items.forEach(function (r) {
+      var li = el('li'), top = el('div');
+      top.style.display = 'flex'; top.style.justifyContent = 'space-between'; top.style.alignItems = 'center'; top.style.gap = '12px';
+      var left = el('div');
+      left.appendChild(el('span', 'cve-id', r.cidr));
+      left.appendChild(el('div', 'meta', [r.description, r.created_by ? 'by ' + r.created_by : '', when(r.created)].filter(Boolean).join(' · ')));
+      top.appendChild(left);
+      top.appendChild(button('Remove', 'btn ghost', function () {
+        if (confirm('Remove ' + r.cidr + '? Targets already added inside it stay, but nothing scans them until it is declared again.'))
+          api('DELETE', rangesUrl + '/' + r.id).then(loadRanges);
+      }));
+      li.appendChild(top);
+      ranges.appendChild(li);
+    });
+  }
+  function loadRanges() { api('GET', rangesUrl).then(function (x) { if (x.ok) renderRanges(x.d.results || []); }); }  // a 403 (not a project administrator) leaves the card hidden
+  document.getElementById('range-add').addEventListener('click', function () {
+    var cidr = document.getElementById('range-cidr'), desc = document.getElementById('range-desc');
+    api('POST', rangesUrl, {cidr: cidr.value.trim(), description: desc.value.trim()}).then(function (x) {
+      rangeMsg.style.display = x.ok ? 'none' : 'block';
+      if (x.ok) { cidr.value = ''; desc.value = ''; loadRanges(); } else rangeMsg.textContent = x.d.error || 'Could not declare this network.';
+    });
+  });
   load();
+  loadRanges();
 })();
 </script>
 {% endblock %}

@@ -1866,3 +1866,23 @@ class SupplierFinding(models.Model):
 
     def __str__(self):
         return f"{self.domain}: {self.title}"
+
+
+class InternalRange(models.Model):
+    """A private network a project declares as its own internal scope (office LAN, a VPC, a VPN), reachable only from a Sentinel
+    deployed inside it. The row is the opt-in: nothing is internal unless a project administrator declared it. Declaring a range
+    lets the project add targets inside it (``agentapi.services._expand_target``) and nothing more: ``targetApp.target_types.
+    is_scannable_ip`` keeps refusing those addresses for every local scanner, so this server never connects to them itself."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="internal_ranges")
+    cidr = models.CharField(max_length=64)  # canonical, network address form (10.20.0.0/24)
+    description = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "cidr"], name="internalrange_project_cidr_uniq")]
+        ordering = ["cidr", "id"]
+
+    def __str__(self):
+        return f"{self.cidr} (project {self.project_id})"

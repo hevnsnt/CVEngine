@@ -260,7 +260,10 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
-        from targetApp.target_types import resolves_to_blocked
+        from targetApp.target_types import resolves_to_blocked, sentinel_only_target
+        if sentinel_only_target(scan.domain.name, scan.domain.project_id):
+            raise ValueError(f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
+                             'never this server')
         if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
             raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
                              'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
@@ -337,6 +340,14 @@ def run_pipeline(scan_id, *args, **kwargs):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     if scan.scan_status == 3:  # aborted while it waited in the queue
         return {'scan_id': scan_id, 'status': 'aborted'}
+    from targetApp.target_types import sentinel_only_target
+    if sentinel_only_target(scan.domain.name, scan.domain.project_id):  # nothing at all runs from this server against a Sentinel-only address
+        message = (f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
+                   'never this server')
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(status=FAILED, time=timezone.now(), error_message=message[:290])
+        activity.log('discovery', f'Refused discovery of {scan.domain.name}: Sentinel-only target', project=scan.domain.project_id, scan_id=scan_id)
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     with domain_lock(scan.domain_id, scan_id) as holder:
         if holder is True:
             from reNgine import resources

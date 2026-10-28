@@ -1571,8 +1571,8 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 
 /* ---- live dashboard: one-row counters, wider map tiles, the temperature counts live in the CVE feed card ---- */
 @media (min-width:1000px){
-  .panel.ticks{grid-template-columns:minmax(0,2.6fr) minmax(0,4.6fr) minmax(0,3.4fr)}
-  #c-map .map{min-height:600px}
+  .panel.ticks{grid-template-columns:minmax(0,2.6fr) minmax(0,4.8fr) minmax(0,3.2fr)}
+  #c-map .map{min-height:420px}
 }
 @media (min-width:720px){
   .strip{flex-wrap:nowrap}
@@ -1595,3 +1595,19 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .strip.in-cell #n-matches,.strip.in-cell #n-coverage,.strip.in-cell #n-oldest{border-right:1px solid var(--line)}
 .strip.in-cell a.wide{grid-column:1/-1}
 .cell-stack>a.cell{flex:none}
+
+/* ---- live dashboard: a compact top row. The activity list fills the card, the counters are small and easy to scan ---- */
+@media (min-width:1000px){
+  .ai-cell .agent{flex:1 1 0;height:0;min-height:0;max-height:none}
+  #c-exposed{padding:14px 18px 12px;gap:8px}
+  #c-exposed .big b{font-size:48px}
+  #c-exposed .big small{font-size:13px}
+  #c-exposed p{font-size:12px;line-height:1.4}
+  .strip.in-cell a,.strip.in-cell a.wide{padding:9px 18px;gap:1px}
+  .strip.in-cell b{font-size:19px}
+  .strip.in-cell span{font-size:10px}
+  .strip.in-cell .spark{height:16px;margin-top:3px}
+  .strip.in-cell .hy-top{margin-top:4px;gap:2px}
+  .strip.in-cell .hy-top li{font-size:11px}
+}
+.map[data-slim="1"] .hx .hx-target{display:none}

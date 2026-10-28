@@ -40,6 +40,7 @@ OFFER_LEASE = broker.OFFER_LEASE
 RUN_LEASE = broker.RUN_LEASE
 MAX_WAIT = broker.MAX_WAIT
 CANDIDATES = broker.CANDIDATES
+INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed inside a private network; the only kind that may claim work for an address of a declared internal range
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register']}
 ENROLLMENT_TTL = timedelta(minutes=30)  # long enough to copy the token into a Sentinel's setup, short enough to limit exposure if it leaks
@@ -313,6 +314,7 @@ class SentinelEff:
         patterns = (agent.scope or {}).get('hosts') or []
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
+        self._internal_nets = {}
 
     @property
     def live(self):
@@ -325,7 +327,19 @@ class SentinelEff:
             return 'scope', "the target is outside this Sentinel's scope"
         if task.kind not in self.caps:
             return 'capability', task.kind
+        if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
+            return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         return None
+
+    def _internal(self, task):
+        """Whether any address of ``task`` is inside a network its project declared internal."""
+        from targetApp.target_types import in_internal_range, internal_networks
+        if not task.ips:
+            return False
+        nets = self._internal_nets.get(task.project_id)
+        if nets is None:
+            nets = self._internal_nets[task.project_id] = internal_networks(task.project_id)
+        return bool(nets) and any(in_internal_range(ip, nets) for ip in task.ips)
 
 
 def effective(agent, now=None):
@@ -465,6 +479,8 @@ def _try_claim(agent, kinds, now):
         for task in list(_claimable(eff, kinds, now)[:CANDIDATES]):
             if eff.hosts is not None and task.ips and not eff.hosts.matches([task.host.lower()] if task.host else [], task.ips):
                 continue
+            if INTERNAL_CAPABILITY not in eff.caps and eff._internal(task):
+                continue  # only a Sentinel inside the private network can reach it
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:

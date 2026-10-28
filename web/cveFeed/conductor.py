@@ -69,7 +69,8 @@ def next_targets(limit, now=None):
     cutoff = now - min_gap()
     rows = (Domain.objects.exclude(project=None).annotate(last_scan=Max('scanhistory__start_scan_date'))
             .order_by(F('last_scan').asc(nulls_first=True), 'id').values_list('id', 'project_id', 'name', 'last_scan'))
-    chosen, projects, banned = [], set(), {}
+    from targetApp.target_types import internal_networks, sentinel_only_target
+    chosen, projects, banned, internal = [], set(), {}, {}
     for domain_id, project_id, name, last_scan in rows.iterator(chunk_size=500):
         if len(chosen) >= limit:
             break
@@ -79,6 +80,10 @@ def next_targets(limit, now=None):
             banned[project_id] = excluded_names(project_id)
         if name.lower().rstrip('.') in banned[project_id]:
             continue
+        if project_id not in internal:
+            internal[project_id] = internal_networks(project_id)
+        if internal[project_id] and sentinel_only_target(name, project_id, internal[project_id]):
+            continue  # inside a declared internal network: a Sentinel scans it, this server never queues discovery for it
         projects.add(project_id)
         chosen.append(domain_id)
     return chosen

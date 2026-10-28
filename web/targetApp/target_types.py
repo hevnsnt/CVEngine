@@ -250,6 +250,62 @@ def is_scannable_ip(value, allow_private=None, project=None):
     return True
 
 
+MAX_INTERNAL_RANGE_ADDRESSES = 65536  # one declared range may cover at most a /16 (IPv4) or a /112 (IPv6): the same as one target may expand to
+
+
+def clean_internal_cidr(value):
+    """The canonical network a project may declare as an internal range, or ``ValueError`` saying why not. It must sit entirely inside
+    the private space the gate refuses (RFC1918, CGNAT, unique-local), so declaring a range can never open a public address, and
+    must not touch the always-blocked ranges (loopback, link-local, metadata): CGNAT holds two metadata addresses, so a range
+    covering one is refused rather than trimmed. Host bits must be zero, so what is stored is what was meant."""
+    try:
+        net = ipaddress.ip_network(str(value).strip(), strict=True)
+    except ValueError:
+        raise ValueError('not a network in CIDR form with no host bits set (for example 10.20.0.0/24)')
+    if net.num_addresses > MAX_INTERNAL_RANGE_ADDRESSES:
+        raise ValueError(f'covers {net.num_addresses} addresses; the most one range may cover is {MAX_INTERNAL_RANGE_ADDRESSES}')
+    if not any(net.version == n.version and net.subnet_of(n) for n in _INTERNAL):
+        raise ValueError('only private ranges can be declared internal (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7)')
+    if any(net.version == n.version and net.overlaps(n) for n in _ALWAYS_BLOCKED + _extra_blocked()):
+        raise ValueError('overlaps a range that is never scanned (loopback, link-local, cloud metadata)')
+    return str(net)
+
+
+def internal_networks(project):
+    """The networks ``project`` (an id) declared internal, as ``ip_network`` objects. A lookup problem means "none"."""
+    if not project:
+        return []
+    try:
+        from cveFeed.models import InternalRange
+        return [ipaddress.ip_network(c, strict=False) for c in InternalRange.objects.filter(project_id=project).values_list("cidr", flat=True)]
+    except Exception:  # noqa: BLE001 - the answer is the safe one when the table cannot be read
+        return []
+
+
+def in_internal_range(value, networks):
+    """Whether ``value`` is an address inside one of ``networks`` (from ``internal_networks``) and is still a clean one: not an
+    address unwrapped from a mapped, NAT64 or 6to4 form, and not in an always-blocked range. This says an address MAY BE ADDED as a
+    target of the project; it never makes it scannable from this server (``is_scannable_ip`` is unchanged and still refuses it)."""
+    try:
+        ip = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return False
+    if getattr(ip, "scope_id", None) is not None or _embedded_v4(ip) is not ip:
+        return False
+    if any(ip.version == n.version and ip in n for n in _ALWAYS_BLOCKED + _extra_blocked()):
+        return False
+    return any(ip.version == n.version and ip in n for n in networks)
+
+
+def sentinel_only_target(name, project, networks=None):
+    """Whether the target ``name`` of ``project`` (an id) is an address inside a network the project declared internal that this server
+    may not scan itself: only a Sentinel inside the network ever scans it. ``networks`` (from ``internal_networks``) saves the lookup
+    when asking about many targets of one project. An address a connected tailnet or the operator's private-targets switch already makes
+    scannable here is not "Sentinel only"."""
+    nets = internal_networks(project) if networks is None else networks
+    return bool(nets) and in_internal_range(name, nets) and not is_scannable_ip(name, project=project)
+
+
 RESOLVE_TIMEOUT = 5  # seconds one name may take to answer; names come from DNS the target owner controls
 RESOLVE_WORKERS = 16
 RESOLVE_BATCH_SECONDS = 120  # the most a whole list of names may take

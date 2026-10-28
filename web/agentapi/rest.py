@@ -16,7 +16,7 @@ from agentapi import suppliers
 from agentapi import system_status
 from agentapi import authcheck
 from agentapi import reports
-from agentapi import tailscale
+from agentapi import internal_ranges, tailscale
 from agentapi import auth
 from agentapi.auth import create_token
 from tenancy import audit
@@ -297,6 +297,12 @@ ROUTES = [
      lambda r, c, slug, target_id, **k: authcheck.set_credential(c, slug, target_id, _body(r))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/auth-credentials/(?P<credential_id>\d+)', 'Remove a stored sign-in (App Admin or organization admin)',
      lambda r, c, slug, credential_id, **k: authcheck.delete_credential(c, slug, credential_id)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/internal-ranges', 'The private networks this project declared internal: only a Sentinel inside one scans its addresses, this server never does (project administrators only)',
+     lambda r, c, slug, **k: internal_ranges.list_ranges(c, slug)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/internal-ranges', 'Declare a private network (CIDR inside 10/8, 172.16/12, 192.168/16, 100.64/10 or fc00::/7, at most a /16) as internal to this project: {cidr, description}; its addresses may then be added as targets (project administrators only)',
+     lambda r, c, slug, **k: (internal_ranges.add_range(c, slug, _body(r)), 201)),
+    ('DELETE', r'projects/(?P<slug>[-\w]+)/internal-ranges/(?P<range_id>\d+)', 'Remove a declared internal range (project administrators only)',
+     lambda r, c, slug, range_id, **k: internal_ranges.delete_range(c, slug, int(range_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/tailscale', 'The project\'s Tailscale connection: tailnet, device counts, last sync, errors, settings (administrators only; never the credentials)',
      lambda r, c, slug, **k: tailscale.tailscale_status(c, slug)),
     ('GET', r'projects/(?P<slug>[-\w]+)/tailscale/devices', 'Tailnet devices imported into the project with their Tailscale facts (state=active|offline|departed|all, q=; administrators only)',
