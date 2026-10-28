@@ -713,6 +713,29 @@ def _ov_num(value, low, high, cast, default):
     return cast(max(low, min(high, value)))
 
 
+MAX_DISCOVER_HOSTS = 512  # one discover task sweeps a /24 (at most 254 hosts); this leaves room for a /23 chunk and is far below a DoS-sized report
+
+
+def _clean_discover_result(body):
+    """The live addresses a Sentinel found in the one chunk of an internal range it was asked to sweep: ``{ip, hostnames}`` entries,
+    nothing else. Whether each address is really inside the chunk, and inside a range the project declared, is decided by the server
+    when it stores them (``cveFeed.internal_discovery``), never trusted from here."""
+    raw = body.get('hosts')
+    if not isinstance(raw, list) or len(raw) > MAX_DISCOVER_HOSTS:
+        raise ApiError(400, f'hosts must be a list of at most {MAX_DISCOVER_HOSTS} entries')
+    hosts, seen = [], set()
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get('ip'), str):
+            continue
+        ip = _clip(item['ip'], 'ip')
+        if ip in seen:
+            continue
+        seen.add(ip)
+        names = item.get('hostnames') if isinstance(item.get('hostnames'), list) else []
+        hosts.append({'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]})
+    return {'hosts': hosts}
+
+
 def _clean_openvas_result(body):
     """A GVM task's own results, reshaped by a Sentinel's local run into exactly the dict ``cveFeed.openvas_scan.parse_result``
     already produces from a local gvmd session, so one import path (``_apply_import``) stores either's output identically. The
@@ -755,7 +778,8 @@ def _clean_openvas_result(body):
 
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
-             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result}
+             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
+             'discover': _clean_discover_result}
 
 
 def clean_result(kind, body):

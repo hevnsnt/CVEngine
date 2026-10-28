@@ -22,7 +22,9 @@ def _admin(ctx, slug, write=False):
 
 def _row(r):
     return {'id': r.pk, 'cidr': r.cidr, 'description': r.description, 'created': _iso(r.created_at),
-            'created_by': r.created_by.username if r.created_by_id else None}
+            'created_by': r.created_by.username if r.created_by_id else None,
+            'last_discovery_at': _iso(r.last_discovery_at), 'last_discovery_hosts': r.last_discovery_hosts,
+            'last_discovery_error': r.last_discovery_error}
 
 
 def list_ranges(ctx, slug):
@@ -64,3 +66,23 @@ def delete_range(ctx, slug, range_id):
     row.delete()
     audit.record(ctx.user, 'internal_range.delete', f'{project.slug} {cidr}', org=project.org_id, project=project.slug, cidr=cidr)
     return {'deleted': cidr, 'note': 'targets already added inside it stay, but nothing scans them until the range is declared again'}
+
+
+def discover_now(ctx, slug, range_id):
+    """Queue a host discovery of one declared range now. Refused with the reason when no Sentinel inside the network could take it, so
+    "scan now" never reports a sweep that nobody will run."""
+    from agentapi import sentinel_broker
+    from cveFeed import internal_discovery
+    from cveFeed.models import InternalRange
+    from cveFeed.tasks import run_internal_discovery
+    project = _admin(ctx, slug, write=True)
+    row = InternalRange.objects.filter(project=project, pk=range_id).first()
+    if row is None:
+        raise ApiError(404, 'internal range not found')
+    if not internal_discovery.chunks(row.cidr)[1]:
+        raise ApiError(400, 'IPv6 ranges are not swept; add their hosts by hand')
+    if not sentinel_broker.any_scanner_for(project, 'discover', internal=True):
+        raise ApiError(409, 'no Sentinel is online that declares network:internal and discover for this project; nothing would sweep the range')
+    run_internal_discovery.delay(row.pk)
+    audit.record(ctx.user, 'internal_range.discover', f'{project.slug} {row.cidr}', org=project.org_id, project=project.slug, cidr=row.cidr)
+    return {'queued': row.cidr}

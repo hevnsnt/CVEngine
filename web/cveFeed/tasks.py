@@ -1083,6 +1083,21 @@ def internal_scan_sweep():
     return internal_scan.sweep()
 
 
+@app.task(name="run_internal_discovery", bind=False, queue="cve_feed_queue")
+def run_internal_discovery(range_id):
+    """Sweep one declared internal range for live hosts through a Sentinel inside it (``cveFeed.internal_discovery``)."""
+    from cveFeed import internal_discovery
+    return internal_discovery.discover_range(range_id)
+
+
+@app.task(name="internal_discovery_sweep", bind=False, queue="cve_feed_queue")
+def internal_discovery_sweep():
+    """Daily: queue a host discovery of every declared internal range not swept inside CVENGINE_INTERNAL_DISCOVERY_DAYS (default 7), in
+    projects where a live network:internal Sentinel that declares ``discover`` could take the work."""
+    from cveFeed import internal_discovery
+    return internal_discovery.sweep()
+
+
 DEEP_SWEEP_MAX = 50  # apexes queued per run (CVENGINE_DEEP_SWEEP_MAX)
 
 
