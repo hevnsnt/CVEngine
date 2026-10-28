@@ -4,6 +4,7 @@
 // GET /api/v1/sentinels/live and is set with textContent; the card ages itself every second between polls.
 import { api, button, el, toast } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
+import { detailCache, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -14,7 +15,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {
@@ -63,7 +64,7 @@ function recent(t) {
   return li;
 }
 
-function card(s, reload) {
+function card(s, reload, detail) {
   const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
   const head = el("header", "sl-head");
   head.append(orbFor(s));
@@ -94,6 +95,8 @@ function card(s, reload) {
   const beat = el("p", "sl-beat");
   beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
   c.append(beat);
+  const version = versionBlock(detail, { onChange: reload });
+  if (version) c.append(version);
   if (s.problem) c.append(el("p", "sl-note", s.problem));
   else if (s.status_note) c.append(el("p", "sl-note", s.status_note));
 
@@ -136,9 +139,13 @@ function summary(data) {
   return bar;
 }
 
+const DETAIL_MS = 15000; // settings, version and update come from each Sentinel's detail, asked for less often than the live list
+
 export function sentinelLive(mount) {
   let data = null;
   let timer = null;
+  const details = detailCache(() => paint());
+  const ids = () => (data ? data.results.map((s) => s.id) : []);
   const paint = () => {
     mount.textContent = "";
     if (!data) return;
@@ -148,7 +155,7 @@ export function sentinelLive(mount) {
     }
     mount.append(summary(data));
     const grid = el("div", "sl-grid");
-    data.results.forEach((s) => grid.append(card(s, load)));
+    data.results.forEach((s) => grid.append(card(s, reload, details.get(s.id))));
     const kept = new Set(data.results.map((s) => s.id));
     orbs.forEach((o, id) => {
       if (!kept.has(id)) {
@@ -176,7 +183,14 @@ export function sentinelLive(mount) {
       if (!data) toast(err.message, true);
     }
   }
-  load();
+  async function reload() {
+    await load();
+    await details.refresh(ids());
+  }
+  reload();
+  setInterval(() => {
+    if (!document.hidden) details.refresh(ids());
+  }, DETAIL_MS);
   timer = setInterval(() => {
     if (document.hidden) return;
     load();
