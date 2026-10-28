@@ -284,7 +284,7 @@ function layoutMap() {
   map.dataset.size = plan.tier.size;
   map.dataset.tier = plan.tier.name;
   map.dataset.narrow = plan.tw < 170 ? "1" : "0"; // narrow tiles drop the long "why" lines, which would only be cut off
-  map.dataset.lines = String(plan.tier.name === "rich" ? Math.max(1, Math.min(5, Math.floor((plan.th - 50) / 15))) : 0);
+  map.dataset.lines = String(plan.tier.name === "rich" ? Math.max(1, Math.min(5, Math.floor((plan.th - 70) / 15))) : 0);
   map.style.setProperty("--cols", plan.cols);
   map.style.setProperty("--rows", plan.rows);
   mapOrdered.forEach((h, i) => {

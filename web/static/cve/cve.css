@@ -1572,7 +1572,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 /* ---- live dashboard: one-row counters, wider map tiles, the temperature counts live in the CVE feed card ---- */
 @media (min-width:1000px){
   .panel.ticks{grid-template-columns:minmax(0,2.6fr) minmax(0,4.6fr) minmax(0,3.4fr)}
-  #c-map .map{min-height:560px}
+  #c-map .map{min-height:600px}
 }
 @media (min-width:720px){
   .strip{flex-wrap:nowrap}
