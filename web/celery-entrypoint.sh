@@ -128,7 +128,7 @@ classic_queues+=",query_whois_queue,run_command_queue,query_reverse_whois_queue,
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
-commands+="$(generate_worker_command "discovery_queue" "${DISCOVERY_CONCURRENCY:-3}" "discovery_worker")"$'\n'
+commands+="$(generate_worker_command "discovery_queue" "${DISCOVERY_CONCURRENCY:-8}" "discovery_worker")"$'\n'
 commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\n'
 # A reserved one-at-a-time lane keeps requested validation ahead of routine feed work.
 # Redis priority 0 is highest; this worker reserves one task for future severity-aware dispatch.

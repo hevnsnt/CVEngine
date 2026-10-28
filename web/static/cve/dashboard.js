@@ -119,11 +119,21 @@ async function paintCoverage() {
   try {
     const r = await get(`/api/v1/projects/${encodeURIComponent(slug || "_all")}/search?q=&page_size=1`);
     const heat = (r.facets && r.facets.heat) || {};
-    const total = Object.values(heat).reduce((n, v) => n + v, 0);
-    const never = heat.unscanned || 0;
-    if (!total) return;
-    $("s-coverage").textContent = `${Math.round((100 * (total - never)) / total)}%`;
-    $("s-coverage_note").textContent = never ? `${never} of ${total} hosts never scanned` : `all ${total} hosts scanned`;
+    const all = Object.values(heat).reduce((n, v) => n + v, 0);
+    // a host with no address a scanner can use has nothing to scan: it is counted apart, not as work that was neglected
+    const u = (r.facets && r.facets.unscannable) || {};
+    const noAddress = u.count || 0;
+    const total = all - noAddress;
+    const never = Math.max(0, (heat.unscanned || 0) - noAddress);
+    if (!all) return;
+    $("s-coverage").textContent = total ? `${Math.round((100 * (total - never)) / total)}%` : "100%";
+    const parts = [];
+    parts.push(never ? `${never} of ${total} hosts never scanned` : `all ${total} hosts scanned`);
+    if (noAddress) {
+      const why = [u.private ? `${u.private} point inside a private network` : "", u.no_dns ? `${u.no_dns} have no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
+      parts.push(`${noAddress} with no address to scan (${why})`);
+    }
+    $("s-coverage_note").textContent = parts.join("; ");
   } catch (_) {
     coverageAt = 0;
   }

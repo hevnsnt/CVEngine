@@ -23,7 +23,10 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | --- | --- | --- |
 | `CELERY_MEM_LIMIT` | `4g` | Memory limit for the scan workers. About 55% of the machine's RAM works well. |
 | `WEB_MEM_LIMIT`, `BEAT_MEM_LIMIT` | `1g`, `512m` | Limits for the web container and the scheduler. |
-| `DISCOVERY_CONCURRENCY` | `3` | Most discovery tasks at once. Lower it on small machines. |
+| `DISCOVERY_CONCURRENCY` | `8` | Most discovery tasks and host assessments at once. A task that waits on a Sentinel holds one of these while it waits, so the Sentinels' slots and the work queued behind them (twice their slots) need more than a few; heavy local tools still wait their turn for memory (`HEAVY_MEMORY_BUDGET_MB`), so more here does not mean more memory. Lower it on very small machines. |
+| `CVENGINE_SENTINEL_REPO`, `CVENGINE_SENTINEL_BRANCH` | `hevnsnt/cvENGINE-sentinel`, `main` | The repository and branch whose head is "the latest Sentinel client" for the version check on the Sentinels page. |
+| `CVENGINE_SENTINEL_VERSION_CHECK` | on | `off` stops asking GitHub for the latest Sentinel client (the page then shows `unknown`). |
+| `CVENGINE_SENTINEL_REPO_TOKEN` | none | A token for a private Sentinel repository (else the update check's token is tried). |
 | `CLASSIC_CONCURRENCY` | `20` | Most tasks at once across all other queues. The CVE feed worker is fixed at 4 and the validation lane at 1. |
 | `HEAVY_MEMORY_BUDGET_MB` | 75% of the limit | Memory the job queue can hand out at once. |
 | `HEAVY_HEADROOM_MB` | larger of 256 and 5% | Free memory kept in reserve. |

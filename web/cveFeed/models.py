@@ -681,6 +681,7 @@ class HostState(models.Model):
     unresolved_first_at = models.DateTimeField(null=True, blank=True)
     unresolved_last_at = models.DateTimeField(null=True, blank=True)
     unresolved_checks = models.PositiveSmallIntegerField(default=0)
+    resolution_note = models.CharField(max_length=160, blank=True, default='')  # why it has no scannable address: 'private address ...' or 'no DNS answer' (unresolved_archive.recheck)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hoststate_project_host")]

@@ -28,6 +28,7 @@ from django.utils import timezone
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
 from agentapi import sentinel_settings
+from agentapi import sentinel_version
 from agentapi import services as svc
 from agentapi.auth import create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
@@ -449,6 +450,24 @@ def capacity_state(project, kind, internal=False, now=None):
     slots = sum(e.max_concurrent for e in live)
     free = sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live)
     return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
+
+
+def project_slots(project, now=None):
+    """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over."""
+    now = now or timezone.now()
+    return max(capacity_state(project, kind, False, now)['slots'] for kind in ('nmap', 'nuclei_light'))
+
+
+def total_slots(now=None):
+    """The slots of every live, active Sentinel on the instance."""
+    now = now or timezone.now()
+    agents = Agent.objects.filter(kind='scanner', status='active', token__revoked=False).select_related('token__user')[:CANDIDATES]
+    return sum(e.max_concurrent for e in (SentinelEff(a, now) for a in agents) if e.live and not e.problem)
+
+
+def waiting_tasks():
+    """Tasks queued for a Sentinel, not yet claimed."""
+    return SentinelTask.objects.filter(status='queued').count()
 
 
 def any_scanner_for(project, kind=None, internal=False):
@@ -1059,6 +1078,7 @@ def live_overview(ctx):
             'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
+            'version_state': sentinel_version.state(agent, sentinel_settings.effective(agent)['self_update']),
             'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
                          'project_name': t.project.name, 'scan_id': t.scan_id, 'since': svc._iso(t.accepted_at or t.claimed_at),
                          'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],

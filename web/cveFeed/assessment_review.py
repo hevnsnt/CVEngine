@@ -52,6 +52,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     """
     from django.db.models import Exists, OuterRef
     from cveFeed.models import HostAssessment, HostExclusion, HostState
+    from cveFeed.unresolved_archive import COUNTS_FOR
     from startScan.models import ScanActivity, Subdomain
 
     completed = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
@@ -66,10 +67,15 @@ def host_coverage_due(project, at, limit=1, need_count=True):
                                       scan_history__scan_status__in=(-1, 1))
     excluded = HostExclusion.objects.filter(org_id=project.org_id, host=OuterRef('name'))
     archived = HostState.objects.filter(project=project, host=OuterRef('name'), archived_at__isnull=False)
+    # A host that has no scannable address (a dangling name, or one that points inside a private network) was tried and has nothing to scan: it is
+    # not a first-pass backlog. Counting it kept the full-port and UDP sweeps waiting, and the project's few assessment slots busy, for ever.
+    # unresolved_archive.recheck resolves it again every few hours and puts it back here the moment it has an address.
+    no_address = HostState.objects.filter(project=project, host=OuterRef('name'), unresolved_checks__gte=1,
+                                          unresolved_last_at__gte=at - COUNTS_FOR)
     rows = (Subdomain.objects.filter(target_domain__project=project)
-            .annotate(covered=Exists(completed), recent_attempt=Exists(attempts),
-                      active_scan=Exists(active), excluded_name=Exists(excluded), archived_name=Exists(archived))
-            .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False))
+            .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
+                      excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
+            .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))
     due_ids = list(rows.order_by('id').values_list('id', flat=True)[:limit]) if limit else []
     count = (rows.order_by().values('name').distinct().count()) if need_count else None
     return count, due_ids

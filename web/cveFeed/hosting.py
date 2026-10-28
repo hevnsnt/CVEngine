@@ -52,6 +52,31 @@ REVERSE_INFRA = (
     (".linodeusercontent.com", "Linode"), (".vultrusercontent.com", "Vultr"), (".your-server.de", "Hetzner"),
 )
 SHARED_KINDS = ("paas", "cdn", "storage", "saas")
+# Address ranges a provider publishes for its shared edge (Cloudflare's, https://www.cloudflare.com/ips/): a customer's name proxied through
+# it answers from these addresses, whatever its recorded CNAME or Server header says, and they are never the customer's machines to test.
+PROVIDER_RANGES = (
+    ("Cloudflare", "cdn", ("173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
+                           "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+                           "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22", "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
+                           "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32")),
+)
+_RANGES = None
+
+
+def provider_range(address):
+    """``(provider, kind)`` when ``address`` is inside a provider's published shared-edge range, else ``None``."""
+    import ipaddress
+    global _RANGES
+    if _RANGES is None:
+        _RANGES = [(provider, kind, [ipaddress.ip_network(n) for n in nets]) for provider, kind, nets in PROVIDER_RANGES]
+    try:
+        ip = ipaddress.ip_address(str(address).strip())
+    except ValueError:
+        return None
+    for provider, kind, nets in _RANGES:
+        if any(ip.version == net.version and ip in net for net in nets):
+            return provider, kind
+    return None
 _LABEL = re.compile(r"[^a-z0-9.-]")
 
 
@@ -141,9 +166,13 @@ def shared_by_address(addresses, lookup=canonical_name):
     wanted = sorted({a for a in addresses if a})
     if not wanted:
         return {}
+    found, lookups = {}, 0
+    for address in wanted:  # the provider's own published range decides first, whatever the names on the address say
+        known = provider_range(address)
+        if known:
+            found[address] = {"provider": known[0], "kind": known[1], "shared_ip": True, "infrastructure": "", "evidence": [f"in {known[0]}'s published address range"]}
     rows = Subdomain.objects.filter(ip_addresses__address__in=wanted).values_list(
         "ip_addresses__address", "name", "cname", "webserver", "cdn_name", "is_cdn", "ip_addresses__is_cdn").distinct()
-    found, lookups = {}, 0
     for address, name, cname, webserver, cdn_name, sub_cdn, ip_cdn in rows:
         if address in found:
             continue

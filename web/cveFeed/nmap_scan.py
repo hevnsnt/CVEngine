@@ -6,6 +6,7 @@ one consistent picture regardless of which tool found what.
 """
 import logging
 import os
+import re
 import subprocess
 import tempfile
 
@@ -132,11 +133,41 @@ def build_targets(ips, limit=MAX_TARGETS):
     return sorted({i for i in ips if i})[:limit]
 
 
+def _is_ipv6(target):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(target).strip().strip('[]')).version == 6
+    except ValueError:
+        return False
+
+
+_HOST_START = re.compile(r'<host[\s>]')
+
+
+def merge_xml(first, second):
+    """``first`` (an nmap XML report) with the ``<host>`` elements of ``second`` added before its closing tag, so one report can answer for an
+    IPv4 run and an IPv6 run (nmap takes one address family per run). A report with no hosts adds nothing."""
+    start, end = _HOST_START.search(second or ''), (second or '').rfind('</host>')
+    closing = (first or '').rfind('</nmaprun>')
+    if not start or end < 0 or closing < 0:
+        return first if closing >= 0 or not start else second
+    return first[:closing] + second[start.start():end + len('</host>')] + '\n' + first[closing:]
+
+
 def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, before_launch=None):
-    """Write ``targets`` to a scratch file and run nmap against them, returning its XML report text. The run waits its
+    """Write ``targets`` to a scratch file and run nmap against them, returning its XML report text. nmap scans one address family per run
+    and needs ``-6`` for IPv6 (without it an IPv6 address is "failed to resolve" and the report has no host), so IPv6 targets run on their own
+    with ``-6`` and their hosts are merged into the one report returned. The run waits its
     turn for memory (as heavy job ``kind``, for at most ``wait_timeout`` seconds) and raises reNgine.resources.MemoryKill if it
     had to be stopped to protect the container. ``before_launch`` may raise to revoke a job after memory admission,
     immediately before process creation; it must re-read any authorization state that could change during the wait."""
+    v6 = [t for t in targets if _is_ipv6(t)]
+    if v6:
+        v4 = [t for t in targets if not _is_ipv6(t)]
+        if v4:
+            first = run_nmap_xml(v4, flags, host_timeout, kind, wait_timeout, before_launch)
+            return merge_xml(first, run_nmap_xml(v6, flags, host_timeout, kind, wait_timeout, before_launch))
+        flags = ['-6', *[f for f in flags if f != '-6']]
     from targetApp.target_types import refuse_local
     refuse_local('nmap')
     from reNgine import resources
