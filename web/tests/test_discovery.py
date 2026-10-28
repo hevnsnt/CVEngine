@@ -868,6 +868,11 @@ class DiscoveryCountsTests(TestCase):
 		ProjectMembership.objects.create(user=user, project=project, role='user')
 		d = client_for(user).get(f'/cve/api/discovery?scan={scan.id}').json()
 		self.assertEqual(d['counts'], {'hosts': 3, 'ips': 2, 'ports': 4})
+		self.assertEqual(d['scan']['error'], '')
+		scan.scan_status, scan.error_message = 0, 'bbot exited with code 2'
+		scan.save()
+		d = client_for(user).get(f'/cve/api/discovery?scan={scan.id}').json()
+		self.assertEqual((d['scan']['status'], d['scan']['error']), (0, 'bbot exited with code 2'))  # the badge shows why on hover
 
 	def test_counts_total_every_live_host_not_only_the_followed_scan(self):
 		"""The graph drawn above the ticker is the whole project's live map (every host a completed scan or rescan has

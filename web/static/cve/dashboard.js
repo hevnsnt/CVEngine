@@ -584,14 +584,18 @@ async function pollDiscovery() {
       $("d-ticker").textContent = "";
       return pollDiscovery();
     }
+    // a badge for a scan that is queued, running or went wrong; a finished one is already said by the line below
     const badge = $("d-status");
-    badge.style.display = "";
+    badge.style.display = d.scan.status === 2 ? "none" : "";
     badge.textContent =
       d.scan.status === -1 && d.scan.queue_position != null
         ? `queued, ${d.scan.queue_position} ahead`
         : STATUS[d.scan.status] || d.scan.status;
     badge.className = `badge ${d.scan.status === 1 ? "running" : d.scan.status === 2 ? "success" : d.scan.status === 0 ? "failed" : ""}`;
     followedProject = d.scan.project || slug || "";
+    badge.title = d.scan.error || "";
+    if (followedProject) badge.href = `/cve/${encodeURIComponent(followedProject)}/scans/${d.scan.id}/`;
+    else badge.removeAttribute("href");
     const target = $("d-target");
     target.textContent = "";
     linkify(
