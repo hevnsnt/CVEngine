@@ -928,6 +928,7 @@ def live_overview(ctx):
     for agent_id in ids:
         finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
     queued = SentinelTask.objects.filter(status='queued').count()
+    orgs, org_of = _visible_orgs(ctx.user)
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)
@@ -940,7 +941,7 @@ def live_overview(ctx):
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
             'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
-            'problem': eff.problem or '',
+            'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'project': t.project.slug, 'scan_id': t.scan_id,
                          'since': svc._iso(t.accepted_at or t.claimed_at), 'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],
             'recent': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'project': t.project.slug, 'finished': svc._iso(t.finished_at),
@@ -948,8 +949,37 @@ def live_overview(ctx):
                         'error': t.error} for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
                       'failed_24h': st.get('failed_24h', 0), 'average_seconds': int(st['seconds'] / st['timed']) if st.get('timed') else None}})
+    from cveFeed import internal_view
+    networks = internal_view.declared_networks()
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
-            'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out}
+            'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out,
+            'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()]}
+
+
+def _visible_orgs(user):
+    """``({slug: name}, {project_slug: org_slug})`` of the organizations ``user`` may read, by name: the groups of the Sentinels page.
+    A Sentinel's scope may name others (an owner in two tenants); those are never shown to this user."""
+    from dashboard.models import Org, Project
+    allowed = roles.allowed_project_ids(user)
+    projects = Project.objects.exclude(org=None) if allowed is None else Project.objects.filter(pk__in=allowed).exclude(org=None)
+    org_of = dict(projects.values_list('slug', 'org__slug'))
+    if user.is_superuser:
+        org_ids = Org.objects.values('id')
+    else:
+        org_ids = set(projects.values_list('org_id', flat=True)) | roles.user_org_ids(user)
+    orgs = dict(Org.objects.filter(pk__in=org_ids).order_by('name', 'slug').values_list('slug', 'name'))
+    return orgs, org_of
+
+
+def _coverage(agent, orgs, org_of):
+    """How far a Sentinel's declared scope reaches, for grouping it: ``instance`` (every organization), else the visible organizations it
+    names directly or through one of their projects."""
+    scope = agent.scope or {}
+    if scope.get('instance'):
+        return {'scope_level': 'instance', 'orgs': []}
+    named = [o for o in scope.get('orgs') or [] if o in orgs]
+    via = [org_of[p] for p in scope.get('projects') or [] if p in org_of]
+    return {'scope_level': 'org' if named else 'project', 'orgs': sorted(set(named) | set(via))}
 
 
 def task_status_counts(agent_ids):
