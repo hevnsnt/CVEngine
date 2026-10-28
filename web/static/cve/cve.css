@@ -1610,3 +1610,4 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
   .strip.in-cell .hy-top{margin-top:4px;gap:2px}
   .strip.in-cell .hy-top li{font-size:11px}
 }
+.map[data-slim="1"] .hx .hx-target{display:none}

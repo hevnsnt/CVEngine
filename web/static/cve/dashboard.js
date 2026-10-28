@@ -243,7 +243,7 @@ const MAP_MIN_SCORE = 30; // hosts that score lower are left off the map (they a
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
-  { name: "rich", size: "xl", w: 124, h: 92 },
+  { name: "rich", size: "xl", w: 116, h: 92 },
   { name: "card", size: "xl", w: 92, h: 64 },
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
@@ -284,6 +284,7 @@ function layoutMap() {
   map.dataset.size = plan.tier.size;
   map.dataset.tier = plan.tier.name;
   map.dataset.narrow = plan.tw < 170 ? "1" : "0"; // narrow tiles drop the long "why" lines, which would only be cut off
+  map.dataset.slim = plan.tw < 132 ? "1" : "0"; // tiles this narrow drop the target line, which would be cut off mid-word
   map.dataset.lines = String(plan.tier.name === "rich" ? Math.max(1, Math.min(5, Math.floor((plan.th - 70) / 15))) : 0);
   map.style.setProperty("--cols", plan.cols);
   map.style.setProperty("--rows", plan.rows);
