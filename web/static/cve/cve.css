@@ -1707,3 +1707,24 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .ak-check{display:flex;gap:8px;align-items:flex-start}
 @media (max-width:640px){.ak-scope{grid-template-columns:1fr}}
 @keyframes orb-breathe{0%,100%{transform:scale(.92);opacity:.7}50%{transform:scale(1.12);opacity:1}}
+
+/* ---- Sentinels page: version, update and settings ---- */
+.ss-version{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:8px 0;border-top:1px dashed var(--line)}
+.ss-vline{display:flex;align-items:center;gap:8px;margin:0;font-size:12.5px;flex:1 1 auto;min-width:0}
+.ss-vline b{font-size:12.5px}
+.ss-detail{flex-basis:100%;margin:0;font-size:12px;overflow-wrap:anywhere}
+.ss-actions{display:flex;gap:6px}
+.ss-reset[hidden]{display:none}
+.ss-rows{display:flex;flex-direction:column;gap:2px;margin:12px 0}
+.ss-row{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:12px 0;border-top:1px solid var(--line)}
+.ss-row-head{display:flex;align-items:baseline;gap:10px;min-width:0}
+.ss-label{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.ss-now{font-size:14px;overflow-wrap:anywhere}
+.ss-src{grid-column:1;margin:0;font-size:12px}
+.ss-row .field{grid-column:1/-1;margin:6px 0 0}
+.ss-reset{grid-column:2;grid-row:1/3;align-self:start}
+.ss-kinds{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 12px}
+.ss-kind{display:flex;align-items:center;gap:6px;font-weight:400;font-size:13px}
+.ss-kind input{width:auto;min-height:0}
+.ss-msg{margin:0}
+@media (max-width:640px){.ss-row{grid-template-columns:1fr}.ss-reset{grid-column:1;grid-row:auto;justify-self:start}}
