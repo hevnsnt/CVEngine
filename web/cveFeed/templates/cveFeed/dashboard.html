@@ -20,15 +20,6 @@
     <div class="meter" role="img" aria-label="Share of hosts that are exposed"><i id="m-exposed"></i></div>
     <p>A host is exposed when a CVE matches it (one the AI has not ruled out), or an open finding is medium or worse.</p>
   </a>
-  <div class="cell" id="c-temps">
-    <div class="cell-head"><span class="eyebrow">CVE intelligence feed</span><span class="eyebrow" id="temp-hint">Filter</span></div>
-    <p class="note">These are catalog advisories, not findings on your assets. Asset candidates are listed under CVE matches.</p>
-    <div class="temps">
-      <button class="temp fire" type="button" data-tier="fire" aria-pressed="false"><span class="nm">Fire</span><span class="bar"><i id="b-fire"></i></span><b id="s-fire">-</b></button>
-      <button class="temp smoke" type="button" data-tier="smoke" aria-pressed="false"><span class="nm">Smoke</span><span class="bar"><i id="b-smoke"></i></span><b id="s-smoke">-</b></button>
-      <button class="temp ice" type="button" data-tier="ice" aria-pressed="false"><span class="nm">Ice</span><span class="bar"><i id="b-ice"></i></span><b id="s-ice">-</b></button>
-    </div>
-  </div>
   </div>
 
   <div class="cell" id="c-map">
@@ -88,6 +79,12 @@
 <section class="card feed-card" style="margin-top:14px">
   <div class="feed-head">
     <h2>CVE feed</h2>
+    <p class="note feed-note">Catalog advisories, not findings on your assets. Asset candidates are listed under CVE matches.</p>
+    <div class="temps" role="group" aria-label="Filter the feed by temperature">
+      <button class="temp fire" type="button" data-tier="fire" aria-pressed="false"><span class="nm">Fire</span><b id="s-fire">-</b></button>
+      <button class="temp smoke" type="button" data-tier="smoke" aria-pressed="false"><span class="nm">Smoke</span><b id="s-smoke">-</b></button>
+      <button class="temp ice" type="button" data-tier="ice" aria-pressed="false"><span class="nm">Ice</span><b id="s-ice">-</b></button>
+    </div>
     <span class="note" id="feed-filter">All temperatures</span>
   </div>
   <ul class="feed" id="feed" aria-live="polite" tabindex="0" aria-label="CVE feed"></ul>

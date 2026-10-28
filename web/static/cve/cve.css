@@ -1568,3 +1568,23 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .ov-projects{border-top:1px solid var(--line);margin-top:6px;padding:6px 0 0 28px}
 .ov-fix{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--bg-sunk,var(--accent-soft));border:1px solid var(--line);border-radius:var(--r-m,6px);padding:8px 12px;margin-top:8px;overflow-x:auto}
 .ov-fix code{white-space:nowrap}
+
+/* ---- live dashboard: one-row counters, wider map tiles, the temperature counts live in the CVE feed card ---- */
+@media (min-width:1000px){
+  .panel.ticks{grid-template-columns:minmax(0,2.6fr) minmax(0,4.6fr) minmax(0,3.4fr)}
+  #c-map .map{min-height:600px}
+}
+@media (min-width:720px){
+  .strip{flex-wrap:nowrap}
+  .strip a{flex:1 1 0;min-width:0}
+  .strip a.wide{flex:2 1 0}
+}
+.feed-head .feed-note{margin:0;flex:1 1 260px;min-width:0}
+.feed-head .temps{flex-direction:row;gap:8px}
+.feed-head .temp{display:flex;align-items:center;gap:10px;width:auto;padding:6px 12px}
+.feed-head .temp b{font-size:16px}
+.feed-head .temp::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ink)}
+.feed-head .temp.fire::before{background:var(--fire)}
+.feed-head .temp.smoke::before{background:var(--smoke)}
+.feed-head .temp.ice::before{background:var(--ice)}
+.feed-head .temp[aria-pressed="true"]::before{box-shadow:0 0 0 2px var(--on-ink)}
