@@ -415,6 +415,8 @@ ROUTES = [
      _sentinel_instance_enroll),
     ('POST', r'sentinels/enroll', 'Same as GET: generates a fresh instance-wide one-time enrollment secret',
      _sentinel_instance_enroll),
+    ('GET', r'projects/(?P<slug>[-\w]+)/sentinels', 'The Sentinels whose scope covers this project (direct, via its organization or instance-wide) with status, liveness, capabilities and this project\'s task counts; {project, results: [...]}',
+     lambda r, c, slug, **k: sentinels.list_project_sentinels(c, slug)),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinel-tasks', 'Scan-stage work dispatched to Sentinels for this project (status, kind, agent_id, scan_id)',
      lambda r, c, slug, **k: sentinels.list_tasks(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/sentinel-tasks/(?P<task_id>\d+)/cancel', 'Cancel a queued or leased SentinelTask',
