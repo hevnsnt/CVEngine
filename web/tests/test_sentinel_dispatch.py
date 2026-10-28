@@ -1,6 +1,7 @@
 """Dispatch-or-local: the critical regression property (zero Sentinels behaves exactly as before this feature existed),
 plus the three dispatch points actually wired (nmap, naabu, nuclei light/targeted) succeeding and timing out."""
 import time
+from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -599,3 +600,55 @@ class WpscanDispatchTests(DispatchBase):
         task = SentinelTask.objects.get(kind='wpscan')
         self.assertEqual(task.status, 'expired')
         self.assertEqual(task.target['token'], '***')
+
+
+class CompletionCeilingTests(DispatchBase):
+    """A Sentinel that has claimed a task is given the time its kind needs, and a dead one is let go when its lease lapses."""
+
+    def test_each_kind_has_its_own_ceiling_well_above_the_old_ninety_seconds(self):
+        for kind in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas'):
+            self.assertGreaterEqual(dispatch._dispatch_timeout(kind), 300, kind)
+        self.assertGreater(dispatch._dispatch_timeout('nuclei_deep'), dispatch._dispatch_timeout('nuclei_light'))
+        self.assertEqual(dispatch._dispatch_timeout('something-new'), dispatch.DEFAULT_CEILING)
+
+    def test_the_operator_override_replaces_every_ceiling(self):
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_DISPATCH_TIMEOUT': '45'}):
+            self.assertEqual({dispatch._dispatch_timeout(k) for k in ('nmap', 'nuclei_deep', None)}, {45})
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_DISPATCH_TIMEOUT': 'soon'}):
+            self.assertEqual(dispatch._dispatch_timeout('nmap'), dispatch.COMPLETION_CEILING['nmap'])
+
+    def test_a_task_still_running_past_ninety_seconds_is_not_given_up_on(self):
+        agent = self.make_sentinel(['nuclei_light'])
+        result = {'outcome': 'done', 'findings': []}
+        clock = {'t': 1000.0}
+        real_sleep = time.sleep
+
+        def jump(_seconds):
+            clock['t'] += 5  # five simulated seconds per poll
+            SentinelTask.objects.filter(status='queued').update(agent=agent, status='running', lease_expires_at=timezone.now() + timedelta(minutes=5))
+            if clock['t'] > 1000 + 200:  # finished after 200 simulated seconds, well past the old 90
+                SentinelTask.objects.filter(status='running').update(status='done', result=result, finished_at=timezone.now())
+            real_sleep(0.001)
+        with mock.patch('agentapi.sentinel_dispatch.time.monotonic', side_effect=lambda: clock['t']), \
+                mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=jump), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
+            out = dispatch.dispatch_or_none(self.project, 'nuclei_light', {'targets': ['10.0.0.1'], 'tags': [], 'severities': []}, host='x')
+        self.assertEqual(out, result)
+        self.assertEqual(SentinelTask.objects.get().status, 'done')  # never expired, so never also run locally
+
+    def test_a_sentinel_that_stopped_heartbeating_is_let_go_when_its_lease_lapses_not_at_the_ceiling(self):
+        agent = self.make_sentinel(['nuclei_light'])
+        real_sleep = time.sleep
+        state = {'n': 0}
+
+        def die(_seconds):
+            state['n'] += 1
+            if state['n'] == 1:
+                SentinelTask.objects.filter(status='queued').update(agent=agent, status='running', lease_expires_at=timezone.now() - timedelta(minutes=1))
+            real_sleep(0.01)
+        with mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=die), \
+                mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
+            start = time.monotonic()
+            out = dispatch.dispatch_or_none(self.project, 'nuclei_light', {'targets': ['10.0.0.1'], 'tags': [], 'severities': []}, host='x')
+        self.assertIsNone(out)
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(SentinelTask.objects.get().status, 'expired')

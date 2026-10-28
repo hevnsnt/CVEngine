@@ -31,15 +31,27 @@ RESOLVE_WORKERS = 16  # matches targetApp.target_types.blocked_names: one bounde
 RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 
 
-def _dispatch_timeout():
-    """CVENGINE_SENTINEL_DISPATCH_TIMEOUT: seconds a stage waits for a dispatched Sentinel task to *finish* once a
-    Sentinel has claimed it, before falling back to running the tool locally. Default 90s: long enough for a Sentinel on
-    an ordinary network to run and report a single chunk, short enough that a quiet or overloaded Sentinel never
-    meaningfully delays a scan."""
-    try:
-        return max(1, int(os.environ.get('CVENGINE_SENTINEL_DISPATCH_TIMEOUT', '90')))
-    except ValueError:
-        return 90
+# The longest a stage waits for a Sentinel that has claimed its task, by kind: a Sentinel that keeps heartbeating a running task is
+# doing the work, and a slow tool (nuclei over ten hosts, a full TLS audit) must not be run a second time locally because a short fixed
+# wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
+# the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes.
+COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600}
+DEFAULT_CEILING = 900
+REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
+
+
+def _dispatch_timeout(kind=None):
+    """Seconds a stage waits for a dispatched Sentinel task to *finish* once a Sentinel has claimed it, before falling back to running
+    the tool locally: ``COMPLETION_CEILING`` for the kind. ``CVENGINE_SENTINEL_DISPATCH_TIMEOUT``, when set, replaces every ceiling with
+    that one number (an operator who wants scans never to wait long, and the tests)."""
+    raw = os.environ.get('CVENGINE_SENTINEL_DISPATCH_TIMEOUT')
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return COMPLETION_CEILING.get(kind, DEFAULT_CEILING)
 
 
 def _claim_timeout():
@@ -87,7 +99,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from cveFeed import activity
     if not sentinel_broker.any_scanner_for(project, kind):
         return None
-    timeout = _dispatch_timeout() if timeout is None else timeout
+    timeout = _dispatch_timeout(kind) if timeout is None else timeout
     task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
                                        ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
     label = _label(host, ips)
@@ -96,11 +108,15 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     deadline = time.monotonic() + timeout
     claim_deadline = time.monotonic() + min(_claim_timeout(), timeout)
     never_claimed = False
+    last_reap = time.monotonic()
     while True:
         task.refresh_from_db()
         if task.status in ('done', 'failed', 'expired'):
             break
         now = time.monotonic()
+        if now - last_reap >= REAP_EVERY:  # a Sentinel that stopped heartbeating loses its lease here, not only when something else asks
+            sentinel_broker.reap_expired()
+            last_reap = now
         if task.status == 'queued' and now >= claim_deadline:
             never_claimed = True
             sentinel_broker.expire(task, 'no Sentinel claimed the task in time; the stage fell back to local execution')
