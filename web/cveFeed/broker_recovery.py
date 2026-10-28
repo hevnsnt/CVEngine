@@ -62,13 +62,41 @@ def _task_ids(raw):
     return out
 
 
-def live_task_ids(app=None, inspect_timeout=3):
-    """The set of Celery task ids that still exist, or None when that cannot be told (no Redis broker, a long queue, no worker
-    answered). None means the caller must not conclude that anything is orphaned. Never raises."""
+SCAN_TASKS = ('run_bbot_discovery', 'run_internal_scan')  # tasks whose first argument is a ScanHistory id
+
+
+def _scan_ref(item):
+    """The scan id a queued scan task message is for (``(args, kwargs, embed)`` is its body, base64 or plain JSON), or None."""
+    import base64
+    headers = item.get('headers') if isinstance(item, dict) else None
+    if not isinstance(headers, dict) or headers.get('task') not in SCAN_TASKS:
+        return None
+    try:
+        body = item.get('body')
+        if (item.get('properties') or {}).get('body_encoding') == 'base64':
+            body = base64.b64decode(body)
+        args = json.loads(body)[0]
+        return int(args[0])
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+
+
+def _scan_refs(raw):
+    try:
+        found = json.loads(raw)
+    except ValueError:
+        return []
+    return [r for r in (_scan_ref(i) for i in (found if isinstance(found, list) else [found])) if r is not None]
+
+
+def live_tasks(app=None, inspect_timeout=3):
+    """``(task ids, scan ids)`` of the Celery tasks that still exist - in a queue, held unacknowledged, or reserved, scheduled or active in
+    a worker - the scan ids being the ScanHistory ids the discovery and internal-scan tasks among them are for, or None when that cannot
+    be told (no Redis broker, a long queue, no worker answered). Never raises."""
     try:
         from reNgine.celery import app as default_app
         app = app or default_app
-        ids = set()
+        ids, scans = set(), set()
         with app.connection_for_read() as connection:
             channel = connection.default_channel
             client = getattr(channel, 'client', None)
@@ -82,8 +110,10 @@ def live_task_ids(app=None, inspect_timeout=3):
                 if size:
                     for raw in client.lrange(name, 0, -1):
                         ids.update(_task_ids(raw))
+                        scans.update(_scan_refs(raw))
             for raw in client.hvals(channel.unacked_key):
                 ids.update(_task_ids(raw))
+                scans.update(_scan_refs(raw))
         inspector = app.control.inspect(timeout=inspect_timeout)
         answered = False
         for call in (inspector.reserved, inspector.active, inspector.scheduled):
@@ -96,10 +126,22 @@ def live_task_ids(app=None, inspect_timeout=3):
                     task = task.get('request', task)  # scheduled() wraps the task request
                     if task.get('id'):
                         ids.add(task['id'])
-        return ids if answered else None
+                    if task.get('name') in SCAN_TASKS and task.get('args'):
+                        try:
+                            scans.add(int(task['args'][0]))
+                        except (ValueError, TypeError, IndexError):
+                            pass
+        return (ids, scans) if answered else None
     except Exception:  # noqa: BLE001
         logger.exception('could not list the Celery tasks that still exist')
         return None
+
+
+def live_task_ids(app=None, inspect_timeout=3):
+    """The set of Celery task ids that still exist, or None when that cannot be told (no Redis broker, a long queue, no worker
+    answered). None means the caller must not conclude that anything is orphaned. Never raises."""
+    found = live_tasks(app, inspect_timeout)
+    return None if found is None else found[0]
 
 
 def cached_live_task_ids(max_age=60):

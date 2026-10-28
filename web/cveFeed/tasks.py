@@ -1509,6 +1509,11 @@ def reap_stuck_jobs():
         activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',
                      status='done', requeued=again)
         counts['HostAssessment:requeued'] = again
+    scans = reaper.redispatch_queued_scans()
+    if scans:
+        activity.log('discovery', f'Queued {scans} discovery scan{"s" if scans != 1 else ""} again: their worker message was lost, most likely in a restart',
+                     status='done', requeued=scans)
+        counts['ScanHistory:requeued'] = scans
     return counts
 
 
