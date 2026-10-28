@@ -38,17 +38,32 @@ def any_scanner_for(project, kind):
     return sentinel_broker.any_scanner_for(project, kind)
 
 
+def _label(host, ips):
+    host = (host or '').strip()
+    if host:
+        return host
+    n = len(ips or [])
+    return f'{n} address{"es" if n != 1 else ""}' if n else 'its target'
+
+
 def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
     eligible Sentinel exists for ``project`` right now. Returns the task's typed ``result`` dict on success; ``None`` on
-    timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead."""
+    timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead. The hand-off
+    and the check-in each get one ``run_check`` activity line (same kind every other scan-stage line already uses, so
+    both the Live page and the Activity page show them with no changes of their own), so it is visible, in one place,
+    whenever work actually left this server for a Sentinel and whether it came back."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
+    from cveFeed import activity
     if not sentinel_broker.any_scanner_for(project, kind):
         return None
     timeout = _dispatch_timeout() if timeout is None else timeout
     task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
                                        ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
+    label = _label(host, ips)
+    entry = activity.log('run_check', f'Handed {kind} work for {label} to a Sentinel', project=project, status='running',
+                         scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk)
     deadline = time.monotonic() + timeout
     while True:
         task.refresh_from_db()
@@ -58,6 +73,16 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
             break
         time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+    sentinel = task.agent.name if task.agent_id else None
+    if task.status == 'done':
+        activity.settle(entry, 'done', message=f'Sentinel {sentinel} checked in {kind} work for {label}' if sentinel
+                        else f'A Sentinel checked in {kind} work for {label}')
+    elif task.status == 'failed':
+        reason = (task.error or (task.result or {}).get('error') or 'no reason given')[:180]
+        activity.settle(entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
+                        else f'A Sentinel reported {kind} failed for {label}: {reason}'))
+    else:  # expired: never claimed, or claimed but not reported back in time
+        activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
     return task.result if task.status == 'done' else None
 
 

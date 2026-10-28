@@ -611,7 +611,7 @@ def _clean_nuclei_result(body):
 
 
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
-             'nuclei_targeted': _clean_nuclei_result}
+             'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result}
 
 
 def clean_result(kind, body):
