@@ -26,6 +26,18 @@
     </div>
     <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
     <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization slug</label><input type="text" id="enroll-org" placeholder="org-slug"></div>
+    <div class="field"><label for="enroll-network">Where it runs</label>
+      <select id="enroll-network">
+        <option value="external">External: reaches the internet-facing targets</option>
+        <option value="internal">Internal: inside a private network (office LAN, VPC, VPN)</option>
+      </select>
+    </div>
+    <div class="field"><label for="enroll-profile">Size</label>
+      <select id="enroll-profile">
+        <option value="full">Full: also runs OpenVAS (several GB, hours of feed sync on first start)</option>
+        <option value="light">Light: nmap, naabu, nuclei, testssl and WPScan only</option>
+      </select>
+    </div>
     <button class="btn" type="button" id="enroll-go">Provision</button>
     <div id="enroll-out" class="msg ok" style="display:none" role="status"></div>
     <h2 style="margin:18px 0 8px">What a Sentinel needs</h2>
@@ -76,6 +88,7 @@
     } else {
       url = '/api/v1/sentinels/enroll?format=blob';
     }
+    url += '&network=' + document.getElementById('enroll-network').value + '&profile=' + document.getElementById('enroll-profile').value;
     api('POST', url).then(function (x) {
       enrollOut.style.display = 'block';
       if (x.ok) {
@@ -83,6 +96,9 @@
         var label = x.d.scope === 'project' ? x.d.project : x.d.scope === 'org' ? ('organization ' + x.d.org) : 'the whole instance';
         enrollOut.appendChild(el('span', '', 'One-time blob for ' + label + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Paste this into your Sentinel\'s CVENGINE_SENTINEL_BLOB and run it once; the Sentinel then keeps its own token.'));
         var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); enrollOut.appendChild(code);
+        var steps = x.d.setup || {};
+        enrollOut.appendChild(el('div', 'meta', 'Or run, on the machine, in the cloned repository (' + steps.network + ', ' + steps.profile + '):'));
+        var cmd = el('pre', 'code', steps.configure_alternative || ''); cmd.appendChild(copyBtn(function () { return steps.configure_alternative || ''; })); enrollOut.appendChild(cmd);
         enrollOut.appendChild(el('div', 'meta', 'server_url: ' + x.d.server_url));
       } else {
         enrollOut.className = 'msg err'; enrollOut.textContent = x.d.error || 'Could not generate an enrollment blob.';
