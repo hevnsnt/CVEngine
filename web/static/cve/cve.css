@@ -1566,3 +1566,5 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .ov-name{display:grid;gap:2px}
 .ov-org-head{padding-top:0}
 .ov-projects{border-top:1px solid var(--line);margin-top:6px;padding:6px 0 0 28px}
+.ov-fix{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--bg-sunk,var(--accent-soft));border:1px solid var(--line);border-radius:var(--r-m,6px);padding:8px 12px;margin-top:8px;overflow-x:auto}
+.ov-fix code{white-space:nowrap}

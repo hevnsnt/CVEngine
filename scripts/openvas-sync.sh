@@ -18,17 +18,18 @@ STATE=$(python3 scripts/update-state.py directory) || exit 1
 exec 9>"$STATE/openvas.lock"
 flock -n 9 || exit 0  # the previous request is still being carried out
 
-report() {  # report ok|failed [message]: one line of JSON, written whole so the app never reads half of it
+report() {  # report applying|ok|failed [message]: one line of JSON, written whole so the app never reads half of it
   local ok=false message
   [ "$1" = ok ] && ok=true
   message=$(printf '%s' "${2:-}" | tr -cd 'A-Za-z0-9 .,:;()_/-' | head -c 200)
-  printf '{"want":"%s","ok":%s,"error":"%s","at":%s}\n' "$want" "$ok" "$message" "$(date +%s)" >"$APPLIED.tmp" && mv -f "$APPLIED.tmp" "$APPLIED"
+  printf '{"want":"%s","state":"%s","ok":%s,"error":"%s","at":%s}\n' "$want" "$1" "$ok" "$message" "$(date +%s)" >"$APPLIED.tmp" && mv -f "$APPLIED.tmp" "$APPLIED"
 }
 
 . scripts/compose-layout.sh
 cvengine_compose_layout || { report failed "the Compose layout could not be worked out"; exit 1; }
 
 if [ "$want" = off ]; then
+  report applying
   if "${COMPOSE[@]}" --profile openvas stop "${SERVICES[@]}"; then report ok; else report failed "stopping the containers failed"; fi
   exit 0
 fi
@@ -40,4 +41,5 @@ if [ "${free:-0}" -lt "$floor" ]; then
   report failed "only $free MB of memory is free and OpenVAS needs $floor MB; free some and switch it on again"
   exit 1
 fi
+report applying
 if "${COMPOSE[@]}" --profile openvas up -d "${SERVICES[@]}"; then report ok; else report failed "starting the containers failed, see web/.openvas-log"; fi

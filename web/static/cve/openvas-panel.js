@@ -12,26 +12,48 @@ function statusCard(data, redraw) {
   const c = el("div", "card ov-status");
   const head = el("div", "ov-head");
   head.append(el("h2", "", "OpenVAS scanner"), badge(e.headline, TONE[e.state] || ""));
-  c.append(head, el("p", "note", e.detail));
-  if (e.state === "off" || e.state === "problem") {
+  c.append(head);
+  if (e.detail) c.append(el("p", "note", e.detail));
+  if (e.state === "off") {
     c.append(
       el(
         "p",
         "note",
-        "OpenVAS is a second vulnerability scanner that looks deeper than the built-in checks. It uses about 4 GB of memory while it runs and scans slowly on purpose, a few hosts at a time, without denial-of-service or brute-force tests.",
+        e.can_switch
+          ? "OpenVAS is a second vulnerability scanner that looks deeper than the built-in checks. While it runs it uses about 4 GB of memory, and it scans slowly on purpose, a few hosts at a time, without denial-of-service or brute-force tests. Switching it on starts it and sets everything up; organization admins can then choose what it scans."
+          : "An App Admin has to switch OpenVAS on first. After that you can choose which of your organizations and projects it scans.",
       ),
     );
   }
+  if (e.fix) {
+    const box = el("div", "ov-fix");
+    box.append(el("code", "mono", e.fix));
+    box.append(
+      button("Copy", async () => {
+        await navigator.clipboard.writeText(e.fix);
+        toast("Copied");
+      }, "btn ghost sm"),
+    );
+    c.append(box);
+  }
   const actions = el("div", "ov-actions");
-  if (e.state === "problem") {
+  if (e.state === "off" && e.can_switch) {
     actions.append(
-      button("Try again", async () => {
-        await api("POST", `${A}/check`, {});
+      button("Switch on", async () => {
+        await api("PUT", A, { enabled: true });
         await redraw();
       }),
     );
   }
-  if (e.enabled && e.can_switch_off) {
+  if (e.state === "problem" || e.fix) {
+    actions.append(
+      button(e.fix ? "Check again" : "Try again", async () => {
+        await api("POST", `${A}/check`, {});
+        await redraw();
+      }, e.fix ? "btn ghost" : "btn"),
+    );
+  }
+  if (e.enabled && e.can_switch) {
     actions.append(
       button("Switch off", async () => {
         await api("PUT", A, { enabled: false });
@@ -44,12 +66,12 @@ function statusCard(data, redraw) {
   return c;
 }
 
-function projectRow(org, project, save) {
+function projectRow(org, project, save, on) {
   const id = `ov-p${project.id}`;
   const row = el("label", "ov-row", null, { for: id });
   const box = el("input", "", null, { type: "checkbox", id });
   box.checked = org.enabled || project.enabled;
-  box.disabled = org.enabled; // the organization choice covers it
+  box.disabled = org.enabled || !on; // the organization choice covers it
   box.onchange = () => save({ projects: { [project.id]: box.checked } });
   const text = el("span", "ov-name");
   text.append(el("span", "", project.name));
@@ -62,12 +84,13 @@ function projectRow(org, project, save) {
   return row;
 }
 
-function orgCard(org, save) {
+function orgCard(org, save, on) {
   const c = el("div", "card ov-org");
   const id = `ov-o${org.id}`;
   const head = el("label", "ov-row ov-org-head", null, { for: id });
   const box = el("input", "", null, { type: "checkbox", id });
   box.checked = org.enabled;
+  box.disabled = !on;
   box.onchange = () => save({ orgs: { [org.id]: box.checked } });
   const name = el("span", "ov-name");
   name.append(el("b", "", org.name), el("span", "note", `Scan every project in ${org.name}, including ones added later`));
@@ -75,7 +98,7 @@ function orgCard(org, save) {
   c.append(head);
   if (org.projects.length) {
     const list = el("div", "ov-projects");
-    org.projects.forEach((p) => list.append(projectRow(org, p, save)));
+    org.projects.forEach((p) => list.append(projectRow(org, p, save, on)));
     c.append(list);
   } else c.append(el("p", "note", "This organization has no projects yet."));
   return c;
@@ -102,7 +125,7 @@ export async function openvasPanel(mount) {
     } else {
       wrap.append(el("h3", "ov-h", data.who === "app_admin" ? "What should it scan?" : "What should it scan in your organizations?"));
       wrap.append(el("p", "note", "Pick whole organizations or single projects. Only hosts that belong to them are scanned, and excluded, archived and private-network hosts are always left out."));
-      data.orgs.forEach((o) => wrap.append(orgCard(o, save)));
+      data.orgs.forEach((o) => wrap.append(orgCard(o, save, data.engine.enabled)));
     }
     clearTimeout(timer);
     // while it starts or loads its feeds the page asks the worker to look again, which also makes the login the moment the scanner answers

@@ -1188,45 +1188,59 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         r = (client.get(url) if method == 'GET' else getattr(client, method.lower())(url, json.dumps(body or {}), **kw))
         return r.status_code, (r.json() if r.content else None)
 
+    def switch_on(self):
+        self.assertEqual(self.call(self.root, 'PUT', body={'enabled': True})[0], 200)
+
     def test_an_org_admin_sees_only_their_organization(self):
         code, data = self.call(self.org_admin, 'GET')
         self.assertEqual(code, 200)
         self.assertEqual([o['name'] for o in data['orgs']], ['R'])
         self.assertEqual(data['who'], 'org_admin')
-        self.assertFalse(data['engine']['can_switch_off'])
+        self.assertFalse(data['engine']['can_switch'])
 
     def test_an_app_admin_sees_every_organization(self):
         _code, data = self.call(self.root, 'GET')
         self.assertTrue({'R', 'Other'} <= {o['name'] for o in data['orgs']})
-        self.assertTrue(data['engine']['can_switch_off'])
+        self.assertTrue(data['engine']['can_switch'])
 
     def test_a_plain_member_gets_nothing(self):
         self.assertEqual(self.call(self.member, 'GET')[0], 403)
         self.assertEqual(self.call(self.member, 'PUT', body={'orgs': {str(self.org.pk): True}})[0], 403)
 
-    def test_choosing_a_project_switches_the_addon_on_and_asks_the_host_to_start_it(self):
+    def test_an_app_admin_has_to_switch_it_on_before_an_org_admin_can_choose(self):
         code, data = self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})
+        self.assertEqual(code, 409)
+        self.assertIn('App Admin has to switch OpenVAS on first', data['error'])
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'enabled': True})[0], 403)
+        self.assertFalse(OpenvasSettings.current().enabled)
+        self.assertFalse(OpenvasProject.objects.exists())
+        code, data = self.call(self.root, 'PUT', body={'enabled': True})
         self.assertEqual(code, 200)
-        self.assertTrue(OpenvasSettings.current().enabled)
-        self.assertTrue(OpenvasProject.objects.get(project=self.project).enabled)
         self.wanted.assert_called_with(True)
         self.assertIn(data['engine']['state'], ('starting', 'problem'))
         from django_celery_beat.models import PeriodicTask
         self.assertTrue(PeriodicTask.objects.get(name=ov.BEAT_NAME).enabled)
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})[0], 200)
+        self.assertTrue(OpenvasProject.objects.get(project=self.project).enabled)
+
+    def test_while_it_is_off_choices_can_still_be_cleared(self):
+        self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): False}})[0], 200)
 
     def test_choosing_several_organizations_and_projects_at_once(self):
+        self.switch_on()
         body = {'orgs': {str(self.org.pk): True}, 'projects': {}}
         self.assertEqual(self.call(self.root, 'PUT', body={**body, 'orgs': {str(self.org.pk): True, str(self.other_org.pk): True}})[0], 200)
         self.assertEqual(set(OpenvasOrg.objects.filter(enabled=True).values_list('org_id', flat=True)), {self.org.pk, self.other_org.pk})
 
     def test_an_org_admin_cannot_choose_someone_elses_organization_or_project(self):
+        self.switch_on()
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'orgs': {str(self.other_org.pk): True}})[0], 403)
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {str(self.other.pk): True}})[0], 404)  # not even visible to them
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {'99999': True}})[0], 404)
         self.assertFalse(OpenvasOrg.objects.exists() or OpenvasProject.objects.exists())
-        self.assertFalse(OpenvasSettings.current().enabled)
 
     def test_only_an_app_admin_switches_it_off_for_everyone(self):
+        self.switch_on()
         self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'enabled': False})[0], 403)
         self.assertTrue(OpenvasSettings.current().enabled)
@@ -1241,6 +1255,7 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertEqual(self.call(self.root, 'PUT', body={'orgs': [1]})[0], 400)
 
     def test_every_choice_is_in_the_audit_log(self):
+        self.switch_on()
         self.call(self.org_admin, 'PUT', body={'orgs': {str(self.org.pk): True}})
         actions = set(AuditLog.objects.values_list('action', flat=True))
         self.assertIn('openvas.org.update', actions)
@@ -1285,8 +1300,26 @@ class HostWatcherTests(SimpleTestCase):
             openvas_admin.request_containers(False)
             self.assertEqual(Path(tmp, '.openvas-wanted').read_text(), 'off\n')
             self.assertIsNone(openvas_admin.host_report())
-            Path(tmp, '.openvas-applied').write_text('{"want":"on","ok":false,"error":"only 900 MB free","at":1700000000}')
+            Path(tmp, '.openvas-applied').write_text('{"want":"on","state":"failed","ok":false,"error":"only 900 MB free","at":1700000000}')
             self.assertEqual(openvas_admin.host_report()['error'], 'only 900 MB free')
+            import time
+            Path(tmp, '.openvas-applied').write_text('{"want":"on","state":"applying","ok":false,"error":"","at":%d}' % time.time())
+            self.assertEqual(openvas_admin.host_report()['state'], 'applying')
+            Path(tmp, '.openvas-applied').write_text('{"want":"on","state":"applying","ok":false,"error":"","at":%d}' % (time.time() - 7200))
+            self.assertEqual(openvas_admin.host_report()['state'], 'failed')  # the script died midway
+
+    def test_the_status_names_the_missing_host_agent_with_the_command_to_install_it(self):
+        from cveFeed import openvas_admin
+        row = OpenvasSettings(enabled=True)
+        with mock.patch('cveFeed.updater.host_updater', return_value={'seen': False, 'alive': False, 'age_seconds': None}), \
+                mock.patch.object(openvas_admin, 'host_report', return_value=None):
+            status = openvas_admin.engine_status(row)
+        self.assertEqual((status['state'], status['fix']), ('problem', 'scripts/install-updater.sh'))
+        with mock.patch('cveFeed.updater.host_updater', return_value={'seen': True, 'alive': True, 'age_seconds': 3}), \
+                mock.patch.object(openvas_admin, 'host_report', return_value=None):
+            self.assertEqual(openvas_admin.engine_status(row)['state'], 'starting')
+        with mock.patch.object(openvas_admin, 'host_report', return_value={'want': 'on', 'state': 'applying', 'error': '', 'at': 0}):
+            self.assertEqual(openvas_admin.engine_status(row)['state'], 'starting')
 
     def test_the_sync_script_accepts_only_on_and_off_and_lists_the_makefile_services(self):
         script = (ROOT / 'scripts' / 'openvas-sync.sh').read_text()
