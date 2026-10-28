@@ -84,10 +84,14 @@ def running_discovery(domain):
     return ScanHistory.objects.filter(_active_filter(), domain=domain).order_by('-id').first()
 
 
-def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False):
+def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_by=None):
     """Queue the streaming bbot task for each domain, in the order given, with rows created in bulk. Returns one ScanHistory
     per domain; a domain that is already being discovered returns that scan instead of a second, since two runs of one target
-    only compete for memory. Scans are created queued (-1); the pipeline marks one running when a worker starts it."""
+    only compete for memory. Scans are created queued (-1); the pipeline marks one running when a worker starts it.
+
+    ``initiated_by`` records who asked for this scan (a person behind an API/MCP call); leave it unset for a scan the
+    system itself started (the setup wizard, the work conductor, a scheduled sweep) - ``ScanHistory.initiated_by`` stays
+    null, the same as it already does for every automatic scan."""
     from cveFeed.tasks import run_bbot_discovery
     from startScan.models import ScanActivity, ScanHistory
     domains = list(domains)
@@ -105,7 +109,8 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False):
         for start in range(0, len(fresh), 500):
             part = fresh[start:start + 500]
             scans = ScanHistory.objects.bulk_create([
-                ScanHistory(domain=d, scan_type=engine, start_scan_date=now, scan_status=QUEUED, results_dir='/usr/src/scan_results')
+                ScanHistory(domain=d, scan_type=engine, start_scan_date=now, scan_status=QUEUED, results_dir='/usr/src/scan_results',
+                           initiated_by=initiated_by)
                 for d in part])
             ScanActivity.objects.bulk_create([
                 ScanActivity(scan_of=scan, title='BBOT discovery', name='bbot_discovery', time=now, status=QUEUED) for scan in scans])
@@ -123,9 +128,9 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False):
     return [created.get(d.id) or active[d.id] for d in domains]
 
 
-def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False):
+def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_by=None):
     """Queue discovery of one domain (see ``start_discoveries``). Returns the ScanHistory."""
-    return start_discoveries([domain], mode, quiet)[0]
+    return start_discoveries([domain], mode, quiet, initiated_by=initiated_by)[0]
 
 
 def queued_ids():

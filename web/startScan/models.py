@@ -48,7 +48,7 @@ class ScanHistory(models.Model):
 	employees = models.ManyToManyField('Employee', related_name='employees', blank=True)
 	buckets = models.ManyToManyField('S3Bucket', related_name='buckets', blank=True)
 	dorks = models.ManyToManyField('Dork', related_name='dorks', blank=True)
-	initiated_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='initiated_scans', blank=True, null=True)
+	initiated_by = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='initiated_scans', blank=True, null=True)
 	aborted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='aborted_scans')
 	# scan related configs, prefix config fields with cfg_
 	cfg_out_of_scope_subdomains = ArrayField(

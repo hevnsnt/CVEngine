@@ -526,7 +526,7 @@ def start_scan(ctx, slug, target_id, engine_id=None):
     _refuse_excluded(project, domain)
     if engine_id is not None and not EngineType.objects.filter(id=engine_id).exists():
         raise ApiError(404, 'engine not found')
-    scan = start_discovery(domain)
+    scan = start_discovery(domain, initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'queued'}
 
 
@@ -636,7 +636,7 @@ def discover_target(ctx, slug, target_id, mode=None):
     if not domain:
         raise ApiError(404, 'target not found')
     _refuse_excluded(project, domain)
-    scan = start_discovery(domain, mode) if mode else start_discovery(domain)
+    scan = start_discovery(domain, mode, initiated_by=ctx.user) if mode else start_discovery(domain, initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'started'}
 
 
@@ -733,13 +733,13 @@ BULK_MAX_ENTRIES = TARGET_EXPAND_CAP  # lines one bulk request may carry
 BULK_MAX_EXPANDED = TARGET_EXPAND_CAP  # rows one request may create after expanding ranges (a /8 per line is never built)
 
 
-def _start_discoveries(domains, mode, project_id):
+def _start_discoveries(domains, mode, project_id, initiated_by=None):
     """Queue discovery for each domain with one summary line in the AI feed instead of one per target."""
     from cveFeed import activity
     from cveFeed.discovery import start_discoveries
     from reNgine import bbot as bbot_lib
     mode = mode or bbot_lib.DEFAULT_MODE
-    scans = start_discoveries(domains, mode, quiet=True)
+    scans = start_discoveries(domains, mode, quiet=True, initiated_by=initiated_by)
     if scans:
         activity.log('discovery', f'Queued {mode} discovery of {len(scans)} target{"s" if len(scans) != 1 else ""}', project=project_id)
     return scans
@@ -944,7 +944,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             added = _add_targets(ctx, project.slug, entries, False, None)
             res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
             if discover and added['domains']:
-                scan_ids += [scan.id for scan in _start_discoveries(added['domains'], used, project.id)]
+                scan_ids += [scan.id for scan in _start_discoveries(added['domains'], used, project.id, initiated_by=ctx.user)]
         except ApiError as exc:
             res['error'] = exc.message
     return {'organization': org.name, 'organization_note': org_note, 'projects': results, 'created': sum(r['created'] for r in results),
@@ -989,13 +989,16 @@ def _add_targets(ctx, slug, values, discover, mode):
     if not entries:
         return {'received': len(patterns), 'created': 0, 'created_names': [], 'domains': [], 'already_exists': [], 'invalid': refused,
                 'excluded': excluded, 'discovery_started': 0, 'scan_ids': [], 'mode': mode, 'mode_note': None}
-    return add_entries(project, entries, discover, mode, excluded, refused)
+    return add_entries(project, entries, discover, mode, excluded, refused, initiated_by=ctx.user)
 
 
-def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=()):
+def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=(), initiated_by=None):
     """Add already-normalized targets to ``project``: the part of Add targets that does not depend on who is asking, so an automated
     source (the runZero import) goes through the same expansion, private-range policy, organization exclusions, organization-wide
-    uniqueness and discovery queueing. The caller has already checked that it may write to ``project``."""
+    uniqueness and discovery queueing. The caller has already checked that it may write to ``project``.
+
+    ``initiated_by`` is recorded on the ``ScanHistory`` rows discovery queues for the newly-created targets; left unset (as the
+    runZero import leaves it) for a source with no asking user."""
     from targetApp.target_types import DOMAIN
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
@@ -1030,7 +1033,7 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
     scan_ids, used, note = [], mode, None
     if discover and created:
-        scan_ids = [scan.id for scan in _start_discoveries(created, used, project.id)]
+        scan_ids = [scan.id for scan in _start_discoveries(created, used, project.id, initiated_by=initiated_by)]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
             'domains': created, 'already_exists': existing, 'invalid': invalid, 'excluded': excluded,
             'discovery_started': len(scan_ids), 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
