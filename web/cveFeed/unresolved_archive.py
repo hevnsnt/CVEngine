@@ -72,6 +72,54 @@ def record_attempt(project, domain, host, result, now=None):
     return 'bumped'
 
 
+RECHECK_EVERY = timedelta(hours=6)  # a host with a no-address streak is resolved again this often (DNS only, no scan)
+RECHECK_BATCH = 40  # hosts re-resolved per sweep
+COUNTS_FOR = timedelta(days=7)  # a streak whose last check is newer than this keeps the host out of the first-pass backlog (see coverage_topup)
+
+
+def recheck(now=None, batch=RECHECK_BATCH, resolver=None):
+    """Resolve again the hosts that were found to have no scannable address, a few at a time, and say why they have none.
+
+    A host whose name now resolves to a scannable address leaves the streak (it is due for a first pass again at once). One that still does
+    not keeps its streak and gets a note: ``private address`` (the name points inside a private network, which only a Sentinel inside that
+    network can scan, once the project declares the range) or ``no DNS answer`` (dangling). Only DNS is asked, so this costs seconds, not a
+    scan. Returns ``{'checked', 'resolved', 'private', 'no_dns'}``."""
+    import ipaddress
+    from cveFeed.discovery import resolve_names
+    from cveFeed.models import HostState
+    from targetApp.target_types import is_scannable_ip
+    now = now or timezone.now()
+    rows = list(HostState.objects.filter(archived_at__isnull=True, unresolved_checks__gte=1, unresolved_last_at__lte=now - RECHECK_EVERY)
+                .order_by('unresolved_last_at')[:batch])
+    out = {'checked': len(rows), 'resolved': 0, 'private': 0, 'no_dns': 0}
+    if not rows:
+        return out
+    found = {}
+    for name, address in (resolver or resolve_names)({r.host for r in rows}):
+        found.setdefault(name, set()).add(address)
+    for row in rows:
+        addresses = sorted(found.get(row.host, ()))
+        if any(is_scannable_ip(a, project=row.project_id if a == row.host else None) for a in addresses):
+            HostState.objects.filter(pk=row.pk).update(unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0, resolution_note='')
+            out['resolved'] += 1
+            continue
+        private = [a for a in addresses if not _is_global(a, ipaddress)]
+        if private:
+            note, key = f'private address ({private[0]}): scannable only by a Sentinel inside that network, once the project declares the range', 'private'
+        else:
+            note, key = 'no DNS answer', 'no_dns'
+        out[key] += 1
+        HostState.objects.filter(pk=row.pk).update(unresolved_last_at=now, resolution_note=note[:160])
+    return out
+
+
+def _is_global(address, ipaddress):
+    try:
+        return ipaddress.ip_address(address).is_global
+    except ValueError:
+        return False
+
+
 def candidates(now=None):
     from cveFeed.models import HostState
     now = now or timezone.now()

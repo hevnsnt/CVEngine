@@ -411,3 +411,10 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Log archive and cleanup | Sundays at 03:23 UTC |
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
+
+## Keeping the Sentinels fed, and hosts with no address
+
+- **Hosts with no scannable address are not a backlog.** A name that resolves to nothing (dangling DNS), or only to a private address, has nothing to scan from this server. Once an assessment found that, the host leaves the first-pass backlog (`coverage_topup`, `assessment_review.host_coverage_due`) instead of holding the project's few assessment slots, and instead of making the full-port and UDP sweeps wait for ever (`backlog_exists`). `unresolved_archive.recheck` resolves such a host again every six hours (DNS only) and records why on `HostState.resolution_note`: `private address (...)` (it points inside a private network: declare the range in the project's internal networks and put a Sentinel with `network:internal` inside it) or `no DNS answer`. A host that resolves again is due at once. The dashboard's coverage counts them apart ("N with no address to scan (...)") from the hosts that are still waiting their turn.
+- **A Sentinel always has twice its capacity queued behind what it runs.** `feed_sentinels` (every minute) compares the tasks waiting for a Sentinel with twice the live Sentinels' slots and, when short, queues more host assessments in the projects they cover. The assessment caps (`host_assessment.caps`: 20 in all and 5 per project on their own) grow to three in flight per Sentinel slot, and `DISCOVERY_CONCURRENCY` now defaults to 8, because a pipeline that waits on a Sentinel holds a worker slot while it waits.
+- **IPv6** addresses are scanned with `nmap -6` (nmap takes one address family per run; a mixed list runs once per family and the reports are merged). Cloudflare's published ranges are a shared edge for both families and are never scanned.
+

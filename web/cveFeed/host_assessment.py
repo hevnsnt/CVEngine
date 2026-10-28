@@ -50,6 +50,24 @@ def active_count(project=None):
     return total - sum(1 for task_id in old if not task_id or task_id not in live)
 
 
+BASE_GLOBAL_CAP, BASE_PROJECT_CAP = 20, 5
+SENTINEL_QUEUE_FACTOR = 3  # assessments in flight per Sentinel slot: the slots working, plus twice as many waiting behind them
+
+
+def caps(project=None):
+    """``(global cap, per-project cap)`` of host assessments in flight. 20 and 5 on their own; with live Sentinels the work is mostly theirs to do
+    (an assessment waits on one for most of its stages), so more may be in flight: ``SENTINEL_QUEUE_FACTOR`` times the slots, so a Sentinel always has
+    twice its capacity queued behind what it is running, instead of idling between the few assessments a small cap lets through."""
+    try:
+        from agentapi import sentinel_broker
+        total = sentinel_broker.total_slots()
+        mine = sentinel_broker.project_slots(project) if project is not None else 0
+    except Exception:  # noqa: BLE001 - the base caps are always safe
+        return BASE_GLOBAL_CAP, BASE_PROJECT_CAP
+    return (max(BASE_GLOBAL_CAP, BASE_GLOBAL_CAP + SENTINEL_QUEUE_FACTOR * total),
+            max(BASE_PROJECT_CAP, SENTINEL_QUEUE_FACTOR * mine))
+
+
 def enqueue(project, sub, *, source='manual', user=None):
     """Accept only a stored host owned by this project; a model cannot supply a new target."""
     from cveFeed.exclusions import is_excluded
@@ -72,7 +90,8 @@ def enqueue(project, sub, *, source='manual', user=None):
     # inside a request would make "20 at once across the installation" mean 20 per user.
     active_scans = ScanHistory._base_manager.filter(Q(scan_status=-1) | Q(scan_status=1,
                                                                           start_scan_date__gte=timezone.now() - timedelta(hours=11)))
-    if active_count() >= 20 or active_count(project) >= 5 or active_scans.count() >= 20:
+    global_cap, project_cap = caps(project)
+    if active_count() >= global_cap or active_count(project) >= project_cap or active_scans.count() >= max(20, global_cap):
         raise RuntimeError('host assessment queue is at capacity; retry later')
     try:
         with transaction.atomic():

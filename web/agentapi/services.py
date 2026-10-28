@@ -1888,6 +1888,25 @@ def _heat_facets(project, qs):
     return counts, heat_by_id, total > HEAT_FACET_CAP
 
 
+def _unscannable_facet(qs, heat_by_id):
+    """``{count, private, no_dns, unknown}``: the hosts counted as ``unscanned`` that have no address a scanner can use, so "never scanned" can say
+    which are waiting their turn and which have nothing to scan. ``private`` points inside a private network (only a Sentinel inside it can scan
+    it, once the project declares the range), ``no_dns`` has no DNS answer, ``unknown`` has not been looked at yet (cveFeed.unresolved_archive)."""
+    from cveFeed.models import HostState
+    out = {'count': 0, 'private': 0, 'no_dns': 0, 'unknown': 0}
+    ids = [i for i, h in heat_by_id.items() if h == 'unscanned']
+    if not ids:
+        return out
+    rows = list(qs.order_by().filter(id__in=ids, ip_addresses__isnull=True).values_list('target_domain__project_id', 'name').distinct())
+    notes = {(p, h): n for p, h, n in HostState.objects.filter(
+        project_id__in={p for p, _n in rows}, host__in={n.lower() for _p, n in rows}).values_list('project_id', 'host', 'resolution_note')}
+    for project_id, name in rows:
+        note = notes.get((project_id, name.lower()), '')
+        out['count'] += 1
+        out['private' if note.startswith('private') else 'no_dns' if note.startswith('no DNS') else 'unknown'] += 1
+    return out
+
+
 SEARCH_FACET_FIELDS = ('port', 'product', 'tech', 'os', 'country')
 SEARCH_FACET_SIZE_DEFAULT = 10
 SEARCH_FACET_SIZE_MAX = 50
@@ -1984,13 +2003,14 @@ def search_hosts(ctx, slug, params):
     terms = parse_search(params.get('q'))
     qs = _internal_filter(search_host_rows(project, terms), params)
     heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
+    qs_all = qs  # the whole match of q, before the heat filter narrows it
     search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
     if heat:
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
-    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated, **search_facets}
+    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id), **search_facets}
     from cveFeed import internal_view
     page['has_internal'] = internal_view.any_visible()  # a project the caller sees declared an internal network: the page offers the scope filter
     return page

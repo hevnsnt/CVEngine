@@ -1369,6 +1369,22 @@ def check_for_updates():
     return {"status": state["status"], "latest": state["latest"]}
 
 
+@app.task(name="feed_sentinels", bind=False, queue="cve_feed_queue")
+def feed_sentinels():
+    """Every minute: keep twice the Sentinels' slots of work queued behind what they are running (see ``cveFeed.coverage_topup.feed_sentinels``)."""
+    from cveFeed import coverage_topup
+    return coverage_topup.feed_sentinels()
+
+
+@app.task(name="refresh_sentinel_version", bind=False, queue="cve_feed_queue")
+def refresh_sentinel_version():
+    """A few times a day (and once when a page finds nothing cached): ask GitHub for the latest Sentinel client version and how far behind each
+    reported version is, for the version column of the Sentinels page (see ``agentapi.sentinel_version``)."""
+    from agentapi import sentinel_version
+    out = sentinel_version.refresh()
+    return {"latest": (out.get("sha") or "")[:12], "error": out.get("error", "")}
+
+
 @app.task(name="update_nuclei_templates", bind=False, queue="cve_feed_queue")
 def update_nuclei_templates():
     """Daily: pull the current nuclei templates. CVEngine's own scans run nuclei with -duc (no update check), so without

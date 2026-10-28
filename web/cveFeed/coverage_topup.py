@@ -37,20 +37,26 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 PROJECT_LIMIT = 100          # projects examined per run; today's installations have under ten
-MAX_ENQUEUED_PER_RUN = 20    # mirrors host_assessment's global active cap: queuing past it would only fail
+MAX_ENQUEUED_PER_RUN = 20    # mirrors host_assessment's base global cap (it grows with the Sentinels' slots, see host_assessment.caps)
+MAX_PER_RUN_BASE = MAX_ENQUEUED_PER_RUN
 PER_PROJECT_LIMIT = 5        # mirrors host_assessment's per-project active cap
 
 
-def top_up(now=None):
-    """One sweep: enqueue due host assessments for every project with free capacity, bounded by the caps above.
+def top_up(now=None, only_sentinel_projects=False):
+    """One sweep: enqueue due host assessments for every project with free capacity, bounded by the caps above (``host_assessment.caps``: they
+    grow with the live Sentinels' slots, so a Sentinel keeps twice its capacity queued behind what it runs). Hosts with no scannable address are
+    resolved again first (``unresolved_archive.recheck``, DNS only) and are not counted as work.
+
+    ``only_sentinel_projects`` is the once-a-minute feed (``feed_sentinels``): only projects a live Sentinel covers.
 
     Returns a small summary dict; never raises for an ordinary gate (paused, bounty-blocked, at capacity) or for one
     project's enqueue failure, so one bad project never stops the rest of the sweep.
     """
     from cveFeed.assessment_review import host_coverage_due
     from cveFeed.conductor import bounty_blocked_projects
-    from cveFeed.host_assessment import active_count, enqueue
+    from cveFeed.host_assessment import active_count, caps, enqueue
     from cveFeed.scan_control import pause_requested
+    from cveFeed import unresolved_archive
     from dashboard.models import Project
     from startScan.models import Subdomain
 
@@ -59,18 +65,26 @@ def top_up(now=None):
     if pause_requested(fail_closed=True):
         result['skipped'] = 'paused'
         return result
+    try:
+        result['rechecked'] = unresolved_archive.recheck(now)
+    except Exception:  # noqa: BLE001 - a DNS problem must never stop the feed
+        logger.exception('coverage top-up: could not re-resolve hosts with no address')
+    global_cap, _project_cap = caps()
     global_active = active_count()
-    if global_active >= MAX_ENQUEUED_PER_RUN:
+    if global_active >= global_cap:
         result['skipped'] = 'global capacity'
         return result
     blocked = bounty_blocked_projects()
-    budget = MAX_ENQUEUED_PER_RUN - global_active
+    budget = min(global_cap - global_active, MAX_PER_RUN_BASE + (global_cap - 20))
     projects = Project.objects.exclude(pk__in=blocked).order_by('pk')[:PROJECT_LIMIT]
+    from agentapi import sentinel_broker
     for project in projects:
         if budget <= 0:
             break
+        if only_sentinel_projects and not sentinel_broker.project_slots(project):
+            continue
         result['projects_checked'] += 1
-        free = min(PER_PROJECT_LIMIT - active_count(project), budget)
+        free = min(caps(project)[1] - active_count(project), budget)
         if free <= 0:
             continue
         _, due_ids = host_coverage_due(project, now, limit=free, need_count=False)
@@ -98,6 +112,22 @@ def top_up(now=None):
                      f"{'s' if result['projects_checked'] != 1 else ''}", status='done',
                      hosts_queued=result['hosts_queued'])
     return result
+
+
+def feed_sentinels(now=None):
+    """Once a minute: when the work waiting for the Sentinels is less than twice their slots, queue more (``top_up`` over the projects they cover,
+    with the Sentinel-scaled caps). A Sentinel that is working through its tasks has the next ones already waiting, instead of idling until the
+    five-minute top-up. Does nothing without a live Sentinel or while the queue is already deep enough."""
+    from agentapi import sentinel_broker
+    slots = sentinel_broker.total_slots()
+    if not slots:
+        return {'skipped': 'no live Sentinel'}
+    waiting = sentinel_broker.waiting_tasks()
+    wanted = 2 * slots
+    if waiting >= wanted:
+        return {'skipped': 'queue is deep enough', 'slots': slots, 'waiting': waiting}
+    out = top_up(now, only_sentinel_projects=True)
+    return {**out, 'slots': slots, 'waiting': waiting, 'wanted': wanted}
 
 
 # ----------------------------------------------------------------------------- deep-scan coverage gate
