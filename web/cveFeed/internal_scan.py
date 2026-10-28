@@ -12,8 +12,8 @@ What it runs: the host record for the address (no network access), an nmap finge
 technology pass and the AI-targeted nuclei pass, then CVE correlation. Each stage is the external pipeline's own function (same
 parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target and makes
 every local scanner refuse to run, so a seam that was missed fails loudly. Stages that run from this server directly (route checks,
-probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run; WPScan needs a server-side WordPress probe first, and OpenVAS
-has its own opt-in sweep, so neither runs here yet.
+probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. WPScan runs through a Sentinel on the sites the Sentinel-run technology
+pass tagged as WordPress (this server sends no probe of its own), and OpenVAS has its own opt-in sweep (``cveFeed.openvas_scan.internal_batch``).
 """
 import logging
 import os
@@ -162,7 +162,7 @@ def _udp(scan, project, ip, dispatch):
     return {'open': len(outcome['open']), 'changed': len(outcome['changed'])}
 
 
-def run(scan_id, dispatch=None, nuclei_stream=None, provider=False):
+def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     """Run the internal pipeline for one queued scan. ``dispatch`` replaces ``sentinel_dispatch.dispatch_or_none`` in tests, ``nuclei_stream``
     (``kind -> stream``) replaces the Sentinel nuclei streams, and ``provider`` (``False`` = the configured AI, ``None`` = none) the AI planner."""
     from agentapi import sentinel_dispatch
@@ -189,7 +189,7 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False):
     org_id = org_id_of_project(project.id)
     persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
                         ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
-    from cveFeed import nuclei_scan
+    from cveFeed import nuclei_scan, wpscan_scan
     from targetApp.target_types import internal_scope
     with internal_scope():
         nmap = _stage(scan, 'nmap scan (internal Sentinel)', 'nmap_scan', lambda: _nmap(scan, project, ip, org_id, dispatch), fallback={'hosts': 0})
@@ -200,6 +200,8 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False):
             _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'internal_udp_scan', lambda: _udp(scan, project, ip, dispatch), fallback={'open': 0})
             _stage(scan, 'Nuclei HTTP and technology pass (internal Sentinel)', 'nuclei_light_scan',
                    lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light')), fallback={'targets': 0, 'techs': {}})
+            _stage(scan, 'WPScan of WordPress sites (internal Sentinel)', 'internal_wpscan',
+                   lambda: wpscan_scan.run_wpscan(scan.id, runner=wp_runner, internal=True), fallback={'sites': 0})
             _stage(scan, 'Nuclei targeted pass (internal Sentinel)', 'nuclei_targeted_scan',
                    lambda: nuclei_scan.run_targeted_nuclei(scan.id, stream=stream('nuclei_targeted'), provider=provider), fallback={'targets': 0})
     error = nmap.get('error')
