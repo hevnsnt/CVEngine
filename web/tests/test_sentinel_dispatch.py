@@ -151,6 +151,56 @@ class NaabuDispatchTests(DispatchBase):
         self.assertEqual(found, {'192.0.2.10': [9999]})
 
 
+class DispatchActivityLoggingTests(DispatchBase):
+    """Every dispatch attempt gets one `run_check` activity line, settled once the wait ends: this is what makes
+    Sentinel hand-off and check-in visible on the Live page and the Activity page, which share the same feed."""
+
+    def _entries(self):
+        from cveFeed.models import AgentActivity
+        return list(AgentActivity.objects.filter(project=self.project).order_by('id'))
+
+    def test_a_successful_check_in_names_the_sentinel(self):
+        agent = self.make_sentinel(['nmap'])
+        result = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'ports': []}]}
+
+        def claim_then_answer(_seconds):
+            # route the fake completion through the real agent, so task.agent_id is set like a real claim would leave it
+            SentinelTask.objects.filter(status='queued').update(agent=agent, status='claimed')
+            _answer_queued_task(result)(_seconds)
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=claim_then_answer):
+            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
+        self.assertEqual(out, result)
+        # the hand-off and the check-in are the same one activity row, running then settled, same as every other
+        # scan-stage line in this codebase (e.g. "nmap is fingerprinting..." -> "nmap fingerprinted...").
+        entries = self._entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].status, 'done')
+        self.assertIn(f'Sentinel {agent.name} checked in nmap work for www.example.test', entries[0].message)
+
+    def test_a_sentinel_reported_failure_names_the_reason(self):
+        self.make_sentinel(['nmap'])
+        result = {'outcome': 'error', 'error': 'nmap binary not found'}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result, status='failed')):
+            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
+        self.assertIsNone(out)
+        entries = self._entries()
+        self.assertEqual(entries[-1].status, 'failed')
+        self.assertIn('reported nmap failed for www.example.test', entries[-1].message)
+
+    def test_a_timeout_says_it_ran_locally_instead(self):
+        self.make_sentinel(['nmap'])
+        dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
+        entries = self._entries()
+        self.assertEqual(entries[-1].status, 'expired')
+        self.assertIn('No Sentinel checked in nmap work for www.example.test in time; it ran locally instead', entries[-1].message)
+
+    def test_no_eligible_sentinel_writes_no_activity_at_all(self):
+        # any_scanner_for's own cheap existence check short-circuits before anything (including activity) is written,
+        # so a project with no Sentinel pays for nothing beyond that one query - matching ZeroSentinelRegressionTests.
+        dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
+        self.assertEqual(self._entries(), [])
+
+
 class NucleiDispatchTests(DispatchBase):
     def test_light_pass_sentinel_finding_creates_a_technology_link_via_the_unchanged_local_loop(self):
         """run_light_nuclei's own loop turns each result line into a Technology link (cveFeed.nuclei_scan.tech_name_from);
@@ -230,3 +280,20 @@ class NucleiDispatchTests(DispatchBase):
             lines = list(stream('/tmp/does-not-exist-targets.txt'))
         self.assertTrue(calls)  # the real local stream ran once the dispatch wait timed out
         self.assertEqual(lines, [{'host': 'local-fallback-ran'}])
+
+    def test_deep_pass_sentinel_findings_land_in_vulnerability_rows_via_the_unchanged_local_loop(self):
+        """The weekly deep pass shares wrap_nuclei_stream with light/targeted (agentapi.sentinel_dispatch is fully generic
+        over kind): a Sentinel-reported finding persists through the same unchanged _run_nuclei loop as a local deep run."""
+        self.make_sentinel(['nuclei_deep'])
+        result = {'outcome': 'done', 'findings': [{'template_id': 'cve-2024-0001', 'name': 'Deep sweep hit', 'severity': 'critical',
+                   'host': 'www.example.test', 'matched_at': 'https://www.example.test/', 'description': 'found it',
+                   'extracted_results': [], 'tags': []}]}
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_deep', timeout=5)
+        self.assertIsNot(stream, nuclei_scan.stream_nuclei)
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            deep = nuclei_scan._run_nuclei(self.scan.id, stream=stream, targets=['www.example.test'])
+        self.assertEqual(deep['findings'], 1)
+        from startScan.models import Vulnerability
+        vuln = Vulnerability.objects.get(name='Deep sweep hit')
+        self.assertEqual(vuln.template_id, 'cve-2024-0001')
+        self.assertEqual(vuln.severity, 4)  # NUCLEI_SEVERITY_MAP['critical']

@@ -19,7 +19,7 @@ OS_FAMILIES = ('linux', 'windows', 'macos', 'bsd')
 # The capabilities the broker itself asks for. Others are accepted (an agent may offer more than the broker knows) but never matched.
 KNOWN_CAPABILITIES = ('validate:network', 'validate:local', 'validate:local-ssh', 'validate:guided', 'remediate:linux', 'remediate:windows',
                       'remediate:web-config', 'report:inventory', 'shell', 'ssh', 'can-restart-services',
-                      'nmap', 'naabu', 'nuclei_light', 'nuclei_targeted')  # the Sentinel (kind='scanner') scan-stage capabilities
+                      'nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep')  # the Sentinel (kind='scanner') scan-stage capabilities
 # Underscores are allowed alongside hyphens so a Sentinel's capabilities can name a SentinelTask kind verbatim (nuclei_light, ...).
 _CAPABILITY = re.compile(r'^[a-z][a-z0-9_-]{0,30}(?::[a-z][a-z0-9_-]{0,30})?$')
 _TOOL = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+-]{0,39}$')
