@@ -1700,7 +1700,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .ak-summary b{font:700 20px var(--font);letter-spacing:-.03em;color:var(--ink);text-transform:none;margin-right:4px}
 .ak-group h3{margin:0;font-size:15px}
 .ak-group>.note{margin:2px 0 10px}
-.ak-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
+.ak-grid{display:grid;align-items:start;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
 .ak-tile{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);min-width:0}
 .ak-tile.on{border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
 .ak-tile.retired{border-style:dashed}
