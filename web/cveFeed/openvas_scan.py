@@ -533,6 +533,7 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     failed_at = ledger.last_run(FAILED_SERVICE, names, project_id)
     fresh = ledger.fresh(SERVICE, names, project_id)
     fresh_failed = ledger.fresh(FAILED_SERVICE, names, project_id)
+    empty = inconclusive_hosts(project_id, [n for n in names if n in fresh_failed])
     passed = []
     for host in names:
         heat = heats.get(host, ('', (0, 0)))[0]
@@ -545,6 +546,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
             refuse(host, heat, f'not Fire or Smoke ({heat or "unknown"}): OpenVAS is only spent on hosts on fire or smoke')
         elif _platform_reason(sub):
             refuse(host, heat, _platform_reason(sub))
+        elif host in empty:
+            refuse(host, heat, f'{INCONCLUSIVE} {_days(failed_at[host])}; asked again after three days')
         elif host in fresh_failed:
             refuse(host, heat, f'could not be scanned {_days(failed_at[host])}; asked again after three days')
         elif host in fresh:
@@ -757,6 +760,28 @@ def finish(run, status, error='', summary=None):
     if summary is not None:
         run.summary = summary
     run.save(update_fields=['status', 'error', 'finished_at', 'summary'])
+
+
+INCONCLUSIVE = 'OpenVAS ran but reported no scanned host'
+
+
+def inconclusive(summary):
+    """A finished task whose report names no scanned host proved nothing about the hosts: not a scan, whatever its status word says. The hosts are not
+    stamped as scanned, the run says so, and they are asked again after the usual three days."""
+    summary['inconclusive'] = not summary.get('hosts_scanned')
+    return summary['inconclusive']
+
+
+def inconclusive_hosts(project_id, names):
+    """The hosts among ``names`` whose latest OpenVAS run finished inconclusive (see ``inconclusive``): for the host record's reason text."""
+    from cveFeed.models import OpenvasRun
+    wanted, out = set(names), set()
+    for run in OpenvasRun.objects.filter(project_id=project_id, status='done').order_by('-id')[:30]:
+        for host in set(run.hosts.values()) & wanted:
+            wanted.discard(host)  # only the newest run of a host counts
+            if (run.summary or {}).get('inconclusive'):
+                out.add(host)
+    return out
 
 
 # ----------------------------------------------------------------------------- results
@@ -1076,7 +1101,11 @@ def poll_sentinel(run):
         gone = [h for h in run.hosts.values() if h not in names]
         ledger.record(SERVICE, names, run.project_id)
         ledger.record(FAILED_SERVICE, gone, run.project_id)
-        finish(run, 'done', error=('stopped at its time budget; the results found so far were kept' if summary['partial'] else ''), summary=summary)
+        empty = inconclusive(summary)
+        finish(run, 'done', error=(INCONCLUSIVE if empty else 'stopped at its time budget; the results found so far were kept' if summary['partial'] else ''), summary=summary)
+        if empty:
+            activity.settle(entry, 'done', message=f'OpenVAS (Sentinel): {INCONCLUSIVE} ({len(run.hosts)} host(s) asked); none is marked scanned')
+            return {'run': run.pk, 'status': 'done', **summary}
         activity.settle(entry, 'done', message=(f'OpenVAS (Sentinel){" stopped at its time budget" if summary["partial"] else ""}: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
                                                 f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')))
         return {'run': run.pk, 'status': 'done', **summary}
@@ -1207,11 +1236,15 @@ def poll(run, gmp, now=None):
         gone = [h for h in run.hosts.values() if h not in names]
         ledger.record(SERVICE, names, run.project_id)
         ledger.record(FAILED_SERVICE, gone, run.project_id)  # gvmd found no live host: asked again in three days
-        finish(run, 'done', summary=summary)
+        empty = inconclusive(summary)
+        finish(run, 'done', error=INCONCLUSIVE if empty else '', summary=summary)
         try:
             gmp.delete_task(run.task_id, ultimate=True)
         except Exception:  # noqa: BLE001 - the results are imported; a leftover task is harmless
             logger.info('could not remove the finished GVM task of run %s', run.pk)
+        if empty:
+            activity.settle(entry, 'done', message=f'OpenVAS: {INCONCLUSIVE} ({len(run.hosts)} host(s) asked); none is marked scanned')
+            return {'run': run.pk, 'status': 'done', **summary}
         activity.settle(entry, 'done', message=(f'OpenVAS: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
                                                 f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')))
         return {'run': run.pk, 'status': 'done', **summary}
