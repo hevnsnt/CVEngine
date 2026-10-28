@@ -275,9 +275,10 @@ def set_target_scope(ctx, slug, target_id, scope_mode):
     return _target(d)
 
 
-def _expand_target(value):
+def _expand_target(value, project=None):
     """Validate one pasted target and expand it: ``(kind, names)``. A CIDR or range is sized before expanding, so a /8 is
-    never built."""
+    never built. ``project`` (an id) lets an address inside a network that project declared internal
+    (``cveFeed.models.InternalRange``) through: it becomes a target, but only a Sentinel inside that network ever scans it."""
     import ipaddress
     from targetApp.target_types import CIDR, DOMAIN, RANGE, classify_target, expand_cidr, expand_range, is_scannable_ip, range_size
     kind = classify_target(value)
@@ -302,11 +303,20 @@ def _expand_target(value):
     if not names:
         raise ApiError(400, 'target expands to no hosts')
     if kind != DOMAIN:
-        blocked = next((n for n in names if not is_scannable_ip(n)), None)  # no project is passed: a tailnet address is only ever imported by the Tailscale sync
+        from targetApp.target_types import in_internal_range, internal_networks
+        internal = internal_networks(project)
+        blocked = next((n for n in names if not is_scannable_ip(n) and not in_internal_range(n, internal)), None)  # no project to is_scannable_ip: a tailnet address is only ever imported by the Tailscale sync
         if blocked:
             raise ApiError(400, f'{blocked} is a loopback, link-local or internal address, which cannot be scanned '
                                 '(an operator can allow internal ranges with CVENGINE_ALLOW_PRIVATE_TARGETS=1)')
     return kind, names
+
+
+def _not_internal(project, domains):
+    """``domains`` without the ones named by an address inside a network ``project`` declared internal."""
+    from targetApp.target_types import in_internal_range, internal_networks
+    nets = internal_networks(project.id)
+    return [d for d in domains if not (nets and in_internal_range(d.name, nets))]
 
 
 def _create_domains(project, names, description='', excluded=None):
@@ -346,7 +356,7 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
     queued for discovery, in order."""
     from targetApp.target_types import DOMAIN
     project, _ = get_project(ctx, slug, write=True)
-    kind, names = _expand_target(value)
+    kind, names = _expand_target(value, project.id)
     excluded = []
     created, existing = _create_domains(project, names, description, excluded)
     if excluded and not created and not existing:
@@ -356,9 +366,10 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
         from cveFeed.tasks import watch_certificate_transparency
         watch_certificate_transparency.delay(created[0].id)
     scan_ids = []
-    if discover and created:  # bbot discovery streams into the dashboard as it runs
+    created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
+    if discover and created_for_discovery:  # bbot discovery streams into the dashboard as it runs
         from cveFeed.discovery import start_discoveries
-        scan_ids = [scan.id for scan in start_discoveries(created, **({'mode': mode} if mode else {}))]
+        scan_ids = [scan.id for scan in start_discoveries(created_for_discovery, **({'mode': mode} if mode else {}))]
     return {'kind': kind, 'created': [_target(d) for d in created], 'already_exists': existing, 'excluded': excluded, 'scan_ids': scan_ids}
 
 
@@ -524,10 +535,19 @@ def start_scan(ctx, slug, target_id, engine_id=None):
     if not domain:
         raise ApiError(404, 'target not found')
     _refuse_excluded(project, domain)
+    _refuse_sentinel_only(project, domain)
     if engine_id is not None and not EngineType.objects.filter(id=engine_id).exists():
         raise ApiError(404, 'engine not found')
     scan = start_discovery(domain, initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'queued'}
+
+
+def _refuse_sentinel_only(project, domain):
+    """409 when the target is inside a network the project declared internal: this server never scans it, only a Sentinel there does."""
+    from targetApp.target_types import sentinel_only_target
+    if sentinel_only_target(domain.name, project.id):
+        raise ApiError(409, f'{domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
+                            'never this server')
 
 
 def _refuse_excluded(project, domain):
@@ -636,6 +656,7 @@ def discover_target(ctx, slug, target_id, mode=None):
     if not domain:
         raise ApiError(404, 'target not found')
     _refuse_excluded(project, domain)
+    _refuse_sentinel_only(project, domain)
     scan = start_discovery(domain, mode, initiated_by=ctx.user) if mode else start_discovery(domain, initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'started'}
 
@@ -1008,7 +1029,7 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             invalid.append({'value': entry, 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
             continue
         try:
-            kind, expanded = _expand_target(entry)
+            kind, expanded = _expand_target(entry, project.id)
         except ApiError as exc:
             invalid.append({'value': entry, 'error': exc.message})
             continue
@@ -1032,8 +1053,9 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
         for i, d in enumerate(wanted):  # crt.sh blocks a burst, so each check starts a couple of seconds after the last
             watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
     scan_ids, used, note = [], mode, None
-    if discover and created:
-        scan_ids = [scan.id for scan in _start_discoveries(created, used, project.id, initiated_by=initiated_by)]
+    to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
+    if discover and to_discover:
+        scan_ids = [scan.id for scan in _start_discoveries(to_discover, used, project.id, initiated_by=initiated_by)]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
             'domains': created, 'already_exists': existing, 'invalid': invalid, 'excluded': excluded,
             'discovery_started': len(scan_ids), 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
