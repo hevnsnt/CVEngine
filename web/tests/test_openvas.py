@@ -1926,6 +1926,40 @@ class BudgetTests(Fixture, TestCase):
         self.assertEqual((out['status'], out['partial']), ('done', True))
         self.assertIn('time budget', OpenvasRun.objects.get().error)
 
+    def sentinel_run(self, **result):
+        from agentapi.models import SentinelTask
+        ServiceRun.objects.all().delete()
+        task = SentinelTask.objects.create(project=self.project, kind='openvas', ips=['93.184.216.5'], status='done',
+                                           target={'hosts': {'93.184.216.5': 'www.rt.test'}}, result=result)
+        return OpenvasRun.objects.create(project=self.project, status='running', sentinel_task=task, hosts={'93.184.216.5': 'www.rt.test'})
+
+    def test_a_sentinel_task_done_with_no_scanned_host_is_inconclusive_not_a_scan(self):
+        run = self.sentinel_run(outcome='done', results=[], unusable=0, without_cve=0, scanned_addresses=[])
+        out = ov.poll_sentinel(run)
+        run.refresh_from_db()
+        self.assertEqual(out['status'], 'done')
+        self.assertTrue(run.summary['inconclusive'])
+        self.assertEqual(run.error, ov.INCONCLUSIVE)
+        self.assertFalse(ServiceRun.objects.filter(service=ov.SERVICE).exists())  # never stamped as scanned
+        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists())  # asked again in three days
+        self.assertEqual(ov.inconclusive_hosts(self.project.id, ['www.rt.test']), {'www.rt.test'})
+
+    def test_a_scan_that_reported_its_host_is_not_inconclusive_even_with_no_result(self):
+        run = self.sentinel_run(outcome='done', results=[], unusable=0, without_cve=0, scanned_addresses=['93.184.216.5'])
+        ov.poll_sentinel(run)
+        run.refresh_from_db()
+        self.assertFalse(run.summary['inconclusive'])
+        self.assertEqual(run.error, '')
+        self.assertTrue(ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test', status='done').exists())
+        self.assertEqual(ov.inconclusive_hosts(self.project.id, ['www.rt.test']), set())
+
+    def test_the_host_reason_says_the_scan_was_inconclusive(self):
+        run = self.sentinel_run(outcome='done', results=[], scanned_addresses=[])
+        ov.poll_sentinel(run)
+        verdict = {r['host']: r for r in ov.explain(self.link)}['www.rt.test']
+        self.assertFalse(verdict['ready'])
+        self.assertIn(ov.INCONCLUSIVE, verdict['reason'])
+
     def test_the_sentinel_task_carries_the_budget_and_preferences_the_server_decided(self):
         from agentapi import sentinel_broker as sb
         cleaned = sb._clean_openvas_result({'results': [], 'scanned_addresses': [], 'partial': True})
