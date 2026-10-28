@@ -233,9 +233,11 @@ def tier_counts():
 
 
 def live_scan_counts():
-    """Running and queued scans, read fresh on every poll (they are cheap and the first thing a person watches)."""
+    """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
+    the first thing a person watches)."""
     from cveFeed import counts
-    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count()}
+    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count(),
+            'scans_background_running': counts.background_running().count()}
 
 
 def stats_payload():
