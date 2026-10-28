@@ -1660,7 +1660,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .sl-org[open]>summary::before{transform:rotate(45deg)}
 .sl-org-head h3{margin:0;font:700 15px/1.2 var(--font);letter-spacing:-.01em}
 .sl-org>.note{margin:-4px 0 10px}
-.sl-nets{margin-bottom:14px;overflow-x:auto}
+.sl-nets{margin-bottom:14px;overflow-x:auto;width:0;min-width:100%} /* scrolls inside itself; never widens the column on a phone */
 .sl-nets h4{margin:0 0 6px;font:600 10.5px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .sl-net-table{width:100%;border-collapse:collapse;font-size:13px}
 .sl-net-table th{text-align:left;font:600 10.5px var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -1668,7 +1668,8 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .sl-net-table td>.note,.sl-net-table td>.msg{display:block;margin:2px 0 0;font-size:12px}
 .sl-net-table td.num{font-variant-numeric:tabular-nums}
 .sl-net-table tr.err td:first-child{box-shadow:inset 3px 0 0 var(--fire)}
-.sl-state .badge{vertical-align:1px;margin-left:4px}
+.sl-state .badge{display:inline-flex;width:max-content;vertical-align:1px;margin-left:4px}
+.sl-net-table td.mono{white-space:nowrap}
 @media (max-width:640px){.sl-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.sl-r{grid-template-columns:auto auto minmax(0,1fr) auto}.sl-when{display:none}}
 
 /* ---- live dashboard: the internal networks group, shown only when a project declared one ---- */
