@@ -241,6 +241,7 @@ form.inline .field{margin:0;flex:1 1 220px}
 .badge.critical,.badge.fire,.tier.fire{background:var(--fire);color:var(--on-solid)}
 .badge.high,.badge.failed{background:var(--fire-bg);color:var(--fire-ink);box-shadow:inset 0 0 0 1px var(--ring-fire)}
 .badge.medium,.badge.smoke,.tier.smoke{background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 0 0 0 1px var(--ring-smoke)}
+.badge.internal{background:var(--surface);color:var(--ink);outline:1px dashed currentColor;outline-offset:-1px}
 .badge.running{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
 .badge.running::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--brand);animation:blink 1s infinite}
 /* "Needs validation" is a link: it opens the match and runs Validate now */

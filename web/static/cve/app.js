@@ -59,6 +59,12 @@ const el = (tag, cls, text, attrs = {}) => {
   return n;
 };
 const badge = (text, cls = "") => el("span", `badge ${cls}`.trim(), text);
+// a host inside a network its project declared internal: only a Sentinel deployed there ever scans it, never this server
+const internalBadge = (network) => {
+  const b = badge("Internal", "internal");
+  b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
+  return b;
+};
 // a hostname printed anywhere (except the host page itself) links to that host's page
 const hostUrl = hostHref;
 const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
@@ -2180,9 +2186,9 @@ const pages = {
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
     // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
-    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list" };
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all" };
     const syncUrl = () => {
-      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list" }, HOST_DEFAULTS, ["host"]);
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter }, HOST_DEFAULTS, ["host"]);
       views.refresh();
       if (searches) searches.refresh();
     };
@@ -2227,6 +2233,24 @@ const pages = {
       };
       chipBtn.set(key, b);
       heatChips.append(b);
+    });
+    // scope filter (?internal=): hosts inside a network a project declared internal are scanned only by a Sentinel there; the chips appear
+    // once the server says a visible project declared one
+    const SCOPE_CHIPS = [["all", "All hosts"], ["0", "External"], ["1", "Internal"]];
+    let scopeFilter = readParam("internal", "all", SCOPE_CHIPS.map((c) => c[0]));
+    const scopeChips = el("div", "picker scope-chips", null, { role: "group", "aria-label": "Scope" });
+    scopeChips.hidden = true;
+    const scopeBtn = new Map();
+    SCOPE_CHIPS.forEach(([key, label]) => {
+      const b = el("button", "", label, { type: "button", "aria-pressed": String(key === scopeFilter) });
+      b.onclick = () => {
+        scopeFilter = key;
+        scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === scopeFilter)));
+        syncUrl();
+        list.reload();
+      };
+      scopeBtn.set(key, b);
+      scopeChips.append(b);
     });
     const countLine = el("p", "list-count note");
     // The pane never shows a host the list is hiding: when a filter or a new search drops the selected host, the pane follows
@@ -2484,7 +2508,7 @@ const pages = {
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, metaRow, bulk.bar, rows, gallery);
+    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, scopeChips, metaRow, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
     let hostTab = "overview";
@@ -3022,11 +3046,12 @@ const pages = {
         settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
       },
       path: `${base}/search`,
-      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}) }),
+      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
       pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
       empty: "No hosts match. Hosts appear as discovery and port scans finish.",
       onLoaded: (data) => {
         totalHosts = data.count || 0;
+        scopeChips.hidden = !data.has_internal && scopeFilter === "all";
         if (data.facets && data.facets.heat) heatFacets = { ...data.facets.heat, truncated: Boolean(data.facets.truncated) };
         paintHeat();
       },
@@ -3055,6 +3080,7 @@ const pages = {
           if (portNumbers.length > 4) ribbon.append(el("i", "more", `+${portNumbers.length - 4}`));
           meta.append(ribbon);
           if (h.cve_matches) meta.append(badge(`${h.cve_matches} CVE`, "fire"));
+          if (h.internal) meta.append(internalBadge(h.network));
           const chip = projChip(h);
           if (chip) meta.append(chip);
           row.append(top, meta);
@@ -3106,10 +3132,13 @@ const pages = {
     const initial = (key, allowed) => (allowed.includes(wanted.get(key)) ? wanted.get(key) : null);
     const header = el("p", "note");
     mount.append(header);
-    const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value });
+    const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}) });
     const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 1 })}`)).total;
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
+    // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
+    const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
+    scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
     const type = picker(
       "Type",
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
@@ -3136,7 +3165,7 @@ const pages = {
       () => reload(),
     );
     const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "" };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "" };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -3147,19 +3176,20 @@ const pages = {
     });
     // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
     const syncUrl = () => {
-      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim() }, FINDING_DEFAULTS);
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value }, FINDING_DEFAULTS);
       views.refresh();
     };
     const views = savedViews({
       page: "findings",
       slug,
       defaults: FINDING_DEFAULTS,
-      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim() }),
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value }),
       apply: (v) => {
         setPicker(type, "type", v.type);
         setPicker(sev, "severity", v.severity);
         setPicker(status, "status", v.status);
         q.value = v.host;
+        scope.value = v.internal || "";
         reload();
       },
     });
@@ -3203,7 +3233,7 @@ const pages = {
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [views.node, q, type.node, sev.node, status.node],
+      filters: [views.node, q, scope, type.node, sev.node, status.node],
       params,
       empty: "No findings match these filters.",
       onLoaded: (data, reset) => {
@@ -3212,7 +3242,7 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), badge(f.severity, f.severity), aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        meta: [badge(TYPE_LABEL[f.type] || f.type), f.internal ? internalBadge() : null, badge(f.severity, f.severity), aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
         notes: [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),

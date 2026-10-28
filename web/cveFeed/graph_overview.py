@@ -76,6 +76,8 @@ def groups(project_slug=None):
     findings_of = names_by_domain(current.filter(pk__in=finding_pks))
     match_pks = CVEMatch.objects.filter(subdomain_id__in=current.values('pk')).exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).values('subdomain')
     candidates_of = names_by_domain(current.filter(pk__in=match_pks))
+    from cveFeed import internal_view
+    internal_of = names_by_domain(current.filter(internal_view.internal_q()))  # hosts inside a network the project declared internal
 
     projects = {}
     for domain in domains:
@@ -84,13 +86,13 @@ def groups(project_slug=None):
                                                 'targets': 0, 'hosts': 0, 'roots': {}, '_names': set()})
         root = root_for(domain)
         group = item['roots'].setdefault(root, {'root': root, 'target_ids': [], 'targets': 0,
-                                                'hosts': 0, 'live': 0, 'assessed': 0, 'findings': 0, 'cve_candidates': 0,
-                                                '_sets': {k: set() for k in ('hosts', 'live', 'assessed', 'findings', 'cve_candidates')}})
+                                                'hosts': 0, 'live': 0, 'assessed': 0, 'findings': 0, 'cve_candidates': 0, 'internal': 0,
+                                                '_sets': {k: set() for k in ('hosts', 'live', 'assessed', 'findings', 'cve_candidates', 'internal')}})
         item['targets'] += 1
         group['targets'] += 1
         group['target_ids'].append(domain.pk)
         for key, source in (('hosts', hosts_of), ('live', live_of), ('assessed', assessed_of),
-                            ('findings', findings_of), ('cve_candidates', candidates_of)):
+                            ('findings', findings_of), ('cve_candidates', candidates_of), ('internal', internal_of)):
             group['_sets'][key] |= source.get(domain.pk, set())
         item['_names'] |= hosts_of.get(domain.pk, set())
     result = []
@@ -128,6 +130,7 @@ def hosts(project_slug, root, page=1, q=''):
     ids = list(reps[(page-1)*HOST_PAGE:page*HOST_PAGE])
     rows = list(Subdomain.objects.filter(pk__in=ids).select_related('target_domain')
                 .prefetch_related('ip_addresses__ports').order_by('name'))
+    from cveFeed import internal_view
     from cveFeed.counts import CLOSED
     found = set(Vulnerability.objects.filter(subdomain_id__in=ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
                 .values_list('subdomain_id', flat=True))
@@ -140,6 +143,7 @@ def hosts(project_slug, root, page=1, q=''):
     return {'project': project.slug, 'root': root, 'count': names, 'page': page, 'page_size': HOST_PAGE,
             'has_more': page * HOST_PAGE < names,
             'results': [{'id': row.pk, 'host': row.name, 'target': row.target_domain.name,
+                         'internal': internal_view.is_internal(project.pk, row.name), 'network': internal_view.network_of(project.pk, row.name),
                          'status': 'attention' if row.pk in found or row.pk in matched else
                                    'assessed' if row.scan_history_id in scanned else 'unscanned',
                          'archived': row.name.lower() in archived,

@@ -104,6 +104,7 @@ def graph_payload(domain_id=None, scan_id=None):
     """Nodes/edges for the asset graph: domain > subdomain > ip, and subdomain > cve. Only live hosts are drawn (they resolved
     to an IP, or something saw them answer); names that never resolved are left out. Ports belong on the host's detail card."""
     from startScan.models import Subdomain, Vulnerability
+    from cveFeed import internal_view
     from cveFeed.graph_overview import root_for
 
     from django.db.models import Prefetch
@@ -188,7 +189,9 @@ def graph_payload(domain_id=None, scan_id=None):
         heat = host_heat(status, tiers, sev)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
-                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()])):
+                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
+                    internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
+                    network=internal_view.network_of(sub.target_domain.project_id if sub.target_domain_id else None, sub.name)):
             break
         by_name[sub.name.lower()] = sid
         if sub.target_domain_id and node(f'dom:{sub.target_domain_id}', 'domain', sub.target_domain.name,
@@ -242,7 +245,7 @@ def live_scan_counts():
 
 def stats_payload():
     """Every headline number, defined once in ``cveFeed.counts`` (what each one counts is in that module's docstring)."""
-    from cveFeed import counts
+    from cveFeed import counts, internal_view
     from startScan.models import Vulnerability
     from targetApp.models import Domain
     tiers = tier_counts()
@@ -264,6 +267,7 @@ def stats_payload():
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
         'oldest_open_kind': oldest['kind'],  # 'cve', 'scanner' or 'hygiene'
         'oldest_open_id': oldest['id'],  # the row of that kind to link to
+        'internal': internal_view.summary(),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
     }
