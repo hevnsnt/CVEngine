@@ -67,13 +67,18 @@ def _label(host, ips):
     return f'{n} address{"es" if n != 1 else ""}' if n else 'its target'
 
 
-def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1):
+def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1, redact_target=None):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
     eligible Sentinel exists for ``project`` right now. Returns the task's typed ``result`` dict on success; ``None`` on
     timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead. The hand-off
     and the check-in each get one ``run_check`` activity line (same kind every other scan-stage line already uses, so
     both the Live page and the Activity page show them with no changes of their own), so it is visible, in one place,
-    whenever work actually left this server for a Sentinel and whether it came back."""
+    whenever work actually left this server for a Sentinel and whether it came back.
+
+    ``redact_target``, when given, is called with ``target`` once the task reaches a terminal state (done, failed or
+    expired) and its return value replaces the stored ``target`` in the database - for a kind whose target carries a
+    secret the Sentinel needed only for this one run (today, only WPScan's API token), so the secret does not sit in
+    the database for the rest of the task's retention window once nothing needs it there any more."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from cveFeed import activity
@@ -113,6 +118,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         activity.settle(entry, 'expired', message=f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead')
     else:  # claimed, but not reported back before the completion timeout
         activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
+    if redact_target is not None:
+        SentinelTask.objects.filter(pk=task.pk).update(target=redact_target(target))
     return task.result if task.status == 'done' else None
 
 
@@ -239,3 +246,28 @@ def wrap_nuclei_stream(scan, kind, timeout=None):
         for finding in result.get('findings', []):
             yield _finding_to_nuclei_line(finding)
     return stream
+
+
+# --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
+
+def wrap_wpscan_runner(project, scan=None, timeout=None):
+    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter, or the literal,
+    unwrapped ``run_wpscan_process`` when no Sentinel is eligible (so ``runner is run_wpscan_process`` identity checks,
+    and every other local behaviour, are unaffected). The project's WPScan API token travels with the dispatched task -
+    the same blast radius it already has today, since it already leaves this process into a subprocess's environment -
+    for this one run only: ``dispatch_or_none``'s ``redact_target`` scrubs it from the stored task once the task is
+    done, failed or expired, so it never sits in the database beyond that. A Sentinel's reported outcome is classified
+    by the exact same ``cveFeed.wpscan_scan._classify`` a local run's own exit code and report go through, so a
+    dispatched site ends up ``NotWordPress``/``Blocked``/a normal report exactly as a local one would."""
+    from cveFeed.wpscan_scan import run_wpscan_process
+    if not any_scanner_for(project, 'wpscan'):
+        return run_wpscan_process
+
+    def runner(url, token):
+        from cveFeed.wpscan_scan import _classify
+        result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, scan=scan, timeout=timeout,
+                                  redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
+        if result is None:
+            return run_wpscan_process(url, token)
+        return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
+    return runner

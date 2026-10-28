@@ -252,34 +252,43 @@ def child_env(token):
 
 
 def run_wpscan_process(url, token, timeout=None, thorough=False):
-    """Run WPScan on one site and return its parsed JSON report. The token travels in the environment. Raises on a timeout, a bad exit
-    code or unreadable output. Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (WPScan
-    says the site is up and is not WordPress), ``Blocked`` (an edge refused or challenged WPScan) or a ``RuntimeError`` (including no report at
-    all). A report that has results despite the abort is returned, marked ``cvengine_partial``."""
+    """Run WPScan on one site and return its parsed JSON report (local execution only - see ``_classify`` for what a
+    Sentinel-dispatched run shares with this). The token travels in the environment."""
     env = child_env(token)
     with tempfile.TemporaryDirectory(prefix='wpscan-') as tmp:
         out = os.path.join(tmp, 'report.json')
         limit = timeout or (thorough_timeout() if thorough else wpscan_timeout())
         proc = subprocess.run([WPSCAN_BIN, '--url', url, *wpscan_args(limit, thorough), '-o', out], env=env, timeout=limit,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        if proc.returncode == 4:
-            report = _read_report(out)
-            if report is None:
-                raise RuntimeError('WPScan did not finish and wrote no report')  # not "not WordPress": nothing was read
-            reason = str(report.get('scan_aborted') or '')
-            if any(report.get(k) for k in ('version', 'plugins', 'themes', 'interesting_findings')):
-                return {**report, 'cvengine_partial': reason[:120] or 'the scan did not finish'}  # what it read before it stopped
-            if NOT_WORDPRESS.search(reason):
-                raise NotWordPress('WPScan says the site is up and is not running WordPress')
-            if BLOCKED.search(reason):
-                raise Blocked(_redact(reason, token))
-            raise RuntimeError(_redact(reason or 'the scan did not finish', token))
-        if proc.returncode not in OK_EXIT_CODES:
-            raise RuntimeError(_redact((proc.stderr or '').strip().splitlines()[-1] if proc.stderr else f'exit {proc.returncode}', token))
-        report = _read_report(out)
+        return _classify(_read_report(out), proc.returncode, proc.stderr, token)
+
+
+def _classify(report, returncode, stderr='', token=''):
+    """A wpscan process's outcome - its own exit code, its JSON report if it wrote one, and stderr if it did not - turned
+    into a report dict, or raised as ``NotWordPress``/``Blocked``/``RuntimeError``. The one function either a local run
+    (``run_wpscan_process``) or a Sentinel's reported ``{report, returncode, stderr_tail}`` (``agentapi.sentinel_dispatch.
+    wrap_wpscan_runner``) goes through, so a dispatched site is classified exactly as a local one would be - no
+    detection logic (what counts as "not WordPress" or "blocked") is duplicated on the Sentinel side.
+
+    Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (WPScan says
+    the site is up and is not WordPress), ``Blocked`` (an edge refused or challenged WPScan) or a ``RuntimeError``
+    (including no report at all). A report that has results despite the abort is returned, marked ``cvengine_partial``."""
+    if returncode == 4:
         if report is None:
-            raise RuntimeError('WPScan wrote no usable report')
-        return report
+            raise RuntimeError('WPScan did not finish and wrote no report')  # not "not WordPress": nothing was read
+        reason = str(report.get('scan_aborted') or '')
+        if any(report.get(k) for k in ('version', 'plugins', 'themes', 'interesting_findings')):
+            return {**report, 'cvengine_partial': reason[:120] or 'the scan did not finish'}  # what it read before it stopped
+        if NOT_WORDPRESS.search(reason):
+            raise NotWordPress('WPScan says the site is up and is not running WordPress')
+        if BLOCKED.search(reason):
+            raise Blocked(_redact(reason, token))
+        raise RuntimeError(_redact(reason or 'the scan did not finish', token))
+    if returncode not in OK_EXIT_CODES:
+        raise RuntimeError(_redact((stderr or '').strip().splitlines()[-1] if stderr else f'exit {returncode}', token))
+    if report is None:
+        raise RuntimeError('WPScan wrote no usable report')
+    return report
 
 
 def _redact(text, token):
@@ -619,7 +628,9 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
     real_runner = runner is None
-    runner = runner or run_wpscan_process
+    if real_runner:
+        from agentapi import sentinel_dispatch
+        runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan)
     allowed, _ips, _ports = _scan_targets(scan)
     subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports'))
     by_name = {s.name.lower(): s for s in subs}
@@ -756,7 +767,11 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
     as long a timeout as it needs (``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default; WPScan writes a partial report before then).
     One pass per project at a time (a Redis claim kept alive while it runs). It stops when scans are paused or stopped, leaves the host
     waiting, and a later run carries on. A site that cannot be reached or that an edge challenges is recorded as such, never retried in a loop.
-    Returns ``{'done', 'partial', 'blocked', 'failed', 'skipped'}`` counts."""
+    Returns ``{'done', 'partial', 'blocked', 'failed', 'skipped'}`` counts.
+
+    Never dispatched to a Sentinel, unlike ``run_wpscan``: ``agentapi.sentinel_dispatch.dispatch_or_none`` waits out a bounded
+    timeout before falling back to local execution, which fits a per-scan stage, not a pass that may legitimately run for
+    hours - the same one-shot-dispatch mismatch that already keeps vhost/subdirectory discovery off Sentinels."""
     from cveFeed import activity, exclusions, ledger, probes, wp_correlation
     from reNgine import resources
     summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
