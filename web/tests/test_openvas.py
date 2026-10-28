@@ -36,14 +36,14 @@ OID_BANNER = '1.3.6.1.4.1.25623.1.0.100315'
 OID_SSH = '1.3.6.1.4.1.25623.1.0.105001'
 OID_PLAIN = '1.3.6.1.4.1.25623.1.0.900001'
 HEALTHY = {'total_mb': 16000, 'limit_mb': None, 'used_mb': 3000, 'available_mb': 13000}
-IPS = {'www.rt.test': '203.0.113.5', 'api.rt.test': '203.0.113.6', 'db.rt.test': '198.51.100.7'}
+IPS = {'www.rt.test': '93.184.216.5', 'api.rt.test': '93.184.216.6', 'db.rt.test': '93.184.214.7'}
 
 
 def memory(**over):
     return {**HEALTHY, **over}
 
 
-def result_xml(host='203.0.113.5', port='443/tcp', oid=OID_APACHE, name='Apache HTTP Server < 2.4.51 Path Traversal', severity=9.8, qod=99, cves=('CVE-2021-41773',),
+def result_xml(host='93.184.216.5', port='443/tcp', oid=OID_APACHE, name='Apache HTTP Server < 2.4.51 Path Traversal', severity=9.8, qod=99, cves=('CVE-2021-41773',),
                description='Installed version: 2.4.49', tags=None, hostname='www.rt.test'):
     """One <result> as gvmd 22.x prints it in get_results."""
     from tests.fake_gvmd import FakeGvmd as F
@@ -56,7 +56,7 @@ def result_xml(host='203.0.113.5', port='443/tcp', oid=OID_APACHE, name='Apache 
 class ParseTests(SimpleTestCase):
     def test_a_result_is_read_with_its_cves_qod_and_severity(self):
         item = ov.parse_result(result_xml())
-        self.assertEqual((item['oid'], item['address'], item['port'], item['port_number']), (OID_APACHE, '203.0.113.5', '443/tcp', 443))
+        self.assertEqual((item['oid'], item['address'], item['port'], item['port_number']), (OID_APACHE, '93.184.216.5', '443/tcp', 443))
         self.assertEqual((item['severity'], item['qod'], item['qod_type'], item['cves']), (9.8, 99, 'remote_banner', ['CVE-2021-41773']))
         self.assertEqual(item['summary'], 'The product Apache HTTP Server < 2.4.51 Path Traversal is affected.')
         self.assertEqual(item['solution_type'], 'VendorFix')
@@ -68,8 +68,8 @@ class ParseTests(SimpleTestCase):
 
     def test_a_result_without_a_host_or_an_oid_is_unusable(self):
         self.assertIsNone(ov.parse_result(etree.fromstring('<result><nvt oid="1.2.3"/></result>')))
-        self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>203.0.113.5</host><nvt oid="not an oid"/></result>')))
-        self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>203.0.113.5</host></result>')))
+        self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>93.184.216.5</host><nvt oid="not an oid"/></result>')))
+        self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>93.184.216.5</host></result>')))
 
     def test_ports(self):
         self.assertEqual(ov._port('443/tcp'), ('443/tcp', 443))
@@ -227,6 +227,27 @@ class ConfigTests(GvmdFixture, TestCase):
         selection = gvmd.sent('modify_config')[0].find('family_selection')
         self.assertEqual(selection.findtext('growing'), '0')
 
+    def test_each_family_is_sent_growing_and_including_every_vt_the_form_gvmd_accepts(self):
+        gvmd = self.start_gvmd()
+        with self.factory() as gmp:
+            ov.ensure_config(gmp)  # the fake refuses "all VTs but not growing" with gvmd's own 400, as the real one does
+        families = gvmd.sent('modify_config')[0].find('family_selection').findall('family')
+        self.assertTrue(families)
+        self.assertEqual({(f.findtext('growing'), f.findtext('all')) for f in families}, {('1', '1')})
+        self.assertNotIn('Denial of Service', {f.findtext('name') for f in families})
+
+    def test_a_half_built_configuration_is_completed_not_refused(self):
+        gvmd = self.start_gvmd()
+        with self.factory() as gmp:
+            config_id = ov.ensure_config(gmp)
+        gvmd.configs[config_id]['safe_checks'] = 'no'  # an earlier run failed after the copy was made, before the selection was applied
+        gvmd.configs[config_id]['families'] = {f: dict(v) for f, v in gvmd.configs[FULL_AND_FAST]['families'].items()}
+        with self.factory() as gmp:
+            self.assertEqual(ov.ensure_config(gmp), config_id)
+        self.assertEqual(gvmd.configs[config_id]['safe_checks'], 'yes')
+        self.assertNotIn('Denial of Service', gvmd.configs[config_id]['families'])
+        self.assertEqual(len(gvmd.sent('create_config')), 1)
+
     def test_it_is_built_once_and_reused(self):
         gvmd = self.start_gvmd()
         with self.factory() as gmp:
@@ -235,18 +256,19 @@ class ConfigTests(GvmdFixture, TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(gvmd.sent('create_config')), 1)
 
-    def test_an_existing_configuration_that_is_not_safe_is_refused_not_used(self):
+    def test_an_existing_configuration_that_stays_unsafe_after_the_selection_is_applied_again_is_refused_not_used(self):
         gvmd = self.start_gvmd()
         with self.factory() as gmp:
             config_id = ov.ensure_config(gmp)
         gvmd.configs[config_id]['safe_checks'] = 'no'
-        with self.factory() as gmp:
+        with mock.patch.object(ov, '_apply_safe_selection') as reapply, self.factory() as gmp:  # gvmd keeps the unsafe state
             with self.assertRaises(ov.OpenvasError) as raised:
                 ov.ensure_config(gmp)
+        reapply.assert_called_once()
         self.assertIn('safe_checks', str(raised.exception))
         gvmd.configs[config_id]['safe_checks'] = 'yes'
         gvmd.configs[config_id]['families']['Denial of Service'] = {'count': 12, 'growing': False}
-        with self.factory() as gmp:
+        with mock.patch.object(ov, '_apply_safe_selection'), self.factory() as gmp:
             with self.assertRaises(ov.OpenvasError) as raised:
                 ov.ensure_config(gmp)
         self.assertIn('Denial of Service', str(raised.exception))
@@ -315,9 +337,9 @@ class Fixture(GvmdFixture, RouteFixture):
 
     def setUp(self):
         super().setUp()
-        self.scan_obj = self.scan(names=('www.rt.test',), ip='203.0.113.5')
-        self.scan(names=('api.rt.test',), ip='203.0.113.6')
-        self.scan(names=('db.rt.test',), ip='198.51.100.7')
+        self.scan_obj = self.scan(names=('www.rt.test',), ip='93.184.216.5')
+        self.scan(names=('api.rt.test',), ip='93.184.216.6')
+        self.scan(names=('db.rt.test',), ip='93.184.214.7')
         self.start_gvmd()
         self.settings = OpenvasSettings.current()
         self.settings.enabled, self.settings.gmp_username, self.settings.gmp_password = True, self.gvmd.user, self.gvmd.password
@@ -352,12 +374,12 @@ class Fixture(GvmdFixture, RouteFixture):
         return self.tick()
 
 
-APACHE = dict(host='203.0.113.5', port='443/tcp', oid=OID_APACHE, name='Apache HTTP Server < 2.4.51 Path Traversal', severity=9.8, qod=99,
+APACHE = dict(host='93.184.216.5', port='443/tcp', oid=OID_APACHE, name='Apache HTTP Server < 2.4.51 Path Traversal', severity=9.8, qod=99,
               cves=['CVE-2021-41773'], hostname='www.rt.test')
-BANNER = dict(host='203.0.113.5', port='80/tcp', oid=OID_BANNER, name='Old thing version check', severity=5.0, qod=30, cves=['CVE-2019-0001'],
+BANNER = dict(host='93.184.216.5', port='80/tcp', oid=OID_BANNER, name='Old thing version check', severity=5.0, qod=30, cves=['CVE-2019-0001'],
               hostname='www.rt.test', qod_type='remote_banner_unreliable')
-PLAIN = dict(host='203.0.113.5', port='22/tcp', oid=OID_PLAIN, name='SSH weak algorithms', severity=5.3, qod=80, cves=[], hostname='www.rt.test')
-LOG = dict(host='203.0.113.6', port='general/tcp', oid='1.3.6.1.4.1.25623.1.0.10267', name='OS detection', severity=0.0, qod=80, cves=[], hostname='api.rt.test')
+PLAIN = dict(host='93.184.216.5', port='22/tcp', oid=OID_PLAIN, name='SSH weak algorithms', severity=5.3, qod=80, cves=[], hostname='www.rt.test')
+LOG = dict(host='93.184.216.6', port='general/tcp', oid='1.3.6.1.4.1.25623.1.0.10267', name='OS detection', severity=0.0, qod=80, cves=[], hostname='api.rt.test')
 
 
 class OffByDefaultTests(Fixture, TestCase):
@@ -398,7 +420,7 @@ class GatingTests(Fixture, TestCase):
         return ov.due(self.project.id, hosts if hosts is not None else self.link.hosts, resolve=kw.get('resolve', self.resolve), blocked=kw.get('blocked', lambda h: False))
 
     def test_opted_in_hosts_are_due_with_their_vetted_address(self):
-        self.assertEqual({(h, ip) for h, ip, _d in self.due()}, {('www.rt.test', '203.0.113.5'), ('api.rt.test', '203.0.113.6')})
+        self.assertEqual({(h, ip) for h, ip, _d in self.due()}, {('www.rt.test', '93.184.216.5'), ('api.rt.test', '93.184.216.6')})
 
     def test_a_host_that_is_not_opted_in_is_never_scanned(self):
         self.assertNotIn('db.rt.test', {h for h, _ip, _d in self.due()})
@@ -421,8 +443,8 @@ class GatingTests(Fixture, TestCase):
             self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
         with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('127.0.0.1', 443))]):
             self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('203.0.113.5', 443))]):
-            self.assertEqual([(h, ip) for h, ip, _d in ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False)], [('www.rt.test', '203.0.113.5')])
+        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.5', 443))]):
+            self.assertEqual([(h, ip) for h, ip, _d in ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False)], [('www.rt.test', '93.184.216.5')])
 
     def test_a_name_that_does_not_resolve_at_all_is_dropped_by_the_real_vetting(self):
         """No injected resolver: a name with no DNS answer (NXDOMAIN) must be skipped exactly like one that resolves somewhere
@@ -437,10 +459,32 @@ class GatingTests(Fixture, TestCase):
         with mock.patch('socket.getaddrinfo', return_value=[]):
             self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
 
+    def test_documentation_ranges_and_this_instances_own_address_are_refused(self):
+        for ip in ('192.0.2.1', '198.51.100.9', '203.0.113.200', '2001:db8::5'):
+            self.assertTrue(ov.refuse_address(ip), ip)
+        with mock.patch.dict(os.environ, {'CVENGINE_OWN_ADDRESSES': '93.184.216.99, 2606:4700::99'}), mock.patch.dict(ov._own, {'at': 0.0}):
+            self.assertTrue(ov.refuse_address('93.184.216.99'))
+            self.assertTrue(ov.refuse_address('2606:4700::99'))
+            self.assertFalse(ov.refuse_address('93.184.216.98'))
+        with mock.patch.dict(ov._own, {'at': 0.0}):
+            self.assertFalse(ov.refuse_address('93.184.216.99'))  # the cache is rebuilt from the environment
+
+    def test_a_name_on_a_shared_saas_front_or_cdn_is_never_given_to_the_sidecar(self):
+        sub = Subdomain.objects.filter(name='www.rt.test').first()
+        mail = Subdomain.objects.create(name='autodiscover.rt.test', target_domain=sub.target_domain, scan_history=sub.scan_history,
+                                        cname='autodiscover.outlook.com')
+        edge = Subdomain.objects.create(name='shop.rt.test', target_domain=sub.target_domain, scan_history=sub.scan_history, is_cdn=True)
+        self.assertTrue(ov.shared_infrastructure(mail, '52.96.1.1'))
+        self.assertTrue(ov.shared_infrastructure(edge, '104.16.1.1'))
+        self.assertFalse(ov.shared_infrastructure(sub, '93.184.216.7'))
+        due = ov.due(self.project.id, ['autodiscover.rt.test', 'shop.rt.test', 'www.rt.test'], resolve=lambda h, p: {
+            'autodiscover.rt.test': '52.96.1.1', 'shop.rt.test': '104.16.1.1', 'www.rt.test': '93.184.216.7'}[h], blocked=lambda h: False)
+        self.assertEqual([h for h, _ip, _d in due], ['www.rt.test'])
+
     def test_the_sidecar_is_never_given_a_tailnet_address(self):
         for ip in ('100.64.0.7', '100.127.255.254', 'fd7a:115c:a1e0::7'):
             self.assertTrue(ov.refuse_address(ip), ip)
-        for ip in ('203.0.113.5', '198.51.100.7', '2001:db8::5'):
+        for ip in ('93.184.216.5', '93.184.214.7', '2606:4700::5'):
             self.assertFalse(ov.refuse_address(ip), ip)
         self.assertEqual(self.due(resolve=lambda h, p: '100.64.0.9'), [])
         with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('100.64.0.9', 443))]):
@@ -457,7 +501,7 @@ class GatingTests(Fixture, TestCase):
         self.assertEqual([h for h, _ip, _d in self.due(resolve=resolve)], ['api.rt.test'])
 
     def test_two_names_on_one_address_are_one_scan_target(self):
-        self.assertEqual(len(self.due(resolve=lambda h, p: '203.0.113.5')), 1)
+        self.assertEqual(len(self.due(resolve=lambda h, p: '93.184.216.5')), 1)
 
     def test_a_host_scanned_within_a_week_is_not_due_and_one_scanned_longer_ago_is(self):
         from cveFeed import ledger
@@ -485,14 +529,14 @@ class SweepTests(Fixture, TestCase):
         out = self.tick()
         self.assertEqual((out['status'], out['hosts']), ('running', 2))
         target = next(iter(self.gvmd.targets.values()))
-        self.assertEqual(set(target['hosts'].split(',')), {'203.0.113.5', '203.0.113.6'})  # numeric addresses only, never a name
+        self.assertEqual(set(target['hosts'].split(',')), {'93.184.216.5', '93.184.216.6'})  # numeric addresses only, never a name
         self.assertEqual(target['port_list'], '33d0cd82-57c6-11e1-8ed1-406186ea4fc5')
         task = next(iter(self.gvmd.tasks.values()))
         self.assertEqual(task['config'], next(i for i, c in self.gvmd.configs.items() if c['name'] == 'cvENGINE safe scan'))
         self.assertEqual((task['prefs'], task['status']), ({'max_checks': '2', 'max_hosts': '1'}, 'Requested'))
         run = OpenvasRun.objects.get()
         self.assertEqual((run.status, run.project_id, run.task_id), ('running', self.project.id, next(iter(self.gvmd.tasks))))
-        self.assertEqual(run.hosts, {'203.0.113.5': 'www.rt.test', '203.0.113.6': 'api.rt.test'})
+        self.assertEqual(run.hosts, {'93.184.216.5': 'www.rt.test', '93.184.216.6': 'api.rt.test'})
 
     def test_the_batch_is_capped(self):
         with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}):
@@ -613,14 +657,15 @@ class SweepTests(Fixture, TestCase):
         self.assertFalse(state['connected'])
         self.assertTrue(state['error'])
 
-    def test_a_task_that_cannot_be_created_fails_the_run_and_backs_off(self):
+    def test_a_task_that_cannot_be_created_fails_the_run_and_marks_no_host_failed(self):
         self.gvmd.fail['create_task'] = ('400', 'Failed to find config')
         out = self.tick()
         self.assertIn('could not create or start', out['error'])
         run = OpenvasRun.objects.get()
         self.assertEqual(run.status, 'failed')
-        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 2)
-        self.assertEqual(self.tick()['skipped'], 'no opted-in host is due')
+        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 0)  # the scan never ran: gvmd's trouble is not the host's
+        self.gvmd.fail.clear()
+        self.assertEqual(self.tick()['status'], 'running')  # the same hosts are tried again at the next tick
 
     def test_a_dead_celery_between_making_the_run_and_the_task_does_not_wedge_the_sweep(self):
         OpenvasRun.objects.create(project=self.project, status='running', task_id='')
@@ -700,7 +745,7 @@ class ImportTests(Fixture, TestCase):
         self.assertEqual(CVEMatch.objects.filter(source='openvas').count(), 2)
 
     def test_dedupe_is_by_host_port_and_oid(self):
-        self.run_scan([APACHE, {**APACHE, 'port': '8443/tcp'}, {**APACHE, 'host': '203.0.113.6', 'hostname': 'api.rt.test'}])
+        self.run_scan([APACHE, {**APACHE, 'port': '8443/tcp'}, {**APACHE, 'host': '93.184.216.6', 'hostname': 'api.rt.test'}])
         self.assertEqual(Vulnerability.objects.filter(source='openvas').count(), 3)
         self.assertEqual(ProbeObservation.objects.filter(probe='openvas').count(), 3)
         keys = set(ProbeObservation.objects.filter(probe='openvas').values_list('host', 'port', 'product'))
@@ -724,7 +769,7 @@ class ImportTests(Fixture, TestCase):
         match = CVEMatch.objects.get(cve_entry=self.cve, source='openvas')
         match.remediation_status = 'in_progress'
         match.save()
-        self.run_scan([{**LOG, 'host': '203.0.113.5', 'hostname': 'www.rt.test'}])  # www answered, and no longer shows the problem
+        self.run_scan([{**LOG, 'host': '93.184.216.5', 'hostname': 'www.rt.test'}])  # www answered, and no longer shows the problem
         match.refresh_from_db()
         self.assertEqual((match.template_result, match.remediation_status, match.ai_verdict), ('no_match', 'in_progress', ''))
 
@@ -748,13 +793,13 @@ class ImportTests(Fixture, TestCase):
         self.tick()
         run = OpenvasRun.objects.get(status='running')
         self.gvmd.add_result(run.task_id, **LOG)
-        self.gvmd.extra_report_hosts = {'203.0.113.5'}  # www was scanned and nothing was found
+        self.gvmd.extra_report_hosts = {'93.184.216.5'}  # www was scanned and nothing was found
         self.gvmd.set_status(run.task_id, 'Done', 100)
         self.tick()
         self.assertFalse(Vulnerability.objects.get(template_id=f'openvas:{OID_APACHE}').open_status)
 
     def test_results_for_an_address_that_was_not_requested_are_ignored(self):
-        out = self.run_scan([{**APACHE, 'host': '203.0.113.99', 'hostname': 'surprise.example.test'}, LOG])
+        out = self.run_scan([{**APACHE, 'host': '93.184.216.99', 'hostname': 'surprise.example.test'}, LOG])
         self.assertEqual(out['not_in_batch'], 1)
         self.assertFalse(Vulnerability.objects.filter(source='openvas').exists())
         self.assertFalse(ProbeObservation.objects.filter(probe='openvas').exists())
@@ -801,7 +846,7 @@ def _sentinel_item(**over):
     ``tests.test_sentinels.OpenvasResultCleanerTests``; this is only used to drive ``poll_sentinel``/``tick``'s import
     path end to end."""
     item = {'oid': OID_APACHE, 'name': 'Apache HTTP Server < 2.4.51 Path Traversal', 'family': 'Web application abuses',
-            'address': '203.0.113.5', 'hostname': 'www.rt.test', 'port': '443/tcp', 'port_number': 443, 'severity': 9.8,
+            'address': '93.184.216.5', 'hostname': 'www.rt.test', 'port': '443/tcp', 'port_number': 443, 'severity': 9.8,
             'threat': 'Critical', 'qod': 99, 'qod_type': 'remote_active', 'result': 'Installed version: 2.4.49',
             'summary': 'The product is affected.', 'insight': 'A flaw in request handling.', 'impact': '',
             'affected': 'Versions before 2.4.51', 'solution': 'Update to the fixed release.', 'solution_type': 'VendorFix',
@@ -873,7 +918,7 @@ class SentinelDispatchTests(Fixture, TestCase):
         task = run.sentinel_task
         task.result = {'results': [_sentinel_item(), _sentinel_item(port='80/tcp', port_number=80, oid=OID_BANNER,
                        name='Old thing version check', severity=5.0, qod=30, cves=['CVE-2019-0001'], qod_type='remote_banner_unreliable')],
-                      'scanned_addresses': ['203.0.113.5', '203.0.113.6'], 'without_cve': 0, 'unusable': 0}
+                      'scanned_addresses': ['93.184.216.5', '93.184.216.6'], 'without_cve': 0, 'unusable': 0}
         task.status = 'done'
         task.save(update_fields=['result', 'status'])
         out = self.tick()
@@ -895,7 +940,7 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertEqual(OpenvasRun.objects.get().status, 'failed')
         self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())
 
-    def test_an_expired_sentinel_task_marks_the_run_failed_too(self):
+    def test_an_expired_sentinel_task_marks_the_run_failed_but_no_host(self):
         self.make_sentinel()
         self.tick()
         run = OpenvasRun.objects.get()
@@ -903,11 +948,29 @@ class SentinelDispatchTests(Fixture, TestCase):
         run.sentinel_task.save(update_fields=['status'])
         out = self.tick()
         self.assertEqual(out['status'], 'failed')
+        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())  # the Sentinel went away; nothing was learned about the hosts
+
+    def test_a_sentinel_whose_own_stack_was_not_ready_marks_no_host_failed(self):
+        for error in ('the default GVM login did not work (GvmResponseError)', 'GVM is still syncing its SCAP feed(s); it cannot scan yet',
+                      'gvmd answered with an error: GvmResponseError: Response Error 400. Family "AIX Local Security Checks" must be growing',
+                      'the "Full and fast" scan configuration is not in gvmd yet (the feed is not loaded)',
+                      'gvmd could not be reached (ConnectionRefusedError): is the GVM stack up yet?'):
+            self.assertTrue(ov.infrastructure_failure('failed', error), error)
+        for error in ('the task ran past its time budget', 'gvmd reports the task as "Stopped"', 'the Sentinel lost its GVM connection', ''):
+            self.assertFalse(ov.infrastructure_failure('failed', error), error)
+        self.make_sentinel()
+        self.tick()
+        run = OpenvasRun.objects.get()
+        run.sentinel_task.status, run.sentinel_task.error = 'failed', 'GVM is still syncing its SCAP feed(s); it cannot scan yet'
+        run.sentinel_task.save(update_fields=['status', 'error'])
+        self.assertEqual(self.tick()['status'], 'failed')
+        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())
+        self.assertEqual(self.tick()['status'], 'running')  # the same hosts are handed out again at the next tick
 
     def test_only_one_task_runs_at_a_time_whether_local_or_dispatched(self):
         self.make_sentinel()
         self.tick()  # dispatched to the Sentinel
-        self.assertIsNone(ov.dispatch_to_sentinel(self.link, [('db.rt.test', '198.51.100.7', 1)]))
+        self.assertIsNone(ov.dispatch_to_sentinel(self.link, [('db.rt.test', '93.184.214.7', 1)]))
         self.assertEqual(OpenvasRun.objects.count(), 1)
 
     def test_while_the_addon_is_off_a_sentinel_is_never_asked_either(self):
@@ -967,7 +1030,7 @@ class SentinelOnlyTests(Fixture, TestCase):
 class CarryForwardTests(Fixture, TestCase):
     def test_a_later_scans_host_row_gets_the_findings_and_the_evidence(self):
         self.run_scan([APACHE, BANNER])
-        later = self.scan(names=('www.rt.test',), ip='203.0.113.5')
+        later = self.scan(names=('www.rt.test',), ip='93.184.216.5')
         sub = Subdomain.objects.get(scan_history=later, name='www.rt.test')
         self.assertFalse(Vulnerability.objects.filter(subdomain=sub).exists())
         self.assertEqual(ov.carry_forward(later), 2)
@@ -979,7 +1042,7 @@ class CarryForwardTests(Fixture, TestCase):
     def test_it_does_not_resolve_what_merely_went_stale(self):
         self.run_scan([APACHE])
         ProbeObservation.objects.update(observed_at=timezone.now() - timedelta(days=40))
-        later = self.scan(names=('www.rt.test',), ip='203.0.113.5')
+        later = self.scan(names=('www.rt.test',), ip='93.184.216.5')
         self.assertEqual(ov.carry_forward(later), 0)
         self.assertEqual(ov.apply_observations(Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')), (0, 0, 0))  # stale is not "gone"
 
@@ -988,7 +1051,7 @@ class CarryForwardTests(Fixture, TestCase):
     def test_a_person_s_decision_on_an_earlier_finding_is_kept_on_the_new_row(self):
         self.run_scan([APACHE])
         Vulnerability.objects.update(remediation_status='accepted_risk', remediation_note='known')
-        later = self.scan(names=('www.rt.test',), ip='203.0.113.5')
+        later = self.scan(names=('www.rt.test',), ip='93.184.216.5')
         ov.carry_forward(later)
         new = Vulnerability.objects.get(subdomain__scan_history=later, source='openvas')
         self.assertEqual((new.remediation_status, new.remediation_note), ('accepted_risk', 'known'))
@@ -1461,6 +1524,7 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertEqual(covered, {self.project.pk, later.pk})
         self.assertNotIn(self.other.pk, covered)
 
+    @mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'})
     def test_a_project_with_no_list_scans_its_own_hosts_never_another_projects(self):
         OpenvasProject.objects.create(project=self.project, enabled=True)
         link = OpenvasProject.objects.get(project=self.project)
@@ -1470,12 +1534,20 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         Subdomain.objects.create(name='x.other.test', target_domain=foreign, scan_history=self.scan_obj)
         self.assertNotIn('x.other.test', {h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)})
 
+    @mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'})
     def test_hosts_that_fail_the_vetting_are_asked_again_in_three_days_not_every_tick(self):
         OpenvasProject.objects.create(project=self.project, enabled=True)
         link = OpenvasProject.objects.get(project=self.project)
         ov.next_batch(link, resolve=self.resolve, blocked=lambda h: h == 'db.rt.test')
         self.assertNotIn('db.rt.test', ov.candidate_hosts(self.project.id))
         self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='db.rt.test').exists())
+
+    def test_a_project_with_no_list_scans_nothing_unless_automatic_selection_is_on(self):
+        OpenvasProject.objects.create(project=self.project, enabled=True)
+        link = OpenvasProject.objects.get(project=self.project)
+        self.assertEqual(ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False), [])
+        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'}):
+            self.assertTrue(ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False))
 
     def test_a_listed_host_set_still_limits_a_project(self):
         OpenvasProject.objects.create(project=self.project, enabled=True, hosts=['www.rt.test'])
@@ -1629,6 +1701,7 @@ class InternalNetworkTests(Fixture, TestCase):
         self.link.save()
         self.assertEqual(ov.internal_batch(self.link), [])
 
+    @mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_AUTO_HOSTS': '1'})
     def test_an_outside_sentinel_is_never_given_the_internal_batch(self):
         self.sentinel(['openvas'])
         self.tick()

@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 
-# (CNAME suffix, provider, kind). kind: paas and cdn and storage are shared edges; cloud is one tenant's own machine.
+# (CNAME suffix, provider, kind). kind: paas, cdn, storage and saas are shared edges; cloud is one tenant's own machine.
 PLATFORM_SUFFIXES = (
     ("netlify.app", "Netlify", "paas"), ("netlify.com", "Netlify", "paas"), ("netlifyglobalcdn.com", "Netlify", "paas"),
     ("vercel.app", "Vercel", "paas"), ("vercel-dns.com", "Vercel", "paas"), ("now.sh", "Vercel", "paas"),
@@ -27,6 +27,12 @@ PLATFORM_SUFFIXES = (
     ("web.app", "Firebase Hosting", "paas"), ("appspot.com", "Google App Engine", "paas"), ("run.app", "Google Cloud Run", "paas"),
     ("webflow.io", "Webflow", "paas"), ("pantheonsite.io", "Pantheon", "paas"), ("hubspot.net", "HubSpot", "paas"),
     ("statuspage.io", "Atlassian Statuspage", "paas"), ("zendesk.com", "Zendesk", "paas"),
+    # SaaS fronts a customer points a name at (mail autodiscover, device enrolment, sign-in): the addresses are the vendor's
+    ("outlook.com", "Microsoft 365", "saas"), ("office365.com", "Microsoft 365", "saas"), ("office.com", "Microsoft 365", "saas"),
+    ("microsoftonline.com", "Microsoft 365", "saas"), ("manage.microsoft.com", "Microsoft Intune", "saas"),
+    ("windows.net", "Microsoft", "saas"), ("sharepoint.com", "Microsoft SharePoint", "saas"), ("azure-api.net", "Azure API Management", "saas"),
+    ("googlehosted.com", "Google Workspace", "saas"), ("ghs.google.com", "Google Workspace", "saas"),
+    ("mimecast.com", "Mimecast", "saas"), ("pphosted.com", "Proofpoint", "saas"),
 )
 # Server header (lowercase, first word) -> (provider, kind)
 SERVER_PLATFORMS = {
@@ -41,7 +47,7 @@ REVERSE_INFRA = (
     (".googleusercontent.com", "Google Cloud"), (".cloudapp.azure.com", "Microsoft Azure"), (".cloudapp.net", "Microsoft Azure"),
     (".linodeusercontent.com", "Linode"), (".vultrusercontent.com", "Vultr"), (".your-server.de", "Hetzner"),
 )
-SHARED_KINDS = ("paas", "cdn", "storage")
+SHARED_KINDS = ("paas", "cdn", "storage", "saas")
 _LABEL = re.compile(r"[^a-z0-9.-]")
 
 

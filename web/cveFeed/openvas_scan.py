@@ -295,9 +295,19 @@ def config_problems(config):
     return problems
 
 
+def _apply_safe_selection(gmp, config_id):
+    """Select every family except ``EXCLUDED_FAMILIES`` (each growing and including all its VTs, the only form gvmd accepts for a family that is
+    in use: "growing and all VTs, or static and empty"), leave new families out, and turn ``safe_checks`` on."""
+    families = [_text(f, 'name') for f in gmp.get_nvt_families().findall('./families/family')]
+    wanted = [(name, True, True) for name in families if name and name not in EXCLUDED_FAMILIES]  # python-gvm: (family, growing, include all)
+    gmp.modify_scan_config_set_family_selection(config_id, wanted, auto_add_new_families=False)
+    gmp.modify_scan_config_set_scanner_preference(config_id, 'safe_checks', value='yes')
+
+
 def ensure_config(gmp):
     """The id of the safe scan configuration: found by name, or built as a copy of "Full and fast" without ``EXCLUDED_FAMILIES``. It is
-    read back and checked every time; a configuration that does not pass is an error, never used."""
+    read back and checked every time. One that does not pass (a copy an earlier failed run left half built) gets the selection applied again
+    once; one that still does not pass is an error, never used."""
     existing = [c for c in gmp.get_scan_configs().findall('config') if _text(c, 'name') == CONFIG_NAME]
     if existing:
         config_id = existing[0].get('id')
@@ -307,11 +317,11 @@ def ensure_config(gmp):
             raise OpenvasError('the "Full and fast" scan configuration is not in gvmd yet (the feed is not loaded)')
         created = gmp.create_scan_config(base.get('id'), CONFIG_NAME, comment='cvENGINE: Full and fast without denial of service and brute force')
         config_id = created.get('id')
-        families = [_text(f, 'name') for f in gmp.get_nvt_families().findall('./families/family')]
-        wanted = [(name, False, True) for name in families if name and name not in EXCLUDED_FAMILIES]
-        gmp.modify_scan_config_set_family_selection(config_id, wanted, auto_add_new_families=False)
-        gmp.modify_scan_config_set_scanner_preference(config_id, 'safe_checks', value='yes')
+        _apply_safe_selection(gmp, config_id)
     problems = config_problems(gmp.get_scan_config(config_id).find('config'))
+    if problems and existing:
+        _apply_safe_selection(gmp, config_id)
+        problems = config_problems(gmp.get_scan_config(config_id).find('config'))
     if problems:
         raise OpenvasError(f'the scan configuration "{CONFIG_NAME}" is not safe ({"; ".join(problems)}): delete it in GVM so cvENGINE can rebuild it')
     return config_id
@@ -351,15 +361,55 @@ def memory_critical(state_fn=None):
 
 # ----------------------------------------------------------------------------- choosing hosts
 
+_DOCUMENTATION = [ipaddress.ip_network(n) for n in ('192.0.2.0/24', '198.51.100.0/24', '203.0.113.0/24', '2001:db8::/32')]
+OWN_TTL = 3600
+_own = {'at': 0.0, 'addresses': frozenset()}
+
+
+def own_addresses():
+    """The addresses this cvENGINE instance answers on: ``CVENGINE_OWN_ADDRESSES`` (comma separated; for an instance behind NAT or a load balancer)
+    and what ``DOMAIN_NAME`` resolves to, cached for an hour. A scan of any of them would be this instance scanning itself."""
+    import socket
+    import time
+    from django.conf import settings
+    now = time.monotonic()
+    if _own['at'] and now - _own['at'] < OWN_TTL:
+        return _own['addresses']
+    found = set()
+    for part in os.environ.get('CVENGINE_OWN_ADDRESSES', '').split(','):
+        part = part.strip()
+        if part:
+            found.add(part)
+    name = str(getattr(settings, 'DOMAIN_NAME', '') or '').strip()
+    if name:
+        try:
+            found.update(item[4][0] for item in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM))
+        except (OSError, UnicodeError):
+            pass
+    _own.update(at=now, addresses=frozenset(found))
+    return _own['addresses']
+
+
 def refuse_address(ip):
     """Whether OpenVAS must not be given this address even though a scanner could reach it from the celery container. The sidecar has no
-    tailscale interface, so a tailnet address would leave by the Docker host's default route: never. Everything else is
-    ``is_scannable_ip``'s decision."""
+    tailscale interface, so a tailnet address would leave by the Docker host's default route: never. A documentation range (RFC 5737, RFC 3849)
+    is nobody's host, and this instance's own address is never a target of its own scanner. Everything else is ``is_scannable_ip``'s decision."""
     try:
         address = ipaddress.ip_address(ip)
     except ValueError:
         return True
-    return any(address.version == net.version and address in net for net in _TAILNET)
+    if address.compressed in own_addresses():
+        return True
+    return any(address.version == net.version and address in net for net in _TAILNET + _DOCUMENTATION)
+
+
+def shared_infrastructure(sub, ip):
+    """Whether ``sub`` (a stored host row) or ``ip`` belongs to a platform other tenants share (a CDN edge, a SaaS front such as Microsoft 365's
+    autodiscover, a PaaS): OpenVAS is an intrusive scanner and those addresses are not the project's to test. Read from what is already
+    recorded about the name and the address (``cveFeed.hosting``); nothing is resolved here."""
+    from cveFeed import hosting
+    verdict = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=sub.webserver or '', cdn_name=sub.cdn_name or '', is_cdn=bool(sub.is_cdn))
+    return bool(verdict['shared_ip'] or hosting.shared_by_address([ip]))
 
 
 def _address(host, project_id):
@@ -379,7 +429,9 @@ def _latest_row(project_id, host):
 def due(project_id, hosts, resolve=None, blocked=None):
     """``[(host, ip, domain_id)]`` of the opted-in ``hosts`` that are due: vetted, not excluded or archived, not scanned within a week and
     not failed within three days, never-scanned first. Vetting is the same as for every other scanner (``scannable_hosts``,
-    ``pinned_transport.resolve``); a host that fails it is dropped silently, like a name that stopped resolving. One host per address."""
+    ``pinned_transport.resolve``) plus the OpenVAS-only refusals of ``refuse_address`` (documentation ranges, this instance's own address, the
+    tailnet) and of ``shared_infrastructure`` (a CDN, a SaaS or PaaS front shared with other customers); a host that fails any is dropped silently,
+    like a name that stopped resolving. One host per address."""
     from cveFeed import exclusions, ledger
     from targetApp.target_types import scannable_hosts
     resolve = resolve or _address
@@ -394,7 +446,7 @@ def due(project_id, hosts, resolve=None, blocked=None):
             ip = resolve(host, project_id)
         except (ValueError, OSError):
             continue
-        if refuse_address(ip) or ip in by_ip:
+        if refuse_address(ip) or ip in by_ip or shared_infrastructure(sub, ip):
             continue
         by_ip.add(ip)
         found.append((host, ip, sub.target_domain_id))
@@ -441,10 +493,20 @@ def sweep_links():
     return OpenvasProject.objects.filter(Q(enabled=True) | Q(project__org_id__in=org_ids)).select_related('project').order_by('project_id')
 
 
+def auto_hosts():
+    """CVENGINE_OPENVAS_AUTO_HOSTS=1 lets a project with no host list scan the names its scans found. Off by default: OpenVAS is an intrusive
+    scanner, so a host is scanned only when someone chose it (``OpenvasProject.hosts``), and what a project's scans happened to find
+    (autodiscover names on a mail provider, API gateways, a CDN) is not that choice."""
+    return os.environ.get('CVENGINE_OPENVAS_AUTO_HOSTS', '').strip().lower() in ('1', 'true', 'yes')
+
+
 def next_batch(link, resolve=None, blocked=None):
-    """``[(host, ip, domain_id)]`` due for this project: the listed hosts when someone limited it to a list, else its own hosts."""
+    """``[(host, ip, domain_id)]`` due for this project: the hosts someone chose. A project with no host list has none unless
+    ``CVENGINE_OPENVAS_AUTO_HOSTS`` is on, and then its own hosts (still vetted)."""
     if link.hosts:
         return due(link.project_id, link.hosts, resolve=resolve, blocked=blocked)[:max_hosts()]
+    if not auto_hosts():
+        return []
     names = candidate_hosts(link.project_id)
     vetted = due(link.project_id, names, resolve=resolve, blocked=blocked)
     kept = {host for host, _ip, _domain in vetted}
@@ -521,9 +583,7 @@ def start(gmp, link, batch):
         run.task_id = task.get('id') or ''
         run.save(update_fields=['task_id'])
         gmp.start_task(run.task_id)
-    except Exception as exc:  # noqa: BLE001
-        from cveFeed import ledger
-        ledger.record(FAILED_SERVICE, run.hosts.values(), link.project_id)  # asked again in three days, not at the next tick
+    except Exception as exc:  # noqa: BLE001 - the scan never ran, so no host is marked failed: gvmd's trouble is not the host's
         finish(run, 'failed', f'could not create or start the task ({type(exc).__name__})')
         raise OpenvasError(f'could not create or start the GVM task ({type(exc).__name__})') from None
     return run
@@ -815,6 +875,19 @@ def dispatch_to_sentinel(link, batch):
     return run
 
 
+# What a Sentinel says when its own stack, not the scan, failed (client/openvas.py raises these before a task exists in gvmd).
+INFRASTRUCTURE_ERRORS = ('no gmp login', 'gvmd could not be reached', 'gvmd refused the gmp login', 'the default gvm login', 'gvmd would not set a password',
+                         'gvmd has no user', 'gvmd answered with an error', 'the connection to gvmd failed', 'is still syncing', 'feed is not loaded',
+                         'not in gvmd yet', 'does not list the openvas scanner', 'port list yet', 'scan configuration', 'is the gvm stack up')
+
+
+def infrastructure_failure(status, reason):
+    """Whether a failed Sentinel task failed for want of a working Sentinel or gvmd (no host is to blame): an ``expired`` task (the Sentinel stopped
+    answering) or an error naming its own stack."""
+    text = str(reason or '').lower()
+    return status == 'expired' or any(marker in text for marker in INFRASTRUCTURE_ERRORS)
+
+
 def poll_sentinel(run):
     """One step of a Sentinel-dispatched run: ask its ``SentinelTask``'s own status, exactly as ``poll`` asks gvmd's for a
     local one. No GMP session is opened for this: the Sentinel talks to its own sidecar, never this instance's."""
@@ -842,9 +915,11 @@ def poll_sentinel(run):
         activity.settle(entry, 'done', message=(f'OpenVAS (Sentinel): {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
                                                 f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')))
         return {'run': run.pk, 'status': 'done', **summary}
-    # failed or expired: the Sentinel never finished it. The hosts stay due; a later tick retries, locally or on a Sentinel.
+    # failed or expired: the Sentinel never finished it. A later tick retries, locally or on a Sentinel. The hosts are marked failed (asked again in
+    # three days) only when the scan itself ran and failed: a Sentinel that went away, or whose gvmd was not ready, says nothing about them.
     reason = task.error or (task.result or {}).get('error') or 'the Sentinel did not report a finished scan'
-    ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
+    if not infrastructure_failure(task.status, reason):
+        ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
     finish(run, 'failed', clean(reason, 300))
     return {'run': run.pk, 'status': 'failed'}
 

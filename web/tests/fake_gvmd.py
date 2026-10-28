@@ -209,6 +209,10 @@ class FakeGvmd:
         selection = root.find('family_selection')
         if selection is not None:
             chosen = {f.findtext('name'): f for f in selection.findall('family')}
+            for name, f in chosen.items():  # gvmd's own rule: a family is growing and includes every VT, or it is static and empty
+                if f.findtext('all') == '1' and f.findtext('growing') != '1':
+                    return (f'<modify_config_response status="400" status_text="Family &quot;{escape(name)}&quot; must be growing and include '
+                            'all VTs or it must be static and empty."/>')
             config['families'] = {name: {'count': 40 if f.findtext('all') == '1' else 5, 'growing': f.findtext('growing') == '1'} for name, f in chosen.items()}
         pref = root.find('preference')
         if pref is not None and pref.findtext('name') == 'safe_checks':
