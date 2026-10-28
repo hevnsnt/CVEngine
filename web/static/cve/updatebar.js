@@ -1,4 +1,5 @@
 // Superusers only: a slim bar when the twice-daily check found a newer CVEngine version. Approval happens in Settings.
+import { hideVeil, loadScene, manageVeil, showVeil } from "/staticfiles/cve/sitewatch.js";
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -35,35 +36,12 @@ function watchUpdate(first) {
   bar.append(el("span", "ul-dot"), text, steps, more, track);
   const layout = document.querySelector(".layout") || document.getElementById("main");
   layout.parentNode.insertBefore(bar, layout.parentNode.firstChild);
-  const body = [...document.querySelectorAll(".layout, #main")];
-  // From the moment the host picks the update up, the whole page is covered by the "we are rebuilding" scene (the same file the proxy
-  // serves to everyone else, which needs nothing from the application) with the current step as its status line. It stays until the
-  // update is done, and then this page goes back to /cve/.
-  let veil = null;
-  let veilText = "";
-  const tellVeil = () => {
-    try {
-      veil.contentWindow.postMessage({ state: veilText }, location.origin);
-    } catch (_) {}
-  };
-  const grey = (on, status) => {
-    document.documentElement.classList.toggle("updating", on);
-    body.forEach((n) => (on ? n.setAttribute("inert", "") : n.removeAttribute("inert")));
-    if (on && !veil) {
-      veil = el("iframe", "update-veil");
-      veil.title = "cvENGINE is being rebuilt";
-      veil.src = new URL("maintenance.html", import.meta.url).pathname;
-      veil.addEventListener("load", tellVeil);
-      document.body.append(veil);
-    } else if (!on && veil) {
-      veil.remove();
-      veil = null;
-    }
-    if (veil && status) {
-      veilText = status;
-      tellVeil();
-    }
-  };
+  // From the moment the host picks the update up, the whole page is covered by the "we are rebuilding" scene (static/cve/sitewatch.js holds
+  // it in memory, so it shows even while nothing answers) with the current step as its status line. It stays until the update is done,
+  // and then this page goes back to /cve/.
+  manageVeil();
+  loadScene();
+  const grey = (on, status) => (on ? showVeil(status) : hideVeil());
   let unreachable = 0;
   let sawDown = false;
   const paint = (step, text, extra, busy = true) => {
@@ -148,6 +126,22 @@ function watchUpdate(first) {
   setTimeout(tick, 1200);
 }
 
+const RECHECK_MS = 30000;
+async function recheck() {
+  if (document.hidden) return setTimeout(recheck, RECHECK_MS);
+  try {
+    const r = await fetch("/cve/api/settings/updates", { credentials: "same-origin", cache: "no-store" });
+    const s = r.ok ? await r.json() : null;
+    if (s && s.status === "approved") {
+      document.querySelectorAll(".updatebar").forEach((n) => n.remove());
+      return watchUpdate(s);
+    }
+  } catch (_) {
+    /* down: sitewatch covers the page */
+  }
+  setTimeout(recheck, RECHECK_MS);
+}
+
 async function run() {
   let s;
   try {
@@ -158,6 +152,8 @@ async function run() {
     return;
   }
   if (s.status === "approved") return watchUpdate(s);
+  // a page opened before the update was approved (here, in Settings or on another device) must still notice it and follow it
+  setTimeout(recheck, RECHECK_MS);
   if (s.status !== "available") return;
   const bar = el("div", "updatebar");
   bar.setAttribute("role", "status");

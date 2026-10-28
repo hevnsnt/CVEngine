@@ -12,38 +12,80 @@
         try {
           pref = localStorage.getItem("cve.theme") || "light";
         } catch (e) {}
-        var dark = pref === "dark" || (pref === "auto" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+        var dark =
+          pref === "dark" ||
+          (pref === "auto" &&
+            window.matchMedia &&
+            matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute(
+          "data-theme",
+          dark ? "dark" : "light",
+        );
       })();
     </script>
     <style>
+      /* One self-contained file: the application is the thing that is down, so nothing here is fetched from it or anywhere else. */
       :root {
         color-scheme: light;
-        --bg: #f4f4f5;
+        --bg: #f3f2ef;
         --card: #ffffff;
-        --ink: #0a0a0b;
-        --muted: #55555c;
-        --line: #dcdce0;
-        --fire: #ff5a00;
-        --paper: #e8f1fb;
-        --paper-line: #8fb4de;
-        --skin-a: #f1c9a5;
-        --skin-b: #b98259;
-        --shirt-a: #2e2e32;
-        --shirt-b: #4a5a78;
-        --bubble: #ffffff;
+        --ink: #0d0d10;
+        --muted: #5b5b63;
+        --line: #e2e1dc;
+        --brand: #ff5a00;
+        --stage: #f7f6f2;
+        --grid: rgba(13, 13, 16, 0.05);
+        --grid-major: rgba(13, 13, 16, 0.08);
+        --faint: rgba(13, 13, 16, 0.16);
+        --plan: #1d3f73;
+        --plan-deep: #16325c;
+        --plan-line: #d7e5ff;
+        --plan-soft: rgba(215, 229, 255, 0.35);
+        --wood: #3a3a40;
+        --wood-hi: #4b4b52;
+        --navy: #262b3a;
+        --navy-hi: #343a4d;
+        --slate: #5d6779;
+        --slate-hi: #6f7a8e;
+        --vest: #ff6a14;
+        --reflect: #e9edf3;
+        --skin-a: #f0c8a4;
+        --skin-a-sh: #dcae86;
+        --skin-b: #a8714a;
+        --skin-b-sh: #8f5d3b;
+        --hair: #2a211c;
+        --hat: #ff5a00;
+        --hat-hi: #ff8b4d;
+        --hat-sh: #d94b00;
+        --hat-b: #f4f4f2;
+        --hat-b-sh: #d9d9d4;
+        --shoe: #16161a;
+        --shadow: rgba(13, 13, 16, 0.12);
+        --steel: #9aa0ab;
       }
       :root[data-theme="dark"] {
         color-scheme: dark;
-          --bg: #0a0a0b;
-          --card: #151517;
-          --ink: #f4f4f5;
-          --muted: #a4a4ac;
-          --line: #2b2b30;
-          --paper: #17283d;
-          --paper-line: #4f78a8;
-          --bubble: #1f1f23;
-        }
+        --bg: #0b0b0d;
+        --card: #141417;
+        --ink: #f3f3f5;
+        --muted: #a3a3ab;
+        --line: #26262c;
+        --stage: #101013;
+        --grid: rgba(243, 243, 245, 0.04);
+        --grid-major: rgba(243, 243, 245, 0.07);
+        --faint: rgba(243, 243, 245, 0.14);
+        --plan: #1b3a6a;
+        --plan-deep: #142d54;
+        --wood: #2b2b31;
+        --wood-hi: #3a3a41;
+        --navy: #2c3244;
+        --navy-hi: #3b4258;
+        --slate: #4f586a;
+        --slate-hi: #616b7f;
+        --shoe: #050507;
+        --shadow: rgba(0, 0, 0, 0.45);
+        --steel: #6d727c;
+      }
       * {
         box-sizing: border-box;
       }
@@ -56,7 +98,7 @@
         background: var(--bg);
         color: var(--ink);
         font:
-          16px/1.5 Inter,
+          16px/1.55 Inter,
           system-ui,
           -apple-system,
           "Segoe UI",
@@ -66,507 +108,906 @@
         align-items: center;
         justify-content: center;
         padding: 24px 16px;
+        -webkit-font-smoothing: antialiased;
       }
       main {
+        position: relative;
         width: 100%;
-        max-width: 760px;
+        max-width: 880px;
         background: var(--card);
         border: 1px solid var(--line);
-        border-left: 4px solid var(--fire);
-        border-radius: 10px;
-        padding: 28px 28px 24px;
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.04),
+          0 24px 60px -28px rgba(0, 0, 0, 0.25);
+      }
+      main::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto;
+        height: 3px;
+        background: linear-gradient(
+          90deg,
+          var(--brand),
+          #ffb27a 55%,
+          transparent
+        );
+      }
+      .head {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 18px;
+        align-items: end;
+        padding: 30px 34px 22px;
       }
       .brand {
-        font-weight: 700;
-        letter-spacing: 0.02em;
-        font-size: 14px;
-        color: var(--muted);
+        font:
+          800 13px/1 ui-monospace,
+          "SF Mono",
+          Menlo,
+          Consolas,
+          monospace;
+        letter-spacing: 0.14em;
         text-transform: uppercase;
+        color: var(--muted);
       }
       .brand b {
-        color: var(--fire);
+        color: var(--brand);
       }
       h1 {
-        margin: 6px 0 8px;
-        font-size: clamp(26px, 5vw, 36px);
-        line-height: 1.15;
-        letter-spacing: -0.01em;
+        margin: 12px 0 10px;
+        font-size: clamp(28px, 4.6vw, 42px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+        font-weight: 800;
       }
       p {
         margin: 0;
         color: var(--muted);
-        max-width: 56ch;
+        max-width: 54ch;
+      }
+      .eta {
+        text-align: right;
+        font:
+          600 11px/1.5 ui-monospace,
+          "SF Mono",
+          Menlo,
+          Consolas,
+          monospace;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .eta b {
+        display: block;
+        font:
+          800 22px/1.1 Inter,
+          system-ui,
+          sans-serif;
+        letter-spacing: -0.03em;
+        text-transform: none;
+        color: var(--ink);
+      }
+      .stage {
+        position: relative;
+        margin: 0 18px;
+        border-radius: 12px;
+        background-color: var(--stage);
+        background-image:
+          linear-gradient(var(--grid-major) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid-major) 1px, transparent 1px),
+          linear-gradient(var(--grid) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+        background-size:
+          100px 100px,
+          100px 100px,
+          20px 20px,
+          20px 20px;
+        background-position: -1px -1px;
+        border: 1px solid var(--line);
+        overflow: hidden;
       }
       svg {
         display: block;
         width: 100%;
         height: auto;
-        margin: 18px 0 6px;
+      }
+      .foot {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 18px 34px 24px;
       }
       .status {
         display: flex;
         align-items: center;
         gap: 10px;
-        margin-top: 10px;
+        flex: 1;
+        min-width: 0;
         font-size: 14px;
         color: var(--muted);
       }
       .pulse {
-        width: 10px;
-        height: 10px;
+        position: relative;
+        flex: none;
+        width: 9px;
+        height: 9px;
         border-radius: 50%;
-        background: var(--fire);
-        animation: pulse 1.4s ease-in-out infinite;
+        background: var(--brand);
+      }
+      .pulse::after {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        border: 2px solid var(--brand);
+        opacity: 0;
+        animation: ring 2s ease-out infinite;
+      }
+      .track {
+        flex: 0 0 160px;
+        height: 4px;
+        border-radius: 4px;
+        background: var(--line);
+        overflow: hidden;
+      }
+      .track i {
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: 4px;
+        background: var(--brand);
+        animation: slide 1.8s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+      }
+      @keyframes ring {
+        0% {
+          transform: scale(0.6);
+          opacity: 0.7;
+        }
+        100% {
+          transform: scale(1.6);
+          opacity: 0;
+        }
+      }
+      @keyframes slide {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(260%);
+        }
       }
 
       /* the scene */
-      .ink {
-        stroke: var(--ink);
-      }
-      .hat {
-        fill: var(--fire);
-      }
-      .sheet {
-        fill: var(--paper);
-        stroke: var(--paper-line);
-      }
-      .trace {
-        stroke: var(--paper-line);
+      .faint {
         fill: none;
-        stroke-width: 2;
+        stroke: var(--faint);
+        stroke-width: 1.4;
         stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .plan-line {
+        fill: none;
+        stroke: var(--plan-line);
+        stroke-width: 1.4;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
       .draw {
-        stroke: var(--fire);
-        fill: none;
-        stroke-width: 3;
-        stroke-linecap: round;
-        stroke-dasharray: 220;
-        stroke-dashoffset: 220;
-        animation: draw 6s ease-in-out infinite;
+        stroke-dasharray: 260;
+        stroke-dashoffset: 260;
+        animation: draw 7s ease-in-out infinite;
       }
-      .draw.two {
-        animation-delay: 2.2s;
-        stroke-dasharray: 160;
-        stroke-dashoffset: 160;
+      .draw.d2 {
+        animation-delay: 0.9s;
       }
-      .gear {
-        transform-box: fill-box;
-        transform-origin: center;
-        animation: spin 9s linear infinite;
+      .draw.d3 {
+        animation-delay: 1.8s;
       }
-      .gear.rev {
-        animation-direction: reverse;
-        animation-duration: 6s;
+      .draw.d4 {
+        animation-delay: 2.7s;
       }
-      .bob-a {
-        transform-box: fill-box;
-        transform-origin: 50% 100%;
-        animation: bob 3s ease-in-out infinite;
-      }
-      .bob-b {
-        transform-box: fill-box;
-        transform-origin: 50% 100%;
-        animation: bob 3s ease-in-out 1.5s infinite;
-      }
-      .point {
-        transform-box: fill-box;
-        transform-origin: 0% 50%;
-        animation: point 3s ease-in-out infinite;
-      }
-      .talk {
-        opacity: 0;
-      }
-      .t1 {
-        animation: say 12s linear 0s infinite;
-      }
-      .t2 {
-        animation: say 12s linear 3s infinite;
-      }
-      .t3 {
-        animation: say 12s linear 6s infinite;
-      }
-      .t4 {
-        animation: say 12s linear 9s infinite;
-      }
-      .bubble {
-        fill: var(--bubble);
-        stroke: var(--line);
-        stroke-width: 1.5;
-      }
-      .words {
-        fill: var(--ink);
-        font:
-          600 15px Inter,
-          system-ui,
-          sans-serif;
-      }
-
-      /* on a phone the speech bubbles would shrink to unreadable, so the same lines are shown as text under the picture */
-  .caption { display: none; position: relative; height: 26px; margin: 0 0 6px; font-weight: 600; }
-  .caption span { position: absolute; inset: 0; opacity: 0; }
-  .caption .t1, .caption .t2, .caption .t3, .caption .t4 { animation-name: say; }
-  @media (max-width: 560px) {
-    .talk { display: none; }
-    .caption { display: block; }
-    main { padding: 22px 18px 20px; }
-  }
-  @keyframes draw {
+      @keyframes draw {
         0% {
-          stroke-dashoffset: 220;
+          stroke-dashoffset: 260;
         }
-        45%,
+        35%,
         80% {
           stroke-dashoffset: 0;
         }
         100% {
-          stroke-dashoffset: -220;
+          stroke-dashoffset: -260;
         }
       }
-      @keyframes spin {
-        to {
-          transform: rotate(360deg);
+      .node {
+        fill: var(--plan-line);
+        animation: glow 3.5s ease-in-out infinite;
+      }
+      .node.n2 {
+        animation-delay: 1.2s;
+      }
+      .node.n3 {
+        animation-delay: 2.4s;
+      }
+      @keyframes glow {
+        0%,
+        100% {
+          opacity: 0.45;
+        }
+        50% {
+          opacity: 1;
         }
       }
-      @keyframes bob {
+      .pencil {
+        animation: sketch 3.2s ease-in-out infinite;
+      }
+      @keyframes sketch {
+        0%,
+        100% {
+          transform: translate(0, 0);
+        }
+        25% {
+          transform: translate(7px, -3px);
+        }
+        50% {
+          transform: translate(14px, 1px);
+        }
+        75% {
+          transform: translate(6px, 3px);
+        }
+      }
+      .point {
+        transform-origin: 624px 184px;
+        animation: point 4.5s ease-in-out infinite;
+      }
+      @keyframes point {
+        0%,
+        100% {
+          transform: rotate(0deg);
+        }
+        45%,
+        60% {
+          transform: rotate(5deg);
+        }
+      }
+      .nod {
+        transform-origin: 643px 162px;
+        animation: nod 4.5s ease-in-out infinite;
+      }
+      @keyframes nod {
         0%,
         100% {
           transform: rotate(0deg);
         }
         50% {
-          transform: rotate(-2.5deg);
+          transform: rotate(-3deg);
         }
       }
-      @keyframes point {
+      .look {
+        transform-origin: 171px 162px;
+        animation: look 6s ease-in-out infinite;
+      }
+      @keyframes look {
         0%,
         100% {
-          transform: rotate(-8deg);
+          transform: rotate(0deg);
         }
         50% {
-          transform: rotate(10deg);
+          transform: rotate(2.5deg);
         }
       }
-      @keyframes say {
-        0% {
-          opacity: 0;
-          transform: translateY(6px);
-        }
-        4%,
-        21% {
-          opacity: 1;
-          transform: translateY(0);
-        }
-        25%,
+      .blink {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: blink 5s infinite;
+      }
+      .blink.b2 {
+        animation-delay: 1.7s;
+      }
+      @keyframes blink {
+        0%,
+        94%,
         100% {
-          opacity: 0;
-          transform: translateY(0);
+          transform: scaleY(1);
+        }
+        96% {
+          transform: scaleY(0.1);
         }
       }
-      @keyframes pulse {
+      .load {
+        transform-origin: 668px 46px;
+        animation: swing 6s ease-in-out infinite;
+      }
+      @keyframes swing {
         0%,
         100% {
-          opacity: 0.3;
-          transform: scale(0.8);
+          transform: rotate(1.6deg);
         }
         50% {
-          opacity: 1;
-          transform: scale(1.1);
+          transform: rotate(-1.6deg);
         }
       }
-
+      .rise {
+        animation: rise 6s ease-in-out infinite;
+      }
+      @keyframes rise {
+        0%,
+        100% {
+          transform: translateY(0);
+        }
+        50% {
+          transform: translateY(-8px);
+        }
+      }
+      .beacon {
+        fill: var(--brand);
+        animation: glow 1.6s ease-in-out infinite;
+      }
       @media (prefers-reduced-motion: reduce) {
-        .gear,
-        .bob-a,
-        .bob-b,
-        .point,
-        .pulse {
-          animation: none;
+        *,
+        *::before,
+        *::after {
+          animation: none !important;
         }
         .draw {
-          animation: none;
           stroke-dashoffset: 0;
         }
-        .t1 {
-          animation: none;
-          opacity: 1;
+      }
+      @media (max-width: 620px) {
+        .head {
+          grid-template-columns: 1fr;
+          padding: 24px 20px 18px;
+        }
+        .eta {
+          text-align: left;
+        }
+        .stage {
+          margin: 0 10px;
+        }
+        .foot {
+          flex-direction: column;
+          align-items: stretch;
+          padding: 16px 20px 20px;
+        }
+        .track {
+          flex: none;
+          width: 100%;
         }
       }
     </style>
   </head>
   <body>
     <main>
-      <div class="brand"><b>cv</b>ENGINE</div>
-      <h1>We are rebuilding cvENGINE.</h1>
-      <p>
-        A new version is going in right now. Back soon. This page reloads by
-        itself the moment the site answers, and scans pick up where they left
-        off.
-      </p>
+      <div class="head">
+        <div>
+          <div class="brand"><b>cv</b>ENGINE</div>
+          <h1>We are rebuilding cvENGINE.</h1>
+          <p>
+            A new version is going in right now. This page comes back by itself
+            the moment the site answers, and scans pick up where they left off.
+          </p>
+        </div>
+        <div class="eta">Usually<b>2 to 5 min</b></div>
+      </div>
 
-      <svg
-        viewBox="0 0 760 330"
-        role="img"
-        aria-label="Two engineers in hard hats study a blueprint and talk it over"
-      >
-        <!-- gears -->
-        <g class="ink" fill="none" stroke-width="3">
-          <g transform="translate(52 226)"><g class="gear">
-            <circle r="22" fill="var(--fire)" stroke="none" />
-            <circle r="8" fill="var(--card)" stroke="none" />
+      <div class="stage">
+        <svg
+          viewBox="0 0 800 340"
+          role="img"
+          aria-label="Two engineers in hard hats work over a blueprint on a drafting board while a crane lifts the next piece into place"
+        >
+          <defs>
+            <linearGradient id="board" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="var(--plan)" />
+              <stop offset="1" stop-color="var(--plan-deep)" />
+            </linearGradient>
+            <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#fff" stop-opacity="0.14" />
+              <stop offset="0.5" stop-color="#fff" stop-opacity="0" />
+            </linearGradient>
+            <pattern
+              id="plangrid"
+              width="12"
+              height="12"
+              patternUnits="userSpaceOnUse"
+            >
+              <path
+                d="M12 0H0V12"
+                fill="none"
+                stroke="var(--plan-soft)"
+                stroke-width="0.5"
+              />
+            </pattern>
+          </defs>
+
+          <!-- the build behind: scaffolding around the frame of what is going up, and a tower crane lifting the next piece -->
+          <g class="faint">
+            <path d="M330 300V118M392 300V118M454 300V118M516 300V118" />
             <path
-              d="M0-30V-22M0 22V30M-30 0H-22M22 0H30M-21-21L-15-15M15 15L21 21M-21 21L-15 15M15-15L21-21"
-              stroke-width="7"
-              stroke-linecap="round"
+              d="M318 300H528M318 250H528M318 200H528M318 150H528M318 118H528"
             />
-          </g></g>
-          <g transform="translate(92 258)"><g class="gear rev">
-            <circle r="14" fill="var(--muted)" stroke="none" />
-            <circle r="5" fill="var(--card)" stroke="none" />
             <path
-              d="M0-19V-14M0 14V19M-19 0H-14M14 0H19M-13-13L-10-10M10 10L13 13M-13 13L-10 10M10-10L13-13"
-              stroke-width="5"
-              stroke-linecap="round"
-            />
-          </g></g>
-          <g transform="translate(712 252)"><g class="gear rev">
-            <circle r="18" fill="var(--muted)" stroke="none" />
-            <circle r="6" fill="var(--card)" stroke="none" />
-            <path
-              d="M0-25V-18M0 18V25M-25 0H-18M18 0H25M-17-17L-13-13M13 13L17 17M-17 17L-13 13M13-13L17-17"
-              stroke-width="6"
-              stroke-linecap="round"
-            />
-          </g></g>
-        </g>
-
-        <!-- floor and table -->
-        <line
-          x1="30"
-          y1="296"
-          x2="730"
-          y2="296"
-          stroke="var(--line)"
-          stroke-width="3"
-        />
-        <rect
-          x="215"
-          y="228"
-          width="330"
-          height="14"
-          rx="3"
-          fill="var(--ink)"
-          opacity="0.85"
-        />
-        <rect
-          x="240"
-          y="242"
-          width="10"
-          height="54"
-          fill="var(--ink)"
-          opacity="0.85"
-        />
-        <rect
-          x="510"
-          y="242"
-          width="10"
-          height="54"
-          fill="var(--ink)"
-          opacity="0.85"
-        />
-
-        <!-- blueprint on the table -->
-        <path
-          class="sheet"
-          d="M235 228 L265 178 L495 178 L525 228 Z"
-          stroke-width="2"
-        />
-        <path
-          class="trace"
-          d="M275 196H485M270 206H490M262 216H498M330 180L305 226M380 178V228M430 178L455 226"
-        />
-        <path
-          class="draw"
-          d="M310 214 C 330 184, 370 184, 392 206 S 450 222, 470 192"
-        />
-        <path class="draw two" d="M300 190 H350 V208 H300 Z" />
-        <circle cx="430" cy="196" r="9" class="trace" />
-
-        <!-- engineer on the left -->
-        <g class="bob-a">
-          <rect
-            x="120"
-            y="164"
-            width="76"
-            height="132"
-            rx="26"
-            fill="var(--shirt-a)"
-          />
-          <circle
-            cx="158"
-            cy="132"
-            r="30"
-            fill="var(--skin-a)"
-            stroke="var(--ink)"
-            stroke-width="3"
-          />
-          <path
-            class="hat"
-            d="M126 126 C 128 94, 188 94, 190 126 Z"
-            stroke="var(--ink)"
-            stroke-width="3"
-          />
-          <rect
-            x="120"
-            y="122"
-            width="76"
-            height="9"
-            rx="4"
-            class="hat"
-            stroke="var(--ink)"
-            stroke-width="3"
-          />
-          <circle cx="148" cy="138" r="3" fill="var(--ink)" />
-          <circle cx="168" cy="138" r="3" fill="var(--ink)" />
-          <path
-            d="M150 150 Q158 156 166 150"
-            fill="none"
-            stroke="var(--ink)"
-            stroke-width="3"
-            stroke-linecap="round"
-          />
-          <g class="point">
-            <rect
-              x="184"
-              y="188"
-              width="70"
-              height="14"
-              rx="7"
-              fill="var(--shirt-a)"
-            />
-            <circle
-              cx="256"
-              cy="195"
-              r="8"
-              fill="var(--skin-a)"
-              stroke="var(--ink)"
-              stroke-width="2"
+              d="M330 300L392 250M392 250L454 300M454 250L516 200M330 200L392 150M454 150L516 118"
             />
           </g>
-        </g>
+          <g class="faint">
+            <path d="M66 300V40M84 300V40" />
+            <path d="M66 300L84 274 L66 248 L84 222 L66 196 L84 170 L66 144 L84 118 L66 92 L84 66 L66 40" />
+            <path d="M10 40H272M10 52H272" />
+            <path d="M22 52L40 40L58 52L76 40L94 52L112 40L130 52L148 40L166 52L184 40L202 52L220 40L238 52L256 40" />
+            <path d="M75 40L75 20L10 40M75 20L262 40" />
+          </g>
+          <rect x="14" y="52" width="22" height="14" rx="2" fill="var(--faint)" />
+          <circle class="beacon" cx="75" cy="18" r="2.6" />
+          <g class="load">
+            <path d="M240 52V84" stroke="var(--steel)" stroke-width="1.2" />
+            <g class="rise">
+              <path d="M232 84L240 76L248 84" fill="none" stroke="var(--steel)" stroke-width="1.2" />
+              <rect x="212" y="84" width="56" height="16" rx="2" fill="var(--wood-hi)" />
+              <rect x="212" y="90" width="56" height="3" fill="var(--brand)" />
+            </g>
+          </g>
 
-        <!-- engineer on the right -->
-        <g class="bob-b">
-          <rect
-            x="564"
-            y="164"
-            width="76"
-            height="132"
-            rx="26"
-            fill="var(--shirt-b)"
-          />
-          <circle
-            cx="602"
-            cy="132"
-            r="30"
-            fill="var(--skin-b)"
-            stroke="var(--ink)"
-            stroke-width="3"
-          />
+          <!-- ground and shadows -->
           <path
-            class="hat"
-            d="M570 126 C 572 94, 632 94, 634 126 Z"
-            stroke="var(--ink)"
-            stroke-width="3"
-          />
-          <rect
-            x="564"
-            y="122"
-            width="76"
-            height="9"
-            rx="4"
-            class="hat"
-            stroke="var(--ink)"
-            stroke-width="3"
-          />
-          <circle cx="592" cy="138" r="3" fill="var(--ink)" />
-          <circle cx="612" cy="138" r="3" fill="var(--ink)" />
-          <path
-            d="M594 150 Q602 155 610 150"
-            fill="none"
-            stroke="var(--ink)"
-            stroke-width="3"
+            d="M40 302H760"
+            stroke="var(--faint)"
+            stroke-width="1.5"
             stroke-linecap="round"
           />
+          <ellipse cx="400" cy="304" rx="165" ry="7" fill="var(--shadow)" />
+          <ellipse cx="168" cy="304" rx="44" ry="6" fill="var(--shadow)" />
+          <ellipse cx="640" cy="304" rx="44" ry="6" fill="var(--shadow)" />
+
+          <!-- drafting table: legs, then the tilted board with the blueprint pinned to it -->
+          <g stroke="var(--wood)" stroke-width="7" stroke-linecap="round">
+            <path d="M290 262L268 300M510 262L532 300" />
+            <path d="M282 284H518" stroke-width="5" />
+          </g>
+          <g transform="translate(262 112) skewX(-6)">
+            <rect
+              x="0"
+              y="0"
+              width="296"
+              height="146"
+              rx="5"
+              fill="var(--wood)"
+            />
+            <rect
+              x="7"
+              y="7"
+              width="282"
+              height="132"
+              rx="3"
+              fill="url(#board)"
+            />
+            <rect
+              x="7"
+              y="7"
+              width="282"
+              height="132"
+              rx="3"
+              fill="url(#plangrid)"
+            />
+            <!-- the drawing: a service wiring diagram that keeps drawing itself in -->
+            <rect
+              class="plan-line draw"
+              x="26"
+              y="26"
+              width="64"
+              height="38"
+              rx="3"
+            />
+            <rect
+              class="plan-line draw d2"
+              x="124"
+              y="22"
+              width="70"
+              height="46"
+              rx="3"
+            />
+            <rect
+              class="plan-line draw d3"
+              x="228"
+              y="30"
+              width="44"
+              height="30"
+              rx="3"
+            />
+            <path class="plan-line draw d2" d="M90 45H124M194 45H228" />
+            <path
+              class="plan-line draw d3"
+              d="M159 68V92H60V110M159 92H250V110"
+            />
+            <circle class="plan-line draw d4" cx="60" cy="118" r="9" />
+            <path class="plan-line draw d4" d="M240 110H262V126H240Z" />
+            <path
+              class="plan-line"
+              d="M140 36H178M140 44H170M140 52H176"
+              opacity="0.6"
+            />
+            <circle class="node" cx="90" cy="45" r="2.6" />
+            <circle class="node n2" cx="159" cy="92" r="2.6" />
+            <circle class="node n3" cx="228" cy="45" r="2.6" />
+            <!-- title block -->
+            <rect
+              x="196"
+              y="100"
+              width="82"
+              height="30"
+              rx="2"
+              fill="none"
+              stroke="var(--plan-soft)"
+            />
+            <path d="M196 112H278M232 112V130" stroke="var(--plan-soft)" />
+            <text
+              x="202"
+              y="109"
+              fill="var(--plan-line)"
+              font-family="ui-monospace, Menlo, monospace"
+              font-size="6"
+              letter-spacing="1"
+            >
+              CVENGINE
+            </text>
+            <text
+              x="238"
+              y="124"
+              fill="var(--plan-line)"
+              font-family="ui-monospace, Menlo, monospace"
+              font-size="6"
+              letter-spacing="0.5"
+              opacity="0.8"
+            >
+              REV NEXT
+            </text>
+            <rect
+              x="7"
+              y="7"
+              width="282"
+              height="132"
+              rx="3"
+              fill="url(#sheen)"
+            />
+            <circle cx="16" cy="16" r="2.4" fill="var(--brand)" />
+            <circle cx="280" cy="16" r="2.4" fill="var(--brand)" />
+          </g>
+          <!-- pencil tray -->
+          <path d="M244 258H560L556 266H246Z" fill="var(--wood-hi)" />
           <rect
-            x="520"
-            y="188"
-            width="70"
-            height="14"
-            rx="7"
-            fill="var(--shirt-b)"
+            x="300"
+            y="254"
+            width="40"
+            height="3"
+            rx="1.5"
+            fill="var(--brand)"
           />
-          <circle
-            cx="518"
-            cy="195"
-            r="8"
-            fill="var(--skin-b)"
-            stroke="var(--ink)"
-            stroke-width="2"
+          <rect
+            x="350"
+            y="254"
+            width="26"
+            height="3"
+            rx="1.5"
+            fill="var(--steel)"
           />
-        </g>
 
-        <!-- what they say, one line at a time -->
-        <g class="talk t1">
-          <path
-            class="bubble"
-            d="M82 40h222a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H190l-20 20 2-20H82a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
-          />
-          <text class="words" x="92" y="72">Are the new tables lined up?</text>
-        </g>
-        <g class="talk t2">
-          <path
-            class="bubble"
-            d="M432 40h226a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H600l2 20-22-20H432a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
-          />
-          <text class="words" x="442" y="72">Checking the blueprint.</text>
-        </g>
-        <g class="talk t3">
-          <path
-            class="bubble"
-            d="M82 40h222a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H190l-20 20 2-20H82a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
-          />
-          <text class="words" x="92" y="72">Hand me the big wrench.</text>
-        </g>
-        <g class="talk t4">
-          <path
-            class="bubble"
-            d="M432 40h226a12 12 0 0 1 12 12v30a12 12 0 0 1-12 12H600l2 20-22-20H432a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12z"
-          />
-          <text class="words" x="442" y="72">Almost there. Back soon.</text>
-        </g>
-      </svg>
+          <!-- engineer on the left: drafting, pencil to the plan -->
+          <g>
+            <path
+              d="M156 236L150 296"
+              stroke="var(--navy)"
+              stroke-width="15"
+              stroke-linecap="round"
+            />
+            <path
+              d="M178 236L188 296"
+              stroke="var(--navy-hi)"
+              stroke-width="15"
+              stroke-linecap="round"
+            />
+            <path
+              d="M140 298Q140 290 150 290H162Q166 300 160 302H142Z"
+              fill="var(--shoe)"
+            />
+            <path
+              d="M180 298Q180 290 190 290H200Q206 300 200 302H182Z"
+              fill="var(--shoe)"
+            />
+            <!-- back arm, holding a rolled plan -->
+            <path
+              d="M150 182Q138 206 142 230"
+              stroke="var(--navy)"
+              stroke-width="12"
+              stroke-linecap="round"
+              fill="none"
+            />
+            <rect
+              x="124"
+              y="214"
+              width="9"
+              height="52"
+              rx="4.5"
+              transform="rotate(-14 128 240)"
+              fill="var(--plan)"
+            />
+            <rect
+              x="124"
+              y="214"
+              width="9"
+              height="6"
+              rx="3"
+              transform="rotate(-14 128 240)"
+              fill="var(--plan-line)"
+              opacity="0.7"
+            />
+            <circle cx="142" cy="232" r="5.5" fill="var(--skin-a)" />
+            <!-- body: jacket with reflective bands -->
+            <path
+              d="M144 184Q146 170 162 168H180Q196 170 198 186L194 242H146Z"
+              fill="var(--navy-hi)"
+            />
+            <path
+              d="M146 214H196"
+              stroke="var(--reflect)"
+              stroke-width="4"
+              opacity="0.9"
+            />
+            <path d="M145 226H195" stroke="var(--brand)" stroke-width="3" />
+            <path d="M171 170V242" stroke="var(--navy)" stroke-width="1.4" />
+            <!-- front arm to the board, with the pencil -->
+            <path
+              d="M190 182Q214 196 238 198L268 194"
+              stroke="var(--navy-hi)"
+              stroke-width="12"
+              stroke-linecap="round"
+              fill="none"
+            />
+            <g class="pencil">
+              <circle cx="272" cy="194" r="5.5" fill="var(--skin-a)" />
+              <path
+                d="M272 194L286 186"
+                stroke="var(--brand)"
+                stroke-width="3"
+                stroke-linecap="round"
+              />
+              <path
+                d="M286 186L290 184"
+                stroke="var(--ink)"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </g>
+            <!-- head -->
+            <g class="look">
+              <rect
+                x="164"
+                y="152"
+                width="13"
+                height="16"
+                rx="4"
+                fill="var(--skin-a-sh)"
+              />
+              <circle cx="171" cy="146" r="15" fill="var(--skin-a)" />
+              <path
+                d="M158 148Q157 156 163 160"
+                fill="none"
+                stroke="var(--hair)"
+                stroke-width="3"
+                stroke-linecap="round"
+              />
+              <ellipse
+                class="blink"
+                cx="179"
+                cy="146"
+                rx="1.6"
+                ry="1.9"
+                fill="var(--ink)"
+              />
+              <path
+                d="M178 154Q181 155.5 184 153.5"
+                fill="none"
+                stroke="var(--skin-a-sh)"
+                stroke-width="1.6"
+                stroke-linecap="round"
+              />
+              <path
+                d="M155 141Q156 124 172 123Q188 124 189 141Z"
+                fill="var(--hat)"
+              />
+              <path
+                d="M163 129Q170 125 178 126"
+                fill="none"
+                stroke="var(--hat-hi)"
+                stroke-width="2.4"
+                stroke-linecap="round"
+              />
+              <path d="M172 123V141" stroke="var(--hat-sh)" stroke-width="2" />
+              <path
+                d="M151 141H196Q198 144 194 145H152Q149 144 151 141Z"
+                fill="var(--hat-sh)"
+              />
+            </g>
+          </g>
 
-      <div class="caption" aria-hidden="true">
-    <span class="t1">Are the new tables lined up?</span>
-    <span class="t2">Checking the blueprint.</span>
-    <span class="t3">Hand me the big wrench.</span>
-    <span class="t4">Almost there. Back soon.</span>
-  </div>
-  <div class="status">
-        <span class="pulse" aria-hidden="true"></span
-        ><span id="state" role="status">Checking again every few seconds.</span>
+          <!-- engineer on the right: hi-vis vest, tablet in hand, pointing at the plan -->
+          <g>
+            <path
+              d="M630 236L622 296"
+              stroke="var(--slate)"
+              stroke-width="15"
+              stroke-linecap="round"
+            />
+            <path
+              d="M652 236L660 296"
+              stroke="var(--slate-hi)"
+              stroke-width="15"
+              stroke-linecap="round"
+            />
+            <path
+              d="M606 298Q606 290 616 290H628Q632 300 626 302H608Z"
+              fill="var(--shoe)"
+            />
+            <path
+              d="M650 298Q650 290 660 290H672Q676 300 670 302H652Z"
+              fill="var(--shoe)"
+            />
+            <path
+              d="M616 186Q618 170 634 168H652Q668 170 670 186L666 242H620Z"
+              fill="var(--slate-hi)"
+            />
+            <path
+              d="M620 184Q624 172 634 170L640 242H622Z"
+              fill="var(--vest)"
+            />
+            <path
+              d="M666 184Q662 172 652 170L646 242H664Z"
+              fill="var(--vest)"
+            />
+            <path
+              d="M621 212H639M647 212H665"
+              stroke="var(--reflect)"
+              stroke-width="4"
+            />
+            <path
+              d="M621 224H639M647 224H665"
+              stroke="var(--reflect)"
+              stroke-width="2"
+              opacity="0.8"
+            />
+            <!-- back arm holding the tablet -->
+            <path
+              d="M662 184Q676 204 662 222"
+              stroke="var(--slate-hi)"
+              stroke-width="12"
+              stroke-linecap="round"
+              fill="none"
+            />
+            <rect
+              x="642"
+              y="206"
+              width="26"
+              height="34"
+              rx="3"
+              transform="rotate(10 655 223)"
+              fill="var(--wood)"
+            />
+            <rect
+              x="645"
+              y="209"
+              width="20"
+              height="26"
+              rx="1.5"
+              transform="rotate(10 655 223)"
+              fill="var(--plan)"
+            />
+            <path
+              d="M648 222H660M648 228H656"
+              transform="rotate(10 655 223)"
+              stroke="var(--plan-line)"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+            <circle cx="661" cy="224" r="5.5" fill="var(--skin-b)" />
+            <!-- pointing arm -->
+            <g class="point">
+              <path
+                d="M624 184Q598 190 572 178"
+                stroke="var(--slate-hi)"
+                stroke-width="12"
+                stroke-linecap="round"
+                fill="none"
+              />
+              <circle cx="566" cy="176" r="5.5" fill="var(--skin-b)" />
+              <path
+                d="M562 174L552 170"
+                stroke="var(--skin-b)"
+                stroke-width="3.6"
+                stroke-linecap="round"
+              />
+            </g>
+            <!-- head -->
+            <g class="nod">
+              <rect
+                x="636"
+                y="152"
+                width="13"
+                height="16"
+                rx="4"
+                fill="var(--skin-b-sh)"
+              />
+              <circle cx="643" cy="146" r="15" fill="var(--skin-b)" />
+              <path
+                d="M656 147Q658 156 652 160"
+                fill="none"
+                stroke="var(--hair)"
+                stroke-width="3"
+                stroke-linecap="round"
+              />
+              <ellipse
+                class="blink b2"
+                cx="635"
+                cy="146"
+                rx="1.6"
+                ry="1.9"
+                fill="var(--ink)"
+              />
+              <path
+                d="M636 154Q633 155.5 630 153.5"
+                fill="none"
+                stroke="var(--skin-b-sh)"
+                stroke-width="1.6"
+                stroke-linecap="round"
+              />
+              <path
+                d="M627 141Q628 124 644 123Q660 124 661 141Z"
+                fill="var(--hat-b)"
+              />
+              <path
+                d="M650 128Q644 125 636 127"
+                fill="none"
+                stroke="#fff"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                opacity="0.9"
+              />
+              <path d="M628 135H660" stroke="var(--brand)" stroke-width="3" />
+              <path
+                d="M618 141H663Q665 144 662 145H620Q616 144 618 141Z"
+                fill="var(--hat-b-sh)"
+              />
+            </g>
+          </g>
+        </svg>
+      </div>
+
+      <div class="foot">
+        <div class="status">
+          <span class="pulse" aria-hidden="true"></span
+          ><span id="state" role="status"
+            >Checking again every few seconds.</span
+          >
+        </div>
+        <div class="track" aria-hidden="true"><i></i></div>
       </div>
     </main>
     <script>
       // Alone (nginx answers every path with this page, status 503, while an update is applied): a request for the same address tells us
       // when the real site is back; anything that is not a 5xx, a redirect to the sign-in page included, means reload.
-      // Framed (the administrator's own page covers itself with this one once the update is picked up, static/cve/updatebar.js): that page knows
-      // when the update is done and goes back to /cve/ itself, so this one only shows the status line it is sent.
+      // Framed (any page of the application covers itself with this one when the site stops answering, static/cve/sitewatch.js, and an
+      // administrator's page does so for the whole update, static/cve/updatebar.js): that page knows when the site is back and returns by
+      // itself, so this one only shows the status line it is sent.
       (function () {
         var state = document.getElementById("state");
         if (window.top !== window) {
           window.addEventListener("message", function (e) {
-            if (e.origin === location.origin && e.data && typeof e.data.state === "string") state.textContent = e.data.state;
+            if (
+              e.origin === location.origin &&
+              e.data &&
+              typeof e.data.state === "string"
+            )
+              state.textContent = e.data.state;
           });
           return;
         }

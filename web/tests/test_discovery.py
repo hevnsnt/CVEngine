@@ -608,6 +608,7 @@ class OneDiscoveryPerTargetTests(TestCase):
 		holder.save()
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			other = discovery.start_discovery(self.domain)
+		ScanHistory.objects.filter(pk=holder.id).update(scan_status=discovery.RUNNING)  # the holder is the scan whose pipeline is running
 		ran = []
 		with discovery.domain_lock(self.domain.id, holder.id) as mine:
 			if mine is not True:
