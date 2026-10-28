@@ -228,44 +228,72 @@ def decode_enrollment_blob(raw):
 SENTINEL_CLIENT_REPO = 'https://github.com/hevnsnt/cvengine-sentinel'
 
 
-def _with_blob_and_setup(payload):
+NETWORKS = ('external', 'internal')
+PROFILES = ('full', 'light')
+
+
+def clean_setup_choices(network=None, profile=None):
+    """``(network, profile)`` from what a caller asked for, defaulting to external and full: the Sentinel client's own defaults. ``network`` says
+    whether the machine sits inside a private network (it then declares ``network:internal``); ``profile`` whether it also runs the OpenVAS stack."""
+    network, profile = (network or 'external'), (profile or 'full')
+    if network not in NETWORKS:
+        raise ApiError(400, f'network must be one of {", ".join(NETWORKS)}')
+    if profile not in PROFILES:
+        raise ApiError(400, f'profile must be one of {", ".join(PROFILES)}')
+    return network, profile
+
+
+def _with_blob_and_setup(payload, network=None, profile=None):
     """``payload`` (from ``_create_enrollment``) plus the same data packaged as one opaque ``blob`` string (see above), plus
     a ``setup`` block of ready-to-run steps. Shared by the project, organization and instance blob entry points below,
     and by the ``generate_sentinel_enrollment`` MCP tool: the ``setup`` block exists so an agent with only Docker and
     shell access to a target machine, and no other context on Sentinels, can provision one from this response alone,
-    without reading documentation first."""
+    without reading documentation first. ``network`` (external or internal) and ``profile`` (full or light, whether the
+    machine also runs OpenVAS) put the matching lines in the ``.env`` the ``configure`` step writes."""
+    network, profile = clean_setup_choices(network, profile)
     blob = encode_enrollment_blob(payload)
+    env = f'CVENGINE_SENTINEL_BLOB=%s\\nCVENGINE_SENTINEL_NETWORK={network}\\nCOMPOSE_PROFILES={"openvas" if profile == "full" else ""}\\n'
+    flags = f'--{profile} --{network}'
     setup = {
         'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
-        'configure': f"cp .env.example .env && printf 'CVENGINE_SENTINEL_BLOB=%s\\n' '{blob}' >> .env",
+        'configure': f"cp .env.example .env && printf '{env}' '{blob}' >> .env",
+        'configure_alternative': f"./setup.sh {flags} --blob '{blob}'",
         'run': 'docker compose up -d',
         'verify': 'docker compose logs -f',
+        'network': network, 'profile': profile,
         'note': (f'The blob is single-use and expires at {payload["expires_at"]}; run these four steps once, in order, '
                  'on the target machine (needs Docker and outbound HTTPS to this server, nothing else). A restarted '
-                 'container reuses its already-issued token from the sentinel-state volume and never needs the blob again.'),
+                 'container reuses its already-issued token from the sentinel-state volume and never needs the blob again. '
+                 + ('This Sentinel is told it sits inside a private network, so it is offered work for the internal ranges a project declared. '
+                    if network == 'internal' else '')
+                 + ('Light: it runs no OpenVAS stack, so it never takes OpenVAS work.' if profile == 'light'
+                    else 'Full: it also runs the OpenVAS stack (several GB, hours of feed sync on its first start).')),
     }
     return {**payload, 'blob': blob, 'setup': setup}
 
 
-def generate_enrollment_blob(ctx, slug):
+def generate_enrollment_blob(ctx, slug, network=None, profile=None):
     """``generate_enrollment``'s own payload, packaged with a blob and setup steps; see ``_with_blob_and_setup``. Used by
     ``?format=blob`` on ``GET/POST projects/{slug}/sentinels/enroll`` and the Sentinels page's Provision button."""
-    return _with_blob_and_setup(generate_enrollment(ctx, slug))
+    clean_setup_choices(network, profile)  # refuse a bad choice before an enrollment secret is created
+    return _with_blob_and_setup(generate_enrollment(ctx, slug), network, profile)
 
 
-def generate_org_enrollment_blob(ctx, slug):
+def generate_org_enrollment_blob(ctx, slug, network=None, profile=None):
     """``generate_org_enrollment``'s own payload, packaged with a blob and setup steps; see ``_with_blob_and_setup``. Used
     by ``?format=blob`` on ``GET/POST orgs/{slug}/sentinels/enroll`` and the Sentinels page's Provision button."""
-    return _with_blob_and_setup(generate_org_enrollment(ctx, slug))
+    clean_setup_choices(network, profile)
+    return _with_blob_and_setup(generate_org_enrollment(ctx, slug), network, profile)
 
 
-def generate_instance_enrollment_blob(ctx):
+def generate_instance_enrollment_blob(ctx, network=None, profile=None):
     """``generate_instance_enrollment``'s own payload, packaged with a blob and setup steps; see ``_with_blob_and_setup``.
     Used by ``?format=blob`` on ``GET/POST sentinels/enroll`` and the Sentinels page's Provision button."""
-    return _with_blob_and_setup(generate_instance_enrollment(ctx))
+    clean_setup_choices(network, profile)
+    return _with_blob_and_setup(generate_instance_enrollment(ctx), network, profile)
 
 
-def generate_enrollment_for(ctx, project=None, org=None):
+def generate_enrollment_for(ctx, project=None, org=None, network=None, profile=None):
     """The ``generate_sentinel_enrollment`` MCP tool's single entry point: at most one of ``project``/``org`` may be given
     (a 400 if both are), dispatching to the project, organization or (neither given) instance-wide blob generator. Kept
     here, not in ``agentapi.mcp``, so the one piece of request-shape validation this tool needs lives beside the three
@@ -273,10 +301,10 @@ def generate_enrollment_for(ctx, project=None, org=None):
     if project and org:
         raise ApiError(400, 'give at most one of project or org (neither means instance-wide)')
     if project:
-        return generate_enrollment_blob(ctx, project)
+        return generate_enrollment_blob(ctx, project, network, profile)
     if org:
-        return generate_org_enrollment_blob(ctx, org)
-    return generate_instance_enrollment_blob(ctx)
+        return generate_org_enrollment_blob(ctx, org, network, profile)
+    return generate_instance_enrollment_blob(ctx, network, profile)
 
 
 def consume_enrollment(raw):

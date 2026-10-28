@@ -99,19 +99,25 @@ def _register_sentinel(request, ctx, **_):
     return out, (201 if out['created'] else 200)
 
 
+def _setup_choices(request):
+    """``(network, profile)`` from ``?network=external|internal&profile=full|light`` (each optional), for the Sentinel setup lines."""
+    return request.GET.get('network') or None, request.GET.get('profile') or None
+
+
 def _sentinel_enroll(request, ctx, slug, **_):
-    out = sentinels.generate_enrollment_blob(ctx, slug) if request.GET.get('format') == 'blob' else sentinels.generate_enrollment(ctx, slug)
+    out = (sentinels.generate_enrollment_blob(ctx, slug, *_setup_choices(request)) if request.GET.get('format') == 'blob'
+           else sentinels.generate_enrollment(ctx, slug))
     return out, 201
 
 
 def _sentinel_org_enroll(request, ctx, org, **_):
-    out = (sentinels.generate_org_enrollment_blob(ctx, org) if request.GET.get('format') == 'blob'
+    out = (sentinels.generate_org_enrollment_blob(ctx, org, *_setup_choices(request)) if request.GET.get('format') == 'blob'
            else sentinels.generate_org_enrollment(ctx, org))
     return out, 201
 
 
 def _sentinel_instance_enroll(request, ctx, **_):
-    out = (sentinels.generate_instance_enrollment_blob(ctx) if request.GET.get('format') == 'blob'
+    out = (sentinels.generate_instance_enrollment_blob(ctx, *_setup_choices(request)) if request.GET.get('format') == 'blob'
            else sentinels.generate_instance_enrollment(ctx))
     return out, 201
 
@@ -411,7 +417,7 @@ ROUTES = [
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
-    ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at, scope: "project"}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB',
+    ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at, scope: "project"}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB, with ready-to-run setup steps; &network=external|internal and &profile=full|light (default external, full) choose the .env lines in them',
      _sentinel_enroll),
     ('POST', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this project',
      _sentinel_enroll),

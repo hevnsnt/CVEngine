@@ -474,6 +474,30 @@ class McpToolTests(SentinelBase):
         self.assertFalse(err, out)
         self.assertEqual(out['status'], 'suspended')
 
+    def test_setup_lines_follow_the_network_and_size_chosen(self):
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a', 'network': 'internal', 'profile': 'light'})
+        self.assertFalse(err, out)
+        setup = out['setup']
+        self.assertEqual((setup['network'], setup['profile']), ('internal', 'light'))
+        self.assertIn('CVENGINE_SENTINEL_NETWORK=internal', setup['configure'])
+        self.assertIn('COMPOSE_PROFILES=\\n', setup['configure'])  # light: no OpenVAS profile
+        self.assertIn('./setup.sh --light --internal --blob', setup['configure_alternative'])
+        self.assertIn('private network', setup['note'])
+        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
+        self.assertEqual((out['setup']['network'], out['setup']['profile']), ('external', 'full'))
+        self.assertIn('COMPOSE_PROFILES=openvas', out['setup']['configure'])
+
+    def test_rest_takes_the_same_choices_and_refuses_a_bad_one_before_creating_a_secret(self):
+        from agentapi.models import SentinelEnrollment
+        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=internal&profile=light')
+        self.assertEqual(status, 201, out)
+        self.assertEqual((out['setup']['network'], out['setup']['profile']), ('internal', 'light'))
+        before = SentinelEnrollment.objects.count()
+        for query in ('network=lan', 'profile=huge'):
+            status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&{query}')
+            self.assertEqual(status, 400, out)
+        self.assertEqual(SentinelEnrollment.objects.count(), before)
+
     def test_enrollment_and_list_tasks_tools_over_mcp(self):
         err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
         self.assertFalse(err, out)
