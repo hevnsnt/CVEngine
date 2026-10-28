@@ -38,12 +38,15 @@ Stop it with the **Switch off** button (App Admin) or `make openvas-down`; the d
 
 ## What gets scanned
 
-Only the hosts of the organizations and projects someone chose. A project can still be limited to a list of hosts through the API (`hosts` on `openvas/projects/{id}`); without a list every host of the project is a candidate, the longest-waiting first. Every host is vetted at every sweep:
+Only the hosts of the organizations and projects someone chose. OpenVAS is an intrusive scanner, so **a host is scanned only when someone chose it**: the list of hosts on the project (`hosts` on `openvas/projects/{id}`). A project with no list scans nothing. (`CVENGINE_OPENVAS_AUTO_HOSTS=1` restores the old behaviour for an instance that wants it: every name the project's scans found is a candidate, the longest-waiting first. Those names include mail autodiscover, device-enrolment and API-gateway names that point at a vendor's shared addresses, so the choice is the safer default.) Every host, chosen or not, is vetted at every sweep:
 
 - each name must be a host of that project (another project's host is never scanned);
 - hosts excluded for the organization or archived are dropped (`cveFeed.exclusions`), as is any name that resolves to an address a scanner may not be pointed at (`scannable_hosts`, `pinned_transport.resolve`);
 - GVM is given the **numeric address** that was vetted, never a name, so a name re-pointed after it was stored cannot redirect the scan;
 - **tailnet addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) are never given to OpenVAS**, even for a project with a connected tailnet. The scanner containers have no Tailscale interface, so the packets would leave by the Docker host's default route.
+- **shared infrastructure is never given to OpenVAS**: a name or address recorded as a CDN edge or a vendor's shared front (Microsoft 365 autodiscover and device enrolment, Google Workspace, a PaaS such as Netlify or Heroku, `cveFeed.hosting`), and any other name recorded on such an address. These are other customers' machines, not the project's to test;
+- **documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`) and this instance's own address are refused**: its own address is what `DOMAIN_NAME` resolves to, plus `CVENGINE_OWN_ADDRESSES` (comma separated, for an instance behind NAT or a load balancer);
+- a task that fails for want of a working scanner (a Sentinel that stopped answering, gvmd not reachable, its feed still syncing, a login or scan configuration problem) **marks no host failed**: the hosts are tried again at the next tick. Only a scan that ran and failed makes a host wait three days;
 - the global pause is honoured, and the project's hosts are visited once a week each (`CVENGINE_TTL_OPENVAS`, hours; a host that failed waits three days, `CVENGINE_TTL_OPENVAS_FAILED`).
 
 The sweep runs on its own queue (`openvas_queue`), every 15 minutes. Each step is small: poll the running task, or start the next due batch of at most `CVENGINE_OPENVAS_MAX_HOSTS` hosts (default 4) as **one task for one project**. **One GVM task runs at a time**, enforced by a database constraint (`OpenvasRun`), so two workers or a restart cannot start a second. The task is throttled (`max_checks` 2, `max_hosts` 1: two tests at a time against one host at a time) and its target reuses the project's last target while the set of addresses is unchanged. A finished task is removed from GVM after its results are imported.
@@ -83,6 +86,8 @@ An NVT's text is third-party text. It is stripped of control characters, clipped
 | `CVENGINE_OPENVAS_COST_MB` | `1500` | What a GVM scan is counted as against the job budget |
 | `CVENGINE_OPENVAS_MAX_HOSTS` | `4` | Hosts in one GVM task |
 | `CVENGINE_OPENVAS_MAX_HOURS` | `12` | A task running longer is stopped |
+| `CVENGINE_OPENVAS_AUTO_HOSTS` | off | `1` lets a project with no host list scan the names its scans found (still vetted); off, only chosen hosts are scanned |
+| `CVENGINE_OWN_ADDRESSES` | none | Addresses of this instance OpenVAS must never scan, besides what `DOMAIN_NAME` resolves to |
 | `CVENGINE_OPENVAS_SOCKET` | `/run/gvmd/gvmd.sock` | gvmd's unix socket in the celery container |
 | `CVENGINE_OPENVAS_HOST`, `_PORT`, `_CA`, `_CERT`, `_KEY` | none, `9390` | Reach a gvmd by TLS instead of the socket (an external GVM; not exercised here) |
 | `CVENGINE_TTL_OPENVAS`, `CVENGINE_TTL_OPENVAS_FAILED` | `168`, `72` hours | How long a scanned host, and a failed one, stays fresh |
