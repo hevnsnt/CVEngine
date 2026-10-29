@@ -90,3 +90,24 @@ class ToolVersionCheckTests(SimpleTestCase):
 		dockerfile = open(os.path.join(os.path.dirname(PATH), '..', 'web', 'Dockerfile'), encoding='utf-8').read()
 		for name in ('NMAP_SHA256', 'NMAP_RPM_SHA256_AMD64'):
 			self.assertRegex(dockerfile, rf'(?m)^ARG {name}=[0-9a-f]{{64}}$')
+
+	def test_the_github_token_goes_to_the_github_api_only(self):
+		"""Unauthenticated, api.github.com is limited to 60 requests an hour per address, which shared CI runners use up: the lookup then reads as unknown and the
+		gate, which fails closed, turns red for no reason. The token must reach GitHub's API and no other host."""
+		seen = {}
+
+		def urlopen(request, timeout=None):
+			seen[request.full_url] = request.get_header('Authorization')
+			raise OSError('stop here')
+
+		with mock.patch.dict(os.environ, {'GITHUB_TOKEN': 'token-value'}), mock.patch.object(tools.urllib.request, 'urlopen', urlopen):
+			for url in ('https://api.github.com/repos/testssl/testssl.sh/tags', 'https://pypi.org/pypi/bbot/json', 'https://nmap.org/dist/'):
+				with self.assertRaises(OSError):
+					tools.fetch(url)
+		self.assertEqual(seen['https://api.github.com/repos/testssl/testssl.sh/tags'], 'Bearer token-value')
+		self.assertIsNone(seen['https://pypi.org/pypi/bbot/json'])
+		self.assertIsNone(seen['https://nmap.org/dist/'])
+		with mock.patch.dict(os.environ, {'GITHUB_TOKEN': ''}), mock.patch.object(tools.urllib.request, 'urlopen', urlopen):
+			with self.assertRaises(OSError):
+				tools.fetch('https://api.github.com/repos/testssl/testssl.sh/tags')
+		self.assertIsNone(seen['https://api.github.com/repos/testssl/testssl.sh/tags'])

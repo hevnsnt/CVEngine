@@ -138,7 +138,7 @@ def _service_record(port):
 def _scanned_ports(nmaprun, protocol="tcp"):
     """The set of ``protocol`` port numbers a run actually probed, from its <scaninfo services="1,3-4,6-7,...">; None when the report
     does not say. Used to tell "closed since last time" (probed, not reported open) from "not looked at"."""
-    ports = set()
+    spans = []
     found = False
     for info in _as_list((nmaprun or {}).get("scaninfo")):
         if not isinstance(info, dict) or info.get("@protocol", "tcp") != protocol:
@@ -147,7 +147,16 @@ def _scanned_ports(nmaprun, protocol="tcp"):
         for part in str(info.get("@services", "")).split(","):
             lo, _, hi = part.strip().partition("-")
             if lo.isdigit() and (not hi or hi.isdigit()):
-                ports.update(range(int(lo), int(hi or lo) + 1))
+                # clamp to real port numbers: a hostile report can claim "1-4000000000", which must not be expanded
+                lo, hi = max(int(lo), 1), min(int(hi or lo), 65535)
+                if lo <= hi:
+                    spans.append((lo, hi))
+    ports = set()
+    top = 0
+    for lo, hi in sorted(spans):  # merged first, so the set is built once and never holds more than 65535 numbers
+        if hi > top:
+            ports.update(range(max(lo, top + 1), hi + 1))
+            top = hi
     return ports if found and ports else None
 
 
@@ -164,8 +173,8 @@ def _extraports_states(host):
 def extract_nmap_inventory(nmap_results):
     """nmap xmltodict dict -> list of host dicts with service-enriched ports.
 
-    Each host dict: {"ip", "os_guess", "os_accuracy", "ports": [service_record], "status", "extraports", "scanned"}:
-    ``status`` is the host state (up/down), ``extraports`` the states of the unlisted ports and ``scanned`` the TCP ports
+    Each host dict: {"ip", "os_guess", "os_accuracy", "ports": [service_record], "status", "timedout", "extraports", "scanned"}:
+    ``status`` is the host state (up/down), ``timedout`` whether nmap gave up on the host (its ports are then not a complete answer), ``extraports`` the states of the unlisted ports and ``scanned`` the TCP ports
     the run probed and ``scanned_udp`` the UDP ports (None when unknown), so a caller can close ports that were probed and not found
     open.
     Ports without a numeric id are dropped.
@@ -195,6 +204,7 @@ def extract_nmap_inventory(nmap_results):
             "ports": records,
             "hostscripts": _scripts(host.get("hostscript")),  # smb-os-discovery, nbstat: attach to the host, not a port
             "status": (host.get("status") or {}).get("@state", "up") if isinstance(host.get("status"), dict) else "up",
+            "timedout": str(host.get("@timedout", "")).lower() == "true",  # --host-timeout cut the host short: its port list is partial
             "extraports": _extraports_states(host),
             "scanned": scanned,
             "scanned_udp": scanned_udp,

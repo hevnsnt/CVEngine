@@ -39,7 +39,7 @@ HOST_STAGES = ('nmap_scan', 'nuclei_light_scan', 'cve_correlation', 'nuclei_targ
 
 
 def host_coverage_due(project, at, limit=1, need_count=True):
-    """Count every distinct inventory name missing a successful core stage; return up to ``limit`` due stored host
+    """Count every distinct current-inventory name missing a successful core stage; return up to ``limit`` due stored host
     ids, ordered by id so every caller (the three-hour review, cveFeed.coverage_topup) walks the same deterministic
     queue.
 
@@ -51,6 +51,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     skip the DISTINCT aggregate below: with it off, this is a single bounded ``LIMIT`` query.
     """
     from django.db.models import Exists, OuterRef
+    from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment, HostExclusion, HostState
     from cveFeed.unresolved_archive import COUNTS_FOR
     from startScan.models import ScanActivity, Subdomain
@@ -72,7 +73,9 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     # unresolved_archive.recheck resolves it again every few hours and puts it back here the moment it has an address.
     no_address = HostState.objects.filter(project=project, host=OuterRef('name'), unresolved_checks__gte=1,
                                           unresolved_last_at__gte=at - COUNTS_FOR)
-    rows = (Subdomain.objects.filter(target_domain__project=project)
+    # the current inventory only (one row per host, from the latest scan), not every scan's copy of every name: with a long history the
+    # six correlated checks below ran once per host per scan, every minute for every project
+    rows = (Subdomain.objects.filter(latest_scan_q()).filter(target_domain__project=project)
             .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
                       excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
             .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))

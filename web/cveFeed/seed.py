@@ -30,6 +30,8 @@ FORMAT = 1
 DEFAULT_URL = 'https://github.com/hevnsnt/CVEngine/releases/download/cve-seed/cve-seed.jsonl.gz'
 MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024
+MAX_DECOMPRESSED_BYTES = 6 * 1024 * 1024 * 1024  # a full catalogue is well under 1 GB of JSON
+MAX_MANIFEST_BYTES = 64 * 1024
 CVE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{3,63}$')
 TEXT_LIMITS = {'title': 2000, 'summary': 8000, 'summary_model': 128, 'original_description': 8000, 'cvss_vector': 128,
                'severity_source': 128, 'stated_severity': 128, 'status': 128}
@@ -50,7 +52,7 @@ def _iso(value):
 
 
 def record_for(cve, detection_row=None):
-    """One catalog line for a CVE. ``raw`` (the feed's full entry) is left out: it is large and nothing reads it for matching."""
+    """One catalog line for a CVE. The feed's full entry is not stored, so none is shipped."""
     from cveFeed.threat import classify_threat_tier
     record = {'cve_id': cve.cve_id, 'tier': classify_threat_tier(cve.kev, cve.epss_reached, cve.exploit_db, cve.cvss),
               'cvss': cve.cvss, 'kev': cve.kev, 'epss_reached': cve.epss_reached, 'exploit_db': cve.exploit_db,
@@ -147,18 +149,40 @@ def detection_for(raw, cvss_vector):
 
 
 def iter_lines(path):
-    """The manifest and then the catalog lines of a seed file, each a decoded object. Over-long or undecodable lines are skipped."""
-    with gzip.open(path, 'rt', encoding='utf-8', errors='replace') as handle:
-        first = handle.readline(MAX_LINE_BYTES)
-        manifest = json.loads(first) if first.strip() else {}
+    """The manifest and then the catalog lines of a seed file, each a decoded object. Over-long or undecodable lines are skipped.
+    Each line is read with a length limit (a line with no newline never fills memory) and the decompressed total is capped, so a
+    crafted file cannot exhaust a worker; a file that expands past the cap is refused."""
+    consumed = 0
+
+    def check(chunk):
+        nonlocal consumed
+        consumed += len(chunk)
+        if consumed > MAX_DECOMPRESSED_BYTES:
+            raise ValueError('the seed expands to more than the allowed %d MB' % (MAX_DECOMPRESSED_BYTES >> 20))
+
+    with gzip.open(path, 'rb') as handle:
+        first = handle.readline(MAX_LINE_BYTES + 1)
+        check(first)
+        manifest = json.loads(first.decode('utf-8', errors='replace')) if len(first) <= MAX_LINE_BYTES and first.strip() else {}
         if not isinstance(manifest, dict) or manifest.get('format') != FORMAT:
             raise ValueError('not a CVEngine CVE seed (format %r)' % (manifest.get('format') if isinstance(manifest, dict) else None))
         yield manifest
-        for line in handle:
-            if len(line) >= MAX_LINE_BYTES:
+        while True:
+            line = handle.readline(MAX_LINE_BYTES + 1)
+            if not line:
+                break
+            check(line)
+            if len(line) > MAX_LINE_BYTES and not line.endswith(b'\n'):  # over-long: read past the rest of it without keeping it
+                while True:
+                    chunk = handle.readline(MAX_LINE_BYTES + 1)
+                    check(chunk)
+                    if not chunk or chunk.endswith(b'\n'):
+                        break
+                continue
+            if not line.strip() or len(line) > MAX_LINE_BYTES:
                 continue
             try:
-                yield json.loads(line)
+                yield json.loads(line.decode('utf-8', errors='replace'))
             except ValueError:
                 continue
 
@@ -205,6 +229,22 @@ def import_seed(path, batch=1000, progress=None):
 
 # --- download ---------------------------------------------------------------------------------------------------------------
 
+def _fetch_manifest(session, url):
+    """The manifest object at ``url``: an HTTP error is an error, and the body is read with a size cap."""
+    with session.get(url, stream=True, timeout=30) as response:
+        response.raise_for_status()
+        body, size = [], 0
+        for block in response.iter_content(8192):
+            size += len(block)
+            if size > MAX_MANIFEST_BYTES:
+                raise ValueError('the seed manifest is larger than expected')
+            body.append(block)
+    try:
+        return json.loads(b''.join(body).decode('utf-8'))
+    except ValueError:
+        raise ValueError('the seed manifest is missing or not understood') from None
+
+
 def download_seed(url=None, directory=None, session=None):
     """Fetch the seed and verify it against its manifest; returns the local path. Raises when the manifest or the checksum is missing or wrong."""
     import requests
@@ -212,7 +252,7 @@ def download_seed(url=None, directory=None, session=None):
     if not url.startswith('https://'):
         raise ValueError('the seed URL must be https')
     session = session or requests.Session()
-    manifest = session.get(url + '.manifest.json', timeout=30).json()
+    manifest = _fetch_manifest(session, url + '.manifest.json')
     if not isinstance(manifest, dict) or manifest.get('format') != FORMAT or not re.fullmatch(r'[0-9a-f]{64}', str(manifest.get('sha256', ''))):
         raise ValueError('the seed manifest is missing or not understood')
     if int(manifest.get('bytes') or 0) > MAX_DOWNLOAD_BYTES:

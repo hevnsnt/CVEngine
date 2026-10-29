@@ -7,6 +7,10 @@ secret against the request's host (and port, unless it is 80 or 443) and sends i
 host sends nothing. The run is also given ``-dr`` (no redirects): nuclei would otherwise carry the custom headers to wherever a redirect
 leads. The targets are explicit ``scheme://host[:port]`` URLs for exactly the origins the credential was stored for.
 
+TLS: nuclei's own HTTP client does not verify server certificates, so before a stored sign-in is handed to it the server of each HTTPS origin is
+checked here (``trusted_plan``: a pinned handshake that verifies the chain and the name). An origin whose certificate does not verify gets no
+sign-in, unless the sign-in has "trust this certificate anyway" switched on, as for the web route check (``route_auth.probe_url``).
+
 Every result line is redacted (``auth_checks.redact_obj``) before anything reads it, so no request, response, curl command or extracted
 value that echoes a secret reaches the database, the activity feed or an AI prompt, and a finding it produced is tagged
 ``seen-while-authenticated``.
@@ -21,6 +25,7 @@ from cveFeed import auth_checks
 logger = logging.getLogger(__name__)
 
 SERVICE = 'nuclei-auth'
+REFUSED_SERVICE = 'nuclei-auth-refused'  # ledger: an origin whose stored sign-in was withheld for its certificate (asset: <url>@<credential revision>)
 CHUNK = 100  # targets per nuclei process, as in nuclei_scan
 
 
@@ -30,6 +35,38 @@ def scope_for_scan(scan_id):
     domain = ScanHistory.objects.select_related('domain').get(pk=scan_id).domain
     scope = auth_checks.AuthScope.for_domain(domain)
     return scope if scope else None
+
+
+def trusted_plan(plan, project, check=None):
+    """``(kept, refused)`` for the ``plan`` of ``auth_checks.plan_nuclei``: ``kept`` are the items whose sign-in may be sent (plain HTTP
+    origins, which have no certificate; HTTPS ones whose certificate verifies; HTTPS ones whose credential has ``allow_untrusted_certificate``),
+    ``refused`` is ``[(url, reason)]`` for the rest. One handshake per host and port. ``check`` is ``auth_checks.certificate_verifies``."""
+    from urllib.parse import urlsplit
+    check = check or auth_checks.certificate_verifies
+    seen, kept, refused = {}, [], []
+    for item in plan:
+        url, cred, _key = item
+        parts = urlsplit(url)
+        if parts.scheme != 'https' or cred.allow_untrusted_certificate:
+            kept.append(item)
+            continue
+        where = (parts.hostname, parts.port or 443)
+        if where not in seen:
+            seen[where] = check(where[0], where[1], project)
+        ok, reason = seen[where]
+        if ok:
+            kept.append(item)
+        else:
+            refused.append((url, reason))
+    return kept, refused
+
+
+def refusal_line(refused):
+    """The activity sentence for the origins ``trusted_plan`` refused: what was not sent, why, and the switch that changes it. No value in it."""
+    urls = sorted({url for url, _reason in refused})
+    more = f' and {len(urls) - 5} more' if len(urls) > 5 else ''
+    return (f'the stored sign-in was not sent to {", ".join(urls[:5])}{more}: the server certificate does not verify ({refused[0][1]}). '
+            f'Turn on "Trust this certificate anyway" for the sign-in to send it regardless')
 
 
 def ledger_service(base, stream_is_real):
@@ -69,6 +106,16 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
         plan = auth_checks.plan_nuclei(scope, vetted)
         if not plan:
             return {**summary, 'skipped': 'no covered host'}
+        planned = plan
+        plan, refused = trusted_plan(plan, project)
+        if refused:
+            activity.log('run_check', f'Authenticated nuclei for {domain.name}: {refusal_line(refused)}', project=project, scan_id=scan.id,
+                         status='failed')
+            kept = {id(item) for item in plan}
+            # a durable record of what was withheld, for the check coverage view (which says the sign-in is not sent, not that it is planned)
+            ledger.record(REFUSED_SERVICE, [_asset(item[0], item[1]) for item in planned if id(item) not in kept], project, scan, 'refused')
+        if not plan:
+            return {**summary, 'skipped': 'certificate not trusted'}
         stream_is_real = stream is nuclei_scan.stream_nuclei
         ledger_name = ledger_service(service, stream_is_real)
         assets = {_asset(url, cred): (url, cred, key) for url, cred, key in plan}
@@ -169,6 +216,9 @@ def merge_template_outcomes(path, hosts, outcomes, project):
         if resources.global_pause_requested(fail_closed=True):
             return outcomes
         plan = auth_checks.plan_nuclei(scope, scannable_hosts(list(hosts), project=project))
+        plan, refused = trusted_plan(plan, project)
+        if refused:
+            logger.info('signed-in template check: %s', refusal_line(refused))
         if not plan:
             return outcomes
         with auth_checks.secrets_file(auth_checks.entries_for(plan)) as secret_path:

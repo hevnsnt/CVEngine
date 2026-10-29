@@ -154,6 +154,31 @@ def evaluate_dmarc(domain, txt_records, has_mx):
     return findings
 
 
+def has_dmarc_record(records):
+    return any(_txt_value(r).lower().startswith('v=dmarc1') for r in records)
+
+
+# the findings about the policy a name is held to; the rest (reports, pct, sp) belong to the record, so they are the owner's, not the name's
+INHERITED_DMARC_CHECKS = ('dmarc_none', 'dmarc_quarantine', 'dmarc_invalid', 'dmarc_multiple')
+
+
+def evaluate_inherited_dmarc(domain, apex, records, has_mx):
+    """DMARC review of a name that publishes no record of its own: a receiver falls back to the organizational domain's record
+    (RFC 7489 section 6.6.3) and applies its ``sp`` tag to subdomains, so the apex's policy is the one the name has. Only what that
+    policy says about the name is reported here (the record's own details are the apex's finding)."""
+    values = [_txt_value(r) for r in records if _txt_value(r).lower().startswith('v=dmarc1')]
+    tags = parse_tags(values[0])
+    sp = tags.get('sp', '').lower()
+    effective = [f'v=DMARC1; p={sp}; rua={tags.get("rua", "")}'] if len(values) == 1 and sp in ('none', 'quarantine', 'reject') else records
+    found = []
+    for f in evaluate_dmarc(domain, effective, has_mx):
+        if f.check in INHERITED_DMARC_CHECKS:
+            f.detail = f'{f.detail} (This name has no DMARC record of its own; it follows the policy of {apex}.)'.strip()
+            f.evidence = {**f.evidence, 'inherited_from': apex}
+            found.append(f)
+    return found
+
+
 # ----------------------------------------------------------------------------- DKIM
 
 def dkim_key_bits(record):
@@ -238,11 +263,11 @@ def evaluate_cert(info, now=None):
     names = list(info.get('sans') or [])
     if info.get('subject') and info['subject'] not in names:
         names.append(info['subject'])
-    if names and not re.fullmatch(r'[\d.:]+', host) and not hostname_matches(host, names):
+    if names and not is_ip(host) and not hostname_matches(host, names):
         findings.append(Finding('tls_hostname_mismatch', HIGH, f'Certificate for {where} does not cover {host}',
                                 f'It is valid for: {", ".join(names[:6])}.', where, {'names': names[:20]}))
     err = (info.get('chain_error') or '').lower()
-    if err and 'hostname mismatch' not in err and 'expired' not in err:
+    if err and 'hostname mismatch' not in err and 'ip address mismatch' not in err and 'expired' not in err:
         if 'self-signed' in err or 'self signed' in err:
             findings.append(Finding('tls_self_signed', MEDIUM, f'{where} uses a self-signed certificate',
                                     'Browsers and clients will not trust it.', where, {'error': info['chain_error']}))
@@ -399,6 +424,11 @@ def fetch_records(name, rtype, resolver=None):
         return []
 
 
+def organizational_domain(name):
+    from targetApp.target_types import apex_domain
+    return apex_domain(name)
+
+
 def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None):
     """SPF, DMARC, DKIM and CAA review for one domain, plus the checks adapted from MailFail (cveFeed.mailfail), with
     injectable DNS for tests. With injected DNS, other record types default to none and no outbound request is made."""
@@ -409,7 +439,12 @@ def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None):
     txt = fetch(domain)
     findings = evaluate_spf(domain, txt, has_mx, count_spf_lookups(domain, fetch))
     dmarc = fetch(f'_dmarc.{domain}')
-    findings += evaluate_dmarc(domain, dmarc, has_mx)
+    apex = None if has_dmarc_record(dmarc) else organizational_domain(domain)
+    parent = fetch(f'_dmarc.{apex}') if apex and apex != domain else []
+    if has_dmarc_record(parent):  # no record of its own: the organizational domain's policy applies to this name
+        findings += evaluate_inherited_dmarc(domain, apex, parent, has_mx)
+    else:
+        findings += evaluate_dmarc(domain, dmarc, has_mx)
     selectors = DKIM_SELECTORS + mailfail.EXTRA_DKIM_SELECTORS
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         answers = pool.map(lambda selector: fetch(f'{selector}._domainkey.{domain}'), selectors)
@@ -492,7 +527,8 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True):
         HygieneFinding.objects.update_or_create(
             domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
     stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
-             if owns(x.check_name) and (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
+             if owns(x.check_name) and (hosts is None or x.host in hosts or (x.check_name.startswith('tls_') and x.host.rpartition(':')[0] in hosts))
+             and (x.host, x.check_name) not in keep]  # a certificate finding's host is 'name:port', a host-only run is given the names
     for x in stale:
         x.status, x.resolved_at = 'resolved', timezone.now()
         x.save(update_fields=['status', 'resolved_at'])

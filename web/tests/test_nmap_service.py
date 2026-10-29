@@ -109,6 +109,24 @@ class TestExtractNmapInventory(unittest.TestCase):
         self.assertEqual(extract_nmap_inventory(None), [])
         self.assertEqual(extract_nmap_inventory({'nmaprun': {}}), [])
 
+    def _scanned(self, services, protocol='tcp'):
+        xml = ('<nmaprun><scaninfo protocol="%s" services="%s"/><host><address addr="203.0.113.5" addrtype="ipv4"/></host></nmaprun>'
+               % (protocol, services))
+        return self._inv(xml)[0]['scanned']
+
+    def test_scanned_ports_parse_lists_and_ranges(self):
+        self.assertEqual(self._scanned('22,80-82,81-84,8080'), {22, 80, 81, 82, 83, 84, 8080})
+
+    def test_a_hostile_scaninfo_range_is_clamped_not_expanded(self):
+        import time
+        start = time.monotonic()
+        scanned = self._scanned('1-4000000000')
+        self.assertEqual(len(scanned), 65535)
+        self.assertEqual(self._scanned('0-3,70000-90000'), {1, 2, 3})
+        # a million overlapping full ranges merge instead of being expanded one by one
+        self.assertEqual(len(self._scanned(','.join(['1-65535'] * 200000))), 65535)
+        self.assertLess(time.monotonic() - start, 5)
+
 
 if __name__ == '__main__':
     unittest.main()

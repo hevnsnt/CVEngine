@@ -39,13 +39,17 @@ def locked(user):
     return cache.get(f'mfa_fail:{user.pk}', 0) >= MAX_FAILURES
 
 
-def fail(user):
+def fail(user, record=True):
     """Count one failed second factor. The counter lives in the shared Redis cache and is incremented atomically, so concurrent
-    attempts (several web workers, several threads) cannot undercount; the lockout window starts at the first failure."""
+    attempts (several web workers, several threads) cannot undercount; the lockout window starts at the first failure. Returns True for
+    the attempt that closes the door, which is audited once; ``record=False`` leaves that audit row to a caller still inside a
+    transaction it is about to roll back."""
     key = f'mfa_fail:{user.pk}'
     throttle.count(key, LOCKOUT_SECONDS)
-    if cache.get(key, 0) == MAX_FAILURES:  # the attempt that closes the door, recorded once
+    closed = cache.get(key, 0) == MAX_FAILURES
+    if closed and record:
         audit.record_for_user_quietly(user, 'account.mfa_locked', user)
+    return closed
 
 
 def clear_failures(user):
@@ -124,11 +128,12 @@ class MFALoginView(LoginView):
 
     def post(self, request, *args, **kwargs):
         if login_throttled(request, request.POST.get('username')):
-            form = self.get_form()
-            form.is_valid()
-            form.errors.pop('__all__', None)
+            kwargs = self.get_form_kwargs()
+            kwargs.pop('data', None)
+            kwargs['initial'] = {'username': request.POST.get('username', '')}
+            form = self.get_form_class()(**kwargs)  # not bound: validating it would check the password, which is what this refuses
             form.add_error(None, 'Too many failed sign-in attempts. Try again in a few minutes.')
-            response = self.render_to_response(self.get_context_data(form=form))
+            response = self.render_to_response(self.get_context_data(form=form, throttled=True))
             response.status_code = 429
             return response
         return super().post(request, *args, **kwargs)

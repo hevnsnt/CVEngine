@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -61,18 +62,27 @@ class FetchCtNamesTests(TestCase):
 			self.assertEqual(ctmonitor.fetch_ct_names('example.com'), set())
 
 	def test_non_json_response_returns_empty_set(self):
-		resp = mock.Mock(); resp.raise_for_status.return_value = None; resp.json.side_effect = ValueError('bad json')
+		resp = mock.Mock(); resp.raise_for_status.return_value = None; resp.iter_content.return_value = [b'<html>not json']
 		with mock.patch('requests.get', return_value=resp):
 			self.assertEqual(ctmonitor.fetch_ct_names('example.com'), set())
 
 	def test_parses_a_real_shaped_response(self):
 		resp = mock.Mock()
 		resp.raise_for_status.return_value = None
-		resp.json.return_value = [{'name_value': 'www.example.com'}, {'name_value': 'mail.example.com\nwebmail.example.com'}]
+		resp.iter_content.return_value = [json.dumps([{'name_value': 'www.example.com'}, {'name_value': 'mail.example.com\nwebmail.example.com'}]).encode()]
 		with mock.patch('requests.get', return_value=resp) as get:
 			names = ctmonitor.fetch_ct_names('example.com')
 		self.assertEqual(names, {'www.example.com', 'mail.example.com', 'webmail.example.com'})
 		self.assertEqual(get.call_args.kwargs['params'], {'q': '%.example.com', 'output': 'json'})
+		self.assertTrue(get.call_args.kwargs['stream'])
+
+	def test_a_reply_over_the_size_cap_is_refused_unread(self):
+		resp = mock.Mock(); resp.raise_for_status.return_value = None
+		resp.iter_content.side_effect = lambda size: iter([b'[' + b' ' * 40] * 3)
+		with mock.patch('requests.get', return_value=resp), mock.patch.object(ctmonitor, 'MAX_BYTES', 100):
+			self.assertEqual(ctmonitor.fetch_ct_names('example.com'), set())
+			self.assertIsNone(ctmonitor._fetch('example.com', sleep=lambda s: None))
+		resp.close.assert_called()
 
 
 class RunCtWatchTests(TestCase):
@@ -158,7 +168,7 @@ class PoliteLookupTests(TestCase):
 	def _resp(self, status=200, body=None, headers=None):
 		r = mock.Mock()
 		r.status_code, r.headers = status, headers or {}
-		r.json.return_value = body if body is not None else []
+		r.iter_content.return_value = [json.dumps(body if body is not None else []).encode()]
 		r.raise_for_status.side_effect = None
 		return r
 

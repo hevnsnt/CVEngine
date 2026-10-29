@@ -165,7 +165,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             run_deadline = now + timeout
         if task.status == 'queued' and now >= claim_deadline:
             if (not busy and now < started + queue_budget
-                    and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'busy'):
+                    and sentinel_broker.capacity_state(project, kind, internal, exclude=task.pk)['state'] == 'busy'):
                 busy, claim_deadline = True, started + queue_budget  # another stage took the free slot first: wait for the next one
                 continue
             never_claimed = True
@@ -303,14 +303,23 @@ def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT
     it was first discovered may not resolve months later), not a name a tenant never controlled, so this is a plain
     resolvability check, not ``targetApp.target_types``'s prohibited-range gate: a target already passed that when it
     was added. One bounded parallel pass, like ``target_types.blocked_names``; never one lookup per target serially."""
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
     targets = list(targets)
     if not targets:
         return []
     hosts = {t: _bare_host(t) for t in targets}
     unique = sorted(set(hosts.values()))
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(unique))), thread_name_prefix='sentinel-resolve') as pool:
-        live = dict(zip(unique, pool.map(lambda h: _resolves(h, timeout), unique)))
+    n_workers = max(1, min(workers, len(unique)))
+    pool = ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix='sentinel-resolve')
+    try:
+        futures = {h: pool.submit(_resolves, h, timeout) for h in unique}
+        # ``getaddrinfo`` cannot be interrupted, so the bound is on the wait: every lookup gets ``timeout`` per round of ``workers`` hosts, and a
+        # name still unanswered then counts as not resolving (its thread ends when the resolver gives up), instead of one slow resolver holding
+        # the whole stage.
+        wait(futures.values(), timeout=timeout * -(-len(unique) // n_workers))
+        live = {h: f.done() and not f.cancelled() and f.exception() is None and f.result() for h, f in futures.items()}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return [t for t in targets if live.get(hosts[t])]
 
 def _finding_to_nuclei_line(finding):
@@ -329,6 +338,33 @@ def _finding_to_nuclei_line(finding):
                      'tags': finding.get('tags') or []}}
 
 
+def _nuclei_target(kind, targets, kwargs):
+    """The target of a dispatched nuclei task: the targets, the tags and severities this pass would run with locally, and the template policy the
+    local run applies. The light pass is nuclei's technology fingerprint (``-tags tech -severity info``): ``run_light_nuclei`` asks for it with a
+    ``tech`` flag only the unwrapped local stream takes, so the Sentinel is told the same here, or it would run the whole template library at
+    every severity and the stage would time out. ``etags`` are the tags the local run always leaves out (``nuclei_scan.BASE_FLAGS``, ``dos``) and
+    ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
+    nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
+    ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
+    cached, else on the first policy request)."""
+    from agentapi import template_bundle
+    from cveFeed import nuclei_scan
+    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or [])
+    if kind == 'nuclei_light' or kwargs.get('tech'):
+        tags, severities = ['tech'], ['info']
+    flags = nuclei_scan.BASE_FLAGS
+    etags = flags[flags.index('-etags') + 1].split(',') if '-etags' in flags else []
+    rev = nuclei_scan.policy_rev()
+    return {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
+            'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()}}
+
+
+def _local_kwargs(kind, kwargs):
+    """The keyword arguments the local stream gets when a dispatched stage falls back to it: the light pass keeps its ``tech`` flag, which the
+    wrapper in place of ``stream_nuclei`` hid from the caller, so the fallback is the quick fingerprint and not the whole template library."""
+    return {**kwargs, 'tech': True} if kind == 'nuclei_light' else kwargs
+
+
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` matching ``nuclei_scan.stream_nuclei``'s own
     signature, for ``run_light_nuclei``/``run_targeted_nuclei``'s ``stream`` parameter. Returns the literal, unwrapped
@@ -338,13 +374,14 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     project = scan.domain.project
     if internal:  # the target is inside a private network: only a Sentinel there can run it, and there is never a local fallback
         def internal_stream(targets_file, **kwargs):
+            if kwargs.get('secret_file'):  # a signed-in pass: a Sentinel is never sent a stored credential, and it must not run signed out and be reported as signed in
+                raise RuntimeError('a signed-in nuclei pass cannot run on a Sentinel: the stored sign-in stays on this server')
             try:
                 with open(targets_file, encoding='utf-8') as handle:
                     targets = [line.strip() for line in handle if line.strip()]
             except OSError:
                 targets = []
-            result = dispatch_or_none(project, kind, {'targets': targets[:MAX_ADDRESSES], 'tags': sorted(kwargs.get('tags') or []),
-                                                      'severities': list(kwargs.get('severities') or [])}, ips=[], scan=scan, internal=True,
+            result = dispatch_or_none(project, kind, _nuclei_target(kind, targets[:MAX_ADDRESSES], kwargs), ips=[], scan=scan, internal=True,
                                       timeout=timeout)
             if result is None:
                 raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
@@ -355,6 +392,11 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         return stream_nuclei
 
     def stream(targets_file, **kwargs):
+        if kwargs.get('secret_file'):
+            # a signed-in pass (cveFeed.auth_nuclei) runs here: the stored credential never goes to a Sentinel, and a dispatched run would be
+            # signed out while its findings were labelled as seen while signed in
+            yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
+            return
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
@@ -366,14 +408,11 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             # fallback below would too (nuclei cannot reach what cannot be looked up either); run it anyway so the
             # existing "ran, found nothing" accounting is unchanged for a target that would already have gone through
             # stream_nuclei with no Sentinel in play.
-            yield from stream_nuclei(targets_file, **kwargs)
+            yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
             return
-        tags = sorted(kwargs.get('tags') or [])
-        severities = list(kwargs.get('severities') or [])
-        payload = {'targets': live, 'tags': tags, 'severities': severities}
-        result = dispatch_or_none(project, kind, payload, ips=[], scan=scan, timeout=timeout)
+        result = dispatch_or_none(project, kind, _nuclei_target(kind, live, kwargs), ips=[], scan=scan, timeout=timeout)
         if result is None:
-            yield from stream_nuclei(targets_file, **kwargs)
+            yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
             return
         for finding in result.get('findings', []):
             yield _finding_to_nuclei_line(finding)

@@ -19,6 +19,7 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 from rolepermissions.decorators import has_permission_decorator
 
+from cveFeed import match_policy
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
@@ -32,8 +33,6 @@ FEED_PAGE = 30
 FEED_MAX = 100
 ALL_PROJECTS = '_all'  # reserved slug of the read-only combined view (tenancy.roles.ALL_PROJECTS)
 GRAPH_NODE_CAP = 1500
-# A scan marked running for longer than this is a casualty of a restart, not live work: never show it as running.
-from cveFeed.counts import RUNNING_WINDOW  # noqa: E402,F401  (defined with every other count, in cveFeed.counts)
 
 
 def _tier(entry):
@@ -80,7 +79,7 @@ def _host_tip(sub, live_matches, severities, aliases=()):
     host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
     worst = None
     for match in live_matches:
-        tier = match_temperature(_tier(match.cve_entry), match.cve_entry.cvss, match.ai_verdict, match.distro_status)
+        tier = match_temperature(_tier(match.cve_entry), match.cve_entry.cvss, match.ai_verdict, match.distro_status, match_policy.version_unknown(match))
         if worst is None or TIER_RANK.get(tier, 0) > TIER_RANK.get(worst[1], 0):
             worst = (match.cve_entry.cve_id, tier)
     reasons = [r.get('label', '') for r in (sub.score_detail or [])][:3] if hasattr(sub, 'score_detail') else []
@@ -108,8 +107,8 @@ def graph_payload(domain_id=None, scan_id=None):
     from cveFeed.graph_overview import root_for
 
     from django.db.models import Prefetch
-    # a match needs its CVE's tier fields only: never CVEEntry.raw or the prose columns
-    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'cve_entry__cve_id', 'cve_entry__kev',
+    # a match needs its CVE's tier fields only: never the prose columns
+    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev',
                                     'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry')
     subs = Subdomain.objects.select_related('target_domain__project').prefetch_related(
         'ip_addresses', Prefetch('cve_matches', queryset=matches))
@@ -151,7 +150,7 @@ def graph_payload(domain_id=None, scan_id=None):
     sibling_matches, sibling_findings, sibling_seen = {}, {}, set()
     if sibling_ids:
         for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
-                'subdomain_id', 'ai_verdict', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
+                'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
                 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry'):
             sibling_matches.setdefault(m.subdomain_id, []).append(m)
         for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
@@ -185,7 +184,7 @@ def graph_payload(domain_id=None, scan_id=None):
                     sev.append(severity)
         if status != 'vulnerable' and (live or sev):
             status = 'vulnerable'
-        tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status) for m in live]
+        tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)) for m in live]
         heat = host_heat(status, tiers, sev)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
@@ -215,7 +214,11 @@ def graph_payload(domain_id=None, scan_id=None):
         events = events.filter(scan_id=scan_id)
     elif domain_id:
         events = events.filter(domain_id=domain_id)  # includes CT-monitor finds, which have no scan
-    for parent, host in events.values_list('parent_host', 'host').distinct()[:GRAPH_NODE_CAP]:
+    # only an edge between two drawn hosts is ever kept, so read only those (a name in the case the host row spells it and lower case, which
+    # is how bbot reports it), in a fixed order: an arbitrary 1500 of every pair ever stored dropped edges of drawn hosts at random
+    drawn = {n for s in sub_list for n in (s.name, s.name.lower())}
+    events = events.filter(host__in=drawn, parent_host__in=drawn)
+    for parent, host in events.values_list('parent_host', 'host').distinct().order_by('parent_host', 'host')[:GRAPH_NODE_CAP]:
         a, b = by_name.get((parent or '').lower()), by_name.get((host or '').lower())
         if a and b and a != b:
             edges.add((a, b))
@@ -255,7 +258,7 @@ def stats_payload():
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
         'certs_total': TlsCertificate.objects.count(),
-        'hygiene_open': HygieneFinding.objects.filter(status='open', severity__gte=1).count(),
+        'hygiene_open': counts.actionable_hygiene(HygieneFinding.objects.all()).count(),
         'hosts': reps.count(),
         'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
         **live_scan_counts(),
@@ -592,6 +595,7 @@ def bump_stats_revision():
     """Invalidate every web worker's short dashboard cache after a finding is closed."""
     from django.core.cache import cache
     _STATS_CACHE.clear()
+    _DISCOVERY_COUNTS_CACHE.clear()
     try:
         cache.set(STATS_REVISION_KEY, timezone.now().isoformat(), timeout=None)
     except Exception:  # noqa: BLE001 - other workers still expire within ten seconds
@@ -690,27 +694,6 @@ def api_graph_live(request):
     response = JsonResponse(graph_live.live(slug if slug and slug != ALL_PROJECTS else None, int(domain) if domain.isdigit() else None))
     response['Cache-Control'] = 'no-store'
     return response
-
-
-@require_GET
-@project_scoped
-def api_graph_overview(request):
-    from cveFeed.graph_overview import groups
-    slug = request.GET.get('project', '')
-    return JsonResponse(groups(slug if slug and slug != ALL_PROJECTS else None))
-
-
-@require_GET
-@project_scoped
-def api_graph_hosts(request):
-    from cveFeed.graph_overview import hosts
-    project, root = request.GET.get('owner', '')[:100], request.GET.get('root', '')[:255]
-    try:
-        page = int(request.GET.get('page', 1))
-    except (TypeError, ValueError):
-        return JsonResponse({'error': 'page must be a number'}, status=400)
-    result = hosts(project, root, page=page, q=request.GET.get('q', ''))
-    return JsonResponse(result) if result is not None else JsonResponse({'error': 'group not found'}, status=404)
 
 
 def _kv(*pairs):
@@ -880,12 +863,37 @@ def api_activity(request):
                          'bumped': [_serialize_activity(a) for a in bumped], 'now': timezone.now().isoformat()})
 
 
+_DISCOVERY_COUNTS_CACHE = {}  # (user id, project slug) -> (computed at, counts)
+
+
+def discovery_counts():
+    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see."""
+    from cveFeed.counts import LIVE_HOST_Q, host_reps
+    from startScan.models import IpAddress, Port
+    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
+    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
+    return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
+
+
+def cached_discovery_counts(key='', now=None):
+    """``discovery_counts`` kept per process for STATS_CACHE_SECONDS: the dashboard polls the ticker every 2.5 s and the three distinct
+    counts walk the caller's whole inventory. Per caller and project like ``cached_stats``, and dropped with it by ``bump_stats_revision``."""
+    import time
+    now = time.monotonic() if now is None else now
+    hit = _DISCOVERY_COUNTS_CACHE.get(key)
+    if hit is None or now - hit[0] >= STATS_CACHE_SECONDS:
+        if len(_DISCOVERY_COUNTS_CACHE) >= STATS_CACHE_ENTRIES:
+            _DISCOVERY_COUNTS_CACHE.clear()
+        hit = _DISCOVERY_COUNTS_CACHE[key] = (now, discovery_counts())
+    return hit[1]
+
+
 @require_GET
 @project_scoped
 def api_discovery(request):
     """Live discovery: the scan being followed (given, else the latest running, else the latest) and its new events."""
     from cveFeed.discovery import queue_position
-    from startScan.models import IpAddress, Port, ScanHistory
+    from startScan.models import ScanHistory
     scan_id = request.GET.get('scan', '')
     if scan_id.isdigit():
         scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain', 'scan_type').first()
@@ -896,19 +904,16 @@ def api_discovery(request):
         return JsonResponse({'scan': None, 'events': [], 'counts': {}})
     after = request.GET.get('after', '')
     events = DiscoveryEvent.objects.filter(scan=scan)
-    events = events.filter(id__gt=int(after)) if after.isdigit() else events.order_by('-id')[:60]
+    events = events.filter(id__gt=int(after)) if after.isdigit() and int(after) else events.order_by('-id')[:60]  # after=0 is no cursor: the tail, not every event of the scan
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
-    from cveFeed.counts import LIVE_HOST_Q, host_reps
-    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
-    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
     return JsonResponse({
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': scan.error_message or '',
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()},
+        'counts': cached_discovery_counts((request.user.pk, request.GET.get('project', ''))),
     })
 
 

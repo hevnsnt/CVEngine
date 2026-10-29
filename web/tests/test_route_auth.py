@@ -206,6 +206,58 @@ class ProbeTests(SimpleTestCase):
 		self.assertEqual((result['title'], result['cookies'], result['status']), ('Pinned', ['sid'], 200))
 		connection.close.assert_called_once()
 
+	def _signed_probe(self, headers, connect_error=None, untrusted_ok=False):
+		import ssl
+		response = mock.Mock(status=200)
+		response.headers = __import__('email.message', fromlist=['Message']).Message()
+		response.getheader.side_effect = lambda name, default=None: response.headers.get(name, default)
+		response.read.return_value = b'<title>In</title>'
+		connection = mock.Mock()
+		connection.getresponse.return_value = response
+		connection.connect.side_effect = connect_error
+		scope = mock.Mock()
+		scope.headers_for.return_value = headers
+		scope.accepts_untrusted_certificate.return_value = untrusted_ok
+		with mock.patch('cveFeed.pinned_transport.resolve', return_value=((2, ('203.0.113.10', 443)),)), \
+				mock.patch('cveFeed.pinned_transport.HTTPConnection', return_value=connection) as factory:
+			try:
+				ra.probe_url('https://app.example.test/a', auth_scope=scope)
+				error = None
+			except ValueError as exc:
+				error = exc
+		return factory.call_args.kwargs['context'], connection, error
+
+	def test_a_stored_sign_in_is_only_sent_to_a_server_whose_certificate_verifies(self):
+		import ssl
+		context, connection, _ = self._signed_probe([('Authorization', 'Bearer x')])
+		self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+		self.assertTrue(context.check_hostname)
+		self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer x')
+		context, _, _ = self._signed_probe([])  # no sign-in applies: the anonymous check still inspects a broken certificate
+		self.assertEqual(context.verify_mode, ssl.CERT_NONE)
+
+	def test_a_certificate_that_does_not_verify_stops_the_signed_request_before_anything_is_sent(self):
+		import ssl
+		_, connection, error = self._signed_probe([('Authorization', 'Bearer x')], connect_error=ssl.SSLCertVerificationError('bad'))
+		self.assertIsInstance(error, ra.UntrustedCertificate)
+		self.assertIn('stored sign-in was not sent', str(error))
+		self.assertIn('Trust this certificate anyway', str(error))  # says why and what to do
+		connection.request.assert_not_called()
+
+	def test_the_per_target_switch_sends_the_sign_in_over_a_certificate_that_does_not_verify(self):
+		import ssl
+		context, connection, error = self._signed_probe([('Authorization', 'Bearer x')], untrusted_ok=True)
+		self.assertIsNone(error)
+		self.assertEqual(context.verify_mode, ssl.CERT_NONE)
+		self.assertFalse(context.check_hostname)
+		self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer x')
+
+	def test_the_switch_never_matters_for_an_anonymous_probe(self):
+		import ssl
+		context, connection, _ = self._signed_probe([], untrusted_ok=True)
+		self.assertEqual(context.verify_mode, ssl.CERT_NONE)
+		self.assertNotIn('Authorization', connection.request.call_args.kwargs['headers'])
+
 
 class RouteFixture:
 	def setUp(self):

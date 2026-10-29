@@ -5,6 +5,8 @@
 import { api, badge, button, dialog, el, field, selectOf, shortDate, text, toast } from "/staticfiles/cve/ui.js";
 
 const EXPIRY_CHOICES = [["30", "30 days"], ["90", "90 days"], ["120", "120 days"], ["never", "Never (I chose this on purpose)"]];
+const UNTRUSTED_WARNING =
+  "Warning: with this on, the sign-in is also sent to a server whose certificate does not verify (self-signed, expired or for another name), so the sign-in can be read by anyone in the network path. Leave it off unless you know the server and the network.";
 const ORIGIN_HELP = "Where the values may be sent, as scheme:port, comma separated. Default https:443. Plain http only if you name it.";
 
 // The stored sign-ins of the project, or null when the viewer may not see them (not an App Admin or the organization's admin).
@@ -88,6 +90,9 @@ function openSignIn(state, target, changed) {
         el("p", "note", `Headers: ${r.header_names.join(", ") || "none"}. Cookie: ${r.cookie_names.length ? r.cookie_names.join(", ") : "none"}.`, { style: "margin:4px 0" }),
         el("p", "note", `${expiryText(r)}. Last sent: ${r.last_used_at ? shortDate(r.last_used_at) : "never"}.`, { style: "margin:4px 0" }),
       );
+      if (r.allow_untrusted_certificate) {
+        box.append(el("p", "note", "Trusts an unverified certificate: the sign-in is sent even when the server's certificate does not verify, so it can be read by anyone in the network path.", { style: "margin:4px 0;color:var(--warn, #b45309)" }));
+      }
       if (r.expired) box.append(el("p", "note", "Expired: the scanners no longer send it. Replace it with a fresh session.", { style: "margin:4px 0" }));
       const actions = el("div", "actions", null, { style: "justify-content:flex-start" });
       const replace = el("button", "btn ghost sm", "Replace", { type: "button" });
@@ -142,6 +147,13 @@ function openSignIn(state, target, changed) {
       const headerRows = el("div", "");
       const cookie = text("", { type: "password", autocomplete: "new-password", placeholder: "name=value; name2=value2" });
       const clearCookie = el("input", "", null, { type: "checkbox" });
+      const untrusted = el("input", "", null, { type: "checkbox" });
+      const untrustedWrap = el("label", "", null, { style: "display:block;margin:4px 0" });
+      untrustedWrap.append(untrusted, document.createTextNode(" Trust this certificate anyway"));
+      const untrustedWarn = el("p", "note", UNTRUSTED_WARNING, { style: "font-size:13px;margin:4px 0;color:var(--warn, #b45309)" });
+      const syncUntrusted = () => (untrustedWarn.hidden = !untrusted.checked);
+      untrusted.onchange = syncUntrusted;
+      syncUntrusted();
       const names = [];
       const addHeader = (name = "", stored = false) => {
         const row = el("div", "scope-cell", null, { style: "display:flex;gap:8px;margin:6px 0" });
@@ -170,6 +182,9 @@ function openSignIn(state, target, changed) {
         scopeTarget.wrap,
         scopeWarn,
         field("Origins", origins, ORIGIN_HELP),
+        el("p", "note", "By default the sign-in is sent only to a server whose TLS certificate verifies. If this target uses a self-signed, expired or mismatched certificate (a typical staging host), the sign-in is not sent and the activity feed says why.", { style: "margin:10px 0 0;font-size:13px" }),
+        untrustedWrap,
+        untrustedWarn,
         el("p", "note", "Headers (for example Authorization or X-Api-Key). A blank value for a stored name keeps it.", { style: "margin:10px 0 0" }),
         headerRows,
         more,
@@ -183,6 +198,7 @@ function openSignIn(state, target, changed) {
         body.headers = names.filter((e) => e.n.value.trim()).map((e) => ({ name: e.n.value.trim(), secret: e.v.value }));
         if (cookie.value) body.cookie_secret = cookie.value;
         if (clearCookie.checked) body.clear_cookie = true;
+        body.allow_untrusted_certificate = untrusted.checked;
         body.expires = expires.value === "never" ? "never" : Number(expires.value);
         await api("PUT", `${state.base}/targets/${target.id}/auth-credential`, body);
         cookie.value = ""; // a saved value is never kept on the page
@@ -192,7 +208,7 @@ function openSignIn(state, target, changed) {
       });
       box.append(el("div", "actions", null, { style: "justify-content:flex-start" }));
       box.lastChild.append(save);
-      current = { label, host, origins, expires, scopeHost, scopeTarget, sync, addHeader, headerRows, names };
+      current = { label, host, origins, expires, untrusted, syncUntrusted, scopeHost, scopeTarget, sync, addHeader, headerRows, names };
       return box;
     };
     const fillForm = (r) => {
@@ -202,6 +218,8 @@ function openSignIn(state, target, changed) {
       current.scopeHost.input.checked = Boolean(r.host);
       current.scopeTarget.input.checked = !r.host;
       current.sync();
+      current.untrusted.checked = Boolean(r.allow_untrusted_certificate); // shown, so a replace never flips it unseen
+      current.syncUntrusted();
       current.expires.value = "30"; // a replacement starts a new term; the choice is shown, never inherited
       current.headerRows.textContent = "";
       current.names.length = 0;

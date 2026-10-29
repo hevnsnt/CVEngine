@@ -425,6 +425,24 @@ class NucleiDispatchTests(DispatchBase):
         self.assertEqual(vuln.template_id, 'exposed-panel')
         self.assertEqual(vuln.severity, 3)  # NUCLEI_SEVERITY_MAP['high']
 
+    def test_a_signed_in_pass_runs_locally_and_is_never_dispatched(self):
+        """A nuclei pass with a secrets file must not be handed to a Sentinel: it would run signed out while auth_nuclei labelled its
+        findings as seen while signed in, and the stored credential never leaves this server."""
+        self.make_sentinel(['nuclei_light', 'nuclei_targeted'])
+        seen = []
+
+        def local_stream(path, **kwargs):
+            seen.append(kwargs)
+            return iter([{'host': 'ran-here'}])
+        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream), \
+                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as dispatched:
+            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_targeted', timeout=5)
+            self.assertIsNot(stream, local_stream)  # a Sentinel is eligible, so the wrapper is in play
+            lines = list(stream('/tmp/does-not-exist-targets.txt', secret_file='/tmp/secrets.yaml', tags=['cve']))
+        dispatched.assert_not_called()
+        self.assertEqual(lines, [{'host': 'ran-here'}])
+        self.assertEqual(seen, [{'secret_file': '/tmp/secrets.yaml', 'tags': ['cve']}])
+
     def test_timeout_falls_back_to_the_real_local_stream(self):
         self.make_sentinel(['nuclei_light'])
         calls = []

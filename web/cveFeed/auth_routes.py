@@ -8,7 +8,8 @@ test account.
 
 Scope: ``AuthScope.credential`` decides per URL (exact host, ``scheme:port`` among the origins, not expired) before anything is sent; the
 SSRF gate (``route_auth.host_allowed``), the pinned transport, the exclusions and the pause apply as for the anonymous check, and
-redirects are never followed.
+redirects are never followed. The values go only over a connection whose certificate verifies, unless the sign-in has "trust this certificate
+anyway" switched on (``route_auth.probe_url``); a route not sent for that reason is counted and said in the activity line.
 """
 import functools
 import logging
@@ -55,7 +56,7 @@ def run_signed_in(scan_id, probe, force=False):
     if not scope:
         return None
     values = scope.secret_values()
-    summary = {'routes': 0, 'differs': 0, 'not_signed_in': 0, 'errors': 0}
+    summary = {'routes': 0, 'differs': 0, 'not_signed_in': 0, 'errors': 0, 'untrusted_certificate': 0}
     try:
         auth_checks.note_expired(scope, domain, project, scan)
         if resources.global_pause_requested(fail_closed=True) or resources.abort_requested(scan_id):
@@ -109,6 +110,11 @@ def run_signed_in(scan_id, probe, force=False):
                     last_host = host
                     try:
                         result = route_auth.analyse(send(url))
+                    except route_auth.UntrustedCertificate as exc:  # nothing was sent; the person is told why and what to do
+                        logger.info('signed-in route check: %s', exc)
+                        summary['untrusted_certificate'] += 1
+                        failed.append(asset)
+                        continue
                     except Exception as exc:  # noqa: BLE001 - a timeout or refusal is not an answer; keep no value in the message
                         logger.info('signed-in route check failed: %s', auth_checks.safe_error(exc, values))
                         summary['errors'] += 1
@@ -131,7 +137,9 @@ def run_signed_in(scan_id, probe, force=False):
                 if summary['not_signed_in'] else '')
         activity.settle(running, 'done', message=(
             f'Checked {summary["routes"]} web routes of {domain.name} signed in ({auth_checks.SEEN_LABEL}): {summary["differs"]} answered '
-            f'differently from the anonymous check{note}' + (f'; {summary["errors"]} could not be reached' if summary['errors'] else '')),
+            f'differently from the anonymous check{note}' + (f'; {summary["errors"]} could not be reached' if summary['errors'] else '')
+            + (f'; the sign-in was not sent to {summary["untrusted_certificate"]} because the server certificate does not verify (turn on '
+               f'"Trust this certificate anyway" for the sign-in to send it regardless)' if summary['untrusted_certificate'] else '')),
             routes=summary['routes'])
         return summary
     except Exception as exc:  # noqa: BLE001

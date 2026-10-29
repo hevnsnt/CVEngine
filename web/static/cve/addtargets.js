@@ -149,7 +149,7 @@ function build() {
       const orgMode = isOrgFormat(area.value);
       const res = await fetch(orgMode ? '/api/v1/targets/bulk-org' : `/api/v1/projects/${encodeURIComponent(projSel.value)}/targets/bulk`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? undefined : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined }),
+        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? undefined : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined, authorized: auth.checked || undefined }), // the attestation travels with the request; the server does not record it yet
       });
       const data = await res.json();
       clearInterval(ticker);

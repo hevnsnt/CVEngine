@@ -18,7 +18,7 @@ NGINX = [{'vendor': 'f5', 'product': 'nginx', 'package': 'nginx', 'ranges': [{'i
 def make_catalog():
 	now = timezone.now()
 	CVEEntry.objects.create(cve_id='CVE-2099-100', kev=True, cvss=9.8, cvss_vector='CVSS:3.1/AV:N/AC:L', published_at=now, affected=NGINX,
-		title='fire one', original_description='desc', raw={'big': 'x' * 5000}, intel={'kev': {'cisa_kev': True}})
+		title='fire one', original_description='desc', intel={'kev': {'cisa_kev': True}})
 	CVEEntry.objects.create(cve_id='CVE-2099-101', cvss=7.5, published_at=now, affected=NGINX, title='smoke one')
 	CVEEntry.objects.create(cve_id='CVE-2099-102', cvss=2.0, published_at=now, affected=[], title='ice one')
 	with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
@@ -34,7 +34,6 @@ class SeedRoundTripTests(TestCase):
 			self.assertEqual((manifest['count'], manifest['tiers']), (3, {'fire': 1, 'smoke': 1, 'ice': 1}))
 			self.assertEqual(manifest['with_detection'], 2)
 			self.assertEqual(json.load(open(path + '.manifest.json'))['sha256'], hashlib.sha256(open(path, 'rb').read()).hexdigest())
-			self.assertNotIn('"big"', gzip.open(path, 'rt').read())  # the feed's raw entry is not shipped
 			CVEEntry.objects.all().delete()
 			counts = seed.import_seed(path)
 		self.assertEqual((counts['created'], counts['skipped'], counts['detections'], counts['invalid']), (3, 0, 2, 0))
@@ -119,7 +118,7 @@ class FakeResponse:
 		pass
 
 	def iter_content(self, size):
-		yield self.body
+		yield json.dumps(self.payload).encode() if self.payload is not None else self.body
 
 	def __enter__(self):
 		return self
@@ -149,6 +148,51 @@ class DownloadTests(TestCase):
 			seed.download_seed('http://example.test/cve-seed.jsonl.gz', session=self.session(body))
 		with self.assertRaises(ValueError):
 			seed.download_seed('https://example.test/cve-seed.jsonl.gz', session=self.session(body, fmt=7))
+
+
+	def test_a_manifest_that_is_an_error_page_or_too_large_is_refused(self):
+		erroring = FakeResponse(payload={})
+		erroring.raise_for_status = mock.Mock(side_effect=OSError('404'))
+		with self.assertRaises(OSError):
+			seed.download_seed('https://example.test/cve-seed.jsonl.gz', session=mock.Mock(get=lambda url, **kw: erroring))
+		huge = FakeResponse(body=b'{' + b' ' * (seed.MAX_MANIFEST_BYTES + 1) + b'}')
+		with self.assertRaises(ValueError):
+			seed.download_seed('https://example.test/cve-seed.jsonl.gz', session=mock.Mock(get=lambda url, **kw: huge))
+
+
+class BoundedReaderTests(TestCase):
+	def write(self, directory, *lines):
+		path = os.path.join(directory, 'seed.jsonl.gz')
+		with gzip.open(path, 'wb') as out:
+			for line in lines:
+				out.write(line)
+		return path
+
+	def test_an_over_long_line_is_skipped_without_reading_it_whole_and_the_next_line_is_kept(self):
+		manifest = json.dumps({'format': 1}).encode() + b'\n'
+		good = json.dumps({'cve_id': 'CVE-2099-1'}).encode() + b'\n'
+		with tempfile.TemporaryDirectory() as directory:
+			path = self.write(directory, manifest, good, b'x' * (seed.MAX_LINE_BYTES * 2 + 5) + b'\n', good, b'y' * (seed.MAX_LINE_BYTES + 10))
+			sizes = []
+			original = gzip.GzipFile.readline
+
+			def spy(self_, limit=-1):
+				chunk = original(self_, limit)
+				sizes.append(len(chunk))
+				return chunk
+			with mock.patch.object(gzip.GzipFile, 'readline', spy):
+				rows = list(seed.iter_lines(path))
+		self.assertEqual([r.get('cve_id') for r in rows[1:]], ['CVE-2099-1', 'CVE-2099-1'])
+		self.assertLessEqual(max(sizes), seed.MAX_LINE_BYTES + 1)  # no read ever asked for more than one bounded chunk
+
+	def test_a_file_that_expands_past_the_cap_is_refused(self):
+		manifest = json.dumps({'format': 1}).encode() + b'\n'
+		line = json.dumps({'cve_id': 'CVE-2099-2'}).encode() + b'\n'
+		with tempfile.TemporaryDirectory() as directory:
+			path = self.write(directory, manifest, line * 50)
+			with mock.patch.object(seed, 'MAX_DECOMPRESSED_BYTES', 200):
+				with self.assertRaises(ValueError):
+					list(seed.iter_lines(path))
 
 
 class FirstRunTests(TestCase):

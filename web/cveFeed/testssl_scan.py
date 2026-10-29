@@ -37,6 +37,8 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from cveFeed import egress_proxy
+
 logger = logging.getLogger(__name__)
 
 TESTSSL_BIN = 'testssl.sh'
@@ -111,8 +113,8 @@ def _destination(host, port):
     return f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
 
 
-def command(host, ip, port, starttls, out_path):
-    args = [TESTSSL_BIN, *BASE_ARGS, '--ip', ip, '--jsonfile', out_path]
+def command(host, ip, port, starttls, out_path, proxy_args=()):
+    args = [TESTSSL_BIN, *BASE_ARGS, '--ip', ip, *proxy_args, '--jsonfile', out_path]
     if starttls:
         args += ['--starttls', starttls]
     return args + [_destination(host, port)]
@@ -125,7 +127,11 @@ def run_testssl(host, ip, port, starttls=None, runner=None):
     refuse_local('testssl.sh')
     with tempfile.TemporaryDirectory(prefix='testssl-') as work:
         out = os.path.join(work, 'out.json')
-        args = command(host, ip, port, starttls, out)
+        try:
+            proxy_args = egress_proxy.for_tool('testssl', [host, ip])
+        except egress_proxy.ProxyUnavailable as exc:  # Settings > Proxy is on and testssl.sh cannot use it: never a direct run
+            raise TestsslError(str(exc)) from None
+        args = command(host, ip, port, starttls, out, proxy_args)
         env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': work, 'TERM': 'dumb', 'LC_ALL': 'C'}
         try:
             (runner or _run)(args, env, timeout_seconds())
@@ -144,7 +150,8 @@ def run_testssl(host, ip, port, starttls=None, runner=None):
 
 
 def _run(args, env, timeout):
-    subprocess.run(args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, check=False)
+    from cveFeed import heavy_process  # under the resource gate: a pause or stop kills testssl.sh and its openssl children, and memory is admitted
+    heavy_process.run('testssl', args, timeout, label=args[-1], env=env)
 
 
 def flatten(report):
@@ -429,6 +436,9 @@ def sweep(project_id, runner=None, resolve=None):
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TestsslError(_why(items))
+            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped or short of memory: not the target's failure
+                activity.settle(running, 'done', message=f'TLS audit of {where} stopped before it finished ({type(exc).__name__}); the target stays due')
+                return {**summary, 'skipped': 'scanning was stopped or memory was short: the targets stay due'}
             except (TestsslError, OSError, ValueError) as exc:
                 ledger.record(FAILED_SERVICE, [asset], project_id, sub.scan_history)
                 summary['failed'] += 1

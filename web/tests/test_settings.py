@@ -90,6 +90,18 @@ class SettingsApiTests(TestCase):
 			send(self.c, 'POST', 'ai/models', {'provider': 'openai'})
 			self.assertEqual(get_provider.call_args.kwargs['api_key'], 'sk-keep-me')
 
+	def test_model_listing_refuses_metadata_addresses_like_saving_does(self):
+		from unittest import mock
+		with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
+			for url in ('http://169.254.169.254/latest', 'http://2852039166/', 'http://metadata.google.internal/'):
+				status, _ = send(self.c, 'POST', 'ai/models', {'provider': 'openai', 'base_url': url})
+				self.assertEqual(status, 400, url)
+			# a name that resolves to a link-local address is refused too
+			with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('169.254.169.254', 0))]):
+				self.assertEqual(send(self.c, 'POST', 'ai/models', {'provider': 'openai', 'base_url': 'http://169.254.169.254.nip.example.test/'})[0], 400)
+				self.assertEqual(send(self.c, 'PUT', 'ai', {'base_url': 'http://169.254.169.254.nip.example.test/'})[0], 400)
+			get_provider.assert_not_called()
+
 	def test_api_vault(self):
 		status, data = send(self.c, 'PUT', 'keys', {'chaos': {'key': 'chaos-secret'}, 'hackerone': {'key': 'h1', 'username': 'bob'}})
 		self.assertEqual((status, data['chaos']['has_key'], data['hackerone']['username']), (200, True, 'bob'))
@@ -112,6 +124,24 @@ class SettingsApiTests(TestCase):
 		self.assertEqual(Proxy.objects.get().proxies, 'http://1.2.3.4:8080\nsocks5://h:1080')
 		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'not a proxy'})[0], 400)
 		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'file:///etc/passwd'})[0], 400)
+
+	def test_proxy_passwords_are_never_returned_and_an_unchanged_masked_line_keeps_them(self):
+		status, data = send(self.c, 'PUT', 'proxy', {'use_proxy': True, 'proxies': 'http://bob:hunter2@203.0.113.5:8080\nsocks5://203.0.113.6:1080'})
+		self.assertEqual(status, 200)
+		self.assertNotIn('hunter2', json.dumps(data))
+		self.assertEqual(data['proxies'], 'http://bob:***@203.0.113.5:8080\nsocks5://203.0.113.6:1080')
+		self.assertTrue(data['has_credentials'])
+		got = send(self.c, 'GET', 'proxy')[1]
+		self.assertNotIn('hunter2', json.dumps(got))
+		# the page sends the masked text back unchanged (plus a new line): the stored password stays
+		send(self.c, 'PUT', 'proxy', {'proxies': got['proxies'] + '\nhttp://203.0.113.7:3128'})
+		self.assertEqual(Proxy.objects.get().proxies, 'http://bob:hunter2@203.0.113.5:8080\nsocks5://203.0.113.6:1080\nhttp://203.0.113.7:3128')
+		# a masked line that matches nothing stored is refused, never saved with the literal ***
+		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'http://eve:***@203.0.113.9:8080'})[0], 400)
+		self.assertNotIn('***', Proxy.objects.get().proxies)
+		# a new password replaces the old one
+		send(self.c, 'PUT', 'proxy', {'proxies': 'http://bob:newpass@203.0.113.5:8080'})
+		self.assertEqual(Proxy.objects.get().proxies, 'http://bob:newpass@203.0.113.5:8080')
 
 	def test_the_inherited_engine_editor_is_gone_and_the_ai_settings_no_longer_carry_an_engine(self):
 		# the engine YAML was never read by anything; its create, update and delete endpoints and the auto-fire engine setting are removed

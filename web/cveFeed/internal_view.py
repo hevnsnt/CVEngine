@@ -98,7 +98,7 @@ def _sentinel_state(project):
     now = timezone.now()
     agents = [a for a in Agent.objects.filter(sentinel_broker._covers(project.slug, project.org.slug if project.org_id else None), kind='scanner',
                                               token__revoked=False).exclude(status='revoked').select_related('token__user')[:50]
-              if sentinel_broker.INTERNAL_CAPABILITY in (a.capabilities or [])]
+              if sentinel_broker.INTERNAL_CAPABILITY in sentinel_broker.effective_capabilities(a)]
     live = [a for a in agents if a.status == 'active' and a.last_seen and now - a.last_seen <= sentinel_broker.LIVE_WINDOW]
     seen = max((a.last_seen for a in agents if a.last_seen), default=None)
     return {'state': 'online' if live else ('offline' if agents else 'none'), 'online': len(live), 'total': len(agents),

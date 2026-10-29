@@ -996,7 +996,7 @@ def get_agent(ctx, agent_id):
     if agent is None:
         raise ApiError(404, 'agent not found')
     # A Sentinel's (kind='scanner') work is SentinelTask, not AgentTask: same admin call, the matching history.
-    recent = (_sentinel().recent_tasks(agent) if agent.kind == 'scanner'
+    recent = (_sentinel().recent_tasks(agent, ctx.user) if agent.kind == 'scanner'
              else [task_brief(t) for t in _task_rows(AgentTask.objects.filter(agent=agent)).order_by('-id')[:20]])
     return {**agent_dict(agent, detail=True, counts=_counts([agent.pk]).get(agent.pk), viewer=ctx.user), 'warnings': _warnings(agent),
             'recent_tasks': recent}

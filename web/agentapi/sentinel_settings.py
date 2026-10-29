@@ -88,7 +88,47 @@ def detail(agent):
         pick = 'sentinel' if m is None else 'server' if r is None else ('sentinel' if (_when(r) and _when(m) and _when(r) > _when(m)) else 'server')
         entry = m if pick == 'server' else r
         out[key] = {'value': entry['value'], 'source': pick, 'at': entry.get('at'), 'by': entry.get('by') if pick == 'server' else None}
+    _limits(agent, out)
     return out
+
+
+RANK = {'off': 0, 'manual': 1, 'automatic': 2}
+
+
+def effective_network(agent):
+    """``internal`` only when the server says the Sentinel is inside a private network (``Agent.network``) AND the machine's own setting does not
+    say otherwise: a Sentinel's local configuration is a limit, so it can lower itself to external but never raise itself to internal."""
+    if agent.network != 'internal':
+        return 'external'
+    return 'external' if ((agent.reported_settings or {}).get('network') or {}).get('value') == 'external' else 'internal'
+
+
+def disabled_kinds(agent):
+    """The task kinds this Sentinel must not be offered: those its own machine disabled and those an administrator disabled (both limit it)."""
+    out = set()
+    for source in (agent.reported_settings or {}, agent.managed_settings or {}):
+        value = (source.get('disabled_kinds') or {}).get('value')
+        if isinstance(value, list):
+            out |= {k for k in value if isinstance(k, str)}
+    return out
+
+
+def _limits(agent, entries):
+    """Mark the settings a Sentinel's own machine holds below what cvENGINE asks for (its local settings are limits): ``network`` cannot be raised to
+    internal from here, and a ``self_update`` of off or manual on the machine caps what cvENGINE can ask for. The administrator is told, so an
+    internal or automatic that does not take effect is not a surprise. Adds ``limited_by_machine`` and ``machine_value`` to the entry."""
+    reported = agent.reported_settings or {}
+    local = (reported.get('network') or {}).get('value')
+    if agent.kind == 'scanner' and agent.network == 'internal' and local == 'external':
+        entry = entries.setdefault('network', {'value': 'internal', 'source': 'server', 'at': None, 'by': None})
+        entry.update(limited_by_machine=True, machine_value='external')
+    local = (reported.get('self_update') or {}).get('value')
+    if local in RANK:
+        managed = ((agent.managed_settings or {}).get('self_update') or {}).get('value')
+        wanted = managed if managed in RANK else instance_self_update()
+        if RANK[local] < RANK.get(wanted, 0):
+            entry = entries.setdefault('self_update', {'value': wanted, 'source': 'server', 'at': None, 'by': None})
+            entry.update(limited_by_machine=True, machine_value=local, wanted=wanted)
 
 
 def instance_self_update():
@@ -110,6 +150,12 @@ def effective(agent):
     """``{setting: value}``: what this Sentinel should run with now. ``self_update`` always has a value: its own, else the instance default."""
     out = explicit(agent)
     out.setdefault('self_update', instance_self_update())
+    if agent.kind == 'scanner':
+        # the server decides whether a Sentinel is inside a private network, whatever the Sentinel reports: internal only where it provisioned it so
+        if agent.network == 'internal':
+            out['network'] = 'internal'
+        elif out.get('network') == 'internal':
+            out['network'] = 'external'
     return out
 
 
@@ -136,9 +182,13 @@ def record_reported(agent, raw, now=None):
 
 def set_managed(agent, raw, actor, now=None):
     """An administrator's change from cvENGINE. A value of ``null`` clears the server's value for that setting, so the Sentinel's own applies."""
+    from agentapi import sentinel_broker as sb
     now = now or timezone.now()
     values = clean_settings(raw)
     managed, before = dict(agent.managed_settings or {}), explicit(agent)
+    if values.get('network') in sb.NETWORKS:  # only an administrator moves a Sentinel in or out of a private network
+        agent.network = values['network']
+        Agent.objects.filter(pk=agent.pk).update(network=agent.network)
     for key, value in values.items():
         if value is None:
             managed.pop(key, None)

@@ -44,6 +44,13 @@ def _untouched_default_org():
     return None
 
 
+def _wizard_org(user):
+    """The organization every wizard step works in: the newest one (not "Default") this superuser administers, else the newest
+    named one, else the starter. One rule for the state, the project step and the org step, so they cannot pick different ones."""
+    mine = Org.objects.filter(memberships__user=user, memberships__role='admin').exclude(name='Default').order_by('-id').first()
+    return mine or Org.objects.exclude(name='Default').order_by('-id').first() or Org.objects.order_by('id').first()
+
+
 def needs_welcome(user):
     """Superusers who have not finished the wizard (or have no project at all)."""
     if not user.is_superuser:
@@ -53,7 +60,7 @@ def needs_welcome(user):
 
 
 def state(request):
-    org = Org.objects.exclude(name='Default').order_by('id').first() or Org.objects.order_by('id').first()
+    org = _wizard_org(request.user)
     project = Project.objects.order_by('id').first()
     cfg = AIProviderSettings.objects.first()
     return {
@@ -69,7 +76,14 @@ def save_org(request):
     name = str(_body(request).get('name', '')).strip()[:100]
     if len(name) < 2:
         raise WelcomeError(400, 'Give your organization a name (2 or more characters).')
-    org = _untouched_default_org() or Org.objects.filter(name=name).first() or Org()
+    org = _untouched_default_org() or Org.objects.filter(name=name).first()
+    if org is None:
+        # the step sent again with another name renames the organization the wizard made, while nothing is built in it
+        own = _wizard_org(request.user)
+        if own and own.name != 'Default' and OrgMembership.objects.filter(user=request.user, org=own, role='admin').exists() \
+                and not Domain.objects.filter(project__org=own).exists():
+            org = own
+    org = org or Org()
     org.name = name
     if not org.pk:
         org.slug = _unique_slug(Org, name, 'org')
@@ -85,7 +99,7 @@ def save_project(request):
         raise WelcomeError(400, 'Give your project a name (2 or more characters).')
     if roles.is_reserved_project(name):
         raise WelcomeError(400, f'"{roles.ALL_PROJECTS}" is reserved for the all-projects view; choose another name.')
-    org = Org.objects.exclude(name='Default').order_by('-id').first() or Org.objects.order_by('id').first()
+    org = _wizard_org(request.user)
     project = Project.objects.filter(org=org, name='Default').first() \
         if not Domain.objects.exists() else None  # rename the untouched starter project
     project = project or Project.objects.filter(org=org, name=name).first()

@@ -294,6 +294,16 @@ class TestParseVersion(unittest.TestCase):
         self.assertIs(version_in_range(parse_version("1:9.6p1-3ubuntu13"), {"introduced": "8.5", "fixed": "9.6p1"}), False)
         self.assertIs(version_in_range(parse_version("1:8.9p1-3ubuntu0.6"), {"introduced": "8.5", "fixed": "9.8p1"}), True)
 
+    def test_a_patch_suffixed_build_is_inside_a_bound_that_names_only_the_release(self):
+        # "up to 8.9" and a single listed 1.0.2 cover 8.9p1 and 1.0.2k; a bound that names a patch level still compares it
+        self.assertIs(version_in_range(parse_version("8.9p1"), {"introduced": "8.9", "lastAffected": "8.9"}), True)
+        self.assertIs(version_in_range(parse_version("1.0.2k"), {"introduced": "1.0.2", "lastAffected": "1.0.2"}), True)
+        self.assertIs(version_in_range(parse_version("8.9p2"), {"introduced": "8.0", "lastAffected": "8.9p1"}), False)
+        self.assertIs(version_in_range(parse_version("1.0.2k"), {"introduced": "1.0.2", "lastAffected": "1.0.2j"}), False)
+        self.assertIs(version_in_range(parse_version("9.0p1"), {"introduced": "8.0", "lastAffected": "8.9"}), False)
+        self.assertIs(version_in_range(parse_version("1.2.3.4"), {"introduced": "1.2.3", "lastAffected": "1.2.3"}), False)  # a real fourth part
+        self.assertIs(version_in_range(parse_version("8.9p1"), {"introduced": "8.0", "fixed": "8.9"}), False)  # fixed in the release itself
+
     def test_a_prerelease_host_is_before_the_fix_and_the_boundary_is_inclusive(self):
         # a host on 2.0-beta9 with fixed 2.0 is still affected (it used to parse as 2.0 and fall out of range)
         self.assertIs(version_in_range(parse_version("2.0-beta9"), {"introduced": "1.0", "fixed": "2.0"}), True)
@@ -398,29 +408,56 @@ class TestWordBoundaryMatching(unittest.TestCase):
         only_pkg = FakeCVE(78, [{"package": "next", "ranges": [{"introduced": "13.0.0", "fixed": "13.5.9"}]}])
         self.assertEqual([row[0] for row in _hits([only_pkg], "Next.js", "13.1.0")], [78])
 
-    def test_the_word_table_is_bounded_and_failing_closed(self):
+    def test_host_strings_cannot_use_up_the_catalogue_word_table(self):
+        from cveFeed import correlation
+        saved, saved_host = dict(correlation._WORDS), dict(correlation._HOST_WORDS)
+        try:
+            correlation._HOST_WORDS.clear()
+            original = correlation._HOST_WORDS_MAX_TOKENS
+            correlation._HOST_WORDS_MAX_TOKENS = 20
+            before = len(correlation._WORDS)
+            for i in range(200):
+                correlation._norm(f"Hostile Banner Product {i}")
+            self.assertEqual(len(correlation._WORDS), before)  # nothing a host says reaches the catalogue's registry
+            self.assertLessEqual(len(correlation._HOST_WORDS), 20)  # and the host table drops its oldest entry instead of growing
+            token = correlation._norm("Hostile Banner Product 199")
+            self.assertTrue(correlation.name_matches_token(token, token))
+            self.assertFalse(correlation.name_matches_token(token, correlation._norm("Product 199")))
+            correlation._HOST_WORDS_MAX_TOKENS = original
+            # a catalogue name registers however many host names came first, and the lookup sees it
+            correlation._norm("Zzyzx Directory Server", True)
+            self.assertIn(("zzyzx", "directory", "server"), correlation._words_for("zzyzxdirectoryserver"))
+        finally:
+            correlation._HOST_WORDS_MAX_TOKENS = 2000
+            correlation._WORDS.clear()
+            correlation._WORDS.update(saved)
+            correlation._HOST_WORDS.clear()
+            correlation._HOST_WORDS.update(saved_host)
+
+    def test_a_full_catalogue_table_is_logged_once_and_fails_closed(self):
         from cveFeed import correlation
         saved = dict(correlation._WORDS)
         try:
             correlation._WORDS_MAX_TOKENS, original = len(correlation._WORDS), correlation._WORDS_MAX_TOKENS
-            before = len(correlation._WORDS)
-            for i in range(200):
-                correlation._norm(f"Hostile Banner Product {i}")
-            self.assertEqual(len(correlation._WORDS), before)
-            token = correlation._norm("Hostile Banner Product 1")
-            self.assertTrue(correlation.name_matches_token(token, token))  # an unregistered token still matches itself
-            self.assertFalse(correlation.name_matches_token(token, correlation._norm("Product 1")))
+            correlation._words_full_logged = False
+            with self.assertLogs("cveFeed.correlation", level="WARNING") as logs:
+                correlation._norm("Another Catalogue Product", True)
+                correlation._norm("Yet Another Catalogue Product", True)
+            self.assertEqual(len(logs.records), 1)
+            self.assertEqual(len(correlation._WORDS), correlation._WORDS_MAX_TOKENS)
         finally:
             correlation._WORDS_MAX_TOKENS = original
+            correlation._words_full_logged = False
             correlation._WORDS.clear()
             correlation._WORDS.update(saved)
 
     def test_overlong_and_many_word_names_are_not_recorded(self):
         from cveFeed import correlation
-        n = len(correlation._WORDS)
-        correlation._norm("a " * 120)
-        correlation._norm(" ".join(f"w{i}x" for i in range(20)))
-        self.assertEqual(len(correlation._WORDS), n)
+        n = len(correlation._WORDS) + len(correlation._HOST_WORDS)
+        for catalogue in (False, True):
+            correlation._norm("a " * 120, catalogue)
+            correlation._norm(" ".join(f"w{i}x" for i in range(20)), catalogue)
+        self.assertEqual(len(correlation._WORDS) + len(correlation._HOST_WORDS), n)
 
 
 class TestUnlistedBranch(unittest.TestCase):

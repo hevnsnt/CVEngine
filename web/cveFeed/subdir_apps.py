@@ -373,9 +373,9 @@ def sweep_host(project_id, entry, fetch, pace, stop=None, budget=None):
     hits, probed = set(), set()
     for path, source in plan:
         response = ask(path)
-        probed.add(path)
-        if response is None:
+        if response is None:  # skipped (a pause, a challenge, the budget) or failed: nothing was learned, so an earlier find is not retired on it
             continue
+        probed.add(path)
         fp = vhost_scan.fingerprint_of(response)
         if fp['status'] not in THERE:
             continue

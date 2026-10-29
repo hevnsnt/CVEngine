@@ -46,35 +46,15 @@ class ScanHistory(models.Model):
 	error_message = models.CharField(max_length=300, blank=True, null=True)
 	emails = models.ManyToManyField('Email', related_name='emails', blank=True)
 	employees = models.ManyToManyField('Employee', related_name='employees', blank=True)
-	buckets = models.ManyToManyField('S3Bucket', related_name='buckets', blank=True)
 	dorks = models.ManyToManyField('Dork', related_name='dorks', blank=True)
 	initiated_by = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='initiated_scans', blank=True, null=True)
 	aborted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='aborted_scans')
-	# scan related configs, prefix config fields with cfg_
-	cfg_out_of_scope_subdomains = ArrayField(
-		models.CharField(max_length=200),
-		blank=True,
-		null=True,
-		default=list
-	)
-	cfg_starting_point_path = models.CharField(max_length=200, blank=True, null=True)
-	cfg_excluded_paths = ArrayField(
-		models.CharField(max_length=200),
-		blank=True,
-		null=True,
-		default=list
-	)
-	cfg_imported_subdomains = ArrayField(
-		models.CharField(max_length=200),
-		blank=True,
-		null=True,
-		default=list
-	)
 
 	class Meta:
 		indexes = [
 			models.Index(fields=['scan_status', 'id'], name='scan_status_id_idx'),
 			models.Index(fields=['domain', 'scan_status'], name='scan_domain_status_idx'),
+			models.Index(fields=['domain', 'start_scan_date'], name='scan_domain_started_idx'),
 		]
 
 	def __str__(self):
@@ -167,16 +147,6 @@ class ScanHistory(models.Model):
 			.filter(severity=4)
 			.count()
 		)
-
-	def get_progress(self):
-		"""Formulae to calculate count number of true things to do, for http
-		crawler, it is always +1 divided by total scan activity associated - 2
-		(start and stop).
-		"""
-		number_of_steps = len(self.tasks) if self.tasks else 0
-		steps_done = len(self.scanactivity_set.all())
-		if steps_done and number_of_steps:
-			return round((number_of_steps / (steps_done)) * 100, 2)
 
 	def get_completed_ago(self):
 		if self.stop_scan_date:
@@ -329,15 +299,6 @@ class Subdomain(models.Model):
 		)
 
 	@property
-	def get_todos(self):
-		TodoNote = apps.get_model('recon_note', 'TodoNote')
-		notes = TodoNote.objects
-		if self.scan_history:
-			notes = notes.filter(scan_history=self.scan_history)
-		notes = notes.filter(subdomain__id=self.id)
-		return notes.values()
-
-	@property
 	def get_subscan_count(self):
 		return (
 			SubScan.objects
@@ -447,18 +408,6 @@ class CweId(models.Model):
 
 	def __str__(self):
 		return self.name
-
-
-class GPTVulnerabilityReport(models.Model):
-	url_path = models.CharField(max_length=2000)
-	title = models.CharField(max_length=2500)
-	description = models.TextField(null=True, blank=True)
-	impact = models.TextField(null=True, blank=True)
-	remediation = models.TextField(null=True, blank=True)
-	references = models.ManyToManyField('VulnerabilityReference', related_name='report_reference', blank=True)
-
-	def __str__(self):
-		return self.title
 
 
 class Vulnerability(models.Model):
@@ -781,24 +730,3 @@ class Dork(models.Model):
 	id = models.AutoField(primary_key=True)
 	type = models.CharField(max_length=500, null=True, blank=True)
 	url = models.CharField(max_length=10000, null=True, blank=True)
-
-
-class S3Bucket(models.Model):
-	id = models.AutoField(primary_key=True)
-	name = models.CharField(max_length=500, null=True, blank=True)
-	region = models.CharField(max_length=500, null=True, blank=True)
-	provider = models.CharField(max_length=100, null=True, blank=True)
-	owner_id = models.CharField(max_length=250, null=True, blank=True)
-	owner_display_name = models.CharField(max_length=250, null=True, blank=True)
-	perm_auth_users_read = models.IntegerField(default=0)
-	perm_auth_users_write = models.IntegerField(default=0)
-	perm_auth_users_read_acl = models.IntegerField(default=0)
-	perm_auth_users_write_acl = models.IntegerField(default=0)
-	perm_auth_users_full_control = models.IntegerField(default=0)
-	perm_all_users_read = models.IntegerField(default=0)
-	perm_all_users_write = models.IntegerField(default=0)
-	perm_all_users_read_acl = models.IntegerField(default=0)
-	perm_all_users_write_acl = models.IntegerField(default=0)
-	perm_all_users_full_control = models.IntegerField(default=0)
-	num_objects = models.IntegerField(default=0)
-	size = models.IntegerField(default=0)

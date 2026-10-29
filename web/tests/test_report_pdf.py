@@ -263,6 +263,13 @@ class ReportContentTests(ReportBase):
         self.assertLess(hygiene.index('Certificate for www.acme.test:443 expired'), hygiene.index('Email'))
         self.assertIn('No SPF record', hygiene)
 
+    def test_testssl_findings_belong_to_the_tls_section(self):
+        # testssl names its checks tlsa_<test> (cveFeed.testssl_scan)
+        for check in ('tlsa_sslv3', 'tlsa_null_ciphers', 'tls_weak_key', 'cert_expired'):
+            self.assertEqual(report_data._hygiene_group(check), 'TLS and certificates', check)
+        self.assertEqual(report_data._hygiene_group('dmarc_missing'), 'Email')
+        self.assertEqual(report_data._hygiene_group('caa_missing'), 'Other configuration')
+
     def test_method_page_says_what_was_scanned_and_when_and_the_validity_caveats(self):
         method = self.text[self.text.index('Method and validity'):]
         self.assertIn('Completed scans 1', method)

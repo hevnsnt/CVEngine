@@ -10,10 +10,11 @@ To roll back, check out the previous commit and start it. It still uses the unto
 
 ## Upgrading to 1.2
 
-An update applies the migrations (it rolls back if one fails) and ends every session once, so everyone signs in again. Three protections are new-install only, because an update cannot switch them on without recreating services:
+An update takes a database dump, applies the migrations (a migration is never rolled back; when one fails the update says what state the database is in and keeps the dump, see [UPDATES.md](UPDATES.md)) and ends every session once, so everyone signs in again. Three protections are new-install only, because an update cannot switch them on without recreating services:
 
 - **Redis password.** New installs generate `REDIS_PASSWORD` and every service uses it. On an older install Redis stays open to the Docker network until you run `make redis-auth` when scanning is idle. It recreates Redis, web, the workers, and the proxy, and queued tasks are lost.
 - **Secret-encryption key.** New installs generate `CVENGINE_FIELD_KEY` in `.env`. An older install keeps reading its stored secrets with the key derived from `web/secret` until you run `make rotate-field-key`, which re-encrypts them under a new key and keeps the old one as `CVENGINE_FIELD_KEY_PREVIOUS` until you have a backup taken after the rotation. Back up `.env` and keep it apart from database dumps.
+- **Web interface certificate.** A 10-year certificate made by an earlier installer is replaced once by the first automatic renewal check after the update, with a 397-day one (same key, same authority, same names); from then on it renews itself 30 days before it ends ([Deployment](DEPLOYMENT.md#https)). Nothing has to be copied to browsers again.
 - **Certificate authority key.** An authority made by an older version keeps an unencrypted `ca.key`. To replace it, delete `ca.key` and `ca.crt` in `secrets/certs` and run `make certs`. Browsers then need the new `ca.crt`.
 
 The in-app updater of a server installed before v1.2.0 has no watcher, so Approve does nothing there until you run `cd /opt/cvengine && git pull --ff-only && sudo scripts/install-updater.sh` once ([UPDATES.md](UPDATES.md)). On an install with its own Compose overlay, update with `scripts/update.sh` or the in-app updater, never `make up`.
@@ -31,5 +32,15 @@ The current release accepts only the host of `DOMAIN_NAME`, loopback (for health
 ## Shared provider domains
 
 An earlier build promoted a tenant such as `acme.jfrog.com` to `jfrog.com` in the weekly deep-discovery sweep. The update's migration deletes targets that sweep created on the shared-domain list, with their scans, hosts, and findings, because that data was outside your scope. A shared domain you added yourself is kept and set to `host` scope. Deleted targets do not come back on rollback, so back up first if you want that data.
+
+## Dropped legacy tables and columns
+
+The update's migrations delete schema that nothing writes or reads any more, since the old classic screens and the legacy `/api` routes are gone. The data in them is deleted with them and is not restored by a rollback of the code, so the database backup the update script takes before migrating is the way back:
+
+- Tables: the old per-target **Organization** (`targetApp_organization`, not the organization/project tenancy), the classic **To-do notes** (`recon_note_todonote`), **Wordlist**, **Configuration** and the interesting-keyword lookup (`scanEngine_wordlist`, `scanEngine_configuration`, `scanEngine_interestinglookupmodel`), the old GPT vulnerability reports and **S3 bucket** results (`startScan_gptvulnerabilityreport`, `startScan_s3bucket`) with their link tables.
+- Columns: `startScan_scanhistory.cfg_out_of_scope_subdomains`, `cfg_starting_point_path`, `cfg_excluded_paths` and `cfg_imported_subdomains`, and `cveFeed_cveentry.raw` (the cve.now entry stored a second time; the modelled columns already hold what is used).
+- The scan report no longer has an "Interesting subdomains" section: its keyword list could only be filled in through the Django admin.
+
+Scans, targets, hosts, findings and CVE data are untouched. A tool of your own that read one of these tables or columns needs the backup, or its data taken before the update.
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).

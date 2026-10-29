@@ -30,7 +30,7 @@ class Base(TestCase):
 class ReportedTests(Base):
     def test_a_sentinel_reports_its_own_settings_and_is_told_the_effective_ones(self):
         agent, out = self.sentinel({'network': 'internal', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4})
-        self.assertEqual(out['settings']['values'], {'network': 'internal', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4, 'self_update': 'manual'})
+        self.assertEqual(out['settings']['values'], {'network': 'external', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4, 'self_update': 'manual'})  # it says internal, but only the server decides that
         self.assertEqual({k: v['source'] for k, v in out['settings']['detail'].items()}, {k: 'sentinel' for k in out['settings']['detail']})  # the instance default is no setting of the Sentinel's
         agent.refresh_from_db()
         self.assertEqual(agent.reported_settings['network']['value'], 'internal')
@@ -57,7 +57,7 @@ class ReportedTests(Base):
         agent, _ = self.sentinel({'network': 'internal'})
         status, out = call(self.tokens['alice'], 'PUT', '/api/v1/sentinel', {'name': 'sentinel-1'})
         self.assertEqual(status, 200)
-        self.assertEqual(out['settings']['values'], {'network': 'internal', 'self_update': 'manual'})
+        self.assertEqual(out['settings']['values'], {'network': 'external', 'self_update': 'manual'})  # its own claim of internal is not honoured
 
 
 class MostRecentWinsTests(Base):

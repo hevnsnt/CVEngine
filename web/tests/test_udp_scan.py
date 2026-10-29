@@ -291,11 +291,6 @@ class ExposureTests(UdpBase):
 		why = {h['host']: h['matched'] for h in call(token, 'GET', '/api/v1/projects/pu/search?q=proto:udp')[1]['results']}
 		self.assertTrue(any('/udp' in line for line in why['router.udp.test']))
 
-	def test_the_host_page_counts_only_what_answered(self):
-		from cveFeed import graph_overview
-		page = graph_overview.hosts('pu', graph_overview.root_for(self.domain))
-		self.assertEqual([row['service_count'] for row in page['results'] if row['host'] == 'router.udp.test'], [3])  # 123, 161, 11211
-
 	def test_a_host_that_stays_silent_on_everything_stores_nothing(self):
 		quiet = self.ip('192.0.2.20')
 		outcome = udp_scan.record_run(quiet, self.host_of(SILENT, '192.0.2.20'))
@@ -641,8 +636,9 @@ class GatingTests(UdpBase):
 			self.assertEqual(udp_scan.pick().address, '10.1.2.3')
 
 	def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_is_not_scanned(self):
-		from cveFeed.models import BountyEngagement, BountyProgram
+		from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram
 		program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
+		BountyAsset.objects.create(program=program, kind='domain', identifier='bb.udp.test')  # the scope names the host (cveFeed.bounty_gate)
 		engagement = BountyEngagement.objects.create(project=self.project, program=program, status='active', automated_ok=False)
 		ip = self.ip('192.0.2.1', name='bb.udp.test')
 		self.assertIsNone(udp_scan.pick())

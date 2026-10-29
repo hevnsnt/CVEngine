@@ -94,11 +94,15 @@ def _package_commands(p):
     below = {'kind': 'version_lt', 'than': bound} if bound else {'kind': 'version_present'}
     out = []
     if eco in ('any', 'dpkg'):
-        compare = (f"v=$(dpkg-query -W -f='${{Version}}' {package} 2>/dev/null) && dpkg --compare-versions \"$v\" lt {shlex.quote(bound)} "
-                   "&& echo AFFECTED || echo NOT-AFFECTED") if bound else f"dpkg-query -W -f='${{Version}}\\n' {package}"
+        # the epoch ("1:" on OpenSSH, bind9, dovecot) is not part of the upstream version the bound is written in; a package that is not
+        # installed under this name (a source name such as openssh is not the binary openssh-server) is UNKNOWN, never NOT-AFFECTED
+        compare = (f"v=$(dpkg-query -W -f='${{Version}}' {package} 2>/dev/null) && [ -n \"$v\" ] && "
+                   f"{{ dpkg --compare-versions \"${{v#*:}}\" lt {shlex.quote(re.sub(r'^[0-9]+:', '', str(bound)))} "
+                   "&& echo AFFECTED || echo NOT-AFFECTED; } || echo UNKNOWN") if bound else f"dpkg-query -W -f='${{Version}}\\n' {package}"
         out.append(_command('debian', 'sh', compare, below,
-                            f"Prints AFFECTED when the installed {p['package']} package is older than {bound}; a package that is not "
-                            'installed prints NOT-AFFECTED.' if bound else 'Prints the installed version.'))
+                            f"Prints AFFECTED when the installed {p['package']} package is older than {bound} (an epoch such as 1: is "
+                            'ignored), and UNKNOWN when no package of that name is installed: check the binary package name '
+                            '(for example openssh-server for openssh).' if bound else 'Prints the installed version.'))
     if eco in ('any', 'rpm'):
         out.append(_command('rhel', 'sh', f"rpm -q --qf '%{{VERSION}}-%{{RELEASE}}\\n' {package}", below,
                             'Prints the installed version-release; compare it with the fixed release in the vendor advisory '

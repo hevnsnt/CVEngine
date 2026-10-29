@@ -11,6 +11,12 @@ was stored for (or, for a target-wide one, the target's own name or one of its s
 its origins, and it has not expired. Callers run the normal vetting first (``pinned_transport.resolve``,
 ``target_types.scannable_hosts``, exclusions); this module never widens what those allow.
 
+A stored sign-in goes only over a TLS connection whose certificate verifies, unless the owner switched on ``allow_untrusted_certificate`` for
+it (a self-signed, expired or wrong-name certificate, typical of a staging host): then anyone in the network path can read the values,
+which the settings say in so many words. ``AuthScope.accepts_untrusted_certificate`` answers that per destination; the senders are
+``route_auth.probe_url`` (the handshake itself verifies) and nuclei (its HTTP client never verifies, so ``certificate_verifies`` checks
+the server first, see ``auth_nuclei.trusted_plan``).
+
 ``redact_text`` and ``redact_obj`` remove every secret value (and the usual encodings of it) from anything that is about to be stored
 or shown: scanner request and response dumps, evidence, error messages. Nothing in this module logs a value.
 """
@@ -46,6 +52,8 @@ COOKIE_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
 # Headers that frame the request or name its destination: sending a stored value for one of them could not be a sign-in.
 FORBIDDEN_HEADERS = frozenset({'host', 'content-length', 'transfer-encoding', 'connection', 'upgrade', 'te', 'trailer', 'expect',
                                'proxy-authorization', 'proxy-connection', 'keep-alive', 'accept-encoding', 'range', 'content-type'})
+UNTRUSTED_WARNING = ('Trust this certificate anyway: the sign-in is then also sent to a server whose certificate does not verify (self-signed, '
+                     'expired or for another name), so it can be read by anyone in the network path. Leave it off unless you know the server and the network.')
 WARNING = ('Use a dedicated low-privilege test account for this, not a real person\'s session. The values expire when the session '
            'does, so choose an expiry (30, 90 or 120 days, or never on purpose) and replace them. Scans only send read-only requests (the Nuclei template read-only policy still '
            'applies), but an application can still change state on a GET, so keep the account\'s data disposable.')
@@ -247,7 +255,7 @@ def summary(cred, now=None):
             'scope': 'host' if cred.host else 'target', 'label': cred.label, 'origins': list(cred.origins or []),
             'header_names': header_names(cred), 'cookie_names': cookie_names(cred),
             'expires_at': cred.expires_at.isoformat() if cred.expires_at else None, 'never_expires': cred.expires_at is None,
-            'days_left': days_left,
+            'days_left': days_left, 'allow_untrusted_certificate': bool(cred.allow_untrusted_certificate),
             'state': 'expired' if expired else 'active', 'expired': expired,
             'updated_at': cred.updated_at.isoformat() if cred.updated_at else None,
             'updated_by': cred.updated_by.username if cred.updated_by_id else None,
@@ -314,6 +322,12 @@ class AuthScope:
             elif best is None and host_in_target(host, cred.domain):
                 best = cred
         return best
+
+    def accepts_untrusted_certificate(self, host, scheme, port):
+        """Whether the credential that applies to ``scheme://host:port`` may be sent over a connection whose certificate does not verify (the
+        owner's per-target switch). False when no credential applies."""
+        cred = self.credential(host, scheme, port)
+        return bool(cred is not None and cred.allow_untrusted_certificate)
 
     def headers_for(self, host, scheme, port):
         """``[(name, value), ...]`` for a request to ``scheme://host:port``, ``[]`` when no credential applies."""
@@ -430,6 +444,29 @@ def target_parts(target):
     if port and not (port.isdigit() and 0 < int(port) < 65536):
         return None, None
     return host, (int(port) if port else None)
+
+
+def certificate_verifies(host, port, project=None, timeout=3):
+    """``(True, '')`` when a TLS handshake with ``host:port`` (vetted and pinned like every scanner connection) verifies the certificate
+    chain and name, else ``(False, reason)``; the reason is the verifier's own words and holds no secret. Used before a stored sign-in is
+    handed to nuclei, whose HTTP client does not verify certificates itself."""
+    import ssl
+    from cveFeed import pinned_transport
+    try:
+        addresses = pinned_transport.resolve(host, port, project=project)
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        raw = pinned_transport.open_socket(addresses, timeout, project=project)
+        try:
+            raw.settimeout(timeout)
+            context.wrap_socket(raw, server_hostname=host).close()
+        finally:
+            raw.close()
+        return True, ''
+    except ssl.SSLCertVerificationError as exc:
+        return False, (getattr(exc, 'verify_message', None) or 'the certificate does not verify')[:120]
+    except (OSError, ValueError) as exc:  # a refused connection, a timeout, another TLS failure, a destination the vetting refuses
+        return False, f'the server could not be checked ({type(exc).__name__})'
 
 
 def _url(host, scheme, port):

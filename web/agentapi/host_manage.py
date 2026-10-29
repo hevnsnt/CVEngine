@@ -75,6 +75,9 @@ def update_host_profile(ctx, slug, host, owner=None, purpose=None, criticality=N
         if level not in HostProfile.CRITICALITY:
             raise ApiError(400, f'criticality must be one of {", ".join(HostProfile.CRITICALITY)}')
         fields['criticality'] = level
+    from startScan.models import Subdomain
+    if not Subdomain.objects.filter(target_domain__project=project, name__iexact=name).exists():  # as host_archive: no rows for names the project lacks
+        raise ApiError(404, 'host not found in this project')
     profile, _ = HostProfile.objects.get_or_create(project=project, host=name)
     for key, value in fields.items():
         setattr(profile, key, value)
@@ -192,33 +195,48 @@ def host_group_names(project, name):
 def _purge(project, name, subtree=False):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
     it). Returns the counts."""
-    from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, HostInventory, HostLabel, HostProfile, HostState,
-                                HygieneFinding, RouteAuth, TlsCertificate, Triage)
+    from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
+                                HostInventory, HostLabel, HostProfile, HostState, HygieneFinding, ProbeObservation, RdpScreenshot,
+                                RouteAuth, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
     counts = {}
     subs = Subdomain.objects.filter(target_domain__project=project).filter(_host_q('name', name, subtree))
     sub_ids = list(subs.values_list('id', flat=True))
     counts['hosts'] = len(sub_ids)
-    counts['findings'] = Vulnerability.objects.filter(subdomain_id__in=sub_ids).count()
-    counts['cve_matches'] = CVEMatch.objects.filter(subdomain_id__in=sub_ids).count()
+    vuln_ids = list(Vulnerability.objects.filter(subdomain_id__in=sub_ids).values_list('id', flat=True))
+    match_ids = list(CVEMatch.objects.filter(subdomain_id__in=sub_ids).values_list('id', flat=True))
+    hygiene = HygieneFinding.objects.filter(_host_q('host', name, subtree), domain__project=project)
+    hygiene_ids = list(hygiene.values_list('id', flat=True))
+    counts['findings'] = len(vuln_ids)
+    counts['cve_matches'] = len(match_ids)
     counts['endpoints'] = EndPoint.objects.filter(subdomain_id__in=sub_ids).count()
     # a finding recorded against the bare host (no Subdomain row) is still this host's
     orphans = Vulnerability.objects.filter(target_domain__project=project, subdomain__isnull=True).filter(
         http_url__iregex=_url_host_pattern(name, subtree))
-    counts['findings'] += orphans.count()
+    orphan_ids = list(orphans.values_list('id', flat=True))
+    counts['findings'] += len(orphan_ids)
     orphans.delete()
     subs.delete()  # cascades findings, CVE matches and endpoints
+    # the notes and audit trail of the findings just deleted (named by kind and id, so nothing cascades to them)
+    for kind, ids in (('vulnerability', vuln_ids + orphan_ids), ('match', match_ids), ('hygiene', hygiene_ids)):
+        for model in (FindingComment, FindingAuditEvent):
+            model.objects.filter(project=project, finding_kind=kind, finding_id__in=ids).delete()
+    # evidence kept per host name: a screenshot's file goes with its row
+    shots = RdpScreenshot.objects.filter(_host_q('host', name, subtree), project=project)
+    shot_files = [path for path in shots.values_list('image_path', flat=True) if path]
     for label, model, flt in (
             ('states', HostState, {'project': project}), ('labels', HostLabel, {'project': project}),
             ('routes', RouteAuth, {'project': project}), ('changes', AssetChange, {'project': project}),
             ('profiles', HostProfile, {'project': project}), ('triage', Triage, {'project': project}),
             ('inventories', HostInventory, {'project': project}),
+            ('probes', ProbeObservation, {'project': project}), ('archives', HostArchive, {'project': project}),
+            ('screenshots', RdpScreenshot, {'project': project}), ('assessments', HostAssessment, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
             ('events', DiscoveryEvent, {'domain__project': project})):
         counts[label] = model.objects.filter(_host_q('host', name, subtree), **flt).delete()[0]
-    scan_dirs = []
+    scan_dirs = list(shot_files)  # relative to the results root, like the scan directories
     counts['target_deleted'], counts['target_kept'] = False, False
     if subtree:  # a whole domain: the targets named like it or under it go with their scans, whatever else they held
         domains = list(Domain.objects.filter(project=project).filter(_host_q('name', name, True)))
@@ -236,7 +254,7 @@ def _purge(project, name, subtree=False):
         if Subdomain.objects.filter(target_domain=domain).exclude(name__iexact=name).exists():
             counts['target_kept'] = True
         else:
-            scan_dirs = [f'{domain.name}_{sid}' for sid in ScanHistory.objects.filter(domain=domain).values_list('id', flat=True)]
+            scan_dirs += [f'{domain.name}_{sid}' for sid in ScanHistory.objects.filter(domain=domain).values_list('id', flat=True)]
             scan_dirs.append(domain.name)
             domain.delete()  # cascades its scans
             counts['target_deleted'] = True

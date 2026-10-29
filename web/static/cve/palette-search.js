@@ -108,7 +108,7 @@ export function suggestions(text) {
 
 export async function previewHosts(slug, q, signal) {
   const res = await fetch(
-    `/api/v1/projects/${encodeURIComponent(slug)}/search?q=${encodeURIComponent(q)}&page_size=6`,
+    `/api/v1/projects/${encodeURIComponent(slug)}/search?q=${encodeURIComponent(q)}&page_size=6&facets=none`,
     { credentials: "same-origin", signal },
   );
   if (!res.ok) {

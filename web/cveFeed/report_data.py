@@ -224,7 +224,7 @@ def _findings(sources, cap):
 
 
 def _hygiene_group(check):
-    if check.startswith('tls_') or check.startswith('cert'):
+    if check.startswith(('tls_', 'tlsa_', 'cert')):  # tlsa_* are the testssl findings (cveFeed.testssl_scan)
         return 'TLS and certificates'
     if check.startswith(('spf_', 'dmarc_', 'dkim_', 'mx_', 'mta_', 'bimi_', 'smtp_')):
         return 'Email'

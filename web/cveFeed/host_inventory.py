@@ -15,6 +15,7 @@ import os
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from cveFeed import inventory_schema as schema
@@ -74,7 +75,6 @@ def _current(project):
 
 
 def _by_name(current, names):
-    from django.db.models import Q
     query = Q()
     for name in names:
         query |= Q(name__iexact=name)
@@ -172,8 +172,9 @@ def _trim_history(inv):
 def _existing(project, report, token_id):
     """The stored row of this machine: by its key, or (a script that gained a machine id since its first report) by the host name
     it reported before, which then takes the machine id as its key. A machine belongs to the token that first reported it: another
-    token (a stolen one, or a second one that claims the same name) is refused, so one reporter cannot speak for another's machine.
-    A signed-in administrator may update any report."""
+    live token (a stolen one, or a second one that claims the same name) is refused, so one reporter cannot speak for another's machine.
+    A token that no longer exists, was revoked or has expired owns nothing: its project's replacement token (a renewal, or a rotation after
+    a leak) takes the machine over, so a yearly renewal does not lock the whole fleet out. A signed-in administrator may update any report."""
     from cveFeed.models import HostInventory
     host = report['host']
     key = schema.machine_key(host)
@@ -184,9 +185,21 @@ def _existing(project, report, token_id):
         if inv:
             inv.key = key
     if inv is not None and token_id is not None and inv.token_id != token_id:
-        raise ReportRefused(NOT_ACCEPTED, 409, why=f'token {token_id} tried to report for a machine held by token {inv.token_id}: delete that report to let '
-                                                    'another token take the machine over')
+        if _owner_is_live(project, inv.token_id):
+            raise ReportRefused(NOT_ACCEPTED, 409, why=f'token {token_id} tried to report for a machine held by token {inv.token_id}: delete that report to let '
+                                                        'another token take the machine over')
+        inv.token_id = token_id  # the owner is gone, revoked or expired: the new token of this project takes the machine over
     return inv, key
+
+
+def _owner_is_live(project, owner_id):
+    """Whether the token that owns a machine can still report for it. A report made by a signed-in administrator has no token and stays
+    the administrator's to replace."""
+    if owner_id is None:
+        return True
+    from dashboard.models import ApiToken
+    return ApiToken.objects.filter(pk=owner_id, project=project, revoked=False, user__is_active=True).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())).exists()
 
 
 def _assign(inv, report, now, token_id, source_ip):
@@ -212,19 +225,31 @@ def has_live_report(project, name, exclude_pk, now):
         pk=exclude_pk).exists()
 
 
+def _normal(address):
+    try:
+        ip = ipaddress.ip_address(str(address).strip().split('%')[0])
+    except ValueError:
+        return ''
+    return str(getattr(ip, 'ipv4_mapped', None) or ip)
+
+
 def corroborates(project, name, host, source_ip=''):
-    """Whether a report that names the host ``name`` is also at one of that host's addresses: the report lists one of them, or it came from
-    one. A name is only the reporter's word, so a token holder must not be able to speak for any scanned host by reporting its name; an
-    address the scanner saw is the second witness. A host with no address to compare (none known, or only CDN or shared ones) has nothing
-    to contradict the name, so it passes. ``CVENGINE_INVENTORY_NAME_ONLY=1`` turns the check off, for an estate whose hosts are scanned at an
-    address (a load balancer or NAT) that neither the report nor its source ever shows: the administrator then adopts or trusts by name."""
-    if os.environ.get('CVENGINE_INVENTORY_NAME_ONLY', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    """Whether a report that matched the host ``name`` (by that name or by an address it lists) came from one of that host's addresses.
+    What a report says about itself, its names and its address list, is only the reporter's word, so a token holder must not be able to
+    speak for any scanned host by listing its name or addresses; the address the request came from is the one witness the reporter does not
+    write, so it is the only witness whenever the request's address is known. A host with no address to compare (none known, or only CDN or shared ones) has nothing to contradict the match, so it passes.
+    The check is off by default: a holder of a token for the project may report for the project's hosts, and many estates are scanned at an
+    address (a load balancer or NAT) that their reports never come from. ``CVENGINE_INVENTORY_STRICT=1`` turns it on."""
+    if os.environ.get('CVENGINE_INVENTORY_STRICT', '').strip().lower() not in ('1', 'true', 'yes', 'on'):
         return True
-    seen = {a for a in _current(project).filter(name__iexact=name, ip_addresses__is_cdn=False).values_list('ip_addresses__address', flat=True)
+    seen = {_normal(a) for a in _current(project).filter(name__iexact=name, ip_addresses__is_cdn=False).values_list('ip_addresses__address', flat=True)
             if a and not is_shared_address(a)}
+    seen.discard('')
     if not seen:
         return True
-    return bool(seen & ({a for a in host.get('ips') or []} | ({source_ip} if source_ip else set())))
+    if not _normal(source_ip):  # no request address (a caller that has none): the reported list is all there is to compare
+        return bool(seen & {_normal(a) for a in host.get('ips') or []})
+    return _normal(source_ip) in seen
 
 
 def _claim_host(project, inv, host, now, source_ip=''):
@@ -241,8 +266,8 @@ def _claim_host(project, inv, host, now, source_ip=''):
     if has_live_report(project, name, inv.pk, now):
         inv.details = {**claimed, 'claimed_host': name}
         return
-    if basis == 'name' and not corroborates(project, name, host, source_ip):
-        inv.details = {**claimed, 'claimed_host': name, 'claim_blocked': 'none of the reported addresses is an address the scanner saw for that host'}
+    if not corroborates(project, name, host, source_ip):
+        inv.details = {**claimed, 'claimed_host': name, 'claim_blocked': 'the report did not come from an address the scanner saw for that host'}
         return  # an administrator can adopt it if it is right
     inv.host, inv.match_basis = name, basis
 

@@ -183,6 +183,27 @@ class SweepTests(FullScanBase):
 		other = self.ip('192.0.2.2')
 		self.assertEqual(fullscan.pick().pk, other.pk)  # the stuck host does not come back first
 
+	def test_a_paused_scan_picks_and_claims_nothing(self):
+		ip = self.ip('192.0.2.1')
+		with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+			out = fullscan.run(runner=self.runner(xml('192.0.2.1', [])))
+		self.assertEqual(out, {'skipped': 'scanning is paused'})
+		ip.refresh_from_db()
+		self.assertIsNone(ip.full_scan_started_at)  # S04-14
+		self.assertFalse(AgentActivity.objects.filter(message__contains='192.0.2.1').exists())
+
+	def test_a_host_the_sweep_timed_out_on_is_a_failed_sweep_not_a_clean_zero(self):
+		"""S04-4: nmap's --host-timeout leaves a host element marked timedout with no ports."""
+		ip = self.ip('192.0.2.1', ports=[22])
+		text = xml('192.0.2.1', []).replace('<host>', '<host timedout="true">')
+		out = fullscan.run(runner=self.runner(text), fingerprint_runner=self.runner(''), pipeline=lambda d, n: None)
+		ip.refresh_from_db()
+		self.assertFalse(out['swept'][0]['ok'])
+		self.assertEqual((ip.full_scanned_at, ip.full_scan_failures), (None, 1))
+		self.assertIsNotNone(ip.full_scan_retry_at)
+		self.assertEqual(ip.ports.get(number=22).state, 'open')  # nothing was closed on a half answer
+		self.assertTrue(AgentActivity.objects.filter(status='failed', message__contains='time limit').exists())
+
 	def test_an_ip_that_keeps_failing_backs_off_and_goes_behind_clean_ones(self):
 		from datetime import timedelta
 		from django.utils import timezone

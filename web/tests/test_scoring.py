@@ -196,6 +196,14 @@ class RescoreTests(ChangeFixture, TestCase):
 		self.assertEqual(detail['New this week'], 10)
 		self.assertEqual(HostState.objects.get(host='www.ct.test').score, 90)
 
+	def test_a_match_the_distribution_patched_scores_as_ice_like_heat_and_the_list(self):
+		CVEMatch.objects.update(distro_status='patched', ai_verdict='affected')
+		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
+		self.rows[1].refresh_from_db()
+		detail = {d['label']: d['points'] for d in self.rows[1].score_detail}
+		self.assertFalse([label for label in detail if label.startswith(('Fire CVE', 'Smoke CVE'))], detail)
+		self.assertLess(self.rows[1].score, 90)  # the fire CVE and its AI bonus (50 points) are gone
+
 	def test_a_ruled_out_match_and_a_private_ip_do_not_count(self):
 		CVEMatch.objects.update(ai_verdict='not_affected')
 		self.ip.is_private = True

@@ -275,6 +275,7 @@ class FakeClient:
     """Stands in for runzero.Client in the sync tests."""
     assets, reports, error, searches = [], [], None, []
     quota_low = False
+    cut = False
 
     def __init__(self, token):
         self.token = token
@@ -283,14 +284,15 @@ class FakeClient:
         if self.error:
             raise self.error
         FakeClient.searches.append(search)
-        return list(self.assets), False
+        return list(self.assets), self.cut
 
     def fetch_vulnerabilities(self, search='', limit=0):
         return list(self.reports), False
 
 
-def fake_client(assets=(), reports=(), error=None):
-    return mock.patch.object(runzero_sync.runzero, 'Client', type('C', (FakeClient,), {'assets': list(assets), 'reports': list(reports), 'error': error}))
+def fake_client(assets=(), reports=(), error=None, quota_low=False, cut=False):
+    return mock.patch.object(runzero_sync.runzero, 'Client', type('C', (FakeClient,), {
+        'assets': list(assets), 'reports': list(reports), 'error': error, 'quota_low': quota_low, 'cut': cut}))
 
 
 class SyncFixture(TestCase):
@@ -419,6 +421,28 @@ class ReportsAsEvidenceTests(SyncFixture):
         self.ip_a.refresh_from_db()
         self.assertEqual((m.confidence, 'runzero' in m.evidence), (0.85, False))
         self.assertNotIn('runzero', self.ip_a.fingerprint)  # its OS and reports no longer describe the host
+
+    def test_a_partial_or_empty_fetch_wipes_nothing(self):
+        """S08-6: the quota stopped the walk, the record cap cut it, or the API answered with nothing: what is stored stays."""
+        m = self.match(self.cve)
+        r = [report('192.0.2.10', 'CVE-2099-5', 443)]
+        self.sync(assets=[asset(['192.0.2.10'], os='Ubuntu Linux')], reports=r)
+        for kw in ({'quota_low': True}, {'cut': True}):
+            result = self.sync(assets=[asset(['192.0.2.99'])], reports=[], **kw)  # the page read does not hold this host
+            self.assertTrue(result['counts']['truncated'])
+            m.refresh_from_db()
+            self.ip_a.refresh_from_db()
+            self.assertEqual((m.confidence, m.evidence.get('runzero')), (0.95, True))
+            self.assertEqual(self.ip_a.fingerprint['runzero']['os'], 'Ubuntu Linux')
+        self.sync(assets=[asset(['192.0.2.10'], os='Ubuntu Linux')], reports=[], quota_low=True)  # the host is read, its report list was cut short
+        m.refresh_from_db()
+        self.ip_a.refresh_from_db()
+        self.assertEqual([v['cve'] for v in self.ip_a.fingerprint['runzero']['vulns']], ['CVE-2099-5'])
+        self.assertEqual(m.confidence, 0.95)
+        self.assertEqual(self.sync(assets=[], reports=[])['state'], 'ok')  # an empty answer retires nothing
+        m.refresh_from_db()
+        self.ip_a.refresh_from_db()
+        self.assertEqual((m.confidence, self.ip_a.fingerprint['runzero']['os']), (0.95, 'Ubuntu Linux'))
 
     def test_reports_never_create_a_match_and_are_stored_on_the_host(self):
         result = self.sync(assets=[asset(['192.0.2.10'])], reports=[report('192.0.2.10', 'CVE-2099-6', 80)])

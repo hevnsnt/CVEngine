@@ -10,7 +10,6 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import stats_history, views
-from cveFeed.graph_overview import groups
 from cveFeed.models import CVEEntry, CVEMatch
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -86,10 +85,9 @@ class AliasedHostTests(AliasFixture):
 		self.assertEqual([h['host'] for h in found], ['www.example.test'])
 		self.assertEqual(found[0]['aliases'], ['example.test'])
 
-	def test_the_dashboard_the_overview_and_the_history_count_one_host(self):
+	def test_the_dashboard_and_the_history_count_one_host(self):
 		self.assertEqual(self.stats('hp1')['hosts'], 6)
 		self.assertEqual(self.stats()['hosts'], 7)  # the other project's host on the same address is a host of its own
-		self.assertEqual(groups()['hosts'], 7)
 		self.assertEqual(stats_history.compute_snapshot(self.p1)['hosts'], 6)
 
 	def test_the_map_draws_the_host_once_and_lists_its_other_names(self):

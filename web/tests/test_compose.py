@@ -42,6 +42,18 @@ class ComposeEnvTests(unittest.TestCase):
             self.assertIn('CVENGINE_ALLOW_PRIVATE_TARGETS', keys)
             self.assertIn('CVENGINE_TRUSTED_PROXIES', keys)
 
+    def test_the_celery_container_has_an_init_process_and_time_to_stop_its_workers(self):
+        # the entrypoint turns SIGTERM into a warm shutdown and exits when a worker dies; both need a PID 1 that behaves
+        for name in FILES:
+            celery = load(name)['celery']
+            self.assertIs(celery.get('init'), True, name)
+            self.assertEqual(celery.get('stop_grace_period'), '60s', name)
+
+    def test_the_openvas_feed_containers_come_back_after_a_host_reboot(self):
+        services = load('docker-compose.yml')
+        for name in ('vulnerability-tests', 'notus-data', 'scap-data', 'cert-bund-data', 'dfn-cert-data', 'data-objects', 'report-formats'):
+            self.assertEqual(services[f'openvas-{name}'].get('restart'), 'unless-stopped', name)
+
     def test_unused_concurrency_variables_are_gone(self):
         for name in FILES + ('.env.example',):
             text = (ROOT / name).read_text()

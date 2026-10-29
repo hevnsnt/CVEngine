@@ -240,6 +240,42 @@ class ApiTests(Fixture):
 			self.assertNotIn(plain, stored)
 		self.assertEqual({r.org_id for r in rows}, {self.org.pk})  # the organization's admins read their own trail
 
+	def test_the_untrusted_certificate_switch_is_off_by_default_is_set_read_kept_and_audited(self):
+		status, created = self.put('orgadmin', self.body())
+		self.assertEqual((status, created['allow_untrusted_certificate']), (200, False))
+		self.assertFalse(AuthCredential.objects.get().allow_untrusted_certificate)
+		self.assertFalse(AuditLog.objects.filter(action='target.auth_credential.untrusted_certificate').exists())  # nothing changed
+		status, on = self.put('orgadmin', self.body(allow_untrusted_certificate=True, headers=[{'name': 'Authorization', 'secret': ''}], cookie_secret=''))
+		self.assertEqual((status, on['allow_untrusted_certificate']), (200, True))
+		_status, listed = call(self.tokens['orgadmin'], 'GET', f'{self.url}/auth-credentials')
+		self.assertIs(listed['results'][0]['allow_untrusted_certificate'], True)
+		row, = AuditLog.objects.filter(action='target.auth_credential.untrusted_certificate')
+		self.assertEqual((row.actor_name, row.org_id, row.detail['allow_untrusted_certificate']), ('ac_orgadmin', self.org.pk, True))
+		# left out on a replace: the choice is kept, and keeping it adds no audit row
+		self.put('orgadmin', self.body(headers=[{'name': 'Authorization', 'secret': ''}], cookie_secret=''))
+		self.assertTrue(AuthCredential.objects.get().allow_untrusted_certificate)
+		self.assertEqual(AuditLog.objects.filter(action='target.auth_credential.untrusted_certificate').count(), 1)
+		self.put('root', self.body(allow_untrusted_certificate=False, headers=[{'name': 'Authorization', 'secret': ''}], cookie_secret=''))
+		self.assertFalse(AuthCredential.objects.get().allow_untrusted_certificate)
+		self.assertEqual(AuditLog.objects.filter(action='target.auth_credential.untrusted_certificate').count(), 2)
+
+	def test_the_untrusted_certificate_switch_must_be_a_boolean_and_is_admin_only(self):
+		for bad in ('yes', 1, None, 'true'):
+			status, data = self.put('orgadmin', self.body(allow_untrusted_certificate=bad))
+			self.assertEqual(status, 400, bad)
+			self.assertIn('true or false', json.dumps(data))
+		self.assertEqual(AuthCredential.objects.count(), 0)
+		for who in ('member', 'pmember', 'auditor'):
+			self.assertEqual(self.put(who, self.body(allow_untrusted_certificate=True))[0], 403, who)
+		self.assertEqual(AuthCredential.objects.count(), 0)
+
+	def test_the_mcp_list_shows_the_switch(self):
+		self.make()
+		AuthCredential.objects.update(allow_untrusted_certificate=True)
+		error, listed = tool_call(self.tokens['orgadmin'], 'list_auth_credentials', {'project': 'acp'})
+		self.assertFalse(error, listed)
+		self.assertIs(listed['results'][0]['allow_untrusted_certificate'], True)
+
 	def test_only_an_app_admin_or_the_projects_org_admin_may_touch_it(self):
 		cred = self.make()
 		for who in ('member', 'pmember', 'auditor'):
@@ -552,6 +588,111 @@ class LiveProbeTests(Fixture):
 			ra.probe_url(f'http://127.0.0.1:{self.port}/', headers={'Authorization': SECRET})
 
 
+class LiveTlsTests(Fixture):
+	"""The real probe and the real certificate check against a local TLS server: one certificate that chains to a CA the client trusts, one that is
+	self-signed. The sign-in is sent to the first, withheld from the second unless the target's switch is on, and an anonymous probe is unchanged."""
+
+	@classmethod
+	def setUpClass(cls):
+		import shutil
+		import ssl
+		import subprocess
+		super().setUpClass()
+		cls.scratch = tempfile.mkdtemp(prefix='cvengine-tls-test-')
+		d = cls.scratch
+
+		def run(*args):
+			subprocess.run(['openssl', *args], cwd=d, check=True, capture_output=True)
+		with open(os.path.join(d, 'ext.cnf'), 'w') as handle:
+			handle.write('subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\n')
+		run('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'ca.key', '-out', 'ca.crt', '-days', '2', '-subj', '/CN=test ca',
+			'-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
+		run('req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'good.key', '-out', 'good.csr', '-subj', '/CN=127.0.0.1')
+		run('x509', '-req', '-in', 'good.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'good.crt', '-days', '2', '-extfile', 'ext.cnf')
+		run('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'self.key', '-out', 'self.crt', '-days', '2', '-subj', '/CN=127.0.0.1',
+			'-addext', 'subjectAltName=IP:127.0.0.1')
+		cls.servers = {}
+		for name in ('good', 'self'):
+			server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+			context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+			context.load_cert_chain(os.path.join(d, f'{name}.crt'), os.path.join(d, f'{name}.key'))
+			server.socket = context.wrap_socket(server.socket, server_side=True)
+			cls.servers[name] = server
+			threading.Thread(target=server.serve_forever, daemon=True).start()
+		cls.ca = os.path.join(d, 'ca.crt')
+		cls._shutil = shutil
+
+	@classmethod
+	def tearDownClass(cls):
+		for server in cls.servers.values():
+			server.shutdown()
+			server.server_close()
+		cls._shutil.rmtree(cls.scratch, ignore_errors=True)
+		super().tearDownClass()
+
+	def setUp(self):
+		Handler.seen.clear()
+		for name, value in (('cveFeed.pinned_transport.is_scannable_ip', True),):  # the fixture talks to its own loopback servers
+			patcher = mock.patch(name, return_value=value)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+		trust = mock.patch.dict(os.environ, {'SSL_CERT_FILE': self.ca})  # the one CA this test trusts, read by the default verify paths
+		trust.start()
+		self.addCleanup(trust.stop)
+		self.target = Domain.objects.create(name='127.0.0.1', project=self.project, insert_date=timezone.now())
+		self.cred = self.make(self.target, host='127.0.0.1', origins=['https:%d' % self.servers['good'].server_address[1],
+			'https:%d' % self.servers['self'].server_address[1]])
+
+	def port(self, name):
+		return self.servers[name].server_address[1]
+
+	def scope(self):
+		return AuthScope.for_domain(self.target)
+
+	def switch(self, on):
+		AuthCredential.objects.filter(pk=self.cred.pk).update(allow_untrusted_certificate=on)
+
+	def test_a_certificate_that_verifies_gets_the_sign_in(self):
+		result = ra.probe_url(f'https://127.0.0.1:{self.port("good")}/', auth_scope=self.scope())
+		self.assertEqual(result['status'], 200)
+		(_, _, headers), = Handler.seen
+		self.assertEqual((headers['Authorization'], headers['Cookie']), (SECRET, COOKIE))
+
+	def test_an_untrusted_certificate_with_the_switch_off_gets_nothing_and_says_why(self):
+		with self.assertRaises(ra.UntrustedCertificate) as caught:
+			ra.probe_url(f'https://127.0.0.1:{self.port("self")}/', auth_scope=self.scope())
+		self.assertIn('does not verify', str(caught.exception))
+		self.assertIn('Trust this certificate anyway', str(caught.exception))
+		self.assertEqual(Handler.seen, [])  # the request was never made
+		for plain in (SECRET, TOKEN, COOKIE, COOKIE_VALUE):
+			self.assertNotIn(plain, str(caught.exception))
+
+	def test_an_untrusted_certificate_with_the_switch_on_gets_the_sign_in(self):
+		self.switch(True)
+		result = ra.probe_url(f'https://127.0.0.1:{self.port("self")}/', auth_scope=self.scope())
+		self.assertEqual(result['status'], 200)
+		(_, _, headers), = Handler.seen
+		self.assertEqual((headers['Authorization'], headers['Cookie']), (SECRET, COOKIE))
+
+	def test_an_anonymous_probe_still_reads_an_untrusted_certificate_and_sends_nothing(self):
+		for flag in (False, True):
+			self.switch(flag)
+			Handler.seen.clear()
+			result = ra.probe_url(f'https://127.0.0.1:{self.port("self")}/')
+			self.assertEqual(result['status'], 200)
+			self.assertNotIn('Authorization', Handler.seen[0][2])
+			self.assertNotIn('Cookie', Handler.seen[0][2])
+
+	def test_the_certificate_check_nuclei_relies_on(self):
+		self.assertEqual(auth_checks.certificate_verifies('127.0.0.1', self.port('good')), (True, ''))
+		ok, reason = auth_checks.certificate_verifies('127.0.0.1', self.port('self'))
+		self.assertFalse(ok)
+		self.assertTrue(reason)
+		ok, reason = auth_checks.certificate_verifies('127.0.0.1', 1)  # nothing listens: not verifiable, so not sent
+		self.assertFalse(ok)
+		self.assertNotIn(SECRET, reason)
+
+
 class SignedRouteTests(Fixture):
 	"""The route stage with a stored sign-in, the probe replaced by a fake application that shows a dashboard only to a signed-in request."""
 
@@ -600,6 +741,21 @@ class SignedRouteTests(Fixture):
 		self.assertIn('[redacted]', signed['title'])
 		self.assertTrue(AgentActivity.objects.filter(message__contains='signed in (seen while authenticated)').exists())
 		self.assertTrue(AuthCredential.objects.get().last_used_at)
+
+	def test_a_route_not_sent_for_an_untrusted_certificate_is_said_with_the_switch_to_change_it(self):
+		self.make(host='app.example.test')
+
+		def probe(url, auth_scope=None, **kw):
+			if auth_scope is not None and auth_scope.headers_for('app.example.test', 'https', 443):
+				raise ra.UntrustedCertificate('the server certificate does not verify (self-signed certificate), so the stored sign-in was not sent')
+			return self.probe(url, auth_scope=auth_scope, **kw)
+		out = ra.run_route_auth(self.scan().id, probe=probe)
+		self.assertEqual(out['signed_in']['routes'], 0)
+		self.assertGreater(out['signed_in']['untrusted_certificate'], 0)
+		self.assertEqual(out['signed_in']['errors'], 0)
+		line = AgentActivity.objects.filter(message__contains='Trust this certificate anyway').get().message
+		self.assertIn('server certificate does not verify', line)
+		self.assertNotIn('authenticated', RouteAuth.objects.get(url='https://app.example.test/').evidence)
 
 	def test_another_host_a_third_party_host_and_another_port_are_never_signed_in(self):
 		self.make(host='app.example.test')
@@ -690,6 +846,8 @@ class NucleiTests(Fixture):
 			patcher = mock.patch(name, return_value=False)
 			patcher.start()
 			self.addCleanup(patcher.stop)
+		self.verify = mock.patch('cveFeed.auth_checks.certificate_verifies', return_value=(True, '')).start()  # nuclei never verifies itself
+		self.addCleanup(mock.patch.stopall)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.runs = []
 		self.leftovers = []
@@ -798,6 +956,60 @@ class NucleiTests(Fixture):
 		plain = self.runs[0]['targets']
 		self.assertIn('app.example.test:8443', plain)  # the plain pass still covers every port and the address
 		self.assertTrue([t for t in plain if t.startswith('203.0.113.')])
+
+	def test_a_certificate_that_verifies_gets_the_sign_in_and_one_that_does_not_gets_nothing_and_says_why(self):
+		self.make(host='app.example.test')
+		nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
+		self.assertEqual(len(self.signed_runs()), 1)
+		self.verify.assert_called_once_with('app.example.test', 443, self.project.pk)
+		self.runs.clear()
+		ServiceRun.objects.all().delete()
+		self.verify.return_value = (False, 'self-signed certificate')
+		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
+		self.assertEqual(self.signed_runs(), [])  # nothing signed in was started, so no value was written anywhere
+		self.assertEqual(out['authenticated']['skipped'], 'certificate not trusted')
+		line = AgentActivity.objects.filter(message__contains='Trust this certificate anyway').get().message
+		self.assertIn('https://app.example.test', line)
+		self.assertIn('self-signed certificate', line)
+		self.assertEqual(self.runs[0]['secret_file'], None)  # the plain pass still ran
+
+	def test_a_withheld_sign_in_is_recorded_and_the_check_coverage_says_it_is_not_sent(self):
+		from cveFeed import check_coverage as cc
+		cred = self.make(host='app.example.test')
+		self.verify.return_value = (False, 'self-signed certificate')
+		nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
+		row = ServiceRun.objects.get(service=auth_nuclei.REFUSED_SERVICE)
+		self.assertEqual((row.status, row.asset, row.project_id), ('refused', f'https://app.example.test@{auth_checks.revision(cred)}', self.project.pk))
+
+		def coverage_of_nuclei_signed_in():
+			ev = cc.Evidence()
+			ev.credentials = {self.project.pk: [AuthCredential.objects.get(pk=cred.pk)]}
+			cc._load_signed(ev, [self.project.pk])
+			host = cc.HostFacts('app.example.test', self.project.pk, target_name=self.domain.name, target_is_domain=True, addresses=[cc.Addr('203.0.113.9')])
+			return {c['id']: c for c in cc.coverage(host, ev)['checks']}['nuclei-signed-in']
+		out = coverage_of_nuclei_signed_in()
+		self.assertEqual(out['state'], 'not_applicable')
+		self.assertIn('is not sent', out['detail'])
+		AuthCredential.objects.filter(pk=cred.pk).update(allow_untrusted_certificate=True)  # the owner chose to trust it: planned again
+		self.assertEqual(coverage_of_nuclei_signed_in()['state'], 'due')
+
+	def test_the_switch_sends_the_sign_in_to_a_certificate_that_does_not_verify(self):
+		self.make(host="app.example.test")
+		AuthCredential.objects.update(allow_untrusted_certificate=True)
+		self.verify.return_value = (False, 'self-signed certificate')
+		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
+		run, = self.signed_runs()
+		self.assertEqual(run['targets'], ['https://app.example.test'])
+		self.assertEqual(out['authenticated']['findings'], 1)
+		self.verify.assert_not_called()  # the owner chose; nothing to check
+
+	def test_a_plain_http_origin_has_no_certificate_to_check(self):
+		self.make(host='app.example.test', origins=['http:80'])
+		self.verify.return_value = (False, 'unused')
+		nuclei_scan.run_nuclei(self.scan(ports=((80, 'http'),)).id, stream=self.stream())
+		run, = self.signed_runs()
+		self.assertEqual(run['targets'], ['http://app.example.test'])
+		self.verify.assert_not_called()
 
 	def test_an_origin_on_another_port_is_named_with_its_port_and_only_that_one(self):
 		self.make(host='app.example.test', origins=['https:8443'])
@@ -991,6 +1203,8 @@ class TemplateCheckTests(Fixture):
 		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		self.verify = mock.patch('cveFeed.auth_checks.certificate_verifies', return_value=(True, '')).start()
+		self.addCleanup(mock.patch.stopall)
 
 	def runs(self, plain_hit, signed_hit):
 		calls = []
@@ -1023,6 +1237,16 @@ class TemplateCheckTests(Fixture):
 		self.make()
 		calls, merged = self.merge(True, True)
 		self.assertNotIn('authenticated', merged[0])
+
+	def test_an_untrusted_certificate_stops_the_signed_in_template_run_unless_the_switch_is_on(self):
+		cred = self.make()
+		self.verify.return_value = (False, 'self-signed certificate')
+		calls, merged = self.merge(False, True)
+		self.assertEqual((calls, merged[0]['vulnerable']), ([], False))
+		AuthCredential.objects.filter(pk=cred.pk).update(allow_untrusted_certificate=True)
+		calls, merged = self.merge(False, True)
+		self.assertEqual(len(calls), 1)
+		self.assertTrue(merged[0]['vulnerable'])
 
 	def test_a_host_the_sign_in_does_not_cover_is_not_run_signed_in(self):
 		self.make(host='app.example.test')

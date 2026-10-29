@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import conductor
-from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, ScanControl
+from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram, HostExclusion, ScanControl
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory
@@ -84,6 +84,7 @@ class ConductorTests(TestCase):
 
 	def test_a_bug_bounty_project_is_scanned_only_once_automated_testing_is_confirmed(self):
 		program = BountyProgram.objects.create(platform='hackerone', handle='acme', name='Acme')
+		BountyAsset.objects.create(program=program, kind='domain', identifier='bounty.test')  # the scope names the target (tests.test_bounty_gate: a host it does not name is never scanned)
 		self.domain('bounty.test')
 		engagement = BountyEngagement.objects.create(project=self.p1, program=program, status='active')
 		self.assertEqual(conductor.keep_work_queued()['started'], 0)  # not acknowledged, automated testing not confirmed

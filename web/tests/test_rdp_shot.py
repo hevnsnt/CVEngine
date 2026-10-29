@@ -1,3 +1,4 @@
+import concurrent.futures
 import io
 import shutil
 import tempfile
@@ -6,7 +7,7 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 
 from cveFeed import rdp_shot
-from cveFeed.models import RdpScreenshot, ServiceRun
+from cveFeed.models import HostExclusion, RdpScreenshot, ServiceRun
 from startScan.models import Port, Subdomain, Vulnerability
 from tests.test_route_auth import RouteFixture
 from tests.test_service_intel import RDP_ENC, RDP_NLA_ONLY
@@ -64,7 +65,48 @@ class MeaningfulImageTests(SimpleTestCase):
 		self.assertFalse(rdp_shot.is_meaningful(b''))
 
 
+class CaptureCapTests(SimpleTestCase):
+	"""S04-7: the wall-clock cap must return control, not wait for the stuck thread it gave up on."""
+
+	def test_a_handshake_that_never_finishes_is_cut_off_at_the_connect_timeout(self):
+		import asyncio
+		import time
+
+		async def stalls(host, port, wait, connect_timeout=None):
+			await asyncio.sleep(60)
+		started = time.monotonic()
+		with mock.patch.object(rdp_shot, '_capture_async', stalls), mock.patch.object(rdp_shot, 'CAP_GRACE', 0.3):
+			with self.assertRaises((TimeoutError, asyncio.TimeoutError, concurrent.futures.TimeoutError)):
+				rdp_shot.capture('203.0.113.9', 3389, connect_timeout=0.2, wait=0)
+		self.assertLess(time.monotonic() - started, 3)
+
+	def test_a_thread_stuck_in_blocking_code_does_not_hold_the_caller(self):
+		import time
+
+		async def blocked(host, port, wait, connect_timeout=None):
+			time.sleep(2.5)  # blocks its event loop: nothing can cancel it
+		started = time.monotonic()
+		with mock.patch.object(rdp_shot, '_capture_async', blocked), mock.patch.object(rdp_shot, 'CAP_GRACE', 0.3):
+			with self.assertRaises(concurrent.futures.TimeoutError):
+				rdp_shot.capture('203.0.113.9', 3389, connect_timeout=0.2, wait=0)
+		self.assertLess(time.monotonic() - started, 1.5)  # a ``with`` pool would have waited the full 2.5 s
+
+
 class CandidatesTests(RouteFixture, TestCase):
+	def test_an_excluded_host_is_never_a_candidate_or_connected_to(self):
+		scan = self.scan(names=('win.rt.test',), ports=())
+		sub = Subdomain.objects.get(scan_history=scan)
+		ip = sub.ip_addresses.get()
+		ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server', extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
+		self.assertEqual(len(rdp_shot.rdp_candidates(scan)), 1)
+		HostExclusion.objects.create(org=scan.domain.project.org, host='win.rt.test')
+		self.assertEqual(rdp_shot.rdp_candidates(scan), [])  # S04-11
+		calls = []
+		with mock.patch('cveFeed.rdp_shot.available', return_value=True), mock.patch.object(rdp_shot, 'rdp_candidates', return_value=[(sub, ip.address, 3389)]):
+			out = rdp_shot.run_for_scan(scan.id, capturer=lambda h, p: calls.append(h), reader=lambda png: {})
+		self.assertEqual((calls, out['captured']), ([], 0))  # excluded after the list was made: still not opened
+
+
 	def test_only_a_confirmed_nla_free_rdp_port_is_a_candidate(self):
 		scan = self.scan(names=('win.rt.test',), ports=())
 		sub = Subdomain.objects.get(scan_history=scan)

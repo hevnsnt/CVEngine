@@ -660,3 +660,24 @@ class SignedInTests(TestCase):
 		self.assertEqual(state_of(other, 'nuclei-signed-in', ev)[0], 'not_applicable')
 		cred.expires_at = now - timedelta(days=1)
 		self.assertEqual(state_of(host, 'nuclei-signed-in', ev)[0], 'not_applicable')
+
+	def test_a_sign_in_withheld_for_its_certificate_is_not_reported_as_planned_or_covered(self):
+		from cveFeed import auth_checks
+		from cveFeed.models import AuthCredential
+		now = timezone.now()
+		org = Org.objects.create(name='W', slug='cov-w')
+		project = Project.objects.create(name='W', slug='cov-pw', insert_date=now, org=org)
+		domain = Domain.objects.create(name='withheld.example.test', project=project, insert_date=now)
+		cred = AuthCredential.objects.create(project=project, domain=domain, host='', label='tester', origins=['https:443'],
+			secret={'headers': [['X-Test', 'v']]})
+		ev = cc.Evidence(now)
+		ev.credentials = {project.id: [cred]}
+		host = cc.HostFacts('app.withheld.example.test', project.id, target_name='withheld.example.test', target_is_domain=True,
+			addresses=[cc.Addr('203.0.113.9')])
+		key = (project.id, host.name, auth_checks.revision(cred))
+		ev.signed[('nuclei-auth-refused', *key)] = [('nuclei-auth-refused', 'refused', now)]
+		state, row = state_of(host, 'nuclei-signed-in', ev)
+		self.assertEqual(state, 'not_applicable')
+		self.assertIn('is not sent', row['detail'])
+		ev.signed[('nuclei-auth', *key)] = [('nuclei-auth:abc', 'done', now + timedelta(minutes=5))]  # a later run did send it
+		self.assertEqual(state_of(host, 'nuclei-signed-in', ev)[0], 'done')

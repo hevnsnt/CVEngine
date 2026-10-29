@@ -32,10 +32,11 @@ A tier describes a CVE in general. What matters to you is how hot it is on **you
 - **A match inherits its CVE's tier.** A fire CVE on one of your hosts is a fire match.
 - **A confirmed smoke becomes fire.** If triage rates the match confirmed or likely and the CVSS is 7.0 or higher, it reads as fire.
 - **A match needs a version.** A tier says how dangerous a CVE is, not whether it applies. A host running a product with no version found has no match at all, whatever the tier, until a version is identified: it is listed as an *unverified product*, not counted in heat or the score. The one tier-driven exception is a CISA KEV advisory that gives no version bound, kept for a host running that product at a known version as a low-confidence candidate that needs validation. Fire and smoke CVEs are template-tested on both kinds of host. See [Match](PIPELINE.md#cve-intelligence).
+- **An unknown version range makes it ice, and a review item.** That KEV candidate is a *version unknown* match: whatever the CVE's tier (KEV, a critical score), on the host it is ice, never fire or smoke, and it adds at most 2 points to the host score (1 each, `scoring.VERSION_UNKNOWN_CAP`). It is marked for review: the Needs validation list and the match's reason read "Version of the CVE is not known: review when the affected versions are published". The model is not asked and cannot dismiss it; only a person decides it, or the CVE gaining a version range does: the next correlation then re-evaluates it like any match with a range (heat, score and review state follow its version).
 - **A distribution patch makes it ice.** If the host's distribution backported the fix, the match is ice however dangerous the CVE is. See [distro backports](PIPELINE.md#cve-intelligence).
 - **A host takes its hottest signal.** A host's heat is the hottest of its CVE matches and its open findings (critical and high findings read as fire, medium as smoke, low as ice). A host with nothing is clean, and one nothing has probed yet is not scanned.
 
-The 0 to 100 [host score](PIPELINE.md#host-score) reads a match's CVE tier: a fire match adds 40 points, smoke 20, and ice 5.
+The 0 to 100 [host score](PIPELINE.md#host-score) reads a match's CVE tier: a fire match adds 40 points, smoke 20, and ice 5 (a match whose CVE has no known version range adds a point, at most 2 in all).
 
 ## What the tiers drive
 

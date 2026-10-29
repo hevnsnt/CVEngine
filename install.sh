@@ -112,6 +112,14 @@ if ! docker compose version >/dev/null 2>&1 && ! have docker-compose; then
   docker compose version >/dev/null 2>&1 || die "Docker Compose is missing. See https://docs.docker.com/compose/install/ and run this again."
 fi
 ok "docker compose"
+# the compose files use `env_file: - path: .env, required: false`, which needs Compose 2.24; an older one fails later with a schema error
+compose_version=$(compose version --short 2>/dev/null | head -n 1 | sed 's/^v//')
+if [[ $compose_version =~ ^([0-9]+)\.([0-9]+) ]]; then
+  if [ "${BASH_REMATCH[1]}" -lt 2 ] || { [ "${BASH_REMATCH[1]}" -eq 2 ] && [ "${BASH_REMATCH[2]}" -lt 24 ]; }; then
+    die "Docker Compose $compose_version is too old: CVEngine needs 2.24 or newer. Update the docker-compose-plugin package (or see https://docs.docker.com/compose/install/) and run this again."
+  fi
+  ok "docker compose $compose_version"
+fi
 
 if ! docker info >/dev/null 2>&1; then
   have systemctl && systemctl enable --now docker >/dev/null 2>&1 || true
@@ -133,7 +141,7 @@ if [ -z "$running_proxy" ]; then
   done
   ok "ports 443 and 8082 are free"
 else
-  ok "CVEngine is already running here: updating it in place"
+  ok "CVEngine is already running here: rebuilding it from this checkout (this does not fetch new code, see docs/UPDATES.md)"
 fi
 
 for host in registry-1.docker.io github.com; do
@@ -192,11 +200,11 @@ step "Installing the update watcher"
 if ! command -v crontab >/dev/null 2>&1; then
   warn "crontab is not available: approving an update in Settings > Updates will not start it. Install cron, then run scripts/install-updater.sh"
 elif crontab -l 2>/dev/null | grep -q 'cvengine-auto-deploy' || systemctl is-enabled cvengine-auto-deploy >/dev/null 2>&1; then
-  ok "automatic deployment is installed and applies updates; the watcher is not needed"
-elif ./scripts/install-updater.sh >/dev/null 2>&1; then
+  ok "automatic deployment is installed: it deploys new master commits while Settings > Updates is set to Automatic (Approve does nothing until then; scripts/install-updater.sh adds the watcher that acts on it)"
+elif watcher_log=$(./scripts/install-updater.sh 2>&1); then
   ok "an update approved in Settings > Updates starts within seconds"
 else
-  warn "could not install the update watcher: run scripts/install-updater.sh to enable one-click updates"
+  warn "could not install the update watcher: $(printf '%s' "$watcher_log" | tail -n 1). Run scripts/install-updater.sh to enable one-click updates"
 fi
 
 ca=$(pwd)/secrets/certs/ca.crt
@@ -214,7 +222,8 @@ cat <<EOF
   3. Things you may need later:
        make admin-password   a new admin password, if this one is lost
        make logs             follow the logs
-       sudo ./install.sh     run again any time; it updates in place
+       sudo ./install.sh     run again any time; it rebuilds the code you have checked out
+                             (it does not fetch new code: updates are in Settings > Updates, see docs/UPDATES.md)
 EOF
 case $address in
   localhost|127.*) warn "CVEngine only answers on this machine. To reach it from elsewhere: sudo ./install.sh --domain <this server's address or name>" ;;

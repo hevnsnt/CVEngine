@@ -111,12 +111,14 @@ def refresh(limit=20000, chunk=2000):
         if not rows:
             break
         now = timezone.now()
-        scopes = dict(CVEDetection.objects.filter(cve_entry_id__in=[r.id for r in rows]).values_list('cve_entry_id', 'strategy__scope'))
+        scopes = {cid: (scope, source) for cid, scope, source in
+                  CVEDetection.objects.filter(cve_entry_id__in=[r.id for r in rows]).values_list('cve_entry_id', 'strategy__scope', 'source')}
         for row in rows:
             row.local_only = classify(row.cvss_vector, row.original_description, row.title, row.affected, row.kev)[0]
-            if ('AV:' not in (row.cvss_vector or '') and scopes.get(row.id) in ('external', 'local_only')
-                    and not (is_linux_kernel_record(row.original_description, row.title, row.affected) and not row.kev)):
-                row.local_only = scopes[row.id] == 'local_only'  # the model's reading of a record with no attack vector
+            scope, source = scopes.get(row.id, ('', ''))
+            decided = scope_decision(scope, source, row.cvss_vector, row.original_description, row.title, row.affected, row.kev)
+            if decided is not None:
+                row.local_only = decided
             row.locality_at = now
         CVEEntry.objects.bulk_update(rows, ['local_only', 'locality_at'])
         done += len(rows)
@@ -165,12 +167,26 @@ def close_local_matches():
     return closed
 
 
-def apply_scope(cve, scope):
-    """The model's scope decision for a CVE (``external`` or ``local_only``). A CVSS attack vector settles the matter and is never
-    overridden; ``unclear`` leaves the rule-based classification as it was. Returns True when the flag was set from the model's answer."""
+def scope_decision(scope, source, cvss_vector, description, title='', affected=None, kev=False):
+    """What a detection record's ``scope`` answer changes: ``True`` (local-only), ``False`` (not local) or ``None`` (nothing).
+    A CVSS attack vector settles the matter and is never overridden; ``unclear`` changes nothing, and neither does a Linux kernel
+    record that is not on KEV. The answer of a model (or of a seed file, which is data from outside) may only widen matching:
+    ``external`` can lift a rule-based local-only flag, but ``local_only`` never overrides the deterministic result, because it
+    switches the CVE off for every organization on the word of text the model read from a third-party feed. It stays on the record as
+    a suggestion for an administrator, who can write the scope themselves (a ``manual`` record is a person's decision)."""
+    if ('AV:' in (cvss_vector or '') or scope not in ('external', 'local_only')
+            or (is_linux_kernel_record(description, title, affected) and not kev)):
+        return None
+    if scope == 'local_only' and source != 'manual':
+        return None
+    return scope == 'local_only'
+
+
+def apply_scope(cve, scope, source='manual'):
+    """Apply the scope decision of a detection record (see ``scope_decision``; the model's answer passes ``source='ai'``). Returns True when the flag was set from that answer."""
     from cveFeed.models import CVEEntry
-    if ('AV:' in (cve.cvss_vector or '') or scope not in ('external', 'local_only')
-            or (is_linux_kernel_record(cve.original_description, cve.title, cve.affected) and not getattr(cve, 'kev', False))):
+    decided = scope_decision(scope, source, cve.cvss_vector, cve.original_description, cve.title, cve.affected, getattr(cve, 'kev', False))
+    if decided is None:
         return False
-    CVEEntry.objects.filter(pk=cve.pk).update(local_only=(scope == 'local_only'), locality_at=timezone.now())
+    CVEEntry.objects.filter(pk=cve.pk).update(local_only=decided, locality_at=timezone.now())
     return True

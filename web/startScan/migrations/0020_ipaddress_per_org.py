@@ -54,8 +54,12 @@ class Migration(migrations.Migration):
         migrations.AddField(model_name='ipaddress', name='org',
                             field=models.ForeignKey(blank=True, editable=False, null=True, on_delete=django.db.models.deletion.CASCADE,
                                                     related_name='+', to='dashboard.org')),
-        migrations.RunPython(split_by_org, migrations.RunPython.noop),
+        # The global constraint goes first: the split below clones a shared address once per extra organization, which it forbids.
         migrations.RemoveConstraint(model_name='ipaddress', name='uniq_ipaddress_address'),
+        migrations.RunPython(split_by_org, migrations.RunPython.noop),
+        # The rows written above leave deferred foreign key checks pending, and PostgreSQL refuses to build an index (or the
+        # deferred org foreign key) on a table in that state. Run the checks now.
+        migrations.RunSQL('SET CONSTRAINTS ALL IMMEDIATE', migrations.RunSQL.noop),
         migrations.AddConstraint(model_name='ipaddress', constraint=models.UniqueConstraint(
             condition=models.Q(('org__isnull', False), ('address__isnull', False), models.Q(('address', ''), _negated=True)),
             fields=('org', 'address'), name='uniq_ipaddress_org_address')),

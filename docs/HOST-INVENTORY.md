@@ -80,7 +80,9 @@ Choices that are worth knowing:
 - **No cloud metadata.** The instance metadata endpoints (169.254.169.254 and friends) are never queried.
 - **The machine id** (`/etc/machine-id`, the IOKit platform UUID, the registry `MachineGuid`) is sent only as
   `sha256("cvengine-inventory-v1:" + id)`. systemd's `machine-id(5)` says the raw id "should be considered confidential" and must not be used
-  directly by applications, which should hash it with an application-specific key.
+  directly by applications, which should hash it with an application-specific key. A VM cloned from an image keeps the image's machine id,
+  and two machines with one id overwrite each other's report on every cycle (and share the per-machine rate limit): regenerate the id on a
+  clone (`systemd-machine-id-setup`, or empty `/etc/machine-id` before its first boot).
 
 On Debian and Ubuntu a package that is installed but held (`apt-mark hold`, dpkg status `hi`) is reported like any other: held packages are often the stale ones.
 
@@ -115,8 +117,10 @@ contents other than the OS metadata above, user accounts, network shares, browse
   machine reports for, cannot update or close another token's machine, and cannot change any other project's data. Revoke it on **Agent access**.
   A fleet that shares one token trusts every machine holding it with the machines that report by host name only (no machine id); machines that
   send a machine id are told apart by it.
-- **A machine belongs to the token that first reported it.** A report for a machine another token owns is a `409`; an administrator deletes
-  the report to let another token take it over (a signed-in administrator may update any report). A new machine never takes a host another
+- **A machine belongs to the token that first reported it.** A report for a machine another live token owns is a `409`; an administrator deletes
+  the report to let another token take it over (a signed-in administrator may update any report). Once the owning token has expired, been
+  revoked or been deleted, the project's replacement token takes the machine over on its next report, so renewing a token after a year (or
+  after a leak) does not lock the fleet out. A new machine never takes a host another
   machine's fresh report already speaks for: it is held as unmatched, with the host it wanted shown to the administrator, until the old
   report goes stale or the administrator adopts it. An address alone never moves an established match, and addresses that many machines share
   (container bridges `172.16.0.0/12`, VirtualBox and libvirt NAT, carrier-grade NAT `100.64.0.0/10`) are never used to match a host.
@@ -199,7 +203,7 @@ confirmed against the spec before relying on it.
 
 In order, within the report's own project, against the hosts of the current inventory:
 
-1. **Name.** The report's FQDN, then its host name, equals a scanned name, **and an address backs it up**: the report lists one of the scanned host's addresses, or it came from one. A name is only the reporter's word, so without that second witness the report is held as unmatched (the dialog shows the host it wanted and why) for an administrator to adopt. A host with no address to compare (none known, or only CDN or shared ones) passes on its name. An estate whose hosts are scanned at an address that neither the report nor its source ever shows (a load balancer or NAT in front) can set `CVENGINE_INVENTORY_NAME_ONLY=1` to accept the name alone.
+1. **Name.** The report's FQDN, then its host name, equals a scanned name, The name alone is enough: whoever holds a token for the project may report for its hosts. An operator who wants more can set `CVENGINE_INVENTORY_STRICT=1`: a report is then held as unmatched (the dialog shows the host it wanted and why) for an administrator to adopt unless it came from one of the scanned host's addresses; the same check applies to a match by address (below), and a host with no address to compare passes on its name.
 2. **Address.** A scanned host resolves to the report's addresses (never a CDN address; names on the same addresses are one host, shown under
    the project's own target name). The host with the most addresses in common wins.
 3. **Short name.** The host name is the first label of exactly one scanned name.

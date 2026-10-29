@@ -56,7 +56,7 @@ class TenancyMiddleware:
         request.project_role = role
         return None
 
-    EXEMPT_FROM_PASSWORD_CHANGE = re.compile(r'^/(logout|mfa|staticfiles|cve/account|cve/api/account)')
+    EXEMPT_FROM_PASSWORD_CHANGE = re.compile(r'^/(logout|mfa|staticfiles|cve/account|cve/api/account)(/|$)')
 
     def _temporary_password(self, request, user):
         """An account whose password an administrator set must choose its own before doing anything else."""

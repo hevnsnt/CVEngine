@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import timedelta
 from unittest import mock
 
@@ -67,6 +68,12 @@ class SystemStatusTests(TestCase):
 		_, cls.t_member = create_token(cls.member, 'agent')
 		_, cls.t_member_ro = create_token(cls.member, 'ro', read_only=True)
 		_, cls.t_root = create_token(cls.root, 'root')
+
+	def setUp(self):
+		# the per-project cache is exercised by CountsCacheTests; here every call counts afresh
+		patch = mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': '0'})
+		patch.start()
+		self.addCleanup(patch.stop)
 
 	def get(self, token):
 		return call(token, 'GET', '/api/v1/system/status')
@@ -396,3 +403,42 @@ class SentinelStatusTests(TestCase):
 		status, data = self.run_status()
 		self.assertEqual(status, 200)
 		self.assertFalse([p for p in data['problems'] if p.startswith('sentinels:')])
+
+
+class CountsCacheTests(TestCase):
+	@classmethod
+	def setUpTestData(cls):
+		org = Org.objects.create(name='C', slug='c-org')
+		cls.project = Project.objects.create(name='Cache', slug='cache-p', insert_date=NOW, org=org)
+		cls.user = User.objects.create_user('cacher', password='x')
+		ProjectMembership.objects.create(user=cls.user, project=cls.project, role='user')
+
+	def setUp(self):
+		from django.core.cache import cache
+		self.cache = cache
+		self.key = f'sysstatus:project:{self.user.pk}:{self.project.id}'
+		self.cache.delete(self.key)
+		self.addCleanup(self.cache.delete, self.key)
+		self.ctx = mock.Mock(user=self.user)
+
+	def rows(self, seconds, row=None):
+		with mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': seconds}), \
+				mock.patch.object(system_status, '_project_row', return_value=row or {'slug': 'cache-p'}) as built:
+			return system_status._projects(self.ctx), built
+
+	def test_a_second_call_inside_the_window_reuses_the_counts(self):
+		first, built = self.rows('60')
+		self.assertEqual(built.call_count, 1)
+		second, built = self.rows('60', row={'slug': 'changed'})
+		self.assertEqual(built.call_count, 0)
+		self.assertEqual(second, first)
+
+	def test_zero_turns_the_cache_off(self):
+		self.rows('0')
+		self.assertIsNone(self.cache.get(self.key))
+		_, built = self.rows('0')
+		self.assertEqual(built.call_count, 1)
+
+	def test_a_bad_value_falls_back_to_the_default(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': 'soon'}):
+			self.assertEqual(system_status._cache_seconds(), system_status.STATUS_CACHE_SECONDS)

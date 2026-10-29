@@ -1,6 +1,6 @@
 // Bulk actions for a list of rows: a Select toggle, a checkbox on each selectable row, and a black action bar (the same bar the
-// Targets page uses). The server has no bulk routes for these, so an action runs the single-item request for each row, four at
-// a time, with progress, and reports exactly which rows failed and why, with a one-click retry of just those.
+// Targets page uses). An action runs the single-item request for each row, four at a time (the server also has `hosts/bulk`, which
+// no screen calls yet), with progress, and reports exactly which rows failed and why, with a one-click retry of just those.
 import {
   ask,
   button,

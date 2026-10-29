@@ -56,14 +56,14 @@ class ProcessTests(SimpleTestCase):
     def run_process(self, returncode=0, stderr='', token='tok-secret'):
         seen = {}
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(kind, cmd, timeout, **kwargs):
             seen['cmd'], seen['env'] = cmd, kwargs['env']
             out = cmd[cmd.index('-o') + 1]
             if returncode in (0, 5):
                 with open(out, 'w') as f:
                     f.write('{"version": {"number": "6.0"}}')
             return mock.Mock(returncode=returncode, stderr=stderr)
-        with mock.patch('cveFeed.wpscan_scan.subprocess.run', side_effect=fake_run):
+        with mock.patch('cveFeed.heavy_process.run', side_effect=fake_run):
             try:
                 return wpscan_scan.run_wpscan_process('https://www.rt.test/', token), seen
             except Exception as exc:  # noqa: BLE001

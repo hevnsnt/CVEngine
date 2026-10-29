@@ -124,7 +124,7 @@ class CheckerReplyTests(unittest.TestCase):
 		resp = mock.MagicMock(status_code=200)
 		resp.__enter__.return_value = resp
 		resp.iter_content.return_value = iter([b'{"cluster_name": "prod", "version": {"number": "7.10.2"}}'])
-		with mock.patch('requests.get', return_value=resp):
+		with mock.patch('requests.Session.get', return_value=resp):
 			self.assertTrue(dbx.check_elasticsearch('203.0.113.9', 9200))
 		self.assertEqual(dbx.EVIDENCE.pop(('203.0.113.9', 9200)), 'cluster prod, version 7.10.2')
 
@@ -132,7 +132,7 @@ class CheckerReplyTests(unittest.TestCase):
 		resp = mock.MagicMock(status_code=200)
 		resp.__enter__.return_value = resp
 		resp.iter_content.return_value = iter([b'["secret_customers", "_users"]'])
-		with mock.patch('requests.get', return_value=resp):
+		with mock.patch('requests.Session.get', return_value=resp):
 			self.assertTrue(dbx.check_couchdb('203.0.113.9', 5984))
 		text = dbx.EVIDENCE.pop(('203.0.113.9', 5984))
 		self.assertIn('2 database', text)

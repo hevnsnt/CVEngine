@@ -320,6 +320,16 @@ class ThoroughPassTests(WordPressFixture, TestCase):
         self.assertEqual(self.thorough_state(), 'pending')
         self.assertEqual(len(self.calls), self.sites)
 
+    def test_a_pass_stopped_by_the_resource_gate_leaves_the_host_waiting_and_is_not_a_failure(self):
+        from reNgine.resources import ScanAborted
+        self.quick()
+
+        def runner(url, token):
+            raise ScanAborted('stopped')
+        result = self.thorough(runner=runner)
+        self.assertIn('stopped', result['skipped'])
+        self.assertEqual((result['failed'], self.thorough_state()), (0, 'pending'))  # S04-8: recorded neither as failed nor as done
+
     def test_only_one_pass_runs_per_project_at_a_time(self):
         self.quick()
         from contextlib import contextmanager
@@ -358,13 +368,13 @@ class ThoroughPassTests(WordPressFixture, TestCase):
 
 class ProcessExitTests(SimpleTestCase):
     def run_process(self, returncode, report=None, token='tok'):
-        def fake_run(cmd, **kwargs):
+        def fake_run(kind, cmd, timeout, **kwargs):
             out = cmd[cmd.index('-o') + 1]
             if report is not None:
                 with open(out, 'w') as f:
                     f.write(json.dumps(report))
             return mock.Mock(returncode=returncode, stderr='')
-        with mock.patch('cveFeed.wpscan_scan.subprocess.run', side_effect=fake_run):
+        with mock.patch('cveFeed.heavy_process.run', side_effect=fake_run):
             try:
                 return wpscan_scan.run_wpscan_process('https://www.rt.test/', token)
             except Exception as exc:  # noqa: BLE001
@@ -399,16 +409,16 @@ class ProcessExitTests(SimpleTestCase):
     def test_the_thorough_process_uses_its_own_long_timeout(self):
         seen = {}
 
-        def fake_run(cmd, **kwargs):
-            seen['timeout'], seen['cmd'] = kwargs['timeout'], cmd
+        def fake_run(kind, cmd, timeout, **kwargs):
+            seen['kind'], seen['timeout'], seen['cmd'] = kind, timeout, cmd
             with open(cmd[cmd.index('-o') + 1], 'w') as f:
                 f.write('{"version": {"number": "6.0"}}')
             return mock.Mock(returncode=0, stderr='')
-        with mock.patch('cveFeed.wpscan_scan.subprocess.run', side_effect=fake_run):
+        with mock.patch('cveFeed.heavy_process.run', side_effect=fake_run):
             wpscan_scan.run_wpscan_process('https://www.rt.test/', '', thorough=True)
-        self.assertEqual(seen['timeout'], wpscan_scan.thorough_timeout())
+        self.assertEqual((seen['kind'], seen['timeout']), ('wpscan', wpscan_scan.thorough_timeout()))  # S04-8: it runs under the resource gate
         self.assertIn('mixed', seen['cmd'])
-        with mock.patch('cveFeed.wpscan_scan.subprocess.run', side_effect=fake_run):
+        with mock.patch('cveFeed.heavy_process.run', side_effect=fake_run):
             wpscan_scan.run_wpscan_process('https://www.rt.test/', '')
         self.assertEqual(seen['timeout'], wpscan_scan.wpscan_timeout())
         self.assertNotIn('mixed', seen['cmd'][seen['cmd'].index('--plugins-detection') + 1])

@@ -24,11 +24,13 @@ The bug bounty page is available to App Admins and to users an App Admin authori
 1. The tenancy middleware works out which projects the user may see on every request.
 2. The default queryset of the main project-owned models (`SCOPES` in `tenancy/scope.py`) is filtered to those projects, for views, lookups by id, and templates. Child rows such as ports are reached through their scoped host.
 3. A project the user cannot see returns 404, the same as one that does not exist.
-4. Roles are checked per project before the view runs. The agent API checks them in its service layer.
+4. Roles are checked per project before the view runs, when the project is in the address or query string. A route that names its project only in the body or by an object id is checked against the user's best role anywhere, so its handler must check the role again for the project it resolves (the agent API does, in its service layer).
 5. Targets and IP rows (with their ports) belong to an organization. Two organizations can track the same name separately, and within one a name is held once across its projects. Host exclusions, organization API keys, and the two-step policy are organization wide.
 6. The slug `_all` is reserved. It is the read-only combined view over every project the user can see, and writes on it return 400.
 
-Background tasks and management commands run unscoped. When a model gains a project owner, add it to `SCOPES`.
+**Scan files (`/media/...`).** Screenshots and other scan artifacts are served by an authenticated view and nginx's internal redirect, never straight from the volume. A user who is not an App Admin gets a file only from the `<domain>_<scan id>/` folder of a scan in a project they can see; anything else answers 404, the same as a missing file. Behaviour change: a bare `<domain>/` folder (the layout of the upstream project, which cvENGINE never writes) used to be served to anyone who could see a target of that name and is now served to App Admins only, because it is not tied to a scan and so cannot be attributed to a project. Files created by an older upstream-style install under such a folder need an App Admin, or moving into a `<domain>_<scan id>/` folder.
+
+Background tasks and management commands run unscoped. When a model gains a project owner, add it to `SCOPES`, or to `UNSCOPED` in the same file with the reason; `tests/test_sentinel_hardening.py` fails for a model with a project, domain, scan or organization owner that is in neither. Sentinel tasks, stored sign-ins, finding comments and audit events, internal ranges, project settings and the like are scoped; an organization's own API credentials (no project) stay visible to the organization.
 
 ## Two-step sign-in
 

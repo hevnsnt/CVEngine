@@ -16,7 +16,7 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
 * **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view.
 * **Scanner findings**: open findings of low severity or worse (informational detections and closed findings excluded). The
   Findings page, Scanner type, Actionable status, shows the same set.
-* **Scans running**: scans marked running that started within ``RUNNING_WINDOW``. An older one is stalled (a casualty of a
+* **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
 * **Certs expiring**: certificates that expire within 30 days, including those already expired.
 * **Oldest open**: the age in whole days of the longest-open critical or high item among the exposed CVE matches, actionable scanner
@@ -27,8 +27,7 @@ from datetime import timedelta
 from django.db.models import Q
 from django.utils import timezone
 
-# discovery (6h cap) + nuclei (4h cap) + slack; see discovery.py
-RUNNING_WINDOW = timedelta(hours=11)
+RUNNING_WINDOW_SLACK = timedelta(hours=1)
 CERT_WARNING_DAYS = 30
 RULED_OUT = 'not_affected'  # the AI verdict that takes a CVE match off every list of exposure
 CLOSED = ('fixed', 'accepted_risk')  # remediation states that do the same: someone dealt with the finding or decided to live with it
@@ -47,10 +46,27 @@ def finding_is_live(finding):
 LIVE_HOST_Q = Q(ip_addresses__isnull=False) | Q(http_status__gt=0)
 
 
+def running_window():
+    """How long a scan may be marked running before it counts as a restart casualty: the configured discovery and nuclei timeouts
+    (Settings, Timings, up to 48 h and 24 h) plus an hour of slack, 11 h with the shipped timeouts. Read live, like the workers do."""
+    try:
+        from dashboard.models import SystemTimings
+        t = SystemTimings.current()
+        return timedelta(hours=t.discovery_timeout_hours + t.nuclei_timeout_hours) + RUNNING_WINDOW_SLACK
+    except Exception:  # noqa: BLE001 - a counting helper never fails on a settings lookup
+        return timedelta(hours=11)
+
+
+def __getattr__(name):
+    if name == 'RUNNING_WINDOW':  # older importers read the window as an attribute; it is no longer a constant
+        return running_window()
+    raise AttributeError(name)
+
+
 def running_scans(qs=None):
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - RUNNING_WINDOW)
+    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - running_window())
 
 
 BACKGROUND_WINDOW = timedelta(hours=3)  # a "running" activity line older than this is a casualty of a restart, not work in progress
@@ -66,14 +82,16 @@ def background_running(now=None):
     under_a_running_scan = list(running_scans().values_list("id", flat=True))
     qs = AgentActivity.objects.filter(status="running", kind__in=BACKGROUND_KINDS, created_at__gte=now - BACKGROUND_WINDOW)
     if under_a_running_scan:
-        qs = qs.exclude(pk__in=AgentActivity.objects.filter(detail__scan_id__in=under_a_running_scan).values("pk"))  # a missing key is not "in": filter first, then exclude by id
+        # a missing key is not "in": filter first, then exclude by id. The inner query repeats the status, kind and age bounds (the lines it
+        # can exclude are a subset of them) so it never reads the whole 30-day activity table on every stats poll
+        qs = qs.exclude(pk__in=qs.filter(detail__scan_id__in=under_a_running_scan).values("pk"))
     return qs
 
 
 def stalled_scans(qs=None):
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__lt=timezone.now() - RUNNING_WINDOW)
+    return qs.filter(scan_status=1, start_scan_date__lt=timezone.now() - running_window())
 
 
 def queued_scans(qs=None):
@@ -126,13 +144,16 @@ def host_siblings(sub_ids):
     return out
 
 
-def exposed_among(reps):
+def exposed_among(reps, project_ids=None):
     """The hosts of ``reps`` (one row each, see ``host_reps``) that are exposed. A host is exposed when any of its names is, so a
-    finding on ``www`` exposes the host whose row is ``example.com``."""
+    finding on ``www`` exposes the host whose row is ``example.com``. ``project_ids``: the projects ``reps`` is drawn from, so the
+    exposed set is not built over every other project's hosts too (a host's key and name never cross projects, so the answer is the same)."""
     from django.db.models import Exists, OuterRef
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     exposed = Subdomain.objects.filter(latest_scan_q()).filter(exposure_filter())
+    if project_ids is not None:
+        exposed = exposed.filter(target_domain__project_id__in=list(project_ids))
     same_name = Exists(exposed.filter(name=OuterRef('name'), target_domain__project_id=OuterRef('target_domain__project_id')))
     return with_host_key(reps).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(same_name))
 
@@ -182,6 +203,12 @@ def actionable_findings(qs):
     return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
 
 
+def actionable_hygiene(qs, severity=1):
+    """Open hygiene findings of ``severity`` or worse (low by default) that are not fixed or an accepted risk: the Findings page's
+    Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
+    return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
+
+
 def oldest_open(now=None):
     """How long the worst open thing has sat: ``{'days', 'kind', 'id'}`` for the oldest open, actionable item of critical or high severity
     across the three sources, or ``{'days': None, 'kind': None, 'id': None}`` when none qualifies. Each source keeps its own definition
@@ -220,8 +247,7 @@ def oldest_open(now=None):
            .filter(first__isnull=False).order_by('first').values('id', 'first').first())
     if row:
         consider('scanner', row['first'], row['id'])
-    row = (HygieneFinding.objects.filter(status='open', severity__gte=3).exclude(remediation_status__in=CLOSED).order_by('first_seen')
-           .values('id', 'first_seen').first())
+    row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen').values('id', 'first_seen').first()
     if row:
         consider('hygiene', row['first_seen'], row['id'])
     if best['at'] is None:

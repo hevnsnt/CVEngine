@@ -207,7 +207,7 @@ class InternalClaimTests(World):
             reset_rates({'t': token})
             status, out = call(token, 'PUT', '/api/v1/sentinel', {'name': name, 'scope': {'projects': ['ir-a']}, 'capabilities': capabilities})
             self.assertIn(status, (200, 201), out)
-            Agent.objects.filter(pk=out['id']).update(status='active')
+            Agent.objects.filter(pk=out['id']).update(status='active', network='internal' if 'network:internal' in capabilities else 'external')
             return token, out['id']
         self.outside = sentinel('outside', ['nmap'])
         self.inside = sentinel('inside', ['nmap', 'network:internal'])

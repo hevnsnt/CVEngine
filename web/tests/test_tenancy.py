@@ -58,6 +58,22 @@ class RuleTests(TestCase):
 		self.assertIsNotNone(ok('admin', 'GET', '/proj/admin_interface/'))  # superuser only
 		self.assertIsNone(ok('admin', 'GET', '/proj/admin_interface/', is_superuser=True))
 
+	def test_a_project_slug_that_starts_like_a_reserved_route_is_not_that_route(self):
+		ok = roles.check_access
+		for slug in ('settings-team', 'setup-corp', 'welcome-pack', 'hackerone-team', 'bountyhub'):
+			self.assertIsNone(ok('user', 'GET', f'/cve/{slug}/hosts/'), slug)
+			self.assertIsNone(ok('user', 'GET', f'/cve/api/{slug}/hosts'), slug)
+		for path in ('/cve/settings/', '/cve/settings', '/cve/setup/', '/cve/api/setup/save', '/cve/api/settings/x', '/cve/welcome/', '/cve/api/welcome/x'):
+			self.assertIsNotNone(ok('admin', 'GET', path), path)  # the real routes stay superuser only
+
+	def test_a_project_called_account_does_not_skip_the_forced_password_change(self):
+		from tenancy.middleware import TenancyMiddleware
+		exempt = TenancyMiddleware.EXEMPT_FROM_PASSWORD_CHANGE
+		for path in ('/cve/account/', '/cve/account', '/cve/api/account/mfa', '/logout/', '/mfa/verify/', '/staticfiles/x.css'):
+			self.assertTrue(exempt.match(path), path)
+		for path in ('/cve/account-team/hosts/', '/cve/accounting/', '/logout-x/', '/mfaa/'):
+			self.assertFalse(exempt.match(path), path)
+
 
 class IsolationTests(TestCase):
 	@classmethod
@@ -291,6 +307,13 @@ class MfaFlowTests(TestCase):
 		self.assertEqual(r.status_code, 429)
 		self.profile.refresh_from_db()
 		self.assertTrue(self.profile.mfa_enabled)
+		from dashboard.models import AuditLog
+		self.assertEqual(AuditLog.objects.filter(action='account.mfa_locked').count(), 1)  # kept, not rolled back with the wrong code
+
+	def test_account_json_helpers_answer_400_for_a_body_that_is_not_utf8(self):
+		c = client_for(self.user)
+		self.assertEqual(c.patch('/cve/api/account/profile', b'\xff{', content_type='application/json').status_code, 400)
+		self.assertEqual(c.post('/cve/api/account/mfa/disable', b'\xff{', content_type='application/json').status_code, 400)
 
 	def test_old_mfa_pages_forward_to_my_account(self):
 		c = client_for(self.user)

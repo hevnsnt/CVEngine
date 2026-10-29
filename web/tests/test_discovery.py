@@ -622,6 +622,25 @@ class OneDiscoveryPerTargetTests(TestCase):
 		self.assertIn('already running', ScanHistory.objects.get(pk=other.id).error_message)
 
 
+class RedeliveredDiscoveryTests(TestCase):
+	"""A message the queue gives back after a worker died finds the dead worker's lock still held: it asks again later instead of being acked."""
+
+	def test_a_duplicate_for_the_same_scan_is_asked_again_after_the_lock_would_have_expired(self):
+		from celery.exceptions import Retry
+		from cveFeed.tasks import DUPLICATE_RETRIES, run_bbot_discovery
+		task = run_bbot_discovery._get_current_object()
+		task.push_request(id='abc', retries=0, called_directly=False)
+		self.addCleanup(task.pop_request)
+		with mock.patch('cveFeed.discovery.run_pipeline', return_value={'scan_id': 7, 'status': 'duplicate'}), mock.patch('startScan.models.ScanHistory.objects'):
+			with mock.patch.object(task, 'retry', side_effect=Retry()) as retry:
+				with self.assertRaises(Retry):
+					task.run(7)
+			retry.assert_called_once_with(countdown=discovery.LOCK_TTL + 15, max_retries=DUPLICATE_RETRIES)
+			task.request.retries = DUPLICATE_RETRIES  # it kept finding the lock: a live twin, so the message is let go
+			with mock.patch.object(task, 'retry', side_effect=AssertionError('retried forever')):
+				self.assertEqual(task.run(7)['status'], 'duplicate')
+
+
 class NucleiLedgerTests(TestCase):
 	"""Nuclei runs once per host per project inside its TTL; a repeat scan reuses the findings instead."""
 

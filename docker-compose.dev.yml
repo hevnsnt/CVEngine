@@ -34,6 +34,8 @@ services:
     build:
       context: ./web
     restart: always
+    init: true  # tini as PID 1; the entrypoint turns SIGTERM into a warm worker shutdown and exits when a worker dies (see docker-compose.yml)
+    stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
     # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/reNgine/" -- celery -A reNgine.tasks worker --autoscale=10,0 -l INFO
     volumes:

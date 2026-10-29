@@ -83,6 +83,20 @@ class CheckRedisTests(SimpleTestCase):
 		with mock.patch.dict('sys.modules', {'redis': fake_redis}):
 			self.assertFalse(dbx.check_redis('h', 6379))
 
+	def test_a_protected_mode_or_any_other_error_reply_is_not_an_exposed_redis(self):
+		"""S04-5: only an unauthenticated PING that succeeds counts."""
+		for message in ('DENIED Redis is running in protected mode because protected mode is enabled', 'LOADING Redis is loading the dataset in memory',
+				'ERR unknown command'):
+			fake_redis = mock.Mock()
+
+			class ResponseError(Exception):
+				pass
+			fake_redis.AuthenticationError = type('AuthenticationError', (Exception,), {})
+			fake_redis.ResponseError = ResponseError
+			fake_redis.Redis.return_value.ping.side_effect = ResponseError(message)
+			with mock.patch.dict('sys.modules', {'redis': fake_redis}):
+				self.assertFalse(dbx.check_redis('h', 6379), message)
+
 	def test_authentication_error_means_not_open(self):
 		fake_redis = mock.Mock()
 		auth_err = type('AuthenticationError', (Exception,), {})
@@ -168,23 +182,23 @@ def _streamed(status, body=b'', chunks=None):
 
 class CheckHttpBackedServicesTests(SimpleTestCase):
 	def test_elasticsearch_open_root_endpoint(self):
-		with mock.patch('requests.get', return_value=_streamed(200, b'{"cluster_name": "x"}')):
+		with mock.patch('requests.Session.get', return_value=_streamed(200, b'{"cluster_name": "x"}')):
 			self.assertTrue(dbx.check_elasticsearch('h', 9200))
 
 	def test_elasticsearch_401_means_not_open(self):
-		with mock.patch('requests.get', return_value=_streamed(401)):
+		with mock.patch('requests.Session.get', return_value=_streamed(401)):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 
 	def test_couchdb_admin_party_all_dbs_listable(self):
-		with mock.patch('requests.get', return_value=_streamed(200, b'["_users", "secrets"]')):
+		with mock.patch('requests.Session.get', return_value=_streamed(200, b'["_users", "secrets"]')):
 			self.assertTrue(dbx.check_couchdb('h', 5984))
 
 	def test_couchdb_401_means_not_open(self):
-		with mock.patch('requests.get', return_value=_streamed(401)):
+		with mock.patch('requests.Session.get', return_value=_streamed(401)):
 			self.assertFalse(dbx.check_couchdb('h', 5984))
 
 	def test_network_errors_mean_not_open_not_a_crash(self):
-		with mock.patch('requests.get', side_effect=OSError('refused')):
+		with mock.patch('requests.Session.get', side_effect=OSError('refused')):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 			self.assertFalse(dbx.check_couchdb('h', 5984))
 
@@ -195,7 +209,7 @@ class CheckHttpBackedServicesTests(SimpleTestCase):
 			while True:
 				read.append(1)
 				yield b'x' * 4096
-		with mock.patch('requests.get', return_value=_streamed(200, chunks=endless())):
+		with mock.patch('requests.Session.get', return_value=_streamed(200, chunks=endless())):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 		self.assertLessEqual(len(read), dbx.MAX_BODY_BYTES // 4096 + 1)
 
@@ -203,12 +217,39 @@ class CheckHttpBackedServicesTests(SimpleTestCase):
 		def slow():
 			yield b'{"cluster_name": '
 			yield b'"x"}'
-		with mock.patch('requests.get', return_value=_streamed(200, chunks=slow())), \
+		with mock.patch('requests.Session.get', return_value=_streamed(200, chunks=slow())), \
 				mock.patch.object(dbx, 'TOTAL_SECONDS', -1):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 
+	def test_a_server_that_drips_is_cut_off_by_the_wall_clock_not_by_the_chunk_size(self):
+		"""S04-6: a read of n bytes blocks until n arrive; here each byte takes 2.9 s, so only a one-byte read lets the deadline fire in time."""
+		clock = [0.0]
+
+		def drip(size):
+			while True:
+				clock[0] += 2.9 * size  # the server sends one byte per 2.9 s: a read of ``size`` bytes waits that many of them
+				yield b'x' * size
+		resp = _streamed(200)
+		resp.iter_content.side_effect = drip
+		with mock.patch('requests.Session.get', return_value=resp), mock.patch('time.monotonic', side_effect=lambda: clock[0]):
+			self.assertFalse(dbx.check_elasticsearch('h', 9200))
+		self.assertLessEqual(clock[0], dbx.TOTAL_SECONDS + dbx.CONNECT_TIMEOUT)
+
+	def test_the_environment_proxy_is_not_used_and_an_ipv6_host_is_bracketed(self):
+		urls, trust = [], []
+
+		def fake_get(self, url, **kw):
+			urls.append(url)
+			trust.append(self.trust_env)
+			return _streamed(200, b'{"cluster_name": "x"}')
+		with mock.patch('requests.Session.get', fake_get):
+			self.assertTrue(dbx.check_elasticsearch('2001:db8::1', 9200))
+			self.assertTrue(dbx.check_elasticsearch('203.0.113.5', 9200))
+		self.assertEqual(urls, ['http://[2001:db8::1]:9200/', 'http://203.0.113.5:9200/'])
+		self.assertEqual(trust, [False, False])
+
 	def test_a_non_json_body_is_not_an_open_server(self):
-		with mock.patch('requests.get', return_value=_streamed(200, b'<html>welcome</html>')):
+		with mock.patch('requests.Session.get', return_value=_streamed(200, b'<html>welcome</html>')):
 			self.assertFalse(dbx.check_elasticsearch('h', 9200))
 			self.assertFalse(dbx.check_couchdb('h', 5984))
 

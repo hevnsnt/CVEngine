@@ -27,12 +27,30 @@ def _error(status, message):
     return SettingsError(status, message)
 
 
+def apply_choice(link, flag):
+    """A person's tick or untick of one project. Ticked: the project's own opt-in, or just back under its organization's when that covers it.
+    Unticked while the organization covers the project: an explicit exclusion, which wins over the organization (the page showed the project as
+    scanned, and the person said no); otherwise simply off."""
+    from cveFeed.models import OpenvasOrg
+    covered = OpenvasOrg.objects.filter(org_id=link.project.org_id, enabled=True).exists()
+    if flag:
+        link.excluded = False
+        link.enabled = link.enabled or not covered
+    else:
+        link.enabled, link.excluded = False, covered
+
+
+def effective(link, org_enabled):
+    """Whether the sweep scans this project: its own opt-in, or its organization's unless the project was excluded (as ``openvas_scan.sweep_links``)."""
+    return bool(link and link.enabled) or (org_enabled and not (link and link.excluded))
+
+
 def link_dict(link):
     """One project's opt-in as the settings page sees it."""
     from cveFeed.models import OpenvasRun
     last = OpenvasRun.objects.filter(project=link.project).order_by('-id').first()
     return {
-        'project': {'id': link.project_id, 'name': link.project.name, 'slug': link.project.slug}, 'enabled': link.enabled, 'hosts': list(link.hosts or []), 'forced_hosts': list(link.forced_hosts or []),
+        'project': {'id': link.project_id, 'name': link.project.name, 'slug': link.project.slug}, 'enabled': link.enabled, 'excluded': link.excluded, 'hosts': list(link.hosts or []), 'forced_hosts': list(link.forced_hosts or []),
         'last_run': ({'status': last.status, 'gvm_status': last.gvm_status, 'progress': last.progress, 'error': last.error, 'summary': last.summary,
                       'started_at': last.started_at.isoformat(), 'finished_at': last.finished_at.isoformat() if last.finished_at else None}
                      if last else None),
@@ -44,7 +62,7 @@ def sentinel_readiness():
     ``openvas`` capability (a Sentinel declares it only while its own GVM stack can scan); ``reason`` is what its GVM stack says when it is not
     ready (still syncing its feeds, no scan configuration, no login), or why this Sentinel does not scan (a light profile, a disabled kind)."""
     from agentapi.models import Agent
-    from agentapi.sentinel_broker import INTERNAL_CAPABILITY, SentinelEff
+    from agentapi.sentinel_broker import INTERNAL_CAPABILITY, SentinelEff, effective_capabilities
     from django.utils import timezone
     now = timezone.now()
     out = []
@@ -60,7 +78,7 @@ def sentinel_readiness():
             reason = ''
         else:
             reason = reported.get('reason') or ('its profile is light, or OpenVAS is turned off on it' if not reported else 'not ready')
-        out.append({'id': agent.pk, 'name': agent.name, 'live': bool(eff.live), 'internal': INTERNAL_CAPABILITY in (agent.capabilities or []),
+        out.append({'id': agent.pk, 'name': agent.name, 'live': bool(eff.live), 'internal': INTERNAL_CAPABILITY in effective_capabilities(agent),
                     'declares': declares, 'ready': bool(eff.live and declares and agent.status == 'active'), 'reason': clean_text(reason, 200)})
     return out
 
@@ -192,7 +210,7 @@ def project_put(request, project_id):
     link.hosts = _hosts(data, project, link.hosts or [])
     link.forced_hosts = [h for h in _hosts(data, project, link.forced_hosts or [], 'forced_hosts')]
     if 'enabled' in data:
-        link.enabled = bool(data['enabled'])
+        apply_choice(link, bool(data['enabled']))
     link.updated_by = request.user
     link.save()
     audit(request.user, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled, hosts=len(link.hosts),
@@ -341,9 +359,12 @@ def admin_get(request, actor):
     links = {l.project_id: l for l in OpenvasProject.objects.filter(project__org_id__in=managed).select_related('project')}
     groups = []
     for org in Org.objects.filter(pk__in=managed).order_by('name'):
-        projects = [{'id': p.id, 'name': p.name, 'enabled': bool(links.get(p.id) and links[p.id].enabled), 'last_run': _last_run(p.id)}
+        covered = bool(org_on.get(org.pk))
+        # ``enabled`` is what the sweep does (the project's own opt-in, or its organization's unless excluded); ``via_org`` says which.
+        projects = [{'id': p.id, 'name': p.name, 'enabled': effective(links.get(p.id), covered), 'via_org': covered and not (links.get(p.id) and links[p.id].enabled)
+                     and not (links.get(p.id) and links[p.id].excluded), 'excluded': bool(links.get(p.id) and links[p.id].excluded), 'last_run': _last_run(p.id)}
                     for p in Project.objects.filter(org_id=org.pk).order_by('name')]
-        groups.append({'id': org.pk, 'name': org.name, 'enabled': bool(org_on.get(org.pk)), 'projects': projects})
+        groups.append({'id': org.pk, 'name': org.name, 'enabled': covered, 'projects': projects})
     return {'engine': {'enabled': row.enabled, 'sentinel_only': row.sentinel_only, 'can_switch': actor.is_superuser, **engine_status(row)},
             'orgs': groups, 'who': 'app_admin' if actor.is_superuser else 'org_admin'}
 
@@ -415,9 +436,10 @@ def admin_put(request, actor):
     for pid, flag in projects.items():
         project = found[pid]
         link = OpenvasProject.objects.filter(project=project).first() or OpenvasProject(project=project)
-        link.enabled, link.updated_by = flag, actor
+        apply_choice(link, flag)
+        link.updated_by = actor
         link.save()
-        audit(actor, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled)
+        audit(actor, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled, excluded=link.excluded)
     if 'sentinel_only' in data:
         # Applied before _engine() below: a single request that both switches the engine on and sets sentinel_only
         # must never ask the host to start the local containers, which it would if _engine() read the old value.

@@ -59,6 +59,15 @@ class ScannableHostsTests(unittest.TestCase):
 		self.assertEqual([bare_host(v) for v in ('a.test', 'a.test:8443', 'https://A.test:8443/p', '[::1]:443', '203.0.113.5:22')],
 			['a.test', 'a.test', 'a.test', '::1', '203.0.113.5'])
 
+	def test_userinfo_query_and_fragment_do_not_hide_the_real_host(self):
+		self.assertEqual([bare_host(v) for v in ('http://u@169.254.169.254/x', 'u:p@127.0.0.1:80', 'http://127.0.0.1?x', 'https://a.test#f',
+												 'http://u:p@[::1]:8080/p', 'http://a.test?next=http://b.test/')],
+			['169.254.169.254', '127.0.0.1', '127.0.0.1', 'a.test', '::1', 'a.test'])
+		hostile = ['http://u@169.254.169.254/x', 'u:p@127.0.0.1:80', 'http://127.0.0.1?x', 'http://127.0.0.1#x', 'http://127.0.0.1\\@ok.test/',
+				   'http://ok.test\\@127.0.0.1/', 'http://exa mple.test/', 'http://ok.test%00.evil/']
+		self.assertEqual(scannable_hosts(hostile, resolver=lambda h: False), [])
+		self.assertEqual(scannable_hosts(['https://u@ok.test/x?y=1#z', 'ok.test:8443'], resolver=blocked_by_name), ['https://u@ok.test/x?y=1#z', 'ok.test:8443'])
+
 
 class ScannerTargetFilterTests(TestCase):
 	"""Every path that aims a scanner at a stored host list goes through the filter."""

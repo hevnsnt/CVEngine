@@ -325,14 +325,15 @@ def reconcile(data, since=None, now=None, chunk=2000):
         qs = qs.filter(created_at__gte=since)
     updated, changed_ids, last = 0, [], 0
     while True:
-        rows = list(qs.filter(id__gt=last).values("id", "cve_id", "kev", "epss_reached", "exploit_db", "intel", "raw__exploitation")[:chunk])
+        rows = list(qs.filter(id__gt=last).values("id", "cve_id", "kev", "epss_reached", "exploit_db", "intel")[:chunk])
         if not rows:
             return updated, changed_ids
         last = rows[-1]["id"]
         batch = []
         for r in rows:
             intel = intel_for(r["cve_id"].upper(), data)
-            kev, epss_reached, exploit_db = merged_flags(r["raw__exploitation"], intel)
+            # the stored flags are what cve.now last said (from_api writes them), so they are the baseline the sources add to
+            kev, epss_reached, exploit_db = merged_flags({"kev": r["kev"], "epssReached": r["epss_reached"], "exploitDb": r["exploit_db"]}, intel)
             flags_moved = (kev, epss_reached, exploit_db) != (r["kev"], r["epss_reached"], r["exploit_db"])
             if not flags_moved and intel == (r["intel"] or {}):
                 continue
@@ -415,8 +416,12 @@ def _next_branch(base):
 
 
 _VER = r"v?(\d[0-9A-Za-z.+~-]*)"
+# a dash is a range only between two dotted versions and with spaces around a plain hyphen: "2.4.1-1" is a Debian-style revision and
+# "4.0.0-beta-1" a pre-release, not the range 2.4.1 to 1
+_VERD = r"v?(\d+\.[0-9A-Za-z.+~-]*)"
 _TEXT_RANGES = (
-    (re.compile(rf"^{_VER}\s*(?:through|thru|to|-|\u2013|\u2014)\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
+    (re.compile(rf"^{_VER}\s*(?:through|thru|to)\s*{_VER}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
+    (re.compile(rf"^{_VERD}(?:\s+-\s+|\s*[\u2013\u2014]\s*){_VERD}$", re.I), lambda m: {"introduced": m.group(1), "lastAffected": m.group(2)}),
     (re.compile(rf"^{_VER}\s*(?:and|or)\s*(?:earlier|prior|below|before|lower|older)$", re.I), lambda m: {"lastAffected": m.group(1)}),
     (re.compile(rf"^{_VER}\s*(?:and|or)\s*(?:later|above|newer|higher|after)$|^{_VER}\+$", re.I),
      lambda m: {"introduced": m.group(1) or m.group(2)}),
@@ -539,8 +544,7 @@ def entry_from_cve5(doc, intel):
     return {"title": _clean(cna.get("title") or kev_name or description[:150], 500), "original_description": _clean(description, 20000),
             "cvss": cvss, "cvss_vector": vector, "stated_severity": severity, "affected": affected,
             "references": [r["url"] for r in cna.get("references") or [] if isinstance(r, dict) and str(r.get("url", "")).startswith("http")][:60],
-            "status": "PUBLISHED", "published_at": published, "first_seen_at": published,
-            "raw": {"source": "cve-list-v5", "exploitation": {}}}
+            "status": "PUBLISHED", "published_at": published, "first_seen_at": published}
 
 
 def import_missing(data, limit, now=None, get=None, workers=8):

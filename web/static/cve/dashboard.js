@@ -20,11 +20,23 @@ const el = (tag, cls, text, attrs = {}) => {
   Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v));
   return n;
 };
+let failures = 0; // requests in a row that failed: the pollers wait longer between rounds while the server is not answering
 const get = (url) =>
-  fetch(url, { credentials: "same-origin" }).then((r) => {
-    if (!r.ok) throw new Error(r.status);
-    return r.json();
-  });
+  fetch(url, { credentials: "same-origin" })
+    .then((r) => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    })
+    .then(
+      (d) => {
+        failures = 0;
+        return d;
+      },
+      (err) => {
+        failures += 1;
+        throw err;
+      },
+    );
 const post = (url, body) =>
   fetch(url, {
     method: "POST",
@@ -119,6 +131,7 @@ async function paintCoverage() {
   try {
     const r = await get(`/api/v1/projects/${encodeURIComponent(slug || "_all")}/search?q=&page_size=1`);
     const heat = (r.facets && r.facets.heat) || {};
+    const capped = Boolean(r.facets && r.facets.truncated); // the server counts at most its first 5000 hosts
     const all = Object.values(heat).reduce((n, v) => n + v, 0);
     // a host with no address a scanner can use has nothing to scan: it is counted apart, not as work that was neglected
     const u = (r.facets && r.facets.unscannable) || {};
@@ -126,9 +139,10 @@ async function paintCoverage() {
     const total = all - noAddress;
     const never = Math.max(0, (heat.unscanned || 0) - noAddress);
     if (!all) return;
-    $("s-coverage").textContent = total ? `${Math.round((100 * (total - never)) / total)}%` : "100%";
+    $("s-coverage").textContent = `${capped ? "~" : ""}${total ? Math.round((100 * (total - never)) / total) : 100}%`;
     const parts = [];
     parts.push(never ? `${never} of ${total} hosts never scanned` : `all ${total} hosts scanned`);
+    if (capped) parts.push(`approximate: only the first ${all} hosts are counted`);
     if (noAddress) {
       const why = [u.private ? `${u.private} point inside a private network` : "", u.no_dns ? `${u.no_dns} have no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
       parts.push(`${noAddress} with no address to scan (${why})`);
@@ -608,6 +622,7 @@ async function pollGraph() {
     $("d-empty").style.display = graphNodeCount ? "none" : "";
     drawMap(g.nodes);
   } catch (_) {
+    failures += 1;
     setOnline(false);
   }
 }
@@ -831,15 +846,26 @@ async function pollFeed() {
 }
 
 // Each poller re-arms itself when its request finishes, instead of firing from setInterval: when the server is busy
-// with scans several requests were in flight with the same cursor, and each one drew the same lines again.
+// with scans several requests were in flight with the same cursor, and each one drew the same lines again. A hidden tab does not
+// poll (visibilitychange starts the loop again), and the wait doubles, up to 16 times, while requests keep failing.
 const every = (fn, ms) => {
+  let timer = 0;
+  let busy = false;
   const tick = async () => {
+    if (document.hidden || busy) return;
+    busy = true;
     try {
       await fn();
     } finally {
-      setTimeout(tick, ms);
+      busy = false;
+      timer = setTimeout(tick, ms * 2 ** Math.min(failures, 4));
     }
   };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    clearTimeout(timer);
+    tick();
+  });
   tick();
 };
 every(pollStats, 6000);
@@ -877,19 +903,25 @@ every(pollFeed, 6000);
   const TIERS = ["fire", "smoke", "ice"];
   const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
   const PAGES = 5;
+  // rows: what was fetched; total: what the project has (the findings list is hottest first, so a cut-off one is not the newest)
   const collect = async (path) => {
     const rows = [];
+    let total = 0;
     for (let page = 1; page <= PAGES; page += 1) {
       const sep = path.includes("?") ? "&" : "?";
       const data = await get(`${base}/${path}${sep}page=${page}&page_size=200`);
       const got = data.results || [];
       rows.push(...got);
+      total = data.total ?? data.count ?? rows.length;
       if (got.length < 200) break;
     }
-    return rows;
+    return { rows, total };
   };
   try {
-    const [findings, changes] = await Promise.all([collect("findings?status=all"), collect("changes?since=365d")]);
+    const [found, changed] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
+    const findings = found.rows;
+    const changes = changed.rows;
+    const cutFindings = found.total > findings.length;
     const section = $("trends");
     if (!findings.length && !changes.length) return;
     const tierOf = (f) => {
@@ -906,13 +938,21 @@ every(pollFeed, 6000);
         ],
       }),
     );
+    // the list is ordered by heat, not by date: when it was cut, the counts are those of the hottest findings only, and say so
+    if (cutFindings) {
+      section.append(el("p", "note", `New findings counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings, so recent low-severity ones may be missing.`));
+    }
+    if (changed.total > changes.length) {
+      section.append(el("p", "note", `Inventory changes counts the newest ${changes.length.toLocaleString()} of ${changed.total.toLocaleString()} in the last 90 days.`));
+    }
     section.hidden = false;
     const spark = (anchorId, dates, label) => {
       const a = $(anchorId);
       if (!a || !dates.length) return;
       const values = dailyCounts(dates, 14).map((p) => p.v);
       const svg = sparkline(values);
-      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days`);
+      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days${cutFindings ? " among the hottest findings" : ""}`);
+      if (cutFindings) a.title = `Counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings`;
       a.append(svg, sr);
     };
     spark("n-matches", findings.filter((f) => f.type === "cve").map((f) => f.detected), "CVE matches");

@@ -46,7 +46,7 @@ def select_hosts(matches, max_hosts):
 def hot_cves_without_run(limit=CANDIDATE_LIMIT):
     """FIRE and SMOKE CVEs that have not fired yet, newest first, plus those whose only run ended in an error within the retry
     window (one failed run, say an AI outage, must not leave a CVE unchecked for good). The tier is decided by the database, and
-    only the columns correlation and the AI prompt read are loaded (never ``raw``)."""
+    only the columns correlation and the AI prompt read are loaded."""
     from django.db.models import Q
     from django.utils import timezone
 
@@ -101,7 +101,7 @@ def confirm_matches(matches, cve, provider=None):
 
 def fire_for_cve(cve, engine_id=None, max_hosts=DEFAULT_MAX_HOSTS, provider=None, test_dispatcher=dispatch_template_test,
                  correlated=False, leads=()):
-    """Correlate one CVE, AI-confirm, pick the hosts (at most ``max_hosts``), test them. Records an AutoFireRun.
+    """Correlate one CVE, AI-confirm, pick the hosts (at most ``max_hosts`` of each project), test them. Records an AutoFireRun.
 
     ``engine_id`` is kept so old callers still work; no scan is started, so it is ignored. With
     ``correlated=True`` the caller already ran ``correlate_hot_cves``, so the inventory is not walked again, and passes this CVE's
@@ -135,13 +135,19 @@ def fire_for_cve(cve, engine_id=None, max_hosts=DEFAULT_MAX_HOSTS, provider=None
             for m in matches if keep_match(m.ai_verdict, m.confidence, m.distro_status)]
         leads = lead_targets(leads)
         rows += [(domain_id, name, host, "", MIN_DETERMINISTIC_CONFIDENCE) for domain_id, name, host, _project in leads]
-        picked = select_hosts(rows, max_hosts)
-        targets = list(dict.fromkeys((domain_id, name) for domain_id, name, _ in picked))  # strongest domain first
-        if not targets:
-            run.status = "no_targets"
         project_of = {m.subdomain.target_domain_id: m.subdomain.target_domain.project_id
                       for m in matches if m.subdomain and m.subdomain.target_domain}
         project_of.update({domain_id: project for domain_id, _name, _host, project in leads})
+        # the cap is per project: one organization with many high-confidence hosts must not take every slot of the CVE
+        rows_of = {}
+        for row in rows:
+            rows_of.setdefault(project_of.get(row[0]), []).append(row)
+        picked = []
+        for project_id in sorted(rows_of, key=lambda p: (p is None, p or 0)):
+            picked += select_hosts(rows_of[project_id], max_hosts)
+        targets = list(dict.fromkeys((domain_id, name) for domain_id, name, _ in picked))
+        if not targets:
+            run.status = "no_targets"
         project_ids |= {project for *_rest, project in leads if project}
         hosts_of = {}
         for domain_id, _name, host in picked:

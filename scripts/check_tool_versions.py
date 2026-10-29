@@ -11,6 +11,7 @@ Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool i
 version cannot be read (the gate fails closed: a renamed pin or an unreachable site must not pass a release; the weekly report, which
 runs without the flag, shows such a row as "?" and never calls it behind). The weekly workflow (.github/workflows/tool-releases.yml) turns "behind" into an issue; the release workflows use --fail-if-behind."""
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -29,7 +30,13 @@ def pinned(path, pattern):
 
 
 def fetch(url, as_json=True):
-    request = urllib.request.Request(url, headers={'User-Agent': 'cvengine-tool-check', 'Accept': 'application/json, text/html'})
+    headers = {'User-Agent': 'cvengine-tool-check', 'Accept': 'application/json, text/html'}
+    # Unauthenticated, api.github.com allows 60 requests an hour per address, which shared CI runners use up: the lookup then reads as "unknown",
+    # and the gate (which fails closed) turns red for no reason. The token goes to GitHub's API and to nothing else.
+    token = os.environ.get('GITHUB_TOKEN', '')
+    if token and url.startswith('https://api.github.com/'):
+        headers['Authorization'] = 'Bearer ' + token
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - fixed https URLs below
         body = response.read(2_000_000).decode('utf-8', 'replace')
     return json.loads(body) if as_json else body

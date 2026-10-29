@@ -3,7 +3,7 @@ import { hostRow, previewHosts, suggestions, syntaxHelp } from "/staticfiles/cve
 // App shell behaviour: project switcher, mobile "More" sheet, account menu, and the jump palette (Ctrl/Cmd+K or "/").
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches"];
+const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "suppliers"];
 
 // Where the switcher sends you when the project changes. On the dashboard it stays on the dashboard
 // (bare /cve/ for the combined view, ?project= for one project); on a section page it keeps the section.

@@ -4,8 +4,9 @@ import markdown
 
 from html import escape
 
+from collections import Counter, defaultdict
 from datetime import datetime
-from django.db.models import Count, Case, When, IntegerField
+from django.db.models import Count, Case, When, IntegerField, Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.template.loader import get_template
@@ -18,6 +19,11 @@ from scanEngine.models import *
 from startScan.models import *
 from targetApp.models import *
 from startScan.report_resources import render_report_pdf
+
+# The report is rendered and converted to PDF inside the request, so the per-host and per-finding sections are cut at these
+# row counts (the totals, charts and summary tables still cover everything) and say so in the document.
+REPORT_MAX_HOSTS = 2000
+REPORT_MAX_FINDINGS = 2000
 
 
 def _text_download(lines, kind, scan):
@@ -105,17 +111,6 @@ def create_report(request, id):
         .filter(http_status__exact=200)
         .count()
     )
-    interesting_subdomains = get_interesting_subdomains(scan_history=id)
-    interesting_subdomains = interesting_subdomains.annotate(
-        sort_order=Case(
-            When(http_status__gte=200, http_status__lt=300, then=1),
-            When(http_status__gte=300, http_status__lt=400, then=2),
-            When(http_status__gte=400, http_status__lt=500, then=3),
-            default=4,
-            output_field=IntegerField(),
-        )
-    ).order_by('sort_order', 'http_status')
-
     subdomains = subdomains.annotate(
         sort_order=Case(
             When(http_status__gte=200, http_status__lt=300, then=1),
@@ -134,15 +129,36 @@ def create_report(request, id):
         .filter(ip_addresses__in=subdomains)
         .distinct()
     )
+    # One query each for the hosts (with their addresses and ports), the findings (with their ids and references) and the
+    # per-host finding names, instead of several queries per host and per finding while the template renders.
+    host_total = subdomains.count()
+    host_rows = list(subdomains.prefetch_related(Prefetch(
+        'ip_addresses', queryset=IpAddress.objects.select_related('geo_iso').prefetch_related('ports')))[:REPORT_MAX_HOSTS])
+    names_by_host, total_by_host = defaultdict(set), Counter()
+    per_host = (Vulnerability.objects.filter(scan_history=scan).order_by()
+                .values('subdomain__name', 'name', 'severity').annotate(n=Count('id')))
+    for row in per_host:
+        total_by_host[row['subdomain__name']] += row['n']
+        if row['severity'] != 0:
+            names_by_host[row['subdomain__name']].add(row['name'])
+    for host in host_rows:
+        host.report_vulnerability_names = sorted(names_by_host.get(host.name, ()))
+        host.report_vulnerability_count = total_by_host.get(host.name, 0)
+    ip_total = ip_addresses.count()
+    ip_rows = list(ip_addresses.order_by('address').select_related('geo_iso').prefetch_related('ports')[:REPORT_MAX_HOSTS])
+    vuln_total = vulns.count()
+    vuln_rows = list(vulns.prefetch_related('cve_ids', 'cwe_ids', 'references')[:REPORT_MAX_FINDINGS])
     data = {
         'scan_object': scan,
         'unique_vulnerabilities': unique_vulns,
-        'all_vulnerabilities': vulns,
-        'all_vulnerabilities_count': vulns.count(),
+        'all_vulnerabilities': vuln_rows,
+        'all_vulnerabilities_count': vuln_total,
+        'findings_cut': f'first {REPORT_MAX_FINDINGS} of {vuln_total} findings' if vuln_total > REPORT_MAX_FINDINGS else '',
         'subdomain_alive_count': subdomain_alive_count,
-        'interesting_subdomains': interesting_subdomains,
-        'subdomains': subdomains,
-        'ip_addresses': ip_addresses,
+        'subdomains': host_rows,
+        'hosts_cut': f'first {REPORT_MAX_HOSTS} of {host_total} hosts' if host_total > REPORT_MAX_HOSTS else '',
+        'ip_addresses': ip_rows,
+        'ip_addresses_count': ip_total,
         'show_recon': show_recon,
         'show_vuln': show_vuln,
         'report_name': report_name,
@@ -163,12 +179,12 @@ def create_report(request, id):
         data['show_executive_summary'] = report.show_executive_summary
 
         # Replace executive_summary_description with template syntax
-        description = report.executive_summary_description
+        description = report.executive_summary_description or ''  # both are nullable settings
         description = description.replace('{scan_date}', scan.start_scan_date.strftime('%d %B, %Y'))
-        description = description.replace('{company_name}', report.company_name)
+        description = description.replace('{company_name}', report.company_name or '')
         description = description.replace('{target_name}', scan.domain.name)
-        description = description.replace('{subdomain_count}', str(subdomains.count()))
-        description = description.replace('{vulnerability_count}', str(vulns.count()))
+        description = description.replace('{subdomain_count}', str(host_total))
+        description = description.replace('{vulnerability_count}', str(vuln_total))
         description = description.replace('{critical_count}', str(vulns.filter(severity=4).count()))
         description = description.replace('{high_count}', str(vulns.filter(severity=3).count()))
         description = description.replace('{medium_count}', str(vulns.filter(severity=2).count()))

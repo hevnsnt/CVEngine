@@ -84,12 +84,13 @@ function projectRow(org, project, save, on) {
   const id = `ov-p${project.id}`;
   const row = el("label", "ov-row", null, { for: id });
   const box = el("input", "", null, { type: "checkbox", id });
-  box.checked = org.enabled || project.enabled;
-  box.disabled = org.enabled || !on; // the organization choice covers it
+  box.checked = project.enabled; // what the sweep does: the project's own choice, or its organization's unless the project was unticked
+  box.disabled = !on;
   box.onchange = () => save({ projects: { [project.id]: box.checked } });
   const text = el("span", "ov-name");
   text.append(el("span", "", project.name));
-  if (org.enabled) text.append(el("span", "note", "covered by the organization"));
+  if (project.via_org) text.append(el("span", "note", "covered by the organization; untick to leave it out"));
+  else if (project.excluded && org.enabled) text.append(el("span", "note", "left out of the organization's scan"));
   else if (project.last_run) {
     const r = project.last_run;
     text.append(el("span", "note", r.error ? `last scan failed: ${r.error}` : `last scan ${r.status}${r.status === "running" ? ` (${r.progress}%)` : ""}`));

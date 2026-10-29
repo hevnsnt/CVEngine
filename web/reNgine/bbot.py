@@ -374,7 +374,14 @@ def private_config(extra_args):
 def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False, problems=None):
     """Run bbot and yield decoded JSON events as they arrive; API keys in ``extra_args`` reach bbot through a private temporary
     config file (see private_config), never through its command line. ``problems``, when given, collects ``(module, reason)`` for every
-    module bbot skipped at start-up. See _stream_events for the rest."""
+    module bbot skipped at start-up. See _stream_events for the rest.
+
+    Settings > Proxy (``cveFeed.egress_proxy``) is applied through bbot's own ``web.http_proxy`` setting, so the HTTP requests of its modules
+    go through it (the passive modules' calls to third-party services included: bbot cannot tell them apart). The proxy URL (it may carry a
+    login) travels in the same private config file as the API keys. bbot's DNS lookups and any module that is not HTTP are not proxied.
+    Raises ``ProxyUnavailable`` when the setting is on and no proxy suits bbot, rather than run it directly."""
+    from cveFeed import egress_proxy
+    extra_args = [*(extra_args or ()), *egress_proxy.for_tool('bbot')]
     with private_config(extra_args) as args:
         yield from _stream_events(targets, presets, mode, timeout, args, secrets=config_secrets(extra_args), strict_scope=strict_scope,
                                   problems=problems)

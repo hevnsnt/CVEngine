@@ -45,8 +45,10 @@ def publish(web_fd, name, chunks):
 def main():
     action = sys.argv[1]
     if action == 'directory':
+        # root (cron, systemd) in a checkout owned by whoever cloned it: git refuses it ("dubious ownership") unless this one is named. Root
+        # already runs this checkout's scripts, so naming it adds no trust.
         path = os.path.abspath(subprocess.check_output(
-            ['git', 'rev-parse', '--git-path', 'cvengine-update'], text=True).strip())
+            ['git', '-c', 'safe.directory=' + os.getcwd(), 'rev-parse', '--git-path', 'cvengine-update'], text=True).strip())
         web = os.path.realpath('web')
         if os.path.commonpath([os.path.realpath(path), web]) == web:
             raise ValueError('host update state cannot be inside the web mount')
@@ -142,6 +144,52 @@ def main():
         elif action == 'log':
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
                 publish(web_fd, '.update-log', iter(lambda: source.read(65536), b''))
+        elif action == 'openvas-wanted':
+            # the OpenVAS switch the app asked for: "on" or "off", nothing else, read without following a link the container may have planted
+            try:
+                with os.fdopen(regular_fd('.openvas-wanted', dir_fd=web_fd), 'rb') as source:
+                    value = source.read(8).strip()
+            except (FileNotFoundError, OSError, ValueError):
+                return
+            if value in (b'on', b'off'):
+                print(value.decode('ascii'))
+        elif action == 'openvas-applied':
+            # the answer scripts/openvas-sync.sh leaves for the app: one line of JSON, published like every other state file
+            row = json.loads(sys.argv[2])
+            if (not isinstance(row, dict) or row.get('want') not in ('on', 'off') or row.get('state') not in ('applying', 'ok', 'failed')
+                    or not isinstance(row.get('ok'), bool) or not isinstance(row.get('error'), str) or len(row['error']) > 200
+                    or not isinstance(row.get('at'), int)):
+                raise ValueError('invalid OpenVAS answer')
+            publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
+        elif action == 'openvas-log':
+            # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
+            with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
+                size = os.fstat(source.fileno()).st_size
+                source.seek(max(0, size - 65536))
+                publish(web_fd, '.openvas-log', [source.read(65536)])
+        elif action == 'cert-status':
+            # the outcome of scripts/renew-certs.sh for the app (Settings > Updates, get_system_status): result, the certificate's notAfter as
+            # openssl prints it ("Nov 30 00:33:02 2027 GMT", empty when unknown: the earlier value is kept) and an error line. renewed_at
+            # moves only when a certificate was issued.
+            import ssl
+            result = sys.argv[2]
+            raw = sys.argv[3] if len(sys.argv) > 3 else ''
+            error = sys.argv[4] if len(sys.argv) > 4 else ''
+            if result not in ('kept', 'issued', 'external', 'failed') or len(error) > 200 or len(raw) > 64:
+                raise ValueError('invalid certificate status')
+            try:
+                with os.fdopen(regular_fd('.cert-status.json', dir_fd=web_fd), 'rb') as source:
+                    previous = json.loads(source.read(4096))
+                if not isinstance(previous, dict):
+                    previous = {}
+            except (FileNotFoundError, OSError, ValueError):
+                previous = {}
+            now = time.time()
+            not_after = ssl.cert_time_to_seconds(raw) if raw else previous.get('not_after')
+            publish(web_fd, '.cert-status.json', [json.dumps({
+                'checked_at': now, 'result': result, 'error': error, 'not_after': not_after,
+                'renewed_at': now if result == 'issued' else previous.get('renewed_at'),
+            }).encode('utf-8')])
         elif action == 'phase':
             value = sys.argv[2]
             if value not in PHASE_VALUES:

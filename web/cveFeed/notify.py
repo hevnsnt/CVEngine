@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_SENDERS = {'discord': 'send_discord_message', 'slack': 'send_slack_message', 'lark': 'send_lark_message', 'telegram': 'send_telegram_message'}
 SAMPLE = 5  # names listed in a message; the count says the rest
+# the stored fields a channel needs before its sender does anything; a sender for a channel without them returns silently
+_CHANNEL_FIELDS = {'discord': ('discord_hook_url',), 'slack': ('slack_hook_url',), 'lark': ('lark_hook_url',),
+                   'telegram': ('telegram_bot_token', 'telegram_bot_chat_id')}
 _UNSAFE = re.compile(r'[^A-Za-z0-9.:_-]')
 
 
@@ -51,10 +54,15 @@ def enabled_channels():
         return []
 
 
+def _set_up(row, channel):
+    """True when the channel is switched on and has the address (or token) its sender needs."""
+    return bool(getattr(row, f'send_to_{channel}') and all(getattr(row, f) for f in _CHANNEL_FIELDS.get(channel, ())))
+
+
 def _send(text, flag, channels=()):
     """Send one message to every enabled channel (or only to those of ``channels``, which the Notification row must still have
-    on) when the Notification row allows this kind of event. Returns True when at least one channel took the message, False when no channel
-    was set up for this kind of event (nothing was tried), and None when channels were tried and every one failed."""
+    on and complete) when the Notification row allows this kind of event. Returns True when at least one channel took the message, False when
+    no channel was set up for this kind of event (nothing was tried), and None when channels were tried and every one failed."""
     try:
         row = _settings()
         if not (row and getattr(row, flag) and (row.send_to_slack or row.send_to_discord or row.send_to_telegram or row.send_to_lark)):
@@ -62,15 +70,15 @@ def _send(text, flag, channels=()):
         from reNgine import common_func
         sent = tried = 0
         for channel, name in CHANNEL_SENDERS.items():
-            if channels and channel not in channels:
-                continue
+            if (channels and channel not in channels) or not _set_up(row, channel):
+                continue  # a silent sender must not count as a delivery
             tried += 1
             try:
                 getattr(common_func, name)(text)
                 sent += 1
             except Exception as exc:  # noqa: BLE001 - one channel failing must not stop the others
                 logger.warning('notification via %s failed (%s)', name, type(exc).__name__)
-        return True if sent or not tried else None
+        return True if sent else (None if tried else False)
     except Exception as exc:  # noqa: BLE001 - notifications never break a scan or a feed sync
         logger.warning('notification failed (%s)', type(exc).__name__)
         return False
@@ -95,6 +103,7 @@ def fire_matches(since, scan=None, cve_ids=None):
     try:
         from django.db.models import Q
 
+        from cveFeed import match_policy
         from cveFeed.models import CVEEntry, CVEMatch
         from cveFeed.threat import fire_tier_q
         rows = CVEMatch.objects.filter(created_at__gte=since)
@@ -103,7 +112,7 @@ def fire_matches(since, scan=None, cve_ids=None):
             rows = rows.filter(cve_entry_id__in=list(cve_ids))
         proven = Q(template_result='vulnerable') | Q(distro_status='vulnerable')
         rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').filter(
-            Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).filter(
+            Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(
             cve_entry_id__in=CVEEntry.objects.filter(fire_tier_q()).values('id'))
         total = rows.count()
         if not total:
