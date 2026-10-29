@@ -42,29 +42,85 @@ def publish(web_fd, name, chunks):
             pass
 
 
-def upstream_base(web_fd, sha):
-    """The newest commit of ``sha`` that is also on the branch it tracks, or '' when there is none or git cannot say.
+REPO_RE = re.compile(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}')
+BRANCH_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}')
+SHA_RE = re.compile(r'[0-9a-f]{40}')
+FETCH_SECONDS = 120
 
-    A fork carries commits of its own, which GitHub does not know: asked how far behind the installed commit is, it answers
-    "not found" and the banner offers an update forever. The shared ancestor is a commit it does know."""
-    branch = ''
+
+def read_small(web_fd, name, limit=256):
+    """The text of a state file the web container wrote, read without following a link it may have planted; '' when it is missing or unsafe."""
     try:
-        with os.fdopen(regular_fd('.update-branch', dir_fd=web_fd), 'rb') as source:
-            raw = source.read(128).strip()
-        if re.fullmatch(rb'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}', raw) and b'..' not in raw and not raw.endswith((b'/', b'.lock')):
-            branch = raw.decode('ascii')
+        with os.fdopen(regular_fd(name, dir_fd=web_fd), 'rb') as source:
+            return source.read(limit).decode('ascii', 'replace').strip()
     except (OSError, ValueError):
-        pass
-    refs = ['@{upstream}'] + (['origin/' + branch] if branch else []) + ['origin/master', 'origin/main']
-    for ref in refs:
-        try:
-            base = subprocess.run(['git', '-c', 'safe.directory=' + os.getcwd(), 'merge-base', sha, ref],
-                                  capture_output=True, text=True, timeout=30, check=True).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if re.fullmatch(r'[0-9a-f]{40}', base):
-            return base if base != sha else ''
-    return ''
+        return ''
+
+
+def valid_branch(name):
+    return bool(BRANCH_RE.fullmatch(name)) and '..' not in name and not name.endswith(('/', '.lock'))
+
+
+def git(*args, timeout=60, env=None):
+    return subprocess.run(['git', '-c', 'safe.directory=' + os.getcwd(), *args], capture_output=True, text=True, timeout=timeout,
+                          env={**os.environ, **(env or {})})
+
+
+def same_repo(url, repo):
+    """Whether a remote's URL names ``repo`` ("owner/name") on github.com, in any of the ways a clone writes it."""
+    match = re.fullmatch(r'(?:https?://(?:[^@/]+@)?|git@|ssh://git@)github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?', url.strip(), re.I)
+    return bool(match) and match.group(1).lower() == repo.lower()
+
+
+def upstream(web_fd):
+    """Where the running build stands against the repository and branch Settings > Updates tracks, published as ``web/.upstream-state.json``.
+
+    Only this host has git. The web container asks GitHub how far behind a commit is, and GitHub has never seen a fork's own commits (or a
+    server's unpushed ones): it answers "not found" for them, so the banner offered an update for ever. Here the tracked branch is fetched (from
+    ``origin`` when that is the tracked repository, otherwise from its public https address) into a private ref, and the build's commit is
+    compared with it: ``base`` (the newest commit they share, which GitHub does know, and which the web container compares with the branch head),
+    ``ahead`` (commits of this server's own) and ``behind`` (upstream commits it lacks). A server with commits of its own cannot be fast-forwarded,
+    which is what an approved update does, so ``ahead`` and ``behind`` both above zero is a divergence the app reports instead of offering Approve."""
+    source = read_small(web_fd, '.update-source').split()
+    if len(source) != 2 or not REPO_RE.fullmatch(source[0]) or '..' in source[0] or not valid_branch(source[1]):
+        return  # the app has not said what it tracks (an older app, or the check has not run yet): nothing to compare
+    repo, branch = source
+    installed = read_small(web_fd, '.commit').splitlines()[:1]
+    installed = installed[0].strip().lower() if installed else ''
+    state = {'repo': repo, 'branch': branch, 'at': time.time()}
+
+    def finish(**fields):
+        state.update(fields)
+        publish(web_fd, '.upstream-state.json', [json.dumps(state).encode('utf-8')])
+
+    try:
+        if not SHA_RE.fullmatch(installed):
+            installed = git('rev-parse', 'HEAD').stdout.strip()
+        state['installed'] = installed
+        ref = 'refs/cvengine/upstream/' + branch
+        if git('check-ref-format', ref).returncode != 0:
+            return finish(error='that is not a usable branch name')
+        remote = git('config', '--get', 'remote.origin.url').stdout.strip()
+        if remote and same_repo(remote, repo):
+            fetch = ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', 'origin']
+        else:
+            # not the repository this checkout was cloned from (a fork pulled from elsewhere): its public address, https only, objects checked
+            fetch = ['-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', '-c', 'transfer.fsckObjects=true',
+                     'fetch', '--quiet', '--no-tags', '--no-recurse-submodules', f'https://github.com/{repo}.git']
+        done = git(*fetch, f'+refs/heads/{branch}:{ref}', timeout=FETCH_SECONDS, env={'GIT_TERMINAL_PROMPT': '0'})
+        if done.returncode != 0:
+            return finish(error='could not fetch ' + repo + ' ' + branch + ' (network, a private repository, or no such branch)')
+        tip = git('rev-parse', ref).stdout.strip()
+        if not SHA_RE.fullmatch(tip) or git('cat-file', '-e', installed + '^{commit}').returncode != 0:
+            return finish(error='the build\'s commit is not in this checkout')
+        base = git('merge-base', installed, tip)
+        if base.returncode != 0 or not SHA_RE.fullmatch(base.stdout.strip()):
+            return finish(error='the build shares no history with ' + repo + ' ' + branch)
+        ahead = int(git('rev-list', '--count', f'{tip}..{installed}').stdout.strip())
+        behind = int(git('rev-list', '--count', f'{installed}..{tip}').stdout.strip())
+        finish(upstream=tip, base=base.stdout.strip(), ahead=ahead, behind=behind)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        finish(error='git could not answer: ' + str(exc)[:100])
 
 
 def main():
@@ -163,9 +219,9 @@ def main():
             value = sys.argv[2]
             if not re.fullmatch(r'[0-9a-f]{40}', value):
                 raise ValueError('invalid commit id')
-            # the second line, when there is one, is the shared ancestor with upstream (see upstream_base); the first stays the build's commit
-            base = upstream_base(web_fd, value)
-            publish(web_fd, '.commit', [(value + '\n' + (base + '\n' if base else '')).encode('ascii')])
+            publish(web_fd, '.commit', [(value + '\n').encode('ascii')])
+        elif action == 'upstream':
+            upstream(web_fd)
         elif action == 'heartbeat':
             publish(web_fd, '.updater-heartbeat', [json.dumps({'at': time.time()}).encode('ascii')])
         elif action == 'log':

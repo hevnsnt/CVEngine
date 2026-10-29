@@ -1124,6 +1124,7 @@ class UpdateSettings(models.Model):
     latest_url = models.CharField(max_length=300, blank=True, default="")
     latest_date = models.DateTimeField(null=True, blank=True)
     behind_by = models.IntegerField(null=True, blank=True)  # commits between the installed version and latest
+    reference_unknown = models.BooleanField(default=False)  # GitHub has never seen the installed commit and the host has not named a shared one
     commits = models.JSONField(default=list, blank=True)  # [{sha, message}] newest first, capped
     last_checked_at = models.DateTimeField(null=True, blank=True)
     last_error = models.CharField(max_length=300, blank=True, default="")

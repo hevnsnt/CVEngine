@@ -667,6 +667,34 @@ class UpdateLayoutAndScanTests(UpdateScriptCase):
         self.assertEqual(before, self.git('rev-parse', 'HEAD', cwd=self.work))
         self.assertFalse(any(' build ' in c or ' stop ' in c or 'cancel_consumer' in c for c in self.calls()))
 
+    def test_check_says_a_checkout_that_has_merged_master_is_up_to_date_and_one_that_diverged_must_be_merged_by_hand(self):
+        (self.stub / 'web_up').touch()
+        (self.work / 'web' / 'local-change').write_text('only this checkout has it\n')
+        self.git('add', 'web/local-change', cwd=self.work)
+        self.git('commit', '-m', 'local', cwd=self.work)
+
+        def check():
+            return subprocess.run(['bash', 'scripts/update.sh', '--check'], cwd=self.work, env=self.env, capture_output=True, text=True, timeout=45)
+        diverged = check()
+        self.assertIn('is available', diverged.stdout)
+        self.assertIn('has to be merged by hand', diverged.stdout)
+        self.git('fetch', 'origin', 'master', cwd=self.work)
+        self.git('merge', '-m', 'merge master', 'origin/master', cwd=self.work)
+        level = check()
+        self.assertIn('GitHub:    up to date (2 commits of this checkout', level.stdout)
+
+    def test_an_update_of_a_diverged_checkout_stops_before_touching_anything(self):
+        (self.stub / 'web_up').touch()
+        (self.work / 'web' / 'local-change').write_text('only this checkout has it\n')
+        self.git('add', 'web/local-change', cwd=self.work)
+        self.git('commit', '-m', 'local', cwd=self.work)
+        before = self.git('rev-parse', 'HEAD', cwd=self.work)
+        result = subprocess.run(['bash', 'scripts/update.sh'], cwd=self.work, env=self.env, capture_output=True, text=True, timeout=45)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot be fast-forwarded', result.stdout + result.stderr)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD', cwd=self.work))
+        self.assertFalse(any(' build ' in c or ' stop ' in c or 'cancel_consumer' in c for c in self.calls()))
+
     def test_check_fails_on_port_conflict(self):
         (self.stub / 'config.json').write_text(PROXY_CONFIG % ('443', ''))
         (self.stub / 'ss_out').write_text('LISTEN 0 511 *:443 *:* users:(("nginx",pid=812,fd=6))\n')

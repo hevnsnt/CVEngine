@@ -215,19 +215,136 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(victim.read_text(), 'keep me')
         self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
 
-    def test_commit_publication_records_the_ancestor_a_fork_shares_with_upstream(self):
-        (self.work / 'web' / 'README').write_text('a change only this fork has\n')
-        self.git('commit', '-am', 'fork only', cwd=self.work)
+    # --- a server with commits of its own (issue 211) --------------------------------------------------------------------
+
+    def track(self, source='hevnsnt/CVEngine master', commit=None):
+        """What the app writes (the source it tracks, the build's commit), with origin standing in for the tracked repository."""
+        (self.work / 'web' / '.update-source').write_text(source + '\n')
+        (self.work / 'web' / '.commit').write_text((commit or self.head()) + '\n')
+        # origin here is a local path: the URL rewrite makes it the repository the app tracks
+        self.git('config', 'remote.origin.url', 'https://github.com/hevnsnt/CVEngine.git', cwd=self.work)
+        self.git('config', f'url.{self.tmp / "origin.git"}.insteadOf', 'https://github.com/hevnsnt/CVEngine.git', cwd=self.work)
+
+    def upstream_state(self, source='hevnsnt/CVEngine master', commit=None):
+        """Run ``update-state.py upstream`` the way the host does, with the app's source and commit files in place."""
+        self.track(source, commit)
+        result = subprocess.run(['python3', 'scripts/update-state.py', 'upstream'], cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.work / 'web' / '.upstream-state.json'
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def commit_of_its_own(self):
+        (self.work / 'web' / 'local-change').write_text('a change only this fork has\n')
+        self.git('add', 'web/local-change', cwd=self.work)
+        self.git('commit', '-m', 'fork only', cwd=self.work)
+        return self.head()
+
+    def test_commit_publication_is_the_one_line_of_the_build(self):
+        mine = self.commit_of_its_own()
+        result = subprocess.run(['python3', 'scripts/update-state.py', 'commit', mine], cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.work / 'web' / '.commit').read_text().split(), [mine])
+
+    def test_the_host_reports_commits_of_its_own_and_commits_it_lacks(self):
+        mine = self.commit_of_its_own()  # origin has `new` on top of `prev`; the fork has its own commit on top of `prev`
+        state = self.upstream_state()
+        self.assertEqual((state['installed'], state['upstream'], state['base'], state['ahead'], state['behind']), (mine, self.new, self.prev, 1, 1))
+        self.assertEqual((state['repo'], state['branch']), ('hevnsnt/CVEngine', 'master'))
+
+    def test_the_host_reports_a_server_that_has_merged_the_branch_as_level_with_it(self):
+        self.commit_of_its_own()
+        self.git('fetch', 'origin', 'master', cwd=self.work)
+        self.git('merge', '-m', 'merge upstream', self.new, cwd=self.work)
         mine = self.head()
-        result = subprocess.run(['python3', 'scripts/update-state.py', 'commit', mine],
-                                cwd=self.work, env=self.env, capture_output=True, text=True)
+        state = self.upstream_state()
+        self.assertEqual((state['base'], state['ahead'], state['behind'], state['installed']), (self.new, 2, 0, mine))
+
+    def test_the_host_reports_a_plain_install_behind_the_branch(self):
+        state = self.upstream_state()
+        self.assertEqual((state['base'], state['ahead'], state['behind']), (self.prev, 0, 1))
+
+    def test_the_host_measures_the_build_not_the_checkout(self):
+        # the files can be ahead of what runs (git pull by hand); the app's banner is about what runs
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        state = self.upstream_state(commit=self.prev)
+        self.assertEqual((state['installed'], state['ahead'], state['behind']), (self.prev, 0, 1))
+
+    def test_a_fork_whose_origin_is_not_the_tracked_repository_is_compared_with_the_tracked_one(self):
+        # origin is somebody's fork; the tracked repository is another one (here unreachable, so the host says why instead of guessing)
+        self.git('config', 'remote.origin.url', 'https://github.com/someone/fork.git', cwd=self.work)
+        (self.work / 'web' / '.update-source').write_text('hevnsnt/CVEngine master\n')
+        (self.work / 'web' / '.commit').write_text(self.head() + '\n')
+        env = {**self.env, 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'url.file:///nonexistent/.insteadOf', 'GIT_CONFIG_VALUE_0': 'https://github.com/hevnsnt/CVEngine.git'}
+        result = subprocess.run(['python3', 'scripts/update-state.py', 'upstream'], cwd=self.work, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.work / 'web' / '.commit').read_text().split(), [mine, self.prev])
-        # an install that is exactly upstream keeps the single line
-        result = subprocess.run(['python3', 'scripts/update-state.py', 'commit', self.prev],
-                                cwd=self.work, env=self.env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.work / 'web' / '.commit').read_text().split(), [self.prev])
+        state = json.loads((self.work / 'web' / '.upstream-state.json').read_text())
+        self.assertIn('could not fetch hevnsnt/CVEngine master', state['error'])
+        self.assertNotIn('ahead', state)
+
+    def test_the_watcher_refreshes_the_comparison_when_it_is_due_and_not_more_often_than_once_a_minute(self):
+        import time
+        shutil.copy(SCRIPTS / 'update-watch.sh', self.work / 'scripts' / 'update-watch.sh')
+        self.track()
+        state_file = self.work / 'web' / '.upstream-state.json'
+
+        def watch():
+            subprocess.run(['bash', 'scripts/update-watch.sh', '2'], cwd=self.work, env={**self.env, 'CVENGINE_HEARTBEAT_SECONDS': '1'},
+                           capture_output=True, text=True, timeout=30)
+            for _ in range(50):  # the refresh runs in the background
+                if state_file.exists():
+                    break
+                time.sleep(0.1)
+        watch()
+        self.assertEqual(json.loads(state_file.read_text())['behind'], 1)
+        state_file.unlink()
+        watch()  # asked again straight away: the host is not fetched from more than once a minute
+        self.assertFalse(state_file.exists())
+
+    def test_the_watcher_does_nothing_until_the_app_has_said_what_it_tracks(self):
+        shutil.copy(SCRIPTS / 'update-watch.sh', self.work / 'scripts' / 'update-watch.sh')
+        subprocess.run(['bash', 'scripts/update-watch.sh', '2'], cwd=self.work, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertFalse((self.work / 'web' / '.upstream-state.json').exists())
+
+    def test_nothing_is_published_until_the_app_has_said_what_it_tracks(self):
+        self.assertIsNone(self.upstream_state(source='not a source'))
+        self.assertIsNone(self.upstream_state(source='../x master'))
+        self.assertIsNone(self.upstream_state(source='hevnsnt/CVEngine ../master'))
+
+    def test_the_tracked_repository_is_recognised_however_the_clone_names_it(self):
+        spec = __import__('importlib.util').util.spec_from_file_location('update_state', SCRIPTS / 'update-state.py')
+        module = __import__('importlib.util').util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for url in ('https://github.com/Hevnsnt/CVEngine.git', 'https://github.com/hevnsnt/CVEngine', 'git@github.com:hevnsnt/CVEngine.git',
+                    'ssh://git@github.com/hevnsnt/CVEngine.git', 'https://token@github.com/hevnsnt/CVEngine.git', 'https://github.com/hevnsnt/CVEngine/'):
+            self.assertTrue(module.same_repo(url, 'hevnsnt/CVEngine'), url)
+        for url in ('https://github.com/someone/CVEngine.git', 'https://example.com/hevnsnt/CVEngine.git', 'https://github.com/hevnsnt/CVEngine-fork.git', ''):
+            self.assertFalse(module.same_repo(url, 'hevnsnt/CVEngine'), url)
+
+    def test_an_approval_for_a_server_with_commits_of_its_own_is_refused_before_scans_are_paused(self):
+        self.commit_of_its_own()
+        mine = self.head()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('commit(s) of its own', result.stdout)
+        self.assertEqual(self.head(), mine)
+        self.assertFalse(self.approved())
+        self.assertFalse(any('update_scan_pause' in c for c in self.calls()), self.calls())  # no pause, no drain, nothing rebuilt
+        self.assertFalse(any(' build ' in c for c in self.calls()))
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual(phase['phase'], 'failed')
+        self.assertIn('merge', phase['detail'])
+
+    def test_an_approval_the_checkout_already_contains_deploys_without_moving_anything(self):
+        self.commit_of_its_own()
+        self.git('fetch', 'origin', 'master', cwd=self.work)
+        self.git('merge', '-m', 'merge upstream', self.new, cwd=self.work)
+        mine = self.head()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), mine)
+        self.assertEqual((self.work / 'web' / '.commit').read_text().split(), [mine])
 
     def test_dev_compose_file_deploys_with_that_file_and_restarts_the_code_services(self):
         self.approve()
