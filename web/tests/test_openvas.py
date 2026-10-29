@@ -1814,8 +1814,8 @@ class HeatGateTests(Fixture, TestCase):
         ready, verdict = self.refused('www.rt.test')
         self.assertEqual(ready, [])
         self.assertIn('CDN', verdict['reason'])
-        Subdomain.objects.filter(name='api.rt.test').update(name='vropco.atlassian.net')
-        ready, verdict = self.refused('vropco.atlassian.net')
+        Subdomain.objects.filter(name='api.rt.test').update(name='client-a.atlassian.net')
+        ready, verdict = self.refused('client-a.atlassian.net')
         self.assertEqual(ready, [])
         self.assertIn('third-party platform', verdict['reason'])
 
