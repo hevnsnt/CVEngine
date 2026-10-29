@@ -1,3 +1,4 @@
+import subprocess
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -53,7 +54,7 @@ class ReportTests(SimpleTestCase):
 
 
 class ProcessTests(SimpleTestCase):
-    def run_process(self, returncode=0, stderr='', token='tok-secret'):
+    def run_process(self, returncode=0, stderr='', token='tok-secret', stdout=''):
         seen = {}
 
         def fake_run(kind, cmd, timeout, **kwargs):
@@ -62,7 +63,8 @@ class ProcessTests(SimpleTestCase):
             if returncode in (0, 5):
                 with open(out, 'w') as f:
                     f.write('{"version": {"number": "6.0"}}')
-            return mock.Mock(returncode=returncode, stderr=stderr)
+            seen['stdout'] = kwargs.get('stdout')
+            return mock.Mock(returncode=returncode, stderr=stderr, stdout=stdout)
         with mock.patch('cveFeed.heavy_process.run', side_effect=fake_run):
             try:
                 return wpscan_scan.run_wpscan_process('https://www.rt.test/', token), seen
@@ -88,6 +90,26 @@ class ProcessTests(SimpleTestCase):
         error, _ = self.run_process(returncode=2, stderr='boom tok-secret')
         self.assertIsInstance(error, RuntimeError)
         self.assertNotIn('tok-secret', str(error))
+
+    def test_a_refused_option_or_address_says_why_instead_of_exit_1(self):
+        error, seen = self.run_process(returncode=1, stdout='\nScan Aborted: --url Invalid scheme format: \'www.rt.test\'\n')
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn('Scan Aborted: --url Invalid scheme format', str(error))
+        self.assertEqual(seen['stdout'], subprocess.PIPE)  # WPScan prints that line on stdout, which used to be thrown away
+        error, _ = self.run_process(returncode=1)
+        self.assertIn('refused its options or the address', str(error))
+        self.assertIn('(exit 1)', str(error))
+        error, _ = self.run_process(returncode=3, stdout='x' * 1000 + ' tok-secret')
+        self.assertLessEqual(len(str(error)), 200)  # clipped, and the token never shows
+        self.assertNotIn('tok-secret', str(error))
+
+    def test_a_dispatched_failure_reads_the_same(self):
+        error = None
+        try:
+            wpscan_scan._classify(None, 1, 'Scan Aborted: invalid option: --nope', 'tok')
+        except RuntimeError as exc:
+            error = exc
+        self.assertEqual(str(error), 'Scan Aborted: invalid option: --nope')
 
     def test_the_child_gets_no_other_secret_of_the_worker(self):
         with mock.patch.dict('os.environ', {'POSTGRES_PASSWORD': 'db-secret', 'FIELD_ENCRYPTION_KEY': 'key-secret', 'CELERY_BROKER': 'redis://x'}):
