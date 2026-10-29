@@ -1077,6 +1077,9 @@ class Triage(models.Model):
     attempts = models.IntegerField(default=0)
     next_attempt_at = models.DateTimeField(null=True, blank=True)
     confidence_adjust = models.FloatField(default=0.0)
+    # the CVE match this row took its record from when a rescan made a new match for the same finding (cveFeed.triage._twins); its
+    # validation jobs are this finding's job history (cveFeed.hot_validation.enqueue). A plain id: the older match may be pruned.
+    carried_from = models.PositiveBigIntegerField(null=True, blank=True)
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)

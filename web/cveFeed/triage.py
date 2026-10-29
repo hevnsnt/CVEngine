@@ -562,6 +562,9 @@ def _reset_fields(d, now):
 
 
 
+TWIN_WINDOW = timedelta(days=30)  # a finding last judged longer ago than this is asked again
+
+
 def _inherited_fields(twin, d, now):
     """The fields of a rescan's new Triage row, taken from the row of the same finding in the scan before it (see ``_twins``). The record
     stays: verdict, classification, reason and the validation result with its time. When the signature moved only because the feed's
@@ -574,7 +577,8 @@ def _inherited_fields(twin, d, now):
               'validation_evidence': twin.validation_evidence, 'local_checks': twin.local_checks,
               # a "no check exists" answer carries no time of its own: the row it was first given on stands for it
               'validated_at': twin.validated_at or (twin.created_at if twin.validation_status == 'no_check' else None),
-              'attempts': twin.attempts, 'next_attempt_at': twin.next_attempt_at, 'confidence_adjust': twin.confidence_adjust}
+              'attempts': twin.attempts, 'next_attempt_at': twin.next_attempt_at, 'confidence_adjust': twin.confidence_adjust,
+              'carried_from': twin.match_id}
     if not unchanged:
         fields.update(status='pending', attempts=0, next_attempt_at=None)
     return fields
@@ -590,20 +594,23 @@ def _twins(pending):
     pending = [(f, d) for f, d in pending if d['kind'] == 'cve_match']
     if not pending:
         return {}
-    candidates = {}
-    rows = (Triage.objects.filter(kind='cve_match', match__isnull=False, project_id__in={d['project_id'] for _, d in pending},
+    from django.db.models import Q
+    # one row per finding: the newest that holds a record, within the window. DISTINCT ON keeps the read to the number of findings in
+    # the chunk however many scans have run since (every rescan adds a row per finding and nothing prunes the old ones)
+    rows = (Triage.objects.filter(Q(status='triaged') | ~Q(validation_status='none'), kind='cve_match', match__isnull=False,
+                                  updated_at__gte=timezone.now() - TWIN_WINDOW,
+                                  project_id__in={d['project_id'] for _, d in pending},
                                   host__in={d['host'][:500] for _, d in pending},
                                   match__cve_entry_id__in={f.cve_entry_id for f, _ in pending})
-            .exclude(match_id__in=[f.pk for f, _ in pending]).select_related('match').order_by('-updated_at', '-id'))
-    for row in rows:
-        candidates.setdefault((row.project_id, row.host, row.match.cve_entry_id), []).append(row)
+            .exclude(match_id__in=[f.pk for f, _ in pending]).select_related('match')
+            .order_by('project_id', 'host', 'match__cve_entry_id', '-updated_at', '-id')
+            .distinct('project_id', 'host', 'match__cve_entry_id'))
+    newest = {(row.project_id, row.host, row.match.cve_entry_id): row for row in rows}
     out = {}
     for f, d in pending:
-        for row in candidates.get((d['project_id'], d['host'][:500], f.cve_entry_id), []):
-            if (row.status == 'triaged' or row.validation_status != 'none') and \
-                    row.evidence_key == evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce):
-                out[f.pk] = row
-                break
+        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id))
+        if row is not None and row.evidence_key == evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce):
+            out[f.pk] = row
     return out
 
 
