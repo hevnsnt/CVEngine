@@ -488,7 +488,8 @@ else
   restore_branch
   git reset --hard "$PREV" >>"$LOG" 2>&1
   restore_env
-  if deploy >>"$LOG" 2>&1; then
+  # The way back must not fail the check that sent it here: a build that stopped for lack of disk space is put back with what is already on the host.
+  if CVENGINE_UPDATE_MIN_FREE_MB=0 deploy >>"$LOG" 2>&1; then
     mark_deployed "$PREV"
     resume_scanning
     phase done

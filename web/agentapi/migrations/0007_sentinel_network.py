@@ -13,7 +13,7 @@ def grandfather_internal(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [("agentapi", "0006_sentinel_enrollment_token")]
     operations = [
-        migrations.AddField(model_name="agent", name="network", field=models.CharField(default="external", max_length=10)),
-        migrations.AddField(model_name="sentinelenrollment", name="network", field=models.CharField(default="external", max_length=10)),
+        migrations.AddField(model_name="agent", name="network", field=models.CharField(default="external", db_default="external", max_length=10)),
+        migrations.AddField(model_name="sentinelenrollment", name="network", field=models.CharField(default="external", db_default="external", max_length=10)),
         migrations.RunPython(grandfather_internal, migrations.RunPython.noop),
     ]

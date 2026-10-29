@@ -23,8 +23,10 @@ This phase dispatches a whole stage (all of a chunk's addresses, or a chunk's nu
 one Sentinel; splitting a stage across multiple Sentinels, or letting several share one project's work, is left to a
 follow-up once there is real-world experience with how many Sentinels a project actually registers.
 """
+import contextlib
 import ipaddress
 import os
+import tempfile
 import time
 
 MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: everything beyond this in one stage call is scanned locally
@@ -365,6 +367,25 @@ def _local_kwargs(kind, kwargs):
     return {**kwargs, 'tech': True} if kind == 'nuclei_light' else kwargs
 
 
+def _chunks(targets):
+    return [targets[i:i + MAX_ADDRESSES] for i in range(0, len(targets), MAX_ADDRESSES)]
+
+
+@contextlib.contextmanager
+def _targets_file(targets):
+    """A temporary file with one target per line, for a local nuclei run over one chunk."""
+    handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False, encoding='utf-8')
+    try:
+        with handle:
+            handle.write('\n'.join(targets) + '\n')
+        yield handle.name
+    finally:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+
+
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` matching ``nuclei_scan.stream_nuclei``'s own
     signature, for ``run_light_nuclei``/``run_targeted_nuclei``'s ``stream`` parameter. Returns the literal, unwrapped
@@ -381,12 +402,12 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     targets = [line.strip() for line in handle if line.strip()]
             except OSError:
                 targets = []
-            result = dispatch_or_none(project, kind, _nuclei_target(kind, targets[:MAX_ADDRESSES], kwargs), ips=[], scan=scan, internal=True,
-                                      timeout=timeout)
-            if result is None:
-                raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
-            for finding in result.get('findings', []):
-                yield _finding_to_nuclei_line(finding)
+            for chunk in _chunks(targets):  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
+                result = dispatch_or_none(project, kind, _nuclei_target(kind, chunk, kwargs), ips=[], scan=scan, internal=True, timeout=timeout)
+                if result is None:
+                    raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
+                for finding in result.get('findings', []):
+                    yield _finding_to_nuclei_line(finding)
         return internal_stream
     if not any_scanner_for(project, kind):
         return stream_nuclei
@@ -402,20 +423,23 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                 targets = [line.strip() for line in handle if line.strip()]
         except OSError:
             targets = []
-        live = resolvable_targets(targets[:MAX_ADDRESSES])
-        if not live:
-            # every target in this chunk failed to resolve: a Sentinel would be asked to do nothing, and the local
-            # fallback below would too (nuclei cannot reach what cannot be looked up either); run it anyway so the
-            # existing "ran, found nothing" accounting is unchanged for a target that would already have gone through
-            # stream_nuclei with no Sentinel in play.
+        if not targets:  # nothing readable to send: the local run decides what an empty or missing list means
             yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
             return
-        result = dispatch_or_none(project, kind, _nuclei_target(kind, live, kwargs), ips=[], scan=scan, timeout=timeout)
-        if result is None:
-            yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
-            return
-        for finding in result.get('findings', []):
-            yield _finding_to_nuclei_line(finding)
+        for chunk in _chunks(targets):  # one task per chunk of MAX_ADDRESSES: the caller marks the whole list scanned, so none may be dropped
+            live = resolvable_targets(chunk)
+            result = dispatch_or_none(project, kind, _nuclei_target(kind, live, kwargs), ips=[], scan=scan, timeout=timeout) if live else None
+            if result is None:
+                # no Sentinel took it, or nothing in the chunk resolves (a Sentinel would be asked to do nothing, and nuclei cannot reach what cannot
+                # be looked up either: run it anyway so the existing "ran, found nothing" accounting is unchanged): this chunk runs here
+                if len(targets) <= MAX_ADDRESSES:  # the whole list is this chunk: the caller's own file
+                    yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
+                    continue
+                with _targets_file(chunk) as path:
+                    yield from stream_nuclei(path, **_local_kwargs(kind, kwargs))
+                continue
+            for finding in result.get('findings', []):
+                yield _finding_to_nuclei_line(finding)
     return stream
 
 

@@ -26,7 +26,7 @@ class Agent(models.Model):
     # Whether a Sentinel sits inside a private network. Decided by this server (the enrollment an administrator provisioned it from, or an
     # administrator's later change), never by the Sentinel: ``network:internal`` in ``capabilities`` is only what the Sentinel claims, and
     # work for a declared internal range goes to a Sentinel whose ``network`` is ``internal`` (``sentinel_broker.effective_capabilities``).
-    network = models.CharField(max_length=10, default='external')
+    network = models.CharField(max_length=10, default='external', db_default='external')
     os = models.JSONField(default=list, blank=True)  # operating system families the agent can act on; empty means any
     tools = models.JSONField(default=list, blank=True)  # free-form tool names the agent has (nmap, curl, ansible ...)
     max_concurrent = models.PositiveSmallIntegerField(default=2)
@@ -143,7 +143,7 @@ class SentinelEnrollment(models.Model):
     created_by = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
-    network = models.CharField(max_length=10, default='external')  # what the administrator chose when provisioning: external or internal
+    network = models.CharField(max_length=10, default='external', db_default='external')  # what the administrator chose when provisioning: external or internal
     used_at = models.DateTimeField(null=True, blank=True)
     used_by_agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     # The API token the redeemed secret minted (scope 'sentinel'): what ties a Sentinel to the scope it was enrolled for, so it can narrow it but

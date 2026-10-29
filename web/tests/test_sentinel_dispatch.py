@@ -2,6 +2,8 @@
 plus the three dispatch points actually wired (nmap, naabu, nuclei light/targeted) succeeding and timing out."""
 import time
 from datetime import timedelta
+import os
+import tempfile
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -374,6 +376,31 @@ class NucleiDispatchTests(DispatchBase):
         self.assertEqual(light_result['techs'], {'www.example.test': ['jQuery']})
         sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
         self.assertIn('jQuery', [t.name for t in sub.technologies.all()])
+
+    def test_every_target_of_a_long_list_is_sent_in_chunks_and_an_unserved_chunk_runs_here(self):
+        """A stage marks its whole list scanned once the stream returns, so the targets past the first chunk must not be dropped."""
+        self.make_sentinel(['nuclei_light'])
+        targets = [f'h{i}.example.test' for i in range(dispatch.MAX_ADDRESSES * 2 + 5)]
+        path = os.path.join(tempfile.mkdtemp(), 'targets.txt')
+        with open(path, 'w') as handle:
+            handle.write('\n'.join(targets))
+        sent, local = [], []
+
+        def fake_dispatch(project, kind, target, **kw):
+            sent.append(list(target['targets']))
+            return {'outcome': 'done', 'findings': []} if len(sent) < 3 else None  # the third chunk is not taken by a Sentinel
+
+        def fake_local(targets_file, **kw):
+            with open(targets_file) as handle:
+                local.append(handle.read().split())
+            return iter(())
+
+        with mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch), mock.patch.object(dispatch, 'resolvable_targets', lambda t: list(t)), \
+                mock.patch('cveFeed.nuclei_scan.stream_nuclei', fake_local):
+            list(dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)(path))
+        self.assertEqual(sent[0] + sent[1] + local[0], targets)
+        self.assertEqual([len(c) for c in sent[:2]], [dispatch.MAX_ADDRESSES] * 2)
+        self.assertEqual(len(local[0]), 5)
 
     def test_light_pass_a_finding_with_no_name_links_nothing(self):
         # cveFeed.nuclei_scan.tech_name_from names a technology from info.name (or, for the real tech-detect template,

@@ -435,8 +435,11 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.approve()
         result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('MB are free where Docker keeps its images', (self.work / 'web' / '.update-log').read_text())
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('MB are free where Docker keeps its images', log)
         self.assertEqual(self.head(), self.prev)  # a failure before the migration returns to the previous version
+        # the way back is not stopped by the same disk check: the previous version is restarted and scanning is resumed
+        self.assertNotIn('could not restart the previous version', log)
 
     def test_a_verified_update_removes_the_image_it_replaced_and_a_failed_one_does_not(self):
         self.new = self.publish_deploy_file()

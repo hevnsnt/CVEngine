@@ -1658,7 +1658,7 @@ class AuthCredential(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
     # The owner's choice, per target: send the values over a TLS connection whose certificate does not verify (self-signed, expired, wrong name).
     # Off by default: then a sign-in goes only to a server that proves its name, and anyone in the network path could read it otherwise.
-    allow_untrusted_certificate = models.BooleanField(default=False)
+    allow_untrusted_certificate = models.BooleanField(default=False, db_default=False)
     updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     last_used_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1735,7 +1735,7 @@ class OpenvasProject(models.Model):
     hosts = models.JSONField(default=list, blank=True)
     forced_hosts = models.JSONField(default=list, blank=True)  # the listed hosts an administrator chose to scan whatever their heat (OpenVAS otherwise only scans Fire or Smoke)
     # An explicit "not this project" that wins over the organization's opt-in (``OpenvasOrg``); ``enabled`` (the project's own opt-in) wins over this.
-    excluded = models.BooleanField(default=False)
+    excluded = models.BooleanField(default=False, db_default=False)
     target_id = models.CharField(max_length=40, blank=True, default="")
     target_key = models.CharField(max_length=64, blank=True, default="")  # hash of the address set the target was made for
     updated_at = models.DateTimeField(auto_now=True)
