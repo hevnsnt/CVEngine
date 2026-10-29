@@ -6,8 +6,8 @@
 
 ## The short version
 
-- **Choose cvENGINE** to run a free, self-hosted tool that tells you which of today's exploited CVEs are live on assets you own, with evidence, and keeps everything on your own server.
-- **Choose ProjectDiscovery** for a managed platform with a pre-indexed asset dataset, cloud account discovery, internal scanning, SSO, Jira, support, and a vendor behind it.
+- **Choose cvENGINE** to run a free, self-hosted tool that tells you which of today's exploited CVEs are live on assets you own, with evidence, and keeps everything on your own server. Scanner agents you run on your own networks (Sentinels) cover internal networks too.
+- **Choose ProjectDiscovery** for a managed platform with a pre-indexed asset dataset, cloud account discovery, a managed route into internal networks, SSO, Jira, support, and a vendor behind it.
 - **Use both** if you like. cvENGINE already runs their open source tools.
 
 ## Cost, hosting, and trust
@@ -15,11 +15,11 @@
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
 | Price | Free and open source (GPL-3.0), with no seat, asset, or usage limits beyond your hardware | A free tier with limits (one seat and a one-time allowance on Neo, a capped domain count on the cloud platform), $200 per seat per month pay as you go, and custom enterprise pricing | cvENGINE |
-| Hosting | Self-hosted only, on one Docker Compose stack | Managed cloud, dedicated VPC, or on-prem (enterprise) | ProjectDiscovery |
+| Hosting | Self-hosted only: one Docker Compose stack, plus optional [Sentinels](ARCHITECTURE.md#sentinels) (a small Docker Compose client you run on another network) | Managed cloud, dedicated VPC, or on-prem (enterprise) | ProjectDiscovery |
 | Your data | Stays on your server. Nothing is sent to the authors. | Managed service. It states SOC 2 Type II and zero data retention. | Different |
 | AI models | Bring your own: Anthropic, OpenAI, OpenRouter, or a local Ollama, vLLM or LM Studio, on every install | Standard and frontier models. Bring your own key is enterprise only. | cvENGINE |
 | Support | Community, through GitHub | Vendor support | ProjectDiscovery |
-| Maturity | New: v1.2, written in days and tested far less | Years in production | ProjectDiscovery |
+| Maturity | New: v1.3, written in days and tested far less | Years in production | ProjectDiscovery |
 
 ## Discovery
 
@@ -29,8 +29,8 @@
 | Other sites on an address | The project's own known names (hosts, certificate names, certificate transparency) are asked once a week at each web address with a Host header, and a distinct site is added as an alias of the host or a host of its own, in scope only. No name guessing. | Virtual host discovery is not described on the pages read | cvENGINE |
 | Applications under subdirectories | About 40 well-known mount paths (Jira, Grafana, phpMyAdmin, OWA and others) asked with one GET each, read into a product and version that CVE matching uses. Not a content wordlist. | Technology fingerprinting and directory brute forcing are described; the depth is not stated | Different |
 | Third-party suppliers | A per-project list of critical vendors, kept apart from owned assets: a host card per supplier domain (headers, certificate, technology stack with versions), a technology search across them, and weekly passive posture checks (TLS, email authentication, headers, well-known login pages). No scanning of them | Not compared here (not checked against their public pages) | Not compared |
-| Related assets | Whatever bbot finds from your domains | ASN mapping, Shodan, Censys, and FOFA data, subsidiaries, and associated domains | ProjectDiscovery |
-| Cloud accounts | Not supported | AWS, Azure, and GCP through Cloudlist | ProjectDiscovery |
+| Related assets | Whatever bbot finds from your domains, plus devices imported from a [Tailscale](TAILSCALE.md) tailnet and from a runZero inventory (matching addresses are enriched with runZero's facts, and new ones are imported only when you turn it on, and only inside scope you already own) | ASN mapping, Shodan, Censys, and FOFA data, subsidiaries, and associated domains | ProjectDiscovery |
+| Cloud accounts | Not supported. A Tailscale tailnet or a runZero inventory can be attached, which is not cloud account discovery. | AWS, Azure, and GCP through Cloudlist | ProjectDiscovery |
 | Open ports | naabu by default (all 65,535 ports), a background full sweep, then nmap | naabu | Even |
 | UDP exposure | A slow background scan of 18 UDP ports that matter (DNS, NTP, SNMP, IKE, IPMI, SSDP, memcached and the like), once a week per address, with findings for memcached, public SNMP, NTP control queries, SSDP and IPMI; a port counts only when it answered | naabu scans UDP only when asked, and nuclei has network templates for individual UDP services. No scheduled UDP sweep or stored UDP inventory stated. | cvENGINE |
 | Service detail | nmap at version intensity 7 with 18 reviewed scripts: versions, CPEs, banners, SSH and TLS facts, database greetings, RDP and SMB facts | HTTP probing, technology fingerprinting, and certificate evaluation. Port and version depth not stated. | cvENGINE |
@@ -46,7 +46,9 @@
 | Custom templates | The AI drafts one when none exists. It never runs until a person approves it with reviewed fixtures. | Private custom checks and AI-assisted generation | Even |
 | Protocols | HTTP, plus network service checks through nmap and the exposure checks, and, with the optional off-by-default [OpenVAS (Greenbone) add-on](OPENVAS.md), its network-level vulnerability tests for the hosts you list (slow, version-based results are not treated as confirmed) | HTTP(S), TCP, DNS, SMB, and more | ProjectDiscovery |
 | Extra scanners | wafw00f to name the firewall in front of a host, WPScan, testssl.sh for the TLS configuration and the named TLS vulnerabilities, cloud storage bucket exposure checks (public and dangling S3, GCS and Azure Blob storage), a read-only node2shell check (off by default), unauthenticated-database checks (Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, CouchDB), web route auth and sensitive-data checks, and email and DNS hygiene | Not stated | cvENGINE |
-| Internal scanning | Possible only if you allow private ranges and the server can reach them. There is no tunnel or agent. | Internal scanning, with a tunnel (beta) | ProjectDiscovery |
+| Internal scanning | A project declares a private network internal, and only a [Sentinel](ARCHITECTURE.md#sentinels) you deploy inside it scans it (this server never does, and there is no fallback). A Sentinel sweeps the range for live hosts, then runs nmap, a TLS audit, two Nuclei passes and WPScan, and OpenVAS where that is switched on. It is a client you run and keep updated, not a managed tunnel, and the server-side checks (route checks, probes, hygiene, database exposure, screenshots) do not run on internal hosts. | Internal scanning, with a tunnel (beta) | Different |
+| Distributed scanning | Sentinels are not only for internal networks: nmap, naabu, Nuclei, testssl.sh, UDP, WPScan and OpenVAS work is handed to a Sentinel scoped to a project, an organization, or the whole instance, and runs on this server when none is live. Discovery (bbot), the cloud storage checks, and the virtual host and subdirectory sweeps always run on this server. | Not compared here (not checked against their public pages) | Not compared |
+| Host-reported inventory | Linux, macOS and Windows scripts report a host's operating system build, packages and patches, so local-only CVEs and backported fixes become decidable ([details](HOST-INVENTORY.md)) | Not compared here (not checked against their public pages) | Not compared |
 | Authenticated testing | Supported with headers and a cookie you store for a target (an API token or a session cookie of a test account; encrypted, write-only, host- and origin-scoped, with an expiry). Nuclei and the web route check then also see the signed-in application. Nothing logs in for you: no SSO, TOTP or login flow. | Stated for Neo, with SSO and TOTP | ProjectDiscovery |
 | Re-testing | Re-test on change, and **Validate now** on any CVE match | One-click retesting and regression monitoring | Even |
 | Pentesting, code review, cloud posture | Not supported | Neo: autonomous app and API pentesting, PR review, cloud security, and mobile (beta) | ProjectDiscovery |
@@ -66,7 +68,7 @@
 
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
-| Search | [Shodan-style filters](SEARCH.md) over your whole inventory | A search-like experience with filtering and grouping | cvENGINE |
+| Search | [Shodan-style filters](SEARCH.md) over your whole inventory, and saved searches that alert on new matches | A search-like experience with filtering and grouping | cvENGINE |
 | API and agents | REST API and an MCP server ([details](AGENT-API.md)) | REST APIs | Even |
 | Access control | Organizations, projects, roles (admin, user, audit), TOTP two-step sign-in, an IP allowlist, and an audit log | Team enrollment, SSO (SAML and OIDC), and scoped runs | ProjectDiscovery |
 | Notifications | Slack, Discord, Telegram, and Lark | Slack, Teams, email, and webhooks | Even |
@@ -77,4 +79,4 @@
 
 ## Where cvENGINE is going to lose
 
-If you need a vendor to call, a compliance report to hand an auditor, SSO for a large team, cloud account discovery, scans from inside the network, or a pentest agent, ProjectDiscovery is the better choice today. cvENGINE's bet is narrower: the most useful free answer to "of everything exploited this week, what do I have exposed?", running on your own hardware, built on the same open source tools. Corrections are welcome: open an issue if a row here is out of date.
+If you need a vendor to call, a compliance report to hand an auditor, SSO for a large team, cloud account discovery, a managed route into private networks (cvENGINE's Sentinels scan inside a network, but you run and update them), or a pentest agent, ProjectDiscovery is the better choice today. cvENGINE's bet is narrower: the most useful free answer to "of everything exploited this week, what do I have exposed?", running on your own hardware, built on the same open source tools. Corrections are welcome: open an issue if a row here is out of date.

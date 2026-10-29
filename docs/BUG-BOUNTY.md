@@ -49,13 +49,15 @@ Address ranges are converted to the CIDR blocks that cover them exactly. A block
 2. **I read the policy** records who read it, when, and the scope at that time. If the scope changes later, the engagement and its reports warn, and the project is not scanned on its own again until you acknowledge the changed scope (the same block as an engagement that never confirmed automated testing).
 3. **Import scope as targets** (into the engagement's project) previews first, then needs the acknowledgement, and imports up to 200 targets. Wildcards become their base domain and URLs their host. Blocks over 64 addresses, mobile apps, source code, and prose entries are listed as not imported, with the reason. Discovery starts only if you ticked that the policy allows automated scanning. Excluded hosts stay excluded.
 
-### What is scanned, and when
+### The scan gate
 
-One shared check (`cveFeed.bounty_gate`) decides, for every scan the system starts on its own and for every host a scanner is aimed at:
+An engagement is also a gate on automatic scanning, so a program's assets are never scanned in the background without your confirmation. One shared check (`cveFeed.bounty_gate`) decides, for every scan the system starts on its own and for every host a scanner is aimed at:
 
 - **The project**: a project whose engagement has not acknowledged the policy, has not confirmed that automated scanning is allowed, is paused or done, or whose program scope changed since the acknowledgement, is not scanned on its own. That covers the work conductor, certificate-transparency watching, archived-host rediscovery, host assessments and the new-hosts and re-test pipelines the system queues, the full TCP port sweep, UDP, the weekly deep nuclei lane, the thorough WPScan pass, OpenVAS, template tests, the validation and hygiene sweeps and the other slow sweeps. A scan you start yourself (Scan, Rescan, Assess host) is your decision and is not held to this.
 - **The host**: whoever starts a scan, a host the program lists as out of scope, or does not list at all (only `example.com` is listed, not its subdomains), is never scanned. A host that is only ambiguous (the apex of an in-scope wildcard, a path-only entry, a pattern entry, a program whose scope is prose) is scanned once you add or import it as a target of the project: that is the confirmation. An address found behind an allowed name is refused only if an out-of-scope entry names it.
 - The weekly deep discovery never adds a parent domain to a bug bounty project: the program's scope names what may be tested.
+
+In short, a project with an engagement is scanned on its own only while you recorded that you read the policy (**I read the policy**), ticked that the policy allows automated scanning (which needs the first), and the engagement's status is `watching` or `active` (not `paused` or `done`); marking an engagement `active` also needs the policy to have been read. A project with no engagement is never blocked, and the host page counts the checks the gate holds back as not applicable. See [Pipeline](PIPELINE.md#the-bug-bounty-gate).
 
 ## Reports
 

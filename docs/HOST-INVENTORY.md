@@ -44,7 +44,7 @@ The scripts live in `scripts/inventory/` and are served at `/staticfiles/cve/inv
 inventory-sync` refreshes them, and a test fails if they differ).
 
 Every script can print, without applying, what it needs to run on a schedule: `--install-cron` (a cron line and a systemd timer) or `-Schedule`
-(a scheduled task). A minute derived from the host name and a random delay spread a fleet over the hour.
+(a scheduled task). A minute derived from the host name and a random delay spread a fleet over the hour. `--timeout` (seconds per request, 1 to 300, default 30) and `--retries` (0 to 10, default 3) tune the request; the PowerShell script takes `-TimeoutSec` and `-Retries`.
 
 ## What each script collects
 
@@ -129,7 +129,7 @@ contents other than the OS metadata above, user accounts, network shares, browse
   at most 500 may be tied to no host (reports nobody adopts are dropped after 30 days; **Delete every unmatched report** or `POST
   .../inventory/delete-unmatched` clears them at once).
 - **A report is untrusted data.** A compromised machine can send anything. The server accepts one fixed shape, cleans every string (Unicode
-  compatibility-normalised; every character that is not printable is dropped, which is all control characters including the C1 set and its
+  compatibility-normalized; every character that is not printable is dropped, which is all control characters including the C1 set and its
   terminal escapes, bidirectional and zero-width marks, soft hyphens, word joiners, Unicode tag characters that can hide an instruction from a
   language model, private-use and unassigned characters, and variation selectors; length caps), validates every field with a known form (addresses, hashes, dates, ports), refuses a
   list over its cap rather than cutting it short, drops and counts what does not validate, and stores nothing it did not ask for. Package
@@ -167,7 +167,7 @@ JSON, UTF-8, `POST /api/v1/projects/{slug}/inventory`, `Authorization: Bearer <t
 | Field | Rule |
 | --- | --- |
 | `schema` | must be `cvengine-inventory/1`; another major version is refused with a message to update the server or the script |
-| text | every string is normalised and stripped of anything not printable; a package version from `dpkg`, `rpm`, `apk` or `pacman` must look like a version (no spaces), else it is dropped; dates and times take ASCII digits only |
+| text | every string is normalized and stripped of anything not printable; a package version from `dpkg`, `rpm`, `apk` or `pacman` must look like a version (no spaces), else it is dropped; dates and times take ASCII digits only |
 | `host` | at least one of `hostname`, `fqdn`, `machine_id` or a usable address; `ips` up to 64, loopback, link-local, multicast and unspecified dropped; `macs` up to 16 |
 | `os.family` | `linux`, `windows` or `macos`; `os.name` is required |
 | `packages` | up to 15,000; `e` (ecosystem) one of `dpkg rpm apk pacman snap flatpak brew win macpkg macapp`; `n` up to 200, `v` printable ASCII up to 100; exact duplicates collapse, other versions of one package stay (installed kernels) |
@@ -182,9 +182,9 @@ A report over a cap is `413`; a malformed one is `400`. An item that does not va
 The answer is `201` for a machine's first report and `200` after, `{"accepted": true, "outcome": "new|changed|updated", "status":
 "matched|created|unmatched", "packages": 812, "dropped": {}, "stale_after_days": 14}`.
 
-### Package normalisation
+### Package normalization
 
-Each package is stored compactly and normalised when read, in the form of a [package URL](https://github.com/package-url/purl-spec) (purl):
+Each package is stored compactly and normalized when read, in the form of a [package URL](https://github.com/package-url/purl-spec) (purl):
 name, version, ecosystem, distribution and release (from `os-release`), architecture and source package.
 
 ```
@@ -195,7 +195,7 @@ pkg:generic/7-Zip%2023.01%20%28x64%29@23.01?ecosystem=win
 ```
 
 `deb`, `rpm` and `apk` follow the registered purl types (vendor as the namespace, `arch` and, for rpm, `epoch` qualifiers; `distro` as in the
-examples of the spec). A catalogue that has no registered type (snap, flatpak, Homebrew, Windows and macOS software) is `pkg:generic` with an
+examples of the spec). A catalog that has no registered type (snap, flatpak, Homebrew, Windows and macOS software) is `pkg:generic` with an
 `ecosystem` qualifier, so no type is invented. Pacman uses `alpm`, which is not covered by the pages this was checked against and should be
 confirmed against the spec before relying on it.
 
@@ -225,13 +225,13 @@ lists the report with how it was matched.
 ## What it is used for
 
 - **Host page.** An **Inventory** tab: operating system, build, kernel, last boot, reboot pending, security posture, listening services,
-  installed updates, the packages (filter and page through them, with their purl), and the summarised history of the last 20 reports (what
+  installed updates, the packages (filter and page through them, with their purl), and the summarized history of the last 20 reports (what
   was added, removed, changed). A badge shows the report's age and turns orange when it is stale.
 - **Operating system.** The host-reported system replaces the network scan's guess (`os_guess`, accuracy 100) for the machine's addresses, and
   an nmap run does not overwrite it for 60 days. Each listening process is noted on the matching open port the scan already found; no port is
   created from a report (a socket nobody can reach from outside is not an exposed port).
 - **CVE matches.** See below.
-- **REST and MCP.** `GET projects/{slug}/inventory`, `.../inventory/{id}` and `.../hosts/{host}/inventory`; MCP `list_host_inventories` and
+- **REST and MCP.** `GET projects/{slug}/inventory` (`status=matched|unmatched|stale|fresh`, `q=`), `.../inventory/{id}` and `.../hosts/{host}/inventory`; to tie a report to a host or add the machine as a target, `POST .../inventory/{id}/adopt` (`{host}` or `{create: true}`); `DELETE .../inventory/{id}` and `POST .../inventory/delete-unmatched` remove reports (a write role is needed for these). MCP has `list_host_inventories` and
   `get_host_inventory` (the package list is paged: at most 200 a page).
 
 ### How the CVE matching works
@@ -251,8 +251,8 @@ report.
    local pool, and the sweep that closes scan matches of local-only CVEs leaves host-reported ones alone.
 5. **Distribution backports.** Ubuntu, Debian and RHEL fix CVEs without changing the upstream version, so an upstream range cannot decide a
    package. When cvENGINE holds the distribution's fixed version for the CVE and package (the tracker data behind `distro_status`), it judges
-   the package release against it: patched is kept at confidence 0.2 and labelled, vulnerable is 0.95. Without that data a distribution package
-   is at most 0.6. **The kernel of a backporting distribution is not matched at all** (its version number says nothing about its patches); the
+   the package release against it: patched is kept at confidence 0.2 and labeled, vulnerable is 0.95. Without that data a distribution package
+   is at most 0.6 (other ecosystems start from 0.8 for `apk` and the running kernel, 0.85 for `pacman` and anything else, and 0.95 for an operating system build). **The kernel of a backporting distribution is not matched at all** (its version number says nothing about its patches); the
    report says so. The kernel of Arch, Alpine, Fedora and other upstream-tracking systems is matched.
 6. A CVE an external scan already matched on the host gets the host's evidence added to that match instead of a second row.
 7. **Staleness.** A report older than the project's `inventory.stale_days` (default 14, 1 to 365) creates nothing and closes nothing: it is

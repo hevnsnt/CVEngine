@@ -1,6 +1,6 @@
 # Deployment
 
-cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
+cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). Two optional parts ship in the same file as Compose profiles and are **off by default**: a `tailscale` service ([TAILSCALE.md](TAILSCALE.md)) and the OpenVAS add-on, 15 Greenbone containers on a network of their own ([OPENVAS.md](OPENVAS.md)). Until you switch one on, none of its containers exist, run, publish a port or use memory. Sentinels, the scanner agents you run on other machines, are not part of this stack: each runs from its own repository and calls this server over HTTPS on 443. The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
 
 ## Ports
 
@@ -11,7 +11,7 @@ cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `cele
 | 8000 | `127.0.0.1` | `web`, for your own reverse proxy |
 | 5432 | `127.0.0.1` | `db` |
 
-Firewall 443 and 8082 to the people who need them. The development stack publishes 8000 and 5432 on `127.0.0.1` only.
+Firewall 443 and 8082 to the people who need them. The development stack has no proxy and publishes 8000 and 5432 on `127.0.0.1` only. The optional `tailscale` and `openvas` profiles publish no ports at all.
 
 ## Install
 
@@ -90,7 +90,7 @@ cvENGINE runs no model itself. In **Settings, AI model**, choose Anthropic, Open
 
 ## Backups
 
-Back up the database, `.env` and the secret file, but keep the keys apart from the dump. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
+Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
 
 ```bash
 docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > cvengine-$(date +%F).sql.gz
@@ -104,6 +104,26 @@ gunzip -c cvengine-2026-01-01.sql.gz | docker compose exec -T db sh -c 'psql -U 
 ```
 
 Every updater takes a database dump just before it migrates (`scripts/update.sh` and the in-app updater keep the last 3 in `.git/cvengine-update/backups`, mode 0700, and stop the update when a dump fails; `CVENGINE_UPDATE_BACKUPS=0` in `.env` turns that off; automatic deployment makes its own in `.git/cvengine-auto-deploy/backups`, [UPDATES.md](UPDATES.md#automatic-deployment)). These dumps stay on the same disk as the database: copy them elsewhere if the disk is what you are protecting against.
+
+## Make targets
+
+`make help` lists them. They all use `docker-compose.yml` alone, and the ones that name services (`stop`, `restart`, `rm`, `logs`, `images`, `build`, `up`) act on the six core services only.
+
+| Target | What it does |
+| --- | --- |
+| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the six core services. |
+| `make build` | Records the installed commit and builds the images. |
+| `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
+| `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one. |
+| `make username`, `make changepassword` | Create an admin account of your own choosing, or change a user's password. |
+| `make migrate` | Applies migrations. |
+| `make down`, `make stop`, `make restart`, `make rm` | Take the stack down, stop, restart or remove its containers. Volumes stay. |
+| `make logs`, `make images` | Follow the logs (last 1000 lines), or show the images. |
+| `make test` | Runs the test suite in the running `celery` container. |
+| `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
+| `make openvas-up`, `make openvas-user`, `make openvas-down` | Start the optional OpenVAS add-on, save its generated login, stop it. The app does the same from Administration, OpenVAS ([OPENVAS.md](OPENVAS.md)). |
+| `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
+| `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
 ## Development stack
 
@@ -121,11 +141,11 @@ docker compose -f docker-compose.dev.yml exec web python3 manage.py createsuperu
 
 ## Updating
 
-Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans. See [UPDATES.md](UPDATES.md). `make up` always uses `docker-compose.yml` alone, so on an install with its own overlay use `scripts/update.sh` or `docker compose` with your files instead. Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md). Every start of the worker container adds the built-in scan engines, keywords and tool rows the install does not have yet and never overwrites one that is there, so an edit to a built-in engine survives restarts and updates (a built-in you deleted comes back; a changed default in a new release does not reach an install that already has the row: clone the engine to adopt it).
+Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans for 5 minutes by default and then interrupts what is left. The optional `tailscale` and `openvas` services are neither started nor stopped by an update. See [UPDATES.md](UPDATES.md). `make up` always uses `docker-compose.yml` alone, so on an install with its own overlay use `scripts/update.sh` or `docker compose` with your files instead. Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md). Every start of the worker container adds the built-in engine rows, keywords and tool rows the install does not have yet and never overwrites one that is there (the engine rows are kept only so that existing agents keep working: no scan reads them).
 
 ## Factory reset
 
-**Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It recreates a "Default" organization and project, ends every other session (yours stays), and records one `system.factory_reset` audit row after clearing the log. Five wrong passwords lock the button for 10 minutes. It removes every organization, project, target, host, scan, result file, other user, token, and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
+**Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It recreates a "Default" organization and project, ends every other session (yours stays), and records one `system.factory_reset` audit row after clearing the log. Five wrong passwords lock the button for 10 minutes. It removes every organization, project, target, host, scan, result file, other user, token (so every Sentinel is removed with its token and has to be enrolled again), and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines, and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
 
 ## Uninstall
 
