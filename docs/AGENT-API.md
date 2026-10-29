@@ -63,6 +63,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | remediation | `PUT assets`, `GET projects/{slug}/work` | `register_assets`, `get_remediation_work` |
 | host info | `POST` or `PATCH projects/{slug}/hosts/{host}/profile` (`owner`, `purpose`, `criticality`) | `set_host_profile` |
 | delete host | `POST projects/{slug}/hosts/{host}/delete` | `delete_host` |
+| move host | `POST projects/{slug}/hosts/{host}/move` (body `{to_project}`): added to that project as a target and scanned there; its data leaves this project, which never brings it back (moving it back lifts that) | `move_host` |
 | exclude host | `POST projects/{slug}/hosts/{host}/exclude`, `GET projects/{slug}/exclusions`, `DELETE projects/{slug}/exclusions/{host}` | `exclude_host`, `list_exclusions`, `remove_exclusion` |
 | host inventory | `POST projects/{slug}/inventory` (reporter scripts), `GET projects/{slug}/inventory`, `GET .../inventory/{id}`, `GET .../hosts/{host}/inventory`, `POST .../inventory/{id}/adopt`, `DELETE .../inventory/{id}` | `list_host_inventories`, `get_host_inventory` (read only) |
 | API keys (read: any role; `PUT`, `DELETE`: project or organization admin) | `GET/PUT/DELETE projects/{slug}/api-keys[/{service}]` | none |
