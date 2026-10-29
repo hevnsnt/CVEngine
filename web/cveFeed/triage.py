@@ -173,7 +173,7 @@ def adjusted_severity(base, adjust, has_hard_evidence):
 def signature_for(kind, fields):
     """The sha1 of the evidence a verdict depends on. Never a host: the same evidence on fifty hosts is one signature."""
     # Change this when the prompt or deterministic decision rules materially change.
-    blob = json.dumps(['decision-v2', kind, fields], sort_keys=True, default=str, separators=(',', ':'))
+    blob = json.dumps(['decision-v3', kind, fields], sort_keys=True, default=str, separators=(',', ':'))
     return hashlib.sha1(blob.encode()).hexdigest()
 
 

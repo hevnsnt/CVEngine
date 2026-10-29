@@ -554,7 +554,11 @@ TRIAGE_SYSTEM_PROMPT = (
 	'4) Does the advisory need local state (kernel, driver, hardware, a local account)? Then no network evidence settles it: answer '
 	'needs_validation and say the host inventory reporter is what decides. Use likely_false_positive or not_applicable only when you can '
 	'name concrete metadata that points away: a different product, a version out of range or patched, or edge-only evidence. A banner or '
-	'tag that says nothing about a version is no reason to close a finding and none to confirm it. ' + UNTRUSTED_NOTICE)
+	'tag that says nothing about a version is no reason to close a finding and none to confirm it. When the only evidence is a version '
+	'inside the advisory range, with no template result, no distribution status and no probe that stated the version, answer '
+	'needs_validation: a version string alone does not show that the host is affected (back-ported fixes, repackaged builds and edge '
+	'devices that report another product\'s version are common). Answer likely only when something beyond the version supports it. '
+	+ UNTRUSTED_NOTICE)
 
 
 def _triage_text(value, limit):

@@ -457,6 +457,15 @@ class TriagePromptTests(unittest.TestCase):
 		self.assertTrue(ai.TRIAGE_SYSTEM_PROMPT.endswith(ai.UNTRUSTED_NOTICE))
 		self.assertIn('never write commands', ai.TRIAGE_SYSTEM_PROMPT)
 
+	def test_the_triage_prompt_tells_the_model_to_abstain_on_a_version_alone(self):
+		# issue 210: a model that answered likely on a version inside a range made the finding affected; one paragraph of abstention
+		# took a local 27B model from 7 false affected in 43 to 1
+		prompt = ai.TRIAGE_SYSTEM_PROMPT
+		self.assertIn('the only evidence is a version inside the advisory range', prompt)
+		self.assertIn('answer needs_validation', prompt)
+		self.assertIn('Answer likely only when something beyond the version supports it', prompt)
+		self.assertTrue(prompt.endswith(ai.UNTRUSTED_NOTICE))
+
 
 class DetectTests(unittest.TestCase):
 	def test_detect_provider(self):
