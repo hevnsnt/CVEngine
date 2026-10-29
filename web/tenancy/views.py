@@ -18,7 +18,7 @@ from django.utils.crypto import constant_time_compare, salted_hmac
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from reNgine.client_ip import client_ip
-from tenancy import audit, mfa, throttle
+from tenancy import audit, invite, mfa, throttle
 
 PENDING_KEY = 'mfa_pending'
 SETUP_SECRET_KEY = 'mfa_setup_secret'
@@ -220,3 +220,52 @@ def setup_view(request):
 @login_required
 def disable_view(request):
     return redirect(reverse('cve_account') + '#security')
+
+
+# --- onboarding link ---------------------------------------------------------------------------------
+
+INVITE_FAILURES = 20  # unreadable or used links per address per window; a real link is a long signed value, so this only slows guessing
+INVITE_WINDOW = 600
+
+
+def _invite_page(request, template, context=None, status=200):
+    response = render(request, template, context or {}, status=status)
+    response['Cache-Control'] = 'no-store'
+    response['Referrer-Policy'] = 'no-referrer'  # the address of this page carries the token
+    return response
+
+
+def invite_view(request, token):
+    """Where the link in an onboarding email lands: the person chooses a password. Opening the page changes nothing (mail scanners
+    open links); the password is set by the form, and setting it ends the link, because the link is bound to the account's credentials."""
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError
+    key = f'invite_fail:{client_ip(request) or "unknown"}'
+    if throttle.exceeded(key, INVITE_FAILURES):
+        return _invite_page(request, 'tenancy/invite_invalid.html', {'throttled': True}, status=429)
+    user = invite.read_token(token)
+    if not user:
+        throttle.count(key, INVITE_WINDOW)
+        return _invite_page(request, 'tenancy/invite_invalid.html', status=410)
+    context = {'invited': user, 'days': invite.valid_days()}
+    if request.method != 'POST':
+        return _invite_page(request, 'tenancy/invite.html', context)
+    new, again = str(request.POST.get('password', '')), str(request.POST.get('confirm', ''))
+    try:
+        if new != again:
+            raise ValidationError('The two passwords are not the same.')
+        validate_password(new, user)
+    except ValidationError as exc:
+        return _invite_page(request, 'tenancy/invite.html', {**context, 'errors': exc.messages}, status=400)
+    with transaction.atomic():
+        locked_user = User.objects.select_for_update().filter(pk=user.pk).first()
+        if not locked_user or not invite.read_token(token, locked_user):  # a second tab got here first
+            throttle.count(key, INVITE_WINDOW)
+            return _invite_page(request, 'tenancy/invite_invalid.html', status=410)
+        locked_user.set_password(new)
+        locked_user.save(update_fields=['password'])
+        profile = profile_of(locked_user)
+        profile.must_change_password = False
+        profile.save(update_fields=['must_change_password'])
+        audit.record_for_user(locked_user, 'account.invite_accepted', locked_user)
+    return _invite_page(request, 'tenancy/invite_done.html', {'invited': locked_user})

@@ -20,6 +20,7 @@ import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 const A = "/cve/api/admin";
 const root = document.getElementById("view");
 let me = { is_superuser: false };
+let emailReady = false; // outgoing mail is set up (Settings, Email), so a new person can be invited by email
 
 const ROLE_OPTIONS = {
   org: [
@@ -33,8 +34,12 @@ const ROLE_OPTIONS = {
   ],
 };
 
-function revealPassword(title, username, password) {
+function revealPassword(title, username, password, why) {
   dialog(title, (body, close) => {
+    if (why)
+      body.append(
+        el("p", "note", `The invitation email could not be sent (${why}).`),
+      );
     body.append(
       el(
         "p",
@@ -74,6 +79,7 @@ async function usersTab(panel) {
     api("GET", `${A}/projects`),
   ]);
   me = users.actor;
+  emailReady = !!users.email_ready;
   const tools = el("div", "tools");
   const q = text("", {
     type: "search",
@@ -142,7 +148,9 @@ async function usersTab(panel) {
             label: "Status",
             render: (u) =>
               u.is_active
-                ? u.must_change_password
+                ? u.invite_pending
+                  ? badge("invited", "info")
+                  : u.must_change_password
                   ? badge("temp password", "medium")
                   : badge("active", "success")
                 : badge("disabled", "critical"),
@@ -214,11 +222,22 @@ function newUser(orgs, projects, done) {
     const email = text("", { type: "email" });
     const pick = scopePicker(orgs, projects);
     pick.sync();
+    const emailNote = el("p", "note", "", { style: "margin:-6px 0 12px" });
+    const showNote = () => {
+      emailNote.textContent = !emailReady
+        ? "Outgoing mail is not set up (Settings, Email), so you will be shown a temporary password to hand over."
+        : email.value.trim()
+          ? "They will get an onboarding email with their username and a link to choose a password."
+          : "Add an email address to send them an onboarding email; without one you will be shown a temporary password.";
+    };
+    email.addEventListener("input", showNote);
+    showNote();
     body.append(
       field("Account name", username, "Letters, digits and . @ + - _"),
       field("First name", first),
       field("Last name", last),
-      field("Email", email),
+      field("Email", email, null),
+      emailNote,
       field("Add them to", pick.scope),
       field("Which one", pick.target),
       field("Their role", pick.role),
@@ -238,7 +257,14 @@ function newUser(orgs, projects, done) {
           role: pick.role.value,
         });
         close();
-        revealPassword("Account created", r.username, r.temporary_password);
+        if (r.invited) toast(`Invitation sent to ${r.email}`);
+        else
+          revealPassword(
+            "Account created",
+            r.username,
+            r.temporary_password,
+            r.invite_error,
+          );
         done();
       }),
     );
@@ -370,6 +396,26 @@ function manageUser(u, orgs, projects, done) {
     }
     body.append(el("h2", "", "Account", { style: "margin-top:20px" }));
     const row = el("div", "actions", null, { style: "flex-wrap:wrap" });
+    if (emailReady && u.email && u.must_change_password && !u.is_superuser)
+      row.append(
+        button(
+          "Send invitation again",
+          async () => {
+            const r = await api("POST", `${A}/users/${u.id}/resend-invite`);
+            close();
+            if (r.invited) toast(`Invitation sent to ${u.email}`);
+            else
+              revealPassword(
+                "Invitation not sent",
+                u.username,
+                r.temporary_password,
+                r.invite_error,
+              );
+            done();
+          },
+          "btn ghost sm",
+        ),
+      );
     row.append(
       button(
         "Reset password",

@@ -202,6 +202,7 @@ LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'login',
     'mfa_verify',
     'admin_login_redirect',
+    'invite',
 ]
 
 # A Sentinel's very first call has no bearer token and no session yet: it authenticates with a one-time enrollment

@@ -1,0 +1,10 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}Password set · CVEngine{% endblock %}
+{% block content %}
+<h1>You are all set</h1>
+<p class="sub">Your password is saved, {{ invited.first_name|default:invited.username }}.</p>
+<div class="card ticks">
+  <p style="margin:0 0 14px">Sign in as <strong>{{ invited.username }}</strong> with the password you just chose.</p>
+  <a class="btn" href="{% url 'login' %}" style="display:block;text-align:center;text-decoration:none">Go to sign in</a>
+</div>
+{% endblock %}

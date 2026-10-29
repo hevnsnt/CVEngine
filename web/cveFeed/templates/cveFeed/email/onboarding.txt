@@ -1,0 +1,18 @@
+{% autoescape off %}Hi {{ name }},
+
+{{ by }} added you to cvENGINE on {{ instance }}. One step left: choose a password.
+
+Your username: {{ username }}
+
+Set your password (this link works once and expires in {{ days }} day{{ days|pluralize }}):
+{{ link }}
+{% if access %}
+You can see:
+{% for line in access %}  - {{ line }}
+{% endfor %}{% endif %}
+After you set it, sign in at {{ sign_in }} with your username.
+
+Did not expect this? Ignore this email and nothing happens: no password is set until someone opens the link.
+
+cvENGINE · {{ instance }}
+{% endautoescape %}

@@ -11,7 +11,7 @@ import re
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
-from cveFeed import egress_proxy, openvas_admin, tailscale_admin
+from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
@@ -349,6 +349,81 @@ def notifications_put(request):
     return notifications_get(request)
 
 
+# --- email -------------------------------------------------------------------------
+
+def _email_payload(cfg):
+    return {'enabled': cfg.enabled, 'host': cfg.host, 'port': cfg.port, 'security': cfg.security, 'username': cfg.username,
+            'has_password': bool(cfg.password), 'from_address': cfg.from_address, 'from_name': cfg.from_name,
+            'verify_certificate': cfg.verify_certificate, 'link_base': cfg.link_base, 'link_effective': mailer.base_url(cfg),
+            'ready': mailer.ready(cfg), 'last_test': cfg.state or None}
+
+
+def email_get(request):
+    return _email_payload(mailer.row())
+
+
+def email_put(request):
+    from cveFeed.admin_api import audit
+    data = _body(request)
+    cfg = mailer.row()
+    host = _text(data, 'host', cfg.host, max_len=253).lower()
+    if host and not mailer.HOST_RE.match(host):
+        raise SettingsError(400, 'the server name may hold only letters, digits, dots, dashes and colons')
+    if host and ai_url_blocked(f'smtp://{host}'):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no mail server uses: enter the address of the server itself')
+    try:
+        port = int(data.get('port', cfg.port))
+    except (TypeError, ValueError):
+        raise SettingsError(400, 'the port must be a number')
+    if not 1 <= port <= 65535:
+        raise SettingsError(400, 'the port must be between 1 and 65535')
+    security = data.get('security', cfg.security)
+    if security not in dict(cfg.SECURITY_CHOICES):
+        raise SettingsError(400, 'Security must be STARTTLS, SSL/TLS or None')
+    username = _text(data, 'username', cfg.username, max_len=255)
+    from_address = _text(data, 'from_address', cfg.from_address, max_len=254)
+    if from_address and not mailer.EMAIL_RE.match(from_address):
+        raise SettingsError(400, 'the From address does not look like an email address')
+    from_name = _text(data, 'from_name', cfg.from_name, max_len=100)
+    link_base = _text(data, 'link_base', cfg.link_base, max_len=200).rstrip('/')
+    if link_base and not mailer.LINK_BASE_RE.match(link_base):
+        raise SettingsError(400, 'the link address must look like https://scanner.example.com, with no path')
+    if any(ord(ch) < 32 or ch in '<>"' for ch in from_name + username):
+        raise SettingsError(400, 'the names may not contain control characters, quotes or angle brackets')
+    password = '' if data.get('clear_password') else _text(data, 'password', cfg.password or '', secret=True, max_len=500)
+    if security == 'none' and (username or password):
+        raise SettingsError(400, 'a user name and password would cross the network unencrypted; choose STARTTLS or SSL/TLS, or clear them')
+    enabled = bool(data.get('enabled', cfg.enabled))
+    if enabled and not (host and from_address):
+        raise SettingsError(400, 'to turn outgoing mail on, enter the server and the From address')
+    cfg.enabled, cfg.host, cfg.port, cfg.security, cfg.username, cfg.password = enabled, host, port, security, username, password
+    cfg.from_address, cfg.from_name, cfg.link_base = from_address, from_name, link_base
+    if 'verify_certificate' in data:
+        cfg.verify_certificate = bool(data['verify_certificate'])
+    cfg.updated_by = request.user
+    cfg.save()
+    audit(request.user, 'email.update', host, enabled=enabled, security=security, verify_certificate=cfg.verify_certificate)
+    return _email_payload(cfg)
+
+
+def email_test(request):
+    """Send a test message through the saved settings, to the address given or else to the signed-in App Admin's own."""
+    from django.utils import timezone
+
+    from cveFeed.admin_api import audit
+    cfg = mailer.row()
+    if not (cfg.host and cfg.from_address):
+        raise SettingsError(409, 'save the server and the From address first')
+    to = str(_body(request).get('to') or request.user.email or '').strip()
+    if not to:
+        raise SettingsError(400, 'enter the address to send the test to (your account has none)')
+    ok, error = mailer.send_test(to, request.user, cfg)
+    cfg.state = {'at': timezone.now().isoformat(), 'ok': ok, 'to': to, 'error': error}
+    cfg.save(update_fields=['state'])
+    audit(request.user, 'email.test', cfg.host, ok=ok)
+    return {'ok': ok, 'to': to, 'error': error, 'last_test': cfg.state}
+
+
 # --- proxy -------------------------------------------------------------------------
 
 _PROXY_USERINFO = re.compile(r'^([a-z0-9]+://)([^/\s]*)@(\S+)$', re.I)
@@ -659,6 +734,8 @@ ROUTES = [
     ('GET', r'keys', lambda r, **k: keys_get(r)), ('PUT', r'keys', lambda r, **k: keys_put(r)),
     ('GET', r'notifications', lambda r, **k: notifications_get(r)),
     ('PUT', r'notifications', lambda r, **k: notifications_put(r)),
+    ('GET', r'email', lambda r, **k: email_get(r)), ('PUT', r'email', lambda r, **k: email_put(r)),
+    ('POST', r'email/test', lambda r, **k: email_test(r)),
     ('GET', r'proxy', lambda r, **k: proxy_get(r)), ('PUT', r'proxy', lambda r, **k: proxy_put(r)),
     ('GET', r'reports', lambda r, **k: report_get(r)), ('PUT', r'reports', lambda r, **k: report_put(r)),
     ('GET', r'tailscale', lambda r, **k: tailscale_admin.tailscale_get(r)),

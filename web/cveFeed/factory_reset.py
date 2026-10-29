@@ -4,7 +4,7 @@ Superuser only (the settings API enforces it, and asks for a typed phrase plus t
 
 Removed: every organization, project, target, host and scan with everything under them (IPs, ports, findings,
 screenshots, reports, notes), every user except the administrator who runs the reset, memberships, API tokens, the AI
-settings, API vault, notification/proxy/report settings, IP allowlist, bans and strikes, the audit log, the CVE feed and
+settings, API vault, notification/email/proxy/report settings, IP allowlist, bans and strikes, the audit log, the CVE feed and
 matches, generated templates, AI activity, update settings, scheduled scans, other sessions, and the files under the
 scan-results directory.
 

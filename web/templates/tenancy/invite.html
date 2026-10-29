@@ -1,0 +1,24 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}Choose your password · CVEngine{% endblock %}
+{% block content %}
+<h1>Welcome, {{ invited.first_name|default:invited.username }}</h1>
+<p class="sub">Choose a password to finish setting up your account.</p>
+<form class="card ticks" method="post" autocomplete="off">
+  {% csrf_token %}
+  <div class="field">
+    <label for="username">Your username</label>
+    <input id="username" value="{{ invited.username }}" readonly autocomplete="username">
+  </div>
+  <div class="field">
+    <label for="password">New password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" autofocus required>
+  </div>
+  <div class="field">
+    <label for="confirm">Type it again</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+  </div>
+  <button class="btn" type="submit" style="width:100%;margin-top:4px">Set password</button>
+  {% if errors %}<div class="msg err" role="alert">{% for e in errors %}{{ e }}{% if not forloop.last %} {% endif %}{% endfor %}</div>{% endif %}
+</form>
+<p class="note" style="margin-top:14px">This link works once and lasts {{ days }} day{{ days|pluralize }}. After you set a password, you sign in with your username.</p>
+{% endblock %}

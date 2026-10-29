@@ -35,7 +35,7 @@ ADMIN_ONLY = re.compile(r'^/(?!)')
 BUGBOUNTY = re.compile(r'^/cve/(api/)?bounty(/|$)|^/(?!cve/)[^/]+/bountyhub(/|$)|'
                        r'^/scanEngine/[^/]+/(hackerone_settings|testHackerone)', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
-ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$)|cve/how-it-works(/|$))')
+ALWAYS_OPEN = re.compile(r'^/((logout|login|invite|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$)|cve/how-it-works(/|$))')
 
 
 def best_role(roles):

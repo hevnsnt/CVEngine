@@ -1725,6 +1725,35 @@ class OpenvasSettings(models.Model):
         return f"OpenVAS add-on ({'on' if self.enabled else 'off'})"
 
 
+class SmtpSettings(models.Model):
+    """Single-row outgoing mail server (Settings, Email; see cveFeed.mailer). Off by default: with it off, or with no address on the
+    account, adding a person shows a temporary password as it always did. The password is encrypted like every other stored secret and
+    never leaves the server: the settings page says only whether it is set."""
+
+    SECURITY_CHOICES = (("starttls", "STARTTLS"), ("ssl", "SSL/TLS"), ("none", "None"))
+
+    enabled = models.BooleanField(default=False)
+    host = models.CharField(max_length=255, blank=True, default="")
+    port = models.PositiveIntegerField(default=587)
+    security = models.CharField(max_length=8, choices=SECURITY_CHOICES, default="starttls")
+    username = models.CharField(max_length=255, blank=True, default="")
+    password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
+    from_address = models.CharField(max_length=254, blank=True, default="")
+    from_name = models.CharField(max_length=100, blank=True, default="")
+    verify_certificate = models.BooleanField(default=True)  # off only for a relay with a private or self-signed certificate
+    link_base = models.CharField(max_length=200, blank=True, default="")  # the address links in a message start with; empty: https://DOMAIN_NAME
+    state = models.JSONField(default=dict, blank=True)  # the last test send: {at, ok, to, error}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls()
+
+    def __str__(self):
+        return f"Outgoing mail ({'on' if self.enabled else 'off'})"
+
+
 class OpenvasProject(models.Model):
     """A project's opt-in to OpenVAS scanning. Off by default. The project's hosts that are Fire or Smoke are scanned by themselves; ``hosts`` (each
     one already a host of the project) adds hosts someone named, still gated by heat unless the host is also in ``forced_hosts``. ``target_id`` is the GVM target last made for this host set, kept
