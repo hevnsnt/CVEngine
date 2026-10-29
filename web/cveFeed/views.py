@@ -536,7 +536,12 @@ def agents_page(request):
 
 
 def sentinels_page(request):
-    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), **ui_context(request, 'sentinels')})
+    from dashboard.models import Org
+    from tenancy import roles
+    # the organizations this person may provision an organization-wide Sentinel for: the same check the enroll endpoint applies
+    enroll_orgs = list(Org.objects.filter(pk__in=roles.managed_org_ids(request.user)).order_by('name').values('slug', 'name'))
+    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs,
+                                                      **ui_context(request, 'sentinels')})
 
 
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)

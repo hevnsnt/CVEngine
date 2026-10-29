@@ -20,12 +20,12 @@
     <div class="field"><label for="enroll-scope">Scope</label>
       <select id="enroll-scope">
         <option value="project">Project</option>
-        <option value="org">Organization</option>
-        <option value="instance">Instance (everything)</option>
+        {% if enroll_orgs %}<option value="org">Organization</option>{% endif %}
+        {% if user.is_superuser %}<option value="instance">Instance (everything)</option>{% endif %}
       </select>
     </div>
     <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
-    <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization slug</label><input type="text" id="enroll-org" placeholder="org-slug"></div>
+    <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization</label><select id="enroll-org">{% for o in enroll_orgs %}<option value="{{ o.slug }}">{{ o.name }}</option>{% endfor %}</select></div>
     <div class="field"><label for="enroll-network">Where it runs</label>
       <select id="enroll-network">
         <option value="external">External: reaches the internet-facing targets</option>
@@ -83,8 +83,8 @@
       if (!enrollProject.value) return;
       url = '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll?format=blob';
     } else if (scope === 'org') {
-      if (!enrollOrg.value.trim()) return;
-      url = '/api/v1/orgs/' + enrollOrg.value.trim() + '/sentinels/enroll?format=blob';
+      if (!enrollOrg.value) return;
+      url = '/api/v1/orgs/' + encodeURIComponent(enrollOrg.value) + '/sentinels/enroll?format=blob';
     } else {
       url = '/api/v1/sentinels/enroll?format=blob';
     }
