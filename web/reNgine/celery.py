@@ -45,6 +45,8 @@ def clear_untrusted_os_guesses(*args, **kwargs):
     try:
         from cveFeed import os_detection
         os_detection.clear_stored_guesses()
+        from cveFeed.tasks import check_os_path
+        check_os_path.apply_async(countdown=180)  # and measure the path, once the other workers are up
     except Exception:  # noqa: BLE001 - the database may not be reachable yet; the next worker start tries again
         logging.getLogger(__name__).exception('could not clear the untrusted operating system guesses')
 

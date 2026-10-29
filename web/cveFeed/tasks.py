@@ -1734,6 +1734,15 @@ def weekly_maintenance():
     return result
 
 
+@app.task(name='check_os_path', bind=False, queue='cve_feed_queue', time_limit=300, soft_time_limit=240)
+def check_os_path():
+    """Daily: measure whether the network path this worker scans from loses nmap's malformed OS-detection probes (cveFeed.path_probe), and
+    keep the verdict where operating system detection reads it (cveFeed.os_detection). Runs in the scanning container, so it measures the
+    path the scans take. Two packets to each of at most eight hosts the scans already reach; waits while scanning is paused."""
+    from cveFeed import os_detection, path_probe
+    return os_detection.record_path(path_probe.check())
+
+
 @app.task(name='generate_report', bind=True, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
 def generate_report(self, export_id):
     """Make one queued PDF report (cveFeed.report_export): read for the project as the user who asked, rendered in a child process,
