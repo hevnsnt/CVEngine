@@ -217,6 +217,40 @@ def _embedded_v4(ip):
     return ip
 
 
+# Addresses the IANA special-purpose registries mark "Globally Reachable: False" or that are not unicast on the public internet, that
+# the standard library's ``is_global`` may or may not cover depending on the Python version (it changed in 3.12.4 and 3.13, gh-113171).
+# Spelled out so the answer does not move with the interpreter in the image.
+_NOT_PUBLIC = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+    "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+    "::/128", "::1/128", "::/96", "64:ff9b:1::/48", "100::/64", "100:0:0:1::/64", "2001::/32", "2001:2::/48", "2001:10::/28",
+    "2001:db8::/32", "3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
+)]
+_COMPATIBLE_V4 = ipaddress.ip_network("::/96")
+_SIIT = ipaddress.ip_network("::ffff:0:0:0/96")
+
+
+def is_public_address(value):
+    """True when ``value`` is a unicast address on the public internet, as a fact about the address alone: no operator setting (the
+    blocked ranges, the opt-in for private targets) changes it, so an exposure score never moves with a scanning policy. An IPv6
+    address that carries an IPv4 one (mapped, translated, NAT64, 6to4, IPv4-compatible) is judged as the IPv4 address. Text that is
+    not an address is not public. ``is_scannable_ip`` answers a different question (may a scanner touch
+    it), and documentation ranges pass that one and fail this one."""
+    try:
+        ip = ipaddress.ip_address(str(value).strip().strip("[]"))
+    except ValueError:
+        return False
+    if getattr(ip, "scope_id", None) is not None:
+        return False
+    if ip.version == 6 and (ip in _SIIT or (ip in _COMPATIBLE_V4 and int(ip) > 1)):
+        ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)  # ::ffff:0:a.b.c.d and ::a.b.c.d
+    else:
+        ip = _embedded_v4(ip)
+    if any(ip.version == n.version and ip in n for n in _NOT_PUBLIC):
+        return False
+    return ip.is_global
+
+
 def _tailnet_authorised(ip, project):
     """Whether ``ip`` is the tailnet address of a device a connected Tailscale integration imported for ``project`` (the device's
     target is named by that very address; see cveFeed.tailscale_scope). Only consulted for an address that would otherwise be
@@ -226,18 +260,6 @@ def _tailnet_authorised(ip, project):
         return tailscale_scope.is_authorised(ip, project)
     except Exception:  # noqa: BLE001 - the answer is the safe one when the table cannot be read
         return False
-
-
-def is_internal_address(value):
-    """True when ``value`` is not an address of the public internet: RFC 1918, carrier-grade NAT (a tailnet), unique-local, loopback,
-    link-local and the other ranges this module never lets a scanner reach. An IPv6 address that carries an IPv4 one is judged as the
-    IPv4 address. Documentation ranges are not internal, as for ``is_scannable_ip``. Text that is not an address counts as internal
-    (nothing public can be said of it). Unlike ``is_scannable_ip`` it does not depend on the operator's opt-in for private targets."""
-    try:
-        ip = _embedded_v4(ipaddress.ip_address(str(value).strip().strip("[]")))
-    except ValueError:
-        return True
-    return any(ip in net for net in _INTERNAL + _ALWAYS_BLOCKED)
 
 
 def is_scannable_ip(value, allow_private=None, project=None):

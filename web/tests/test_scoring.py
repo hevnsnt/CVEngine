@@ -106,7 +106,7 @@ class RescoreTests(ChangeFixture, TestCase):
 		now = timezone.now()
 		self.old = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, tasks=[], results_dir='x')
 		self.new = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, tasks=[], results_dir='x')
-		self.ip = IpAddress.objects.create(address='203.0.113.5')
+		self.ip = IpAddress.objects.create(address='93.184.216.34')
 		self.rows = []
 		for scan in (self.old, self.new):
 			sub = Subdomain.objects.create(name='www.ct.test', target_domain=self.domain, scan_history=scan)
@@ -206,7 +206,7 @@ class RescoreTests(ChangeFixture, TestCase):
 
 	def test_a_ruled_out_match_and_a_private_ip_do_not_count(self):
 		CVEMatch.objects.update(ai_verdict='not_affected')
-		self.ip.is_private = True
+		self.ip.address = '192.168.1.5'  # judged from the address, not from a stored flag
 		self.ip.save()
 		AssetChange.objects.all().delete()
 		RouteAuth.objects.all().delete()
