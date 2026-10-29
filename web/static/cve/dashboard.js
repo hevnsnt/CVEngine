@@ -118,8 +118,9 @@ function paintOldest(s) {
   tile.hidden = days == null;
   if (days == null) return;
   setNum("s-oldest_open_days", days);
+  $("s-oldest_unit").textContent = days === 1 ? "day" : "days";
   const kind = OLDEST_KIND[s.oldest_open_kind];
-  $("s-oldest_note").textContent = kind ? `a ${kind[0].toLowerCase()}` : "";
+  $("s-oldest_note").textContent = kind ? kind[0] : "";
   if (kind && slug) tile.href = `/cve/${encodeURIComponent(slug)}/${kind[1]}/${kind[2]}`;
   tile.classList.toggle("old", days >= 30);
 }
@@ -139,15 +140,13 @@ async function paintCoverage() {
     const total = all - noAddress;
     const never = Math.max(0, (heat.unscanned || 0) - noAddress);
     if (!all) return;
-    $("s-coverage").textContent = `${capped ? "~" : ""}${total ? Math.round((100 * (total - never)) / total) : 100}%`;
-    const parts = [];
-    parts.push(never ? `${never} of ${total} hosts never scanned` : `all ${total} hosts scanned`);
-    if (capped) parts.push(`approximate: only the first ${all} hosts are counted`);
-    if (noAddress) {
-      const why = [u.private ? `${u.private} point inside a private network` : "", u.no_dns ? `${u.no_dns} have no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
-      parts.push(`${noAddress} with no address to scan (${why})`);
-    }
-    $("s-coverage_note").textContent = parts.join("; ");
+    // two plain numbers: hosts scanned, out of the hosts that can be scanned. The rest of the story is in the tooltip
+    const approx = capped ? "~" : "";
+    $("s-coverage").textContent = `${approx}${total - never}`;
+    $("s-coverage_of").textContent = `of ${approx}${total}`;
+    const why = [u.private ? `${u.private} inside a private network` : "", u.no_dns ? `${u.no_dns} with no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
+    $("n-coverage").title = `${total - never} of the ${total} hosts that can be scanned have been scanned.` +
+      (noAddress ? ` ${noAddress} more have no address to scan (${why}).` : "") + (capped ? ` Approximate: only the first ${all} hosts are counted.` : "");
   } catch (_) {
     coverageAt = 0;
   }
