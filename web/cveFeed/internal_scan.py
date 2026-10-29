@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 TASK_TAG = 'internal_pipeline'  # ScanHistory.tasks marks a scan that belongs to this driver
 SWEEP_MAX = 20  # targets one sweep queues (CVENGINE_INTERNAL_SCAN_MAX)
+FAILURE_RETRY = timedelta(hours=1)  # avoid repeatedly queueing a failed target when a sweep is retried
 
 
 def cadence():
@@ -38,11 +39,18 @@ def cadence():
 def start(domain, initiated_by=None):
     """Queue an internal scan of ``domain`` and return its ``ScanHistory``; one already queued or running is returned instead of a second."""
     from cveFeed.discovery import QUEUED, _active_filter, pick_engine
+    from cveFeed.bounty_gate import Gate
+    from cveFeed.exclusions import is_excluded
     from cveFeed.tasks import run_internal_scan
     from startScan.models import ScanHistory
     from targetApp.target_types import sentinel_only_target
     if not sentinel_only_target(domain.name, domain.project_id):
         raise ValueError(f'{domain.name} is not inside an internal range of its project')
+    if is_excluded(domain.project_id, domain.name):
+        raise ValueError(f'{domain.name} is excluded for this organization')
+    why = Gate().refusal(domain.project_id, domain.name, unattended=initiated_by is None)
+    if why:
+        raise ValueError(f'{domain.name} is not scanned: {why}')
     active = ScanHistory.objects.filter(_active_filter(), domain=domain, tasks__contains=[TASK_TAG]).order_by('id').first()
     if active:
         return active
@@ -58,30 +66,48 @@ def start(domain, initiated_by=None):
 def due_targets(limit=SWEEP_MAX, now=None):
     """Internal targets to scan now, oldest scan first: not scanned inside the cadence, none with a scan going, and only in a project
     where a live ``network:internal`` Sentinel could take the work (a scan nobody can run would only fail)."""
-    from django.db.models import F, Max
+    from django.db.models import Exists, F, OuterRef, Q, Subquery
+    from django.db.models.functions import Coalesce
     from agentapi import sentinel_broker
-    from cveFeed.discovery import _active_filter
+    from cveFeed.bounty_gate import Gate
+    from cveFeed.discovery import SUCCESS, FAILED, _active_filter
+    from cveFeed.exclusions import excluded_names
     from dashboard.models import Project
-    from startScan.models import ScanHistory
+    from startScan.models import ScanActivity, ScanHistory
     from targetApp.models import Domain
     from targetApp.target_types import internal_networks, sentinel_only_target
     now = now or timezone.now()
     cutoff = now - cadence()
+    retry_cutoff = now - FAILURE_RETRY
     busy = set(ScanHistory.objects.filter(_active_filter(), tasks__contains=[TASK_TAG]).values_list('domain_id', flat=True))
     from cveFeed.models import InternalRange
     chosen = []
+    gate = Gate()
+    failed_stage = ScanActivity.objects.filter(scan_of_id=OuterRef('pk'), status=FAILED)
+    attempts = (ScanHistory.objects.filter(domain_id=OuterRef('pk'), tasks__contains=[TASK_TAG])
+                .annotate(stage_failed=Exists(failed_stage), completed_at=Coalesce('stop_scan_date', 'start_scan_date')))
+    last_success = (attempts.filter(scan_status=SUCCESS, stage_failed=False)
+                    .order_by('-completed_at').values('completed_at')[:1])
+    last_failure = (attempts.filter(Q(scan_status=FAILED) | Q(scan_status=SUCCESS, stage_failed=True))
+                    .order_by('-completed_at').values('completed_at')[:1])
     for project in Project.objects.filter(pk__in=InternalRange.objects.values('project_id')).select_related('org'):
         if len(chosen) >= limit:
             break
         if not sentinel_broker.any_scanner_for(project, 'nmap', internal=True):
             continue
         nets = internal_networks(project.id)
-        rows = (Domain.objects.filter(project=project).annotate(last=Max('scanhistory__start_scan_date'))
-                .order_by(F('last').asc(nulls_first=True), 'id'))
+        banned = excluded_names(project.id)
+        rows = (Domain.objects.filter(project=project).annotate(last_success=Subquery(last_success), last_failure=Subquery(last_failure))
+                .order_by(F('last_success').asc(nulls_first=True), 'id'))
         for domain in rows:
             if len(chosen) >= limit:
                 break
-            if domain.id in busy or (domain.last and domain.last >= cutoff) or not sentinel_only_target(domain.name, project.id, nets):
+            recent_failure = domain.last_failure and (not domain.last_success or domain.last_failure > domain.last_success)
+            if (domain.id in busy
+                    or (recent_failure and domain.last_failure >= retry_cutoff)
+                    or (not recent_failure and domain.last_success and domain.last_success >= cutoff)
+                    or not sentinel_only_target(domain.name, project.id, nets)
+                    or domain.name.lower().rstrip('.') in banned or gate.refusal(project.id, domain.name)):
                 continue
             chosen.append(domain)
     return chosen
@@ -101,6 +127,8 @@ def sweep():
         try:
             start(domain)
             started += 1
+        except ValueError:  # policy or range changed after due_targets selected it
+            continue
         except Exception:  # noqa: BLE001 - one target's trouble must not stop the round
             logger.exception('internal scan sweep: could not queue %s', domain.name)
     return {'started': started}
@@ -176,6 +204,8 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     from agentapi import sentinel_dispatch
     from cveFeed import activity
     from cveFeed.discovery import FAILED, RUNNING, SUCCESS, _stage, mark_running
+    from cveFeed.bounty_gate import Gate
+    from cveFeed.exclusions import is_excluded
     from reNgine.tasks import persist_bbot_result
     from reNgine import bbot as bbot_lib
     from startScan.ip_rows import org_id_of_project
@@ -191,6 +221,15 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     if not sentinel_only_target(ip, project.id):  # the range was removed (or the operator now allows private targets) since it was queued
         message = f'{ip} is no longer inside an internal range of this project; nothing was scanned'
         ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
+    if is_excluded(project.id, ip):
+        message = f'{ip} is excluded for this organization and is not scanned'
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
+    why = Gate().refusal(project.id, ip, unattended=scan.initiated_by_id is None)
+    if why:
+        message = f'{ip} is not scanned: {why}'
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     running = activity.log('run_check', f'Internal scan of {ip}: a Sentinel inside the network does the scanning, never this server',
                            project=project.id, status='running', scan_id=scan.id)
