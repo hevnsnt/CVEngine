@@ -562,6 +562,51 @@ def _reset_fields(d, now):
 
 
 
+def _inherited_fields(twin, d, now):
+    """The fields of a rescan's new Triage row, taken from the row of the same finding in the scan before it (see ``_twins``). The record
+    stays: verdict, classification, reason and the validation result with its time. When the signature moved only because the feed's
+    intelligence or the host context did (the asset evidence is the same), the row is queued for a fresh review, as ``_rereview_fields``
+    does on one row, and keeps what it inherited until that review replaces it."""
+    unchanged = twin.signature == effective_signature(d, twin.review_nonce)
+    fields = {'signature': d['signature'], 'evidence_key': d['evidence_key'], 'verdict_id': twin.verdict_id, 'status': twin.status,
+              'classification': twin.classification, 'reason': twin.reason, 'hard_evidence': hard_evidence(d['kind'], d['facts'])[1],
+              'validation_status': twin.validation_status, 'validation_steps': twin.validation_steps,
+              'validation_evidence': twin.validation_evidence, 'local_checks': twin.local_checks,
+              # a "no check exists" answer carries no time of its own: the row it was first given on stands for it
+              'validated_at': twin.validated_at or (twin.created_at if twin.validation_status == 'no_check' else None),
+              'attempts': twin.attempts, 'next_attempt_at': twin.next_attempt_at, 'confidence_adjust': twin.confidence_adjust}
+    if not unchanged:
+        fields.update(status='pending', attempts=0, next_attempt_at=None)
+    return fields
+
+
+def _twins(pending):
+    """``{match pk: Triage row}`` for the CVE matches in ``pending`` (``[(match, description)]``, none with a Triage row yet). A rescan
+    makes new host rows and so new match rows, and a new row used to start with no record: every match was judged and validated again
+    although nothing about it had changed (issue 206). The twin of a match is the newest row of another match with the same project,
+    host and CVE whose asset evidence is the same. That test is made with the twin's own review nonce, because a validation sets one
+    on its row and the nonce is part of the stored evidence key."""
+    from cveFeed.models import Triage
+    pending = [(f, d) for f, d in pending if d['kind'] == 'cve_match']
+    if not pending:
+        return {}
+    candidates = {}
+    rows = (Triage.objects.filter(kind='cve_match', match__isnull=False, project_id__in={d['project_id'] for _, d in pending},
+                                  host__in={d['host'][:500] for _, d in pending},
+                                  match__cve_entry_id__in={f.cve_entry_id for f, _ in pending})
+            .exclude(match_id__in=[f.pk for f, _ in pending]).select_related('match').order_by('-updated_at', '-id'))
+    for row in rows:
+        candidates.setdefault((row.project_id, row.host, row.match.cve_entry_id), []).append(row)
+    out = {}
+    for f, d in pending:
+        for row in candidates.get((d['project_id'], d['host'][:500], f.cve_entry_id), []):
+            if (row.status == 'triaged' or row.validation_status != 'none') and \
+                    row.evidence_key == evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce):
+                out[f.pk] = row
+                break
+    return out
+
+
 def describe_kind(finding):
     from cveFeed.models import CVEMatch, HygieneFinding, RouteAuth
     if isinstance(finding, CVEMatch):
@@ -605,6 +650,7 @@ def _track(findings):
             ids = [f.pk for f, d in described if KIND_FK[d['kind']] == fk]
             existing[fk] = _fetch(fk, ids)
         new_rows, changed = [], []
+        twins = _twins([(f, d) for f, d in described if existing[KIND_FK[d['kind']]].get(f.pk) is None])
         for f, d in described:
             fk = KIND_FK[d['kind']]
             row = existing[fk].get(f.pk)
@@ -612,7 +658,8 @@ def _track(findings):
                 d['signature'] = effective_signature(d, row.review_nonce)
                 d['evidence_key'] = evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce)
             if row is None:
-                fields = {k: v for k, v in _reset_fields(d, now).items() if k != 'updated_at'}
+                twin = twins.get(f.pk)
+                fields = _inherited_fields(twin, d, now) if twin is not None else {k: v for k, v in _reset_fields(d, now).items() if k != 'updated_at'}
                 new_rows.append(Triage(project_id=d['project_id'], domain_id=d['domain_id'], host=d['host'][:500], kind=d['kind'],
                                        first_seen=d['first_seen'], last_seen=now, **{f'{fk}_id': f.pk}, **fields))
                 continue

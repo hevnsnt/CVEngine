@@ -72,6 +72,35 @@ class HotValidationTests(TestCase):
             self.assertEqual(hot_validation.enqueue(row, 'fire'), 'queued')
         dispatch.assert_called_once_with(args=[mock.ANY], priority=0)
 
+    def _rescan_twin(self, validated_ago):
+        """The same finding in a later scan: a new host row of the same name and a new match for the same CVE."""
+        Triage.objects.filter(match=self.fire_match).update(status='triaged', classification='likely', validation_status='clean',
+                                                            validated_at=timezone.now() - validated_ago)
+        later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+        match = CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')
+        return triage.track([match])[0][0]
+
+    def test_a_rescans_new_match_keeps_the_validation_its_predecessor_finished(self):
+        row = self._rescan_twin(timedelta(days=1))
+        self.assertEqual((row.validation_status, row.classification), ('clean', 'likely'))
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as dispatch:
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'fresh')
+        dispatch.assert_not_called()
+        self.assertFalse(OnDemandValidation.objects.filter(match=row.match).exists())
+
+    def test_a_validation_older_than_the_window_is_run_again_on_the_new_match(self):
+        row = self._rescan_twin(timedelta(days=9))
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as dispatch:
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'queued')
+        dispatch.assert_called_once()
+
+    def test_a_failed_validation_is_not_carried_to_the_new_match(self):
+        Triage.objects.filter(match=self.fire_match).update(status='triaged', validation_status='failed', validated_at=timezone.now())
+        later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+        row = triage.track([CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')])[0][0]
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'queued')
+
     def test_cursor_keeps_work_over_the_per_sweep_cap(self):
         with mock.patch('cveFeed.hot_validation._backfill_projects', return_value=0), \
                 mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'), \
