@@ -250,6 +250,11 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
 
 
 COVERAGE_DAYS_DEFAULT = 14
+GAP_LEGACY_DAYS = 30        # an install that predates the gap record: look this far back once
+GAP_MARGIN_DAYS = 1         # a snapshot's clock and the feed's first-seen times do not agree to the minute
+GAP_ENTRIES_PER_DAY = 800   # about what the feed lists in a day at most: how deep a walk back to a gap has to read
+GAP_MAX_SCAN = 40000
+GAP_MAX_NEW = 1500
 BACKFILL_ID_RE = re.compile(r'^(CVE-\d{4}-\d{4,9}|GHSA(-[a-z0-9]{4}){3}|OSV-[A-Za-z0-9-]{4,40})$', re.IGNORECASE)
 
 
@@ -303,17 +308,30 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     from cveFeed.threat import FIRE, SMOKE
     pause_for = sleep or time.sleep
     explicit = bool(ids or techs)
+    gap = None
     if not explicit:
+        from cveFeed import seed
         window = _coverage_days() if days is None else int(days)
         if window <= 0:
             return {'status': 'disabled'}
-        cutoff = timezone.now() - timedelta(days=window)
-        oldest = _oldest_first_seen()
-        if not force and oldest is not None and oldest <= cutoff:
-            return {'status': 'covered', 'oldest': oldest.isoformat()}
+        now = timezone.now()
+        cutoff = now - timedelta(days=window)
+        # a seed leaves a gap between its snapshot and the first sync: walk back to it, however old the entries already stored are
+        gap = seed.feed_gap_from()
+        if gap is None and not seed.feed_gap_checked():
+            gap = now - timedelta(days=GAP_LEGACY_DAYS)  # an install from before the gap was recorded: look once
+        if gap is not None:
+            cutoff = min(cutoff, gap - timedelta(days=GAP_MARGIN_DAYS))
+            max_scan = max(max_scan, min(GAP_MAX_SCAN, (now - cutoff).days * GAP_ENTRIES_PER_DAY + 1000))
+            max_new = max(max_new, GAP_MAX_NEW)
+        else:
+            oldest = _oldest_first_seen()
+            if not force and oldest is not None and oldest <= cutoff:
+                return {'status': 'covered', 'oldest': oldest.isoformat()}
     client = CVENowClient()
     result = {'status': 'ok', 'listed': 0, 'wanted': 0, 'created': 0, 'failed': 0, 'blocked': False, 'invalid': []}
     wanted, first_seen = [], {}
+    reached_floor = False  # the walk read back to the start of the window, with nothing left to fetch past a cap
 
     def want(entry_id):
         if entry_id not in first_seen and entry_id not in wanted:
@@ -342,6 +360,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                 walked += 1
                 seen_at = _parse_time(summary.get('firstSeenAt') or summary.get('publishedAt'))
                 if seen_at and seen_at < cutoff:
+                    reached_floor = True
                     break
                 entry_id = summary.get('id')
                 if entry_id and (force or entry_id not in known):
@@ -378,6 +397,11 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             result['failed'] += 1
             logger.warning('cve.now backfill: failed to save %s: %s', entry_id, exc)
         pause_for(pause)
+    if (gap is not None and reached_floor and result['status'] == 'ok' and not result['failed']
+            and result['created'] == result['wanted'] and len(wanted) < max_new):
+        from cveFeed import seed
+        seed.close_feed_gap()  # read back past the gap and everything the feed listed there is stored
+        result['gap_closed'] = True
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"

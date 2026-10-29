@@ -63,6 +63,44 @@ class SeedRoundTripTests(TestCase):
 		self.assertEqual((counts['created'], counts['detections']), (0, 2))
 
 
+class SeedGapTests(TestCase):
+	"""The CVEs first seen between a seed's snapshot and the first sync are in neither: the import records where that gap starts."""
+
+	def _import(self, manifest):
+		with tempfile.TemporaryDirectory() as directory:
+			path = os.path.join(directory, 'seed.jsonl.gz')
+			with gzip.open(path, 'wt') as out:
+				out.write(json.dumps({'format': 1, **manifest}) + '\n')
+				out.write(json.dumps({'cve_id': 'CVE-2099-300', 'title': 't'}) + '\n')
+			return seed.import_seed(path)
+
+	def test_an_import_records_where_the_snapshot_ends(self):
+		self._import({'generated_at': '2026-10-20T06:00:00+00:00'})
+		self.assertEqual(seed.feed_gap_from().isoformat(), '2026-10-20T06:00:00+00:00')
+
+	def test_a_seed_that_added_nothing_records_no_gap(self):
+		CVEEntry.objects.create(cve_id='CVE-2099-300', affected=[])
+		self._import({'generated_at': '2026-10-20T06:00:00+00:00'})
+		self.assertIsNone(seed.feed_gap_from())
+
+	def test_a_manifest_with_no_usable_time_records_nothing(self):
+		self._import({'generated_at': 'not a time'})
+		self.assertIsNone(seed.feed_gap_from())
+
+	def test_the_earliest_gap_stands_and_a_new_seed_reopens_the_check(self):
+		seed.note_feed_gap(timezone.now())
+		earlier = timezone.now() - timezone.timedelta(days=9) if hasattr(timezone, 'timedelta') else None
+		import datetime
+		earlier = timezone.now() - datetime.timedelta(days=9)
+		seed.note_feed_gap(earlier)
+		self.assertEqual(int(seed.feed_gap_from().timestamp()), int(earlier.timestamp()))
+		seed.close_feed_gap()
+		self.assertIsNone(seed.feed_gap_from())
+		self.assertTrue(seed.feed_gap_checked())
+		seed.note_feed_gap(timezone.now())
+		self.assertFalse(seed.feed_gap_checked())
+
+
 def write_seed(path, records):
 	with gzip.open(path, 'wt') as out:
 		out.write(json.dumps({'format': 1}) + '\n')

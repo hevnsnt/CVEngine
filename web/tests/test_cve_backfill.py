@@ -7,7 +7,7 @@ import requests
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import cve_now, tasks
+from cveFeed import cve_now, seed, tasks
 from cveFeed.models import CVEEntry
 
 
@@ -23,7 +23,7 @@ def _http_error(status):
 	return requests.HTTPError(f'{status}', response=SimpleNamespace(status_code=status))
 
 
-class BackfillTests(TestCase):
+class _BackfillBase(TestCase):
 	def setUp(self):
 		self.client = mock.Mock()
 		self.client.get_entry.side_effect = lambda cid: _full(cid, _ago(3))
@@ -34,6 +34,7 @@ class BackfillTests(TestCase):
 		patches[0].start()
 		self.addCleanup(mock.patch.stopall)
 		self.sleeps = []
+		seed.close_feed_gap()  # the steady state: the gap behind a seed was looked at (a test about the gap reopens it)
 
 	def _store(self, cid, seen):
 		CVEEntry.objects.create(cve_id=cid, affected=[], first_seen_at=seen)
@@ -41,6 +42,8 @@ class BackfillTests(TestCase):
 	def _run(self, **kw):
 		return tasks.backfill_cve_now_feed(sleep=self.sleeps.append, **kw)
 
+
+class BackfillTests(_BackfillBase):
 	def test_the_walk_does_not_stop_at_known_entries_and_stops_at_the_window(self):
 		now = timezone.now()
 		for n in range(60):  # more known entries in a row than the incremental sync's stop of 40
@@ -223,3 +226,65 @@ class ClientRetryTests(unittest.TestCase):
 			with self.assertRaises(ValueError):
 				client.tech_entry_ids(bad)
 		session.get.assert_not_called()
+
+
+class GapBehindASeedTests(_BackfillBase):
+	"""A seed holds entries from 1999, so "the oldest stored entry is older than the window" said nothing about the days between the
+	snapshot and the first sync (issue 207). With a gap recorded the walk reads back to it, then closes it."""
+
+	def setUp(self):
+		super().setUp()
+		self._store('CVE-1999-0001', timezone.now() - datetime.timedelta(days=9000))
+
+	def test_a_recorded_gap_is_walked_although_older_entries_are_stored(self):
+		seed.note_feed_gap(timezone.now() - datetime.timedelta(days=6))
+		summaries = [{'id': 'CVE-2026-901', 'firstSeenAt': _ago(1)}, {'id': 'CVE-2026-902', 'firstSeenAt': _ago(5)},
+					 {'id': 'CVE-2026-903', 'firstSeenAt': _ago(6, 5)}, {'id': 'CVE-2020-1', 'firstSeenAt': _ago(30)}]
+		self.client.iter_entries.side_effect = lambda **kw: iter(summaries)
+		out = self._run()
+		self.assertEqual((out['status'], out['created']), ('ok', 3))
+		self.assertTrue(out['gap_closed'])
+		self.assertFalse(CVEEntry.objects.filter(cve_id='CVE-2020-1').exists())  # past the start of the gap
+		self.assertEqual(self._run()['status'], 'covered')  # and once closed, the cheap check applies again
+
+	def test_the_walk_is_allowed_to_read_as_deep_as_the_gap(self):
+		seed.note_feed_gap(timezone.now() - datetime.timedelta(days=20))
+		self.client.iter_entries.side_effect = lambda **kw: iter([])
+		self._run()
+		self.assertGreaterEqual(self.client.iter_entries.call_args.kwargs['max_entries'], 21 * tasks.GAP_ENTRIES_PER_DAY)
+		self.assertLessEqual(self.client.iter_entries.call_args.kwargs['max_entries'], tasks.GAP_MAX_SCAN)
+
+	def test_a_walk_that_stopped_at_its_cap_keeps_the_gap_open_and_the_next_run_finishes(self):
+		seed.note_feed_gap(timezone.now() - datetime.timedelta(days=4))
+		summaries = [{'id': f'CVE-2026-{n}', 'firstSeenAt': _ago(1)} for n in range(10)] + [{'id': 'CVE-2020-1', 'firstSeenAt': _ago(30)}]
+		self.client.iter_entries.side_effect = lambda **kw: iter(summaries)
+		with mock.patch.object(tasks, 'GAP_MAX_NEW', 4):
+			first = self._run(max_new=4)
+			self.assertEqual(first['created'], 4)
+			self.assertNotIn('gap_closed', first)
+			self.assertIsNotNone(seed.feed_gap_from())
+			self._run(max_new=4)
+			last = self._run(max_new=4)
+		self.assertEqual(CVEEntry.objects.filter(cve_id__startswith='CVE-2026-').count(), 10)
+		self.assertTrue(last['gap_closed'])
+		self.assertIsNone(seed.feed_gap_from())
+
+	def test_a_failed_fetch_keeps_the_gap_open(self):
+		seed.note_feed_gap(timezone.now() - datetime.timedelta(days=4))
+		self.client.iter_entries.side_effect = lambda **kw: iter([{'id': 'CVE-2026-1', 'firstSeenAt': _ago(1)}, {'id': 'CVE-2020-1', 'firstSeenAt': _ago(30)}])
+		self.client.get_entry.side_effect = _http_error(500)
+		out = self._run()
+		self.assertEqual(out['failed'], 1)
+		self.assertNotIn('gap_closed', out)
+		self.assertIsNotNone(seed.feed_gap_from())
+
+	def test_an_install_from_before_the_gap_was_recorded_looks_back_once(self):
+		from cveFeed.models import BackgroundCursor
+		BackgroundCursor.objects.all().delete()  # no gap recorded and never checked, as on an install that updates to this version
+		summaries = [{'id': 'CVE-2026-5', 'firstSeenAt': _ago(22)}, {'id': 'CVE-2020-1', 'firstSeenAt': _ago(60)}]
+		self.client.iter_entries.side_effect = lambda **kw: iter(summaries)
+		out = self._run()
+		self.assertEqual(out['created'], 1)  # 22 days back is outside the 14-day window, inside the one-time 30
+		self.assertTrue(out['gap_closed'])
+		self.assertEqual(self._run()['status'], 'covered')
+
