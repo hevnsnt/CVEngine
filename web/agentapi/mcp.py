@@ -225,7 +225,7 @@ TOOLS = [
      _schema(_page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'open': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_vulnerabilities(c, a.get('project'), a), False),
     ('list_routes', 'Web routes (/, /admin, /api, /login and discovered endpoints) with their auth state: open, login page, session_required (401/403 or redirect to login), sso (known identity provider).', _schema(
-        _page_props({'project': SLUG_OR_ALL, 'auth_state': {'type': 'string', 'enum': ['open', 'login', 'session_required', 'sso', 'redirect', 'not_found', 'error']},
+        _page_props({'project': SLUG_OR_ALL, 'auth_state': {'type': 'string', 'enum': ['open', 'login', 'session_required', 'sso', 'redirect', 'not_found', 'catch_all', 'error']},
                      'host': {'type': 'string'}, 'q': {'type': 'string'}, 'sensitive': {'type': 'string', 'description': '1 for routes serving sensitive data'},
                      'zombie': {'type': 'string', 'description': '1 for retired routes that answer again'}}), ['project']),
      lambda c, a: svc.list_routes(c, a.get('project'), a), False),

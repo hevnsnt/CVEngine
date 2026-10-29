@@ -551,7 +551,7 @@ const CHANGE_LABEL = {
   screenshot_changed: "Screenshot changed",
 };
 const AUTH_RANK = { open: 0, login: 1, session_required: 2, sso: 3 };
-const AUTH_LABEL = { open: "open", login: "login page", session_required: "session required", sso: "SSO", redirect: "redirect", not_found: "not found" };
+const AUTH_LABEL = { open: "open", login: "login page", session_required: "session required", sso: "SSO", redirect: "redirect", not_found: "not found", catch_all: "same as a missing page" };
 const authLabel = (s) => AUTH_LABEL[s] || s || "unknown";
 const pathOf = (url) => {
   try {
@@ -627,7 +627,7 @@ const SENSITIVE_GROUP = {
   pii: ["email", "phone", "card"],
   internal: ["internal_ip", "internal_host"],
 };
-const AUTH_BADGE = { open: "smoke", login: "", session_required: "ice", sso: "success", redirect: "queued", not_found: "queued", error: "queued" };
+const AUTH_BADGE = { open: "smoke", login: "", session_required: "ice", sso: "success", redirect: "queued", not_found: "queued", catch_all: "queued", error: "queued" };
 const NOTABLE_ROUTES = ["open", "login", "session_required", "sso"];
 function routeLine(r) {
   const line = el("div", "find");

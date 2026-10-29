@@ -398,6 +398,101 @@ class RunnerTests(RouteFixture, TestCase):
 		self.assertEqual((out['routes'], self.asked), (0, []))
 
 
+class SameAsMissingPageTests(SimpleTestCase):
+	def answer(self, **kw):
+		title = kw.pop('title', 'NAS')
+		body = kw.pop('body', f'<title>{title}</title><div id="root"></div>')
+		return ra.analyse(probe(url='https://nas.rt.test/admin', body=body, title=title, **kw))
+
+	def test_the_same_page_is_the_same(self):
+		self.assertTrue(ra.same_as_missing_page(self.answer(), self.answer()))
+
+	def test_a_page_with_a_changing_token_but_the_same_title_and_size_is_the_same(self):
+		self.assertTrue(ra.same_as_missing_page(self.answer(body='<title>NAS</title><div id="root" data-t="a1b2c3"></div>'),
+			self.answer(body='<title>NAS</title><div id="root" data-t="x9y8z7"></div>')))
+
+	def test_another_title_another_status_or_another_type_is_another_page(self):
+		self.assertFalse(ra.same_as_missing_page(self.answer(title='Admin'), self.answer()))
+		self.assertFalse(ra.same_as_missing_page(self.answer(status=403), self.answer()))
+		self.assertFalse(ra.same_as_missing_page(self.answer(content_type='application/json'), self.answer()))
+
+	def test_a_page_of_another_size_with_the_same_title_is_another_page(self):
+		self.assertFalse(ra.same_as_missing_page(self.answer(body='<title>NAS</title><div id="root"></div>' + 'x' * 4000), self.answer()))
+
+	def test_nothing_to_compare_with_is_not_the_same(self):
+		self.assertFalse(ra.same_as_missing_page(self.answer(), None))
+
+
+class CatchAllTests(RouteFixture, TestCase):
+	"""A server that answers every path with one page (a NAS web interface, a single-page app) says nothing about whether /admin or
+	/wp-login.php exist (issue 213)."""
+
+	SHELL = '<html><head><title>NAS</title></head><body><div id="root"></div></body></html>'
+
+	def catch_all(self, url):
+		self.asked.append(url)
+		return probe(url=url, status=200, body=self.SHELL, title='NAS')
+
+	def states(self):
+		return {r.path: r.auth_state for r in RouteAuth.objects.filter(project=self.project)}
+
+	def test_every_route_a_catch_all_server_answers_is_not_open_but_its_front_page_is(self):
+		out = self.run_it(self.scan(), probe=self.catch_all)
+		states = self.states()
+		self.assertEqual(states['/'], 'open')  # the host does serve a page
+		self.assertEqual({v for k, v in states.items() if k != '/'}, {'catch_all'})
+		self.assertEqual(out['by_state'].get('open'), 1)
+		self.assertEqual(out['by_state'].get('catch_all'), len(ra.COMMON_PATHS) - 1)
+		row = RouteAuth.objects.get(project=self.project, path='/admin')
+		self.assertEqual(row.evidence['catch_all']['status'], 200)
+		self.assertEqual(row.sensitive, {})
+		self.assertTrue(AgentActivity.objects.filter(message__contains='answer like a page that does not exist').exists())
+
+	def test_one_extra_request_per_web_base_and_it_is_for_a_path_that_cannot_exist(self):
+		self.run_it(self.scan(), probe=self.catch_all)
+		extra = [u for u in self.asked if '/cvengine-' in u]
+		self.assertEqual(len(extra), 1)
+		self.assertRegex(extra[0], r'^https://www\.rt\.test/cvengine-[0-9a-f]{12}$')
+		self.assertEqual(len(self.asked), len(ra.COMMON_PATHS) + 1)
+
+	def test_a_server_that_answers_a_missing_path_with_not_found_keeps_its_open_routes(self):
+		self.answers = {'/admin': {'status': 200, 'title': 'Admin', 'body': '<h1>Admin</h1>'}}
+		self.run_it(self.scan())
+		self.assertEqual(self.states()['/admin'], 'open')
+		self.assertEqual(len([u for u in self.asked if '/cvengine-' in u]), 1)
+
+	def test_no_extra_request_when_no_route_other_than_the_front_page_is_open(self):
+		self.answers = {'/': {'status': 200, 'title': 'Home'}}
+		self.run_it(self.scan())
+		self.assertEqual([u for u in self.asked if '/cvengine-' in u], [])
+
+	def test_a_baseline_that_cannot_be_read_leaves_the_route_as_it_was_read(self):
+		def probe_fn(url):
+			self.asked.append(url)
+			if '/cvengine-' in url:
+				raise OSError('reset')
+			return probe(url=url, status=200, body='<h1>Admin</h1>', title='Admin') if url.endswith('/admin') else probe(url=url, status=404)
+		self.run_it(self.scan(), probe=probe_fn)
+		self.assertEqual(self.states()['/admin'], 'open')
+
+	def test_a_route_that_was_open_and_is_now_a_catch_all_is_a_correction_not_a_change(self):
+		RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.rt.test', url='https://www.rt.test/admin', path='/admin',
+			auth_state='open', http_status=200)
+		self.run_it(self.scan(), probe=self.catch_all)
+		self.assertEqual(self.states()['/admin'], 'catch_all')
+		self.assertFalse(AssetChange.objects.filter(kind='auth_changed').exists())
+
+	def test_a_real_login_page_on_a_catch_all_server_is_still_a_login_page(self):
+		def probe_fn(url):
+			self.asked.append(url)
+			return probe(url=url, status=200, body='<input type="password">', title='Sign in')
+		self.run_it(self.scan(), probe=probe_fn)
+		self.assertEqual(self.states()['/login'], 'login')
+
+	def test_the_state_is_one_the_api_accepts_as_a_filter(self):
+		self.assertIn('catch_all', RouteAuth.STATES)
+
+
 class ApiTests(TestCase):
 	@classmethod
 	def setUpTestData(cls):

@@ -9,9 +9,11 @@ helper (``probe_url``) is injectable.
 """
 import concurrent.futures
 import functools
+import hashlib
 import http.client
 import logging
 import re
+import secrets
 import socket
 import threading
 import time
@@ -274,9 +276,49 @@ def analyse(result):
     from cveFeed import sensitive
     state, evidence = classify(result)
     content_type = (result.get('content_type') or '')[:100]
-    found = sensitive.scan_text(result.get('body') or '') if sensitive.is_text(content_type) else {}
+    body = result.get('body') or ''
+    found = sensitive.scan_text(body) if sensitive.is_text(content_type) else {}
     return {'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
-            'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found)}
+            'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
+            # what the page was, for comparing it with the answer to a path that cannot exist; never stored
+            'digest': hashlib.sha1(body.encode('utf-8', 'replace')).hexdigest()[:16], 'bytes': result.get('bytes', len(body))}
+
+
+CATCH_ALL = 'catch_all'  # answers exactly as the server answers for a path that does not exist: no evidence that the route is there
+
+
+def same_as_missing_page(answer, missing):
+    """True when ``answer`` (a route's analysed response) is the server's answer for a path that cannot exist (``missing``): the same
+    status and type and the same body, or, for a page that carries a changing token or time, the same title and nearly the same size."""
+    if not missing or answer.get('status') != missing.get('status') or answer.get('content_type') != missing.get('content_type'):
+        return False
+    if answer.get('digest') == missing.get('digest'):
+        return True
+    a, b = answer.get('bytes') or 0, missing.get('bytes') or 0
+    return bool(answer.get('title') and answer.get('title') == missing.get('title') and abs(a - b) <= max(32, b // 50))
+
+
+def _against_missing_page(answer, url, probe, known):
+    """``answer`` for ``url`` as it stands, or as ``catch_all`` when the server gives the same answer for a path that cannot exist
+    (many appliances and single-page apps answer every path with one page, which says nothing about the route). Only a non-root route
+    that came out open is compared, and the one extra request per web base (a random path) is made the first time one does."""
+    path = urlparse(url).path or '/'
+    if answer.get('state') != 'open' or path == '/':
+        return answer
+    parts = urlparse(url)
+    base = f'{parts.scheme}://{parts.netloc}'
+    if base not in known:
+        time.sleep(PER_REQUEST_GAP)
+        try:
+            known[base] = analyse(probe(f'{base}/cvengine-{secrets.token_hex(6)}'))
+        except Exception:  # noqa: BLE001 - no answer to compare with: the route stands as it was read
+            known[base] = None
+    missing = known[base]
+    if not same_as_missing_page(answer, missing):
+        return answer
+    evidence = {**answer['evidence'], 'catch_all': {'status': missing.get('status'), 'bytes': missing.get('bytes'),
+                                                    'note': 'the same answer as for a path that cannot exist'}}
+    return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0}
 
 
 # ----------------------------------------------------------------------------- network
@@ -545,13 +587,14 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
             if not host_allowed(host, project):
                 return host, None
             out = []
+            missing_pages = {}  # web base -> the answer to a path that cannot exist, read once if a route came out open
             for i, url in enumerate(urls):
                 if resources.abort_requested(scan_id):
                     break
                 if i:
                     time.sleep(PER_REQUEST_GAP)
                 try:
-                    result = analyse(probe(url))
+                    result = _against_missing_page(analyse(probe(url)), url, probe, missing_pages)
                     _read_scripts(result, probe, scan_id)
                     out.append((url, result))
                 except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
@@ -586,6 +629,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
         activity.settle(running, 'done', message=(
             f'Checked {len(probed)} web routes on {len(by_host)} hosts of {domain.name}: {counts.get("open", 0)} open, '
             f'{counts.get("login", 0)} login pages, {counts.get("sso", 0)} SSO, {counts.get("session_required", 0)} require a session'
+            + (f'; {counts[CATCH_ALL]} answer like a page that does not exist' if counts.get(CATCH_ALL) else '')
             + (f'; {stored["sensitive"]} routes serve sensitive data' if stored['sensitive'] else '')
             + (f'; {len(errors)} could not be reached' if errors else '')), routes=len(probed))
         return {'routes': len(probed), 'hosts': len(by_host), 'by_state': counts, 'reused': len(fresh), 'errors': len(errors),
@@ -642,7 +686,7 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
         elif row.zombie_since is not None and not answers:
             row.zombie_since = None
         old_rows.append(row)
-        if was != state and not explained:
+        if was != state and not explained and not (was == 'open' and state == CATCH_ALL):  # a reading corrected, nothing changed on the server
             changes.record_auth_change(project, scan.domain_id, scan.id, host.lower(), url, was, state,
                                        {'http_status': result.get('status'), 'provider': evidence.get('provider', '')})
     for part in _chunks(new_rows):
