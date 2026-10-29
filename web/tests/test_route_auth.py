@@ -1,6 +1,7 @@
 import datetime
 import http.server
 import json
+import re
 import threading
 from types import SimpleNamespace
 from unittest import mock
@@ -300,7 +301,7 @@ class RunnerTests(RouteFixture, TestCase):
 		self.answers = {'/': {'status': 200, 'title': 'Home'}, '/login': {'status': 200, 'body': '<input type="password">'},
 			'/admin': {'status': 302, 'location': '/login?next=/admin'}, '/api': {'status': 401, 'www_authenticate': 'Bearer'}}
 		out = self.run_it(self.scan())
-		self.assertEqual(len(self.asked), len(ra.COMMON_PATHS))
+		self.assertEqual(len([u for u in self.asked if '/cvengine-' not in u]), len(ra.COMMON_PATHS))  # and a few for what a missing page looks like
 		self.assertEqual(out['routes'], len(ra.COMMON_PATHS))
 		rows = {r.path: r for r in RouteAuth.objects.filter(project=self.project)}
 		self.assertEqual((rows['/'].auth_state, rows['/'].title, rows['/'].host), ('open', 'Home', 'www.rt.test'))
@@ -398,36 +399,19 @@ class RunnerTests(RouteFixture, TestCase):
 		self.assertEqual((out['routes'], self.asked), (0, []))
 
 
-class SameAsMissingPageTests(SimpleTestCase):
-	def answer(self, **kw):
-		title = kw.pop('title', 'NAS')
-		body = kw.pop('body', f'<title>{title}</title><div id="root"></div>')
-		return ra.analyse(probe(url='https://nas.rt.test/admin', body=body, title=title, **kw))
-
-	def test_the_same_page_is_the_same(self):
-		self.assertTrue(ra.same_as_missing_page(self.answer(), self.answer()))
-
-	def test_a_page_with_a_changing_token_but_the_same_title_and_size_is_the_same(self):
-		self.assertTrue(ra.same_as_missing_page(self.answer(body='<title>NAS</title><div id="root" data-t="a1b2c3"></div>'),
-			self.answer(body='<title>NAS</title><div id="root" data-t="x9y8z7"></div>')))
-
-	def test_another_title_another_status_or_another_type_is_another_page(self):
-		self.assertFalse(ra.same_as_missing_page(self.answer(title='Admin'), self.answer()))
-		self.assertFalse(ra.same_as_missing_page(self.answer(status=403), self.answer()))
-		self.assertFalse(ra.same_as_missing_page(self.answer(content_type='application/json'), self.answer()))
-
-	def test_a_page_of_another_size_with_the_same_title_is_another_page(self):
-		self.assertFalse(ra.same_as_missing_page(self.answer(body='<title>NAS</title><div id="root"></div>' + 'x' * 4000), self.answer()))
-
-	def test_nothing_to_compare_with_is_not_the_same(self):
-		self.assertFalse(ra.same_as_missing_page(self.answer(), None))
-
-
 class CatchAllTests(RouteFixture, TestCase):
 	"""A server that answers every path with one page (a NAS web interface, a single-page app) says nothing about whether /admin or
-	/wp-login.php exist (issue 213)."""
+	/wp-login.php exist (issue 213). The answer for a path that cannot exist is read in the route's own directory and of its own kind
+	(bare name, directory, file extension), and compared by status, type, redirect target and a normalised body."""
 
 	SHELL = '<html><head><title>NAS</title></head><body><div id="root"></div></body></html>'
+
+	def serve(self, make):
+		"""A probe for ``make(path)``, the answer for every path."""
+		def fn(url):
+			self.asked.append(url)
+			return probe(url=url, **make(url.split('://', 1)[1].split('/', 1)[1] and '/' + url.split('://', 1)[1].split('/', 1)[1]))
+		return fn
 
 	def catch_all(self, url):
 		self.asked.append(url)
@@ -435,6 +419,9 @@ class CatchAllTests(RouteFixture, TestCase):
 
 	def states(self):
 		return {r.path: r.auth_state for r in RouteAuth.objects.filter(project=self.project)}
+
+	def extra(self):
+		return [u for u in self.asked if '/cvengine-' in u]
 
 	def test_every_route_a_catch_all_server_answers_is_not_open_but_its_front_page_is(self):
 		out = self.run_it(self.scan(), probe=self.catch_all)
@@ -445,26 +432,31 @@ class CatchAllTests(RouteFixture, TestCase):
 		self.assertEqual(out['by_state'].get('catch_all'), len(ra.COMMON_PATHS) - 1)
 		row = RouteAuth.objects.get(project=self.project, path='/admin')
 		self.assertEqual(row.evidence['catch_all']['status'], 200)
+		self.assertNotIn('shingles', row.evidence['catch_all'])  # nothing of the page is kept
 		self.assertEqual(row.sensitive, {})
 		self.assertTrue(AgentActivity.objects.filter(message__contains='answer like a page that does not exist').exists())
 
-	def test_one_extra_request_per_web_base_and_it_is_for_a_path_that_cannot_exist(self):
+	def test_the_missing_path_is_asked_for_in_the_directory_and_the_kind_of_the_route(self):
 		self.run_it(self.scan(), probe=self.catch_all)
-		extra = [u for u in self.asked if '/cvengine-' in u]
-		self.assertEqual(len(extra), 1)
-		self.assertRegex(extra[0], r'^https://www\.rt\.test/cvengine-[0-9a-f]{12}$')
-		self.assertEqual(len(self.asked), len(ra.COMMON_PATHS) + 1)
+		kinds = sorted(re.sub(r'cvengine-[0-9a-f]{12}', 'N', u.split('rt.test', 1)[1]) for u in self.extra())
+		# bare names at the root and in /actuator/ and /swagger/, a directory, and the extensions the routes carry (.php and .html)
+		self.assertIn('/N', kinds)
+		self.assertIn('/N/', kinds)
+		self.assertIn('/N.php', kinds)
+		self.assertIn('/swagger/N.html', kinds)
+		self.assertIn('/actuator/N', kinds)
+		self.assertLessEqual(len(self.extra()), ra.MAX_BASELINES_PER_HOST)
+		self.assertEqual(len(self.extra()), len(set(self.extra())))  # each kind is read once per host
 
 	def test_a_server_that_answers_a_missing_path_with_not_found_keeps_its_open_routes(self):
 		self.answers = {'/admin': {'status': 200, 'title': 'Admin', 'body': '<h1>Admin</h1>'}}
 		self.run_it(self.scan())
 		self.assertEqual(self.states()['/admin'], 'open')
-		self.assertEqual(len([u for u in self.asked if '/cvengine-' in u]), 1)
 
-	def test_no_extra_request_when_no_route_other_than_the_front_page_is_open(self):
+	def test_no_extra_request_when_no_route_other_than_the_front_page_answers(self):
 		self.answers = {'/': {'status': 200, 'title': 'Home'}}
 		self.run_it(self.scan())
-		self.assertEqual([u for u in self.asked if '/cvengine-' in u], [])
+		self.assertEqual(self.extra(), [])
 
 	def test_a_baseline_that_cannot_be_read_leaves_the_route_as_it_was_read(self):
 		def probe_fn(url):
@@ -482,15 +474,90 @@ class CatchAllTests(RouteFixture, TestCase):
 		self.assertEqual(self.states()['/admin'], 'catch_all')
 		self.assertFalse(AssetChange.objects.filter(kind='auth_changed').exists())
 
-	def test_a_real_login_page_on_a_catch_all_server_is_still_a_login_page(self):
+	def test_a_real_login_page_beside_404s_is_still_a_login_page(self):
 		def probe_fn(url):
 			self.asked.append(url)
-			return probe(url=url, status=200, body='<input type="password">', title='Sign in')
+			if url.endswith('/login'):
+				return probe(url=url, status=200, body='<input type="password">', title='Sign in')
+			return probe(url=url, status=404)
 		self.run_it(self.scan(), probe=probe_fn)
 		self.assertEqual(self.states()['/login'], 'login')
 
 	def test_the_state_is_one_the_api_accepts_as_a_filter(self):
 		self.assertIn('catch_all', RouteAuth.STATES)
+
+	# --- the shapes a server can take ---------------------------------------------------------------------------------------
+
+	def test_a_page_that_reflects_the_path_is_still_a_catch_all(self):
+		def make(url):
+			path = url.split('rt.test', 1)[1]
+			return probe(url=url, status=200, title=f'Not found: {path}', body=f'<html><title>Not found: {path}</title><body><p>We could not find {path} here.</p></body></html>')
+		self.run_it(self.scan(), probe=lambda url: (self.asked.append(url), make(url))[1])
+		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
+
+	def test_a_shell_with_a_changing_nonce_and_no_title_is_a_catch_all(self):
+		counter = iter(range(1000))
+
+		def fn(url):
+			self.asked.append(url)
+			n = next(counter)
+			return probe(url=url, status=200, title='', body=f'<html><head><script nonce="r4nd0m{n}x9y8z7w6v5">boot()</script></head><body><div id="app">Loading ' + 'application shell content ' * 12 + f'</div><meta name="csrf-token" content="tok{n}abcdef"></body></html>')
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
+
+	def test_a_json_answer_with_a_timestamp_is_a_catch_all(self):
+		counter = iter(range(1000))
+
+		def fn(url):
+			self.asked.append(url)
+			return probe(url=url, status=200, content_type='application/json', title='',
+				body='{"status":"ok","message":"endpoint available for service consumers","time":"2026-10-29T21:%02d:00Z","requestId":"a1b2c3d4e5f6a7b8%d"}' % (next(counter) % 60, next(counter)))
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
+
+	def test_a_server_that_redirects_every_path_to_its_login_page_is_a_catch_all(self):
+		def fn(url):
+			self.asked.append(url)
+			path = url.split('rt.test', 1)[1]
+			return probe(url=url, status=302, location='/login?next=' + path)
+		self.run_it(self.scan(), probe=fn)
+		states = self.states()
+		self.assertEqual({v for k, v in states.items() if k not in ('/', '/login')}, {'catch_all'})
+
+	def test_a_server_that_answers_403_to_everything_is_a_catch_all(self):
+		self.run_it(self.scan(), probe=lambda url: (self.asked.append(url), probe(url=url, status=403, body='Forbidden'))[1])
+		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
+
+	def test_only_files_with_an_extension_answering_with_the_shell_are_caught_by_the_extension_probe(self):
+		def fn(url):
+			self.asked.append(url)
+			path = url.split('rt.test', 1)[1]
+			if path.rsplit('/', 1)[1].endswith(('.php', '.html')):
+				return probe(url=url, status=200, body=self.SHELL, title='NAS')
+			return probe(url=url, status=404)
+		self.run_it(self.scan(), probe=fn)
+		states = self.states()
+		self.assertEqual((states['/wp-login.php'], states['/swagger/index.html']), ('catch_all', 'catch_all'))
+		self.assertEqual(states['/admin'], 'not_found')
+
+	def test_a_directory_with_its_own_wildcard_is_compared_in_that_directory(self):
+		def fn(url):
+			self.asked.append(url)
+			path = url.split('rt.test', 1)[1]
+			if path.startswith('/api'):
+				return probe(url=url, status=200, content_type='application/json', body='{"error":"unknown endpoint for this service"}')
+			return probe(url=url, status=404)
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual((self.states()['/api'], self.states()['/api/']), ('catch_all', 'catch_all'))
+
+	def test_a_page_that_is_really_different_from_the_wildcard_stays_open(self):
+		def fn(url):
+			self.asked.append(url)
+			if url.endswith('/admin'):
+				return probe(url=url, status=200, title='Administration', body='<html><title>Administration</title>' + '<li>user list entry</li>' * 40 + '</html>')
+			return probe(url=url, status=200, title='NAS', body=self.SHELL)
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual(self.states()['/admin'], 'open')
 
 
 class ApiTests(TestCase):
