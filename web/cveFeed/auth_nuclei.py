@@ -45,9 +45,9 @@ def trusted_plan(plan, project, check=None):
     check = check or auth_checks.certificate_verifies
     seen, kept, refused = {}, [], []
     for item in plan:
-        url, cred, _key = item
+        url, sign_in, _key = item
         parts = urlsplit(url)
-        if parts.scheme != 'https' or cred.allow_untrusted_certificate:
+        if parts.scheme != 'https' or sign_in.allow_untrusted_certificate:
             kept.append(item)
             continue
         where = (parts.hostname, parts.port or 443)
@@ -218,11 +218,11 @@ def merge_template_outcomes(path, hosts, outcomes, project):
         plan = auth_checks.plan_nuclei(scope, scannable_hosts(list(hosts), project=project))
         plan, refused = trusted_plan(plan, project)
         if refused:
-            logger.info('signed-in template check: %s', refusal_line(refused))
+            logger.info('signed-in template check: the stored sign-in was withheld from %d origin(s) whose certificate does not verify', len(refused))
         if not plan:
             return outcomes
         with auth_checks.secrets_file(auth_checks.entries_for(plan)) as secret_path:
-            signed_in = templategen.run_template(path, [url for url, _cred, _key in plan], secret_file=secret_path, redact=values)
+            signed_in = templategen.run_template(path, [item[0] for item in plan], secret_file=secret_path, redact=values)
         scope.mark_used()
     except Exception as exc:  # noqa: BLE001 - MemoryKill, a timeout or nuclei failing: the plain result stands
         logger.error('signed-in template check could not run: %s', auth_checks.safe_error(exc, values))

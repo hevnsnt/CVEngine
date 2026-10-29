@@ -367,6 +367,7 @@ class ForwardProxy:
     def _serve_origin(self, conn, record):
         if self.certificate:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(*self.certificate)
             context.sni_callback = lambda _sock, name, _context: record.__setitem__('sni', name)
             conn = context.wrap_socket(conn, server_side=True)
