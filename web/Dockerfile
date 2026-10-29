@@ -11,9 +11,9 @@ ARG NMAPVERSION=7.993
 # purpose, after scripts/check_tool_versions.py says a newer one exists: see "Pinned tools" in docs/UPDATES.md. Nuclei's TEMPLATES are not
 # pinned: they refresh at runtime.
 ARG NUCLEI_VERSION=3.11.1
-ARG NAABU_VERSION=2.6.1
+ARG NAABU_VERSION=2.7.0
 ARG BBOT_VERSION=3.0.2
-ARG TZDATA_VERSION=2026.5
+ARG TZDATA_VERSION=2026.6
 # nmap: amd64 installs the project's own x86_64 release RPM (its libraries are linked in statically), arm64 builds the source
 # tarball, because nmap.org publishes no arm64 binary. Both checksums are published beside the files at nmap.org/dist/sigs/.
 ARG NMAP_SHA256=270e55f04915bfcecb5db8feb959d4c5ba86a48c094520a4f1c07571e1c79c59
@@ -147,7 +147,7 @@ RUN printf 'config:\n  modules:\n    shodan_dns:\n      api_key: build-check\n' 
 
 # WPScan, run against every host that shows any sign of WordPress, quick pass in the scan and a thorough pass in the background (see docs/CONFIGURATION.md for its licence).
 # Pinned; its vulnerability metadata is fetched now and refreshed by WPScan itself while it runs.
-ARG WPSCAN_VERSION=4.1.0
+ARG WPSCAN_VERSION=4.2.0
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends ruby ruby-dev libcurl4-openssl-dev libxml2-dev libxslt1-dev libffi-dev zlib1g-dev && \
     gem install wpscan -v ${WPSCAN_VERSION} --no-document && \
@@ -157,8 +157,8 @@ RUN apt-get update -y && \
 # testssl.sh (GPLv2, run as a separate program) audits the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named
 # TLS vulnerabilities (see cveFeed/testssl_scan.py). Pinned tarball with its checksum, never a branch. It needs dig (--nodns none still checks
 # for it), hexdump and ps; the x86_64 tarball bundles an openssl that still speaks SSLv2/SSLv3 and export ciphers (arm64 uses the system openssl).
-ARG TESTSSL_VERSION=3.2.3
-ARG TESTSSL_SHA256=1c4bb10185a67592164eb870c717b8bdd03f290c8d68f9a8c658335ff5ac8b91
+ARG TESTSSL_VERSION=3.2.4
+ARG TESTSSL_SHA256=98528f8a0ac07f1e226efaa8ead438247df8efcb8fee4e056a937ab82a305490
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends bind9-dnsutils bsdextrautils procps && \
     curl -fsSL -o /tmp/testssl.tar.gz "https://testssl.sh/testssl.sh-${TESTSSL_VERSION}.tar.gz" && \

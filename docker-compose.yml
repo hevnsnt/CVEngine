@@ -200,7 +200,7 @@ services:
     profiles: ["tailscale"]
     # Pinned on purpose: this container sits inside the scanner's namespace. To update, change the tag (releases and the security
     # bulletins are at https://tailscale.com/security-bulletins) or set TAILSCALE_IMAGE in .env, then `docker compose up -d tailscale`.
-    image: "${TAILSCALE_IMAGE:-tailscale/tailscale:v1.104.2}"
+    image: "${TAILSCALE_IMAGE:-tailscale/tailscale:v1.104.4}"
     restart: always
     network_mode: "service:celery"
     depends_on:
