@@ -263,9 +263,10 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
         if host.get('os_guess') and os_reliable and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_source': 'nmap'}
             ip_obj.last_seen = now
             fit_columns(ip_obj)
-            ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
+            ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen', 'fingerprint'])
             if host.get('os_matches'):  # the runners-up: a guess a few points ahead of another family is not settled
                 ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_matches': host['os_matches']}
                 ip_obj.save(update_fields=['fingerprint'])

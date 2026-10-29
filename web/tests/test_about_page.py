@@ -20,6 +20,11 @@ class AboutPageTests(TestCase):
 		self.assertContains(r, 'About CVEngine')
 		self.assertContains(r, settings.RENGINE_CURRENT_VERSION)
 
+	def test_page_names_its_contributors(self):
+		html = self.page().content.decode()
+		self.assertIn('Contributors', html)
+		self.assertIn('https://github.com/camstork', html)
+
 	def test_page_credits_every_tool_the_image_pins_and_the_optional_ones(self):
 		# the pinned tools (web/Dockerfile) and the optional add-ons must not go missing from the credits page again
 		html = self.page().content.decode()
