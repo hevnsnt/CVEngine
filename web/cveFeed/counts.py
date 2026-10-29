@@ -16,34 +16,82 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
 * **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view.
 * **Scanner findings**: open findings of low severity or worse (informational detections and closed findings excluded). The
   Findings page, Scanner type, Actionable status, shows the same set.
-* **Scans running**: scans marked running that started within ``RUNNING_WINDOW``. An older one is stalled (a casualty of a
+* **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
 * **Certs expiring**: certificates that expire within 30 days, including those already expired.
+* **Oldest open**: the age in whole days of the longest-open critical or high item among the exposed CVE matches, actionable scanner
+  findings and open hygiene findings (``oldest_open``).
 """
 from datetime import timedelta
 
 from django.db.models import Q
 from django.utils import timezone
 
-# discovery (6h cap) + nuclei (4h cap) + slack; see discovery.py
-RUNNING_WINDOW = timedelta(hours=11)
+RUNNING_WINDOW_SLACK = timedelta(hours=1)
 CERT_WARNING_DAYS = 30
 RULED_OUT = 'not_affected'  # the AI verdict that takes a CVE match off every list of exposure
+CLOSED = ('fixed', 'accepted_risk')  # remediation states that do the same: someone dealt with the finding or decided to live with it
+
+
+def match_is_live(match):
+    """A CVE match that still counts toward a host's heat, score and exposure: not ruled out by the AI, not fixed, not an accepted risk."""
+    return match.ai_verdict != RULED_OUT and match.remediation_status not in CLOSED
+
+
+def finding_is_live(finding):
+    """A scanner finding that still counts: open, and not fixed or an accepted risk."""
+    return bool(finding.open_status) and finding.remediation_status not in CLOSED
 
 # a host that resolved to an address, or that something saw answer over HTTP
 LIVE_HOST_Q = Q(ip_addresses__isnull=False) | Q(http_status__gt=0)
 
 
+def running_window():
+    """How long a scan may be marked running before it counts as a restart casualty: the configured discovery and nuclei timeouts
+    (Settings, Timings, up to 48 h and 24 h) plus an hour of slack, 11 h with the shipped timeouts. Read live, like the workers do."""
+    try:
+        from dashboard.models import SystemTimings
+        t = SystemTimings.current()
+        return timedelta(hours=t.discovery_timeout_hours + t.nuclei_timeout_hours) + RUNNING_WINDOW_SLACK
+    except Exception:  # noqa: BLE001 - a counting helper never fails on a settings lookup
+        return timedelta(hours=11)
+
+
+def __getattr__(name):
+    if name == 'RUNNING_WINDOW':  # older importers read the window as an attribute; it is no longer a constant
+        return running_window()
+    raise AttributeError(name)
+
+
 def running_scans(qs=None):
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - RUNNING_WINDOW)
+    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - running_window())
+
+
+BACKGROUND_WINDOW = timedelta(hours=3)  # a "running" activity line older than this is a casualty of a restart, not work in progress
+BACKGROUND_KINDS = ("run_check", "discovery", "scan", "hygiene", "validate")
+
+
+def background_running(now=None):
+    """The activity lines of background work in progress: a check, sweep, rescan or assessment that runs under a scan record that is
+    no longer running (the weekly deep nuclei pass, a host rescan, an assessment), so it is invisible to ``running_scans``. A line that
+    belongs to a scan ``running_scans`` already counts is left out, so the two never count the same work twice."""
+    from cveFeed.models import AgentActivity
+    now = now or timezone.now()
+    under_a_running_scan = list(running_scans().values_list("id", flat=True))
+    qs = AgentActivity.objects.filter(status="running", kind__in=BACKGROUND_KINDS, created_at__gte=now - BACKGROUND_WINDOW)
+    if under_a_running_scan:
+        # a missing key is not "in": filter first, then exclude by id. The inner query repeats the status, kind and age bounds (the lines it
+        # can exclude are a subset of them) so it never reads the whole 30-day activity table on every stats poll
+        qs = qs.exclude(pk__in=qs.filter(detail__scan_id__in=under_a_running_scan).values("pk"))
+    return qs
 
 
 def stalled_scans(qs=None):
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__lt=timezone.now() - RUNNING_WINDOW)
+    return qs.filter(scan_status=1, start_scan_date__lt=timezone.now() - running_window())
 
 
 def queued_scans(qs=None):
@@ -96,13 +144,16 @@ def host_siblings(sub_ids):
     return out
 
 
-def exposed_among(reps):
+def exposed_among(reps, project_ids=None):
     """The hosts of ``reps`` (one row each, see ``host_reps``) that are exposed. A host is exposed when any of its names is, so a
-    finding on ``www`` exposes the host whose row is ``example.com``."""
+    finding on ``www`` exposes the host whose row is ``example.com``. ``project_ids``: the projects ``reps`` is drawn from, so the
+    exposed set is not built over every other project's hosts too (a host's key and name never cross projects, so the answer is the same)."""
     from django.db.models import Exists, OuterRef
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     exposed = Subdomain.objects.filter(latest_scan_q()).filter(exposure_filter())
+    if project_ids is not None:
+        exposed = exposed.filter(target_domain__project_id__in=list(project_ids))
     same_name = Exists(exposed.filter(name=OuterRef('name'), target_domain__project_id=OuterRef('target_domain__project_id')))
     return with_host_key(reps).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(same_name))
 
@@ -131,8 +182,8 @@ def exposure_filter(prefix=''):
     """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(subdomain=None).values('subdomain')
-    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(subdomain=None).values('subdomain')
+    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
+    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
     return Q(**{prefix + 'pk__in': matches}) | Q(**{prefix + 'pk__in': findings})
 
 
@@ -143,13 +194,65 @@ def exposed_host_count():
 def exposed_matches():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).filter(latest_scan_q('subdomain__'))
+    return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).filter(latest_scan_q('subdomain__'))
 
 
 def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
-    informational detections and closed findings are the rest (``status=all``)."""
-    return qs.filter(open_status=True, severity__gte=1)
+    informational detections and closed findings (fixed or an accepted risk too) are the rest (``status=all``)."""
+    return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
+
+
+def actionable_hygiene(qs, severity=1):
+    """Open hygiene findings of ``severity`` or worse (low by default) that are not fixed or an accepted risk: the Findings page's
+    Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
+    return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
+
+
+def oldest_open(now=None):
+    """How long the worst open thing has sat: ``{'days', 'kind', 'id'}`` for the oldest open, actionable item of critical or high severity
+    across the three sources, or ``{'days': None, 'kind': None, 'id': None}`` when none qualifies. Each source keeps its own definition
+    of actionable so the number agrees with the page it links to:
+
+    * ``cve``: an exposed match (``exposed_matches``: not ruled out by the AI, not fixed or accepted) whose CVE scores 7.0 or more, the
+      Findings page's high and critical bands. A match is stored once per scan, so it has been open since the first scan that held
+      the same CVE on the same host name of the same target.
+    * ``scanner``: an actionable finding (``actionable_findings``) of severity high (3) or critical (4), open since the earliest
+      discovery of the same finding on the same host.
+    * ``hygiene``: an open hygiene finding of severity high or critical that is not fixed or an accepted risk, open since its first_seen.
+
+    Whole days, rounded down. ``id`` is the id of the row to link to: the current row of that finding."""
+    from django.db.models import OuterRef, Subquery
+
+    from cveFeed.models import CVEMatch, HygieneFinding
+    from cveFeed.threat import HIGH_CVSS
+    from startScan.models import Vulnerability
+    now = now or timezone.now()
+    best = {'at': None, 'kind': None, 'id': None}
+
+    def consider(kind, at, row_id):
+        if at is not None and (best['at'] is None or at < best['at']):
+            best.update(at=at, kind=kind, id=row_id)
+
+    first_match = Subquery(CVEMatch.objects.filter(
+        cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
+        subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
+    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first').values('id', 'first').first())
+    if row:
+        consider('cve', row['first'], row['id'])
+    first_finding = Subquery(Vulnerability.objects.filter(
+        name=OuterRef('name'), subdomain__target_domain=OuterRef('subdomain__target_domain'), subdomain__name=OuterRef('subdomain__name'),
+        discovered_date__isnull=False).order_by('discovered_date').values('discovered_date')[:1])
+    row = (actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).annotate(first=first_finding)
+           .filter(first__isnull=False).order_by('first').values('id', 'first').first())
+    if row:
+        consider('scanner', row['first'], row['id'])
+    row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen').values('id', 'first_seen').first()
+    if row:
+        consider('hygiene', row['first_seen'], row['id'])
+    if best['at'] is None:
+        return {'days': None, 'kind': None, 'id': None}
+    return {'days': max(0, (now - best['at']).days), 'kind': best['kind'], 'id': best['id']}
 
 
 def expiring_certificates(qs, days=CERT_WARNING_DAYS):

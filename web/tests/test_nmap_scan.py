@@ -50,6 +50,20 @@ class ParseXmlTests(TestCase):
 	def test_unparseable_xml_is_empty_not_a_crash(self):
 		self.assertEqual(nmap_scan.parse_xml('<not xml'), [])
 
+	def test_an_entity_expansion_payload_is_refused_not_expanded(self):
+		# This function now also reads XML a Sentinel reported (agentapi.sentinel_dispatch.try_nmap_udp), not only this
+		# process's own nmap subprocess, so a billion-laughs-style payload must fail safe (a custom ENTITY is refused
+		# outright, real nmap output never declares one), same as any other malformed report - never expand, never
+		# crash the pipeline.
+		bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
+				']><nmaprun><host><address addr="&lol2;" addrtype="ipv4"/></host></nmaprun>')
+		self.assertEqual(nmap_scan.parse_xml(bomb), [])
+
+	def test_an_external_entity_is_refused_not_fetched(self):
+		xxe = ('<?xml version="1.0"?><!DOCTYPE nmaprun [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+			  '<nmaprun><host><address addr="&xxe;" addrtype="ipv4"/></host></nmaprun>')
+		self.assertEqual(nmap_scan.parse_xml(xxe), [])
+
 	def test_valid_report_extracts_host_os_and_service(self):
 		inventory = nmap_scan.parse_xml(FAST_XML)
 		self.assertEqual(len(inventory), 1)
@@ -60,6 +74,7 @@ class ParseXmlTests(TestCase):
 			'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh',
 			'product': 'OpenSSH', 'version': '8.9', 'service_extra': 'Ubuntu', 'ostype': '',
 			'cpe': '', 'cpes': [], 'method': '', 'scripts': {}, 'banner': '',
+			'tunnel': '', 'hostname': '', 'devicetype': '', 'confidence': '', 'tls': {},
 		}])
 
 
@@ -81,6 +96,23 @@ class PersistInventoryTests(TestCase):
 		nmap_scan.persist_inventory(nmap_scan.parse_xml(FAST_XML))
 		self.assertEqual(Port.objects.filter(number=22).count(), 1)
 		self.assertEqual(ip.ports.get(number=22).version, '8.9')
+
+	def test_a_run_without_service_detection_keeps_what_a_fingerprinting_pass_found(self):
+		"""S04-3: the -p- sweep and naabu know only that a port is open."""
+		probed = {'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh', 'product': 'OpenSSH', 'version': '8.9p1',
+			'service_extra': 'Ubuntu Linux; protocol 2.0', 'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:linux:linux_kernel'], 'method': 'probed', 'tunnel': 'ssl'}
+		nmap_scan.persist_inventory([{'ip': '192.0.2.40', 'os_guess': '', 'os_accuracy': None, 'ports': [probed]}])
+		port = IpAddress.objects.get(address='192.0.2.40').ports.get(number=22)
+		before = (port.distro, port.package_release, port.extra['cpes'], port.extra['method'], port.extra['tunnel'], port.service_name, port.product, port.version)
+		self.assertEqual(before[4], 'ssl')
+		sweep = {'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh', 'method': 'table', 'confidence': '3'}
+		nmap_scan.persist_inventory([{'ip': '192.0.2.40', 'os_guess': '', 'os_accuracy': None, 'ports': [sweep, {'number': 9999, 'state': 'open'}]}], source='fullscan')
+		naabu = [{'ip': '192.0.2.40', 'os_guess': '', 'ports': [{'number': 22, 'state': 'open', 'protocol': 'tcp'}]}]
+		nmap_scan.persist_inventory(naabu, source='naabu')
+		port = IpAddress.objects.get(address='192.0.2.40').ports.get(number=22)
+		self.assertEqual((port.distro, port.package_release, port.extra['cpes'], port.extra['method'], port.extra['tunnel'], port.service_name, port.product, port.version), before)
+		self.assertEqual((port.state, port.source), ('open', 'nmap'))
+		self.assertTrue(IpAddress.objects.get(address='192.0.2.40').ports.filter(number=9999).exists())  # a new port is still recorded
 
 	def test_a_product_on_one_ip_is_not_visible_on_another(self):
 		def host(ip, product):
@@ -240,6 +272,15 @@ class OpenPortStateTests(TestCase):
 		host = nmap_scan.parse_xml(_report([(22, 'open', 'OpenSSH', '8.9')], scanned='22,80-82,8080'))[0]
 		self.assertEqual(host['scanned'], {22, 80, 81, 82, 8080})
 		self.assertEqual((host['status'], host['extraports']), ('up', ['closed']))
+
+	def test_a_cdn_or_shared_edge_address_is_not_a_nuclei_target(self):
+		from cveFeed.nuclei_scan import scan_targets
+		self._sub_with_ip()
+		nmap_scan.persist_inventory(nmap_scan.parse_xml(_report([(443, 'open', 'nginx', '1.18.0')])))
+		self.assertEqual(scan_targets(self.scan)[1], {'192.0.2.77'})
+		IpAddress.objects.filter(pk=self.ip.pk).update(is_cdn=True)
+		hostnames, ips, ports = scan_targets(self.scan)
+		self.assertEqual((hostnames, ips, ports), ({'www.ports.test'}, set(), set()))  # S04-13: the name is still scanned, the edge address is not
 
 	def test_a_filtered_port_is_not_a_target_and_not_correlated(self):
 		from cveFeed import correlation

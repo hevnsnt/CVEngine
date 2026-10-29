@@ -18,8 +18,11 @@ A ``manual`` strategy is never overwritten by either.
 import json
 import re
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2 adds the plain-language guidance (identify, confirm_steps, true/false-positive signs); version 1 records stay valid
 MAX_CHECKS = 8
+GUIDANCE_LISTS = {'confirm_steps': (6, 240), 'true_positive_signs': (4, 180), 'false_positive_signs': (4, 180)}
+GUIDANCE_TEXT = {'identify': 320, 'scope_reason': 200, 'revision_note': 200}
+SCOPES = ('external', 'local_only', 'unclear')  # can an outside scan decide this CVE, only the host itself, or cannot tell
 CONFIDENCE = ('high', 'medium', 'low')
 
 _ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,39}$')
@@ -237,7 +240,8 @@ def validate_strategy(obj):
     for key in ('remote_checks', 'local_checks'):
         if isinstance(obj.get(key), list):
             obj[key] = [{k: v for k, v in c.items() if k not in ('how', 'commands')} if isinstance(c, dict) else c for c in obj[key]]
-    allowed = {'summary', 'remote_checks', 'local_checks', 'prerequisites', 'false_positive_notes', 'remediation', 'safety'}
+    allowed = {'summary', 'remote_checks', 'local_checks', 'prerequisites', 'false_positive_notes', 'remediation', 'safety',
+               *GUIDANCE_TEXT, *GUIDANCE_LISTS, 'scope'}
     for key in set(obj) - allowed:
         problems.append(f'unknown key {str(key)[:40]!r} dropped')
     if obj.get('safety', 'read_only') != 'read_only':
@@ -250,8 +254,22 @@ def validate_strategy(obj):
            'remediation': _text(obj.get('remediation', ''), 600) or ''}
     prerequisites = obj.get('prerequisites', [])
     out['prerequisites'] = [t for t in (_text(p, 150) for p in prerequisites[:5]) if t] if isinstance(prerequisites, list) else []
-    if not out['remote_checks'] and not out['local_checks']:
-        return None, problems + ['no usable check']
+    for key, cap in GUIDANCE_TEXT.items():
+        out[key] = _text(obj.get(key, ''), cap) or ''
+    scope = obj.get('scope', '')
+    if scope and scope not in SCOPES:
+        problems.append(f'scope must be one of {", ".join(SCOPES)}')
+        scope = ''
+    out['scope'] = scope or ''
+    for key, (count, cap) in GUIDANCE_LISTS.items():
+        items = obj.get(key, [])
+        if items and not isinstance(items, list):
+            problems.append(f'{key} is not a list')
+            items = []
+        out[key] = [t for t in (_text(i, cap) for i in (items or [])[:count]) if t]
+    written = out['identify'] or out['scope'] or any(out[key] for key in GUIDANCE_LISTS)
+    if not out['remote_checks'] and not out['local_checks'] and not written:
+        return None, problems + ['no usable check or guidance']
     return out, problems
 
 
@@ -264,7 +282,7 @@ def parse_ai_strategy(text):
             candidate, _ = decoder.raw_decode(text, match.start())
         except (json.JSONDecodeError, TypeError, RecursionError):
             continue
-        if isinstance(candidate, dict) and ('remote_checks' in candidate or 'local_checks' in candidate):
+        if isinstance(candidate, dict) and ({'remote_checks', 'local_checks', 'identify', 'confirm_steps', 'scope'} & set(candidate)):
             candidates.append(candidate)
     if len(candidates) != 1:
         return None, ['the reply has no single strategy object']
@@ -308,8 +326,46 @@ def rules_strategy(cve, template_ids=()):
                            'description': 'a nuclei template exists for this CVE', 'params': {'template_id': template_id}})
     if not remote and not local:
         return None
-    strategy, _ = validate_strategy({'summary': (cve.title or cve.cve_id)[:400], 'remote_checks': remote, 'local_checks': local})
+    strategy, _ = validate_strategy({'summary': (cve.title or cve.cve_id)[:400], 'remote_checks': remote, 'local_checks': local,
+                                     **rules_guidance(remote, local, bool(template_ids))})
     return strategy
+
+
+def _range_text(params):
+    parts = []
+    if params.get('introduced'):
+        parts.append(f"from {params['introduced']}")
+    if params.get('fixed'):
+        parts.append(f"before {params['fixed']}")
+    elif params.get('last_affected'):
+        parts.append(f"up to {params['last_affected']}")
+    return ' '.join(parts) or 'every version'
+
+
+def rules_guidance(remote, local, has_template):
+    """Plain guidance a person can follow, written from the checks alone (no model): what is affected, the steps to confirm it, and what
+    makes a match true or false. A model-written record replaces it with something specific to the CVE."""
+    versions = [c for c in remote if c['kind'] == 'version_banner']
+    fixed = next((r['fixed'] for c in versions for r in c['params']['ranges'] if r.get('fixed')), None)
+    identify = '; '.join(f"{c['params']['product']} {_range_text(c['params']['ranges'][0])}" for c in versions[:2])
+    steps = []
+    if versions:
+        steps.append(f"Find the exact {versions[0]['params']['product']} version on the host (the Services tab shows what cvENGINE saw).")
+        steps.append('Compare it with the affected range' + (f' and the fixed release {fixed}.' if fixed else '.'))
+    if has_template:
+        steps.append('Run Validate now: the nuclei template for this CVE checks it from outside.')
+    if local:
+        steps.append('On the host, run the check for its platform below and compare the result with what it says to look for.')
+    steps.append('If it is a Linux package, check the distribution security tracker: a backported fix keeps the old version number.')
+    return {
+        'identify': (f'Affects {identify}.' if identify else ''),
+        'confirm_steps': steps[:6],
+        'true_positive_signs': (['The nuclei template for this CVE matches.'] if has_template else []) +
+                               (['The version found is inside the affected range and the service is reachable.'] if versions else []),
+        'false_positive_signs': ['The version found is at or above the fixed release.',
+                                 'The distribution backported the fix, so the older version number is already patched.',
+                                 'The component is not installed, not reachable, or not the product the match was made on.'],
+    }
 
 
 def installed_template_ids(cve):
@@ -323,7 +379,8 @@ def installed_template_ids(cve):
 
 
 def merge_strategies(base, extra):
-    """``base`` with the checks of ``extra`` whose ids it lacks, keeping each list within MAX_CHECKS. Text fields fill only when empty."""
+    """``base`` with the checks of ``extra`` whose ids it lacks, keeping each list within MAX_CHECKS. For the written guidance, ``extra``
+    wins where it has something and ``base`` fills the rest."""
     if not base:
         return extra
     if not extra:
@@ -332,9 +389,11 @@ def merge_strategies(base, extra):
     for key in ('remote_checks', 'local_checks'):
         have = {c['id'] for c in base[key]}
         merged[key] = (list(base[key]) + [c for c in extra[key] if c['id'] not in have])[:MAX_CHECKS]
-    for key in ('summary', 'false_positive_notes', 'remediation'):
-        merged[key] = base[key] or extra[key]
-    merged['prerequisites'] = base['prerequisites'] or extra['prerequisites']
+    # the words a person reads: what the second author wrote wins over the rules' generic text, and generic text fills what it left empty
+    for key in ('summary', 'false_positive_notes', 'remediation', 'scope', *GUIDANCE_TEXT):
+        merged[key] = extra.get(key) or base.get(key) or ''
+    for key in ('prerequisites', *GUIDANCE_LISTS):
+        merged[key] = extra.get(key) or base.get(key) or []
     return merged
 
 
@@ -432,3 +491,19 @@ def finalize(strategy, cvss_vector=''):
         out[key] = checks
     out['validation'] = validation_profile(out, cvss_vector)
     return out
+
+
+def prompt_guidance(cve):
+    """The record's own words, trimmed, for an AI prompt about a match of this CVE: a hint about what makes it apply and what makes it
+    false, never evidence (what this host showed is). None when the CVE has no record yet. Safe to read on any CVEEntry."""
+    row = getattr(cve, 'detection', None)
+    strategy = (row.strategy if row is not None else None) or {}
+    if not strategy:
+        return None
+    profile = strategy.get('validation') or {}
+    out = {'summary': strategy.get('summary') or '', 'identify': strategy.get('identify') or '',
+           'true_positive_signs': (strategy.get('true_positive_signs') or [])[:3],
+           'false_positive_signs': (strategy.get('false_positive_signs') or [])[:3],
+           'decidable_from_outside': profile.get('remote_determinable') or '',
+           'written_by': row.source}
+    return {k: v for k, v in out.items() if v} or None

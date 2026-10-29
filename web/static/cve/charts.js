@@ -1,7 +1,8 @@
 // Small dependency-free SVG charts for the Thermal UI. DOM is built with textContent only.
 // areaChart: a daily series with range tabs, a scrubbing tooltip and arrow-key access.
+import { tzMode } from "/staticfiles/cve/prefs.js";
+
 const NS = "http://www.w3.org/2000/svg";
-const DAY = 86400000;
 const W = 640;
 const H = 200;
 const PAD = { t: 14, b: 6 };
@@ -18,8 +19,17 @@ const s = (tag, attrs = {}) => {
   return n;
 };
 
+// A day is keyed by the midnight (in this browser) of its calendar date in the zone the page displays (the browser's or UTC, see
+// prefs.js), so the keys can be formatted with the plain local Date methods. Days are stepped with calendar arithmetic, never by adding
+// 86400000: across a daylight-saving change a day is 23 or 25 hours long and the fixed step misses every key on the other side.
 const dayKey = (d) =>
-  new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  tzMode() === "utc"
+    ? new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()).getTime()
+    : new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const addDays = (t, n) => {
+  const d = new Date(t);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime();
+};
 const fmtDay = (ms) =>
   new Date(ms).toLocaleDateString(undefined, {
     month: "short",
@@ -37,7 +47,7 @@ export function dailyCounts(isoDates, days) {
   });
   const out = [];
   for (let i = days - 1; i >= 0; i--) {
-    const t = end - i * DAY;
+    const t = addDays(end, -i);
     out.push({ t, v: counts.get(t) || 0 });
   }
   return out;
@@ -238,9 +248,9 @@ export function heatmap({ title, unit = "events", dates, weeks = 18 }) {
   });
   const today = dayKey(new Date());
   const dow = (new Date(today).getDay() + 6) % 7; // Monday = 0
-  const start = today - (dow + (weeks - 1) * 7) * DAY;
+  const start = addDays(today, -(dow + (weeks - 1) * 7));
   const days = [];
-  for (let t = start; t <= today; t += DAY) days.push({ t, v: counts.get(t) || 0 });
+  for (let t = start; t <= today; t = addDays(t, 1)) days.push({ t, v: counts.get(t) || 0 });
   const peak = Math.max(1, ...days.map((d) => d.v));
   const sum = days.reduce((n, d) => n + d.v, 0);
   total.textContent = sum;
@@ -336,7 +346,7 @@ export function activityMatrix({ title, rows }) {
   head.append(readout, legend);
 
   const today = dayKey(new Date());
-  const start = today - (MATRIX_DAYS - 1) * DAY;
+  const start = addDays(today, -(MATRIX_DAYS - 1));
   const series = rows.map((row) => {
     const days = new Map();
     row.items.forEach((it) => {
@@ -349,7 +359,7 @@ export function activityMatrix({ title, rows }) {
       days.set(k, e);
     });
     const list = [];
-    for (let t = start; t <= today; t += DAY) list.push({ t, e: days.get(t) || { n: 0, fire: 0, smoke: 0, ice: 0 } });
+    for (let t = start; t <= today; t = addDays(t, 1)) list.push({ t, e: days.get(t) || { n: 0, fire: 0, smoke: 0, ice: 0 } });
     const peak = Math.max(1, ...list.map((d) => d.e.n));
     const sum = list.reduce((n, d) => n + d.e.n, 0);
     const byTier = TIER_NAMES.map((t) => list.reduce((n, d) => n + d.e[t], 0));

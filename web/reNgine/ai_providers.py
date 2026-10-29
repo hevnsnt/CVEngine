@@ -1,5 +1,5 @@
 """Model-agnostic AI layer: one ``complete(system, user)`` interface over
-Anthropic, OpenAI, OpenRouter, Ollama and vLLM, plus CVE-match confirmation built on it.
+Anthropic, OpenAI, OpenRouter, Ollama, vLLM and LM Studio, plus CVE-match confirmation built on it.
 
 Plain HTTP via ``requests`` (no vendor SDKs) so providers are swappable and the
 module imports without Django. Keys are passed in by the caller (read from the
@@ -90,20 +90,21 @@ ANTHROPIC_VERSION = '2023-06-01'
 OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 # Models used when none is chosen. Anthropic and OpenAI get the newest cheapest model: resolved from the
 # provider's own model list (see pick_cheapest_newest), with these as the fallback when the list cannot be read.
-# OpenRouter, Ollama and vLLM serve whatever the operator picked or hosts, so there is no default for them.
+# OpenRouter, Ollama, vLLM and LM Studio serve whatever the operator picked or hosts, so there is no default for them.
 DEFAULT_MODELS = {
 	'anthropic': 'claude-haiku-5-5',
 	'openai': 'gpt-5.4-nano',
 	'openrouter': '',
 	'ollama': '',
 	'vllm': '',
+	'lmstudio': '',
 }
-SELECTABLE = ('openrouter', 'ollama', 'vllm')  # the user must choose the model
+SELECTABLE = ('openrouter', 'ollama', 'vllm', 'lmstudio')  # the user must choose the model
 OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 LOCAL_NAMES = ('localhost', '127.0.0.1', '::1', '[::1]')
 HOST_FROM_CONTAINER = 'host.docker.internal'  # compose maps this to the Docker host for the web and celery containers
-URL_HELP = ('the server address, for example http://100.64.0.5:11434 (a Tailscale or other remote machine) '
-			'or http://localhost:11434 if it runs on this same server')
+URL_HELP = ('the server address, for example http://100.64.0.5:{port} (a Tailscale or other remote machine) '
+			'or http://localhost:{port} if it runs on this same server')
 
 
 def reachable_url(url):
@@ -200,6 +201,7 @@ def _epoch(value):
 
 class AIProvider:
 	name = ''
+	timeout = REQUEST_TIMEOUT  # seconds a completion may take; a provider that loads models on demand overrides it
 
 	def __init__(self, model=None, api_key=None, base_url=None):
 		self._model = model or ''
@@ -245,9 +247,12 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+			resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
 			resp.raise_for_status()
-			data = resp.json()
+			try:
+				data = resp.json()
+			except ValueError as e:  # requests' own JSONDecodeError is a RequestException too: it must not read as "connection failed" below
+				raise AIProviderError(f'{self.name} returned invalid JSON', category='provider_json') from e
 			if isinstance(data, dict):
 				self._last_usage = data.get('usage') or {
 					'prompt_tokens': data.get('prompt_eval_count'), 'completion_tokens': data.get('eval_count')}
@@ -271,7 +276,9 @@ class AIProvider:
 			resp.raise_for_status()
 			return resp.json()
 		except (requests.RequestException, ValueError) as e:
-			raise AIProviderError(f'{self.name} model list failed: {e}') from e
+			# the error's own text names the address it tried and why it failed: to a caller that is a map of what answers where
+			status = getattr(getattr(e, 'response', None), 'status_code', None)
+			raise AIProviderError(f'{self.name} model list failed ({type(e).__name__}{f", HTTP {status}" if status else ""})') from e
 
 
 def _anthropic_text(data):
@@ -388,6 +395,20 @@ class VLLMProvider(OpenAIProvider):
 	name = 'vllm'
 
 
+class LMStudioProvider(OpenAIProvider):
+	"""An LM Studio server's OpenAI-compatible API, e.g. http://100.64.0.5:1234/v1 (port 1234 by default).
+
+	The token is optional: LM Studio 0.4 and later can require one (Server Settings, Manage Tokens) and then expects it as a bearer
+	token, which is how the key is sent. With just-in-time loading on, /v1/models lists every downloaded model (embedding models
+	too) and the first request for one loads it, which can take a minute on a big model, so the request timeout is longer."""
+	name = 'lmstudio'
+	timeout = 300
+
+	def list_models(self):
+		# the server lists the embedding models it holds beside the chat ones; an embedding model cannot answer a prompt
+		return [m for m in super().list_models() if 'embed' not in m['id'].lower()]
+
+
 def _ollama_text(data):
 	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
 	try:
@@ -426,8 +447,10 @@ class OllamaProvider(AIProvider):
 		return _ollama_text(data)
 
 
-PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider)}
-KEYLESS = ('ollama', 'vllm')  # a key is optional (vLLM) or unused (Ollama)
+PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider, LMStudioProvider)}
+KEYLESS = ('ollama', 'vllm', 'lmstudio')  # a key is optional (vLLM, LM Studio) or unused (Ollama)
+SERVER_URL_PROVIDERS = ('ollama', 'vllm', 'lmstudio')  # you run the server, so there is no default address
+LOCAL_PORT = {'ollama': 11434, 'vllm': 8000, 'lmstudio': 1234}  # each server's usual port, for the address hints
 
 
 def get_provider(name, model=None, api_key=None, base_url=None):
@@ -437,21 +460,41 @@ def get_provider(name, model=None, api_key=None, base_url=None):
 		raise AIProviderError(f'unknown AI provider: {name!r}') from None
 	if name not in KEYLESS and not api_key:
 		raise AIProviderError(f'{name} requires an API key')
-	if name in ('ollama', 'vllm') and not (base_url or '').strip():
-		raise AIProviderError(f'{name} needs the server URL: {URL_HELP}')
+	if name in SERVER_URL_PROVIDERS and not (base_url or '').strip():
+		raise AIProviderError(f'{name} needs the server URL: {URL_HELP.format(port=LOCAL_PORT[name])}')
 	if base_url and not re.match(r'^https?://', base_url.strip(), re.I):
 		raise AIProviderError('the server URL must start with http:// or https://')
 	return cls(model=model, api_key=api_key, base_url=base_url)
 
 
+_THINK = re.compile(r'<think(?:ing)?>.*?</think(?:ing)?>', re.DOTALL | re.IGNORECASE)
+
+
+def extract_json(text, keys=()):
+	"""The JSON object a model reply holds, or None. Reasoning models (qwen3, deepseek-r1 and others served by LM Studio, Ollama or vLLM) put
+	their thinking, braces and all, before the answer: the thinking block is dropped, every top-level object that parses is a candidate, and
+	the last one that has all of ``keys`` wins (the answer follows the reasoning)."""
+	text = _THINK.sub('', str(text or ''))
+	text = re.sub(r'^.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)  # a reply cut at the closing tag has no opening one
+	decoder, found, position = json.JSONDecoder(), None, 0
+	while True:
+		start = text.find('{', position)
+		if start < 0:
+			return found
+		try:
+			obj, end = decoder.raw_decode(text, start)
+		except (json.JSONDecodeError, RecursionError):
+			position = start + 1
+			continue
+		if isinstance(obj, dict) and all(k in obj for k in keys):
+			found = obj
+		position = end
+
+
 def parse_verdict(text):
 	"""Extract {'verdict', 'reason'} from a model reply; None if unusable."""
-	match = re.search(r'\{.*\}', text or '', re.DOTALL)
-	if not match:
-		return None
-	try:
-		obj = json.loads(match.group(0))
-	except json.JSONDecodeError:
+	obj = extract_json(text, ('verdict',))
+	if obj is None:
 		return None
 	verdict = str(obj.get('verdict', '')).strip().lower()
 	if verdict not in VERDICTS:
@@ -501,7 +544,17 @@ TRIAGE_SYSTEM_PROMPT = (
 	'Use at most five validation_steps and an integer severity_adjust. Omit a field only when unavailable; do not add extra keys. '
 	'Use "confirmed" only when the evidence itself shows the problem is present; your own reasoning is not evidence. Use '
 	'"needs_validation" when you cannot tell. Use "likely_false_positive" only when the evidence points away from the '
-	'finding. validation_steps are advice for a person: never write commands. ' + UNTRUSTED_NOTICE)
+	'finding. validation_steps are advice for a person: never write commands. The CVE may carry "guidance": earlier notes about what '
+	'makes it apply or what makes a match false. Treat it as a hint that may be wrong; the evidence in this finding decides. '
+	'A HOST_CONTEXT block, when present, is everything cvENGINE holds about the host: read it before you answer. Decide from it, in this '
+	'order. 1) Is the product the advisory names the same product the host runs (nginx is not ingress-nginx or nginx-ui; a plugin is not '
+	'its CMS)? 2) Is the version found inside the advisory range, and did a probe state it or only a banner? 3) Is the host behind a CDN, '
+	'WAF or hosting edge (host_context.edge)? Then the Server header, X-Powered-By and error pages describe the edge, so the origin product '
+	'and version are unknown: a tag such as cloudflare names the edge, not an application; say that instead of assuming an origin. '
+	'4) Does the advisory need local state (kernel, driver, hardware, a local account)? Then no network evidence settles it: answer '
+	'needs_validation and say the host inventory reporter is what decides. Use likely_false_positive or not_applicable only when you can '
+	'name concrete metadata that points away: a different product, a version out of range or patched, or edge-only evidence. A banner or '
+	'tag that says nothing about a version is no reason to close a finding and none to confirm it. ' + UNTRUSTED_NOTICE)
 
 
 def _triage_text(value, limit):
@@ -586,34 +639,36 @@ def _triage_clean(value, depth=0):
 	return clean_text(value, 200, strict=True)
 
 
-def build_triage_prompt(kind, payload):
+def build_triage_prompt(kind, payload, host_context=None):
 	"""The user message for one finding: its kind and its cleaned, structured evidence between nonce markers. No hostname, no
-	raw request or response, no secret ever goes in: ``payload`` is built from structured columns and is cleaned again here."""
-	return f'Finding kind: {clean_text(kind, 20, strict=True)}\n' + untrusted_block('FINDING', _triage_clean(payload))
+	raw request or response, no secret ever goes in: ``payload`` is built from structured columns and is cleaned again here.
+	``host_context`` (cveFeed.host_context, already cleaned) is a second untrusted block: what is known about the host."""
+	text = f'Finding kind: {clean_text(kind, 20, strict=True)}\n' + untrusted_block('FINDING', _triage_clean(payload))
+	return text + ('\n' + untrusted_block('HOST_CONTEXT', host_context) if host_context else '')
 
 
-def build_repair_prompt(kind, payload, reply, reason):
+def build_repair_prompt(kind, payload, reply, reason, host_context=None):
 	"""The original request again, with the model's rejected reply and exactly why it was rejected, so it can answer correctly. The earlier
 	reply goes back as untrusted text (it was written from untrusted evidence), cleaned and capped."""
-	return (build_triage_prompt(kind, payload) + '\n\nYour previous reply was REJECTED by the validator: ' + reason + '.\n'
+	return (build_triage_prompt(kind, payload, host_context) + '\n\nYour previous reply was REJECTED by the validator: ' + reason + '.\n'
 			'Answer the original request again. Reply with ONLY one JSON object that has exactly the keys in the schema you were given, '
 			'with the types the schema gives. No other text, no markdown fence, no extra keys.\n'
 			+ untrusted_block('REJECTED_REPLY', clean_text(str(reply), 2500)))
 
 
-def triage_finding(provider, kind, payload):
+def triage_finding(provider, kind, payload, host_context=None):
 	"""Ask ``provider`` to triage one finding. Returns {'parsed': dict, 'model': 'provider:model'} (plus 'repaired': True when the first
 	reply was rejected and the second was fine); the raw reply is dropped. A reply that fails validation is sent back to the model once,
 	with why it failed, and the second answer is the one that counts. Raises AIProviderError when the provider cannot be reached or the
 	second reply is also unusable (category schema_invalid, with the reason)."""
 	import hashlib
 	with usage_stage('finding_triage'):
-		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload))
+		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload, host_context))
 	parsed, reason = validate_triage(reply)
 	repaired = False
 	if parsed is None:
 		with usage_stage('finding_triage_repair'):
-			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason))
+			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason, host_context))
 		parsed, second = validate_triage(reply)
 		if parsed is None:
 			digest = hashlib.sha256(str(reply).encode()).hexdigest()[:12]

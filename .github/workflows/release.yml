@@ -14,6 +14,11 @@ on:
         description: 'Tag to release (default: the version in web/.version, e.g. v1.0)'
         required: false
         default: ''
+      tools_reviewed:
+        description: 'Release even though a pinned tool is behind its newest release (only after looking at the newer version)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -30,12 +35,30 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
+      - name: 🔭 Every pinned tool is at its newest release
+        env:
+          REVIEWED: ${{ github.event.inputs.tools_reviewed }}
+          GITHUB_TOKEN: ${{ github.token }}  # for api.github.com lookups: unauthenticated they are rate limited on shared runners
+        run: |
+          if python3 scripts/check_tool_versions.py --fail-if-behind; then
+            exit 0
+          fi
+          if [ "$REVIEWED" = "true" ]; then
+            echo "::warning::A tool is behind its newest release; this run says that was looked at."
+            exit 0
+          fi
+          echo "::error::A pinned tool is behind its newest release (table above). Bump the pin, or run again with tools_reviewed after deciding not to."
+          exit 1
+
       - name: 🏷️ Resolve the tag
         id: tag
         env:
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
           EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
           version="v$(tr -d '[:space:]' < web/.version | sed 's/^v//')"
           if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -46,6 +69,13 @@ jobs:
             tag="${INPUT_TAG:-$version}"
           else
             tag="$REF_NAME"
+            # a pushed tag must point at a commit that is on master: the master-only rule above holds for manual runs, and a tag on a branch
+            # commit whose web/.version matched would otherwise publish a "latest" release from it
+            relation=$(gh api "repos/$REPO/compare/master...$SHA" --jq .status) || relation=unknown
+            case "$relation" in
+              identical|behind) ;;
+              *) echo "::error::Tag $tag points at $SHA, which is not on master (compare status: $relation). Releases are cut from master."; exit 1 ;;
+            esac
           fi
           if [ "$tag" != "$version" ]; then
             echo "::error::web/.version is '$version' but the tag is '$tag'. Bump web/.version or pass a matching tag."
@@ -60,6 +90,9 @@ jobs:
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists on the remote; publishing from it."
+            # the notes, the archives and the bill of materials are built from the tag's own tree, not from master's tip, which may be ahead of it
+            git fetch --no-tags --depth=1 origin "+refs/tags/$TAG:refs/tags/$TAG"
+            git checkout --quiet "refs/tags/$TAG"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -117,7 +150,9 @@ jobs:
           # end up in it). A git checkout stays the supported way to install, because the updater works through git; these are
           # for reading, mirroring and offline transfer.
           mkdir -p "$RUNNER_TEMP/assets"
-          git archive --format=zip    --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.zip"    HEAD
-          git archive --format=tar.gz --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.tar.gz" HEAD
-          (cd "$RUNNER_TEMP/assets" && sha256sum cvengine-"$TAG".zip cvengine-"$TAG".tar.gz > SHA256SUMS)
+          git archive --format=zip    --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.zip"    "refs/tags/$TAG"
+          git archive --format=tar.gz --prefix="cvengine-$TAG/" -o "$RUNNER_TEMP/assets/cvengine-$TAG.tar.gz" "refs/tags/$TAG"
+          # the bill of materials of this tag: every pinned tool, package and image (scripts/generate_sbom.py)
+          python3 scripts/generate_sbom.py --output "$RUNNER_TEMP/assets/cvengine-$TAG.sbom.cdx.json"
+          (cd "$RUNNER_TEMP/assets" && sha256sum cvengine-"$TAG".zip cvengine-"$TAG".tar.gz cvengine-"$TAG".sbom.cdx.json > SHA256SUMS)
           gh release upload "$TAG" "$RUNNER_TEMP"/assets/* --clobber

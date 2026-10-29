@@ -405,10 +405,28 @@ def _host_key(value):
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
-def run_template(path, hosts):
+def run_template(path, hosts, secret_file=None, redact=()):
+    """``_run_template`` after one more look at the names: a name a tenant controls can answer a public address when the host list
+    is vetted and an internal one later, so the names are resolved again here, at launch, and one that now resolves to a blocked
+    address is reported as not tested instead of being handed to nuclei. (The name is still resolved by nuclei itself a moment later:
+    this narrows the window, it does not close it.)"""
+    from targetApp.target_types import IP, bare_host, blocked_names, classify_target
+    hosts = [hosts] if isinstance(hosts, str) else list(hosts)
+    names = {bare_host(h) for h in hosts}
+    blocked = blocked_names([n for n in names if n and classify_target(n) != IP]) if hosts else set()
+    if not blocked:
+        return _run_template(path, hosts, secret_file=secret_file, redact=redact)
+    allowed = [h for h in hosts if bare_host(h) not in blocked]
+    ran = iter(_run_template(path, allowed, secret_file=secret_file, redact=redact) if allowed else [])
+    return [{"host": h, "vulnerable": False, "output": "", "error": "the host name now resolves to an address that may not be scanned"}
+            if bare_host(h) in blocked else next(ran) for h in hosts]
+
+
+def _run_template(path, hosts, secret_file=None, redact=()):
     """Run one template against ``hosts`` (one nuclei process, ``-l`` a host file); returns a
     {host, vulnerable, output} per host, in order. Waits its turn for memory; if it had to be stopped to protect the
-    container it raises reNgine.resources.MemoryKill."""
+    container it raises reNgine.resources.MemoryKill. ``secret_file`` (a nuclei secrets file, see cveFeed.auth_nuclei) makes it a signed-in
+    check without redirects, and ``redact`` lists the secret values to strip from every line of output and from an error message."""
     from reNgine import resources
     hosts = [hosts] if isinstance(hosts, str) else list(hosts)
     from cveFeed.validation import approved_template
@@ -428,6 +446,13 @@ def run_template(path, hosts):
             handle.write("\n".join(hosts) + "\n")
         cmd = [NUCLEI_BIN, "-t", template_path, "-l", host_path, "-jsonl", "-silent", "-duc", "-ni",
                "-rl", RATE_LIMIT, "-timeout", "10", "-retries", "0"]
+        if secret_file:
+            cmd += ["-sf", secret_file, "-dr"]
+        from cveFeed import egress_proxy
+        try:
+            cmd += egress_proxy.for_tool("nuclei", hosts)  # Settings > Proxy: these hosts are scan targets (loopback stays direct)
+        except egress_proxy.ProxyUnavailable as exc:
+            return [{"host": host, "vulnerable": False, "output": "", "error": str(exc)} for host in hosts]
         with resources.heavy_job("template-test", label=hosts[0] if len(hosts) == 1 else f"{len(hosts)} hosts") as job:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
@@ -440,6 +465,9 @@ def run_template(path, hosts):
             job.raise_if_killed()
             if proc.returncode != 0:
                 reason = (err or f'nuclei exited with status {proc.returncode}').strip()[-300:]
+                if redact:
+                    from cveFeed.auth_checks import redact_text
+                    reason = redact_text(reason, redact)
                 return [{"host": host, "vulnerable": False, "output": "", "error": reason} for host in hosts]
     hits, rows, malformed = {}, {}, False
     for line in out.splitlines():
@@ -455,6 +483,10 @@ def run_template(path, hosts):
             continue
         if not is_hit(row):
             continue
+        if redact:
+            from cveFeed.auth_checks import redact_obj
+            row = redact_obj(row, redact)
+            line = json.dumps(row)
         key = _host_key(row.get("host") or row.get("matched-at") or row.get("ip"))
         hits.setdefault(key, []).append(line)
         rows.setdefault(key, row)
@@ -684,8 +716,15 @@ def _generate_template(cve, provider, project):
     with activity.step('write_check', f'Writing a nuclei check for {cve.cve_id} with {provider.name}',
                        project=project, cve_id=cve.cve_id) as handle:
         from reNgine.ai_providers import usage_stage
-        with usage_stage('template_generation'):
-            text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
+        try:
+            with usage_stage('template_generation'):
+                text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
+        except Exception as exc:
+            # a failed provider call is still a billable attempt: leave the ledger row, so the next run does not retry this CVE at once
+            GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID,
+                                             ai_model=f"{provider.name}:{provider.model}"[:128],
+                                             validation_output=f'the AI provider call failed ({type(exc).__name__}); no template was written')
+            raise
         handle.done_message = f'Wrote a nuclei check for {cve.cve_id}'
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
     tmpl = GeneratedTemplate(
@@ -762,7 +801,7 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
                     "cve_ids": [], "cwe_ids": [], "references": [], "tags": []}
         data.update(
             source="nuclei-cve", severity=_severity_of(cve.cvss, data.get("severity", 0)), cvss_score=cve.cvss,
-            template_url=str(data.get("template_url") or "")[:2500], tags=list(data.get("tags") or []) + ["cve-check"],
+            template_url=str(data.get("template_url") or "")[:2500], tags=list(data.get("tags") or []) + ["cve-check"] + (["seen-while-authenticated"] if outcome.get("authenticated") else []),
             cve_ids=sorted({*(data.get("cve_ids") or []), cve.cve_id}), template_id=data.get("template_id") or template_id)
         data["name"] = f'{cve.cve_id}: {data["name"]}'[:2500] if data.get("name") and data["name"] != cve.cve_id else cve.cve_id
         save_vulnerability(target_domain=sub.target_domain, scan_history=sub.scan_history, subdomain=sub,
@@ -803,6 +842,8 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
         with activity.step('run_check', f'Running the {cve.cve_id} check against {label}', project=project,
                            cve_id=cve.cve_id) as handle:
             outcomes = _run_template_with_retry(path, chunk)
+            from cveFeed import auth_nuclei  # a stored sign-in adds a signed-in run for the hosts it covers
+            outcomes = auth_nuclei.merge_template_outcomes(path, chunk, outcomes, project)
             errors = sum(bool(o.get('error')) for o in outcomes)
             handle.done_message = (f'{errors} of {len(outcomes)} checks failed for {cve.cve_id}' if errors else
                                    f'{sum(o["vulnerable"] for o in outcomes)} of {len(outcomes)} hosts matched {cve.cve_id}')
@@ -810,7 +851,8 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
     for outcome in results:
         host = outcome['host']
         activity.log('validate', (f'Check failed for {host} and {cve.cve_id}: {outcome["error"]}' if outcome.get('error')
-                                  else f'Template matched {cve.cve_id} on {host}' if outcome['vulnerable']
+                                  else f'Template matched {cve.cve_id} on {host}' + (', seen while authenticated' if outcome.get('authenticated') else '')
+                                  if outcome['vulnerable']
                                   else f'Template did not match {cve.cve_id} on {host}'),
                      project=project, cve_id=cve.cve_id, vulnerable=outcome['vulnerable'])
     try:

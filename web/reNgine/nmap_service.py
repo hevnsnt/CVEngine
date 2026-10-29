@@ -26,6 +26,19 @@ def _host_ip(host):
     return None
 
 
+def _os_alternatives(host, limit=3):
+    """The best ``limit`` OS guesses of a host as ``[{name, accuracy, cpe}]``: nmap ranks many guesses and the first is often only a few
+    points ahead of a different family, so the runners-up are kept for whoever reads the guess."""
+    out = []
+    for match in _as_list((host.get("os") or {}).get("osmatch"))[:limit]:
+        if not isinstance(match, dict):
+            continue
+        classes = [c for c in _as_list(match.get("osclass")) if isinstance(c, dict)]
+        cpes = [x for c in classes for x in _as_list(c.get("cpe")) if isinstance(x, str)]
+        out.append({"name": str(match.get("@name", ""))[:100], "accuracy": match.get("@accuracy"), "cpe": (cpes or [""])[0][:120]})
+    return out
+
+
 def _host_os(host):
     """Best OS match (name, accuracy) from an nmap <host><os> element, if any."""
     os_el = host.get("os") or {}
@@ -66,6 +79,34 @@ def _banner_from(scripts, service):
     return raw.strip()[:BANNER_CAP]
 
 
+def parse_ssl_cert(text):
+    """``{subject, issuer, sans, not_before, not_after, key, signature}`` from the ssl-cert script's output (``Subject: commonName=...``
+    lines); only the fields it printed, each clipped. {} for output that is not a certificate."""
+    out = {}
+    for raw in str(text or "").splitlines():
+        key, _, value = raw.strip().partition(":")
+        value = value.strip()
+        if not value:
+            continue
+        if key == "Subject":
+            out["subject"] = value[:300]
+        elif key == "Issuer":
+            out["issuer"] = value[:300]
+        elif key == "Subject Alternative Name":
+            out["sans"] = [part.strip()[:200] for part in value.split(",") if part.strip()][:40]
+        elif key == "Not valid before":
+            out["not_before"] = value[:40]
+        elif key == "Not valid after":
+            out["not_after"] = value[:40]
+        elif key == "Public Key type":
+            out["key_type"] = value[:20]
+        elif key == "Public Key bits":
+            out["key_bits"] = value[:10]
+        elif key == "Signature Algorithm":
+            out["signature"] = value[:60]
+    return out if "subject" in out else {}
+
+
 def _service_record(port):
     """One port's service record from an nmap <port> element, including any NSE <script> output and a banner."""
     service = port.get("service") or {}
@@ -82,27 +123,45 @@ def _service_record(port):
         "service_extra": service.get("@extrainfo", "") or "",
         "ostype": service.get("@ostype", "") or "",
         "method": service.get("@method", "") or "",  # "probed" (it answered) or "table" (guessed from the port number)
+        "tunnel": service.get("@tunnel", "") or "",  # "ssl": the service speaks TLS (name="http" tunnel="ssl" is HTTPS)
+        "hostname": service.get("@hostname", "") or "",  # a name the service gave for itself (SMTP and IMAP greetings, SSH banners)
+        "devicetype": service.get("@devicetype", "") or "",
+        "confidence": service.get("@conf", "") or "",  # nmap's 1-10 certainty that the product and version are right
         "cpe": cpes[0] if cpes else "",
         "cpes": cpes,
         "scripts": scripts,
         "banner": _banner_from(scripts, service),
+        "tls": parse_ssl_cert(scripts.get("ssl-cert")),
     }
 
 
-def _scanned_tcp_ports(nmaprun):
-    """The set of TCP port numbers a run actually probed, from its <scaninfo services="1,3-4,6-7,...">; None when the report
+def _scanned_ports(nmaprun, protocol="tcp"):
+    """The set of ``protocol`` port numbers a run actually probed, from its <scaninfo services="1,3-4,6-7,...">; None when the report
     does not say. Used to tell "closed since last time" (probed, not reported open) from "not looked at"."""
-    ports = set()
+    spans = []
     found = False
     for info in _as_list((nmaprun or {}).get("scaninfo")):
-        if not isinstance(info, dict) or info.get("@protocol", "tcp") != "tcp":
+        if not isinstance(info, dict) or info.get("@protocol", "tcp") != protocol:
             continue
         found = True
         for part in str(info.get("@services", "")).split(","):
             lo, _, hi = part.strip().partition("-")
             if lo.isdigit() and (not hi or hi.isdigit()):
-                ports.update(range(int(lo), int(hi or lo) + 1))
+                # clamp to real port numbers: a hostile report can claim "1-4000000000", which must not be expanded
+                lo, hi = max(int(lo), 1), min(int(hi or lo), 65535)
+                if lo <= hi:
+                    spans.append((lo, hi))
+    ports = set()
+    top = 0
+    for lo, hi in sorted(spans):  # merged first, so the set is built once and never holds more than 65535 numbers
+        if hi > top:
+            ports.update(range(max(lo, top + 1), hi + 1))
+            top = hi
     return ports if found and ports else None
+
+
+def _scanned_tcp_ports(nmaprun):
+    return _scanned_ports(nmaprun, "tcp")
 
 
 def _extraports_states(host):
@@ -114,13 +173,15 @@ def _extraports_states(host):
 def extract_nmap_inventory(nmap_results):
     """nmap xmltodict dict -> list of host dicts with service-enriched ports.
 
-    Each host dict: {"ip", "os_guess", "os_accuracy", "ports": [service_record], "status", "extraports", "scanned"}:
-    ``status`` is the host state (up/down), ``extraports`` the states of the unlisted ports and ``scanned`` the TCP ports
-    the run probed (None when unknown), so a caller can close ports that were probed and not found open.
+    Each host dict: {"ip", "os_guess", "os_accuracy", "ports": [service_record], "status", "timedout", "extraports", "scanned"}:
+    ``status`` is the host state (up/down), ``timedout`` whether nmap gave up on the host (its ports are then not a complete answer), ``extraports`` the states of the unlisted ports and ``scanned`` the TCP ports
+    the run probed and ``scanned_udp`` the UDP ports (None when unknown), so a caller can close ports that were probed and not found
+    open.
     Ports without a numeric id are dropped.
     """
     run = (nmap_results or {}).get("nmaprun", {})
     scanned = _scanned_tcp_ports(run)
+    scanned_udp = _scanned_ports(run, "udp")
     hosts = _as_list(run.get("host"))
     inventory = []
     for host in hosts:
@@ -139,10 +200,13 @@ def extract_nmap_inventory(nmap_results):
             "ip": _host_ip(host),
             "os_guess": os_guess,
             "os_accuracy": os_accuracy,
+            "os_matches": _os_alternatives(host),
             "ports": records,
             "hostscripts": _scripts(host.get("hostscript")),  # smb-os-discovery, nbstat: attach to the host, not a port
             "status": (host.get("status") or {}).get("@state", "up") if isinstance(host.get("status"), dict) else "up",
+            "timedout": str(host.get("@timedout", "")).lower() == "true",  # --host-timeout cut the host short: its port list is partial
             "extraports": _extraports_states(host),
             "scanned": scanned,
+            "scanned_udp": scanned_udp,
         })
     return inventory

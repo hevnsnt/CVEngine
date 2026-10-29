@@ -11,7 +11,7 @@ on:
       - develop
       - release/*
   schedule:
-    # weekly rebuild without the layer cache, so the @latest tools and templates are re-fetched
+    # weekly rebuild without the layer cache, so the pinned tools and the runtime-fetched templates are re-fetched from scratch
     - cron: '17 6 * * 1'
 
 permissions:
@@ -85,6 +85,12 @@ jobs:
           unzip -p "$nuclei_archive" nuclei > "$RUNNER_TEMP/cvengine-nuclei"
           chmod 700 "$RUNNER_TEMP/cvengine-nuclei"
           CVENGINE_NUCLEI_SMOKE_BIN="$RUNNER_TEMP/cvengine-nuclei" python tests/nuclei_fixture_smoke.py
+      - name: No model change without its migration
+        working-directory: web
+        env:
+          DEBUG: '0'
+        # the celery container no longer writes migrations at start (it used to, into the host's checkout): a model change must carry its migration
+        run: python manage.py makemigrations --check --dry-run
       - name: Django test suite
         working-directory: web
         env:
@@ -92,7 +98,7 @@ jobs:
         # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
         run: python manage.py test --noinput --parallel auto
       - name: Graph cluster regression gate
-        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs
+        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs web/tests/test_inventory_snippets.mjs web/tests/test_frontend_static.mjs
 
   build:
     name: 🐳 Build Docker image (${{ matrix.platform }})
@@ -113,6 +119,18 @@ jobs:
 
       - name: 🏗️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: 📋 Bill of materials
+        if: matrix.arch == 'amd64'
+        run: python3 scripts/generate_sbom.py --output "$RUNNER_TEMP/cvengine.sbom.cdx.json"
+
+      - name: 📋 Keep the bill of materials
+        if: matrix.arch == 'amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/cvengine.sbom.cdx.json
+          retention-days: 30
 
       - name: 🏷️ Extract metadata (tags, labels) for Docker
         id: meta

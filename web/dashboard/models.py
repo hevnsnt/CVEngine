@@ -73,7 +73,7 @@ class AIProviderSettings(models.Model):
 
 	The API key lives here (Postgres), set via the settings UI, never in git or .env.
 	"""
-	PROVIDER_CHOICES = [('anthropic', 'Anthropic'), ('openai', 'OpenAI'), ('openrouter', 'OpenRouter'), ('ollama', 'Ollama'), ('vllm', 'vLLM')]
+	PROVIDER_CHOICES = [('anthropic', 'Anthropic'), ('openai', 'OpenAI'), ('openrouter', 'OpenRouter'), ('ollama', 'Ollama'), ('vllm', 'vLLM'), ('lmstudio', 'LM Studio')]
 	id = models.AutoField(primary_key=True)
 	provider = models.CharField(max_length=32, choices=PROVIDER_CHOICES, default='anthropic')
 	model = models.CharField(max_length=200, blank=True, default='')
@@ -87,6 +87,8 @@ class AIProviderSettings(models.Model):
 	# How many times a day the model may be asked to plan validation checks (each is a paid request): in total, and for one project.
 	plan_daily_total = models.PositiveIntegerField(default=200)
 	plan_daily_per_project = models.PositiveIntegerField(default=20)
+	# How many CVEs a day the model may write or revise guidance for (each is a paid request); the catalogue is covered in this many days.
+	cve_guidance_daily = models.PositiveIntegerField(default=25, db_default=25)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
@@ -221,6 +223,10 @@ class ApiToken(models.Model):
 	revoked = models.BooleanField(default=False)
 	# Hosts, IPs or CIDRs this agent has registered as its responsibility (narrows /work).
 	assets = models.JSONField(default=list, blank=True)
+	# "full": acts as its user everywhere. "inventory": a host reporter's token (cveFeed.host_inventory); it can post one project's
+	# inventory reports and do nothing else, so a token left on a server is worth little if it leaks.
+	scope = models.CharField(max_length=12, default='full', db_default='full')
+	project = models.ForeignKey('Project', null=True, blank=True, on_delete=models.CASCADE, related_name='+')  # the one project an inventory token reports to
 
 	def __str__(self):
 		return f'{self.name} ({self.prefix}...) for {self.user}'
@@ -243,9 +249,9 @@ class SystemTimings(models.Model):
 class ScanPolicy(models.Model):
 	"""Single-row App Admin setting for what the scanners may run (Settings > Scan engines)."""
 	id = models.AutoField(primary_key=True)
-	# Off: only Nuclei templates whose own text is a read-only check run. On: every template Nuclei ships may run
-	# (the AI-written ones always stay read-only).
-	nuclei_all_templates = models.BooleanField(default=False)
+	# On (the default): every template Nuclei ships may run (the AI-written ones always stay read-only). Off: only Nuclei templates
+	# whose own text is a read-only check run.
+	nuclei_all_templates = models.BooleanField(default=True, db_default=True)
 
 	@classmethod
 	def current(cls):

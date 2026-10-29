@@ -13,7 +13,6 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import views
-from cveFeed.graph_overview import groups
 from cveFeed.models import CVEEntry, CVEMatch, HygieneFinding, TlsCertificate, Triage
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -106,16 +105,6 @@ class HostCountTests(CountFixture):
 		self.assertEqual(self.stats('ca')['hosts'], 6)
 		self.assertEqual(self.stats('cb')['hosts'], 2)
 		self.assertEqual(self.stats()['hosts'], 8)
-		overview = groups()
-		self.assertEqual(overview['hosts'], 8)
-		self.assertEqual({p['slug']: p['hosts'] for p in overview['projects']}, {'ca': 6, 'cb': 2})
-
-	def test_a_group_counts_a_host_held_by_two_targets_once(self):
-		overview = groups('ca')
-		group = overview['projects'][0]['roots'][0]
-		self.assertEqual(group['targets'], 2)
-		self.assertEqual(group['hosts'], 6)  # not 7: the sum of its two targets' host counts
-		self.assertEqual(group['live'], 5)
 
 	def test_the_map_draws_exactly_the_live_hosts_the_status_line_reports(self):
 		live = self.stats()['hosts_live']
@@ -123,7 +112,6 @@ class HostCountTests(CountFixture):
 		nodes = [n for n in views.graph_payload()['nodes'] if n['kind'] == 'subdomain']
 		self.assertEqual(len(nodes), live)
 		self.assertEqual(len({(n['project'], n['label']) for n in nodes}), live)  # no host twice
-		self.assertEqual(sum(g['live'] for p in groups()['projects'] for g in p['roots']), live)
 
 	def test_the_dead_host_is_listed_but_not_drawn(self):
 		self.assertIn('dead.one.test', {h['host'] for h in self.api('projects/ca/hosts', page_size=50)['results']})
@@ -172,6 +160,13 @@ class ExposureCountTests(CountFixture):
 		counts = self.api('projects/_all/findings')['counts']
 		self.assertEqual(counts, {'cve': s['matches'], 'scanner': s['scanner_findings'], 'hygiene': s['hygiene_open']})
 
+	def test_hygiene_findings_that_are_fixed_or_accepted_are_not_counted(self):
+		for name, state in (('dmarc_missing', 'fixed'), ('dkim_missing', 'accepted_risk')):
+			HygieneFinding.objects.create(domain=self.da1, host='live1.one.test', check_name=name, severity=2, title='x', remediation_status=state)
+		s = self.stats()
+		self.assertEqual(s['hygiene_open'], 1)
+		self.assertEqual(self.api('projects/_all/findings', type='hygiene')['total'], s['hygiene_open'])  # the Findings page, Actionable
+
 
 class ScanAndCertificateCountTests(CountFixture):
 	def test_running_is_the_same_on_the_dashboard_and_the_scans_page(self):
@@ -184,6 +179,18 @@ class ScanAndCertificateCountTests(CountFixture):
 		self.assertTrue(stalled['results'][0]['stalled'])
 		everything = self.api('projects/_all/scans')['results']
 		self.assertEqual(sum(1 for s in everything if s['status'] == 1 and not s['stalled']), self.stats()['scans_running'])
+
+	def test_the_running_window_follows_the_configured_timeouts(self):
+		from cveFeed import counts
+		from dashboard.models import SystemTimings
+		SystemTimings.objects.all().delete()
+		self.assertEqual(counts.running_window(), timedelta(hours=11))  # the shipped 6 h + 4 h + 1 h
+		SystemTimings.objects.create(discovery_timeout_hours=24, nuclei_timeout_hours=8)
+		self.assertEqual(counts.running_window(), timedelta(hours=33))
+		long_scan = ScanHistory.objects.create(domain=self.da1, scan_type=self.engine, scan_status=1, tasks=[],
+		                                       start_scan_date=timezone.now() - timedelta(hours=20))
+		self.assertIn(long_scan.pk, counts.running_scans().values_list('pk', flat=True))  # a healthy long scan is not a restart casualty
+		self.assertNotIn(long_scan.pk, counts.stalled_scans().values_list('pk', flat=True))
 
 	def test_the_chips_add_up_to_all(self):
 		total = self.api('projects/_all/scans')['count']
@@ -199,6 +206,39 @@ class ScanAndCertificateCountTests(CountFixture):
 		ScanHistory.objects.create(domain=self.da1, scan_type=self.engine, scan_status=1, start_scan_date=timezone.now(), tasks=[])
 		second = self.stats()  # inside the cache window
 		self.assertEqual(second['scans_running'], first['scans_running'] + 1)
+
+	def line(self, project, status='running', kind='run_check', age=timedelta(minutes=5), **detail):
+		from cveFeed.models import AgentActivity
+		row = AgentActivity.objects.create(kind=kind, message='work', status=status, project=project, detail=detail)
+		AgentActivity.objects.filter(pk=row.pk).update(created_at=timezone.now() - age)
+		return row
+
+	def test_background_running_counts_work_that_runs_under_a_finished_scan(self):
+		self.assertEqual(self.stats()['scans_background_running'], 0)
+		self.line(self.pa)                                       # a weekly deep pass: no scan record at all
+		self.line(self.pa, scan_id=self.scans[self.da1].id)      # a rescan under a finished scan record
+		self.assertEqual(self.stats()['scans_background_running'], 2)
+
+	def test_background_running_leaves_out_what_the_running_scan_already_counts(self):
+		running = ScanHistory.objects.filter(scan_status=1).order_by('-start_scan_date').first()
+		self.line(self.pa, scan_id=running.id)                   # a stage of a scan scans_running counts
+		self.line(self.pa, scan_id=self.scans[self.da1].id)
+		self.assertEqual(self.stats()['scans_background_running'], 1)
+
+	def test_background_running_ignores_settled_stale_and_ai_lines(self):
+		self.line(self.pa, status='done')
+		self.line(self.pa, status='failed')
+		self.line(self.pa, kind='confirm')                       # the AI engine reading, not scanning
+		self.line(self.pa, age=timedelta(hours=4))               # a casualty of a restart
+		self.assertEqual(self.stats()['scans_background_running'], 0)
+
+	def test_background_running_follows_the_project_filter(self):
+		self.line(self.pa)
+		self.line(self.pb)
+		self.line(self.pb)
+		self.assertEqual(self.stats()['scans_background_running'], 3)
+		self.assertEqual(self.stats('ca')['scans_background_running'], 1)
+		self.assertEqual(self.stats('cb')['scans_background_running'], 2)
 
 	def test_certificates_expiring_agree_and_include_the_expired(self):
 		self.assertEqual(self.stats()['certs_expiring'], 2)

@@ -54,6 +54,17 @@ class ProviderTests(unittest.TestCase):
 			with self.assertRaises(ai.AIProviderError):
 				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
 
+	def test_a_non_json_reply_is_a_json_error_not_a_connection_failure(self):
+		import requests
+
+		class NotJson(FakeResp):
+			def json(self):
+				raise requests.exceptions.JSONDecodeError('Expecting value', '<html>', 0)  # a RequestException and a ValueError at once
+		with mock.patch('requests.post', return_value=NotJson({})):
+			with self.assertRaises(ai.AIProviderError) as caught:
+				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
+		self.assertEqual(caught.exception.category, 'provider_json')
+
 
 class VisionTests(unittest.TestCase):
 	"""complete_vision() attaches one image to the user turn, in each provider's own shape, and shares the text
@@ -146,10 +157,11 @@ class ModelSelectionTests(unittest.TestCase):
 		with mock.patch('requests.get', return_value=FakeResp({'models': [{'name': 'a'}, {'name': 'b'}]})):
 			with self.assertRaises(ai.AIProviderError):
 				ai.get_provider('ollama', base_url='http://100.64.0.5:11434').model
-		for name in ('vllm', 'ollama'):
+		for name, port in (('vllm', 8000), ('ollama', 11434), ('lmstudio', 1234)):
 			with self.assertRaises(ai.AIProviderError) as ctx:
 				ai.get_provider(name)  # no URL: there is no default server
 			self.assertIn('Tailscale', str(ctx.exception))
+			self.assertIn(f':{port}', str(ctx.exception))  # each server's own usual port in the hint
 		with self.assertRaises(ai.AIProviderError):
 			ai.get_provider('ollama', base_url='ftp://x')
 
@@ -185,6 +197,50 @@ class ModelSelectionTests(unittest.TestCase):
 			ai.get_provider('vllm', model='m', base_url='http://v:8000/v1/').complete('s', 'u')
 		self.assertEqual(post.call_args[0][0], 'http://v:8000/v1/chat/completions')
 		self.assertEqual(post.call_args[1]['headers'], {})
+
+
+class LMStudioTests(unittest.TestCase):
+	def test_it_is_an_openai_compatible_keyless_server_you_must_give_the_address_of(self):
+		self.assertIn('lmstudio', ai.SELECTABLE)
+		self.assertIn('lmstudio', ai.KEYLESS)
+		self.assertIn('lmstudio', ai.DEFAULT_MODELS)
+		with self.assertRaises(ai.AIProviderError):
+			ai.get_provider('lmstudio')
+		with self.assertRaises(ai.AIProviderError):
+			ai.get_provider('lmstudio', base_url='ftp://x')
+
+	def test_it_posts_to_chat_completions_and_sends_a_token_only_when_one_is_set(self):
+		reply = FakeResp({'choices': [{'message': {'content': 'ok'}}]})
+		with mock.patch('os.path.exists', return_value=False), mock.patch('requests.post', return_value=reply) as post:
+			ai.get_provider('lmstudio', model='qwen3-8b', base_url='http://100.64.0.5:1234/v1/').complete('s', 'u')
+			self.assertEqual(post.call_args[0][0], 'http://100.64.0.5:1234/v1/chat/completions')
+			self.assertEqual(post.call_args[1]['headers'], {})
+			self.assertEqual(post.call_args[1]['json']['model'], 'qwen3-8b')
+			ai.get_provider('lmstudio', model='m', api_key='lm-token', base_url='http://100.64.0.5:1234/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['headers'], {'Authorization': 'Bearer lm-token'})
+
+	def test_a_model_may_take_minutes_to_load_so_the_timeout_is_longer_than_a_hosted_providers(self):
+		reply = FakeResp({'choices': [{'message': {'content': 'ok'}}]})
+		with mock.patch('requests.post', return_value=reply) as post:
+			ai.get_provider('lmstudio', model='m', base_url='http://h:1234/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['timeout'], 300)
+			ai.get_provider('vllm', model='m', base_url='http://h:8000/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['timeout'], ai.REQUEST_TIMEOUT)
+
+	def test_embedding_models_are_left_out_of_the_choice_and_one_chat_model_is_the_default(self):
+		listing = {'data': [{'id': 'text-embedding-nomic-embed-text-v1.5'}, {'id': 'qwen3-8b'}]}
+		with mock.patch('requests.get', return_value=FakeResp(listing)) as get:
+			provider = ai.get_provider('lmstudio', base_url='http://h:1234/v1')
+			self.assertEqual([m['id'] for m in provider.list_models()], ['qwen3-8b'])
+			self.assertEqual(provider.model, 'qwen3-8b')  # the one chat model it serves is the choice
+		self.assertEqual(get.call_args[0][0], 'http://h:1234/v1/models')
+
+	def test_a_screenshot_goes_as_an_image_url_like_any_openai_compatible_server(self):
+		reply = FakeResp({'choices': [{'message': {'content': 'a login screen'}}]})
+		with mock.patch('requests.post', return_value=reply) as post:
+			out = ai.get_provider('lmstudio', model='vl', base_url='http://h:1234/v1').complete_vision('s', 'u', b'\x89PNG')
+		self.assertEqual(out, 'a login screen')
+		self.assertEqual(post.call_args[1]['json']['messages'][1]['content'][1]['type'], 'image_url')
 
 
 class VerdictTests(unittest.TestCase):
@@ -415,3 +471,52 @@ class DetectTests(unittest.TestCase):
 
 if __name__ == '__main__':
 	unittest.main()
+
+
+class ReasoningModelReplyTests(unittest.TestCase):
+	"""Reasoning models (qwen3, deepseek-r1 on LM Studio, Ollama or vLLM) put their thinking, braces and all, before the answer."""
+
+	def test_the_answer_after_a_thinking_block_with_braces_is_found(self):
+		reply = '<think>maybe {x} or {"verdict": "affected"} no wait</think>{"verdict": "not_affected", "reason": "patched"}'
+		self.assertEqual(ai.parse_verdict(reply), {'verdict': 'not_affected', 'reason': 'patched'})
+
+	def test_a_reply_cut_at_the_closing_tag_and_prose_around_the_object_are_fine(self):
+		self.assertEqual(ai.parse_verdict('reasoning {a}</think>\nHere you go: {"verdict": "affected", "reason": "r"} done')['verdict'], 'affected')
+
+	def test_the_last_matching_object_wins_and_a_nested_one_is_not_split(self):
+		text = '{"verdict": "affected", "reason": "first"} then {"verdict": "uncertain", "reason": {"nested": {"verdict": "affected"}}}'
+		self.assertEqual(ai.extract_json(text, ('verdict',))['verdict'], 'uncertain')
+
+	def test_junk_and_unclosed_objects_give_nothing(self):
+		for text in ('', None, 'no json', '{"verdict": "affected"', '{x}', '<think>{"verdict": "affected", "reason": "r"}</think>'):
+			self.assertIsNone(ai.parse_verdict(text), text)
+
+	def test_the_planner_and_the_targeting_parsers_use_it_too(self):
+		from cveFeed import validation_plan
+		reply = '<think>{"check_kinds": ["bogus"]}</think>{"check_kinds": [], "generate_template": false, "reason": "nothing applies"}'
+		plan = validation_plan.parse_plan(reply, [{'kind': 'http_head'}], False)
+		self.assertEqual((plan['check_kinds'], plan['reason']), ([], 'nothing applies'))
+
+
+class AiServerAddressPolicyTests(unittest.TestCase):
+	"""Local and private AI servers are allowed on purpose; the addresses of cloud metadata services are not."""
+
+	def test_metadata_and_link_local_addresses_are_refused(self):
+		from cveFeed.settings_api import ai_url_blocked
+		for url in ('http://169.254.169.254/latest/meta-data', 'http://169.254.0.1:1234/v1', 'http://[fe80::1]:1234', 'http://[fd00:ec2::254]/',
+				'http://metadata.google.internal/computeMetadata/v1', 'http://[::ffff:169.254.169.254]/'):
+			self.assertTrue(ai_url_blocked(url), url)
+
+	def test_localhost_the_lan_a_tailnet_and_names_are_allowed(self):
+		from cveFeed.settings_api import ai_url_blocked
+		for url in ('http://localhost:1234/v1', 'http://127.0.0.1:11434', 'http://192.168.1.20:8000/v1', 'http://100.64.0.5:11434',
+				'http://lmstudio.tailnet.example.test:1234/v1', 'https://api.openai.com/v1'):
+			self.assertFalse(ai_url_blocked(url), url)
+
+	def test_a_failing_model_list_names_the_kind_of_failure_not_the_address(self):
+		import requests
+		with mock.patch('requests.get', side_effect=requests.ConnectionError('HTTPConnectionPool(host=\'10.9.8.7\', port=1234): refused')):
+			with self.assertRaises(ai.AIProviderError) as raised:
+				ai.get_provider('ollama', model='m', base_url='http://100.64.0.5:11434').list_models()
+		self.assertNotIn('10.9.8.7', str(raised.exception))
+		self.assertIn('ConnectionError', str(raised.exception))

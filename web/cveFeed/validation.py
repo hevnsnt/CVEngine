@@ -1,7 +1,7 @@
 """Automatic validation of findings: after triage, CVEngine tries to reproduce a finding itself with a small fixed set of read-only
 checks and records exactly what it ran and what came back.
 
-The owner of every target has authorised this, and it stays inside these limits. There is no free-form command: only four kinds of
+The owner of every target has authorised this, and it stays inside these limits. There is no free-form command: only five kinds of
 check exist.
 
 * ``nuclei_template``: an installed template for the CVE, or a generated template that is status valid, still passes the safety gate and
@@ -11,6 +11,9 @@ check exist.
 * ``http_head``: one HEAD (a GET only when the server answers 405 to HEAD), through the route check's probe: no cookies, no
   credentials, no redirects, the body never kept.
 * ``db_probe``: the existing single credential-less database exposure check.
+* ``fact_probe``: a version or identity probe from the catalogue in ``cveFeed.probes`` (a few GETs with the front page's headers, an
+  error page signature, a framework script, or ``nmap -sV --version-all`` on one port). It finds the fact an advisory depends on (the
+  version, which look-alike product runs, what answers behind a CDN) and records it; it never exploits anything.
 
 Everything is read-only; every host goes through the scannable-host filter and must belong to the finding's project; work is
 dispatched per project; each check waits its turn for memory (heavy_job), is kept off the ledger while fresh (CVENGINE_TTL_VALIDATE),
@@ -39,7 +42,7 @@ from cveFeed.safeyaml import load_template
 
 logger = logging.getLogger(__name__)
 
-CHECK_KINDS = ('nuclei_template', 'nmap_sv', 'http_head', 'db_probe')
+CHECK_KINDS = ('nuclei_template', 'nmap_sv', 'http_head', 'db_probe', 'fact_probe')
 PLANNED_KINDS = ('cve_match', 'db_exposure', 'route_auth')  # the finding kinds that have a validated check
 READONLY_METHODS = {'GET', 'HEAD', 'OPTIONS'}
 # Keys that make a template send something other than a plain read: an inline payload list, an attack mode, a body, raw sockets,
@@ -277,6 +280,7 @@ def plan_checks(subject, signature, template=('', '')):
                                      f'{ip}:{port}', f'{ip}:{port}', signature, NMAP_TIMEOUT, ip=ip, port=port))
             if subject.get('source') == 'tech' and subject.get('url'):
                 checks.append(_http_check(subject['url'], signature))
+            checks += _probe_checks(subject, signature)
     elif kind == 'db_exposure':
         ip, port, label = subject.get('ip'), subject.get('port'), (subject.get('db') or '').lower()
         if ip and _safe_ip(ip) and isinstance(port, int) and 0 < port < 65536:
@@ -292,12 +296,45 @@ def plan_checks(subject, signature, template=('', '')):
     return checks, notes
 
 
+def _probe_checks(subject, signature):
+    """One ``fact_probe`` check per planned version or identity probe (``subject['probe_plan']``, chosen by cveFeed.probes.plan_for_host)."""
+    from cveFeed import probes
+    checks = []
+    for entry in subject.get('probe_plan') or []:
+        target = entry['target']
+        display = probes.display_for(entry['probe'], target)
+        argv = probes.nmap_argv(target['ip'], target['port'], target.get('service', '')) if entry['family'] == 'nmap' else ['probe', entry['probe'], target['base']]
+        # one step per probe: the step key is (kind, target), and several probes read the same base URL
+        where = f"{target['base'].rstrip('/')}/#{entry['probe']}" if target.get('base') else f"{target['ip']}:{target['port']}"
+        checks.append(_check('fact_probe', f"Version and identity probe: {entry['label']}", argv, display, where, where, signature + entry['probe'],
+                             probes.NMAP_TIMEOUT if entry['family'] == 'nmap' else 90, probe=entry['probe'], probe_target=target,
+                             project_id=subject.get('project_id'), domain_id=subject.get('domain_id'), host=subject.get('host'), product=subject.get('product') or ''))
+    return checks
+
+
 def _http_check(url, signature):
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https') or not _safe_host(parsed.hostname or ''):
         return None
     argv = ['curl', '-I', '-k', '--max-time', '6', url]
     return _check('http_head', 'HTTP banner check (HEAD, GET only if HEAD is refused)', argv, shlex.join(argv), url, url, signature, 15, url=url)
+
+
+def _probe_plan(finding, evidence):
+    """The version and identity probes for a CVE match: the matched product's own lead first (a version-less match, or a version a probe
+    can confirm or refute), then the host's other unversioned products. Chosen by rule, with no AI."""
+    from cveFeed import host_context, probes
+    from startScan.models import Subdomain
+    sub = Subdomain.objects.filter(pk=finding.subdomain_id).prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related(
+        'target_domain').first()
+    lead = {'name': finding.matched_product, 'source': finding.source}
+    if finding.source == 'port' and evidence.get('port') and evidence.get('ip'):
+        lead.update(ip=evidence['ip'], port=evidence['port'])
+    edge = host_context.edge_for(sub, sub.target_domain.project_id)['fronted']
+    if finding.matched_version:
+        # the version is stated, and nmap_sv or the front page already re-read it: only the probes that tell look-alike products apart add anything
+        return probes.plan_for_host(sub, [lead], edge_fronted=edge, wanted=probes.IDENTITY_PROBES)
+    return probes.plan_for_host(sub, [lead] + probes.leads_for(sub), edge_fronted=edge)
 
 
 def subject_for(row, finding):
@@ -308,7 +345,8 @@ def subject_for(row, finding):
         ev = finding.evidence or {}
         subject.update(cve_id=finding.cve_entry.cve_id, source=finding.source, ip=ev.get('ip'), port=ev.get('port'),
                        product=finding.matched_product, matched_version=finding.matched_version, range=ev.get('range') or {},
-                       local_component_only=local_component_only(finding.cve_entry))
+                       local_component_only=local_component_only(finding.cve_entry), project_id=row.project_id,
+                       domain_id=finding.subdomain.target_domain_id if finding.subdomain is not None else None)
         if finding.subdomain is not None:
             from startScan.models import open_ports
             # Only ports already observed in this host's inventory. Never ask the model for a port or expand target scope.
@@ -321,6 +359,8 @@ def subject_for(row, finding):
         if finding.source == 'tech' and finding.subdomain is not None:
             bases = route_auth.web_bases(finding.subdomain)
             subject['url'] = bases[0] + '/' if bases else None
+        if finding.subdomain is not None and not subject['local_component_only']:
+            subject['probe_plan'] = _probe_plan(finding, ev)
     elif row.kind == 'db_exposure':
         parsed = urlparse(finding.http_url or '')
         subject.update(ip=parsed.hostname, port=parsed.port, db=(finding.template_id or '').replace('db-exposure-', '', 1))
@@ -387,6 +427,30 @@ def run_http_head(check):
         'observed': {'product': found.group(1) if found else '', 'version': found.group(2) if found else ''}}
 
 
+def run_fact_probe(check):
+    """Run one catalogued probe (cveFeed.probes) on the host's current row, store what it found as host facts and say it in one line. A
+    probe that reads a version gives ``observed`` with that version (``interpret`` then tests it against the finding's range); one that finds
+    the product states none, or only an edge, still answers: the version is hidden from outside, which is a result, not a failure."""
+    from cveFeed import probes
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    params = check['params']
+    sub = (Subdomain.objects.filter(target_domain__project_id=params['project_id'], name=params['host']).filter(latest_scan_q())
+           .prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').order_by('-id').first())
+    if sub is None:
+        return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
+    found = probes.run_one(params['project_id'], params['domain_id'], sub, {'probe': params['probe'], 'target': params['probe_target']})
+    product = re.sub(r'[^a-z0-9]', '', params.get('product', '').lower())
+    versions = [o for o in found if o['kind'] == 'version' and o['outcome'] == 'found' and o['version']]
+    pick = next((o for o in versions if product and (product in re.sub(r'[^a-z0-9]', '', o['product'].lower())
+                                                      or re.sub(r'[^a-z0-9]', '', o['product'].lower()) in product)), None)
+    result = {'status': 'observed', 'summary': f"probe {params['probe']}: {probes.summarize(found)}",
+              'output_excerpt': _trim(probes.summarize(found), OUTPUT_CAP), 'probe': {'id': params['probe'], 'found': len(found)}}
+    if pick:
+        result['observed'] = {'product': pick['product'], 'version': pick['version']}
+    return result
+
+
 def run_db_probe(check):
     from cveFeed import db_exposure
     params = check['params']
@@ -402,7 +466,8 @@ def run_db_probe(check):
     return {'status': 'no_match', 'summary': 'the service did not answer without credentials at the time of the check'}
 
 
-RUNNERS = {'nuclei_template': run_nuclei_template, 'nmap_sv': run_nmap_sv, 'http_head': run_http_head, 'db_probe': run_db_probe}
+RUNNERS = {'nuclei_template': run_nuclei_template, 'nmap_sv': run_nmap_sv, 'http_head': run_http_head, 'db_probe': run_db_probe,
+           'fact_probe': run_fact_probe}
 
 
 # ----------------------------------------------------------------------------- outcome rules

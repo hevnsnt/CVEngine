@@ -12,6 +12,10 @@ A failed or timed-out sweep records its attempt in ``full_scan_started_at`` but 
 sweeps keep failing backs off (``full_scan_retry_at``: 6 hours after the first failure, doubling, at most 7 days) and goes
 behind the clean never-swept IPs, so a few dead addresses cannot hold the one sweep slot. Waiting too long for memory or a
 pause is not the address's failure and does not count.
+
+Before picking a target, each firing also defers entirely, instance-wide, while any project (not bounty-blocked) still has a
+host missing core first-pass coverage (see ``cveFeed.coverage_topup.backlog_exists``): a full 65,535-port sweep of one address
+is never worth more than a first pass over every host. The next firing checks again.
 """
 import functools
 import logging
@@ -83,7 +87,8 @@ def candidates():
 
     from django.db.models import Count, Exists, F, OuterRef, Q
     from startScan.models import IpAddress
-    attached = active_attached(OuterRef('pk'))
+    from cveFeed.conductor import bounty_blocked_projects
+    attached = active_attached(OuterRef('pk')).exclude(target_domain__project_id__in=bounty_blocked_projects())  # a bug bounty project that has not confirmed automated testing is never swept
     # a sweep is in flight when it started after its last finish (or was never finished) and that start is recent
     in_flight = (Q(full_scan_started_at__isnull=False) & Q(full_scan_started_at__gte=timezone.now() - timedelta(seconds=IN_FLIGHT_SECONDS))
                  & (Q(full_scanned_at__isnull=True) | Q(full_scanned_at__lt=F('full_scan_started_at'))))
@@ -98,8 +103,13 @@ def in_scope(ip, *, strict=False):
     at least one of the in-scope names on it that does not resolve anywhere blocked."""
     from targetApp import target_types
     address = (ip.address or '').strip()
-    if not address or ip.is_cdn or not target_types.is_scannable_ip(address):
+    if not address or ip.is_cdn:
         return False
+    rows = None
+    if not target_types.is_scannable_ip(address):  # an internal address passes only as the tailnet device of one of the projects it belongs to
+        rows = list(active_attached(ip).values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
+        if not any(target_types.is_scannable_ip(address, project=project) for _name, project in rows):
+            return False
     from cveFeed import hosting
     shared = hosting.shared_by_address([address])
     if shared:  # a shared platform's edge (Netlify, Vercel, a CDN): other customers answer here. Flag it so the queue skips it for good.
@@ -107,20 +117,25 @@ def in_scope(ip, *, strict=False):
         return False
     from cveFeed.exclusions import excluded_names
     from cveFeed.archive_rediscovery import archived_names
-    rows = list(active_attached(ip)
-                .values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
+    if rows is None:
+        rows = list(active_attached(ip).values_list('name', 'target_domain__project_id').distinct()[:MAX_NAMES_CHECKED])
     banned = {}  # project id -> the names its organization excluded for good: such a name does not make the address in scope
     for _name, project in rows:
         if project not in banned:
             if strict:
                 # Admission is an authorization boundary: a failed lookup must prevent process creation.
-                from cveFeed.models import HostExclusion
-                banned[project] = set(HostExclusion.objects.filter(org__projects__id=project).values_list('host', flat=True))
+                banned[project] = excluded_names(project, strict=True)
             else:
                 banned[project] = excluded_names(project)
-            banned[project] |= archived_names(project)
-    names = [name for name, project in rows if name.lower().rstrip('.') not in banned[project]]
-    return any(not target_types.resolves_to_blocked(name) for name in names)
+            banned[project] = banned[project] | archived_names(project)
+    from cveFeed.bounty_gate import Gate
+    gate = Gate()  # the project's bug bounty confirmation, and the program's scope for each name on the address
+    names = [(name, project) for name, project in rows if name.lower().rstrip('.') not in banned[project] and gate.allows(project, name)]
+    def blocked(name, project):  # an address is judged as that address (its project may authorise a tailnet device); a name only by DNS
+        if target_types.classify_target(name) == target_types.IP:
+            return not target_types.is_scannable_ip(name, project=project)
+        return target_types.resolves_to_blocked(name)
+    return any(not blocked(name, project) for name, project in names)
 
 
 def pick():
@@ -199,11 +214,17 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
                                                                        f'{type(exc).__name__}: {exc}', type(exc).__name__)
                         + (f'; next try after {retry:%Y-%m-%d %H:%M} UTC' if retry else ''))
         return {'ip': address, 'ok': False, 'error': type(exc).__name__}
-    found = set()
+    found, timedout = set(), False
     for xml in seen:
         for host in nmap_scan.parse_xml(xml):
             if host.get('ip') == address:
                 found.update(_open_tcp(host))
+                timedout = timedout or bool(host.get('timedout'))
+    if timedout:  # --host-timeout cut the sweep short: the ports above are a partial answer, not a clean sweep of 65,535
+        retry = _back_off(ip)
+        activity.settle(running, 'failed', message=f'Background full port scan of {address}: nmap gave up on the host at its time limit '
+                        f'({len(found)} open port(s) so far); next try after {retry:%Y-%m-%d %H:%M} UTC')
+        return {'ip': address, 'ok': False, 'error': 'HostTimeout'}
     _advance(ip, len(found))
     new = sorted(found - before)
     gone = sorted(before - found)
@@ -328,10 +349,21 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
 # ----------------------------------------------------------------------------- the task body
 
 def run(runner=None, fingerprint_runner=None, pipeline=None):
-    """One firing of the background sweep: up to CVENGINE_FULLSCAN_BATCH IPs, one at a time, under one Redis claim."""
+    """One firing of the background sweep: up to CVENGINE_FULLSCAN_BATCH IPs, one at a time, under one Redis claim.
+
+    Skips the whole firing, instance-wide, while any project (not bounty-blocked) still has a host missing core
+    first-pass coverage (see cveFeed.coverage_topup.backlog_exists): every host gets a first look before any one
+    address gets a full 65,535-port sweep. The next firing checks again.
+    """
+    from cveFeed import coverage_topup
     from reNgine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_FULLSCAN is off'}
+    if coverage_topup.backlog_exists():
+        coverage_topup.log_deferral('Full-port scan')
+        return {'skipped': 'coverage backlog: first-pass hosts are still outstanding'}
+    if resources.global_pause_requested(fail_closed=True):  # a paused firing would claim an IP and fail a feed row for no work
+        return {'skipped': 'scanning is paused'}
     swept = []
     with resources.redis_claim(CLAIM_KEY, f'fullscan-{os.getpid()}', CLAIM_TTL) as held:
         if held is not True:

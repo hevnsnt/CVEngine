@@ -16,6 +16,7 @@ ip:203.0.113.0/24 product:nginx     nginx anywhere in a network range
 | **Anywhere in the app** | Press `Ctrl+K` (`Cmd+K` on a Mac) or `/`. Filter names and values complete as you type, up to six matching hosts preview live, and the help sheet lists every filter. |
 | **REST API** | `GET /api/v1/projects/<slug>/search?q=...` ([AGENT-API.md](AGENT-API.md)) |
 | **MCP** | The `search_hosts` tool, so an agent can ask the same questions |
+| **Saved searches** | Keep a search and be told when it finds something new ([below](#saved-searches-and-alerts)) |
 
 Use the slug `_all` to search every project you can see.
 
@@ -33,6 +34,7 @@ Use the slug `_all` to search every project you can see.
 | Filter | Matches | Example |
 | --- | --- | --- |
 | `port:` | An **open** port number | `port:3306` |
+| `proto:` | Hosts with an open port over `tcp` or `udp`. A UDP port counts only when it answered, never when it stayed silent (`open\|filtered`). | `proto:udp` |
 | `product:` | Software nmap saw on a port | `product:openssh` |
 | `service:` | Service name on a port | `service:ssh` |
 | `tech:` | Everything a host runs: technologies, `Server` and `X-Powered-By` headers, product and version, banners, script output, page titles, cookie names, route fingerprints | `tech:php` |
@@ -48,7 +50,7 @@ Use the slug `_all` to search every project you can see.
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 
-`port:` takes a number only. Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
+`port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
 
 `tech:` also reads what the Internet Archive saw on the host in the past (a `.php` page, `/wp-content/`). Those hits are labelled **seen in web archive**, because they are history, not what runs today.
 
@@ -61,6 +63,8 @@ port:3389                              every host with Remote Desktop open
 port:22 port:2222                      SSH on both the usual and the alternate port
 product:redis                          Redis anywhere, including on odd ports
 os:windows port:445                    Windows hosts with SMB reachable
+proto:udp port:161                     SNMP that answered over UDP (UDP 161 is not TCP 161)
+proto:udp product:memcached            memcached that answers datagrams
 banner:"Anonymous FTP login allowed"   FTP servers that let anyone in
 ```
 
@@ -118,6 +122,39 @@ curl -s -H "Authorization: Bearer $CVENGINE_TOKEN" \
   | jq '.results[] | {host, score, matched}'
 ```
 
-`page_size` goes up to 200. With no `q`, the search lists every host. `heat=fire|smoke|ice|clean|unscanned` narrows the page, and `facets=port,product,tech,os,country` (with `facet_size`, 10 by default and 50 at most) returns counts per value, plus `facets.heat` over the whole match; counts stop after 5,000 hosts. The heat chips on the Hosts page filter only the rows already loaded.
+`page_size` goes up to 200. With no `q`, the search lists every host. `heat=fire|smoke|ice|clean|unscanned` narrows the whole result to hosts of that [temperature](FIRE-SMOKE-ICE.md), and `facets=port,product,tech,os,country` (with `facet_size`, 10 by default and 50 at most) returns counts per value, plus `facets.heat` over the whole match of `q` (it ignores `heat` itself, so every chip keeps its real total); counts stop after 5,000 hosts and the response says so (`facets.truncated`). `facets.unscannable` splits the *Not scanned* hosts that have no address a scanner can use (`private`: it points inside a private network, `no_dns`: no DNS answer, `unknown`: not looked at yet) from those still waiting their turn. `internal=1` keeps only hosts inside a network their project declared internal (scanned by a [Sentinel](ARCHITECTURE.md#sentinels) there), and `internal=0` only the others. Temperature and scope are API parameters and chips, not `filter:value` terms, so they are not part of a saved search's query.
+
+On the Hosts page, the **Temperature** chips (All, Fire, Smoke, Ice, Clean, Not scanned, each with its count) set `heat=` and ask the server, so they narrow the whole inventory and not only the rows on screen. The **Scope** chips (All hosts, External, Internal) set `internal=` and appear once a project you can see declares an internal network. Both live in the address (`?heat=`, `?internal=`), next to `?q=` and `?sort=`.
+
+## Saved searches and alerts
+
+A search you run again and again can be kept. On the Hosts page, type a search and choose **Save search**; **Saved searches** lists yours. A saved search is a query in the syntax above, kept on the server, private to you and to one project. Within ten minutes of saving it (or at once, with **Run now**) cvENGINE runs it for the first time and records which hosts match. That first check is silent: it sets the baseline, so saving a search never floods a channel with every host that already matches. From the next check on you are told what changed.
+
+```text
+port:5432 -ip:10.0.0.0/8        Postgres reachable on a public address
+tech:grafana                    every Grafana, and a message when a new one appears
+auth:open sensitive:credentials a route that serves credentials without a login
+zombie:yes tech:wordpress       retired names that still answer and run WordPress
+```
+
+| Setting | What it does |
+| --- | --- |
+| **How often** | Every hour, day or week (default: every day). Checks run when due, at most 25 searches every ten minutes, oldest first. |
+| **Alert when a host starts to match** | On by default. One message, naming up to five new hosts and counting the rest, with a link that opens the search. |
+| **Alert when a host stops matching** | Off by default. Same message, for hosts that left the result. |
+| **Alert when the match count reaches** | Optional. Once each time the count rises to that number; it re-arms when the count falls below it. |
+| **Send alerts to** | Slack, Discord, Telegram, or Lark, among those switched on in Settings, Notifications. Nothing ticked means every channel that is on. |
+
+How it behaves:
+
+- **Same results as the search box.** A saved search runs through the same code as the live search, so it finds exactly what the Hosts page finds. The query is checked when you save it: an empty query, an unusable value (`port:abc`, `sev:scary`), more than 15 terms or 1,000 characters is refused with the same message the search gives.
+- **One host is one match.** Names that point at the same addresses are one host (see the Hosts page), so `example.com` gaining a `www.example.com` on the same servers is not a new match. A host whose set of addresses changes does count as a new one.
+- **At most one message per search per check**, plus a line in the Activity feed (kind **Saved search**), even when Settings has no channel switched on. Alerts use the "Interesting findings" switch under Settings, Notifications.
+- **Your access, at every check.** The search runs with your rights as they are then. If you leave the project or your account is deactivated, the search is switched off with the reason shown on the list; it is never run with the access it was saved under. Switching it on again (which needs access) restarts its baseline.
+- **Too broad.** A search that matches more than 1,000 hosts is flagged **too broad** and is not alerted on until you narrow it: a set that large shifts all the time and cannot be compared cheaply.
+- **Limits.** 25 saved searches per person and 100 per project. Editing the query restarts the baseline. Each check has a 20 second database limit; a failure is recorded in the Activity feed and retried at the next time.
+- **Browser views stay.** The saved views kept in your browser (Hosts, Findings) keep working. **Import browser views** on the Saved searches list copies the ones that hold a search into saved searches, with alerts off, and leaves the local copies alone.
+
+Over the API ([AGENT-API.md](AGENT-API.md#saved-searches)) the same operations are `GET/POST projects/{slug}/saved-searches`, `GET/PATCH/DELETE .../saved-searches/{id}`, `POST .../{id}/run` and `GET .../{id}/matches`, and the MCP tools `list_saved_searches`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `run_saved_search` and `get_saved_search_matches`.
 
 See also: [PIPELINE.md](PIPELINE.md) for what fills the inventory, [FRONTEND.md](FRONTEND.md), [documentation index](README.md).

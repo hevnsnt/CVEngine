@@ -22,7 +22,7 @@
       <label for="provider">Provider</label>
       <select id="provider">
         <option value="">Detect from key</option>
-        <option value="anthropic" {% if ai_usage_provider == 'anthropic' %}selected{% endif %}>Anthropic</option><option value="openai" {% if ai_usage_provider == 'openai' %}selected{% endif %}>OpenAI</option><option value="openrouter" {% if ai_usage_provider == 'openrouter' %}selected{% endif %}>OpenRouter</option><option value="ollama" {% if ai_usage_provider == 'ollama' %}selected{% endif %}>Ollama (local, no key)</option><option value="vllm" {% if ai_usage_provider == 'vllm' %}selected{% endif %}>vLLM</option>
+        <option value="anthropic" {% if ai_usage_provider == 'anthropic' %}selected{% endif %}>Anthropic</option><option value="openai" {% if ai_usage_provider == 'openai' %}selected{% endif %}>OpenAI</option><option value="openrouter" {% if ai_usage_provider == 'openrouter' %}selected{% endif %}>OpenRouter</option><option value="ollama" {% if ai_usage_provider == 'ollama' %}selected{% endif %}>Ollama (local, no key)</option><option value="vllm" {% if ai_usage_provider == 'vllm' %}selected{% endif %}>vLLM</option><option value="lmstudio" {% if ai_usage_provider == 'lmstudio' %}selected{% endif %}>LM Studio (local)</option>
       </select>
     </div>
     <div class="field">
@@ -36,11 +36,7 @@
   <section class="card ai-discovery-keys">
     <h2>Discovery API keys</h2>
     <p class="note">Shodan and other OSINT keys belong to a project or its organization. A configured Shodan key helps BBOT's passive Shodan DNS discovery; InternetDB lookup does not need a key. Results remain observations until confirmed for this asset.</p>
-    {% if projects %}
-    <div class="ai-discovery-links">
-      {% for item in projects %}<a class="btn ghost sm" href="{% url 'cve_section' item.slug 'keys' %}">Configure {{ item.name }} keys</a>{% endfor %}
-    </div>
-    {% else %}<p class="note">Add a project before configuring discovery keys.</p>{% endif %}
+    <div class="ai-discovery-links"><a class="btn ghost sm" href="{% url 'cve_settings' %}#keys">Open Settings &gt; API keys</a></div>
   </section>
 </div>
 {% endblock %}

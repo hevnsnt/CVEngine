@@ -457,11 +457,7 @@
         <li><a href="#quick-summary"></a></li>
         <li><a href="#assessment-timeline"></a></li>
 
-        {% if interesting_subdomains and show_recon %}
-          <li><a href="#interesting-recon-data"></a></li>
-        {% endif %}
-
-        {% if all_vulnerabilities.count > 0 and show_vuln %}
+        {% if all_vulnerabilities_count > 0 and show_vuln %}
           <li><a href="#vulnerability-summary"></a></li>
         {% endif %}
 
@@ -469,7 +465,7 @@
           <li><a href="#reconnaissance-results"></a></li>
         {% endif %}
 
-        {% if all_vulnerabilities.count > 0 and show_vuln %}
+        {% if all_vulnerabilities_count > 0 and show_vuln %}
           <li><a href="#vulnerabilities-discovered"></a></li>
         {% endif %}
       </ul>
@@ -593,66 +589,18 @@
         {% elif scan_object.scan_status == 1 %}
           {{ scan_object.get_elapsed_time }}
         {% elif scan_object.scan_status == 2 %}
-          {% if scan_object.get_completed_time_in_sec < 60 %}
+          {% if scan_object.get_total_scan_time_in_sec < 60 %}
             Completed in < 1 minutes {% else %} Completed in {{ scan_object.start_scan_date|timesince:scan_object.stop_scan_date }} {% endif %} {% elif scan_object.scan_status == 3 %} Aborted in
           {{ scan_object.start_scan_date|timesince:scan_object.stop_scan_date }} {% endif %} <br>
         Report Generated on: {% now "F j, Y" %}
       </p>
     </article>
 
-    {# show interesting_subdomains section only when show_recon result is there #}
-    {% if interesting_subdomains and show_recon %}
-      <article style="page-break-before: always" class="summary">
-        <h3 id="interesting-recon-data" class="page_title">Interesting Recon Data</h3>
-        <p>Listed below are the {{interesting_subdomains.count}} interesting subdomains identified on <span class="primary-color">{{scan_object.domain.name}}</span></p>
-        <div class="table">
-          <div class="row header bg-success">
-            <div class="cell grey-color" style="width: 5%">
-              #
-            </div>
-            <div class="cell grey-color" style="width: 33%">
-              Subdomain
-            </div>
-            <div class="cell grey-color" style="width: 33%">
-              Page title
-            </div>
-            <div class="cell grey-color" style="width: 15%">
-              HTTP Status
-            </div>
-          </div>
-          {% for subdomain in interesting_subdomains %}
-            <div class="row">
-              <div class="cell" style="width: 5%">
-                {{ forloop.counter }}
-              </div>
-              <div class="cell" style="width: 35%">
-                {{subdomain.name}}
-              </div>
-              <div class="cell" style="width: 35%">
-                {% if subdomain.page_title %}
-                  {{subdomain.page_title}}
-                {% else %}
-                  &nbsp;&nbsp;&nbsp;
-                {% endif %}
-              </div>
-              <div class="cell" style="width: 15%;">
-                {% if subdomain.http_status %}
-                  {{subdomain.http_status}}
-                {% else %}
-                  &nbsp;&nbsp;&nbsp;
-                {% endif %}
-              </div>
-            </div>
-          {% endfor %}
-        </div>
-      </article>
-    {% endif %}
-
     {# vulnerability_summary only when vuln_report #}
     {% if show_vuln %}
       <article style="page-break-before: always" class="summary">
         <h3 id="vulnerability-summary" class="page_title">Summary of Vulnerabilities Identified</h3>
-        {% if all_vulnerabilities.count > 0 %}
+        {% if all_vulnerabilities_count > 0 %}
         <p>Listed below are the vulnerabilities identified on <span class="primary-color">{{scan_object.domain.name}}</span></p>
         <div class="table">
           <div class="row header bg-critical">
@@ -718,7 +666,6 @@
         <p>
           During the reconnaissance phase, {{scan_object.get_subdomain_count}} subdomains were discovered.
           Out of {{scan_object.get_subdomain_count}} subdomains, {{subdomain_alive_count}} returned HTTP status 200.
-          {{interesting_subdomains.count}} interesting subdomains were also identified based on the interesting keywords used.
         </p>
         <h4>{{scan_object.get_subdomain_count}} subdomains identified on <span class="primary-color">{{scan_object.domain.name}}</span></h4>
         <div class="table">
@@ -749,9 +696,9 @@
             </div>
           {% endfor %}
         </div>
-        {% if ip_addresses.count %}
+        {% if ip_addresses_count %}
           <h4 class="subheading" style="margin-top: 10px;">IP Addresses</h4>
-          <h4>{{ip_addresses.count}} IP Addresses were identified on <span class="primary-color">{{scan_object.domain.name}}</span></h4>
+          <h4>{{ip_addresses_count}} IP Addresses were identified on <span class="primary-color">{{scan_object.domain.name}}</span></h4>
           <div class="table">
             <div class="row header bg-info">
               <div class="cell grey-color" style="width: 38%">
@@ -793,6 +740,7 @@
     {% if show_recon %}
       <article class="summary" style="page-break-before: always">
         <h3 class="page_title">Reconnaissance Findings</h3>
+        {% if hosts_cut %}<p><em>To keep the report a usable size this section lists the {{ hosts_cut }}.</em></p>{% endif %}
         {% for subdomain in subdomains %}
           <table class="table" cellspacing="0" style="border-collapse: collapse;">
             <tr>
@@ -837,15 +785,14 @@
                 </td>
               </tr>
             {% endif %}
-            {% if subdomain.get_vulnerabilities_without_info %}
+            {% if subdomain.report_vulnerability_names %}
               <tr>
                 <td colspan="3" class="cell table-border">
                   Vulnerabilities
-                  {% regroup subdomain.get_vulnerabilities_without_info by name as vuln_list %}
                   <ul>
-                    {% for vulnerability in vuln_list %}
+                    {% for vulnerability_name in subdomain.report_vulnerability_names %}
                       <li>
-                        <a href="#vuln_{{vulnerability.list.0.name.split|join:'_'}}">{{ vulnerability.grouper }}</a>
+                        <a href="#vuln_{{vulnerability_name.split|join:'_'}}">{{ vulnerability_name }}</a>
                       </li>
                     {% endfor %}
                   </ul>
@@ -857,7 +804,7 @@
       </article>
     {% endif %}
 
-    {% if all_vulnerabilities.count > 0 and show_vuln %}
+    {% if all_vulnerabilities_count > 0 and show_vuln %}
       <article style="page-break-before: always" class="summary">
         <h3 id="vulnerabilities-discovered" class="page_title">Vulnerabilities Discovered</h3>
         <p>
@@ -932,6 +879,7 @@
       {# start vulnerability #}
       {% if show_vuln %}
         <article class="">
+          {% if findings_cut %}<p><em>To keep the report a usable size this section lists the {{ findings_cut }}, most severe first.</em></p>{% endif %}
           {% regroup all_vulnerabilities by get_path as grouped_vulnerabilities %}
           {% for vulnerabilities in grouped_vulnerabilities %}
             {% for vulnerability in vulnerabilities.list %}

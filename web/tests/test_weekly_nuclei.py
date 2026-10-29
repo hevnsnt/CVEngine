@@ -61,3 +61,35 @@ class WeeklyDeepNucleiTests(TestCase):
         row = PeriodicTask.objects.get(name='cvengine-weekly-deep-nuclei')
         self.assertEqual((row.task, row.queue, row.interval.every, row.interval.period),
                          ('weekly_deep_nuclei', 'cve_feed_queue', 10, 'minutes'))
+
+    def test_the_pass_offers_its_stream_to_a_live_eligible_sentinel_first(self):
+        # weekly_deep_nuclei builds its stream through sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_deep'), the
+        # same seam the per-scan light/targeted passes use; with no Sentinel registered this stays the identity
+        # (stream_nuclei itself), so run_nuclei's own call is unaffected other than the new stream= kwarg.
+        from agentapi import sentinel_dispatch
+        from cveFeed.nuclei_scan import stream_nuclei
+        with mock.patch.object(sentinel_dispatch, 'wrap_nuclei_stream', wraps=sentinel_dispatch.wrap_nuclei_stream) as wrapped:
+            _, run = self.run_sweep()
+        self.assertEqual(wrapped.call_count, 1)
+        scan_arg, kind_arg = wrapped.call_args.args
+        self.assertEqual(scan_arg.pk, self.scan.pk)
+        self.assertEqual(kind_arg, 'nuclei_deep')
+        self.assertIs(run.call_args.kwargs['stream'], stream_nuclei)
+
+    def test_reuse_reads_only_the_newest_copy_of_each_finding(self):
+        """S04-16: every scan stores its own copy of a finding; the reuse reads one per (name, URL), not the whole history."""
+        from cveFeed import nuclei_scan
+        from startScan.models import Vulnerability
+        engine = EngineType.objects.first()
+        domain = self.scan.domain
+        scans = [self.scan] + [ScanHistory.objects.create(domain=domain, scan_type=engine, scan_status=2, start_scan_date=timezone.now()) for _ in range(3)]
+        for number, old in enumerate(scans):
+            sub = Subdomain.objects.create(name='a.weekly.test', target_domain=domain, scan_history=old)
+            for name in ('Exposed panel', 'Old TLS'):
+                Vulnerability.objects.create(name=name, http_url='https://a.weekly.test/', target_domain=domain, scan_history=old,
+                                             subdomain=sub, severity=2, description=f'copy {number}')
+        fresh = ScanHistory.objects.create(domain=domain, scan_type=engine, scan_status=1, start_scan_date=timezone.now())
+        Subdomain.objects.create(name='a.weekly.test', target_domain=domain, scan_history=fresh)
+        copied, hosts = nuclei_scan.reuse_findings(fresh, self.project.id, ['a.weekly.test'])
+        self.assertEqual((copied, hosts), (2, 1))
+        self.assertEqual(sorted(Vulnerability.objects.filter(scan_history=fresh).values_list('description', flat=True)), ['copy 3', 'copy 3'])

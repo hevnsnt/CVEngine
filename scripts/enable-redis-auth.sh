@@ -19,7 +19,7 @@ set_value() {
   local key=$1 value=$2 file=${3:-.env} tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/cvengine-env.XXXXXX")
   if grep -q "^${key}=" "$file"; then
-    awk -v key="$key" -v value="$value" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix value; next } { print }' "$file" > "$tmp"
+    CVENGINE_AWK_VALUE="$value" awk -v key="$key" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix ENVIRON["CVENGINE_AWK_VALUE"]; next } { print }' "$file" > "$tmp"  # not on awk's command line: `ps` shows that
   else
     { cat "$file"; echo "${key}=${value}"; } > "$tmp"
   fi
@@ -41,5 +41,7 @@ if [ -n "${COMPOSE_ENV_FILE:-}" ] && [ "$COMPOSE_ENV_FILE" != .env ]; then
 fi
 services=(redis web celery celery-beat)
 compose config --services | grep -qx proxy && services+=(proxy)
+# the Tailscale sidecar shares celery's network namespace and is orphaned when celery is recreated (only present with the tailscale profile)
+compose config --services | grep -qx tailscale && services+=(tailscale)
 compose up -d --force-recreate "${services[@]}"
 echo "Done. Redis now refuses connections without the password."

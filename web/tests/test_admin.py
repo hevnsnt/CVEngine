@@ -89,12 +89,23 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(client_for(self.member_a), 'GET', 'activity')[0], 403)
 		self.assertEqual(api(admin, 'GET', 'activity?page_size=201')[0], 400)
 
+	def test_scheduler_health_tells_a_running_beat_from_a_silent_or_unknown_one(self):
+		import time
+		inspector = mock.Mock(active_queues=mock.Mock(return_value={}), active=mock.Mock(return_value={}))
+		def beat(value):
+			with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector), \
+					mock.patch('cveFeed.scan_control.beat_heartbeat', return_value=value):
+				return api(client_for(self.root), 'GET', 'health')[1]['beat']
+		self.assertEqual(beat(time.time() - 20)['state'], 'running')
+		self.assertEqual(beat(time.time() - 900)['state'], 'silent')
+		self.assertEqual(beat(None), {'state': 'unknown', 'seconds_since_tick': None})
+
 	def test_scheduler_health_is_app_admin_only_and_never_returns_task_arguments(self):
 		from datetime import timedelta
 		from django_celery_beat.models import IntervalSchedule, PeriodicTask
 		interval = IntervalSchedule.objects.create(every=5, period='minutes')
 		PeriodicTask.objects.create(name='test-hot-sweep', task='hot_validation_sweep', interval=interval,
-			queue='cve_feed_queue', last_run_at=timezone.now() - timedelta(minutes=7), total_run_count=4)
+			queue='cve_feed_queue', last_run_at=timezone.now() - timedelta(minutes=15), total_run_count=4)
 		inspector = mock.Mock()
 		inspector.active_queues.return_value = {
 			'cve_feed_worker@local': [{'name': 'cve_feed_queue'}],
@@ -326,6 +337,15 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(PeriodicTask.objects.get(name='cvengine-hygiene-daily').crontab.hour, '5')
 		from cveFeed import discovery
 		self.assertEqual(discovery.discovery_timeout(), 8 * 3600)
+
+	def test_a_timing_whose_schedule_row_already_exists_still_reaches_beat(self):
+		from django_celery_beat.models import IntervalSchedule, PeriodicTask, PeriodicTasks
+		IntervalSchedule.objects.get_or_create(every=10, period='minutes')  # another task already uses this cadence: no new row, no signal
+		PeriodicTasks.update_changed()
+		before = PeriodicTasks.last_change()
+		self.assertEqual(api(client_for(self.root), 'PUT', 'timings', {'cve_sync_minutes': 10})[0], 200)
+		self.assertEqual(PeriodicTask.objects.get(name='cvengine-cve-sync').interval.every, 10)
+		self.assertGreater(PeriodicTasks.last_change(), before)  # beat reloads when this moves
 
 	def test_audit_log_is_scoped_to_what_the_admin_manages(self):
 		api(client_for(self.admin_a), 'POST', f'users/{self.member_a.id}/reset-mfa')

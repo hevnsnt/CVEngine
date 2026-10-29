@@ -131,7 +131,7 @@ class RescanHostsApiTests(TestCase):
 		self.assertEqual(status, 202)
 		self.assertEqual(body['queued'], 2)
 		self.assertEqual(body['skipped'], 1)
-		delay.assert_called_once_with(self.domain.id, ['www.rs.test', 'api.rs.test'])
+		delay.assert_called_once_with(self.domain.id, ['www.rs.test', 'api.rs.test'], by_person=True)
 
 	def test_rest_validates_and_respects_roles(self):
 		path = f'/api/v1/projects/pr/targets/{self.domain.id}/rescan-hosts'
@@ -151,4 +151,4 @@ class RescanHostsApiTests(TestCase):
 				'arguments': {'project': 'pr', 'target_id': self.domain.id, 'hosts': ['www.rs.test']}})
 		self.assertFalse(out['result']['isError'])
 		self.assertEqual(json.loads(out['result']['content'][0]['text'])['queued'], 1)
-		delay.assert_called_once_with(self.domain.id, ['www.rs.test'])
+		delay.assert_called_once_with(self.domain.id, ['www.rs.test'], by_person=True)

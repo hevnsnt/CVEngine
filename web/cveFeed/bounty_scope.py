@@ -132,12 +132,13 @@ class ScopeIndex:
         return Verdict(NOT_LISTED, f"{host} is not in any listed range")
 
     def _check_domain(self, host):
-        for d, a in self.out_domains.items():  # an out-of-scope host also rules out everything under it
-            if host == d or host.endswith("." + d):
-                return Verdict(OUT, f"{d} is listed as out of scope", a)
-        for base, a in self.out_wild.items():
-            if host == base or host.endswith("." + base):
-                return Verdict(OUT, f"*.{base} is listed as out of scope", a)
+        labels = host.split(".")
+        for i in range(len(labels)):  # an out-of-scope host also rules out everything under it: its own name and each parent
+            suffix = ".".join(labels[i:])
+            if suffix in self.out_domains:
+                return Verdict(OUT, f"{suffix} is listed as out of scope", self.out_domains[suffix])
+            if suffix in self.out_wild:
+                return Verdict(OUT, f"*.{suffix} is listed as out of scope", self.out_wild[suffix])
         for pat, a in self.out_patterns:
             if fnmatch.fnmatchcase(host, pat):
                 return Verdict(OUT, f"{pat} is listed as out of scope", a)

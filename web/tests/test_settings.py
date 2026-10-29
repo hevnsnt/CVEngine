@@ -33,7 +33,7 @@ class SettingsApiTests(TestCase):
 
 	def test_superuser_only(self):
 		other = client_for(self.admin)  # org admin is still not a superuser
-		for method, path in (('GET', 'ai'), ('PUT', 'ai'), ('GET', 'keys'), ('GET', 'engines'), ('PUT', 'proxy')):
+		for method, path in (('GET', 'ai'), ('PUT', 'ai'), ('GET', 'keys'), ('GET', 'scan_policy'), ('PUT', 'proxy')):
 			self.assertEqual(send(other, method, path, {} if method == 'PUT' else None)[0], 403, path)
 		self.assertEqual(other.get('/cve/settings/').status_code, 403)
 		self.assertEqual(self.c.get('/cve/settings/').status_code, 200)
@@ -51,7 +51,6 @@ class SettingsApiTests(TestCase):
 		self.assertEqual((cfg.api_key, cfg.model), ('sk-ant-secret-123', 'claude-x'))
 		self.assertNotIn('sk-ant-secret-123', json.dumps(send(self.c, 'GET', 'ai')[1]))
 		self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': 'bogus'})[0], 400)
-		self.assertEqual(send(self.c, 'PUT', 'ai', {'auto_fire_engine_id': 99999})[0], 400)
 
 	def test_the_ai_planning_budget_is_a_setting(self):
 		data = send(self.c, 'GET', 'ai')[1]
@@ -62,14 +61,14 @@ class SettingsApiTests(TestCase):
 			self.assertEqual(send(self.c, 'PUT', 'ai', bad)[0], 400, bad)
 		self.assertEqual(AIProviderSettings.objects.get().plan_daily_total, 500)
 
-	def test_all_nuclei_templates_is_off_until_a_superuser_turns_it_on(self):
-		self.assertFalse(send(self.c, 'GET', 'scan_policy')[1]['nuclei_all_templates'])
-		self.assertEqual(send(client_for(self.admin), 'PUT', 'scan_policy', {'nuclei_all_templates': True})[0], 403)
+	def test_all_nuclei_templates_is_on_until_a_superuser_turns_it_off(self):
+		self.assertTrue(send(self.c, 'GET', 'scan_policy')[1]['nuclei_all_templates'])
+		self.assertEqual(send(client_for(self.admin), 'PUT', 'scan_policy', {'nuclei_all_templates': False})[0], 403)
 		self.assertEqual(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': 'yes'})[0], 400)
-		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
-		from dashboard.models import AuditLog
-		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='on').exists())
 		self.assertFalse(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': False})[1]['nuclei_all_templates'])
+		from dashboard.models import AuditLog
+		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='off').exists())
+		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
 
 	def test_a_stored_ai_key_is_never_kept_for_a_different_address_or_provider(self):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})
@@ -90,6 +89,18 @@ class SettingsApiTests(TestCase):
 			self.assertIsNone(get_provider.call_args.kwargs['api_key'])
 			send(self.c, 'POST', 'ai/models', {'provider': 'openai'})
 			self.assertEqual(get_provider.call_args.kwargs['api_key'], 'sk-keep-me')
+
+	def test_model_listing_refuses_metadata_addresses_like_saving_does(self):
+		from unittest import mock
+		with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
+			for url in ('http://169.254.169.254/latest', 'http://2852039166/', 'http://metadata.google.internal/'):
+				status, _ = send(self.c, 'POST', 'ai/models', {'provider': 'openai', 'base_url': url})
+				self.assertEqual(status, 400, url)
+			# a name that resolves to a link-local address is refused too
+			with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('169.254.169.254', 0))]):
+				self.assertEqual(send(self.c, 'POST', 'ai/models', {'provider': 'openai', 'base_url': 'http://169.254.169.254.nip.example.test/'})[0], 400)
+				self.assertEqual(send(self.c, 'PUT', 'ai', {'base_url': 'http://169.254.169.254.nip.example.test/'})[0], 400)
+			get_provider.assert_not_called()
 
 	def test_api_vault(self):
 		status, data = send(self.c, 'PUT', 'keys', {'chaos': {'key': 'chaos-secret'}, 'hackerone': {'key': 'h1', 'username': 'bob'}})
@@ -114,28 +125,39 @@ class SettingsApiTests(TestCase):
 		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'not a proxy'})[0], 400)
 		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'file:///etc/passwd'})[0], 400)
 
-	def test_engines_crud_and_safe_delete(self):
-		status, e = send(self.c, 'POST', 'engines', {'name': 'Mine', 'yaml': GOOD_YAML})
-		self.assertEqual(status, 201)
-		self.assertEqual(send(self.c, 'POST', 'engines', {'name': 'bad', 'yaml': 'a: [unclosed'})[0], 400)
-		self.assertEqual(send(self.c, 'POST', 'engines', {'name': 'list', 'yaml': '- a\n- b'})[0], 400)
-		self.assertEqual(send(self.c, 'POST', 'engines', {'name': '', 'yaml': GOOD_YAML})[0], 400)
-		self.assertEqual(send(self.c, 'PUT', f"engines/{e['id']}", {'name': 'Renamed'})[1]['name'], 'Renamed')
-		# an engine with scan history cannot be deleted (the FK cascades)
-		now = timezone.now()
-		project = Project.objects.create(name='P', slug='p-s', insert_date=now)
-		domain = Domain.objects.create(name='s.example', project=project, insert_date=now)
-		ScanHistory.objects.create(domain=domain, scan_type=EngineType.objects.get(id=e['id']), start_scan_date=now)
-		self.assertEqual(send(self.c, 'DELETE', f"engines/{e['id']}")[0], 409)
-		self.assertEqual(ScanHistory.objects.count(), 1)
-		ScanHistory.objects.all().delete()
-		self.assertEqual(send(self.c, 'DELETE', f"engines/{e['id']}")[0], 200)
-		self.assertEqual(send(self.c, 'DELETE', 'engines/999999')[0], 404)
+	def test_proxy_passwords_are_never_returned_and_an_unchanged_masked_line_keeps_them(self):
+		status, data = send(self.c, 'PUT', 'proxy', {'use_proxy': True, 'proxies': 'http://bob:hunter2@203.0.113.5:8080\nsocks5://203.0.113.6:1080'})
+		self.assertEqual(status, 200)
+		self.assertNotIn('hunter2', json.dumps(data))
+		self.assertEqual(data['proxies'], 'http://bob:***@203.0.113.5:8080\nsocks5://203.0.113.6:1080')
+		self.assertTrue(data['has_credentials'])
+		got = send(self.c, 'GET', 'proxy')[1]
+		self.assertNotIn('hunter2', json.dumps(got))
+		# the page sends the masked text back unchanged (plus a new line): the stored password stays
+		send(self.c, 'PUT', 'proxy', {'proxies': got['proxies'] + '\nhttp://203.0.113.7:3128'})
+		self.assertEqual(Proxy.objects.get().proxies, 'http://bob:hunter2@203.0.113.5:8080\nsocks5://203.0.113.6:1080\nhttp://203.0.113.7:3128')
+		# a masked line that matches nothing stored is refused, never saved with the literal ***
+		self.assertEqual(send(self.c, 'PUT', 'proxy', {'proxies': 'http://eve:***@203.0.113.9:8080'})[0], 400)
+		self.assertNotIn('***', Proxy.objects.get().proxies)
+		# a new password replaces the old one
+		send(self.c, 'PUT', 'proxy', {'proxies': 'http://bob:newpass@203.0.113.5:8080'})
+		self.assertEqual(Proxy.objects.get().proxies, 'http://bob:newpass@203.0.113.5:8080')
 
-	def test_auto_fire_engine_cannot_be_deleted(self):
-		engine = EngineType.objects.create(engine_name='AF', yaml_configuration=GOOD_YAML)
-		send(self.c, 'PUT', 'ai', {'auto_fire_engine_id': engine.id})
-		self.assertEqual(send(self.c, 'DELETE', f'engines/{engine.id}')[0], 409)
+	def test_the_inherited_engine_editor_is_gone_and_the_ai_settings_no_longer_carry_an_engine(self):
+		# the engine YAML was never read by anything; its create, update and delete endpoints and the auto-fire engine setting are removed
+		for method, path in (('GET', 'engines'), ('POST', 'engines'), ('PUT', 'engines/1'), ('DELETE', 'engines/1')):
+			self.assertEqual(send(self.c, method, path, {} if method in ('POST', 'PUT') else None)[0], 404, f'{method} {path}')
+		self.assertNotIn('auto_fire_engine_id', send(self.c, 'GET', 'ai')[1])
+
+	def test_scans_are_filed_under_the_recommended_engine_not_whichever_default_comes_first(self):
+		from cveFeed.discovery import RECOMMENDED_ENGINE, pick_engine
+		# the inherited engines are all flagged default; the first of them used to label every scan "Full Scan"
+		full = EngineType.objects.create(engine_name='Full Scan', yaml_configuration=GOOD_YAML, default_engine=True)
+		recommended = EngineType.objects.create(engine_name=RECOMMENDED_ENGINE, yaml_configuration=GOOD_YAML, default_engine=True)
+		self.assertLess(full.id, recommended.id)
+		self.assertEqual(pick_engine().id, recommended.id)
+		recommended.delete()
+		self.assertEqual(pick_engine().id, EngineType.objects.filter(default_engine=True).order_by('id').first().id)  # no recommended one: the lowest id, always
 
 	def test_ip_allowlist_requires_an_entry_and_your_own_ip_before_enabling(self):
 		from reNgine import ip_allowlist as ipa

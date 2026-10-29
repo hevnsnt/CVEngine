@@ -45,16 +45,29 @@ class SearchLimitTests(SimpleTestCase):
 
 
 class WrongTypeArgumentTests(SimpleTestCase):
-	def test_an_mcp_tool_with_a_wrong_type_gives_a_generic_400(self):
+	def test_an_mcp_tool_with_a_wrong_type_gives_a_400_that_names_the_argument(self):
+		from unittest import mock
+
+		from agentapi import mcp
+		handler = mock.Mock()
+		with mock.patch.dict(mcp.BY_NAME, {'x': ('x', '', {'type': 'object', 'properties': {'n': {'type': 'integer'}}, 'required': ['n']}, handler, False)}):
+			for args in ({}, {'n': 'abc'}, {'n': [1]}):
+				with self.assertRaises(ApiError) as ctx:
+					mcp.call_tool(None, 'x', args)
+				self.assertEqual(ctx.exception.status, 400)
+		handler.assert_not_called()
+
+	def test_a_bug_inside_a_tool_answers_generically_and_leaks_nothing(self):
 		from unittest import mock
 
 		from agentapi import mcp
 		boom = TypeError("unsupported operand secret-internal-detail")
 		with mock.patch.dict(mcp.BY_NAME, {'x': ('x', '', {}, mock.Mock(side_effect=boom), False)}):
-			with self.assertRaises(ApiError) as ctx:
-				mcp.call_tool(None, 'x', {})
-		self.assertEqual(ctx.exception.status, 400)
-		self.assertNotIn('secret-internal-detail', ctx.exception.message)
+			message = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'x', 'arguments': {}}}
+			with self.assertLogs('agentapi.mcp', 'ERROR'):
+				answer = mcp._internal_error(None, message)
+		self.assertEqual(answer['error']['code'], -32603)
+		self.assertNotIn('secret-internal-detail', str(answer))
 
 
 

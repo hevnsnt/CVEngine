@@ -19,10 +19,19 @@
 # The Compose layout is the one the running stack was started with, or CVENGINE_COMPOSE_FILES / CVENGINE_COMPOSE_ENV_FILE /
 # CVENGINE_COMPOSE_PROJECT (environment or .env, the settings scripts/update.sh reads); see resolve_layout below. Ordinary updates
 # deliberately keep db/Redis containers running. A PostgreSQL major-version migration requires a separate maintenance operation. An update
-# waits while recorded scans or targeted jobs are running; operators should drain other worker work as well.
+# waits while recorded scans or targeted jobs are running, up to CVENGINE_UPDATE_DRAIN_SECONDS (environment or .env, default 300); past that it
+#    proceeds and interrupts them (cveFeed.reaper.expire_orphaned_running closes out what the restart leaves behind within one reaper tick).
+#    Operators should drain other worker work as well.
+# A dump of the database is taken just before the migrations (scripts/update-deploy.sh, CVENGINE_UPDATE_BACKUPS, default 3 kept). Which branches an
+# approval may name (CVENGINE_UPDATE_BRANCHES, default: any) and whether the commit must be signed (CVENGINE_UPDATE_REQUIRE_SIGNED=1) are set in
+# .env on the host: the web container, which writes the approval, cannot change them. See docs/UPDATES.md, "What the host trusts".
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# root (cron, a systemd unit) in a checkout owned by whoever cloned it: git refuses it ("dubious ownership") unless this one is named. Root
+# already runs this checkout's scripts, so naming it adds no trust.
+export GIT_CONFIG_COUNT=$(( ${GIT_CONFIG_COUNT:-0} + 1 ))
+export "GIT_CONFIG_KEY_$((GIT_CONFIG_COUNT - 1))=safe.directory" "GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT - 1))=$PWD"
 FLAG=web/.update-approved
 BRANCH_FLAG=web/.update-branch  # the branch the administrator chose in Settings; optional
 clear_approval() { rm -f "$FLAG" "$BRANCH_FLAG"; }
@@ -164,7 +173,7 @@ resolve_layout() {
 
 # How far the last deploy got; "migrated" means the database already has the new schema.
 DEPLOY_STAGE=
-deploy() {
+deploy_builtin() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
   local services=(web celery celery-beat) listed
@@ -204,6 +213,18 @@ verify_running() {
   return 1
 }
 
+# What an update does to the services is read from scripts/update-deploy.sh, AFTER the new files are merged: this script is the copy already
+# on the host, so anything added to it would only run on the update after the one that delivers it (a new image to refresh, say). The
+# copy above is the fallback for a checkout without that file (a rollback to a version older than this one).
+deploy() {
+  if [ -f scripts/update-deploy.sh ]; then
+    # shellcheck source=update-deploy.sh
+    . scripts/update-deploy.sh && deploy_current
+  else
+    deploy_builtin
+  fi
+}
+
 RUNNING_QUERY="from django.apps import apps; from startScan.models import ScanHistory; n=ScanHistory.objects.filter(scan_status=1).count(); n+=sum(m.objects.filter(status='running').count() for m in apps.get_models() if m.__name__ in ('OnDemandValidation','DeferredRetest','TriageCall')); print(n)"
 
 running_scans() {
@@ -235,6 +256,19 @@ resume_scanning() {
     log "could not release the update's scan-pause; release it by hand in Settings > Scan control"
 }
 
+# web/.commit is written when a deploy STARTS (the build needs it), so on its own it cannot say the deploy finished: a run that was
+# stopped after the files were merged but before the migration (the host rebooted, the timer was killed) left the new files, that
+# marker and an old database, and the next approval was answered "already at" with the schema unmigrated. A deploy counts as finished
+# only when this host-side marker, written after the services were recreated, names the commit too, and the database has no migration
+# waiting. If either cannot be confirmed the deploy runs again (a rebuild that finds nothing to do is harmless).
+mark_deployed() { printf '%s\n' "$1" > "$STATE/deployed-commit" 2>>"$LOG" || true; }
+deployed_commit() { head -n1 "$STATE/deployed-commit" 2>/dev/null | tr 'A-F' 'a-f' || true; }
+schema_current() {
+  local compose=("${COMPOSE[@]}")
+  "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1 ||
+    "${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py migrate --check >/dev/null 2>&1
+}
+
 if ! SHA=$(python3 "$STATE_HELPER" approval); then
   log "refusing: approval file does not hold a commit id"
   clear_approval
@@ -251,6 +285,15 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD)
 # when it cannot, the reason is shown in Settings > Updates.
 WANT=$(python3 "$STATE_HELPER" approval-branch 2>/dev/null || true)
 [ -n "$WANT" ] || WANT=$BRANCH
+# The branch name comes from the web container (web/.update-branch). Without CVENGINE_UPDATE_BRANCHES any origin branch is accepted, as before;
+# with it (comma separated, set in .env on the host) only the listed ones are.
+ALLOWED=$(setting CVENGINE_UPDATE_BRANCHES)
+if [ -n "$ALLOWED" ] && ! grep -qxF -- "$WANT" < <(tr ', ' '\n\n' <<<"$ALLOWED"); then
+  log "refusing: the update branch $WANT is not in CVENGINE_UPDATE_BRANCHES ($ALLOWED)"
+  phase failed "this server only updates from $ALLOWED (CVENGINE_UPDATE_BRANCHES in .env). Choose one of those under Settings > Updates > Update source, then approve again"
+  clear_approval
+  exit 1
+fi
 if ! git fetch --quiet origin "+refs/heads/$WANT:refs/remotes/origin/$WANT" >>"$LOG" 2>&1; then
   log_once "refusing: could not fetch origin/$WANT (network, credentials, or no such branch); approval kept, will retry"
   phase draining "the host could not reach origin/$WANT; it keeps retrying (see the update log)"
@@ -259,6 +302,12 @@ fi
 if ! git merge-base --is-ancestor "$SHA" "origin/$WANT"; then
   log "refusing: $SHA is not on origin/$WANT"
   phase failed "the approved commit is not on $WANT. Check the update branch in Settings > Updates, then check for updates and approve again"
+  clear_approval
+  exit 1
+fi
+if [ "$(setting CVENGINE_UPDATE_REQUIRE_SIGNED)" = 1 ] && ! git verify-commit "$SHA" >>"$LOG" 2>&1; then
+  log "refusing: $SHA has no valid signature from a key this host trusts (CVENGINE_UPDATE_REQUIRE_SIGNED=1)"
+  phase failed "the approved commit is not signed by a key this server trusts (CVENGINE_UPDATE_REQUIRE_SIGNED=1 in .env). Import the signer's public key into root's keyring, or approve a signed commit"
   clear_approval
   exit 1
 fi
@@ -299,6 +348,24 @@ if [ -n "$DIRTY" ]; then
   exit 1
 fi
 
+# A deploy that fails after the migration keeps the approval (the old code must not run on the new schema), and the watcher then asks again every
+# 30 seconds: a full rebuild, maintenance page and recreate each time, for ever. Stop after a few failed runs for the same commit; approving
+# again starts a new count. CVENGINE_UPDATE_MAX_ATTEMPTS (environment or .env, default 3).
+ATTEMPTS_FILE="$STATE/deploy-attempts"  # "<commit> <failed runs>"
+MAX_ATTEMPTS=$(setting CVENGINE_UPDATE_MAX_ATTEMPTS)
+[[ $MAX_ATTEMPTS =~ ^[1-9][0-9]{0,2}$ ]] || MAX_ATTEMPTS=3
+TRIES=0
+if [ -f "$ATTEMPTS_FILE" ]; then
+  read -r TRIED_SHA TRIED_N <"$ATTEMPTS_FILE" || true
+  if [ "${TRIED_SHA:-}" = "$SHA" ] && [[ ${TRIED_N:-} =~ ^[0-9]+$ ]]; then TRIES=$TRIED_N; else rm -f "$ATTEMPTS_FILE"; fi
+fi
+if (( TRIES >= MAX_ATTEMPTS )); then
+  rm -f "$ATTEMPTS_FILE"
+  log "giving up on $SHA: $TRIES runs in a row failed after the database was migrated. The approval is removed; fix the cause (see the lines above and docker compose logs), then approve again"
+  phase failed "the update to $SHA failed $TRIES times after its database migration and is no longer retried. The cause is in the update log; scanning stays paused until it is fixed or resumed under Activity"
+  clear_approval
+  exit 1
+fi
 pause_scanning
 RUNNING=$(running_scans)
 if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
@@ -306,15 +373,35 @@ if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
   log "refusing: could not verify active scans; approval kept for retry"
   exit 1
 fi
+DRAIN_SINCE_FILE="$STATE/draining-since"
+# How long a drain wait may run before the update proceeds anyway and interrupts whatever is still running, rather than waiting
+# without end (a scan that outlives this, or was never going to finish because the worker holding it is already gone, used to
+# block every later update): default 5 minutes, an administrator may raise or lower it.
+DRAIN_MAX=$(setting CVENGINE_UPDATE_DRAIN_SECONDS)  # the environment or .env; cron's own environment is bare, so .env is where it is set
+[[ $DRAIN_MAX =~ ^[0-9]{1,6}$ ]] && DRAIN_MAX=$((10#$DRAIN_MAX)) || DRAIN_MAX=300  # whole seconds; anything else is the default
 if [[ $RUNNING =~ ^[1-9][0-9]*$ ]]; then
-  if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
-    phase draining "waiting for $RUNNING scan(s) to finish" "$RUNNING"
-    log "waiting: $RUNNING scan(s) running; an update restarts the workers (approval kept, will retry)"
-    printf '%s' "$RUNNING" > "$STATE/last-wait"
+  NOW=$(date +%s)
+  SINCE=$(cat "$DRAIN_SINCE_FILE" 2>/dev/null || true)
+  [[ $SINCE =~ ^[0-9]+$ ]] || { SINCE=$NOW; printf '%s' "$NOW" > "$DRAIN_SINCE_FILE"; }
+  ELAPSED=$((NOW - SINCE))
+  if (( ELAPSED >= DRAIN_MAX )); then
+    log "forcing ahead: $RUNNING scan(s)/job(s) still running after ${ELAPSED}s (over the ${DRAIN_MAX}s drain limit); the update proceeds and interrupts them now (cveFeed.reaper closes out what the restart leaves behind)"
+    phase draining "forcing the update after ${DRAIN_MAX}s: $RUNNING scan(s)/job(s) interrupted" "$RUNNING"
+    rm -f "$DRAIN_SINCE_FILE" "$STATE/last-wait" "$STATE/last-refusal"
+    # falls through to the deploy below: not a refusal, and not another wait
+  else
+    if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
+      phase draining "waiting for $RUNNING scan(s) to finish (forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running)" "$RUNNING"
+      log "waiting: $RUNNING scan(s) running; forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running (approval kept, will retry)"
+      printf '%s' "$RUNNING" > "$STATE/last-wait"
+    fi
+    # This is a normal, expected wait, not a failure the ERR trap should narrate ("stopped at line N") on every poll: the two log
+    # lines above already say why. The trap is restored by the next invocation (a fresh shell), so every later command keeps it.
+    trap - ERR
+    exit 3  # "still waiting": the watcher polls slowly for this; cron treats any status the same
   fi
-  exit 3  # "still waiting": the watcher polls slowly for this; cron treats any status the same
 fi
-rm -f "$STATE/last-wait" "$STATE/last-refusal"
+rm -f "$STATE/last-wait" "$STATE/last-refusal" "$DRAIN_SINCE_FILE"
 
 PREV=$(git rev-parse HEAD)
 SWITCHED=0
@@ -340,7 +427,7 @@ restore_branch() { if [ "$SWITCHED" = 1 ]; then git checkout -q -f "$BRANCH" >>"
 # The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
 # without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
 BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
-if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ]; then
+if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ] && [ "$(deployed_commit)" = "$SHA" ] && schema_current; then
   log "already at $SHA"
   python3 "$STATE_HELPER" commit "$SHA"
   clear_approval
@@ -350,7 +437,11 @@ if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ]; then
 fi
 
 if [ "$PREV" = "$SHA" ]; then
-  log "the files are at $SHA but the running build is ${BUILT:-unknown}; rebuilding"
+  if [ "$BUILT" = "$SHA" ]; then
+    log "the files are at $SHA but a finished deploy of it is not on record or the database has migrations waiting (an earlier update was interrupted); deploying it again"
+  else
+    log "the files are at $SHA but the running build is ${BUILT:-unknown}; rebuilding"
+  fi
   phase applying "files are current, rebuilding the services"
 else
   log "updating $PREV -> $SHA"
@@ -369,22 +460,27 @@ fi
 
 if deploy >>"$LOG" 2>&1; then
   python3 "$STATE_HELPER" commit "$SHA"
+  mark_deployed "$SHA"
+  rm -f "$ATTEMPTS_FILE"
   clear_approval
   resume_scanning
   phase done
   log "updated to $SHA"
 elif [ "$DEPLOY_STAGE" = migrated ]; then
-  # The database already has $SHA's schema, so $PREV's code must not run on it: keep $SHA and retry the restart.
+  # The database already has $SHA's schema (or part of it), so $PREV's code must not run on it: keep $SHA and retry the restart.
   log "restarting $SHA failed after its migrations ran; keeping $SHA and retrying the restart"
   if deploy >>"$LOG" 2>&1; then
     python3 "$STATE_HELPER" commit "$SHA"
+    mark_deployed "$SHA"
+    rm -f "$ATTEMPTS_FILE"
     clear_approval
     resume_scanning
     phase done
     log "updated to $SHA"
   else
-    phase failed "restart of $SHA failed after migration; database already on new schema, scanning stays paused"
-    log "could not restart $SHA; the database is already migrated, so $PREV is not restored. The approval is kept and the next run retries; see $LOG"
+    printf '%s %s\n' "$SHA" "$((TRIES + 1))" >"$ATTEMPTS_FILE"
+    phase failed "restart of $SHA failed after migration; database already on new schema, scanning stays paused (run $((TRIES + 1)) of $MAX_ATTEMPTS)"
+    log "could not restart $SHA; the database is already migrated (or part way), so $PREV is not restored. Run $((TRIES + 1)) of $MAX_ATTEMPTS: the approval is kept and the next run retries until then; see $LOG"
     exit 1
   fi
 else
@@ -392,7 +488,9 @@ else
   restore_branch
   git reset --hard "$PREV" >>"$LOG" 2>&1
   restore_env
-  if deploy >>"$LOG" 2>&1; then
+  # The way back must not fail the check that sent it here: a build that stopped for lack of disk space is put back with what is already on the host.
+  if CVENGINE_UPDATE_MIN_FREE_MB=0 deploy >>"$LOG" 2>&1; then
+    mark_deployed "$PREV"
     resume_scanning
     phase done
   else

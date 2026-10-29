@@ -61,7 +61,8 @@ class AgentApiTests(TestCase):
 		cls.cve = CVEEntry.objects.create(
 			cve_id='CVE-2099-1', kev=True, cvss=9.8, title='nginx bug', published_at=now,
 			affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
-		cls.match = CVEMatch.objects.create(cve_entry=cls.cve, subdomain=sub, confidence=0.9, matched_product='nginx', matched_version='1.18.0')
+		cls.match = CVEMatch.objects.create(cve_entry=cls.cve, subdomain=sub, confidence=0.9, matched_product='nginx', matched_version='1.18.0',
+			version_in_range=True)
 		other = Subdomain.objects.create(name='www.b.example', target_domain=cls.db)
 		cls.match_b = CVEMatch.objects.create(cve_entry=cls.cve, subdomain=other, confidence=0.9)
 
@@ -177,17 +178,49 @@ class AgentApiTests(TestCase):
 			self.assertEqual((status, data['status']), (202, 'queued'))
 			scan = ScanHistory.objects.get(pk=data['scan_id'])
 			self.assertEqual(scan.domain_id, self.da.id)
+			self.assertEqual(scan.initiated_by_id, self.alice.id)  # who asked for this scan is on the record, not just that it ran
 			queued.assert_called_once_with(scan.id, 'standard')
 			# engine_id is optional, but a bogus one is still rejected
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id, 'engine_id': 99999})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.db.id})[0], 404)
 			self.assertEqual(call(self.t_alice, 'POST', '/api/v1/projects/proj-a/scans', {'target_id': self.da.id})[0], 202)
 
+	def test_deleting_the_initiating_user_keeps_the_scan_not_cascades_it_away(self):
+		from startScan.models import ScanHistory
+		temp = User.objects.create_user('temp-initiator', password='x')
+		scan = ScanHistory.objects.create(domain=self.da, scan_type=self.engine, start_scan_date=timezone.now(),
+			scan_status=2, results_dir='/tmp', initiated_by=temp)
+		temp.delete()
+		scan.refresh_from_db()
+		self.assertIsNone(scan.initiated_by_id)  # who ran it is forgotten, but the scan and its findings are not deleted with them
+
+	def test_discover_target_also_records_who_asked_for_it(self):
+		from startScan.models import ScanHistory
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+			status, data = call(self.t_alice, 'POST', f'/api/v1/projects/proj-a/targets/{self.da.id}/discover', {})
+			self.assertEqual(status, 202)
+			scan = ScanHistory.objects.get(pk=data['scan_id'])
+			self.assertEqual(scan.initiated_by_id, self.alice.id)
+			queued.assert_called_once()
+
 	def test_inventory_hosts_with_ports(self):
 		status, data = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/hosts')
 		self.assertEqual(data['count'], 1)
 		port = data['results'][0]['ips'][0]['ports'][0]
 		self.assertEqual((port['number'], port['product'], port['version']), (443, 'nginx', '1.18.0'))
+
+	def test_the_host_record_carries_probe_results_and_wordpress_state_of_its_own_project_only(self):
+		from cveFeed.models import ProbeObservation
+		ProbeObservation.objects.create(project=self.pa, domain=self.da, host='www.a.example', probe='error-page', kind='version', product='nginx',
+			version='1.24.0', outcome='found', source='body:nginx-error-page', confidence=0.95)
+		ProbeObservation.objects.create(project=self.pa, domain=self.da, host='www.a.example', probe='wpscan', kind='wordpress', product='WordPress',
+			outcome='challenged', evidence={'state': 'blocked', 'reason': 'the edge challenged the scanner'})
+		ProbeObservation.objects.create(project=self.pb, domain=self.db, host='www.a.example', probe='error-page', kind='version', product='nginx',
+			version='9.9.9', outcome='found')  # another project that happens to scan the same name
+		host = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/hosts')[1]['results'][0]
+		self.assertEqual([(p['product'], p['version'], p['outcome']) for p in host['probes']], [('nginx', '1.24.0', 'found')])
+		self.assertEqual(host['wordpress']['status']['state'], 'blocked')
+		self.assertNotIn('9.9.9', json.dumps(host))
 
 	def test_remediation_workflow(self):
 		base = '/api/v1/projects/proj-a'
@@ -428,7 +461,8 @@ class AgentApiTests(TestCase):
 				mock.patch('cveFeed.validation.run_validation', return_value={'ran': 1, 'reused': 0}) as checks, \
 				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
 			validate_match_on_demand(job_id)
-		self.assertEqual(checks.call_args.kwargs['selected_kinds'], {'nmap_sv'})
+		# the model's choice, plus the identity probes (nginx next to ingress-nginx or nginx-ui) that always accompany a plan when one applies
+		self.assertEqual(checks.call_args.kwargs['selected_kinds'], {'nmap_sv', 'fact_probe'})
 		job = OnDemandValidation.objects.get(pk=job_id)
 		self.assertEqual(job.result['plan']['source'], 'ai')
 		self.assertEqual(TriageCall.objects.filter(kind='validation_plan', project=self.pa).count(), 1)
@@ -548,6 +582,7 @@ class AgentApiTests(TestCase):
 		self.match.matched_product = 'AWS Service -'
 		self.match.matched_version = ''
 		self.match.save(update_fields=['matched_product', 'matched_version'])
+		CVEMatch.objects.filter(pk=self.match_b.pk).update(matched_version='1.19.0', version_in_range=True)  # a match the policy keeps
 		with mock.patch('cveFeed.triage.run_triage') as ai, mock.patch('cveFeed.validation.run_validation') as checks:
 			first = reconcile_invalid_correlations(limit=1)
 			second = reconcile_invalid_correlations(limit=1)
@@ -619,6 +654,32 @@ class AgentApiTests(TestCase):
 		self.assertEqual(rpc(self.t_alice, 'nope')[1]['error']['code'], -32601)
 		self.assertEqual(call(self.t_alice, 'GET', '/mcp/')[0], 405)
 
+	def mcp_post(self, body, **headers):
+		from django.test import Client
+		response = Client().post('/mcp/', json.dumps(body), content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.t_alice}', **headers)
+		return response.status_code, (response.json() if response.content else None)
+
+	def test_mcp_follows_the_transport_rules_of_the_spec(self):
+		message = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}
+		# a browser page of another site: refused. No Origin (every MCP client) and this site's own Origin: fine
+		self.assertEqual(self.mcp_post(message, HTTP_ORIGIN='https://evil.example.test')[0], 403)
+		self.assertEqual(self.mcp_post(message)[0], 200)
+		self.assertEqual(self.mcp_post(message, HTTP_ORIGIN='http://testserver')[0], 200)
+		# a protocol version the server does not speak: 400; a supported one or none: fine
+		self.assertEqual(self.mcp_post(message, HTTP_MCP_PROTOCOL_VERSION='1999-01-01')[0], 400)
+		self.assertEqual(self.mcp_post(message, HTTP_MCP_PROTOCOL_VERSION='2025-06-18')[0], 200)
+		# a client's own response or error to something the server never asked: accepted with 202 and no body
+		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'result': {}}), (202, None))
+		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'error': {'code': -1, 'message': 'x'}}), (202, None))
+
+	def test_an_unknown_tool_is_a_protocol_error_and_a_crash_is_a_json_rpc_error(self):
+		status, data = rpc(self.t_alice, 'tools/call', {'name': 'no_such_tool', 'arguments': {}})
+		self.assertEqual((status, data['error']['code']), (200, -32602))
+		with mock.patch('agentapi.mcp.call_tool', side_effect=RuntimeError('database exploded with a secret path /var/x')):
+			status, data = rpc(self.t_alice, 'tools/call', {'name': 'list_projects', 'arguments': {}}, rpc_id=9)
+		self.assertEqual((status, data['id'], data['error']['code']), (200, 9, -32603))
+		self.assertNotIn('secret path', json.dumps(data))
+
 	def _tool(self, token, name, args=None):
 		status, data = rpc(token, 'tools/call', {'name': name, 'arguments': args or {}})
 		content = data['result']['content'][0]['text']
@@ -641,8 +702,7 @@ class AgentApiTests(TestCase):
 		self.assertEqual((err, msg), (True, 'audit role is read only'))
 		err, msg = self._tool(self.t_ro, 'add_target', {'project': 'proj-a', 'value': 'x.example'})
 		self.assertEqual((err, msg), (True, 'this token is read only'))
-		err, msg = self._tool(self.t_alice, 'no_such_tool')
-		self.assertTrue(err)
+		self.assertEqual(rpc(self.t_alice, 'tools/call', {'name': 'no_such_tool', 'arguments': {}})[1]['error']['code'], -32602)  # a protocol error, not a tool result
 
 	def test_an_over_long_assets_argument_is_refused_not_ground_through(self):
 		err, data = self._tool(self.t_alice, 'get_remediation_work',
@@ -980,6 +1040,20 @@ class HostHeatTests(TestCase):
 		self.assertEqual(heat, {'hot.heat.example': 'fire', 'cold.heat.example': 'unscanned'})
 		subs = {n['label']: n for n in graph_payload(domain.id)['nodes'] if n['kind'] == 'subdomain'}
 		self.assertEqual(subs['hot.heat.example']['heat'], 'fire')
+
+		# a light-only nuclei pass (the common case: the AI-targeted pass is gated on there being something worth
+		# targeting) must read 'scanned', not 'unscanned' - this is the same ScanActivity-name lookup as heat, in
+		# the graph's own node status.
+		from scanEngine.models import EngineType
+		from startScan.models import ScanActivity, ScanHistory
+		light = Subdomain.objects.create(name='light.heat.example', target_domain=domain, http_status=200)
+		engine = EngineType.objects.create(engine_name='heat-light', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=now, scan_status=2)
+		light.scan_history = scan
+		light.save(update_fields=['scan_history'])
+		ScanActivity.objects.create(scan_of=scan, name='nuclei_light_scan', status=2, time=now)
+		subs = {n['label']: n for n in graph_payload(domain.id)['nodes'] if n['kind'] == 'subdomain'}
+		self.assertEqual(subs['light.heat.example']['status'], 'scanned')
 		# the hover card's compact summary rides on the node: no extra request, worst CVE and its tier
 		info = subs['hot.heat.example']['info']
 		self.assertEqual((info['cves'], info['top_cve'], info['top_tier']), (1, 'CVE-2099-7', 'fire'))
@@ -1034,6 +1108,8 @@ class BulkDiscoveryTests(TestCase):
 		lines = AgentActivity.objects.filter(kind='discovery', message__startswith='Queued')
 		self.assertEqual(lines.count(), 1)
 		self.assertIn('12 targets', lines[0].message)
+		from startScan.models import ScanHistory
+		self.assertEqual(set(ScanHistory.objects.filter(domain__project=project).values_list('initiated_by_id', flat=True)), {user.id})
 
 
 class ListSummaryTests(TestCase):
@@ -1663,6 +1739,20 @@ class HostSearchTests(TestCase):
 		status, _ = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?q=&heat=bogus')
 		self.assertEqual(status, 400)
 
+	def test_a_light_only_nuclei_pass_counts_as_scanned_not_unscanned(self):
+		# Most hosts only ever get the light pass (the AI-targeted pass is gated on there being something worth
+		# targeting), so this is the common real-world case, not an edge case: it must read 'clean', not 'unscanned'.
+		from startScan.models import ScanActivity, ScanHistory
+		from scanEngine.models import EngineType
+		from agentapi.services import _host_heat
+		sub = Subdomain.objects.get(name='db.srch.example')
+		engine = EngineType.objects.create(engine_name='e-light', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=sub.target_domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2)
+		sub.scan_history = scan
+		sub.save(update_fields=['scan_history'])
+		ScanActivity.objects.create(scan_of=scan, name='nuclei_light_scan', status=2, time=timezone.now())
+		self.assertEqual(_host_heat(sub), 'clean')
+
 	def test_the_search_is_an_mcp_tool(self):
 		status, data = rpc(self.tok, 'tools/call', {'name': 'search_hosts', 'arguments': {'project': 'srch-a', 'q': 'port:3306'}})
 		self.assertEqual(status, 200)
@@ -1855,6 +1945,7 @@ class TriageApiTests(TestCase):
 		self.assertEqual(status, 200)
 		self.assertEqual((d['kind'], d['host'], d['target'], d['severity']), ('match', 'www.a.example', 'a.example', 'critical'))
 		self.assertEqual(d['why_it_matters'], 'attackers get a foothold')
+		self.assertEqual(d['confidence'], self.match.confidence)
 		self.assertEqual(d['ai']['classification'], 'needs_validation')
 		self.assertTrue(d['ai']['overridden'])
 		self.assertEqual((d['ai']['model_classification'], d['ai']['model_reason']), ('likely_false_positive', 'because'))  # the model's own words

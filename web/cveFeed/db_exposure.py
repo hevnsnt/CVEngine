@@ -42,8 +42,8 @@ def check_redis(host, port):
         return True
     except redis.AuthenticationError:
         return False
-    except redis.ResponseError as exc:
-        return 'NOAUTH' not in str(exc) and 'WRONGPASS' not in str(exc)
+    except redis.ResponseError:  # NOAUTH, WRONGPASS, a protected-mode DENIED, LOADING: the server did not let the PING through
+        return False
     except Exception:  # noqa: BLE001 - refused/timeout/reset: simply "not exposed", not a crash
         return False
     finally:
@@ -90,30 +90,45 @@ def check_postgres(host, port):
             conn.close()
 
 
+def _netloc(host, port):
+    """``host:port`` for a URL, an IPv6 literal in brackets."""
+    return f'[{host}]:{port}' if ':' in str(host) else f'{host}:{port}'
+
+
 def _bounded_json(url):
     """GET ``url`` (no redirects) and parse its JSON body, reading at most MAX_BODY_BYTES within TOTAL_SECONDS. None unless the answer
     is a 200 with JSON inside those bounds. The scanned server controls how much it sends and how slowly, so neither is trusted."""
     import json
     import time
 
+    from urllib.parse import urlsplit
+
     import requests
+
+    from cveFeed import egress_proxy
     deadline = time.monotonic() + TOTAL_SECONDS
-    with requests.get(url, timeout=CONNECT_TIMEOUT, allow_redirects=False, stream=True) as resp:
-        if resp.status_code != 200:
-            return None
-        body = b''
-        for chunk in resp.iter_content(4096):
-            body += chunk
-            if len(body) > MAX_BODY_BYTES or time.monotonic() > deadline:
+    with requests.Session() as session:
+        session.trust_env = False  # scanner traffic never takes the environment's proxy or .netrc; Settings > Proxy is the only one
+        with session.get(url, timeout=CONNECT_TIMEOUT, allow_redirects=False, stream=True,
+                         proxies=egress_proxy.requests_proxies(urlsplit(url).hostname)) as resp:
+            if resp.status_code != 200:
                 return None
-        return json.loads(body) if body else None
+            body, size = [], 0
+            # one byte per read: a read of n bytes blocks until n arrive, so a server dripping a byte just inside the socket timeout would
+            # hold a larger read (and the deadline check after it) for n times that timeout
+            for chunk in resp.iter_content(1):
+                body.append(chunk)
+                size += len(chunk)
+                if size > MAX_BODY_BYTES or time.monotonic() > deadline:
+                    return None
+            return json.loads(b''.join(body)) if body else None
 
 
 def check_elasticsearch(host, port):
     """A plain GET /: Elasticsearch with no security plugin configured answers with cluster info and no
     auth challenge at all."""
     try:
-        info = _bounded_json(f'http://{host}:{port}/')
+        info = _bounded_json(f'http://{_netloc(host, port)}/')
         if not isinstance(info, dict) or 'cluster_name' not in info:
             return False
         _note(host, port, f'cluster {info.get("cluster_name")}, version {(info.get("version") or {}).get("number", "?")}')
@@ -126,7 +141,7 @@ def check_couchdb(host, port):
     """GET /_all_dbs: lists database NAMES only, never document content. CouchDB's "admin party" mode
     (no admin user ever configured) answers this with no credential at all."""
     try:
-        names = _bounded_json(f'http://{host}:{port}/_all_dbs')
+        names = _bounded_json(f'http://{_netloc(host, port)}/_all_dbs')
         if not isinstance(names, list):
             return False
         _note(host, port, f'/_all_dbs answered with {len(names)} database name(s)')  # a count, never the names
@@ -209,10 +224,8 @@ def checker_for(port, table=None):
 
 def _excluded_names(project):
     """Authorization checks fail closed, unlike best-effort discovery filtering."""
-    from cveFeed.models import HostExclusion
-    if not project:
-        return frozenset()
-    return frozenset(HostExclusion.objects.filter(org__projects__id=project).values_list('host', flat=True))
+    from cveFeed.exclusions import excluded_names
+    return excluded_names(project, strict=True)
 
 
 def run_db_exposure_checks(scan_id, checks=None):
@@ -222,6 +235,7 @@ def run_db_exposure_checks(scan_id, checks=None):
     ``checks`` overrides the {name-fragment: (label, fn)} table (tests inject fakes here)."""
     from cveFeed import activity
     from cveFeed.exclusions import normalize
+    from reNgine import resources
     from startScan.models import open_ports
     from targetApp.target_types import is_scannable_ip
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
@@ -234,11 +248,13 @@ def run_db_exposure_checks(scan_id, checks=None):
     targets = []  # (subdomain, host, port_obj, label, check_fn)
     EVIDENCE.clear()
     banned = _excluded_names(project)
+    from cveFeed.bounty_gate import Gate
+    gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name, or an address it excludes, is never connected to
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
-        if normalize(sub.name) in banned:
+        if normalize(sub.name) in banned or gate.refusal(project, sub.name, unattended=False):
             continue
         for ip in sub.ip_addresses.all():
-            if not is_scannable_ip(ip.address):
+            if not is_scannable_ip(ip.address, project=project) or gate.refusal(project, ip.address, unattended=False, derived=True):
                 continue
             for port in open_ports(ip):
                 label, fn = checker_for(port, table)
@@ -255,40 +271,48 @@ def run_db_exposure_checks(scan_id, checks=None):
     groups = {}
     for sub, host, port, label, fn in targets:
         groups.setdefault((host, port.number, label), (fn, []))[1].append(sub)
-    for (host, number, label), (fn, subs) in groups.items():
-        # Exclusion is organization-wide even when its author could not purge
-        # this project's records. Recheck at dispatch, not only while planning.
-        banned = _excluded_names(project)
-        subs = [sub for sub in subs if normalize(sub.name) not in banned]
-        if not subs or not is_scannable_ip(host):
-            continue
-        checked += 1
-        try:
-            is_open = fn(host, number)
-        except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
-            logger.exception('db exposure check %s failed for %s:%s', label, host, number)
-            continue
-        if not is_open:
-            continue
-        reply = EVIDENCE.pop((host, number), '')
-        banned = _excluded_names(project)
-        subs = [sub for sub in subs if normalize(sub.name) not in banned]
-        if not subs:
-            continue
-        exposed += 1
-        for sub in subs:
-            vuln, created = save_vulnerability(
-                target_domain=domain, scan_history=scan, subdomain=sub, source='db_exposure',
-                template_id=f'db-exposure-{label.lower()}', name=f'Unauthenticated {label} exposure',
-                severity=NUCLEI_SEVERITY_MAP['critical'],
-                description=f'{label} on {host}:{number} accepted a connection with no credentials at all.'
-                            + (f' The server replied: {reply}' if reply else ''),
-                impact=f'Anyone who can reach {host}:{number} has the same access as a fully authenticated client.',
-                remediation=f'Require authentication on this {label} instance and restrict network access to trusted hosts only.',
-                extracted_results=[reply] if reply else [], http_url=f'{label.lower()}://{host}:{number}')
-            if created:
-                activity.log('validate', f'{label} on {host}:{number} has no authentication required'
-                             + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+    try:
+        # under the resource gate like the other scanner stages: a pause or a stopped scan ends the stage between connections
+        with resources.heavy_job('route-probe', label=domain.name) as job:
+            for (host, number, label), (fn, subs) in groups.items():
+                job.raise_if_killed()
+                # Exclusion is organization-wide even when its author could not purge
+                # this project's records. Recheck at dispatch, not only while planning.
+                banned = _excluded_names(project)
+                subs = [sub for sub in subs if normalize(sub.name) not in banned]
+                if not subs or not is_scannable_ip(host, project=project):
+                    continue
+                checked += 1
+                try:
+                    is_open = fn(host, number)
+                except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
+                    logger.exception('db exposure check %s failed for %s:%s', label, host, number)
+                    continue
+                if not is_open:
+                    continue
+                reply = EVIDENCE.pop((host, number), '')
+                banned = _excluded_names(project)
+                subs = [sub for sub in subs if normalize(sub.name) not in banned]
+                if not subs:
+                    continue
+                exposed += 1
+                for sub in subs:
+                    vuln, created = save_vulnerability(
+                        target_domain=domain, scan_history=scan, subdomain=sub, source='db_exposure',
+                        template_id=f'db-exposure-{label.lower()}', name=f'Unauthenticated {label} exposure',
+                        severity=NUCLEI_SEVERITY_MAP['critical'],
+                        description=f'{label} on {host}:{number} accepted a connection with no credentials at all.'
+                                    + (f' The server replied: {reply}' if reply else ''),
+                        impact=f'Anyone who can reach {host}:{number} has the same access as a fully authenticated client.',
+                        remediation=f'Require authentication on this {label} instance and restrict network access to trusted hosts only.',
+                        extracted_results=[reply] if reply else [], http_url=f'{label.lower()}://{host}:{number}')
+                    if created:
+                        activity.log('validate', f'{label} on {host}:{number} has no authentication required'
+                                     + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the rest is checked on the next scan
+        activity.settle(running, 'done', message=f'Database exposure check for {domain.name} stopped early ({type(exc).__name__}): '
+                        f'{exposed} of {checked} service(s) open with no authentication so far')
+        return {'checked': checked, 'exposed': exposed, 'skipped': 'scanning was stopped or memory was short'}
     activity.settle(running, 'done', message=(
         f'Database exposure check for {domain.name}: {exposed} of {checked} service(s) open with no authentication'))
     return {'checked': checked, 'exposed': exposed}

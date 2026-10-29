@@ -3,8 +3,9 @@
 import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
-import { fmtTime } from "/staticfiles/cve/prefs.js";
+import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
+import { reportButton } from "/staticfiles/cve/report-export.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -19,11 +20,23 @@ const el = (tag, cls, text, attrs = {}) => {
   Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v));
   return n;
 };
+let failures = 0; // requests in a row that failed: the pollers wait longer between rounds while the server is not answering
 const get = (url) =>
-  fetch(url, { credentials: "same-origin" }).then((r) => {
-    if (!r.ok) throw new Error(r.status);
-    return r.json();
-  });
+  fetch(url, { credentials: "same-origin" })
+    .then((r) => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    })
+    .then(
+      (d) => {
+        failures = 0;
+        return d;
+      },
+      (err) => {
+        failures += 1;
+        throw err;
+      },
+    );
 const post = (url, body) =>
   fetch(url, {
     method: "POST",
@@ -84,11 +97,125 @@ function setNum(id, value) {
   n.classList.add("bump");
 }
 
+// The biggest hygiene problems, worst first: the open issues grouped by what was checked, so the strip says what is wrong
+// (expired certificates, no DMARC) and not only how many. Reads the worst three severities; a group counts what those pages hold.
+const HY_AREA = { tls_expired: "Expired certificates", tls_expiring: "Certificates expiring", tls_legacy: "Old TLS versions", tls_weak: "Weak TLS" };
+const HY_PREFIX = { spf: "SPF", dkim: "DKIM", dmarc: "DMARC", caa: "CAA", mx: "Mail exchangers", mta_sts: "MTA-STS", smtp_tlsrpt: "TLS reporting", dane: "DANE", tls: "TLS" };
+const HY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+const hyName = (check) => {
+  if (HY_AREA[check]) return HY_AREA[check];
+  const word = check.replace(/_/g, " ");
+  const area = Object.keys(HY_PREFIX).sort((a, b) => b.length - a.length).find((k) => check === k || check.startsWith(`${k}_`));
+  const rest = area ? word.slice(area.length).trim() : word;
+  return area ? `${HY_PREFIX[area]}${rest ? ` ${rest}` : ""}` : word.charAt(0).toUpperCase() + word.slice(1);
+};
+// The longest-open critical or high item (stats keys oldest_open_days / _kind / _id, null when nothing qualifies). Hidden until the server sends it.
+const OLDEST_KIND = { cve: ["CVE match", "matches", ""], scanner: ["Scanner finding", "vulns", "?type=scanner"], hygiene: ["Hygiene issue", "hygiene", ""] };
+function paintOldest(s) {
+  const tile = $("n-oldest");
+  if (!tile) return;
+  const days = s.oldest_open_days;
+  tile.hidden = days == null;
+  if (days == null) return;
+  setNum("s-oldest_open_days", days);
+  $("s-oldest_unit").textContent = days === 1 ? "day" : "days";
+  const kind = OLDEST_KIND[s.oldest_open_kind];
+  // name the issue itself ("High: TLS hostname mismatch on vpn.example.com"): an age alone says nothing
+  const w = s.oldest_open_what;
+  $("s-oldest_note").textContent = w && w.title ? w.title : kind ? kind[0] : "";
+  $("s-oldest_host").textContent = (w && w.host) || "";
+  tile.title = w && w.title ? `${w.severity}: ${w.title}${w.host ? ` on ${w.host}` : ""}, unfixed for ${days} day${days === 1 ? "" : "s"}. Fixed, accepted-risk and ruled-out issues are not counted.` : tile.title;
+  if (kind && slug) tile.href = `/cve/${encodeURIComponent(slug)}/${kind[1]}/${kind[2]}`;
+  tile.classList.toggle("old", days >= 30);
+}
+// Scan coverage: the share of hosts a scan has looked at. The host search already counts every temperature, so one request answers it.
+let coverageAt = 0;
+async function paintCoverage() {
+  if (!$("n-coverage") || Date.now() - coverageAt < 30000) return;
+  coverageAt = Date.now();
+  try {
+    const r = await get(`/api/v1/projects/${encodeURIComponent(slug || "_all")}/search?q=&page_size=1`);
+    const heat = (r.facets && r.facets.heat) || {};
+    const capped = Boolean(r.facets && r.facets.truncated); // the server counts at most its first 5000 hosts
+    const all = Object.values(heat).reduce((n, v) => n + v, 0);
+    // a host with no address a scanner can use has nothing to scan: it is counted apart, not as work that was neglected
+    const u = (r.facets && r.facets.unscannable) || {};
+    const noAddress = u.count || 0;
+    const total = all - noAddress;
+    const never = Math.max(0, (heat.unscanned || 0) - noAddress);
+    if (!all) return;
+    // two plain numbers: hosts scanned, out of the hosts that can be scanned. The rest of the story is in the tooltip
+    const approx = capped ? "~" : "";
+    $("s-coverage").textContent = `${approx}${total - never}`;
+    $("s-coverage_of").textContent = `of ${approx}${total}`;
+    const why = [u.private ? `${u.private} inside a private network` : "", u.no_dns ? `${u.no_dns} with no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
+    $("n-coverage").title = `${total - never} of the ${total} hosts that can be scanned have been scanned.` +
+      (noAddress ? ` ${noAddress} more have no address to scan (${why}).` : "") + (capped ? ` Approximate: only the first ${all} hosts are counted.` : "");
+  } catch (_) {
+    coverageAt = 0;
+  }
+}
+let hygieneSig = null;
+async function paintHygiene(open) {
+  const box = $("hy-top");
+  if (!box || open === hygieneSig) return;
+  hygieneSig = open;
+  try {
+    const path = `/api/v1/projects/${encodeURIComponent(slug || "_all")}/hygiene`;
+    const pages = await Promise.all(["critical", "high", "medium"].map((sev) => get(`${path}?severity=${sev}&page_size=100`).catch(() => ({ results: [] }))));
+    const groups = new Map();
+    pages.flatMap((p) => p.results || []).forEach((f) => {
+      const g = groups.get(f.check) || { check: f.check, worst: f.severity, n: 0 };
+      g.n += 1;
+      if ((HY_RANK[f.severity] || 0) > (HY_RANK[g.worst] || 0)) g.worst = f.severity;
+      groups.set(f.check, g);
+    });
+    const top = [...groups.values()].sort((a, b) => (HY_RANK[b.worst] || 0) - (HY_RANK[a.worst] || 0) || b.n - a.n).slice(0, 3);
+    box.textContent = "";
+    top.forEach((g) => {
+      const li = el("li", `sev-${g.worst}`);
+      li.append(el("i", "hy-dot"), el("span", "", hyName(g.check)), el("b", "", String(g.n)));
+      box.append(li);
+    });
+    if (!top.length) box.append(el("li", "hy-none", open ? "Low severity only" : "All clear"));
+  } catch (_) {
+    hygieneSig = null;
+  }
+}
+
+// Internal networks: hosts inside a range the project declared internal, scanned only by a Sentinel deployed there. The group stays out of
+// the page until one exists (stats.internal.has). A network whose Sentinel is not live is said to be unscanned, never shown as clean.
+const SENTINEL_WORD = { online: "Sentinel online", offline: "Sentinel offline", none: "No Sentinel" };
+function paintInternal(x) {
+  const box = $("n-internal");
+  if (!box) return;
+  box.hidden = !(x && x.has);
+  if (box.hidden) return;
+  const num = (id, n) => ($(id).querySelector("b").textContent = String(n));
+  num("in-hosts", x.hosts);
+  num("in-findings", x.findings);
+  num("in-matches", x.matches);
+  $("in-hosts").querySelector("small").textContent = x.hosts ? `${x.hosts_live} live` : "";
+  $("in-last").textContent = x.last_scan_at ? `scanned ${ago(x.last_scan_at)}` : "never scanned";
+  const list = $("in-nets");
+  list.textContent = "";
+  (x.networks || []).forEach((n) => {
+    const state = (n.sentinel && n.sentinel.state) || "none";
+    const li = el("li", `in-net ${state}`);
+    li.append(el("i", "in-dot"), el("b", "mono", n.cidr), el("span", "in-state", SENTINEL_WORD[state] || state));
+    const scanned = n.last_scan_at ? `last scanned ${ago(n.last_scan_at)}` : "not scanned yet";
+    // a quiet network with no live Sentinel has not been looked at: say since when, instead of letting it read as clean
+    const note = state === "online" ? scanned : n.last_scan_at ? `not scanned since ${fmtDateTime(n.last_scan_at)}` : "never scanned";
+    li.append(el("span", "in-note", `${n.hosts} host${n.hosts === 1 ? "" : "s"} · ${note}`));
+    if (n.description) li.title = n.description;
+    list.append(li);
+  });
+}
+
 async function pollStats() {
   try {
     const s = await get(`/cve/api/stats${projParam ? "?" + projParam : ""}`);
     const flat = {
-      targets: s.targets,
       hosts: s.hosts,
       exposed_hosts: s.exposed_hosts,
       fire: s.tiers.fire,
@@ -96,25 +223,31 @@ async function pollStats() {
       ice: s.tiers.ice,
       matches: s.matches,
       scanner_findings: s.scanner_findings,
-      autofire_runs: s.autofire_runs,
-      templates: s.templates,
+      hygiene_open: s.hygiene_open,
       certs_expiring: s.certs_expiring,
-      scans_running: s.scans_running,
     };
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
     statsNow = s;
     paintMapCount();
-    const scansLabel = $("s-scans_label");
-    if (scansLabel)
-      scansLabel.textContent = s.scans_queued
-        ? `Scans running, ${s.scans_queued} queued`
-        : "Scans running";
+    const certNote = $("s-certs_total_note");
+    if (certNote) {
+      // beside the count, like "of 299 hosts" on the Exposed hosts tile: short enough to fit the narrow tile
+      certNote.textContent = s.certs_total ? `of ${s.certs_total}` : "";
+      certNote.title = s.certs_total ? `${s.certs_total} certificates tracked` : "";
+    }
+    paintHygiene(s.hygiene_open);
+    const stuck = $("n-queue");
+    if (stuck) {
+      // the activity feed also shows scans that run under a finished scan record (weekly deep Nuclei, host rescans): those are work, so not stuck
+      // background work (weekly deep Nuclei, host rescans, assessments) runs under finished scan records: it is work too, so nothing is stuck
+      stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0 && !(s.scans_background_running > 0) && running.size === 0);
+      setNum("s-scans_queued", s.scans_queued);
+    }
+    paintCoverage();
+    paintOldest(s);
+    paintInternal(s.internal);
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
     $("m-exposed").style.width = `${pct}%`;
-    const top = Math.max(s.tiers.fire, s.tiers.smoke, s.tiers.ice, 1);
-    ["fire", "smoke", "ice"].forEach((t) => {
-      $(`b-${t}`).style.width = `${Math.round((100 * s.tiers[t]) / top)}%`;
-    });
   } catch (_) {
     /* keep last values */
   }
@@ -136,7 +269,7 @@ function fillTip(cell) {
   head.append(el("span", "tip-heat", HEAT_LABEL[cell.dataset.heat] || ""));
   tip.append(head);
   tip.append(el("div", "tip-name", cell.dataset.name));
-  if (info.project) tip.append(el("div", "tip-project", info.project));
+  if (info.org || info.project) tip.append(el("div", "tip-project", [info.org, info.project].filter(Boolean).join(" / ")));
   const facts = [];
   if (info.ips) facts.push(`${info.ips} IP${info.ips === 1 ? "" : "s"}`);
   if (info.cves) facts.push(`${info.cves} CVE${info.cves === 1 ? "" : "s"}`);
@@ -167,12 +300,13 @@ function hostsHref(name, project) {
 
 const MAP_POOL = 400; // tiles built; the layout below shows as many of the highest-scoring hosts as fill the card in whole rows
 const MAP_GAP = 6;
+const MAP_SCORE_OVER = 40; // only hosts that score more than this are on the map (the rest are still on the Hosts page)
 // Tile tiers, richest first: the minimum size each needs. The layout picks the richest tier that holds every host, then stretches the
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
-  { name: "rich", size: "xl", w: 96, h: 104 },
-  { name: "card", size: "xl", w: 92, h: 56 },
+  { name: "rich", size: "xl", w: 116, h: 92 },
+  { name: "card", size: "xl", w: 92, h: 78 }, // room for the name, its domain and its "Org / Project" line
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
 ];
@@ -186,7 +320,8 @@ function fitTier(W, H, n, t) {
     if (th < t.h) continue;
     const aspect = tw / th;
     const shape = aspect >= 0.9 && aspect <= 2 ? 1 : 0.6; // prefer tiles that are not slivers
-    const score = Math.min(tw, 210) * Math.min(th, 150) * (n / (c * r)) * shape;
+    // width counts for more than height: a wider tile shows the whole host name and CVE instead of cutting it off
+    const score = Math.min(tw, 200) ** 1.5 * Math.min(th, 150) * (n / (c * r)) * shape;
     if (!best || score > best.score) best = { cols: c, rows: r, tw, th, score };
   }
   return best;
@@ -211,23 +346,39 @@ function layoutMap() {
   map.dataset.size = plan.tier.size;
   map.dataset.tier = plan.tier.name;
   map.dataset.narrow = plan.tw < 170 ? "1" : "0"; // narrow tiles drop the long "why" lines, which would only be cut off
-  map.dataset.lines = String(plan.tier.name === "rich" ? Math.max(1, Math.min(5, Math.floor((plan.th - 50) / 15))) : 0);
+  map.dataset.slim = plan.tw < 132 ? "1" : "0"; // tiles this narrow drop the target line, which would be cut off mid-word
+  map.dataset.lines = String(plan.tier.name === "rich" ? Math.max(1, Math.min(5, Math.floor((plan.th - 70) / 15))) : 0);
   map.style.setProperty("--cols", plan.cols);
   map.style.setProperty("--rows", plan.rows);
   mapOrdered.forEach((h, i) => {
     const cell = cells.get(h.id);
     if (cell) cell.hidden = i >= plan.show;
   });
+  if (plan.tier.name === "rich") fitDetails(map);
   if (mapDrawn !== plan.show) {
     mapDrawn = plan.show;
     paintMapCount();
   }
+}
+// A tile shows only the detail lines that fit whole: a host with a target or owner line has less room than its neighbours, so the
+// lines past the bottom of each tile are dropped instead of being squeezed and cut through the middle
+function fitDetails(map) {
+  map.querySelectorAll(".hx:not([hidden]) .hx-details").forEach((box) => {
+    const lines = [...box.children];
+    lines.forEach((d) => d.classList.remove("hx-cut"));
+    const bottom = box.getBoundingClientRect().bottom + 0.5;
+    lines.forEach((d) => {
+      if (d.offsetParent && d.getBoundingClientRect().bottom > bottom) d.classList.add("hx-cut");
+    });
+  });
 }
 new ResizeObserver(() => requestAnimationFrame(layoutMap)).observe($("map"));
 // The header of the attack-surface map reads the same numbers as the Exposed hosts tile, so the two cannot disagree: the map
 // draws live hosts (they resolved, or answered over HTTP), the tile counts every host the Hosts page lists.
 let statsNow = null;
 let mapDrawn = null; // squares on the map right now
+let mapBelow = 0; // live hosts under the score threshold
+let mapEligible = 0; // live hosts that score high enough to be on the map
 function paintMapCount() {
   const n = $("map-count");
   paintMapEmpty($("map").querySelectorAll(".hx:not([hidden])").length);
@@ -237,9 +388,9 @@ function paintMapCount() {
     return;
   }
   const live = statsNow.hosts_live;
-  const shown = mapDrawn != null && mapDrawn < live ? `Top ${mapDrawn} of ${live} live hosts` : `${live} live host${live === 1 ? "" : "s"}`;
-  n.textContent = `${shown} · ${statsNow.hosts} in all`;
-  n.title = "One square per live host: a host that resolved to an address or answered over HTTP, highest score first. The total is every host the Hosts page lists, live or not.";
+  const shown = mapDrawn != null && mapDrawn < mapEligible ? `Top ${mapDrawn} of ${mapEligible} scoring over ${MAP_SCORE_OVER}` : `${mapEligible} scoring over ${MAP_SCORE_OVER}`;
+  n.textContent = `${shown} · ${live} live`;
+  n.title = `One square per live host that scores more than ${MAP_SCORE_OVER} (a live host resolved to an address or answered over HTTP), highest score first. ${live} hosts are live and ${statsNow.hosts} are in the inventory; the rest are on the Hosts page.`;
 }
 
 // An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
@@ -251,12 +402,18 @@ function paintMapEmpty(shown) {
     return;
   }
   const known = statsNow ? statsNow.hosts || 0 : 0;
-  const key = known ? `known:${known}` : "none";
+  const key = mapBelow ? `low:${mapBelow}` : known ? `known:${known}` : "none";
   if (box && box.dataset.key === key) return;
   if (box) box.remove();
   box = el("div", "map-empty");
   box.dataset.key = key;
-  if (known) {
+  if (mapBelow) {
+    box.append(
+      el("b", "", `No host scores over ${MAP_SCORE_OVER}`),
+      el("p", "", `${mapBelow} live host${mapBelow === 1 ? " scores" : "s score"} lower and ${mapBelow === 1 ? "is" : "are"} left off the map. They are all on the Hosts page.`),
+    );
+    if (slug) box.append(el("a", "btn ghost sm", "Open hosts", { href: `/cve/${encodeURIComponent(slug)}/hosts/` }));
+  } else if (known) {
     box.append(
       el("b", "", "No live hosts yet"),
       el("p", "", `${known} host${known === 1 ? " is" : "s are"} in the inventory, but none has resolved to an address or answered over HTTP. Squares appear here as they do.`),
@@ -290,13 +447,42 @@ function hostDetails(info) {
   return box;
 }
 
+// Who the host belongs to, "Org / Project": the dashboard spans every project the viewer can see, so a tile says which one it is
+// (the organization is left out when every host on the map shares it, and on tiles too narrow for both)
+function hostOwner(info, withOrg) {
+  const box = el("span", "hx-owner");
+  if (withOrg && info.org) box.append(el("span", "hx-org", info.project ? `${info.org} / ` : info.org));
+  if (info.project) box.append(document.createTextNode(info.project));
+  box.title = [info.org, info.project].filter(Boolean).join(" / ");
+  return box;
+}
+
 function hostTag(info) {
   const tier = info.top_tier || (info.top_cve ? "cve" : "");
   return tier ? el("i", `hx-tag ${info.top_tier || ""}`, tier.toUpperCase()) : null;
 }
 
+// What a tile calls its host. An address is shown whole (cutting it at the first dot leaves "52" or "20"); a name is shown as its
+// first part ("staging", "www"), with the domain it belongs to underneath, so two "www" tiles from different targets can be told apart.
+const IP_LIKE = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]*:[0-9a-f:]+)$/i;
+const tileName = (h) => {
+  const label = String(h.label || "");
+  const target = String(h.target || "").toLowerCase();
+  if (IP_LIKE.test(label) || (target && label.toLowerCase() === target)) return label;
+  return label.split(".")[0];
+};
+function hostName(short, h) {
+  const name = el("span", IP_LIKE.test(short) ? "hx-name ip" : "hx-name", short);
+  const target = String(h.target || "");
+  if (target && target.toLowerCase() !== String(h.label || "").toLowerCase() && !IP_LIKE.test(String(h.label || ""))) name.append(el("small", "hx-target", target));
+  return name;
+}
+
 function drawMap(nodes) {
-  const hosts = nodes.filter((n) => n.kind === "subdomain");
+  const liveHosts = nodes.filter((n) => n.kind === "subdomain");
+  const hosts = liveHosts.filter((h) => (h.score || 0) > MAP_SCORE_OVER);
+  mapEligible = hosts.length;
+  mapBelow = liveHosts.length - hosts.length;
   const map = $("map");
   const counts = {};
   const seen = new Set();
@@ -306,6 +492,7 @@ function drawMap(nodes) {
     .slice()
     .sort((a, b) => (b.score || 0) - (a.score || 0) || HEAT_ORDER.indexOf(a.heat) - HEAT_ORDER.indexOf(b.heat) || a.label.localeCompare(b.label))
     .slice(0, MAP_POOL);
+  const manyOrgs = new Set(ordered.map((h) => (h.info || {}).org || "")).size > 1;
   const cellsInOrder = ordered.map((h, i) => {
     const heat = heatOf(h);
     seen.add(h.id);
@@ -331,14 +518,14 @@ function drawMap(nodes) {
       cells.set(h.id, cell);
     }
     const score = h.score || 0;
-    const short = h.label.split(".")[0];
+    const short = tileName(h);
     const infoJson = JSON.stringify(h.info || {});
-    if (cell.dataset.score !== String(score) || cell.dataset.short !== short || cell.dataset.info !== infoJson) {
+    if (cell.dataset.score !== String(score) || cell.dataset.short !== short + String(h.target || "") + manyOrgs || cell.dataset.info !== infoJson) {
       cell.textContent = "";
-      cell.append(el("span", "score", String(score)), el("span", "hx-name", short), hostDetails(h.info || {}));
+      cell.append(el("span", "score", String(score)), hostName(short, h), hostOwner(h.info || {}, manyOrgs), hostDetails(h.info || {}));
       const tag = hostTag(h.info || {});
       if (tag) cell.append(tag);
-      cell.dataset.short = short;
+      cell.dataset.short = short + String(h.target || "") + manyOrgs;
     }
     cell.dataset.name = h.label;
     cell.dataset.score = score;
@@ -385,6 +572,7 @@ function drawMap(nodes) {
 // --- live discovery -----------------------------------------------------------------
 let followScan = dash.dataset.follow || "";
 const graph = mountGraph($("d-graph"), {
+  pods: true,
   onSelect: (d) => showNodeDetails($("d-detail"), d),
   pinKey: () => `cve.pins.${slug || "all"}`, // where nodes were dropped; the graph spans the project, so the key is the project
 });
@@ -461,6 +649,7 @@ async function pollGraph() {
     $("d-empty").style.display = graphNodeCount ? "none" : "";
     drawMap(g.nodes);
   } catch (_) {
+    failures += 1;
     setOnline(false);
   }
 }
@@ -482,14 +671,18 @@ async function pollDiscovery() {
       $("d-ticker").textContent = "";
       return pollDiscovery();
     }
+    // a badge for a scan that is queued, running or went wrong; a finished one is already said by the line below
     const badge = $("d-status");
-    badge.style.display = "";
+    badge.style.display = d.scan.status === 2 ? "none" : "";
     badge.textContent =
       d.scan.status === -1 && d.scan.queue_position != null
         ? `queued, ${d.scan.queue_position} ahead`
         : STATUS[d.scan.status] || d.scan.status;
     badge.className = `badge ${d.scan.status === 1 ? "running" : d.scan.status === 2 ? "success" : d.scan.status === 0 ? "failed" : ""}`;
     followedProject = d.scan.project || slug || "";
+    badge.title = d.scan.error || "";
+    if (followedProject) badge.href = `/cve/${encodeURIComponent(followedProject)}/scans/${d.scan.id}/`;
+    else badge.removeAttribute("href");
     const target = $("d-target");
     target.textContent = "";
     linkify(
@@ -538,6 +731,7 @@ const KIND = {
   scan: "scan",
   hygiene: "hygiene",
   changes: "changes",
+  saved_search: "saved search",
 };
 let lastActivity = 0;
 let activityNow = ""; // the server's clock at the last answer, to ask which lines were repeated since
@@ -679,15 +873,26 @@ async function pollFeed() {
 }
 
 // Each poller re-arms itself when its request finishes, instead of firing from setInterval: when the server is busy
-// with scans several requests were in flight with the same cursor, and each one drew the same lines again.
+// with scans several requests were in flight with the same cursor, and each one drew the same lines again. A hidden tab does not
+// poll (visibilitychange starts the loop again), and the wait doubles, up to 16 times, while requests keep failing.
 const every = (fn, ms) => {
+  let timer = 0;
+  let busy = false;
   const tick = async () => {
+    if (document.hidden || busy) return;
+    busy = true;
     try {
       await fn();
     } finally {
-      setTimeout(tick, ms);
+      busy = false;
+      timer = setTimeout(tick, ms * 2 ** Math.min(failures, 4));
     }
   };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    clearTimeout(timer);
+    tick();
+  });
   tick();
 };
 every(pollStats, 6000);
@@ -725,19 +930,25 @@ every(pollFeed, 6000);
   const TIERS = ["fire", "smoke", "ice"];
   const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
   const PAGES = 5;
+  // rows: what was fetched; total: what the project has (the findings list is hottest first, so a cut-off one is not the newest)
   const collect = async (path) => {
     const rows = [];
+    let total = 0;
     for (let page = 1; page <= PAGES; page += 1) {
       const sep = path.includes("?") ? "&" : "?";
       const data = await get(`${base}/${path}${sep}page=${page}&page_size=200`);
       const got = data.results || [];
       rows.push(...got);
+      total = data.total ?? data.count ?? rows.length;
       if (got.length < 200) break;
     }
-    return rows;
+    return { rows, total };
   };
   try {
-    const [findings, changes] = await Promise.all([collect("findings?status=all"), collect("changes?since=365d")]);
+    const [found, changed] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
+    const findings = found.rows;
+    const changes = changed.rows;
+    const cutFindings = found.total > findings.length;
     const section = $("trends");
     if (!findings.length && !changes.length) return;
     const tierOf = (f) => {
@@ -754,13 +965,21 @@ every(pollFeed, 6000);
         ],
       }),
     );
+    // the list is ordered by heat, not by date: when it was cut, the counts are those of the hottest findings only, and say so
+    if (cutFindings) {
+      section.append(el("p", "note", `New findings counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings, so recent low-severity ones may be missing.`));
+    }
+    if (changed.total > changes.length) {
+      section.append(el("p", "note", `Inventory changes counts the newest ${changes.length.toLocaleString()} of ${changed.total.toLocaleString()} in the last 90 days.`));
+    }
     section.hidden = false;
     const spark = (anchorId, dates, label) => {
       const a = $(anchorId);
       if (!a || !dates.length) return;
       const values = dailyCounts(dates, 14).map((p) => p.v);
       const svg = sparkline(values);
-      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days`);
+      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days${cutFindings ? " among the hottest findings" : ""}`);
+      if (cutFindings) a.title = `Counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings`;
       a.append(svg, sr);
     };
     spark("n-matches", findings.filter((f) => f.type === "cve").map((f) => f.detected), "CVE matches");
@@ -769,3 +988,59 @@ every(pollFeed, 6000);
     /* trends are extra: leave the section hidden when the data does not come */
   }
 })();
+
+// --- scanning now ---------------------------------------------------------------------------------
+// What is being worked on right now, so it can be told apart on the graph: the domains and hosts of the running scans (the server's
+// graph-live view) plus the addresses and names the running AI-activity lines mention ("Background full port scan of 198.51.100.34").
+// They pulse on the graph and are listed as chips above it; a chip pans and zooms the graph to its node.
+const SCAN_TOKEN = /\b(?:\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi;
+const MAX_CHIPS = 6;
+async function pollScanning() {
+  if (document.hidden) return;
+  try {
+    const live = await get(`/cve/api/graph-live${projParam ? "?" + projParam : ""}`);
+    const labels = new Set();
+    running.forEach((li) => (String(li.dataset.msg || "").split("|").slice(1).join("|").match(SCAN_TOKEN) || []).forEach((t) => labels.add(t.toLowerCase())));
+    graph.setActive(live.domains, live.hosts, [...labels]);
+    const box = $("d-scanning");
+    const targets = new Map(); // name -> stage
+    live.scans.forEach((s) => targets.set(s.domain.toLowerCase(), s.stage || ""));
+    labels.forEach((l) => { if (!targets.has(l) && graph.hasLabel(l)) targets.set(l, ""); });
+    box.textContent = "";
+    if (!targets.size) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.append(el("span", "eyebrow", "Scanning now"));
+    [...targets].slice(0, MAX_CHIPS).forEach(([name, stage]) => {
+      const chip = el("button", "scan-chip", name, { type: "button", title: `Show ${name} on the graph` });
+      if (stage) chip.append(el("small", "", stage));
+      chip.addEventListener("click", () => graph.locate(name));
+      box.append(chip);
+    });
+    if (targets.size > MAX_CHIPS) box.append(el("span", "note", `+${targets.size - MAX_CHIPS} more`));
+  } catch (_) {
+    /* the next poll tries again */
+  }
+}
+pollScanning();
+setInterval(pollScanning, 3000);
+
+// The "Group CVEs" toggle: fold each host's CVEs into its bubble (default), or draw every CVE as its own dot.
+{
+  const toggle = $("d-pods");
+  if (toggle)
+    toggle.addEventListener("click", () => {
+      const on = toggle.getAttribute("aria-pressed") !== "true";
+      toggle.setAttribute("aria-pressed", String(on));
+      graph.setPods(on);
+    });
+}
+
+// --- PDF report ----------------------------------------------------------------------------------
+// A report is about one project, so the button is offered once a project is selected (not in the combined All projects view).
+if (slug && slug !== "_all") {
+  const head = document.querySelector(".page-head");
+  if (head) head.append(reportButton({ slug }));
+}

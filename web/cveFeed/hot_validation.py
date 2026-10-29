@@ -13,7 +13,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from cveFeed import activity, triage
+from cveFeed import activity, match_policy, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
 from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, match_temperature
@@ -23,6 +23,7 @@ MAX_ENQUEUE = 20
 PROJECT_ACTIVE_CAP = 10
 PROJECT_ICE_CAP = 5  # Ice stops here, so a project's cold matches cannot fill the slots a Fire or Smoke finding needs
 PRIORITY = {FIRE: 0, SMOKE: 6, ICE: 9}  # Redis steps: 0 Fire, 3 manual, 6 Smoke, 9 Ice
+HOST_REPORTED = 'host'  # CVEMatch.source of a match the host reported itself (cveFeed.inventory_match): no outside check can see what it rests on
 MAX_ATTEMPTS = 7  # failed tries of the same evidence before it is left alone (a changed signature starts again)
 
 
@@ -61,7 +62,7 @@ def tier_for(row):
             return None
         cve = match.cve_entry
         return match_temperature(classify_threat_tier(cve.kev, cve.epss_reached, cve.exploit_db, cve.cvss),
-                                 cve.cvss, match.ai_verdict, match.distro_status)
+                                 cve.cvss, match.ai_verdict, match.distro_status, match_policy.version_unknown(match))
     if row.vulnerability_id:
         vuln = row.vulnerability
         if not vuln.open_status:
@@ -97,14 +98,15 @@ def _candidate_rows(lane):
                 | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
                 | (Q(match__ai_verdict='affected') & Q(match__cve_entry__cvss__gte=7)))
     cve_hot = cve_fire | Q(match__cve_entry__cvss__gte=7) | Q(match__cve_entry__epss_reached=True)
+    unknown = match_policy.version_unknown_q('match__')  # waits for a person or a published range: never validated automatically
     if lane == ICE:
         # every other current CVE match, whatever its confidence or score (an unscored CVE too); one the AI ruled out or the distro
         # patched is not a finding to validate
-        cold = (Q(match__isnull=False) & ~cve_hot & ~Q(match__ai_verdict='not_affected') & ~Q(match__distro_status='patched')
-                & latest_scan_q('match__subdomain__'))
+        cold = (Q(match__isnull=False) & ~cve_hot & ~unknown & ~Q(match__ai_verdict='not_affected') & ~Q(match__distro_status='patched')
+                & ~Q(match__source=HOST_REPORTED) & latest_scan_q('match__subdomain__'))
         return Triage.objects.filter(cold).select_related('match__cve_entry', 'match__subdomain__target_domain').order_by('pk')
     severity = 3 if lane == FIRE else 2
-    candidate = ((cve_fire if lane == FIRE else cve_hot) & Q(match__isnull=False)
+    candidate = ((cve_fire if lane == FIRE else cve_hot) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
                  & latest_scan_q('match__subdomain__'))
     candidate |= Q(vulnerability__open_status=True, vulnerability__severity__gte=severity)
     candidate |= Q(hygiene__status='open', hygiene__severity__gte=severity)

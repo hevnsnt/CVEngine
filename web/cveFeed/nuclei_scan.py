@@ -106,6 +106,25 @@ def approved_templates():
         return _approved_templates_locked()
 
 
+def with_approved_snapshot(use):
+    """``use(directory, revision, count, rev)`` for the current approved snapshot, called while the snapshot lock is held, so what ``use`` does
+    with the directory (the Sentinel template bundle is packed from it) cannot race a rebuild of the snapshot."""
+    with _APPROVED_LOCK:
+        directory, revision, count = _approved_templates_locked()
+        return use(directory, revision, count, _APPROVED.get('rev'))
+
+
+def approved_snapshot_cached():
+    """The current snapshot ``(directory, revision, count)`` when it is already built and still fresh, else ``None``: never builds one, never
+    waits for the lock (a snapshot build can take a while), for a caller that only wants what is cheap to know."""
+    from cveFeed import templategen
+    value = _APPROVED['value']
+    if (value and _APPROVED['root'] == os.path.realpath(templategen.TEMPLATES_ROOT) and _APPROVED.get('rev') == policy_rev()
+            and os.path.isdir(value[0]) and time.monotonic() - _APPROVED['at'] < 3600):
+        return value
+    return None
+
+
 def _approved_templates_locked():
     """Snapshot only installed templates passing the same destination/read-only gate as targeted checks."""
     from cveFeed import templategen, validation
@@ -186,11 +205,14 @@ def cve_service(cve_id):
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
-def build_flags(tags=None, profile='normal', severities=None, tech=False, templates_dir=None):
+def build_flags(tags=None, profile='normal', severities=None, tech=False, templates_dir=None, secret_file=None, proxy_args=()):
     """Pure: the nuclei CLI flags for a run, optionally narrowed to ``tags`` (an iterable of tag names
     already validated against a known-safe allowlist by the caller - see cveFeed.nuclei_templates).
     ``profile='light'`` lowers concurrency and rate for a memory-constrained retry. ``severities`` narrows the severity
-    list, and ``tech`` is the light technology-fingerprint pass (the http/technologies templates, info severity)."""
+    list, and ``tech`` is the light technology-fingerprint pass (the http/technologies templates, info severity). ``secret_file`` (the
+    path of a nuclei secrets file, see cveFeed.auth_checks) makes it an authenticated run: nuclei reads the headers from that file, so no
+    value is ever on the command line, and ``-dr`` stops it following redirects, which could carry a header to another host. ``proxy_args`` is the
+    egress proxy's argument list (``cveFeed.egress_proxy.for_tool('nuclei')``, empty for a direct run)."""
     flags = list(BASE_FLAGS)
     if templates_dir:
         flags += ['-t', templates_dir]
@@ -204,7 +226,9 @@ def build_flags(tags=None, profile='normal', severities=None, tech=False, templa
         flags += TECH_FLAGS
     elif tags:
         flags += ['-tags', ','.join(sorted(tags))]
-    return flags
+    if secret_file:
+        flags += ['-sf', secret_file, '-dr']
+    return flags + list(proxy_args)
 
 
 def build_targets(hostnames, ips, ports):
@@ -234,19 +258,24 @@ def host_of(line):
     return raw.rsplit(':', 1)[0].strip('[]').lower() if raw.count(':') == 1 else raw.strip('[]').lower()
 
 
-def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False):
+def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
     """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
     reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter)."""
+    from targetApp.target_types import refuse_local
+    refuse_local('nuclei')
     from reNgine import resources
+    from cveFeed import egress_proxy
     try:
         with open(targets_file) as f:
-            label = f'{sum(1 for _ in f)} targets'
+            hosts = [ln.strip() for ln in f if ln.strip()]
+        label = f'{len(hosts)} targets'
     except OSError:
-        label = 'targets'
+        hosts, label = None, 'targets'
+    proxy_args = egress_proxy.for_tool('nuclei', hosts)  # Settings > Proxy: raises when it is on and no proxy suits nuclei, never a direct run
     kind = 'nuclei-light' if profile == 'light' or tech else 'nuclei'
     approved_dir, _, _ = approved_templates()
     with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
-        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir)], stdout=subprocess.PIPE,
+        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
                                 stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)
         timed_out = threading.Event()
@@ -297,22 +326,30 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
 def scan_targets(scan):
     """Hostnames, IPs and (host, port) pairs discovered for ``scan``."""
     from startScan.models import Subdomain, open_ports
-    from targetApp.target_types import blocked_names, is_scannable_ip
+    from targetApp.target_types import blocked_names, internal_scope_active, is_scannable_ip, sentinel_only_target
     from cveFeed.exclusions import excluded_names, normalize
     hostnames, ips, ports = set(), set(), set()
+    internal = internal_scope_active()  # an internal scan (cveFeed.internal_scan) may target the project's own internal addresses: its stream is a Sentinel's
     banned = excluded_names(scan.domain.project_id)  # hosts the organization excluded for good: never a target
     from cveFeed.archive_rediscovery import archived_names
     banned = banned | archived_names(scan.domain.project_id)
+    from cveFeed.bounty_gate import Gate
+    gate, project = Gate(blocked=()), scan.domain.project_id  # a bug bounty program's scope: a host it does not name, or an address it excludes, is never a target of any stage
     subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
-            if not (banned and normalize(s.name) in banned)]
+            if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)]
     # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
-    pointing_inside = blocked_names([s.name for s in subs])
+    pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
     for sub in subs:
-        if sub.name in pointing_inside:
+        if sub.name in pointing_inside and not (internal and sentinel_only_target(sub.name, scan.domain.project_id)):
             continue
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():
-            if not is_scannable_ip(ip.address):
+            if gate.refusal(project, ip.address, unattended=False, derived=True):
+                continue
+            if ip.is_cdn:  # a shared edge address belongs to the platform and its other customers: the sweeps and nmap never aim at it either
+                continue
+            if not is_scannable_ip(ip.address, project=scan.domain.project_id) and not (
+                    internal and sentinel_only_target(ip.address, scan.domain.project_id)):
                 continue
             ips.add(ip.address)
             for port in open_ports(ip):
@@ -331,8 +368,9 @@ def reuse_findings(scan, project, targets):
         return 0, 0
     mine = {s.name: s for s in Subdomain.objects.filter(scan_history=scan, name__in=hosts)}
     have = set(Vulnerability.objects.filter(scan_history=scan).values_list('name', 'http_url'))
+    # every scan stores its own copy of a finding: only the newest copy of each (name, URL) is read, not all of the history
     source = Vulnerability.objects.filter(target_domain__project_id=project, subdomain__name__in=hosts) \
-        .exclude(scan_history=scan).select_related('subdomain').order_by('-id')
+        .exclude(scan_history=scan).select_related('subdomain').order_by('name', 'http_url', '-id').distinct('name', 'http_url')
     copied, copied_hosts = 0, set()
     for vuln in source.iterator(chunk_size=500):
         key = (vuln.name, vuln.http_url)
@@ -354,7 +392,7 @@ def reuse_findings(scan, project, targets):
     return copied, len(copied_hosts)
 
 
-def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
+def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
     """Run nuclei over the scan's discovered assets and persist every result. Returns a summary dict.
     ``tags`` narrows the template set to a focused pass (see cveFeed.nuclei_templates); omitted, this
     is the blanket info-severity-and-up pass over every default template. Targets this project's nuclei already covered
@@ -470,6 +508,22 @@ def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severitie
     return {'targets': len(targets), 'findings': new, 'reused': reused, **counts}
 
 
+def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
+    """``_run_nuclei``, then, when the scan's target has a stored sign-in (cveFeed.auth_checks), the same selection again for the hosts that
+    sign-in covers, with the headers read from a private secrets file (cveFeed.auth_nuclei). A target with none runs exactly as before."""
+    from cveFeed import auth_nuclei, ledger
+    scope = auth_nuclei.scope_for_scan(scan_id)
+    if scope is None:
+        return _run_nuclei(scan_id, stream, tags, targets, severities, service_override, force)
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
+    targets = list(targets) if targets is not None else build_targets(*scan_targets(scan))
+    out = _run_nuclei(scan_id, stream, tags, targets, severities, service_override, force)
+    out['authenticated'] = auth_nuclei.run_authenticated(scan, scope, targets, stream, tags=tags, severities=severities,
+                                                         service=service_override or (ledger.nuclei_tag_service(tags) if tags else 'nuclei'), force=force)
+    return out
+
+
 LIGHT_SERVICE = 'nuclei-light'
 
 
@@ -494,7 +548,7 @@ def tech_name_from(line):
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
         name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
     name = (name or '').strip()[:100]
-    version = next((str(v) for v in line.get('extracted-results') or [] if v and str(v)[0].isdigit()), '')
+    version = next((str(v).lstrip('vV') for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or ''))), '')
     return f'{name}:{version[:30]}' if name and version else name
 
 

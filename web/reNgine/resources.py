@@ -42,13 +42,16 @@ BASE_COSTS_MB = {
     'nuclei-light': 500,    # fewer parallel hosts
     'nmap': 400,            # -sV over the top 1000 ports; chunks of hosts, and a memory kill halves the chunk
     'nmap-full-bg': 500,    # the background -p- sweep of one IP (cveFeed.fullscan): it waits behind everything else, so discovery is never starved
+    'nmap-udp-bg': 300,     # the background UDP sweep of one IP (cveFeed.udp_scan): a few dozen probes, version detection on what answered
     'naabu': 150,           # SYN port discovery over every TCP port, one process for many addresses
     'template-test': 600,   # one generated template against one host
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
+    'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
+    'testssl': 150,         # testssl.sh and its openssl children against one TLS port
 }
 # How many of each kind may run at once in a container, whatever memory is free: these are CPU and network bound, so more
 # in parallel only makes every one of them slower. Override with HEAVY_MAX_<KIND>, e.g. HEAVY_MAX_NMAP=2.
-MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2}
+MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2}
 DEFAULT_WAIT_SECONDS = 24 * 3600  # a queued deep discovery may wait behind several others, one at a time
 RESERVATION_TTL = 90        # a holder that stops heartbeating loses its reservation after this many seconds
 HEARTBEAT_SECONDS = 3

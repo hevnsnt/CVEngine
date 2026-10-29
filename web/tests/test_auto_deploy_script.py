@@ -126,6 +126,34 @@ class AutoDeployTests(unittest.TestCase):
         self.assertEqual(self.run_deploy().returncode, 0)
         self.assertIn('update --stop-scans drain=1800', self.calls())
 
+    def test_a_checkout_on_another_branch_does_nothing_and_says_so_once(self):
+        # update.sh only ever deploys master: without this the timer backed up the database and failed inside update.sh at every retry
+        self.push_new_commit()
+        self.git('checkout', '-b', 'develop', cwd=self.work)
+        first, second = self.run_deploy(), self.run_deploy()
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertIn('not master', first.stdout)
+        self.assertEqual(second.stdout.strip(), '')
+        self.git('checkout', 'master', cwd=self.work)
+        self.assertEqual(self.run_deploy().returncode, 0)
+        self.assertIn('update --stop-scans drain=1800', self.calls())
+
+    def test_the_update_is_told_not_to_take_a_second_dump(self):
+        self.push_new_commit()
+        updater = self.work / 'scripts' / 'update.sh'
+        updater.write_text(UPDATER.replace('exit 0\n', 'echo "backups=$CVENGINE_UPDATE_BACKUPS" >> "$STUB_DIR/calls"\nexit 0\n'))
+        self.assertEqual(self.run_deploy().returncode, 0)
+        self.assertIn('backups=0', self.calls())
+
+    @unittest.skipUnless(os.geteuid() == 0, 'the ownership check only bites root')
+    def test_root_can_deploy_a_checkout_owned_by_the_user_who_cloned_it(self):
+        self.push_new_commit()
+        subprocess.run(['chown', '-R', '1000:1000', str(self.work)], check=True)
+        result = self.run_deploy(SUDO_UID='')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('update --stop-scans drain=1800', self.calls())
+
     def test_failed_backup_never_updates(self):
         self.push_new_commit()
         (self.stub / 'dump_fail').touch()

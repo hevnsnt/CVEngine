@@ -29,13 +29,36 @@ from django.db.models import Count
 from startScan.models import Subdomain, IpAddress
 from targetApp.models import Domain
 assert Domain.objects.filter(name='rehearsal.example').exists(), 'the target is gone'
-hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example')
-assert hosts.count() == 4, f'{hosts.count()} hosts, expected 4'
+# discovery runs in the background of an updated install and may add hosts of its own (the domain itself, say): the seeded four must all be there
+wanted = {'h0.rehearsal.example', 'h1.rehearsal.example', 'h2.rehearsal.example', 'www.rehearsal.example'}
+hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted)
+assert {h.name for h in hosts} == wanted, f'seeded hosts missing: {sorted(wanted - {h.name for h in hosts})}'
 assert all(h.ip_addresses.exists() for h in hosts), 'a host lost its address'
 dups = IpAddress.objects.values('address').annotate(c=Count('id')).filter(c__gt=1).count()
 assert dups == 0, f'{dups} addresses are still stored more than once'
 print('DATA OK')
 PY
+
+# The old containers ran on the new schema for a while: nothing the update added may make the old code's inserts fail
+if [ -f "$HOME/schema-before.txt" ]; then
+  "$GITHUB_WORKSPACE/.github/rehearsal/schema.sh" check "$HOME/schema-before.txt" || bad "the update added a column the old code cannot insert around"
+fi
+# The application works on the new schema: the MCP endpoint and its token lookup, tools that read the changed tables, the main pages
+dc exec -T web python3 manage.py shell < "$GITHUB_WORKSPACE/.github/rehearsal/smoke.py" || bad "the functional smoke test failed (see the lines above)"
+if [ "$(cat "$HOME/base.sha")" != "$(cat "$HOME/candidate.sha")" ]; then
+  dc exec -T web python3 manage.py shell <<'PY' || bad "the stored closure wording was not rewritten"
+from cveFeed.models import CVEMatch, TriageVerdict
+old = CVEMatch.objects.filter(ai_reason__contains='invalid product correlation').count() + TriageVerdict.objects.filter(reason__contains='invalid product correlation').count()
+new = CVEMatch.objects.filter(ai_reason__contains='different product').count()
+assert old == 0, f'{old} rows still carry the first wording'
+if CVEMatch.objects.exists():
+    assert new > 0 or CVEMatch.objects.filter(ai_reason__contains='Closed automatically').count() == 0, 'no row carries the reworded closure'
+print('WORDING OK', new)
+PY
+fi
+# captured first: `inspect | grep -q` fails under pipefail when grep exits early and the producer gets SIGPIPE, even though it matched
+queues=$(dc exec -T celery celery -A reNgine.tasks inspect active_queues -t 20 2>/dev/null || true)
+grep -q wpscan_queue <<<"$queues" || { bad "no worker consumes wpscan_queue"; grep -oE "'name': '[a-z_]+'" <<<"$queues" | sort -u | head -20; }
 
 if [ "$(mode)" = overlay ]; then
   ports=$(docker ps --filter "label=com.docker.compose.service=proxy" --format '{{.Ports}}')

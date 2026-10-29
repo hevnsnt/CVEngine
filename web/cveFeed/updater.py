@@ -78,6 +78,58 @@ def host_updater():
     return {'seen': True, 'alive': age <= HEARTBEAT_ALIVE_SECONDS, 'age_seconds': age}
 
 
+CERT_WARN_DAYS = 30  # the host renews the web interface certificate with this many days left (scripts/renew-certs.sh); a warning at that point means it did not
+CERT_STALE_SECONDS = 3 * 86400  # the host checks twice a day; this is days of silence
+
+
+def certificate(now=None):
+    """The web interface certificate as scripts/renew-certs.sh last reported it (``.cert-status.json``, written on the host): when it ends,
+    how many days remain now, when it was last checked and renewed, and a ``problem`` sentence when an admin should act (a failed renewal,
+    fewer than 30 days left, expired, or no check for days). ``known`` is False when nothing was ever reported (not an installation with the
+    bundled certificate authority, or an older updater): then nothing is claimed and nothing warns."""
+    unknown = {'known': False, 'not_after': None, 'days_left': None, 'state': 'unknown', 'last_checked_at': None, 'last_renewed_at': None,
+               'last_result': None, 'error': None, 'problem': None}
+    try:
+        with open(_file('.cert-status.json')) as f:
+            data = json.load(f)
+        checked, ends = float(data['checked_at']), data.get('not_after')
+        ends = float(ends) if ends is not None else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return unknown
+    if not math.isfinite(checked) or (ends is not None and not math.isfinite(ends)):
+        return unknown
+    now = now if now is not None else time.time()
+    renewed = data.get('renewed_at')
+
+    def iso(seconds):
+        return datetime.fromtimestamp(seconds, tz=dt_timezone.utc).isoformat()
+    out = dict(unknown, known=True, last_checked_at=iso(checked), last_result=data.get('result') if data.get('result') in ('kept', 'issued', 'external', 'failed') else None,
+               last_renewed_at=iso(float(renewed)) if isinstance(renewed, (int, float)) and math.isfinite(renewed) else None,
+               error=str(data.get('error') or '')[:200] or None)
+    problems = []
+    if ends is not None:
+        out['not_after'] = iso(ends)
+        out['days_left'] = math.floor((ends - now) / 86400)
+        out['state'] = 'expired' if ends <= now else 'expiring' if out['days_left'] < CERT_WARN_DAYS else 'ok'
+        if out['state'] == 'expired':
+            problems.append('The web interface certificate has expired, so browsers warn on every visit.')
+        elif out['state'] == 'expiring' and out['last_result'] == 'external':
+            problems.append(f"The web interface certificate expires in {out['days_left']} days. It was not issued by this server's own authority, so it is not "
+                            f"renewed automatically: renew it as its issuer describes (docs/HOSTING-ONLINE.md).")
+        elif out['state'] == 'expiring':
+            problems.append(f"The web interface certificate expires in {out['days_left']} days; it should have been renewed automatically by now.")
+    else:
+        out['state'] = 'ok' if out['last_result'] != 'failed' else 'unknown'
+    if out['last_result'] == 'failed':
+        problems.append(f"Renewing the web interface certificate failed: {out['error'] or 'no reason was given'}.")
+    if now - checked > CERT_STALE_SECONDS:
+        problems.append(f"The certificate renewal check has not run for {int((now - checked) // 86400)} days (is the host updater or cron running?).")
+    if problems and out['last_result'] != 'external':
+        problems.append('On the server, run scripts/renew-certs.sh; its log is cert.log in .git/cvengine-update.')
+    out['problem'] = ' '.join(problems) or None
+    return out
+
+
 MODES = ('manual', 'auto')
 
 
@@ -310,5 +362,6 @@ def state(row):
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
         'host_updater': host_updater(),
+        'certificate': certificate(),
         'mode': read_mode(),
     }

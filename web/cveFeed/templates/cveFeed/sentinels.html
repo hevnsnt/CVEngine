@@ -1,0 +1,110 @@
+{% extends 'cveFeed/base.html' %}
+{% load assets %}
+{% block title %}CVEngine · Sentinels{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+<h1>Sentinels</h1>
+<p class="sub">A Sentinel is a scanner you run on your own network: it registers itself, pulls scan work off this project's queue (nmap, naabu, the nuclei passes, TLS audits, UDP sweeps, WPScan, OpenVAS and, on an internal network, host discovery), runs it and reports typed results back. A scan with no live Sentinel runs the external stages locally exactly as before; work on an internal network only ever runs on a Sentinel inside it.</p>
+</div></div>
+
+<div class="grid main" style="margin-top:0">
+  <div>
+    <div class="card">
+      <h2 style="margin-bottom:8px">Registered Sentinels</h2>
+      <div id="live" aria-live="polite"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
+    <p class="note" style="margin-bottom:6px">A Sentinel can be scoped to one project, one organization (every project of it, present and future) or, for an App Admin, the whole instance (every organization and project). Whichever scope, Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, packaged into one opaque blob. On the machine that will scan, clone <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code>, and run <code>docker compose up -d</code>; see that repository's <code>README.md</code> (or its <code>AGENTS.md</code> if an AI agent is doing the provisioning).</p>
+    <div class="field"><label for="enroll-scope">Scope</label>
+      <select id="enroll-scope">
+        <option value="project">Project</option>
+        {% if enroll_orgs %}<option value="org">Organization</option>{% endif %}
+        {% if user.is_superuser %}<option value="instance">Instance (everything)</option>{% endif %}
+      </select>
+    </div>
+    <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
+    <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization</label><select id="enroll-org">{% for o in enroll_orgs %}<option value="{{ o.slug }}">{{ o.name }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="enroll-network">Where it runs</label>
+      <select id="enroll-network">
+        <option value="external">External: reaches the internet-facing targets</option>
+        <option value="internal">Internal: inside a private network (office LAN, VPC, VPN)</option>
+      </select>
+    </div>
+    <div class="field"><label for="enroll-profile">Size</label>
+      <select id="enroll-profile">
+        <option value="full">Full: also runs OpenVAS (several GB, hours of feed sync on first start)</option>
+        <option value="light">Light: nmap, naabu, nuclei, testssl and WPScan only</option>
+      </select>
+    </div>
+    <button class="btn" type="button" id="enroll-go">Provision</button>
+    <div id="enroll-out" class="msg ok" style="display:none" role="status"></div>
+    <h2 style="margin:18px 0 8px">What a Sentinel needs</h2>
+    <p class="note">The blob is nothing new: standard base64 of the same JSON <code>projects/{slug}/sentinels/enroll</code>, <code>orgs/{slug}/sentinels/enroll</code> or <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, scope}</code>, plus <code>project</code> or <code>org</code> where scope is not instance-wide), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/sentinel-live.js' %}"></script>
+<script>
+(function () {
+  var csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+  function api(method, url, body) {
+    return fetch(url, {method: method, credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: body ? JSON.stringify(body) : undefined})
+      .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, status: r.status, d: d}; }); });
+  }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function copyBtn(getText) {
+    var b = el('button', 'copy', 'Copy'); b.type = 'button';
+    b.addEventListener('click', function () {
+      var text = getText();
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { window.getSelection().selectAllChildren(b.parentNode); });
+      else window.getSelection().selectAllChildren(b.parentNode);
+    });
+    return b;
+  }
+
+  var enrollScope = document.getElementById('enroll-scope'), enrollProject = document.getElementById('enroll-project'),
+    enrollProjectField = document.getElementById('enroll-project-field'), enrollOrg = document.getElementById('enroll-org'),
+    enrollOrgField = document.getElementById('enroll-org-field'), enrollOut = document.getElementById('enroll-out');
+  api('GET', '/api/v1/projects').then(function (x) {
+    (x.d.results || x.d.projects || []).forEach(function (p) { var o = el('option', '', p.name || p.slug); o.value = p.slug; enrollProject.appendChild(o); });
+  });
+  enrollScope.addEventListener('change', function () {
+    enrollProjectField.style.display = enrollScope.value === 'project' ? '' : 'none';
+    enrollOrgField.style.display = enrollScope.value === 'org' ? '' : 'none';
+  });
+  document.getElementById('enroll-go').addEventListener('click', function () {
+    var scope = enrollScope.value, url;
+    if (scope === 'project') {
+      if (!enrollProject.value) return;
+      url = '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll?format=blob';
+    } else if (scope === 'org') {
+      if (!enrollOrg.value) return;
+      url = '/api/v1/orgs/' + encodeURIComponent(enrollOrg.value) + '/sentinels/enroll?format=blob';
+    } else {
+      url = '/api/v1/sentinels/enroll?format=blob';
+    }
+    url += '&network=' + document.getElementById('enroll-network').value + '&profile=' + document.getElementById('enroll-profile').value;
+    api('POST', url).then(function (x) {
+      enrollOut.style.display = 'block';
+      if (x.ok) {
+        enrollOut.className = 'msg ok secret-box'; enrollOut.textContent = '';
+        var label = x.d.scope === 'project' ? x.d.project : x.d.scope === 'org' ? ('organization ' + x.d.org) : 'the whole instance';
+        enrollOut.appendChild(el('span', '', 'One-time blob for ' + label + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Paste this into your Sentinel\'s CVENGINE_SENTINEL_BLOB and run it once; the Sentinel then keeps its own token.'));
+        var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); enrollOut.appendChild(code);
+        var steps = x.d.setup || {};
+        enrollOut.appendChild(el('div', 'meta', 'Or run, on the machine, in the cloned repository (' + steps.network + ', ' + steps.profile + '):'));
+        var cmd = el('pre', 'code', steps.configure_alternative || ''); cmd.appendChild(copyBtn(function () { return steps.configure_alternative || ''; })); enrollOut.appendChild(cmd);
+        enrollOut.appendChild(el('div', 'meta', 'server_url: ' + x.d.server_url));
+      } else {
+        enrollOut.className = 'msg err'; enrollOut.textContent = x.d.error || 'Could not generate an enrollment blob.';
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

@@ -5,8 +5,9 @@ One row per cve.now entry, carrying the merged severity, exploitation
 correlation engine matches against the discovered asset inventory.
 """
 from django.db import models
+from django.db.models.functions import Lower
 
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField
+from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -51,9 +52,13 @@ class CVEEntry(models.Model):
     published_at = models.DateTimeField(null=True, blank=True)
     first_seen_at = models.DateTimeField(null=True, blank=True)
 
-    raw = models.JSONField(default=dict, blank=True)  # full entry, for fields not yet modelled
     intel = models.JSONField(default=dict, blank=True)  # per-source exploitation detail (cveFeed.intel): kev, epss, exploits
     needs_recorrelation = models.BooleanField(default=False)
+    # A flaw an attacker can only use from the host itself (CVSS attack vector local or physical, or a kernel or operating-system
+    # elevation of privilege): an external scan cannot see the software or patch level that decides it, so it is never matched to a
+    # host (cveFeed.locality). Computed from the record; ``locality_at`` is when it was last worked out.
+    local_only = models.BooleanField(default=False, db_default=False, db_index=True)
+    locality_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     synced_at = models.DateTimeField(auto_now=True)
 
@@ -117,7 +122,6 @@ class CVEEntry(models.Model):
             "status": entry.get("status") or "",
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
-            "raw": entry,
         }
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds
         for field in cls._meta.get_fields():
@@ -448,7 +452,7 @@ class AgentActivity(models.Model):
     target, writing / running / validating a check. Global entries (project null) are visible to every member."""
 
     KINDS = ("feed", "inventory", "target", "confirm", "write_check", "run_check", "validate", "discovery", "scan", "hygiene", "changes",
-             "remediation")
+             "remediation", "saved_search", "runzero")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
     status = models.CharField(max_length=10, default="done")  # running | done | failed
@@ -562,6 +566,39 @@ class HostLabel(models.Model):
         return f"{self.host}: {self.label}"
 
 
+class ProbeObservation(models.Model):
+    """One fact a version or identity probe (cveFeed.probes) found, or looked for and did not find, about a host: a product's version,
+    which of several look-alike products runs there, the edge in front of it, whether it is WordPress. One row per
+    (project, host, probe, port, kind, product); a repeat updates it. ``outcome`` says whether the probe found the fact, found that the host
+    hides it (``hidden``: the product answers and states no version), saw only a CDN or WAF edge (``edge``), was refused by the edge
+    (``challenged``) or found nothing of the kind (``absent``). Never a guess: a version is stored only when the response states it."""
+
+    OUTCOMES = ("found", "hidden", "edge", "challenged", "absent")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase
+    probe = models.CharField(max_length=48)
+    kind = models.CharField(max_length=16)  # version | identity | edge | wordpress | wp-plugin | wp-theme | vhost | subapp
+    product = models.CharField(max_length=120, blank=True, default="")
+    version = models.CharField(max_length=100, blank=True, default="")
+    variant = models.CharField(max_length=60, blank=True, default="")  # identity: nginx, ingress-nginx, nginx-ui ...
+    port = models.IntegerField(default=0)  # 0: not specific to one port
+    url = models.CharField(max_length=500, blank=True, default="")  # the path or URL that answered, host name removed
+    outcome = models.CharField(max_length=12, default="found")
+    confidence = models.FloatField(default=0.0)
+    source = models.CharField(max_length=48, blank=True, default="")  # header:server, body:regex, nmap:-sV, wpscan ...
+    evidence = models.JSONField(default=dict, blank=True)
+    first_seen = models.DateTimeField(default=timezone.now)
+    observed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "probe", "port", "kind", "product"], name="uniq_probeobs_host_probe_port_kind_product")]
+        indexes = [models.Index(fields=["project", "host"], name="probeobs_proj_host_idx")]
+
+    def __str__(self):
+        return f"{self.host}: {self.probe} {self.product} {self.version}".strip()
+
+
 class HostProfile(models.Model):
     """Editable asset information for one host of a project: who owns it, what it is for and how much it matters.
     One row per (project, host); the host name is stored lowercase. Never read by a scanner."""
@@ -584,10 +621,29 @@ class HostProfile(models.Model):
         return f"{self.host}: {self.criticality}"
 
 
+class HostMove(models.Model):
+    """A host moved out of this project into another ("Move host"). The source project never brings it back: its discovery and
+    scans treat the name as excluded (cveFeed.exclusions.excluded_names), while the destination scans it as its own target.
+    Exact name only, lowercase. Moving the host back into this project deletes the row."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase, no trailing dot
+    moved_to = models.ForeignKey("dashboard.Project", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    moved_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    moved_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hostmove_project_host")]
+
+    def __str__(self):
+        return f"{self.host} moved out of project {self.project_id}"
+
+
 class HostExclusion(models.Model):
     """A host an organization never wants scanned again ("Remove & exclude"). Org-wide: it applies to every project of the org
-    and to nothing outside it. The match is the whole host name, lowercase and case-insensitive; never a suffix or substring,
-    so excluding ``provider.example`` leaves ``notprovider.example`` and ``www.provider.example`` alone.
+    and to nothing outside it. The match is the whole host name, lowercase and case-insensitive; never a bare suffix or substring,
+    so excluding ``provider.example`` leaves ``notprovider.example`` and ``www.provider.example`` alone, unless the exclusion was
+    made with ``include_subdomains``, which also covers every name under the domain (on a dot boundary).
 
     Not in tenancy.scope.SCOPES (that maps a model to a project id): it is read and written only through cveFeed.exclusions
     and the agentapi services, which always filter by the caller's own org, so it cannot leak across orgs. Scanners read it
@@ -595,6 +651,7 @@ class HostExclusion(models.Model):
 
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="host_exclusions")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
+    include_subdomains = models.BooleanField(default=False, db_default=False)  # a whole domain: the name and every name under it ("-example.com")
     reason = models.CharField(max_length=300, blank=True, default="")
     created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(default=timezone.now)
@@ -634,12 +691,20 @@ class HostState(models.Model):
     inactive_first_absent_at = models.DateTimeField(null=True, blank=True)
     inactive_last_absent_at = models.DateTimeField(null=True, blank=True)
     inactive_absent_checks = models.PositiveSmallIntegerField(default=0)
+    # A different streak from inactive_first_absent_at/retired_at: this host is still enumerated every run (it never
+    # vanished), but every attempt since unresolved_first_at failed to resolve to a scannable IP (see
+    # cveFeed.unresolved_archive). One successful resolution resets all three fields to their defaults.
+    unresolved_first_at = models.DateTimeField(null=True, blank=True)
+    unresolved_last_at = models.DateTimeField(null=True, blank=True)
+    unresolved_checks = models.PositiveSmallIntegerField(default=0, db_default=0)
+    resolution_note = models.CharField(max_length=160, blank=True, default='', db_default='')  # why it has no scannable address: 'private address ...' or 'no DNS answer' (unresolved_archive.recheck)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hoststate_project_host")]
         indexes = [models.Index(fields=["domain", "retired_at"], name="hoststate_domain_retired_idx"),
                    models.Index(fields=["project", "zombie_since"], name="hoststate_proj_zombie_idx"),
-                   models.Index(fields=['archived_at', 'retired_at', 'id'], name='hoststate_inactive_idx')]
+                   models.Index(fields=['archived_at', 'retired_at', 'id'], name='hoststate_inactive_idx'),
+                   models.Index(fields=['archived_at', 'unresolved_first_at', 'id'], name='hoststate_unresolved_idx')]
 
     def __str__(self):
         return self.host
@@ -744,6 +809,23 @@ class InactiveArchiveReview(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
 
+class UnresolvedArchiveReview(models.Model):
+    """One daily, checkpointed pass over hosts stuck without a scannable IP (see cveFeed.unresolved_archive): a
+    shorter, separate timeline from InactiveArchiveReview's 30-day vanished-from-enumeration case."""
+
+    day = models.DateField(unique=True)
+    status = models.CharField(max_length=16, default='queued')
+    cursor_hoststate_id = models.PositiveBigIntegerField(default=0)
+    total = models.PositiveIntegerField(default=0)
+    checked = models.PositiveIntegerField(default=0)
+    archived = models.PositiveIntegerField(default=0)
+    deferred = models.PositiveIntegerField(default=0)
+    errors = models.PositiveIntegerField(default=0)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+
 class AssetChange(models.Model):
     """One observed difference between two snapshots of a host. Append only; pruned after a retention period."""
 
@@ -776,7 +858,9 @@ class AssetChange(models.Model):
 class RouteAuth(models.Model):
     """How one web route answers an anonymous GET: open, a login page, a session requirement (401/403 or a redirect to a
     login), or single sign-on (a redirect to or a page from a known identity provider). Probes are safe GETs with no
-    credentials, no cookies, no redirects followed, and at most ROUTE_SAMPLE_BYTES of each body read."""
+    credentials, no cookies, no redirects followed, and at most ROUTE_SAMPLE_BYTES of each body read. When the owner stored a sign-in
+    for the target, the same GET is also made with it and answered under ``evidence["authenticated"]`` (cveFeed.auth_routes); the
+    state and every other field stay the anonymous answer."""
 
     STATES = ("open", "login", "session_required", "sso", "redirect", "not_found", "error")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
@@ -984,6 +1068,7 @@ class Triage(models.Model):
             models.Index(fields=["project", "classification"], name="triage_proj_class_idx"),
             models.Index(fields=["project", "validation_status", "next_attempt_at"], name="triage_proj_valid_idx"),
             models.Index(fields=["kind", "signature"], name="triage_kind_sig_idx"),
+            models.Index(fields=["project", "host"], name="triage_proj_host_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -1321,7 +1406,9 @@ class FindingComment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx")]
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx"),
+                   # the comment count of a findings page names (kind, id) with no project (agentapi.services._comment_count_annotation)
+                   models.Index(fields=["finding_kind", "finding_id"], name="findingcomment_kind_id_idx")]
         ordering = ["created_at", "id"]
 
 
@@ -1354,6 +1441,10 @@ class ProjectSettings(models.Model):
 
     project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="cve_settings")
     sla_days = models.JSONField(default=dict, blank=True)  # only the severities changed from DEFAULT_SLA_DAYS
+    # host inventory reports (cveFeed.host_inventory): whether a report from a host nobody scans yet may add it to the project (off:
+    # it waits for an administrator to adopt it), and how old a report may get before it stops creating findings
+    inventory_create_hosts = models.BooleanField(default=False, db_default=False)
+    inventory_stale_days = models.PositiveSmallIntegerField(default=14, db_default=14)
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 
@@ -1362,6 +1453,27 @@ class ProjectSettings(models.Model):
         """The effective {severity: days} of ``project``: the defaults with its own overrides on top."""
         row = cls.objects.filter(project=project).first()
         return {**DEFAULT_SLA_DAYS, **{k: v for k, v in ((row.sla_days if row else None) or {}).items() if k in DEFAULT_SLA_DAYS}}
+
+
+class RunZeroSync(models.Model):
+    """The runZero integration of one project (cveFeed.runzero_sync): whether unknown runZero addresses are imported as targets, which
+    runZero search limits that, and how the last sync went. One row per project, created when first needed. The token itself is an
+    ApiCredential; nothing here is secret."""
+
+    DEFAULT_SEARCH = "alive:true"
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="runzero_sync")
+    import_enabled = models.BooleanField(default=False)
+    search = models.CharField(max_length=300, default=DEFAULT_SEARCH)  # runZero inventory search that limits what is imported
+    status = models.CharField(max_length=10, blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)  # when the current or last run began (a stale "running" is not honoured)
+    last_sync_at = models.DateTimeField(null=True, blank=True)  # when the last run finished, whether it worked or not
+    last_ok_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    counts = models.JSONField(default=dict, blank=True)  # what the last good run did: assets, matched_hosts, imported, skipped ...
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"runZero sync for {self.project_id}"
 
 
 class CVEDetection(models.Model):
@@ -1378,6 +1490,7 @@ class CVEDetection(models.Model):
     ai_model = models.CharField(max_length=128, blank=True, default="")
     ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
     ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
+    ai_input_hash = models.CharField(max_length=16, blank=True, default="", db_default="")  # what the CVE said when the model last read it: a change re-asks
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1388,3 +1501,449 @@ class CVEDetection(models.Model):
 
     def __str__(self):
         return f"detection for {self.cve_entry_id}"
+
+
+class SavedSearch(models.Model):
+    """A host search (the Hosts page / ``search_hosts`` syntax) a person keeps and, optionally, is alerted about. Private to its
+    owner, inside one project. The evaluator (cveFeed.saved_searches) re-runs due searches with the owner's own access and keeps
+    ``matched`` (host key hash -> host name, one entry per host, aliases of one machine counted once) to tell new matches from old."""
+
+    FREQUENCIES = {"hourly": 60, "daily": 24 * 60, "weekly": 7 * 24 * 60}  # minutes between evaluations
+    CHANNELS = ("slack", "discord", "telegram", "lark")
+    MAX_PER_USER, MAX_PER_PROJECT = 25, 100
+    MAX_NAME, MAX_QUERY, MAX_MATCHES = 80, 1000, 1000  # a search with more matches than MAX_MATCHES is too broad to watch
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    owner = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
+    name = models.CharField(max_length=MAX_NAME)
+    query = models.CharField(max_length=MAX_QUERY)
+    enabled = models.BooleanField(default=True)  # evaluated on schedule; off after the owner loses access, until they switch it on again
+    alert_new = models.BooleanField(default=True)  # a host starts to match
+    alert_gone = models.BooleanField(default=False)  # a host stops matching
+    threshold = models.PositiveIntegerField(null=True, blank=True)  # the match count reaches this (once per crossing)
+    channels = models.JSONField(default=list, blank=True)  # subset of CHANNELS; empty means every channel Settings has on
+    frequency = models.CharField(max_length=8, default="daily")
+    next_run_at = models.DateTimeField(default=timezone.now)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_alert_at = models.DateTimeField(null=True, blank=True)
+    last_match_count = models.PositiveIntegerField(default=0)
+    last_status = models.CharField(max_length=12, blank=True, default="")  # ok | too_broad | error | disabled
+    last_error = models.CharField(max_length=200, blank=True, default="")
+    baseline_at = models.DateTimeField(null=True, blank=True)  # null until the first evaluation, which alerts nothing
+    matched = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "owner", "name"], name="uniq_savedsearch_project_owner_name")]
+        indexes = [models.Index(fields=["enabled", "next_run_at"], name="savedsearch_due_idx"),
+                   models.Index(fields=["owner", "project"], name="savedsearch_owner_proj_idx")]
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return f"{self.name}: {self.query}"
+
+
+class TailscaleLink(models.Model):
+    """A tailnet an administrator connected to one project (see cveFeed.tailscale_sync): its devices become that project's targets.
+    One link per project. The credentials are encrypted like every other stored secret and never leave the server; the settings
+    page and the API say only whether they are set. Connecting is what authorises scanning the tailnet's addresses for this
+    project's imported devices (cveFeed.tailscale_scope)."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="tailscale_link")
+    enabled = models.BooleanField(default=True)
+    credentials = EncryptedJSONField(default=dict, blank=True)  # {"access_token"} or {"client_id", "client_secret"}
+    use_local = models.BooleanField(default=True)  # also read this server's own tailscaled (the sidecar) for status and peers
+    ROUTING_CHOICES = (("auto", "this server's tailscale sidecar"), ("host", "already routed (the Docker host is on the tailnet)"))
+    routing = models.CharField(max_length=8, choices=ROUTING_CHOICES, default="auto")  # how scans reach the tailnet; "host" is the operator's word
+    scan_reachable = models.BooleanField(default=False)  # the scanner can reach this tailnet (checked at each sync); only then may its devices be scanned
+    auto_scan = models.BooleanField(default=False)  # queue the normal pipeline for new and changed devices
+    max_devices = models.PositiveIntegerField(default=100)  # most devices one sync imports or queues; the rest follow on the next run
+    only_tags = models.JSONField(default=list, blank=True)  # import only devices carrying one of these tags (empty: any)
+    skip_tags = models.JSONField(default=list, blank=True)  # never import devices carrying one of these tags
+    only_os = models.JSONField(default=list, blank=True)  # import only these operating systems (empty: any)
+    check_policy = models.BooleanField(default=True)  # read the tailnet policy file for the tailnet-wide findings
+    tailnet_name = models.CharField(max_length=200, blank=True, default="")
+    device_count = models.PositiveIntegerField(default=0)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=12, default="never")  # never | ok | partial | error
+    last_error = models.CharField(max_length=300, blank=True, default="")
+    local_state = models.JSONField(default=dict, blank=True)  # what this server's own tailscaled reported at the last sync
+    anchor_domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # carries the tailnet-wide findings
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    def __str__(self):
+        return f"tailnet of project {self.project_id}"
+
+
+class TailscaleDevice(models.Model):
+    """One device of a linked tailnet and what Tailscale said about it at the last sync. ``domain`` is the target the device became
+    (named by its tailnet IPv4 address, which every scanner already handles); ``facts`` is the clipped, typed record. A device that
+    left the tailnet keeps its row with ``departed_at`` set, so its findings and history stay and its address stops being scannable."""
+
+    link = models.ForeignKey(TailscaleLink, on_delete=models.CASCADE, related_name="devices")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    node_id = models.CharField(max_length=80)  # Tailscale's stable node id (the API's nodeId or id; the public key from a local status)
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    name = models.CharField(max_length=300, blank=True, default="")  # MagicDNS name without the trailing dot, else the hostname
+    addresses = models.JSONField(default=list, blank=True)  # tailnet IPs only (100.64.0.0/10, fd7a:115c:a1e0::/48)
+    online = models.BooleanField(default=False)
+    facts = models.JSONField(default=dict, blank=True)
+    fingerprint = models.CharField(max_length=40, blank=True, default="")  # of the facts that matter for scanning, to spot a changed device
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)  # the last sync that listed it
+    departed_at = models.DateTimeField(null=True, blank=True)
+    scan_queued_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["link", "node_id"], name="uniq_tailscaledevice_link_node")]
+        indexes = [models.Index(fields=["project", "departed_at"], name="tsdevice_proj_departed_idx")]
+
+    def __str__(self):
+        return self.name or self.node_id
+
+
+class HostInventory(models.Model):
+    """The latest report one machine sent about itself (cveFeed.host_inventory): what the on-host reporter script found, which an
+    external scan cannot see. One row per (project, machine); ``host`` is the name of the project's host it was matched to (lowercase,
+    like HostProfile), empty while the report is unmatched and waiting for an administrator. The package list is kept compact
+    (``[{n, v, e, a, s}]``); older reports are summarised in HostInventoryReport."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    key = models.CharField(max_length=300)  # the machine's app-specific id hash, else "h:" plus its lowercase host name
+    host = models.CharField(max_length=500, blank=True, default="")
+    match_basis = models.CharField(max_length=12, blank=True, default="")  # ip | name | adopted | "" (unmatched)
+    hostname = models.CharField(max_length=255, blank=True, default="")
+    fqdn = models.CharField(max_length=255, blank=True, default="")
+    ips = models.JSONField(default=list, blank=True)
+    os_family = models.CharField(max_length=16, blank=True, default="")  # linux | windows | macos
+    os_name = models.CharField(max_length=120, blank=True, default="")
+    os_version = models.CharField(max_length=60, blank=True, default="")
+    os_build = models.CharField(max_length=60, blank=True, default="")
+    os_kernel = models.CharField(max_length=80, blank=True, default="")
+    os_arch = models.CharField(max_length=20, blank=True, default="")
+    os_info = models.JSONField(default=dict, blank=True)  # the whole validated os block (id, pretty name, last boot and update, ...)
+    packages = models.JSONField(default=list, blank=True)
+    package_count = models.PositiveIntegerField(default=0)
+    patches = models.JSONField(default=list, blank=True)
+    services = models.JSONField(default=list, blank=True)  # listening sockets
+    details = models.JSONField(default=dict, blank=True)  # runtime (reboot, containers, units) and security posture
+    script_name = models.CharField(max_length=40, blank=True, default="")
+    script_version = models.CharField(max_length=20, blank=True, default="")
+    collected_at = models.DateTimeField(null=True, blank=True)  # the host's own clock
+    reported_at = models.DateTimeField(default=timezone.now)  # ours: staleness is judged on this one
+    token_id = models.PositiveBigIntegerField(null=True, blank=True)  # which token sent it (kept after the token is deleted)
+    source_ip = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "key"], name="uniq_hostinventory_project_key")]
+        indexes = [models.Index(fields=["project", "host"], name="hostinv_project_host_idx")]
+
+    def __str__(self):
+        return f"{self.hostname or self.key}: {self.os_name} {self.os_version}".strip()
+
+
+class HostInventoryReport(models.Model):
+    """One report of a HostInventory, summarised (never the whole package list): when, what changed since the one before and how big.
+    Trimmed to the newest ``host_inventory.HISTORY_KEEP`` per machine."""
+
+    inventory = models.ForeignKey(HostInventory, on_delete=models.CASCADE, related_name="history")
+    reported_at = models.DateTimeField()
+    script_version = models.CharField(max_length=20, blank=True, default="")
+    os_summary = models.CharField(max_length=200, blank=True, default="")
+    package_count = models.PositiveIntegerField(default=0)
+    changes = models.JSONField(default=dict, blank=True)  # {added, removed, changed: counts, names: [first few], os_changed: bool}
+
+    class Meta:
+        ordering = ["-reported_at", "-id"]
+
+
+class AuthCredential(models.Model):
+    """Request headers and a cookie the owner supplied for a target they may test, so Nuclei and the web route check see the signed-in
+    application and not only its login page (see cveFeed.auth_checks). One row per target and host: ``host`` names the one host it is
+    for, or is blank for every host of the target (the target's own name and its subdomains). ``origins`` lists the ``scheme:port`` pairs it
+    may be sent to; nothing else is covered. The header and cookie values are encrypted at rest and never returned by any read: only
+    the header names are shown. Past ``expires_at`` it is not sent."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="auth_credentials")
+    host = models.CharField(max_length=300, blank=True, default="")
+    label = models.CharField(max_length=80)
+    origins = models.JSONField(default=list)  # ["https:443"]: the only scheme and port pairs the values may be sent to
+    secret = EncryptedJSONField(default=dict)  # {"headers": [[name, value], ...], "cookie": "a=b; c=d"}
+    expires_at = models.DateTimeField(null=True, blank=True)
+    # The owner's choice, per target: send the values over a TLS connection whose certificate does not verify (self-signed, expired, wrong name).
+    # Off by default: then a sign-in goes only to a server that proves its name, and anyone in the network path could read it otherwise.
+    allow_untrusted_certificate = models.BooleanField(default=False, db_default=False)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["domain", "host"], name="uniq_authcredential_domain_host")]
+        indexes = [models.Index(fields=["project"], name="authcred_project_idx")]
+
+    def __str__(self):
+        return f"{self.label} for {self.host or self.domain_id}"
+
+
+class ReportExport(models.Model):
+    """One requested PDF report (cveFeed.report_export): who asked for what, how it went, and the random file name it was written to.
+
+    The file lives under the report directory and is served only by an authenticated view to the user who asked, until ``expires_at``.
+    ``token`` is the id a client sees; ``filename`` is a second random value that never leaves the server."""
+
+    STATUSES = ("queued", "running", "done", "failed")
+    token = models.CharField(max_length=64, unique=True)
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    requested_by = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500, blank=True, default="")  # empty: the whole project
+    include_closed = models.BooleanField(default=False)  # also list fixed and accepted-risk findings
+    status = models.CharField(max_length=10, default="queued")
+    filename = models.CharField(max_length=80, blank=True, default="")
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    summary = models.JSONField(default=dict, blank=True)  # what the report holds and what the caps left out
+    error = models.CharField(max_length=200, blank=True, default="")
+    celery_id = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "expires_at"], name="reportexport_status_exp_idx"),
+                   models.Index(fields=["requested_by", "created_at"], name="reportexport_user_created_idx")]
+        ordering = ["-id"]
+
+    def __str__(self):
+        return f"report {self.pk} {self.project_id} {self.host or 'project'} [{self.status}]"
+
+
+class OpenvasSettings(models.Model):
+    """Single-row state of the optional OpenVAS (Greenbone) add-on (see cveFeed.openvas_scan): the App Admin's switch, the GMP login of the
+    sidecar and what the worker last saw of it. Off by default; while it is off nothing contacts the sidecar and the beat task is disabled.
+    The password is encrypted like every other stored secret and never leaves the server: the settings page says only whether it is set."""
+
+    enabled = models.BooleanField(default=False)
+    sentinel_only = models.BooleanField(default=False)  # refuse the local gvmd fallback: a due batch with no eligible Sentinel stays due
+    gmp_username = models.CharField(max_length=64, blank=True, default="")
+    gmp_password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
+    state = models.JSONField(default=dict, blank=True)  # the worker's last check: {checked_at, connected, gmp_version, error, feed: {...}}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls.objects.create()
+
+    def __str__(self):
+        return f"OpenVAS add-on ({'on' if self.enabled else 'off'})"
+
+
+class SmtpSettings(models.Model):
+    """Single-row outgoing mail server (Settings, Email; see cveFeed.mailer). Off by default: with it off, or with no address on the
+    account, adding a person shows a temporary password as it always did. The password is encrypted like every other stored secret and
+    never leaves the server: the settings page says only whether it is set."""
+
+    SECURITY_CHOICES = (("starttls", "STARTTLS"), ("ssl", "SSL/TLS"), ("none", "None"))
+
+    enabled = models.BooleanField(default=False)
+    host = models.CharField(max_length=255, blank=True, default="")
+    port = models.PositiveIntegerField(default=587)
+    security = models.CharField(max_length=8, choices=SECURITY_CHOICES, default="starttls")
+    username = models.CharField(max_length=255, blank=True, default="")
+    password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
+    from_address = models.CharField(max_length=254, blank=True, default="")
+    from_name = models.CharField(max_length=100, blank=True, default="")
+    verify_certificate = models.BooleanField(default=True)  # off only for a relay with a private or self-signed certificate
+    link_base = models.CharField(max_length=200, blank=True, default="")  # the address links in a message start with; empty: https://DOMAIN_NAME
+    state = models.JSONField(default=dict, blank=True)  # the last test send: {at, ok, to, error}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls()
+
+    def __str__(self):
+        return f"Outgoing mail ({'on' if self.enabled else 'off'})"
+
+
+class OpenvasProject(models.Model):
+    """A project's opt-in to OpenVAS scanning. Off by default. The project's hosts that are Fire or Smoke are scanned by themselves; ``hosts`` (each
+    one already a host of the project) adds hosts someone named, still gated by heat unless the host is also in ``forced_hosts``. ``target_id`` is the GVM target last made for this host set, kept
+    so an unchanged set reuses it."""
+
+    project = models.OneToOneField("dashboard.Project", on_delete=models.CASCADE, related_name="openvas_link")
+    enabled = models.BooleanField(default=False)
+    hosts = models.JSONField(default=list, blank=True)
+    forced_hosts = models.JSONField(default=list, blank=True)  # the listed hosts an administrator chose to scan whatever their heat (OpenVAS otherwise only scans Fire or Smoke)
+    # An explicit "not this project" that wins over the organization's opt-in (``OpenvasOrg``); ``enabled`` (the project's own opt-in) wins over this.
+    excluded = models.BooleanField(default=False, db_default=False)
+    target_id = models.CharField(max_length=40, blank=True, default="")
+    target_key = models.CharField(max_length=64, blank=True, default="")  # hash of the address set the target was made for
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    def __str__(self):
+        return f"OpenVAS opt-in of project {self.project_id}"
+
+
+class OpenvasOrg(models.Model):
+    """An organization's opt-in to OpenVAS scanning: every project of the organization (the ones it has now and the ones it gets later) is
+    scanned, through the same gate as a single opted-in project. An Org Admin or an App Admin sets it; nothing outside the chosen organizations
+    is scanned."""
+
+    org = models.OneToOneField("dashboard.Org", on_delete=models.CASCADE, related_name="openvas_link")
+    enabled = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    def __str__(self):
+        return f"OpenVAS opt-in of organization {self.org_id}"
+
+
+class OpenvasRun(models.Model):
+    """One GVM task cvENGINE started: the batch of hosts it covers, where it stands and what its import found. At most one is ``running``
+    at a time (the constraint), which is how the sweep stays one task at a time even across workers and restarts."""
+
+    STATUSES = ("running", "done", "failed", "stopped")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    status = models.CharField(max_length=10, default="running")
+    sentinel_task = models.ForeignKey("agentapi.SentinelTask", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Null: cvENGINE ran this against its own sidecar. Set: a Sentinel ran it against its own, and this row only tracks the
+    # hand-off and the imported result - see cveFeed.openvas_scan.dispatch_to_sentinel / poll_sentinel.
+    task_id = models.CharField(max_length=40, blank=True, default="")
+    target_id = models.CharField(max_length=40, blank=True, default="")
+    gvm_status = models.CharField(max_length=30, blank=True, default="")  # the task's own status: New, Requested, Queued, Running, Done ...
+    progress = models.IntegerField(default=0)
+    hosts = models.JSONField(default=dict, blank=True)  # {address: host name the results are stored under}
+    summary = models.JSONField(default=dict, blank=True)  # what the import did: results, findings, evidence, resolved, skipped
+    error = models.CharField(max_length=300, blank=True, default="")
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["status"], condition=models.Q(status="running"), name="uniq_openvasrun_one_running")]
+        ordering = ["-id"]
+
+    def __str__(self):
+        return f"OpenVAS run {self.pk} ({self.status})"
+
+
+class Supplier(models.Model):
+    """A third party a project depends on and cannot fix for itself (cveFeed.supplier_scan). It is NOT an owned host: it never becomes a
+    target, host or scan input, and nothing the owned-asset flows do (discovery, port scans, assessments, remediation, SLA clocks, stats)
+    reads this table. ``domains`` are the exact names that are checked, never expanded. The checks are passive and polite, run weekly at
+    most per supplier, and store their results as ``SupplierFinding`` rows."""
+
+    TIERS = ("critical", "high", "normal")
+    TIER_CHOICES = [(t, t) for t in TIERS]
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="suppliers")
+    name = models.CharField(max_length=120)
+    tier = models.CharField(max_length=10, choices=TIER_CHOICES, default="normal")
+    domains = models.JSONField(default=list, blank=True)  # the exact names to check: lowercase, validated, never wildcards
+    contact = models.CharField(max_length=300, blank=True, default="")  # who to write to (free text)
+    notes = models.TextField(blank=True, default="")
+    added_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)  # when a sweep last got an answer for this supplier
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [models.UniqueConstraint(Lower("name"), "project", name="uniq_supplier_project_name")]
+
+    def __str__(self):
+        return f"{self.name} ({self.tier})"
+
+
+class SupplierHostCard(models.Model):
+    """The Shodan-style card of one supplier domain: what its public services say about themselves, as of the last check. One row per
+    (supplier, domain), refreshed by each sweep. A section the last check could not read (the certificate, the web page) keeps what the
+    check before it saw, and ``checked_at`` says when the card was last attempted. Everything here is what a browser or a TLS client is
+    given anyway: response headers (never cookies' values), the certificate, the technologies the page and its headers state (the same
+    fingerprinting owned hosts use, ``cveFeed.fingerprint``), and the address and mail facts. ``tech_text`` is the lowercase text the
+    technology search reads."""
+
+    STATES = ("ok", "no_address", "blocked", "unreachable", "challenged", "excluded")
+    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="cards")
+    domain = models.CharField(max_length=255)
+    state = models.CharField(max_length=12, default="ok")
+    addresses = models.JSONField(default=list, blank=True)  # the public addresses the name resolved to
+    http = models.JSONField(default=dict, blank=True)  # status of the front page over https and http, title, server, powered_by, raw response headers
+    tls = models.JSONField(default=dict, blank=True)  # subject, issuer, SANs, validity, key, signature, protocol, cipher, chain error
+    technologies = models.JSONField(default=list, blank=True)  # [{name, version, category, source}]
+    tech_text = models.TextField(blank=True, default="")
+    mail = models.JSONField(default=dict, blank=True)  # whether the name handles mail, and its MX records
+    evidence = models.JSONField(default=dict, blank=True)  # edge in front, challenge, DNS state, notes: whatever else explains the card
+    checked_at = models.DateTimeField(null=True, blank=True)
+    last_ok_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["supplier__name", "domain"]
+        constraints = [models.UniqueConstraint(fields=["supplier", "domain"], name="uniq_supplierhostcard_domain")]
+
+    def __str__(self):
+        return f"{self.domain} ({self.state})"
+
+
+class SupplierFinding(models.Model):
+    """One thing a supplier's public face got wrong, as seen from outside: a "supplier posture" item. One row per (supplier, domain,
+    check). ``status`` is ``open`` while the check still finds it, ``resolved`` (by the sweep) when a later check no longer does, and
+    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence). ``ask`` says what to ask the supplier.
+    Never validated by exploitation: nothing here is ever tested beyond what the supplier's service announces."""
+
+    STATUSES = ("open", "accepted", "resolved")
+    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="findings")
+    domain = models.CharField(max_length=255)
+    check_name = models.CharField(max_length=60)
+    category = models.CharField(max_length=12, default="")  # tls | email | web | cve
+    severity = models.IntegerField(default=0)  # 0 info .. 4 critical, the same scale as hygiene findings
+    title = models.CharField(max_length=300)
+    detail = models.TextField(blank=True, default="")
+    ask = models.TextField(blank=True, default="")  # plain text: what to ask the supplier to do or confirm
+    evidence = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=10, default="open")
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    status_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    status_note = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        ordering = ["-severity", "domain", "check_name"]
+        constraints = [models.UniqueConstraint(fields=["supplier", "domain", "check_name"], name="uniq_supplierfinding_check")]
+        indexes = [models.Index(fields=["supplier", "status"], name="supplierfinding_status_idx")]
+
+    def __str__(self):
+        return f"{self.domain}: {self.title}"
+
+
+class InternalRange(models.Model):
+    """A private network a project declares as its own internal scope (office LAN, a VPC, a VPN), reachable only from a Sentinel
+    deployed inside it. The row is the opt-in: nothing is internal unless a project administrator declared it. Declaring a range
+    lets the project add targets inside it (``agentapi.services._expand_target``) and nothing more: ``targetApp.target_types.
+    is_scannable_ip`` keeps refusing those addresses for every local scanner, so this server never connects to them itself."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="internal_ranges")
+    cidr = models.CharField(max_length=64)  # canonical, network address form (10.20.0.0/24)
+    description = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # The sweep that finds the live hosts of this range (``cveFeed.internal_discovery``): when one last finished, how many hosts it found,
+    # what stopped the last attempt, and where a range too large for one run resumes.
+    last_discovery_at = models.DateTimeField(null=True, blank=True)
+    last_discovery_hosts = models.PositiveIntegerField(null=True, blank=True)
+    last_discovery_error = models.CharField(max_length=200, blank=True, default="")
+    discovery_cursor = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "cidr"], name="internalrange_project_cidr_uniq")]
+        ordering = ["cidr", "id"]
+
+    def __str__(self):
+        return f"{self.cidr} (project {self.project_id})"

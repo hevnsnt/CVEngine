@@ -13,7 +13,18 @@ SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
 
 DOCKER_STUB = """#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls.log"
+# the updater is killed (SIGKILL, as a reboot or the OOM killer would) at the first call that matches: it is the shell running the update
+if [ -n "${STUB_KILL_ON:-}" ] && [[ " $* " == *"$STUB_KILL_ON"* ]] && [ ! -f "$STUB_DIR/killed" ]; then touch "$STUB_DIR/killed"; kill -KILL $PPID; exit 137; fi
 case " $* " in
+  *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
+    if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
+  *" info "*) echo "$STUB_DIR";;
+  *" ps -q --status running db "*) echo dbid; exit 0;;
+  *" exec dbid "*) case "$*" in *pg_dump*) if [ -f "$STUB_DIR/dump_fails" ]; then exit 1; fi
+      echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
+    esac; exit 0;;
+  *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
+  *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
@@ -26,8 +37,14 @@ case " $* " in
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
-  *" build "*) if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
-  *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi;;
+  *" pull "*) if [ -f "$STUB_DIR/pull_fails" ]; then exit 1; fi;;
+  *" build "*) if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
+    if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
+  *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi
+    if [ -f "$STUB_DIR/fail_migrate_partial" ]; then rm -f "$STUB_DIR/fail_migrate_partial"
+      printf '[X]  app.0001_initial\n[X]  app.0002_first_of_the_batch\n' > "$STUB_DIR/migrations_state"; exit 1; fi
+    if [ -f "$STUB_DIR/fail_migrate_always_partial" ]; then
+      printf '[X]  app.0001_initial\n[X]  app.0002_first_of_the_batch\n' > "$STUB_DIR/migrations_state"; exit 1; fi;;
   *" --force-recreate "*) if [ -f "$STUB_DIR/fail_recreate_always" ]; then exit 1; fi
     if [ -f "$STUB_DIR/fail_recreate" ]; then rm -f "$STUB_DIR/fail_recreate"; exit 1; fi;;
 esac
@@ -55,6 +72,8 @@ class ApplyUpdateScriptTests(unittest.TestCase):
                     'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
                     'GIT_COMMITTER_EMAIL': 't@t', 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull}
         self.env.pop('CVENGINE_COMPOSE_FILE', None)
+        self.env['CVENGINE_UPDATE_MIN_FREE_MB'] = '1'  # the test disk is not the server's
+        self.env['CVENGINE_UPDATE_BACKUPS'] = '0'  # the dump has tests of its own (BackupTests)
         origin, self.work, other = self.tmp / 'origin.git', self.tmp / 'work', self.tmp / 'other'
         self.git('init', '--bare', '-b', 'master', str(origin), cwd=self.tmp)
         self.git('clone', str(origin), str(self.work), cwd=self.tmp)
@@ -225,6 +244,59 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('docker compose -f docker-compose.yml up -d --no-deps --force-recreate web celery celery-beat proxy', calls)
         self.assertEqual(self.head(), self.new)
 
+    def test_the_deploy_steps_come_from_the_files_that_were_just_merged_not_from_the_script_already_on_the_host(self):
+        """The script that applies an update is the copy already on the host, so a step added to it only ran one update late. The steps live in
+        scripts/update-deploy.sh, read after the merge: a step the new files add runs in the update that brings them."""
+        other = self.tmp / 'other'
+        real = (SCRIPTS / 'update-deploy.sh').read_text()
+        marker = '  run_migrations || return 1'
+        self.assertIn(marker, real)
+        (other / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
+        (other / 'scripts' / 'update-deploy.sh').write_text(real.replace(marker, '  "${compose[@]}" images --quiet proxy\n' + marker, 1))
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'a new deploy step', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        newest = self.git('rev-parse', 'HEAD', cwd=other)
+        self.approve(newest)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn('docker compose -f docker-compose.yml images --quiet proxy', calls)  # a step this host's script has never heard of
+        self.assertLess(calls.index('docker compose -f docker-compose.yml images --quiet proxy'),
+                        next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        self.assertEqual(self.head(), newest)
+
+    def test_the_real_deploy_file_does_what_the_built_in_copy_does(self):
+        """The same calls in the same order whether the steps come from scripts/update-deploy.sh or from the copy built into the script."""
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        built_in = [c for c in self.calls() if c.startswith('docker compose')]
+        for path in self.work.glob('web/.update-*'):
+            path.unlink()
+        self.git('reset', '--hard', self.prev, cwd=self.work)
+        (self.stub / 'calls.log').unlink()
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
+        shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'the deploy file', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        newest = self.git('rev-parse', 'HEAD', cwd=other)
+        self.approve(newest)
+        self.assertEqual(self.run_script().returncode, 0)
+        from_file = [c for c in self.calls() if c.startswith('docker compose')]
+        # the deploy file also pulls the proxy image and reads the migration count (the built-in copy, for checkouts older than the deploy file, does not)
+        verification = lambda call: any(x in call for x in ('http.client', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
+        self.assertEqual([c for c in from_file if not verification(c)], built_in)
+
+    def test_the_dev_stack_pulls_nothing(self):
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.calls() if ' pull ' in c])
+
     def test_waits_while_scans_are_running_and_keeps_the_approval(self):
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
@@ -234,6 +306,43 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertTrue(self.approved())
         self.assertFalse([c for c in self.calls() if ' up ' in c or 'restart' in c or c.startswith('make')])
         self.assertIn('scan(s) running', (self.work / 'web' / '.update-log').read_text())
+
+    def test_waiting_past_the_drain_limit_forces_the_update_ahead(self):
+        # CVENGINE_UPDATE_DRAIN_SECONDS=0: the very first wait is already past the limit, so the update proceeds at once
+        # instead of exiting 3, the same way it would after really waiting out the default five minutes.
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertTrue([c for c in self.calls() if ' up ' in c or 'restart' in c])
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('forcing ahead', log)
+        self.assertIn('2 scan(s)/job(s)', log)
+
+    def test_the_drain_timer_does_not_restart_on_every_poll(self):
+        # the watcher calls this script again every few seconds while waiting; the drain clock must not reset each time,
+        # or a scan that never finishes would block forever no matter how low the limit is set.
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        first = self.run_script(CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(first.returncode, 3)
+        since_file = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update' / 'draining-since'
+        self.assertTrue(since_file.is_file())
+        recorded = since_file.read_text()
+        second = self.run_script(CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(second.returncode, 3)
+        self.assertEqual(since_file.read_text(), recorded)  # unchanged: still counting from the first wait
+
+    def test_waiting_for_scans_does_not_log_the_err_trap_line(self):
+        # exit 3 is an expected, normal "still waiting" control-flow exit under `set -e`, not a command that actually
+        # failed; the generic ERR-trap narration ("stopped at line N") must not fire for it on every poll.
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        for _ in range(3):
+            self.assertEqual(self.run_script().returncode, 3)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertNotIn('stopped at line', log)
 
     def test_files_pulled_by_hand_but_an_older_build_still_running_are_rebuilt(self):
         # a host without the updater is first brought up to date with `git pull`; the approval must still rebuild the services
@@ -248,14 +357,154 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse(self.approved())
         self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
 
+    def mark_deployed(self, sha):
+        state = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update'
+        state.mkdir(exist_ok=True)
+        (state / 'deployed-commit').write_text(sha + '\n')
+
+    def deployed_marker(self):
+        state = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update'
+        marker = state / 'deployed-commit'
+        return marker.read_text().strip() if marker.exists() else None
+
     def test_files_and_build_already_at_the_approved_commit_rebuild_nothing(self):
         self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
         (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.mark_deployed(self.new)
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse([c for c in self.calls() if ' build ' in c])
         self.assertFalse(self.approved())
+
+    def test_an_interrupted_deploy_is_not_reported_as_already_done(self):
+        # the files and web/.commit are at the new commit (the deploy writes the marker before it builds) but the run stopped before
+        # the migration: nothing on record says the deploy finished, so the approval deploys it instead of answering "already at"
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertTrue([c for c in calls if ' build ' in c])
+        self.assertTrue([c for c in calls if ' migrate --noinput' in c])
+        self.assertIn('deploying it again', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.deployed_marker(), self.new)
+        self.assertFalse(self.approved())
+
+    def test_a_recorded_deploy_is_still_redone_when_the_database_has_migrations_waiting(self):
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.mark_deployed(self.new)
+        (self.stub / 'unmigrated').write_text('')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertTrue([c for c in calls if ' migrate --noinput' in c])
+        self.assertTrue([c for c in calls if '--force-recreate web' in c])
+        self.assertIn('migrate --check', '\n'.join(calls))
+
+    def test_a_successful_update_records_that_the_deploy_finished(self):
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.deployed_marker(), self.new)
+        self.assertEqual(self.head(), self.new)
+
+    def publish_deploy_file_again(self):
+        """A further commit on top of the deploy file, for a second update."""
+        other = self.tmp / 'other'
+        (other / 'web' / 'README').write_text('v3\n')
+        self.git('commit', '-am', 'three', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def publish_deploy_file(self):
+        """Push scripts/update-deploy.sh to the origin as a new commit, as a release that carries it does; returns that commit."""
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
+        shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'the deploy file', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def test_too_little_disk_space_stops_the_update_before_anything_is_built_and_says_so(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('MB are free where Docker keeps its images', log)
+        self.assertEqual(self.head(), self.prev)  # a failure before the migration returns to the previous version
+        # the way back is not stopped by the same disk check: the previous version is restarted and scanning is resumed
+        self.assertNotIn('could not restart the previous version', log)
+
+    def test_a_verified_update_removes_the_image_it_replaced_and_a_failed_one_does_not(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertIn('docker image prune -f', self.calls())
+        (self.stub / 'calls.log').unlink()
+        (self.stub / 'web_not_serving').write_text('')
+        newest = self.publish_deploy_file_again()
+        self.approve(newest)
+        self.assertEqual(self.run_script(CVENGINE_VERIFY_WEB_TRIES='2', CVENGINE_VERIFY_POLL='0').returncode, 1)
+        self.assertNotIn('docker image prune -f', self.calls())
+
+    def test_a_web_service_that_never_answers_makes_the_update_a_failure_not_a_success(self):
+        # "running" is not "working": the update used to be reported done for a web container that was restarting over and over
+        (self.stub / 'web_not_serving').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_WEB_TRIES='2', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('does not answer', log)
+        self.assertEqual(self.head(), self.new)  # the schema is already the new one: the old code is not put back on it
+        self.assertTrue(self.approved())  # kept: the next run retries
+        self.assertFalse(self.deployed_marker())
+
+    def test_a_migration_still_waiting_after_the_restart_is_applied_and_checked_again(self):
+        (self.stub / 'unmigrated_once').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('migrations waiting; applying them', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.deployed_marker(), self.new)
+
+    def test_a_migration_that_cannot_be_applied_after_the_restart_fails_the_update(self):
+        (self.stub / 'unmigrated').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('still waiting', (self.work / 'web' / '.update-log').read_text())
+        self.assertFalse(self.deployed_marker())
+
+    def killed_then_retried(self, step, deploy_file=False):
+        """Kill the updater when it reaches ``step``, then let the next run finish. Returns the retry's calls."""
+        if deploy_file:
+            self.new = self.publish_deploy_file()
+        self.approve()
+        killed = self.run_script(STUB_KILL_ON=step, CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(killed.returncode, -9, f'the updater was not killed at {step!r}: {killed.returncode}\n{killed.stdout}{killed.stderr}')
+        self.assertTrue(self.approved(), 'a killed update must leave its approval for the retry')
+        before = len(self.calls())
+        retried = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        return self.calls()[before:]
+
+    def assert_converged(self, retry_calls):
+        self.assertEqual(self.head(), self.new)
+        self.assertFalse(self.approved(), (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.deployed_marker(), self.new)
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
+        self.assertTrue(any(' migrate --noinput' in c for c in retry_calls), 'the retry must migrate: ' + str(retry_calls))
+        self.assertTrue(any('--force-recreate' in c for c in retry_calls), 'the retry must recreate the services')
+        self.assertTrue(any('update_scan_pause --release' in c for c in retry_calls), 'scanning must be released again')
 
     def test_the_stack_is_recreated_with_the_overlay_and_env_file_it_was_started_with(self):
         # a host behind its own proxy: the overlay moves the published port and sets limits, the env file holds its settings
@@ -572,6 +821,188 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('is not restored', log)
         self.assertNotIn('returning to', log)
 
+    # --- a dump before the migration, and what a failed migration does ---------------------------------------------------------------------
+
+    def backups(self, pattern='*.sql.gz'):
+        return sorted((self.work / '.git' / 'cvengine-update' / 'backups').glob(pattern))
+
+    def test_the_database_is_dumped_before_it_is_migrated(self):
+        import gzip
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertLess(next(i for i, c in enumerate(calls) if 'pg_dump' in c), next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        dumps = self.backups()
+        self.assertEqual(len(dumps), 1)
+        self.assertEqual(oct(dumps[0].stat().st_mode & 0o777), '0o600')
+        self.assertIn(b'a dump of the database', gzip.open(dumps[0]).read())
+        self.assertIn('backed up the database', (self.work / 'web' / '.update-log').read_text())
+
+    def test_a_dump_that_fails_stops_the_update_before_anything_is_migrated_and_the_previous_version_is_put_back(self):
+        (self.stub / 'dump_fails').touch()
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.calls()
+        # the new version's deploy never reached its migration (the one migrate call is the previous version being put back, by its own deploy)
+        self.assertFalse(any('showmigrations' in c for c in calls))
+        self.assertEqual(len([c for c in calls if ' migrate --noinput' in c]), 1)
+        self.assertLess(next(i for i, c in enumerate(calls) if 'pg_dump' in c), next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        self.assertEqual(self.head(), self.prev)
+        self.assertFalse(self.approved())
+        self.assertIn('the database backup failed', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.backups(), [])
+
+    def test_a_migration_that_changed_nothing_is_still_rolled_back(self):
+        (self.stub / 'fail_migrate').touch()
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.prev)
+        self.assertIn('returning to', (self.work / 'web' / '.update-log').read_text())
+
+    def test_a_migration_that_failed_part_way_never_puts_the_old_code_back_on_the_new_schema(self):
+        # the first migration of the batch is committed, the second fails: the previous code was not written for that schema
+        (self.stub / 'fail_migrate_always_partial').touch()
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertTrue(self.approved())
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('NOT put back', log)
+        self.assertNotIn('returning to', log)
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertTrue(self.backups('premigration-failed-*.sql.gz'), 'the dump taken before the migration is kept under its own name')
+
+    def test_a_deploy_that_keeps_failing_after_the_migration_is_not_retried_for_ever(self):
+        (self.stub / 'fail_recreate_always').touch()
+        self.approve()
+        for attempt in (1, 2, 3):
+            self.assertEqual(self.run_script().returncode, 1, f'run {attempt}')
+            self.assertTrue(self.approved())
+        builds = len([c for c in self.calls() if c.endswith('build web celery celery-beat')])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.approved(), 'the approval is removed once the budget is used up')
+        self.assertEqual(len([c for c in self.calls() if c.endswith('build web celery celery-beat')]), builds, 'and nothing is rebuilt again')
+        self.assertIn('giving up on', (self.work / 'web' / '.update-log').read_text())
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        # approving again starts a new count
+        (self.stub / 'fail_recreate_always').unlink()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+
+    def test_the_proxy_image_is_pulled_before_the_build_and_a_failed_pull_does_not_fail_the_update(self):
+        (self.stub / 'pull_fails').touch()
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        pull = calls.index('docker compose -f docker-compose.yml pull --quiet proxy')
+        self.assertLess(pull, next(i for i, c in enumerate(calls) if c.endswith(' build web celery celery-beat')))
+        self.assertIn('could not pull the newest proxy image', (self.work / 'web' / '.update-log').read_text())
+
+    # --- who can make the host run what ------------------------------------------------------------------------------------------------
+
+    def test_a_branch_outside_the_configured_list_is_refused_and_a_listed_one_is_switched_to(self):
+        tip = self.develop_ahead()
+        self.approve(tip)
+        self.choose_branch('develop')
+        refused = self.run_script(CVENGINE_UPDATE_BRANCHES='master', CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'master')
+        self.assertFalse(self.approved())
+        self.assertIn('not in CVENGINE_UPDATE_BRANCHES', (self.work / 'web' / '.update-log').read_text())
+
+    def test_a_listed_branch_is_still_switched_to(self):
+        tip = self.develop_ahead()
+        self.approve(tip)
+        self.choose_branch('develop')
+        result = self.run_script(CVENGINE_UPDATE_BRANCHES='master, develop', CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.work), 'develop')
+
+    def test_an_unsigned_commit_is_refused_when_signatures_are_required(self):
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_REQUIRE_SIGNED='1')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.prev)
+        self.assertFalse(self.approved())
+        self.assertFalse([c for c in self.calls() if ' build ' in c])
+        self.assertIn('no valid signature', (self.work / 'web' / '.update-log').read_text())
+
+    def test_the_drain_limit_is_read_from_dot_env_where_cron_cannot_set_the_environment(self):
+        (self.work / '.env').write_text('CVENGINE_UPDATE_DRAIN_SECONDS=0\n')
+        (self.stub / 'running_count').write_text('2\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('over the 0s drain limit', (self.work / 'web' / '.update-log').read_text())
+
+    @unittest.skipUnless(os.geteuid() == 0, 'the ownership check only bites root')
+    def test_root_can_update_a_checkout_owned_by_the_user_who_cloned_it(self):
+        # cron and systemd start the updater as root with no SUDO_UID; git then refuses another user's repository ("dubious ownership")
+        subprocess.run(['chown', '-R', '1000:1000', str(self.work)], check=True)
+        self.approve()
+        env = {k: v for k, v in self.env.items() if k != 'SUDO_UID'}
+        result = subprocess.run(['bash', 'scripts/apply-update.sh'], cwd=self.work, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        head = subprocess.run(['git', '-c', 'safe.directory=*', 'rev-parse', 'HEAD'], cwd=self.work, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, self.new)
+
+    # --- the OpenVAS switch writes only through the safe publisher; the watcher keeps its heartbeat while an update runs --------------------
+
+    def test_the_watcher_goes_on_reporting_that_it_is_alive_while_an_update_runs(self):
+        import json
+        import time
+        self.install_watcher()
+        (self.stub / 'slow_build').touch()
+        self.approve()
+        process = subprocess.Popen(['bash', 'scripts/update-watch.sh', '10'], cwd=self.work, env={**self.env, 'CVENGINE_HEARTBEAT_SECONDS': '1'},
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        seen, beat = set(), self.work / 'web' / '.updater-heartbeat'
+        while process.poll() is None and not (self.stub / 'calls.log').exists():
+            time.sleep(0.1)
+        building = time.monotonic()
+        while process.poll() is None and time.monotonic() - building < 4:  # the stubbed build takes 6 seconds
+            try:
+                seen.add(json.loads(beat.read_text())['at'])
+            except (OSError, ValueError, KeyError):
+                pass
+            time.sleep(0.2)
+        process.wait(timeout=60)
+        self.assertGreaterEqual(len(seen), 3, 'the heartbeat must keep moving during the update')
+        self.assertEqual(self.head(), self.new)
+
+    def test_the_openvas_switch_never_writes_through_a_link_the_web_container_planted(self):
+        import json
+        self.install_watcher()
+        shutil.copy(SCRIPTS / 'openvas-sync.sh', self.work / 'scripts' / 'openvas-sync.sh')
+        shutil.copy(SCRIPTS / 'compose-layout.sh', self.work / 'scripts' / 'compose-layout.sh')
+        (self.work / 'scripts' / 'openvas-sync.sh').chmod(0o755)
+        victim = self.tmp / 'host-only'
+        victim.write_text('keep me')
+        for name in ('.openvas-applied.tmp', '.openvas-log', '.openvas-applied'):
+            (self.work / 'web' / name).symlink_to(victim)
+        (self.work / 'web' / '.openvas-wanted').write_text('on\n')
+        result = subprocess.run(['bash', 'scripts/update-watch.sh', '6'], cwd=self.work, env={**self.env, 'CVENGINE_OPENVAS_MIN_AVAILABLE_MB': '0'},
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(victim.read_text(), 'keep me')
+        answer = self.work / 'web' / '.openvas-applied'
+        self.assertFalse(answer.is_symlink())
+        self.assertEqual(json.loads(answer.read_text())['state'], 'ok')
+        self.assertTrue(any('--profile openvas up -d' in c for c in self.calls()))
+        self.assertFalse((self.work / 'web' / '.openvas-log').is_symlink())
+
     def test_the_scan_check_asks_a_one_off_container_when_web_is_down(self):
         (self.stub / 'web_down').write_text('')
         self.approve()
@@ -676,6 +1107,32 @@ esac
 case " $* " in *" ps -q db "*) echo dbid;; *" count(*) "*) echo 42;; esac
 exit 0
 """
+
+
+# An update killed at each step (a reboot, the OOM killer, a lost session) and then retried must end converged: the new code, the database
+# migrated, the services recreated, scanning released, the approval gone. Once with the steps built into the script (the update that brings
+# the deploy file) and once with scripts/update-deploy.sh (every update after it).
+KILL_STEPS = {
+    'during_the_build': ' build ',
+    'during_the_migration': ' migrate --noinput',
+    # the dangerous one: web/.commit already names the new commit and the files are new, so a run used to answer "already at"
+    'after_the_migration_before_the_restart': 'collectstatic',
+    'while_the_services_are_recreated': '--force-recreate',
+    'right_after_the_files_were_merged': 'up -d --no-recreate db redis',
+}
+
+
+def _killed_update_test(step, deploy_file):
+    def test(self):
+        self.assert_converged(self.killed_then_retried(step, deploy_file))
+    return test
+
+
+for _name, _step in KILL_STEPS.items():
+    for _variant, _deploy_file in (('built_in', False), ('deploy_file', True)):
+        _test = _killed_update_test(_step, _deploy_file)
+        _test.__name__ = f'test_an_update_killed_{_name}_is_finished_by_the_next_run_{_variant}'
+        setattr(ApplyUpdateScriptTests, _test.__name__, _test)
 
 
 @unittest.skipUnless(SCRIPTS.joinpath('upgrade-postgres.sh').is_file(), 'needs the repository scripts directory')

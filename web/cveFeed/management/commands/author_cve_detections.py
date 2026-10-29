@@ -9,7 +9,9 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--batch', type=int, default=5000, help='records per round (default 5000)')
-        parser.add_argument('--ai', action='store_true', help='also ask the configured AI model, within CVENGINE_DETECTION_AI_PER_DAY')
+        parser.add_argument('--ai', action='store_true', help='also ask the configured AI model, within the daily budget (Settings > AI model)')
+        parser.add_argument('--count', type=int, default=0, help='with --ai: write this many CVEs now, whatever is left of the daily budget')
+        parser.add_argument('--workers', type=int, default=4, help='with --ai: requests in flight at once (default 4)')
 
     def handle(self, *args, **options):
         total = 0
@@ -26,4 +28,9 @@ class Command(BaseCommand):
             if provider is None:
                 self.stdout.write('no AI provider is configured; skipped')
             else:
-                self.stdout.write(f'{detection_author.author_with_ai(provider, per_run=detection_author.limit("DETECTION_AI_PER_DAY"))} record(s) gained AI checks')
+                if options['count']:
+                    wrote = detection_author.author_with_ai(provider, per_run=options['count'], workers=options['workers'], within_budget=False)
+                else:
+                    wrote = detection_author.author_with_ai(provider, workers=options['workers'])
+                self.stdout.write(f'{wrote} record(s) gained the model\'s guidance')
+            self.stdout.write(str(detection_author.progress()))

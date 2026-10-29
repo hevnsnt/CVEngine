@@ -1,4 +1,5 @@
 // Superusers only: a slim bar when the twice-daily check found a newer CVEngine version. Approval happens in Settings.
+import { hideVeil, loadScene, manageVeil, showVeil } from "/staticfiles/cve/sitewatch.js";
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -35,11 +36,12 @@ function watchUpdate(first) {
   bar.append(el("span", "ul-dot"), text, steps, more, track);
   const layout = document.querySelector(".layout") || document.getElementById("main");
   layout.parentNode.insertBefore(bar, layout.parentNode.firstChild);
-  const body = [...document.querySelectorAll(".layout, #main")];
-  const grey = (on) => {
-    document.documentElement.classList.toggle("updating", on);
-    body.forEach((n) => (on ? n.setAttribute("inert", "") : n.removeAttribute("inert")));
-  };
+  // From the moment the host picks the update up, the whole page is covered by the "we are rebuilding" scene (static/cve/sitewatch.js holds
+  // it in memory, so it shows even while nothing answers) with the current step as its status line. It stays until the update is done,
+  // and then this page goes back to /cve/.
+  manageVeil();
+  loadScene();
+  const grey = (on, status) => (on ? showVeil(status) : hideVeil());
   let unreachable = 0;
   let sawDown = false;
   const paint = (step, text, extra, busy = true) => {
@@ -57,9 +59,9 @@ function watchUpdate(first) {
     }
   };
   const finish = (now) => {
-    grey(false);
+    grey(true, `Updated to ${now.latest || first.latest}. Taking you back.`);
     paint(3, `Updated to ${now.latest || first.latest}`, "Scanning has resumed. Reloading.", false);
-    setTimeout(() => location.reload(), 2500);
+    setTimeout(() => location.replace("/cve/"), 1800);
   };
   const tick = async () => {
     let now = null;
@@ -70,7 +72,7 @@ function watchUpdate(first) {
     } catch (_) {
       unreachable += 1;
       sawDown = true;
-      grey(true);
+      grey(true, "Waiting for the site to answer. Usually 2 to 5 minutes.");
       paint(2, "Rebuilding CVEngine", "The page is paused and returns when the services are back. Usually 2 to 5 minutes.");
       return setTimeout(tick, POLL_MS);
     }
@@ -89,10 +91,10 @@ function watchUpdate(first) {
     }
     const phase = now.phase;
     if (phase === "applying" || phase === "restarting") {
-      grey(true);
+      grey(true, now.phase_detail ? `Rebuilding: ${now.phase_detail}` : "Building and restarting the services.");
       paint(2, "Rebuilding CVEngine", now.phase_detail || "Building and restarting the services.");
     } else if (phase === "resuming") {
-      grey(false);
+      grey(true, "Back up. Resuming scanning.");
       paint(3, "Back up. Resuming scanning", now.phase_detail || "");
     } else {
       grey(false);
@@ -124,6 +126,22 @@ function watchUpdate(first) {
   setTimeout(tick, 1200);
 }
 
+const RECHECK_MS = 30000;
+async function recheck() {
+  if (document.hidden) return setTimeout(recheck, RECHECK_MS);
+  try {
+    const r = await fetch("/cve/api/settings/updates", { credentials: "same-origin", cache: "no-store" });
+    const s = r.ok ? await r.json() : null;
+    if (s && s.status === "approved") {
+      document.querySelectorAll(".updatebar").forEach((n) => n.remove());
+      return watchUpdate(s);
+    }
+  } catch (_) {
+    /* down: sitewatch covers the page */
+  }
+  setTimeout(recheck, RECHECK_MS);
+}
+
 async function run() {
   let s;
   try {
@@ -134,6 +152,8 @@ async function run() {
     return;
   }
   if (s.status === "approved") return watchUpdate(s);
+  // a page opened before the update was approved (here, in Settings or on another device) must still notice it and follow it
+  setTimeout(recheck, RECHECK_MS);
   if (s.status !== "available") return;
   const bar = el("div", "updatebar");
   bar.setAttribute("role", "status");

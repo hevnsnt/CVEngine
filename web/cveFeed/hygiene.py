@@ -7,10 +7,11 @@ resolves the ones that no longer apply, so the table always reflects the current
 import base64
 import concurrent.futures
 import datetime
+import functools
 import logging
 import re
 import socket
-from cveFeed import pinned_transport
+from cveFeed import legacy_tls, pinned_transport
 import ssl
 from dataclasses import dataclass, field
 
@@ -153,6 +154,31 @@ def evaluate_dmarc(domain, txt_records, has_mx):
     return findings
 
 
+def has_dmarc_record(records):
+    return any(_txt_value(r).lower().startswith('v=dmarc1') for r in records)
+
+
+# the findings about the policy a name is held to; the rest (reports, pct, sp) belong to the record, so they are the owner's, not the name's
+INHERITED_DMARC_CHECKS = ('dmarc_none', 'dmarc_quarantine', 'dmarc_invalid', 'dmarc_multiple')
+
+
+def evaluate_inherited_dmarc(domain, apex, records, has_mx):
+    """DMARC review of a name that publishes no record of its own: a receiver falls back to the organizational domain's record
+    (RFC 7489 section 6.6.3) and applies its ``sp`` tag to subdomains, so the apex's policy is the one the name has. Only what that
+    policy says about the name is reported here (the record's own details are the apex's finding)."""
+    values = [_txt_value(r) for r in records if _txt_value(r).lower().startswith('v=dmarc1')]
+    tags = parse_tags(values[0])
+    sp = tags.get('sp', '').lower()
+    effective = [f'v=DMARC1; p={sp}; rua={tags.get("rua", "")}'] if len(values) == 1 and sp in ('none', 'quarantine', 'reject') else records
+    found = []
+    for f in evaluate_dmarc(domain, effective, has_mx):
+        if f.check in INHERITED_DMARC_CHECKS:
+            f.detail = f'{f.detail} (This name has no DMARC record of its own; it follows the policy of {apex}.)'.strip()
+            f.evidence = {**f.evidence, 'inherited_from': apex}
+            found.append(f)
+    return found
+
+
 # ----------------------------------------------------------------------------- DKIM
 
 def dkim_key_bits(record):
@@ -237,11 +263,11 @@ def evaluate_cert(info, now=None):
     names = list(info.get('sans') or [])
     if info.get('subject') and info['subject'] not in names:
         names.append(info['subject'])
-    if names and not re.fullmatch(r'[\d.:]+', host) and not hostname_matches(host, names):
+    if names and not is_ip(host) and not hostname_matches(host, names):
         findings.append(Finding('tls_hostname_mismatch', HIGH, f'Certificate for {where} does not cover {host}',
                                 f'It is valid for: {", ".join(names[:6])}.', where, {'names': names[:20]}))
     err = (info.get('chain_error') or '').lower()
-    if err and 'hostname mismatch' not in err and 'expired' not in err:
+    if err and 'hostname mismatch' not in err and 'ip address mismatch' not in err and 'expired' not in err:
         if 'self-signed' in err or 'self signed' in err:
             findings.append(Finding('tls_self_signed', MEDIUM, f'{where} uses a self-signed certificate',
                                     'Browsers and clients will not trust it.', where, {'error': info['chain_error']}))
@@ -262,35 +288,25 @@ def evaluate_cert(info, now=None):
     return findings
 
 
-def _legacy_context():
-    """A client that will talk TLS 1.0 / 1.1 only, to find servers that still accept the old protocols."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.minimum_version, ctx.maximum_version = ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1
-    ctx.set_ciphers('ALL:@SECLEVEL=0')
-    return ctx
-
-
-def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
+def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None, project=None):
     """Connect without verification (so broken certs can still be read), return a plain info dict or None."""
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
-    if legacy:
-        try:
-            ctx = _legacy_context()
-        except (ValueError, ssl.SSLError):
+    if legacy:  # a modern client cannot read servers that only speak TLS 1.0 / 1.1: legacy_tls is the one module that speaks those
+        got = legacy_tls.handshake(host, port, timeout, addresses=addresses, project=project)
+        if got is None:
             return None
+        der, protocol, cipher = got
     else:
         ctx = ssl.create_default_context()
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: the legacy check below is the only place old protocols are spoken
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit: legacy_tls is the only place old protocols are spoken
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-            der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
-    except (OSError, ssl.SSLError, socket.timeout, ValueError):
-        return None
+        try:
+            with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+                der, protocol, cipher = tls.getpeercert(binary_form=True), tls.version(), (tls.cipher() or ('',))[0]
+        except (OSError, ssl.SSLError, socket.timeout, ValueError):
+            return None
     cert = x509.load_der_x509_certificate(der)
     try:
         sans = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
@@ -310,12 +326,12 @@ def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None):
             'key_description': key, 'protocol': protocol, 'cipher': cipher}
 
 
-def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
+def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """Empty string if the system trust store accepts the certificate for this host, else the reason."""
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host):
+        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port, **_project_kw(project)), timeout, **_project_kw(project)) as raw, ctx.wrap_socket(raw, server_hostname=host):
             return ''
     except ssl.SSLCertVerificationError as exc:
         return (exc.verify_message or str(exc))[:300]
@@ -323,14 +339,9 @@ def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None):
         return ''
 
 
-def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None):
+def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
     """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
-    try:
-        ctx = _legacy_context()
-        with pinned_transport.open_socket(addresses if addresses is not None else pinned_transport.resolve(host, port), timeout) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-            return tls.version() in ('TLSv1', 'TLSv1.1')
-    except (OSError, ssl.SSLError, ValueError):
-        return False
+    return legacy_tls.accepts(host, port, timeout, addresses=addresses, project=project)
 
 
 CERT_TEXT_LIMITS = {'subject': 500, 'issuer': 500, 'signature_algorithm': 100, 'key_description': 100, 'protocol': 20, 'cipher': 100,
@@ -349,17 +360,27 @@ def clip_certificate(info):
     return out
 
 
-def probe_tls(host, port):
-    try:
-        addresses = pinned_transport.resolve(host, port)
-    except (OSError, ValueError):
-        return None
-    info = _fetch_cert(host, port, addresses=addresses)
+def _project_kw(project):
+    """``{'project': id}`` when the target has one that may authorise a tailnet device, else nothing (the probes take it as an option)."""
+    return {} if project is None else {'project': project}
+
+
+def probe_tls(host, port, project=None, addresses=None):
+    """Read the certificate and TLS posture of ``host:port``. ``project`` may authorise a tailnet device of its own. ``addresses`` (numeric
+    ``(family, sockaddr)`` pairs a caller already vetted, as ``pinned_transport.resolve`` returns them) replaces the lookup, so the third-party
+    supplier checks connect only to the addresses they admitted themselves."""
+    kw = _project_kw(project)
+    if addresses is None:
+        try:
+            addresses = pinned_transport.resolve(host, port, **kw)
+        except (OSError, ValueError):
+            return None
+    info = _fetch_cert(host, port, addresses=addresses, **kw)
     if info:
-        info['chain_error'] = _chain_error(host, port, addresses=addresses)
-        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses)
+        info['chain_error'] = _chain_error(host, port, addresses=addresses, **kw)
+        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses, **kw)
         return info
-    info = _fetch_cert(host, port, legacy=True, addresses=addresses)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
+    info = _fetch_cert(host, port, legacy=True, addresses=addresses, **kw)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
     if info:
         info['chain_error'] = 'cannot be verified: the server only speaks TLS 1.0 / 1.1'
         info['legacy_tls'] = True
@@ -403,6 +424,11 @@ def fetch_records(name, rtype, resolver=None):
         return []
 
 
+def organizational_domain(name):
+    from targetApp.target_types import apex_domain
+    return apex_domain(name)
+
+
 def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None):
     """SPF, DMARC, DKIM and CAA review for one domain, plus the checks adapted from MailFail (cveFeed.mailfail), with
     injectable DNS for tests. With injected DNS, other record types default to none and no outbound request is made."""
@@ -413,7 +439,12 @@ def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None):
     txt = fetch(domain)
     findings = evaluate_spf(domain, txt, has_mx, count_spf_lookups(domain, fetch))
     dmarc = fetch(f'_dmarc.{domain}')
-    findings += evaluate_dmarc(domain, dmarc, has_mx)
+    apex = None if has_dmarc_record(dmarc) else organizational_domain(domain)
+    parent = fetch(f'_dmarc.{apex}') if apex and apex != domain else []
+    if has_dmarc_record(parent):  # no record of its own: the organizational domain's policy applies to this name
+        findings += evaluate_inherited_dmarc(domain, apex, parent, has_mx)
+    else:
+        findings += evaluate_dmarc(domain, dmarc, has_mx)
     selectors = DKIM_SELECTORS + mailfail.EXTRA_DKIM_SELECTORS
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         answers = pool.map(lambda selector: fetch(f'{selector}._domainkey.{domain}'), selectors)
@@ -475,15 +506,49 @@ def email_domains(domain, mx=has_record):
     return names + extra
 
 
-def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
-    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
+def store_findings(domain, found, hosts=None, owns=lambda check: True):
+    """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
+    owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
+    Tailscale checks (cveFeed.tailscale_checks) and the UDP exposure checks (cveFeed.udp_scan) store through here too, and the TLS and email sweep leaves their rows alone."""
     from django.utils import timezone
 
+    from cveFeed.models import HygieneFinding
+    keep = set()
+    for f in found:
+        keep.add((f.host or domain.name, f.check))
+        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
+                    'status': 'open', 'resolved_at': None}
+        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
+        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
+            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
+            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
+                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
+                            + 'Reopened: the check found this again after it was marked fixed.')
+        HygieneFinding.objects.update_or_create(
+            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
+    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
+             if owns(x.check_name) and (hosts is None or x.host in hosts or (x.check_name.startswith('tls_') and x.host.rpartition(':')[0] in hosts))
+             and (x.host, x.check_name) not in keep]  # a certificate finding's host is 'name:port', a host-only run is given the names
+    for x in stale:
+        x.status, x.resolved_at = 'resolved', timezone.now()
+        x.save(update_fields=['status', 'resolved_at'])
+    if domain.project_id:  # hygiene issues count toward the host score: a new or resolved one moves it now, not at the daily pass
+        from cveFeed import scoring
+        touched = sorted({h.lower() for h, _ in keep} | {x.host.lower() for x in stale})
+        for i in range(0, len(touched), scoring.CHUNK):
+            scoring.rescore_quietly(domain.project_id, touched[i:i + scoring.CHUNK])
+    return stale
+
+
+def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
+    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
     from cveFeed import activity, changes
-    from cveFeed.models import HygieneFinding, TlsCertificate
+    from cveFeed.models import TlsCertificate
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     project = domain.project_id
+    if probe is probe_tls:  # the project may authorise the tailnet devices of its own
+        probe = functools.partial(probe_tls, project=project)
     running = activity.log('hygiene', f'Checking TLS and email authentication for {domain.name}', project=project, status='running')
     found = []
 
@@ -524,24 +589,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             f'MailFail checks (Black Hills Information Security) on {shown}: {issues} issue{"s" if issues != 1 else ""}'),
             credit=CREDIT, mail_domains=len(mail_hosts), issues=issues)
 
-    keep = set()
-    for f in found:
-        keep.add((f.host or domain.name, f.check))
-        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
-                    'status': 'open', 'resolved_at': None}
-        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
-        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
-            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
-            defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
-                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
-                            + 'Reopened: the check found this again after it was marked fixed.')
-        HygieneFinding.objects.update_or_create(
-            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
-    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
-             if (hosts is None or x.host in hosts) and (x.host, x.check_name) not in keep]
-    for x in stale:
-        x.status, x.resolved_at = 'resolved', timezone.now()
-        x.save(update_fields=['status', 'resolved_at'])
+    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_')))  # the tailnet, testssl.sh, cloud storage and UDP checks keep their own
     try:  # the medium and worse findings are triaged (impact and a fix); never fatal to the check
         from cveFeed import triage
         triage.triage_hygiene(domain_id)

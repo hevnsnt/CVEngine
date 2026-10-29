@@ -8,13 +8,13 @@ never what it is, and an empty value on update keeps the stored one.
 import json
 import re
 
-import yaml
-from django.http import JsonResponse
+from django.http import FileResponse, Http404, JsonResponse
+from django.http.response import HttpResponseBase
 
+from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
-from scanEngine.models import EngineType, Notification, Proxy, VulnerabilityReportSetting
+from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
-MAX_YAML_BYTES = 100_000
 
 
 class SettingsError(Exception):
@@ -23,10 +23,43 @@ class SettingsError(Exception):
         self.status, self.message = status, message
 
 
+METADATA_NAMES = frozenset({'metadata.google.internal', 'metadata', 'instance-data', 'instance-data.ec2.internal'})
+
+
+def _link_local(ip):
+    import ipaddress
+    if getattr(ip, 'ipv4_mapped', None):
+        ip = ip.ipv4_mapped
+    return ip.is_link_local or ip in ipaddress.ip_network('fd00:ec2::/32')
+
+
+def ai_url_blocked(url):
+    """Whether an AI server URL points at a link-local or cloud metadata address, whether written as one (a literal address, a metadata
+    name) or as a name that resolves to one (``169.254.169.254.nip.io``, the decimal form ``2852039166``). Local and private servers
+    (LM Studio, Ollama, vLLM on this machine, the LAN or a tailnet) are allowed on purpose, but nothing legitimate listens on
+    169.254.0.0/16 (the metadata services of the clouds) or fe80::/10, and a request there would hand out the host's cloud credentials.
+    A name that does not resolve is not blocked (the request fails by itself). The name is looked up again when the request is made."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    host = (urlsplit(url.strip()).hostname or '').lower().rstrip('.')
+    if host in METADATA_NAMES:
+        return True
+    try:
+        return _link_local(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        found = {info[4][0].split('%')[0] for info in socket.getaddrinfo(host, None)}
+    except (OSError, UnicodeError):
+        return False
+    return any(_link_local(ipaddress.ip_address(a)) for a in found)
+
+
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, and UnicodeDecodeError for a body that is not UTF-8
         raise SettingsError(400, 'body must be valid JSON')
     if not isinstance(data, dict):
         raise SettingsError(400, 'body must be a JSON object')
@@ -50,20 +83,46 @@ def _text(data, key, current='', secret=False, max_len=500):
 
 # --- AI -----------------------------------------------------------------------
 
+def _guidance_progress():
+    from cveFeed import detection_author
+    try:
+        return detection_author.progress()
+    except Exception:  # noqa: BLE001 - a counting problem must not break the settings page
+        return None
+
+
+def cve_guidance_run(request):
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import write_cve_guidance_now
+    try:
+        count = int(_body(request).get('count', 200))
+    except (TypeError, ValueError):
+        raise SettingsError(400, 'count must be a number')
+    if not 1 <= count <= 5000:
+        raise SettingsError(400, 'count must be between 1 and 5000')
+    cfg = AIProviderSettings.objects.first()
+    if not cfg or not cfg.enabled:
+        raise SettingsError(409, 'turn on the AI model first (Settings > AI model)')
+    write_cve_guidance_now.delay(count)
+    audit(request.user, 'cve_guidance.write_now', str(count), count=count)
+    return {'queued': count}
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE
     return {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
             'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
             'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
-            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire, 'auto_fire_engine_id': cfg.auto_fire_engine_id,
+            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
             'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
-            'plan_daily_per_project': cfg.plan_daily_per_project, 'default_models': DEFAULT_MODELS,
+            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
+            'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
             'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
 
 
 def ai_put(request):
-    from reNgine.ai_providers import DEFAULT_MODELS
+    from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     old_connection = (cfg.provider, cfg.model, cfg.base_url, cfg.api_key)
@@ -75,8 +134,10 @@ def ai_put(request):
     cfg.base_url = _text(data, 'base_url', cfg.base_url)
     if cfg.base_url and not re.match(r'^https?://', cfg.base_url.strip(), re.I):
         raise SettingsError(400, 'the server URL must start with http:// or https://')
-    if provider in ('ollama', 'vllm') and data.get('enabled') and not cfg.base_url.strip():
-        raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:11434 if it runs on this server)')
+    if cfg.base_url and ai_url_blocked(cfg.base_url):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
+    if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
+        raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
     if cfg.api_key == old_connection[3] and (cfg.provider, (cfg.base_url or '').strip()) != (old_connection[0], (old_connection[2] or '').strip()):
         cfg.api_key = ''  # a stored key is never sent to a different service or address: type it again for the new one
@@ -86,20 +147,12 @@ def ai_put(request):
         cfg.enabled = bool(data['enabled'])
     if 'auto_fire' in data:
         cfg.auto_fire = bool(data['auto_fire'])
-    if 'auto_fire_engine_id' in data:
-        engine = data['auto_fire_engine_id']
-        if engine in (None, ''):
-            cfg.auto_fire_engine_id = None
-        elif EngineType.objects.filter(id=engine).exists():
-            cfg.auto_fire_engine_id = int(engine)
-        else:
-            raise SettingsError(400, 'unknown scan engine')
     if 'auto_fire_max_scans' in data:
         try:
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
-    for key in ('plan_daily_total', 'plan_daily_per_project'):
+    for key in ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily'):
         if key in data:
             try:
                 value = int(data[key])
@@ -110,6 +163,53 @@ def ai_put(request):
             setattr(cfg, key, value)
     cfg.save()
     return ai_get(request)
+
+
+# --- the CVE catalog seed (build here, publish as the cve-seed release) --------------------------
+
+SEED_NAME = 'cve-seed.jsonl.gz'
+SEED_BUILDING = 'cvengine:cve-seed-building'
+
+
+def seed_dir():
+    import os
+    from django.conf import settings
+    return os.path.join(getattr(settings, 'RENGINE_HOME', '/usr/src/app'), 'exports')
+
+
+def cve_seed_get(request):
+    """What the last build holds (count, tiers, how many carry a detection record, size, sha256) and whether one is running."""
+    import os
+    from django.core.cache import cache
+    path = os.path.join(seed_dir(), SEED_NAME)
+    manifest = None
+    try:
+        with open(path + '.manifest.json', encoding='utf-8') as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        pass
+    return {'built': manifest, 'building': bool(cache.get(SEED_BUILDING)), 'file': SEED_NAME if manifest and os.path.exists(path) else None}
+
+
+def cve_seed_build(request):
+    from django.core.cache import cache
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import build_cve_seed
+    if not cache.add(SEED_BUILDING, 1, 3600):
+        raise SettingsError(409, 'a seed is already being built')
+    build_cve_seed.delay()
+    audit(request.user, 'cve_seed.build', SEED_NAME)
+    return {'building': True}
+
+
+def cve_seed_download(request, which):
+    import os
+    path = os.path.join(seed_dir(), SEED_NAME)
+    path = path + '.manifest.json' if which == 'manifest' else path
+    if not os.path.isfile(path):
+        raise Http404('no seed has been built yet')
+    return FileResponse(open(path, 'rb'), as_attachment=True, filename=os.path.basename(path),
+                        content_type='application/json' if which == 'manifest' else 'application/gzip')
 
 
 def scan_policy_get(request):
@@ -141,6 +241,8 @@ def ai_models(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    if base_url and ai_url_blocked(base_url):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
     same_service = provider == cfg.provider and base_url.strip() == (cfg.base_url or '').strip()
     key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service else '')  # the stored key goes only where it was saved for
     try:
@@ -247,11 +349,101 @@ def notifications_put(request):
     return notifications_get(request)
 
 
+# --- email -------------------------------------------------------------------------
+
+def _email_payload(cfg):
+    return {'enabled': cfg.enabled, 'host': cfg.host, 'port': cfg.port, 'security': cfg.security, 'username': cfg.username,
+            'has_password': bool(cfg.password), 'from_address': cfg.from_address, 'from_name': cfg.from_name,
+            'verify_certificate': cfg.verify_certificate, 'link_base': cfg.link_base, 'link_effective': mailer.base_url(cfg),
+            'ready': mailer.ready(cfg), 'last_test': cfg.state or None}
+
+
+def email_get(request):
+    return _email_payload(mailer.row())
+
+
+def email_put(request):
+    from cveFeed.admin_api import audit
+    data = _body(request)
+    cfg = mailer.row()
+    host = _text(data, 'host', cfg.host, max_len=253).lower()
+    if host and not mailer.HOST_RE.match(host):
+        raise SettingsError(400, 'the server name may hold only letters, digits, dots, dashes and colons')
+    if host and ai_url_blocked(f'smtp://{host}'):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no mail server uses: enter the address of the server itself')
+    try:
+        port = int(data.get('port', cfg.port))
+    except (TypeError, ValueError):
+        raise SettingsError(400, 'the port must be a number')
+    if not 1 <= port <= 65535:
+        raise SettingsError(400, 'the port must be between 1 and 65535')
+    security = data.get('security', cfg.security)
+    if security not in dict(cfg.SECURITY_CHOICES):
+        raise SettingsError(400, 'Security must be STARTTLS, SSL/TLS or None')
+    username = _text(data, 'username', cfg.username, max_len=255)
+    from_address = _text(data, 'from_address', cfg.from_address, max_len=254)
+    if from_address and not mailer.EMAIL_RE.match(from_address):
+        raise SettingsError(400, 'the From address does not look like an email address')
+    from_name = _text(data, 'from_name', cfg.from_name, max_len=100)
+    link_base = _text(data, 'link_base', cfg.link_base, max_len=200).rstrip('/')
+    if link_base and not mailer.LINK_BASE_RE.match(link_base):
+        raise SettingsError(400, 'the link address must look like https://scanner.example.com, with no path')
+    if any(ord(ch) < 32 or ch in '<>"' for ch in from_name + username):
+        raise SettingsError(400, 'the names may not contain control characters, quotes or angle brackets')
+    password = '' if data.get('clear_password') else _text(data, 'password', cfg.password or '', secret=True, max_len=500)
+    if security == 'none' and (username or password):
+        raise SettingsError(400, 'a user name and password would cross the network unencrypted; choose STARTTLS or SSL/TLS, or clear them')
+    enabled = bool(data.get('enabled', cfg.enabled))
+    if enabled and not (host and from_address):
+        raise SettingsError(400, 'to turn outgoing mail on, enter the server and the From address')
+    cfg.enabled, cfg.host, cfg.port, cfg.security, cfg.username, cfg.password = enabled, host, port, security, username, password
+    cfg.from_address, cfg.from_name, cfg.link_base = from_address, from_name, link_base
+    if 'verify_certificate' in data:
+        cfg.verify_certificate = bool(data['verify_certificate'])
+    cfg.updated_by = request.user
+    cfg.save()
+    audit(request.user, 'email.update', host, enabled=enabled, security=security, verify_certificate=cfg.verify_certificate)
+    return _email_payload(cfg)
+
+
+def email_test(request):
+    """Send a test message through the saved settings, to the address given or else to the signed-in App Admin's own."""
+    from django.utils import timezone
+
+    from cveFeed.admin_api import audit
+    cfg = mailer.row()
+    if not (cfg.host and cfg.from_address):
+        raise SettingsError(409, 'save the server and the From address first')
+    to = str(_body(request).get('to') or request.user.email or '').strip()
+    if not to:
+        raise SettingsError(400, 'enter the address to send the test to (your account has none)')
+    ok, error = mailer.send_test(to, request.user, cfg)
+    cfg.state = {'at': timezone.now().isoformat(), 'ok': ok, 'to': to, 'error': error}
+    cfg.save(update_fields=['state'])
+    audit(request.user, 'email.test', cfg.host, ok=ok)
+    return {'ok': ok, 'to': to, 'error': error, 'last_test': cfg.state}
+
+
 # --- proxy -------------------------------------------------------------------------
+
+_PROXY_USERINFO = re.compile(r'^([a-z0-9]+://)([^/\s]*)@(\S+)$', re.I)
+
+
+def _mask_proxy(line):
+    """A proxy URL with its password hidden: ``http://user:pass@host`` becomes ``http://user:***@host`` (a bare token before the @
+    is hidden whole)."""
+    m = _PROXY_USERINFO.match(line)
+    if not m:
+        return line
+    scheme, userinfo, rest = m.groups()
+    return f'{scheme}{userinfo.split(":", 1)[0]}:***@{rest}' if ':' in userinfo else f'{scheme}***@{rest}'
+
 
 def proxy_get(request):
     row = Proxy.objects.first() or Proxy()
-    return {'use_proxy': bool(row.use_proxy), 'proxies': row.proxies or ''}
+    lines = (row.proxies or '').splitlines()
+    return {'use_proxy': bool(row.use_proxy), 'proxies': '\n'.join(_mask_proxy(ln) for ln in lines),
+            'has_credentials': any(_mask_proxy(ln) != ln for ln in lines)}
 
 
 def proxy_put(request):
@@ -261,11 +453,21 @@ def proxy_put(request):
         row.use_proxy = bool(data['use_proxy'])
     if 'proxies' in data:
         lines = [ln.strip() for ln in str(data['proxies']).splitlines() if ln.strip()]
-        bad = [ln for ln in lines if not re.match(r'^(https?|socks[45]h?)://\S+$', ln)]
+        bad = [ln for ln in lines if egress_proxy.parse(ln) is None]
         if bad:
-            raise SettingsError(400, f'not a proxy URL (http, https or socks): {bad[0][:60]}')
-        row.proxies = '\n'.join(lines)
+            raise SettingsError(400, f'not a proxy URL (http, https, socks5 or socks5h, like http://host:8080): {_mask_proxy(bad[0])[:60]}')
+        # the page shows passwords as ***: a line sent back unchanged keeps the stored password
+        stored = {_mask_proxy(ln): ln for ln in (row.proxies or '').splitlines() if _mask_proxy(ln) != ln}
+        kept = []
+        for ln in lines:
+            if ln in stored:
+                ln = stored[ln]
+            elif '***@' in ln.split('/', 3)[2]:
+                raise SettingsError(400, 'a proxy password shown as *** is not stored: type the full proxy URL again')
+            kept.append(ln)
+        row.proxies = '\n'.join(kept)
     row.save()
+    egress_proxy.reset_cache()  # this process applies the change at once; the other workers within a few seconds
     return proxy_get(request)
 
 
@@ -304,65 +506,6 @@ def report_put(request):
             setattr(row, field, bool(data[name]))
     row.save()
     return report_get(request)
-
-
-# --- scan engines ------------------------------------------------------------------
-
-def _engine(e):
-    return {'id': e.id, 'name': e.engine_name, 'default': bool(e.default_engine), 'yaml': e.yaml_configuration}
-
-
-def engines_list(request):
-    return {'results': [_engine(e) for e in EngineType.objects.order_by('engine_name')]}
-
-
-def _valid_engine_yaml(text):
-    if not text or len(text.encode()) > MAX_YAML_BYTES:
-        raise SettingsError(400, 'engine YAML is empty or too large')
-    try:
-        doc = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise SettingsError(400, f'invalid YAML: {str(exc)[:200]}')
-    if not isinstance(doc, dict):
-        raise SettingsError(400, 'engine YAML must be a mapping of tasks to settings')
-
-
-def engines_create(request):
-    data = _body(request)
-    name = _text(data, 'name', max_len=200)
-    if not name:
-        raise SettingsError(400, 'name is required')
-    text = data.get('yaml') or ''
-    _valid_engine_yaml(text)
-    return _engine(EngineType.objects.create(engine_name=name, yaml_configuration=text, default_engine=False)), 201
-
-
-def engines_update(request, engine_id):
-    engine = EngineType.objects.filter(id=engine_id).first()
-    if not engine:
-        raise SettingsError(404, 'engine not found')
-    data = _body(request)
-    if 'name' in data:
-        engine.engine_name = _text(data, 'name', engine.engine_name, max_len=200) or engine.engine_name
-    if 'yaml' in data:
-        _valid_engine_yaml(data['yaml'])
-        engine.yaml_configuration = data['yaml']
-    engine.save()
-    return _engine(engine)
-
-
-def engines_delete(request, engine_id):
-    from startScan.models import ScanHistory
-    engine = EngineType.objects.filter(id=engine_id).first()
-    if not engine:
-        raise SettingsError(404, 'engine not found')
-    # ScanHistory.scan_type cascades, so deleting a used engine would delete scan history
-    if ScanHistory._base_manager.filter(scan_type=engine).exists():
-        raise SettingsError(409, 'this engine has scans; deleting it would delete their history')
-    if AIProviderSettings.objects.filter(auto_fire_engine_id=engine.id).exists():
-        raise SettingsError(409, 'this engine is used by auto-fire')
-    engine.delete()
-    return {'deleted': True}
 
 
 # --- ip allowlist ---------------------------------------------------------------
@@ -579,6 +722,9 @@ ROUTES = [
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
+    ('POST', r'cve_guidance/run', lambda r, **k: cve_guidance_run(r)),
+    ('GET', r'cve_seed', lambda r, **k: cve_seed_get(r)), ('POST', r'cve_seed/build', lambda r, **k: cve_seed_build(r)),
+    ('GET', r'cve_seed/download/(?P<which>seed|manifest)', lambda r, which, **k: cve_seed_download(r, which)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),
     ('GET', r'resources', lambda r, **k: resources_get(r)),
@@ -588,11 +734,20 @@ ROUTES = [
     ('GET', r'keys', lambda r, **k: keys_get(r)), ('PUT', r'keys', lambda r, **k: keys_put(r)),
     ('GET', r'notifications', lambda r, **k: notifications_get(r)),
     ('PUT', r'notifications', lambda r, **k: notifications_put(r)),
+    ('GET', r'email', lambda r, **k: email_get(r)), ('PUT', r'email', lambda r, **k: email_put(r)),
+    ('POST', r'email/test', lambda r, **k: email_test(r)),
     ('GET', r'proxy', lambda r, **k: proxy_get(r)), ('PUT', r'proxy', lambda r, **k: proxy_put(r)),
     ('GET', r'reports', lambda r, **k: report_get(r)), ('PUT', r'reports', lambda r, **k: report_put(r)),
-    ('GET', r'engines', lambda r, **k: engines_list(r)), ('POST', r'engines', lambda r, **k: engines_create(r)),
-    ('PUT', r'engines/(?P<engine_id>\d+)', lambda r, engine_id, **k: engines_update(r, int(engine_id))),
-    ('DELETE', r'engines/(?P<engine_id>\d+)', lambda r, engine_id, **k: engines_delete(r, int(engine_id))),
+    ('GET', r'tailscale', lambda r, **k: tailscale_admin.tailscale_get(r)),
+    ('PUT', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_put(r, project_id)),
+    ('DELETE', r'tailscale/(?P<project_id>\d+)', lambda r, project_id, **k: tailscale_admin.tailscale_delete(r, project_id)),
+    ('POST', r'tailscale/(?P<project_id>\d+)/test', lambda r, project_id, **k: tailscale_admin.tailscale_test(r, project_id)),
+    ('POST', r'tailscale/(?P<project_id>\d+)/sync', lambda r, project_id, **k: tailscale_admin.tailscale_sync_now(r, project_id)),
+    ('GET', r'openvas', lambda r, **k: openvas_admin.openvas_get(r)), ('PUT', r'openvas', lambda r, **k: openvas_admin.openvas_put(r)),
+    ('POST', r'openvas/test', lambda r, **k: openvas_admin.openvas_test(r)),
+    ('PUT', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_put(r, project_id)),
+    ('GET', r'openvas/projects/(?P<project_id>\d+)/queue', lambda r, project_id, **k: openvas_admin.project_queue(r, project_id)),
+    ('DELETE', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_delete(r, project_id)),
     ('GET', r'ip_allowlist', lambda r, **k: ip_allowlist_get(r)), ('PUT', r'ip_allowlist', lambda r, **k: ip_allowlist_put(r)),
     ('POST', r'ip_allowlist/entries', lambda r, **k: ip_allowlist_entry_create(r)),
     ('DELETE', r'ip_allowlist/entries/(?P<entry_id>\d+)', lambda r, entry_id, **k: ip_allowlist_entry_delete(r, int(entry_id))),
@@ -616,6 +771,8 @@ def dispatch(request, path):
             result = fn(request, **match.groupdict())
         except SettingsError as exc:
             return JsonResponse({'error': exc.message}, status=exc.status)
+        if isinstance(result, HttpResponseBase):  # a download
+            return result
         data, status = result if isinstance(result, tuple) else (result, 200)
         return JsonResponse(data, status=status)
     if methods:

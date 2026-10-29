@@ -20,15 +20,24 @@
     <div class="meter" role="img" aria-label="Share of hosts that are exposed"><i id="m-exposed"></i></div>
     <p>A host is exposed when a CVE matches it (one the AI has not ruled out), or an open finding is medium or worse.</p>
   </a>
-  <div class="cell" id="c-temps">
-    <div class="cell-head"><span class="eyebrow">CVE intelligence feed</span><span class="eyebrow" id="temp-hint">Filter</span></div>
-    <p class="note">These are catalog advisories, not findings on your assets. Asset candidates are listed under CVE matches.</p>
-    <div class="temps">
-      <button class="temp fire" type="button" data-tier="fire" aria-pressed="false"><span class="nm">Fire</span><span class="bar"><i id="b-fire"></i></span><b id="s-fire">-</b></button>
-      <button class="temp smoke" type="button" data-tier="smoke" aria-pressed="false"><span class="nm">Smoke</span><span class="bar"><i id="b-smoke"></i></span><b id="s-smoke">-</b></button>
-      <button class="temp ice" type="button" data-tier="ice" aria-pressed="false"><span class="nm">Ice</span><span class="bar"><i id="b-ice"></i></span><b id="s-ice">-</b></button>
+  <nav class="strip in-cell" aria-label="Engine counters">
+    <a id="n-matches" title="CVE matches the AI has not ruled out. The CVE matches page opens on the same view." {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-matches">-</b><span>CVE matches</span></a>
+    <a id="n-findings" title="Open scanner findings of low severity or worse (the Findings page, Scanner, Actionable). Informational detections and closed findings are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
+    <a id="n-hygiene" class="wide" title="Open hygiene issues of low severity or worse: TLS, certificates, SPF, DKIM, DMARC, CAA" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-hygiene_open">-</b><span>Hygiene issues</span><ul class="hy-top" id="hy-top" aria-label="Biggest hygiene issues"></ul></a>
+    <a id="n-coverage" title="Hosts a scan has looked at, out of the hosts that can be scanned. A host never scanned has no findings because nothing looked, not because it is clean." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?heat=unscanned"{% endif %}><p class="of"><b id="s-coverage">-</b><small id="s-coverage_of"></small></p><span>Hosts scanned</span></a>
+    <a id="n-queue" hidden title="Scans are waiting but none is running. Look at the Scans page." {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_queued">-</b><span>Queued, none running</span></a>
+    <a id="n-oldest" hidden title="The critical or high issue that has gone unfixed the longest, and for how many days: a CVE match with CVSS 7.0 or more, or a high or critical scanner or hygiene finding. Fixed, accepted-risk, ruled-out and resolved items are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}"{% endif %}><p class="of"><b id="s-oldest_open_days">-</b><small id="s-oldest_unit">days</small></p><span>Longest unfixed issue</span><small id="s-oldest_note"></small><small id="s-oldest_host" class="mono"></small></a>
+    <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><p class="of"><b id="s-certs_expiring">-</b><small id="s-certs_total_note"></small></p><span>Certs expiring 30d</span></a>
+  </nav>
+  <section class="internal" id="n-internal" hidden aria-label="Internal networks">
+    <div class="cell-head"><span class="eyebrow">Internal</span><span class="eyebrow" id="in-last"></span></div>
+    <div class="in-nums">
+      <a id="in-hosts" title="Hosts inside a network declared internal. Only a Sentinel inside that network scans them." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?internal=1"{% endif %}><b>-</b><span>Internal hosts</span><small></small></a>
+      <a id="in-findings" title="Open scanner findings of low severity or worse on internal hosts" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner&internal=1"{% endif %}><b>-</b><span>Findings</span></a>
+      <a id="in-matches" title="Exposed CVE matches on internal hosts" {% if slug %}href="{% url 'cve_section' slug 'matches' %}?internal=1"{% endif %}><b>-</b><span>CVE matches</span></a>
     </div>
-  </div>
+    <ul class="in-nets" id="in-nets" aria-label="Sentinel state per internal network"></ul>
+  </section>
   </div>
 
   <div class="cell" id="c-map">
@@ -48,15 +57,6 @@
   </div>
 </section>
 
-<nav class="strip" aria-label="Engine counters">
-  <a id="n-targets" title="Targets in this view" {% if slug %}href="{% url 'cve_section' slug 'targets' %}"{% endif %}><b id="s-targets">-</b><span>Targets</span></a>
-  <a id="n-matches" title="CVE matches the AI has not ruled out. The CVE matches page opens on the same view." {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-matches">-</b><span>CVE matches</span></a>
-  <a id="n-findings" title="Open scanner findings of low severity or worse (the Findings page, Scanner, Actionable). Informational detections and closed findings are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
-  <a id="n-scans" title="Scans running now. A scan marked running for over 11 hours is stalled and is not counted." {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_running">-</b><span id="s-scans_label">Scans running</span></a>
-  <a id="n-certs" title="Certificates that expire within 30 days, including any already expired" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-certs_expiring">-</b><span>Certs expiring 30d</span></a>
-  <a id="n-auto" title="CVE advisories in the Fire tier that CVEngine scanned for automatically. This is global, not per project." {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %}><b id="s-autofire_runs">-</b><span>Auto-fire runs</span></a>
-  <a id="n-ai" {% if slug %}href="{% url 'cve_section' slug 'activity' %}"{% endif %} title="AI-authored Nuclei templates that passed syntax checks; this is not a count of reviewed or validated findings"><b id="s-templates">-</b><span>AI templates syntax-valid</span></a>
-</nav>
 
 
 <section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}">
@@ -64,9 +64,10 @@
   <div class="card discovery">
     <div class="card-head">
       <h2>Live discovery</h2>
-      <span class="badge" id="d-status" style="display:none"></span>
+      <span class="card-tools"><button class="btn ghost sm" id="d-pods" type="button" aria-pressed="true" title="Fold each host's CVEs into its bubble. Double-click a host to open its pod.">Group CVEs</button><a class="badge" id="d-status" style="display:none"></a></span>
     </div>
     <p class="note" id="d-target" style="margin:2px 0 10px">Waiting for a scan.</p>
+    <div class="scanning-now" id="d-scanning" hidden aria-live="polite"></div>
     <div class="graph-box">
       <div id="d-graph" role="group" aria-label="Live graph of what discovery is finding"></div>
       <div class="graph-empty" id="d-empty">
@@ -87,14 +88,17 @@
 <section class="card feed-card" style="margin-top:14px">
   <div class="feed-head">
     <h2>CVE feed</h2>
+    <p class="note feed-note">Catalog advisories, not findings on your assets. Asset candidates are listed under CVE matches.</p>
+    <div class="temps" role="group" aria-label="Filter the feed by temperature">
+      <button class="temp fire" type="button" data-tier="fire" aria-pressed="false"><span class="nm">Fire</span><b id="s-fire">-</b></button>
+      <button class="temp smoke" type="button" data-tier="smoke" aria-pressed="false"><span class="nm">Smoke</span><b id="s-smoke">-</b></button>
+      <button class="temp ice" type="button" data-tier="ice" aria-pressed="false"><span class="nm">Ice</span><b id="s-ice">-</b></button>
+    </div>
     <span class="note" id="feed-filter">All temperatures</span>
   </div>
   <ul class="feed" id="feed" aria-live="polite" tabindex="0" aria-label="CVE feed"></ul>
   <p class="empty" id="feed-empty">Waiting for CVEs. They arrive as cve.now publishes them.</p>
-  <details class="how">
-    <summary>How the engine works</summary>
-    <p>New <b>fire</b> and <b>smoke</b> CVEs are matched against your inventory, confirmed by the AI, checked with a nuclei template (written on the spot if none exists), and validated.</p>
-  </details>
+  <a class="how-link" href="{% url 'cve_how' %}">How the engine works <span aria-hidden="true">→</span></a>
 </section>
 {% endblock %}
 {% block scripts %}

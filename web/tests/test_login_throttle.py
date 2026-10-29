@@ -24,6 +24,18 @@ class LoginThrottleTests(TestCase):
 		self.assertEqual(r.status_code, 429)
 		self.assertNotIn('_auth_user_id', c.session)
 
+	def test_a_throttled_attempt_is_refused_without_hashing_the_password(self):
+		from unittest import mock
+		limit = dict(views.LOGIN_LIMITS)['pair']
+		c = Client()
+		for _ in range(limit):
+			self.attempt('wrong', client=c)
+		with mock.patch('django.contrib.auth.forms.authenticate') as check:
+			r = self.attempt('right-pw-1', client=c)
+		self.assertEqual(r.status_code, 429)
+		check.assert_not_called()
+		self.assertContains(r, 'Too many failed sign-in attempts', status_code=429)
+
 	def test_a_success_clears_the_pair_counter(self):
 		limit = dict(views.LOGIN_LIMITS)['pair']
 		for _ in range(limit - 1):

@@ -48,6 +48,23 @@ class DiscoveryTests(TestCase):
 		queued.assert_called_once_with(scan.id, 'standard')  # standard is the default
 		return scan
 
+	def test_a_rejected_key_becomes_an_activity_line_naming_the_service(self):
+		from cveFeed.models import AgentActivity
+		from dashboard.models import ApiCredential
+		ApiCredential.objects.create(project=self.project, service='virustotal', value={'api_key': 'vt-bad'})
+		scan = self._scan()
+
+		def stream(targets, problems=None, **k):
+			problems += [('virustotal', 'Error with API (401 Unauthorized'), ('crt', 'unrelated module without a key')]
+			return iter(EVENTS)
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=stream)
+		lines = list(AgentActivity.objects.filter(message__contains='key was not accepted').values_list('message', 'status'))
+		self.assertEqual(len(lines), 1)  # the module without a configured key is not blamed on a key
+		self.assertIn('VirusTotal', lines[0][0])
+		self.assertIn('401', lines[0][0])
+		self.assertEqual(lines[0][1], 'failed')
+
 	def test_streaming_discovery_persists_assets_events_and_activity(self):
 		scan = self._scan()
 		self.assertEqual(scan.scan_status, -1)  # queued until a worker starts it
@@ -486,7 +503,7 @@ class NucleiStageTests(TestCase):
 		scan, out = self._pipeline(light_stream=lambda path, **k: calls.append('light') or iter([]),
 			targeted_stream=lambda path, **k: calls.append('targeted') or iter([]))
 		self.assertEqual(list(ScanActivity.objects.filter(scan_of=scan).order_by('id').values_list('name', flat=True)),
-			['bbot_discovery', 'nmap_scan', 'db_exposure_scan', 'nuclei_light_scan', 'route_auth_scan', 'cve_correlation', 'nuclei_targeted_scan', 'triage', 'asset_changes'])
+			['bbot_discovery', 'nmap_scan', 'db_exposure_scan', 'nuclei_light_scan', 'route_auth_scan', 'version_probes', 'wpscan', 'cve_correlation', 'nuclei_targeted_scan', 'triage', 'asset_changes'])
 		self.assertEqual(calls, ['light', 'targeted'])
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='triage').title, 'AI triage and validation')
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_light_scan').title, 'Nuclei HTTP and technology pass')
@@ -591,6 +608,7 @@ class OneDiscoveryPerTargetTests(TestCase):
 		holder.save()
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			other = discovery.start_discovery(self.domain)
+		ScanHistory.objects.filter(pk=holder.id).update(scan_status=discovery.RUNNING)  # the holder is the scan whose pipeline is running
 		ran = []
 		with discovery.domain_lock(self.domain.id, holder.id) as mine:
 			if mine is not True:
@@ -604,6 +622,25 @@ class OneDiscoveryPerTargetTests(TestCase):
 		self.assertIn('already running', ScanHistory.objects.get(pk=other.id).error_message)
 
 
+class RedeliveredDiscoveryTests(TestCase):
+	"""A message the queue gives back after a worker died finds the dead worker's lock still held: it asks again later instead of being acked."""
+
+	def test_a_duplicate_for_the_same_scan_is_asked_again_after_the_lock_would_have_expired(self):
+		from celery.exceptions import Retry
+		from cveFeed.tasks import DUPLICATE_RETRIES, run_bbot_discovery
+		task = run_bbot_discovery._get_current_object()
+		task.push_request(id='abc', retries=0, called_directly=False)
+		self.addCleanup(task.pop_request)
+		with mock.patch('cveFeed.discovery.run_pipeline', return_value={'scan_id': 7, 'status': 'duplicate'}), mock.patch('startScan.models.ScanHistory.objects'):
+			with mock.patch.object(task, 'retry', side_effect=Retry()) as retry:
+				with self.assertRaises(Retry):
+					task.run(7)
+			retry.assert_called_once_with(countdown=discovery.LOCK_TTL + 15, max_retries=DUPLICATE_RETRIES)
+			task.request.retries = DUPLICATE_RETRIES  # it kept finding the lock: a live twin, so the message is let go
+			with mock.patch.object(task, 'retry', side_effect=AssertionError('retried forever')):
+				self.assertEqual(task.run(7)['status'], 'duplicate')
+
+
 class NucleiLedgerTests(TestCase):
 	"""Nuclei runs once per host per project inside its TTL; a repeat scan reuses the findings instead."""
 
@@ -612,6 +649,10 @@ class NucleiLedgerTests(TestCase):
 		self.p1 = Project.objects.create(name='P1', slug='nl1', insert_date=timezone.now(), org=org)
 		self.p2 = Project.objects.create(name='P2', slug='nl2', insert_date=timezone.now(), org=org)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		# no real DNS: a name that is slow to answer counts as blocked, which dropped a host from the chunk test on a loaded runner
+		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def _scan(self, project, name, host='shared.example.test'):
 		domain = Domain.objects.create(name=name, project=project, insert_date=timezone.now())
@@ -851,6 +892,11 @@ class DiscoveryCountsTests(TestCase):
 		ProjectMembership.objects.create(user=user, project=project, role='user')
 		d = client_for(user).get(f'/cve/api/discovery?scan={scan.id}').json()
 		self.assertEqual(d['counts'], {'hosts': 3, 'ips': 2, 'ports': 4})
+		self.assertEqual(d['scan']['error'], '')
+		scan.scan_status, scan.error_message = 0, 'bbot exited with code 2'
+		scan.save()
+		d = client_for(user).get(f'/cve/api/discovery?scan={scan.id}').json()
+		self.assertEqual((d['scan']['status'], d['scan']['error']), (0, 'bbot exited with code 2'))  # the badge shows why on hover
 
 	def test_counts_total_every_live_host_not_only_the_followed_scan(self):
 		"""The graph drawn above the ticker is the whole project's live map (every host a completed scan or rescan has

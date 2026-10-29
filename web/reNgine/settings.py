@@ -23,8 +23,6 @@ environ.Env.read_env(os.path.join(BASE_DIR, os.pardir, '.env'))
 # Root env vars
 RENGINE_HOME = env('RENGINE_HOME', default='/usr/src/app')
 RENGINE_RESULTS = env('RENGINE_RESULTS', default=f'{RENGINE_HOME}/scan_results')
-RENGINE_CACHE_ENABLED = env.bool('RENGINE_CACHE_ENABLED', default=False)
-RENGINE_RECORD_ENABLED = env.bool('RENGINE_RECORD_ENABLED', default=True)
 RENGINE_RAISE_ON_ERROR = env.bool('RENGINE_RAISE_ON_ERROR', default=False)
 
 # Common env vars
@@ -110,17 +108,16 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.humanize',
     'rest_framework',
-    'rest_framework_datatables',
     'dashboard.apps.DashboardConfig',
     'targetApp.apps.TargetappConfig',
     'scanEngine.apps.ScanengineConfig',
     'startScan.apps.StartscanConfig',
     'recon_note.apps.ReconNoteConfig',
     'cveFeed.apps.CveFeedConfig',
+    'agentapi.apps.AgentapiConfig',
     'django_ace',
     'django_celery_beat',
     'mathfilters',
-    'drf_yasg',
     'rolepermissions'
 ]
 MIDDLEWARE = [
@@ -137,8 +134,8 @@ MIDDLEWARE = [
     'tenancy.middleware.TenancyMiddleware',
     'tenancy.middleware.RetireClassicUiMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'reNgine.middleware.UserPreferencesMiddleware',
     'reNgine.middleware.ContentSecurityPolicyMiddleware',
+    'reNgine.schema_guard.SchemaBehindMiddleware',
 ]
 TEMPLATES = [
     {
@@ -151,27 +148,15 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
-                'reNgine.context_processors.projects',
                 'reNgine.context_processors.version_context',
-                'reNgine.context_processors.user_preferences',
             ],
     },
 }]
 ROOT_URLCONF = 'reNgine.urls'
-REST_FRAMEWORK = {
-    'DEFAULT_RENDERER_CLASSES': (
-        'rest_framework.renderers.JSONRenderer',
-        'rest_framework.renderers.BrowsableAPIRenderer',
-        'rest_framework_datatables.renderers.DatatablesRenderer',
-    ),
+REST_FRAMEWORK = {  # no DRF view is left (the REST API is agentapi); only tenancy.drf's scoping backend remains
     'DEFAULT_FILTER_BACKENDS': (
         'tenancy.drf.ProjectScopeFilterBackend',
-        'rest_framework_datatables.filters.DatatablesFilterBackend',
     ),
-    'DEFAULT_PAGINATION_CLASS':(
-        'rest_framework_datatables.pagination.DatatablesPageNumberPagination'
-    ),
-    'PAGE_SIZE': 500,
 }
 WSGI_APPLICATION = 'reNgine.wsgi.application'
 
@@ -218,6 +203,14 @@ LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'login',
     'mfa_verify',
     'admin_login_redirect',
+    'invite',
+]
+
+# A Sentinel's very first call has no bearer token and no session yet: it authenticates with a one-time enrollment
+# secret instead (agentapi.sentinel_broker.bootstrap), checked by the route itself. Every other /api/v1/ and /mcp/
+# path still requires a bearer token or a signed-in session, enforced by agentapi.auth.AgentTokenMiddleware.
+LOGIN_REQUIRED_IGNORE_PATHS = [
+    r'^/api/v1/sentinels/bootstrap/?$',
 ]
 
 LOGIN_URL = 'login'
@@ -305,6 +298,7 @@ LOGGING = {
             'formatter': 'simple',
             'filename': 'celery.log',
             'maxBytes': 1024 * 1024 * 100,  # 100 mb
+            'backupCount': 3,
         },
     },
     'formatters': {
@@ -325,7 +319,7 @@ LOGGING = {
     'loggers': {
         'django': {
             'handlers': ['file'],
-            'level': 'ERROR' if DEBUG else 'CRITICAL',
+            'level': 'ERROR',  # 500 tracebacks (django.request) and security errors (django.security.*) are ERROR records; CRITICAL hid them all
             'propagate': True,
         },
         '': {
@@ -362,11 +356,6 @@ LOGGING = {
             'handlers': ['task'],
             'level': 'DEBUG' if DEBUG else 'INFO',
             'propagate': False
-        },
-        'api.views': {
-            'handlers': ['console'],
-            'level': 'DEBUG' if DEBUG else 'INFO',
-            'propagate': False
         }
     },
 }
@@ -374,7 +363,11 @@ LOGGING = {
 '''
 File upload settings
 '''
-DATA_UPLOAD_MAX_NUMBER_FIELDS = None
+# A finite cap on form fields (Django's own default is 1000): a body of `a=&a=&...` costs CPU linear in the field count, and /login/ takes
+# one without authentication. Set above the default so the larger bulk forms still post.
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 5000
+# nginx caps every request at 4 MB except a Sentinel's task result (24 MB, config/nginx/rengine.conf); the application accepts what nginx lets through
+DATA_UPLOAD_MAX_MEMORY_SIZE = 24 * 1024 * 1024
 
 '''
     Caching Settings

@@ -23,14 +23,24 @@
       <ul class="feed" id="list" style="max-height:none"></ul>
       <p class="empty" id="none">No tokens yet.</p>
     </div>
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin-bottom:8px">Your agents</h2>
+      <ul class="feed" id="agents" style="max-height:none"></ul>
+      <p class="empty" id="no-agents">No agent has registered on your tokens. An agent registers itself with <code>register_agent</code>, saying which hosts, projects or organizations it is responsible for and what it can do.</p>
+    </div>
   </div>
   <div class="card">
     <h2 style="margin-bottom:8px">Connect an agent</h2>
     <p class="note" style="margin-bottom:6px">Claude Code</p>
-    <pre class="code" data-copy>claude mcp add --transport http cvengine http://{{ host }}/mcp/ --header "Authorization: Bearer &lt;token&gt;"</pre>
+    <pre class="code" data-copy>claude mcp add --transport http cvengine {{ request.scheme }}://{{ host }}/mcp/ --header "Authorization: Bearer &lt;token&gt;"</pre>
     <p class="note" style="margin-bottom:6px">REST</p>
-    <pre class="code" data-copy>curl -H "Authorization: Bearer &lt;token&gt;" http://{{ host }}/api/v1/me</pre>
-    <p class="note">Remediation agents: <code>register_assets</code>, then <code>get_remediation_work</code>, then <code>update_remediation_status</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+    <pre class="code" data-copy>curl -H "Authorization: Bearer &lt;token&gt;" {{ request.scheme }}://{{ host }}/api/v1/me</pre>
+    <p class="note">Agents that take assigned work: <code>register_agent</code> once, then <code>get_next_task</code>, <code>accept_task</code>, <code>report_task_result</code>, with <code>agent_heartbeat</code> about once a minute. <code>whoami</code> shows your agent's scope and open assignments.</p>
+    <p class="note">Remediation agents that pick their own work: <code>register_assets</code>, then <code>get_remediation_work</code>, then <code>update_remediation_status</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+    <h2 style="margin:18px 0 8px">Host inventory</h2>
+    <p class="note" style="margin-bottom:8px">Have a host report its own operating system, packages and patches with a script (Linux, macOS, Windows). Its token can only post that project's reports.</p>
+    <div class="field"><label for="inv-project">Project</label><select id="inv-project"></select></div>
+    <button class="btn" type="button" id="inv-open">Set up host reporting</button>
   </div>
 </div>
 {% endblock %}
@@ -52,7 +62,7 @@
     live.forEach(function (t) {
       var li = el('li'); li.style.display = 'flex'; li.style.justifyContent = 'space-between'; li.style.alignItems = 'center'; li.style.gap = '12px';
       var left = el('div'); left.appendChild(el('span', 'cve-id', t.name));
-      left.appendChild(el('div', 'meta', t.prefix + '...  ' + (t.read_only ? 'read only  ' : '') + (t.last_used ? 'used ' + t.last_used.slice(0, 10) : 'never used')));
+      left.appendChild(el('div', 'meta', t.prefix + '...  ' + (t.scope === 'inventory' ? 'host reporter for ' + t.project + '  ' : '') + (t.read_only ? 'read only  ' : '') + (t.last_used ? 'used ' + t.last_used.slice(0, 10) : 'never used')));
       var b = el('button', 'btn ghost', 'Revoke'); b.type = 'button';
       b.addEventListener('click', function () { api('DELETE', '/api/v1/tokens/' + t.id).then(load); });
       li.appendChild(left); li.appendChild(b); list.appendChild(li);
@@ -69,6 +79,20 @@
     return b;
   }
   document.querySelectorAll('pre[data-copy]').forEach(function (pre) { var t = pre.textContent; pre.appendChild(copyBtn(function () { return t; })); });
+  function renderAgents(items) {
+    var box = document.getElementById('agents'), empty = document.getElementById('no-agents');
+    box.textContent = '';
+    empty.style.display = items.length ? 'none' : '';
+    items.forEach(function (a) {
+      var li = el('li'), scope = a.scope || {};
+      li.appendChild(el('span', 'cve-id', a.name));
+      var where = ['orgs', 'projects', 'hosts'].map(function (k) { return (scope[k] || []).length ? k + ': ' + scope[k].slice(0, 3).join(', ') : ''; }).filter(Boolean).join(' · ') || 'no scope declared';
+      li.appendChild(el('div', 'meta', a.kind + ' · ' + (a.status !== 'active' ? a.status : (a.live ? 'live' : 'offline')) + ' · ' + (a.last_seen ? 'seen ' + a.last_seen.slice(0, 16).replace('T', ' ') : 'never seen') + ' · ' + a.tasks.open + ' open, ' + a.tasks.completed + ' done'));
+      li.appendChild(el('div', 'meta', where + ' · ' + (a.capabilities.join(', ') || 'no capabilities')));
+      box.appendChild(li);
+    });
+  }
+  function loadAgents() { api('GET', '/api/v1/agents?page_size=50').then(function (x) { if (x.ok) renderAgents(x.d.results || []); }); }
   function load() { api('GET', '/api/v1/tokens').then(function (x) { render(x.d.results || []); }); }
   document.getElementById('f').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -83,7 +107,16 @@
       else { secret.className = 'msg err'; secret.textContent = x.d.error || 'Could not create the token.'; }
     });
   });
+  var invProject = document.getElementById('inv-project');
+  api('GET', '/api/v1/projects').then(function (x) {
+    (x.d.results || x.d.projects || []).forEach(function (p) { var o = el('option', '', p.name || p.slug); o.value = p.slug; invProject.appendChild(o); });
+  });
+  document.getElementById('inv-open').addEventListener('click', function () {
+    if (!invProject.value) return;
+    import('/staticfiles/cve/inventory.js').then(function (m) { m.openInventoryDialog({project: invProject.value}); });
+  });
   load();
+  loadAgents();
 })();
 </script>
 {% endblock %}

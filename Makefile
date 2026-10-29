@@ -8,6 +8,8 @@ COMPOSE_PREFIX_CMD := COMPOSE_DOCKER_CLI_BUILD=1
 
 COMPOSE_ALL_FILES := -f docker-compose.yml
 SERVICES          := db web proxy redis celery celery-beat
+# the optional OpenVAS (Greenbone) add-on: docs/OPENVAS.md. Named in full because `--profile openvas stop` would stop the whole stack.
+OPENVAS_SERVICES  := openvas-gvmd openvas-ospd openvas-openvasd openvas-redis openvas-pg-gvm openvas-pg-gvm-migrator openvas-configure openvas-gpg-data openvas-vulnerability-tests openvas-notus-data openvas-scap-data openvas-cert-bund-data openvas-dfn-cert-data openvas-data-objects openvas-report-formats
 
 # Check if 'docker compose' command is available, otherwise use 'docker-compose'
 DOCKER_COMPOSE := $(shell if command -v docker > /dev/null && docker compose version > /dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi)
@@ -15,7 +17,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-user openvas-down
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -31,9 +33,12 @@ certs: check-secrets	## Generate the HTTPS certificate.
 	@${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} -f docker-compose.setup.yml run --rm certs
 
 up: check-env		## Build and start all services.
+	@rm -f config/nginx/state/maintenance
 	@./scripts/upgrade-postgres.sh
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
+	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
+	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi
 
 build: check-env		## Build all services.
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
@@ -81,6 +86,18 @@ rm:				## Remove all services containers.
 
 test:			## Run the test suite (the stack must be running).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) exec celery python3 manage.py test tests
+
+openvas-up: check-env	## Start the optional OpenVAS (Greenbone) add-on (docs/OPENVAS.md). The first start loads the feeds for a long time; add COMPOSE_PROFILES=openvas to .env to keep it across updates.
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas up -d ${OPENVAS_SERVICES}
+
+openvas-user:	## Create the GVM user cvENGINE uses and save its generated login, encrypted (after make openvas-up).
+	./scripts/openvas-user.sh
+
+openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}
+
+inventory-sync:	## Copy the host inventory reporter scripts to the copies the server hands out (web/static/cve/inventory).
+	cp -p scripts/inventory/cvengine-inventory.sh scripts/inventory/cvengine-inventory.py scripts/inventory/cvengine-inventory.ps1 web/static/cve/inventory/
 
 logs:			## Tail all logs with -n 1000.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) logs --follow --tail=1000 ${SERVICES}

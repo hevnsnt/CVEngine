@@ -42,7 +42,9 @@ case " $* " in
     exit 1;;
   *" config --services "*) if [[ "$*" == *"docker-compose.dev.yml"* ]]; then
       printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\n';
-    else printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\nproxy\\n'; fi; exit 0;;
+    else printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\nproxy\\n'; fi
+    if [ -e "$STUB_DIR/tailscale_profile" ]; then printf 'tailscale\\n'; fi; exit 0;;
+  *" pull "*) test ! -e "$STUB_DIR/pull_fails"; exit $?;;
   *" cancel_consumer "*) touch "$STUB_DIR/paused";
     if [ -e "$STUB_DIR/warn_on_control" ]; then echo 'SyntaxWarning: old scanner regex' >&2; fi
     echo '{}'; exit 0;;
@@ -64,7 +66,14 @@ case " $* " in
     cat "$STUB_DIR/empty_queues"; exit 0;;
   *" exec -T celery-beat "*) test ! -e "$STUB_DIR/beat_down"; exit $?;;
   *" build "*) test ! -e "$STUB_DIR/build_fail"; exit $?;;
-  *" migrate --noinput "*) test ! -e "$STUB_DIR/migrate_fail"; exit $?;;
+  *" ps -q --status running db "*) echo dbid; exit 0;;
+  *" exec dbid "*) case "$*" in *pg_dump*) if [ -e "$STUB_DIR/dump_fails" ]; then exit 1; fi
+      echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
+    esac; exit 0;;
+  *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
+  *" migrate --noinput "*) if [ -e "$STUB_DIR/migrate_partial" ]; then
+      printf '[X]  app.0001_initial\\n[X]  app.0002_first_of_the_batch\\n' > "$STUB_DIR/migrations_state"; exit 1; fi
+    test ! -e "$STUB_DIR/migrate_fail"; exit $?;;
   *" collectstatic --noinput "*) test ! -e "$STUB_DIR/collectstatic_fail"; exit $?;;
   *" up -d --no-deps --force-recreate "*) rm -f "$STUB_DIR/paused" "$STUB_DIR/container_down" "$STUB_DIR/inspect_fail";
     if [ ! -e "$STUB_DIR/post_missing" ]; then cp "$STUB_DIR/healthy_queues" "$STUB_DIR/queues"; fi; exit 0;;
@@ -95,6 +104,7 @@ class UpdateScriptCase(unittest.TestCase):
         self.env = {**os.environ, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'STUB_DIR': str(self.stub),
                     'CVENGINE_UPDATE_READY_SECONDS': '1', 'CVENGINE_UPDATE_DRAIN_SECONDS': '1',
                     'CVENGINE_UPDATE_POLL_SECONDS': '0.2',  # the script's real pause is 5 seconds per check; the stubs answer at once
+                    'CVENGINE_UPDATE_BACKUPS': '0',  # the dump has tests of its own (BackupTests)
                     'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
                     'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t',
                     'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull}
@@ -106,6 +116,7 @@ class UpdateScriptCase(unittest.TestCase):
         (self.work / 'scripts').mkdir()
         shutil.copy(SCRIPT, self.work / 'scripts' / 'update.sh')
         shutil.copy(SCRIPT.with_name('update-state.py'), self.work / 'scripts' / 'update-state.py')
+        shutil.copy(SCRIPT.with_name('db-backup.sh'), self.work / 'scripts' / 'db-backup.sh')
         (self.work / 'web').mkdir()
         (self.work / 'web' / 'README').write_text('v1\n')
         (self.work / 'docker-compose.yml').write_text('services: {}\n')
@@ -274,6 +285,74 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any('--force-recreate web' in c for c in self.calls()))
         self.assertTrue(any(' add_consumer ' in c for c in self.calls()))
+
+    def test_the_database_is_dumped_just_before_the_migration(self):
+        import gzip
+        result = self.run_update(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = self.calls()
+        self.assertLess(next(i for i, c in enumerate(calls) if 'pg_dump' in c), next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        folder = self.work / '.git' / 'cvengine-update' / 'backups'
+        dumps = list(folder.glob('cvengine-*.sql.gz'))
+        self.assertEqual(len(dumps), 1)
+        self.assertEqual(oct(dumps[0].stat().st_mode & 0o777), '0o600')
+        self.assertEqual(oct(folder.stat().st_mode & 0o777), '0o700')
+        self.assertIn(b'a dump of the database', gzip.open(dumps[0]).read())
+        self.assertIn('Backed up the database', result.stdout)
+
+    def test_only_the_newest_dumps_are_kept(self):
+        folder = self.work / '.git' / 'cvengine-update' / 'backups'
+        folder.mkdir(parents=True)
+        for day in range(1, 6):
+            old = folder / f'cvengine-2026010{day}T000000Z-abc.sql.gz'
+            old.write_bytes(b'x')
+            os.utime(old, (1_700_000_000 + day * 86400,) * 2)
+        result = self.run_update(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        names = sorted(p.name for p in folder.glob('cvengine-*.sql.gz'))
+        self.assertEqual(len(names), 3)
+        self.assertNotIn('cvengine-20260101T000000Z-abc.sql.gz', names)
+
+    def test_a_failed_dump_stops_the_update_before_the_migration_and_puts_the_checkout_back(self):
+        (self.stub / 'dump_fails').touch()
+        result = self.run_update(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('database backup failed', result.stderr)
+        self.assertFalse(any(' migrate --noinput' in c for c in self.calls()))
+        self.assertFalse(any('--force-recreate web' in c for c in self.calls()))
+        self.assertEqual(self.readme(), 'v1\n')
+        self.assertEqual(list((self.work / '.git' / 'cvengine-update' / 'backups').glob('*.sql.gz')), [])
+
+    def test_a_migration_that_failed_part_way_does_not_put_the_old_code_back(self):
+        # every migration commits on its own: the first of a batch is applied when a later one fails, and the previous code must not run on that
+        (self.stub / 'migrate_partial').touch()
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.readme(), 'v2\n')
+        self.assertIn('NOT put back', result.stderr)
+        self.assertNotIn('Returned the checkout', result.stderr)
+        self.assertFalse(any('--force-recreate web' in c for c in self.calls()))
+
+    def test_the_proxy_image_is_pulled_before_the_build_and_an_unreachable_registry_does_not_fail_the_update(self):
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = self.calls()
+        self.assertIn('docker compose -f docker-compose.yml pull --quiet proxy', calls)
+        self.assertLess(calls.index('docker compose -f docker-compose.yml pull --quiet proxy'), next(i for i, c in enumerate(calls) if ' build ' in c))
+        (self.stub / 'calls').unlink()
+        (self.stub / 'pull_fails').touch()
+        self.git('reset', '--hard', 'HEAD~1', cwd=self.work)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('Could not pull the newest proxy image', result.stderr)
+
+    def test_the_tailscale_sidecar_is_recreated_after_celery_when_its_profile_is_on(self):
+        (self.stub / 'tailscale_profile').touch()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = self.calls()
+        self.assertLess(next(i for i, c in enumerate(calls) if '--force-recreate web' in c),
+                        calls.index('docker compose -f docker-compose.yml up -d --no-deps --force-recreate tailscale'))
 
     def test_static_publish_failure_does_not_serve_new_app(self):
         (self.stub / 'collectstatic_fail').touch()

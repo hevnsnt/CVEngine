@@ -22,19 +22,20 @@ def is_reserved_project(*values):
 # Instance-wide configuration (AI key, API vault, tools, user management) affects every org,
 # so only superusers may open it. Per-project settings below need the admin role.
 SUPERUSER_ONLY = re.compile(
-    r'^/(admin/|cve/setup|cve/api/setup|cve/settings|cve/api/settings|cve/welcome|cve/api/welcome|[^/]+/admin_interface|'
-    r'api/(getFileContents|github/tool|external/tool|tool/|rengine/update|tools/)|'
+    r'^/(admin/|cve/(api/)?(setup|settings|welcome)(/|$)|[^/]+/admin_interface|'
     r'scanEngine/[^/]+/(tool_settings|api_vault|tool_arsenal|ai_settings|llm_toolkit|rengine_settings|'
     r'notification_settings|proxy_settings|report_settings|hackerone_settings|add|delete|update|wordlist|interesting|testHackerone))')
 # Per-project settings that need the admin role (none yet: notification, proxy and report
 # settings are global singletons in reNgine, so they are instance-wide above).
 ADMIN_ONLY = re.compile(r'^/(?!)')
-# Bug bounty workflow: the program catalogue and report pages (/cve/bounty, /cve/api/bounty), the HackerOne routes and the legacy
-# toggle. App Admins always have it; any other user only after an App Admin authorized that user (UserProfile.bugbounty_enabled,
+# Bug bounty workflow: the program catalogue and report pages (/cve/bounty, /cve/api/bounty).
+# App Admins always have it; any other user only after an App Admin authorized that user (UserProfile.bugbounty_enabled,
 # set through /cve/api/admin/users/<id>/bug-bounty, which only an App Admin may call and which is written to the audit log).
-BUGBOUNTY = re.compile(r'^/cve/(api/)?bounty(/|$)|hackerone|bountyhub|vulnerability/report|toggle-bug-bounty', re.I)
+# Anchored to the route's own segments: a project slug is free-form, so a project called "hackerone-team" must not look like a route.
+BUGBOUNTY = re.compile(r'^/cve/(api/)?bounty(/|$)|^/(?!cve/)[^/]+/bountyhub(/|$)|'
+                       r'^/scanEngine/[^/]+/(hackerone_settings|testHackerone)', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
-ALWAYS_OPEN = re.compile(r'^/((logout|login|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$))')
+ALWAYS_OPEN = re.compile(r'^/((logout|login|invite|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$)|cve/how-it-works(/|$))')
 
 
 def best_role(roles):

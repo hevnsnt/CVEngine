@@ -29,6 +29,7 @@ CONNECT_TIMEOUT = 8      # seconds to complete the RDP security and MCS handshak
 SCREEN_WAIT = 5          # seconds to let the server paint its pre-authentication screen once connected
 VIDEO_WIDTH, VIDEO_HEIGHT = 1024, 768
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
+CAP_GRACE = 15          # seconds past connect and paint that the whole capture may take before it is abandoned
 MAX_HOSTS_PER_SCAN = 10  # a screenshot is comparatively expensive (a live RDP session plus an AI call); bound it per scan
 
 VISION_SYSTEM = ('You read unauthenticated screenshots of Windows Remote Desktop (RDP) login screens for a security '
@@ -41,13 +42,6 @@ VISION_PROMPT = (
     '"description" is one short, factual sentence about what the screen shows. Never invent a name that is not visible, '
     'and never suggest or attempt a password.')
 _JSON_RE = re.compile(r'\{.*\}', re.DOTALL)
-
-
-def rdp_shot_timeout():
-    try:
-        return max(1, int(os.environ.get('CVENGINE_TTL_RDP_SHOT', 24)))
-    except ValueError:
-        return 24
 
 
 def max_hosts():
@@ -69,7 +63,9 @@ def available():
     return True
 
 
-async def _capture_async(host, port, wait):
+async def _capture_async(host, port, wait, connect_timeout=CONNECT_TIMEOUT):
+    import asyncio
+
     from aardwolf.commons.factory import RDPConnectionFactory
     from aardwolf.commons.iosettings import RDPIOSettings
     from aardwolf.commons.queuedata.constants import VIDEO_FORMAT
@@ -83,10 +79,9 @@ async def _capture_async(host, port, wait):
     factory = RDPConnectionFactory.from_url(f'rdp+none://{host}:{port}', io_settings)
     connection = factory.get_connection(io_settings)
     try:
-        _, err = await connection.connect()
+        _, err = await asyncio.wait_for(connection.connect(), connect_timeout)  # a server that accepts TCP and never finishes the handshake
         if err is not None:
             raise err
-        import asyncio
         await asyncio.sleep(wait)
         if not connection.desktop_buffer_has_data:
             return None
@@ -107,10 +102,16 @@ def capture(host, port, connect_timeout=CONNECT_TIMEOUT, wait=SCREEN_WAIT):
     (never the calling gevent greenlet), with a hard wall-clock cap on top of the connect and paint timeouts."""
     import asyncio
 
+    limit = connect_timeout + wait + CAP_GRACE
+
     def run():
-        return asyncio.run(_capture_async(host, port, wait))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(run).result(timeout=connect_timeout + wait + 15)
+        return asyncio.run(asyncio.wait_for(_capture_async(host, port, wait, connect_timeout), limit))
+    # not a ``with`` block: leaving it would wait for the thread, which is the very thing the cap is for
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(run).result(timeout=limit)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def is_meaningful(png_bytes):
@@ -174,13 +175,29 @@ def read_logged_in_user(png_bytes):
     return parsed
 
 
+def _allowed(project, name, address):
+    """Whether a session may be opened to ``address`` for the host ``name`` now: the organization's exclusions are read afresh (an
+    unreadable list stops the stage rather than clearing everything), and an address the scanner may not reach is never connected to."""
+    from cveFeed.exclusions import excluded_names, normalize
+    from targetApp.target_types import is_scannable_ip
+    return normalize(name) not in excluded_names(project, strict=True) and is_scannable_ip(address, project=project)
+
+
 def rdp_candidates(scan):
-    """``[(Subdomain, address, port number)]`` for this scan's open ports that nmap showed accept RDP without NLA."""
+    """``[(Subdomain, address, port number)]`` for this scan's open ports that nmap showed accept RDP without NLA, leaving out hosts the
+    organization excluded and addresses the scanner may not reach."""
     from cveFeed import service_intel
     from startScan.models import Subdomain, open_ports
+    from cveFeed.bounty_gate import Gate
+    gate, project = Gate(blocked=()), scan.domain.project_id  # a bug bounty program's scope: a host it does not name is never connected to
     out = []
+    project = scan.domain.project_id
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
+        if gate.refusal(project, sub.name, unattended=False):
+            continue
         for ip in sub.ip_addresses.all():
+            if not _allowed(project, sub.name, ip.address):
+                continue
             for port in open_ports(ip):
                 if service_intel.is_rdp_port(port) and service_intel.rdp_without_nla(port):
                     out.append((sub, ip.address, port.number))
@@ -210,6 +227,8 @@ def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=Fa
     for sub, addr, port in todo:
         attempted += 1
         asset = f'{addr}:{port}'
+        if not _allowed(project, sub.name, addr):  # excluded since the candidates were listed
+            continue
         try:
             png = capturer(addr, port)
         except Exception as exc:  # noqa: BLE001 - one bad target must never interrupt the scan

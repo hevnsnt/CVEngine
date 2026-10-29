@@ -6,25 +6,6 @@ from celery._state import get_current_task
 from celery.utils.log import ColorFormatter
 
 
-def is_safe_path(basedir, path, follow_symlinks=True):
-	# Source: https://security.openstack.org/guidelines/dg_using-file-paths.html
-	# resolves symbolic links
-	if follow_symlinks:
-		matchpath = os.path.realpath(path)
-	else:
-		matchpath = os.path.abspath(path)
-	return basedir == os.path.commonpath((basedir, matchpath))
-
-
-# Source: https://stackoverflow.com/a/10408992
-def remove_lead_and_trail_slash(s):
-	if s.startswith('/'):
-		s = s[1:]
-	if s.endswith('/'):
-		s = s[:-1]
-	return s
-
-
 def get_time_taken(latest, earlier):
 	duration = latest - earlier
 	days, seconds = duration.days, duration.seconds
@@ -38,13 +19,6 @@ def get_time_taken(latest, earlier):
 	elif not minutes:
 		return f'{hours} hours'
 	return f'{hours} hours {minutes} minutes'
-
-# Check if value is a simple string, a string with commas, a list [], a tuple (), a set {} and return an iterable
-def return_iterable(string):
-	if not isinstance(string, (list, tuple)):
-		string = [string]
-
-	return string
 
 
 # Logging formatters
@@ -68,15 +42,6 @@ class RengineTaskFormatter(ColorFormatter):
 			record.__dict__.setdefault('task_name', f'{record.module}.{record.funcName}')
 			record.__dict__.setdefault('task_id', '')
 		return super().format(record)
-
-
-def get_gpt_vuln_input_description(title, path):
-	vulnerability_description = ''
-	vulnerability_description += f'Vulnerability Title: {title}'
-	# gpt gives concise vulnerability description when a vulnerable URL is provided
-	vulnerability_description += f'\nVulnerable URL: {path}'
-
-	return vulnerability_description
 
 
 def replace_nulls(obj):
@@ -161,15 +126,3 @@ class SubdomainScopeChecker:
 		return any(pattern.search(subdomain) for pattern in self.regex_patterns)
 
 
-
-def sorting_key(subdomain):
-	# sort subdomains based on their http status code with priority 200 < 300 < 400 < rest
-	status = subdomain['http_status']
-	if 200 <= status <= 299:
-		return 1
-	elif 300 <= status <= 399:
-		return 2
-	elif 400 <= status <= 499:
-		return 3
-	else:
-		return 4

@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import changes, correlation, scoring
-from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, RouteAuth
+from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, HygieneFinding, RouteAuth
 from cveFeed.tasks import rescore_all_hosts
 from cveFeed.views import graph_payload
 from dashboard.models import Org, Project, ProjectMembership
@@ -31,6 +31,16 @@ class ScoreHostTests(SimpleTestCase):
 		self.assertEqual(scoring.score_host({}), (0, []))
 		self.assertEqual(total({'public_ip': True}), 10)
 		self.assertEqual(total({'public_ip': False}), 0)
+
+	def test_hygiene_issues_add_the_worst_one_plus_two_per_further_serious_one_capped_at_twenty(self):
+		self.assertEqual(total({'hygiene': [{'severity': 4, 'title': 'Certificate has expired'}]}), 20)
+		self.assertEqual(total({'hygiene': [{'severity': 2, 'title': 'DMARC missing'}]}), 8)
+		self.assertEqual(total({'hygiene': [{'severity': 2, 'title': 'DMARC missing'}, {'severity': 2, 'title': 'SPF soft fail'},
+			{'severity': 1, 'title': 'No CAA record'}]}), 10)
+		self.assertEqual(total({'hygiene': [{'severity': 3, 'title': 'a'}, {'severity': 3, 'title': 'b'}, {'severity': 3, 'title': 'c'},
+			{'severity': 2, 'title': 'd'}]}), 20)
+		self.assertEqual(total({'hygiene': [{'severity': 0, 'title': 'info only'}]}), 0)
+		self.assertEqual(labels({'hygiene': [{'severity': 4, 'title': 'Certificate has expired'}]}), ['Critical hygiene issue Certificate has expired'])
 
 	def test_cve_points_follow_the_worst_match_and_the_ai_bonus_needs_fire(self):
 		self.assertEqual(total({'cves': [{'id': 'CVE-1', 'temp': 'ice'}, {'id': 'CVE-2', 'temp': 'smoke'}]}), 20)
@@ -113,6 +123,66 @@ class RescoreTests(ChangeFixture, TestCase):
 			detected_at=now - datetime.timedelta(days=30))
 		HostState.objects.create(project=self.project, domain=self.domain, host='www.ct.test', state={})
 
+	def test_open_hygiene_issues_of_the_host_raise_its_score_and_resolving_them_lowers_it_again(self):
+		from cveFeed.hygiene import Finding, store_findings
+		before, _ = self._fire_score()
+		store_findings(self.domain, [Finding('tls_expired', 4, 'Certificate has expired', host='www.ct.test')])
+		self.rows[1].refresh_from_db()
+		self.assertIn('Critical hygiene issue Certificate has expired', [d['label'] for d in self.rows[1].score_detail])
+		self.assertGreater(self.rows[1].score, before)
+		row = HygieneFinding.objects.get(host='www.ct.test')
+		row.remediation_status = 'accepted_risk'
+		row.save()
+		self.assertNotIn('Critical hygiene issue Certificate has expired', self._fire_score()[1])
+		row.remediation_status = 'open'
+		row.save()
+		store_findings(self.domain, [])  # the next sweep no longer finds it
+		self.assertFalse(any('hygiene' in label for label in self._fire_score()[1]))
+
+	def _fire_score(self):
+		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
+		self.rows[1].refresh_from_db()
+		return self.rows[1].score, [d['label'] for d in self.rows[1].score_detail]
+
+	def test_a_match_marked_fixed_or_accepted_stops_heating_the_host_and_reopening_restores_it(self):
+		from agentapi.services import Ctx, _heat_reasons, update_match
+		from cveFeed.counts import exposed_matches
+		ctx = Ctx(user=User.objects.create_user('closer', password='x', is_superuser=True))
+		match = CVEMatch.objects.get(subdomain=self.rows[1])
+		before, labels_before = self._fire_score()
+		self.assertIn('Fire CVE match CVE-2099-5', labels_before)
+		self.assertEqual(len(_heat_reasons(self.rows[1])), 1)
+		for status in ('fixed', 'accepted_risk'):
+			update_match(ctx, self.project.slug, match.id, status=status)  # rescores the host at once
+			self.rows[1].refresh_from_db()
+			self.assertEqual(self.rows[1].score, before - 40, status)
+			self.assertNotIn('Fire CVE match CVE-2099-5', [d['label'] for d in self.rows[1].score_detail])
+			self.assertEqual(_heat_reasons(Subdomain.objects.get(pk=self.rows[1].pk)), [])
+			self.assertFalse(exposed_matches().filter(pk=match.pk).exists())
+		update_match(ctx, self.project.slug, match.id, status='in_progress')
+		self.rows[1].refresh_from_db()
+		self.assertEqual(self.rows[1].score, before)
+		update_match(ctx, self.project.slug, match.id, status='open')
+		self.rows[1].refresh_from_db()
+		self.assertEqual(self.rows[1].score, before)
+
+	def test_closed_scanner_findings_stop_counting_and_a_bulk_update_rescores_each_host_once(self):
+		from agentapi.services import Ctx, bulk_update_finding_status
+		ctx = Ctx(user=User.objects.create_user('closer2', password='x', is_superuser=True))
+		vuln = Vulnerability.objects.create(name='Admin panel', severity=4, scan_history=self.new, subdomain=self.rows[1],
+			target_domain=self.domain, open_status=True)
+		match = CVEMatch.objects.get(subdomain=self.rows[1])
+		_, labels_before = self._fire_score()
+		self.assertIn('Critical finding Admin panel', labels_before)
+		with mock.patch('cveFeed.scoring.rescore_quietly', wraps=scoring.rescore_quietly) as spy:
+			result = bulk_update_finding_status(ctx, self.project.slug, [{'kind': 'vulnerability', 'id': vuln.id}, {'kind': 'match', 'id': match.id}], 'fixed')
+		self.assertEqual(result['updated'], 2)
+		self.assertEqual(spy.call_count, 1)
+		self.rows[1].refresh_from_db()
+		labels_after = [d['label'] for d in self.rows[1].score_detail]
+		self.assertNotIn('Critical finding Admin panel', labels_after)
+		self.assertNotIn('Fire CVE match CVE-2099-5', labels_after)
+
 	def test_inputs_are_gathered_scored_and_stored_on_every_copy_of_the_host(self):
 		self.assertEqual(scoring.rescore_hosts(self.project.id, ['WWW.ct.test', 'unknown.ct.test']), 1)
 		for row in self.rows:
@@ -125,6 +195,14 @@ class RescoreTests(ChangeFixture, TestCase):
 		self.assertEqual(detail['Personal data served on /api'], 15)
 		self.assertEqual(detail['New this week'], 10)
 		self.assertEqual(HostState.objects.get(host='www.ct.test').score, 90)
+
+	def test_a_match_the_distribution_patched_scores_as_ice_like_heat_and_the_list(self):
+		CVEMatch.objects.update(distro_status='patched', ai_verdict='affected')
+		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
+		self.rows[1].refresh_from_db()
+		detail = {d['label']: d['points'] for d in self.rows[1].score_detail}
+		self.assertFalse([label for label in detail if label.startswith(('Fire CVE', 'Smoke CVE'))], detail)
+		self.assertLess(self.rows[1].score, 90)  # the fire CVE and its AI bonus (50 points) are gone
 
 	def test_a_ruled_out_match_and_a_private_ip_do_not_count(self):
 		CVEMatch.objects.update(ai_verdict='not_affected')

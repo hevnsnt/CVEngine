@@ -19,10 +19,12 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 from rolepermissions.decorators import has_permission_decorator
 
+from cveFeed import match_policy
+from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
 from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_temperature
-from startScan.models import open_ports
+from startScan.models import OPEN_PORT_STATES, open_services
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
 
 logger = logging.getLogger(__name__)
@@ -31,8 +33,6 @@ FEED_PAGE = 30
 FEED_MAX = 100
 ALL_PROJECTS = '_all'  # reserved slug of the read-only combined view (tenancy.roles.ALL_PROJECTS)
 GRAPH_NODE_CAP = 1500
-# A scan marked running for longer than this is a casualty of a restart, not live work: never show it as running.
-from cveFeed.counts import RUNNING_WINDOW  # noqa: E402,F401  (defined with every other count, in cveFeed.counts)
 
 
 def _tier(entry):
@@ -79,7 +79,7 @@ def _host_tip(sub, live_matches, severities, aliases=()):
     host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
     worst = None
     for match in live_matches:
-        tier = match_temperature(_tier(match.cve_entry), match.cve_entry.cvss, match.ai_verdict, match.distro_status)
+        tier = match_temperature(_tier(match.cve_entry), match.cve_entry.cvss, match.ai_verdict, match.distro_status, match_policy.version_unknown(match))
         if worst is None or TIER_RANK.get(tier, 0) > TIER_RANK.get(worst[1], 0):
             worst = (match.cve_entry.cve_id, tier)
     reasons = [r.get('label', '') for r in (sub.score_detail or [])][:3] if hasattr(sub, 'score_detail') else []
@@ -87,6 +87,8 @@ def _host_tip(sub, live_matches, severities, aliases=()):
                    for r in (sub.score_detail or [])[:8]] if hasattr(sub, 'score_detail') else []
     return {
         'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
+        'org': (sub.target_domain.project.org.name if sub.target_domain_id and sub.target_domain.project_id
+                and sub.target_domain.project.org_id else ''),
         'ips': len({ip.address for ip in sub.ip_addresses.all()}),
         'cves': len(live_matches),
         'top_cve': worst[0] if worst else '',
@@ -103,13 +105,14 @@ def graph_payload(domain_id=None, scan_id=None):
     """Nodes/edges for the asset graph: domain > subdomain > ip, and subdomain > cve. Only live hosts are drawn (they resolved
     to an IP, or something saw them answer); names that never resolved are left out. Ports belong on the host's detail card."""
     from startScan.models import Subdomain, Vulnerability
+    from cveFeed import internal_view
     from cveFeed.graph_overview import root_for
 
     from django.db.models import Prefetch
-    # a match needs its CVE's tier fields only: never CVEEntry.raw or the prose columns
-    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'cve_entry__cve_id', 'cve_entry__kev',
+    # a match needs its CVE's tier fields only: never the prose columns
+    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev',
                                     'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry')
-    subs = Subdomain.objects.select_related('target_domain__project').prefetch_related(
+    subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
         'ip_addresses', Prefetch('cve_matches', queryset=matches))
     if domain_id:
         subs = subs.filter(target_domain_id=domain_id)
@@ -127,7 +130,7 @@ def graph_payload(domain_id=None, scan_id=None):
             return True
         return False
 
-    from cveFeed.counts import LIVE_HOST_Q
+    from cveFeed.counts import CLOSED, LIVE_HOST_Q, match_is_live
     subs = subs.filter(LIVE_HOST_Q).distinct()
     sub_list = list(subs[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
@@ -135,11 +138,11 @@ def graph_payload(domain_id=None, scan_id=None):
     # second query narrows to the ones severe enough, open, and not ruled out, to call "vulnerable".
     scanned_ids = set(Vulnerability.objects.filter(subdomain_id__in=sub_ids).values_list('subdomain_id', flat=True))
     vulnerable_ids = set(Vulnerability.objects.filter(
-        subdomain_id__in=sub_ids, open_status=True, severity__gte=1).values_list('subdomain_id', flat=True))
-    vulnerable_ids |= {s.pk for s in sub_list if any(m.ai_verdict != 'not_affected' for m in s.cve_matches.all())}
+        subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', flat=True))
+    vulnerable_ids |= {s.pk for s in sub_list if any(match_is_live(m) for m in s.cve_matches.all())}
 
     severities = {}
-    for sub_id, severity in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).values_list('subdomain_id', 'severity'):
+    for sub_id, severity in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', 'severity'):
         severities.setdefault(sub_id, []).append(severity)
 
     # one host, several names: the evidence of the other names on the same addresses counts for the host drawn
@@ -148,26 +151,26 @@ def graph_payload(domain_id=None, scan_id=None):
     sibling_ids = {i for rows in siblings.values() for i, _ in rows}
     sibling_matches, sibling_findings, sibling_seen = {}, {}, set()
     if sibling_ids:
-        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').only(
-                'subdomain_id', 'ai_verdict', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
+        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
+                'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
                 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry'):
             sibling_matches.setdefault(m.subdomain_id, []).append(m)
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1) \
+        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
                 .values_list('subdomain_id', 'severity', 'name'):
             sibling_findings.setdefault(sid, []).append((severity, name))
     own_findings = {}
     if sibling_ids:
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1) \
+        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
                 .values_list('subdomain_id', 'severity', 'name'):
             own_findings.setdefault(sid, set()).add((severity, name))
 
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
-                                                  name__in=('nuclei_scan', 'nuclei_targeted_scan'), status=2).values_list('scan_of_id', flat=True))
+                                                  name__in=NUCLEI_SCAN_ACTIVITY_NAMES, status=2).values_list('scan_of_id', flat=True))
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
-        live = [m for m in sub.cve_matches.all() if m.ai_verdict != 'not_affected']
+        live = [m for m in sub.cve_matches.all() if match_is_live(m)]
         sev = list(severities.get(sub.pk, []))
         sibs = siblings.get(sub.pk, [])
         have = {m.cve_entry.cve_id for m in live}
@@ -183,11 +186,13 @@ def graph_payload(domain_id=None, scan_id=None):
                     sev.append(severity)
         if status != 'vulnerable' and (live or sev):
             status = 'vulnerable'
-        tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status) for m in live]
+        tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)) for m in live]
         heat = host_heat(status, tiers, sev)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
-                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()])):
+                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
+                    internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
+                    network=internal_view.network_of(sub.target_domain.project_id if sub.target_domain_id else None, sub.name)):
             break
         by_name[sub.name.lower()] = sid
         if sub.target_domain_id and node(f'dom:{sub.target_domain_id}', 'domain', sub.target_domain.name,
@@ -199,7 +204,7 @@ def graph_payload(domain_id=None, scan_id=None):
             if node(f'ip:{ip.pk}', 'ip', ip.address):
                 edges.add((sid, f'ip:{ip.pk}'))
         for match in sub.cve_matches.all():
-            if match.ai_verdict == 'not_affected':
+            if not match_is_live(match):
                 continue
             cve = match.cve_entry
             if node(f'cve:{cve.pk}', 'cve', cve.cve_id, tier=_tier(cve)):
@@ -211,7 +216,11 @@ def graph_payload(domain_id=None, scan_id=None):
         events = events.filter(scan_id=scan_id)
     elif domain_id:
         events = events.filter(domain_id=domain_id)  # includes CT-monitor finds, which have no scan
-    for parent, host in events.values_list('parent_host', 'host').distinct()[:GRAPH_NODE_CAP]:
+    # only an edge between two drawn hosts is ever kept, so read only those (a name in the case the host row spells it and lower case, which
+    # is how bbot reports it), in a fixed order: an arbitrary 1500 of every pair ever stored dropped edges of drawn hosts at random
+    drawn = {n for s in sub_list for n in (s.name, s.name.lower())}
+    events = events.filter(host__in=drawn, parent_host__in=drawn)
+    for parent, host in events.values_list('parent_host', 'host').distinct().order_by('parent_host', 'host')[:GRAPH_NODE_CAP]:
         a, b = by_name.get((parent or '').lower()), by_name.get((host or '').lower())
         if a and b and a != b:
             edges.add((a, b))
@@ -232,23 +241,46 @@ def tier_counts():
 
 
 def live_scan_counts():
-    """Running and queued scans, read fresh on every poll (they are cheap and the first thing a person watches)."""
+    """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
+    the first thing a person watches)."""
     from cveFeed import counts
-    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count()}
+    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count(),
+            'scans_background_running': counts.background_running().count()}
+
+
+def _oldest_open_what(kind, row_id):
+    """What the oldest open item is, in plain words for the Live tile: ``{'severity', 'title', 'host'}``, or None when the row is gone."""
+    from startScan.models import Vulnerability
+    names = {4: 'Critical', 3: 'High'}
+    if kind == 'cve':
+        m = CVEMatch.objects.filter(pk=row_id).select_related('cve_entry', 'subdomain').first()
+        if m:
+            cvss = m.cve_entry.cvss or 0
+            return {'severity': 'Critical' if cvss >= 9 else 'High', 'title': m.cve_entry.cve_id, 'host': m.subdomain.name if m.subdomain else ''}
+    elif kind == 'scanner':
+        v = Vulnerability.objects.filter(pk=row_id).select_related('subdomain').first()
+        if v:
+            return {'severity': names.get(v.severity, 'High'), 'title': v.name or '', 'host': v.subdomain.name if v.subdomain else ''}
+    elif kind == 'hygiene':
+        h = HygieneFinding.objects.filter(pk=row_id).first()
+        if h:
+            return {'severity': names.get(h.severity, 'High'), 'title': h.title, 'host': h.host}
+    return None
 
 
 def stats_payload():
     """Every headline number, defined once in ``cveFeed.counts`` (what each one counts is in that module's docstring)."""
-    from cveFeed import counts
+    from cveFeed import counts, internal_view
     from startScan.models import Vulnerability
     from targetApp.models import Domain
     tiers = tier_counts()
     reps = counts.host_reps()
+    oldest = counts.oldest_open()
     return {
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
         'certs_total': TlsCertificate.objects.count(),
-        'hygiene_open': HygieneFinding.objects.filter(status='open', severity__gte=1).count(),
+        'hygiene_open': counts.actionable_hygiene(HygieneFinding.objects.all()).count(),
         'hosts': reps.count(),
         'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
         **live_scan_counts(),
@@ -257,6 +289,11 @@ def stats_payload():
         'matches': counts.exposed_matches().count(),
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
         'exposed_hosts': counts.exposed_host_count(),
+        'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
+        'oldest_open_kind': oldest['kind'],  # 'cve', 'scanner' or 'hygiene'
+        'oldest_open_id': oldest['id'],  # the row of that kind to link to
+        'oldest_open_what': _oldest_open_what(oldest['kind'], oldest['id']) if oldest['id'] else None,  # {severity, title, host}
+        'internal': internal_view.summary(),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
     }
@@ -273,7 +310,9 @@ SECTIONS = {
     'vulns': 'Findings',
     'matches': 'CVE matches',
     'hygiene': 'Hygiene',
+    'suppliers': 'Suppliers',
     'keys': 'API keys',
+    'sentinels': 'Sentinels',
 }
 
 
@@ -296,9 +335,12 @@ def ui_context(request, active, slug=None):
     from dashboard.models import AIProviderSettings
     ai_cfg = AIProviderSettings.objects.first()
     ai_connected = bool(ai_cfg and ai_cfg.enabled)
+    from agentapi.sentinel_broker import has_sentinels
+    here = next((p for p in projects if p['slug'] == current), None) if slug != ALL_PROJECTS else None
     return {'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
             'is_app_admin': request.user.is_superuser,
             'bounty_enabled': _bounty_allowed(request.user),
+            'sentinels_enabled': bool(here and has_sentinels(here['slug'], here['org_slug'])),
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
@@ -373,6 +415,14 @@ def project_page(request, slug, section):
     """Targets, scans, hosts, vulnerabilities and matches: shells that the page script fills from /api/v1. The reserved slug
     ``_all`` is the same shell over every project the caller may see (read-only; the script reads /api/v1/projects/_all/...)."""
     from dashboard.models import Project
+    if section == 'keys':
+        # the keys now live in Settings > API keys (App Admins) and Administration (organization admins); an old link lands there
+        from tenancy.roles import is_admin_anywhere
+        if request.user.is_superuser:
+            return redirect('/cve/settings/#keys')
+        if is_admin_anywhere(request.user):
+            return redirect('/cve/admin/')
+        raise Http404
     if slug == ALL_PROJECTS:
         from tenancy.roles import user_best_role
         if not user_best_role(request.user):
@@ -382,6 +432,10 @@ def project_page(request, slug, section):
         project = Project.objects.filter(slug=slug).first()
     if not project:
         raise Http404
+    if section == 'sentinels':
+        if slug == ALL_PROJECTS:
+            raise Http404  # a Sentinel's scope is per project; there is no combined view
+        return render(request, 'cveFeed/project_sentinels.html', {'title': SECTIONS[section], 'project': project, **ui_context(request, 'project-sentinels', slug)})
     return render(request, 'cveFeed/section.html', {
         'section': section, 'title': SECTIONS[section], 'project': project, **ui_context(request, section, slug),
     })
@@ -474,6 +528,15 @@ def account_page(request):
     return render(request, 'cveFeed/account.html', ui_context(request, 'account'))
 
 
+# The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
+# (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
+HOW_REVIEWED_VERSION = '1.3.0'
+
+
+def how_page(request):
+    return render(request, 'cveFeed/how.html', {**ui_context(request, 'about'), 'how_reviewed_version': HOW_REVIEWED_VERSION})
+
+
 def about_page(request):
     return render(request, 'cveFeed/about.html', ui_context(request, 'about'))
 
@@ -493,6 +556,15 @@ def settings_page(request):
 
 def agents_page(request):
     return render(request, 'cveFeed/agents.html', {'host': request.get_host(), **ui_context(request, 'agents')})
+
+
+def sentinels_page(request):
+    from dashboard.models import Org
+    from tenancy import roles
+    # the organizations this person may provision an organization-wide Sentinel for: the same check the enroll endpoint applies
+    enroll_orgs = list(Org.objects.filter(pk__in=roles.managed_org_ids(request.user)).order_by('name').values('slug', 'name'))
+    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs,
+                                                      **ui_context(request, 'sentinels')})
 
 
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
@@ -551,6 +623,7 @@ def bump_stats_revision():
     """Invalidate every web worker's short dashboard cache after a finding is closed."""
     from django.core.cache import cache
     _STATS_CACHE.clear()
+    _DISCOVERY_COUNTS_CACHE.clear()
     try:
         cache.set(STATS_REVISION_KEY, timezone.now().isoformat(), timeout=None)
     except Exception:  # noqa: BLE001 - other workers still expire within ten seconds
@@ -575,6 +648,15 @@ def cached_stats(key='', now=None):
             _STATS_CACHE.clear()
         hit = _STATS_CACHE[key] = (now, stats_payload())
     return hit[1]
+
+
+@require_GET
+def api_alive(request):
+    """Answers for as long as the web service does, and touches nothing else: every page asks it now and then (static/cve/sitewatch.js)
+    and covers itself with the rebuilding scene when it stops answering, during an update or a restart."""
+    response = JsonResponse({'ok': True})
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 @require_GET
@@ -642,27 +724,6 @@ def api_graph_live(request):
     return response
 
 
-@require_GET
-@project_scoped
-def api_graph_overview(request):
-    from cveFeed.graph_overview import groups
-    slug = request.GET.get('project', '')
-    return JsonResponse(groups(slug if slug and slug != ALL_PROJECTS else None))
-
-
-@require_GET
-@project_scoped
-def api_graph_hosts(request):
-    from cveFeed.graph_overview import hosts
-    project, root = request.GET.get('owner', '')[:100], request.GET.get('root', '')[:255]
-    try:
-        page = int(request.GET.get('page', 1))
-    except (TypeError, ValueError):
-        return JsonResponse({'error': 'page must be a number'}, status=400)
-    result = hosts(project, root, page=page, q=request.GET.get('q', ''))
-    return JsonResponse(result) if result is not None else JsonResponse({'error': 'group not found'}, status=404)
-
-
 def _kv(*pairs):
     """Rows of a node's detail card. A value is text, or a list of ``(text, href)`` pairs: each item then links to its record."""
     rows = []
@@ -719,7 +780,7 @@ def node_detail(node_id):
         if not s:
             return None
         first = DiscoveryEvent.objects.filter(scan_id=s.scan_history_id, host__iexact=s.name).order_by('id').first()
-        ports = [f'{p.number} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_ports(ip)]
+        ports = [f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_services(ip)]
         matches = list(CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage'))
         vulns = Vulnerability.objects.filter(subdomain=s).order_by('-severity')[:8]
         from agentapi.services import _host_heat
@@ -749,7 +810,7 @@ def node_detail(node_id):
         return {'kind': 'ip', 'title': ip.address, 'link': _ip_href(first, ip.address) if first else '', 'rows': _kv(
             ('Hosts', [(h.name, _host_href(h.target_domain.project.slug, h.name)) if h.target_domain_id and h.target_domain.project_id
                        else (h.name, '') for h in shown]),
-            ('Open ports', ', '.join(f'{p.number} {p.product}'.strip() for p in open_ports(ip))),
+            ('Open ports', ', '.join(f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product}'.strip() for p in open_services(ip))),
             ('OS guess', ip.os_guess), ('Reverse pointer', ip.reverse_pointer),
             ('Full port scan', f'{timezone.localtime(ip.full_scanned_at):%Y-%m-%d %H:%M} ({ip.full_scan_ports} open)'
              if ip.full_scanned_at else 'never'),
@@ -795,6 +856,12 @@ def api_node(request):
     return JsonResponse(detail)
 
 
+def _public_error(text):
+    """The first line of a stored failure reason, clipped, for the live ticker: whatever follows (a traceback's frames, paths, a long chain) stays in the log."""
+    first = (text or '').strip().splitlines()[:1]
+    return first[0][:200] if first else ''
+
+
 def _serialize_activity(a):
     return {'id': a.id, 'kind': a.kind, 'message': a.message, 'status': a.status, 'cve_id': a.cve_id,
             'project': a.project.slug if a.project_id else None,  # the project a line's hosts and CVEs link into
@@ -830,12 +897,37 @@ def api_activity(request):
                          'bumped': [_serialize_activity(a) for a in bumped], 'now': timezone.now().isoformat()})
 
 
+_DISCOVERY_COUNTS_CACHE = {}  # (user id, project slug) -> (computed at, counts)
+
+
+def discovery_counts():
+    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see."""
+    from cveFeed.counts import LIVE_HOST_Q, host_reps
+    from startScan.models import IpAddress, Port
+    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
+    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
+    return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
+
+
+def cached_discovery_counts(key='', now=None):
+    """``discovery_counts`` kept per process for STATS_CACHE_SECONDS: the dashboard polls the ticker every 2.5 s and the three distinct
+    counts walk the caller's whole inventory. Per caller and project like ``cached_stats``, and dropped with it by ``bump_stats_revision``."""
+    import time
+    now = time.monotonic() if now is None else now
+    hit = _DISCOVERY_COUNTS_CACHE.get(key)
+    if hit is None or now - hit[0] >= STATS_CACHE_SECONDS:
+        if len(_DISCOVERY_COUNTS_CACHE) >= STATS_CACHE_ENTRIES:
+            _DISCOVERY_COUNTS_CACHE.clear()
+        hit = _DISCOVERY_COUNTS_CACHE[key] = (now, discovery_counts())
+    return hit[1]
+
+
 @require_GET
 @project_scoped
 def api_discovery(request):
     """Live discovery: the scan being followed (given, else the latest running, else the latest) and its new events."""
     from cveFeed.discovery import queue_position
-    from startScan.models import IpAddress, Port, ScanHistory
+    from startScan.models import ScanHistory
     scan_id = request.GET.get('scan', '')
     if scan_id.isdigit():
         scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain', 'scan_type').first()
@@ -846,19 +938,16 @@ def api_discovery(request):
         return JsonResponse({'scan': None, 'events': [], 'counts': {}})
     after = request.GET.get('after', '')
     events = DiscoveryEvent.objects.filter(scan=scan)
-    events = events.filter(id__gt=int(after)) if after.isdigit() else events.order_by('-id')[:60]
+    events = events.filter(id__gt=int(after)) if after.isdigit() and int(after) else events.order_by('-id')[:60]  # after=0 is no cursor: the tail, not every event of the scan
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
-    from cveFeed.counts import LIVE_HOST_Q, host_reps
-    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
-    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
     return JsonResponse({
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
-                 'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(),
+                 'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': _public_error(scan.error_message),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips).distinct().count()},
+        'counts': cached_discovery_counts((request.user.pk, request.GET.get('project', ''))),
     })
 
 
@@ -899,7 +988,7 @@ def api_onboarding_save(request):
         provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url)
         with usage_stage('connection_test'):
             if needs_model:
-                provider.list_models()  # OpenRouter/Ollama/vLLM: prove the connection, the user picks the model in Settings
+                provider.list_models()  # OpenRouter/Ollama/vLLM/LM Studio: prove the connection, the user picks the model in Settings
             else:
                 provider.complete('Reply with the single word: ok', 'ping')
     except AIProviderError as exc:

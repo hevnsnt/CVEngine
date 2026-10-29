@@ -51,7 +51,7 @@ sudo install -m 644 $L/chain.pem     secrets/certs/rengine_chain.pem
 docker compose up -d --force-recreate proxy
 ```
 
-Do not run `make certs` afterwards: it writes the private authority's certificate over these files. `sudo ./install.sh` is safe to run again, because it only regenerates the certificate when the name on it no longer matches `DOMAIN_NAME`.
+The automatic renewal of the private certificate (`scripts/renew-certs.sh`, [Deployment](DEPLOYMENT.md#https)) never replaces a certificate the private authority did not issue, so it leaves these files alone; Settings > Updates and `get_system_status` still warn when such a certificate has fewer than 30 days left. Do not run `make certs` afterwards: it writes the private authority's certificate over these files. `sudo ./install.sh` is safe to run again, because it only regenerates the certificate when the name on it no longer matches `DOMAIN_NAME`.
 
 **Renewal.** Let's Encrypt certificates last 90 days. Put the copy and restart in a certbot deploy hook so renewal needs no one:
 
@@ -103,6 +103,7 @@ The first should answer `HTTP/2 302` (or `200`) with no certificate warning; the
 - **Raise HSTS** once HTTPS works reliably everywhere: `CVENGINE_HSTS_SECONDS=31536000` in `.env`, then `make up`. It starts at one hour so a mistake is forgiven; a browser holds a longer value for that long.
 - **Keep Docker's published ports tight.** Only 443 (and 8082 for the redirect) should be reachable. The database and `web` ports are bound to `127.0.0.1`; leave them that way.
 - **Turn on two-step sign-in** for the admin accounts ([TENANCY.md](TENANCY.md)) and set an IP allowlist under **Settings** if the users come from known addresses (not behind a CDN, see above).
+- **Sentinels call the public name.** A Sentinel you enroll gets `https://` plus `DOMAIN_NAME` as its server address, so that name must resolve and answer on 443 from the machine the Sentinel runs on (an internal network included). Enroll Sentinels after you settle the name, because the address is fixed in the enrollment ([AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents)).
 - **Back up** the database, and `.env` with `web/secret`, in different places ([DEPLOYMENT.md](DEPLOYMENT.md#backups)). A restored database needs the same keys, but a dump kept next to them is readable by anyone who can read the backup.
 - **Plain `http://` goes nowhere on port 80.** The redirect to HTTPS lives on 8082, so type or bookmark `https://`, or forward port 80 to 8082 in your firewall if you want `http://` links to work.
 

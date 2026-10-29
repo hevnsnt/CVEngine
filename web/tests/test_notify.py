@@ -50,6 +50,25 @@ class NotifyTests(TestCase):
 			CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, version_in_range=True)
 		return entry
 
+	def test_send_says_whether_any_channel_took_the_message(self):
+		self.enable(send_interesting_notif=True, send_vuln_notif=False)
+		self.assertIs(notify._send('x', 'send_interesting_notif'), True)
+		self.assertFalse(notify._send('x', 'send_vuln_notif'))  # this kind of event is switched off: nothing was tried
+		with mock.patch.object(notify, 'CHANNEL_SENDERS', {'slack': 'send_slack_message'}), \
+				mock.patch('reNgine.common_func.send_slack_message', side_effect=RuntimeError('down')):
+			self.assertIsNone(notify._send('x', 'send_interesting_notif'))  # tried, and every channel failed
+
+	def test_a_failing_only_channel_is_a_failure_even_though_the_other_senders_are_silent(self):
+		# the real channel table: the three switched-off senders return silently and must not count as delivered
+		self.enable(send_interesting_notif=True)
+		with mock.patch('reNgine.common_func.send_slack_message', side_effect=RuntimeError('down')):
+			self.assertIsNone(notify._send('x', 'send_interesting_notif'))
+		self.assertIs(notify._send('x', 'send_interesting_notif'), True)
+		# switched on but with no address: nothing can be tried
+		Notification.objects.all().delete()
+		Notification.objects.create(send_to_slack=True, slack_hook_url='', send_interesting_notif=True)
+		self.assertIs(notify._send('x', 'send_interesting_notif'), False)
+
 	# --- settings gate ---------------------------------------------------------------------
 	def test_nothing_is_sent_without_settings_or_with_everything_off(self):
 		scan = self.scan()
@@ -194,7 +213,8 @@ class NotifyTests(TestCase):
 
 	# --- failure handling --------------------------------------------------------------------
 	def test_a_failing_channel_is_logged_without_its_text_and_does_not_stop_the_others_or_the_caller(self):
-		self.enable()
+		self.enable(send_to_discord=True, discord_hook_url='https://hooks.invalid/d', send_to_lark=True, lark_hook_url='https://hooks.invalid/l',
+		            send_to_telegram=True, telegram_bot_token='123:T', telegram_bot_chat_id='1')
 		secret = 'https://api.telegram.org/bot123:SECRET/sendMessage'
 		with mock.patch('reNgine.common_func.send_discord_message', side_effect=RuntimeError(secret)):
 			with self.assertLogs('cveFeed.notify', level=logging.WARNING) as logs:

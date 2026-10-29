@@ -50,6 +50,12 @@ class FeedEntryStorageTests(TestCase):
 		self.assertEqual(stored.cvss, 5.0)  # the rest of the row is intact
 
 
+	def test_the_modelled_columns_hold_the_feed_entry(self):
+		obj, _ = CVEEntry.from_api(self._entry(references=['https://example.com/a']))
+		stored = CVEEntry.objects.get(pk=obj.pk)
+		self.assertEqual(stored.references, ['https://example.com/a'])
+
+
 class ActivityPagingTests(TestCase):
 	def test_150_new_rows_come_back_in_two_pages_oldest_first_with_no_gaps(self):
 		from django.contrib.auth.models import User

@@ -15,10 +15,12 @@ import {
   text,
   toast,
 } from "/staticfiles/cve/ui.js";
+import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 
 const A = "/cve/api/admin";
 const root = document.getElementById("view");
 let me = { is_superuser: false };
+let emailReady = false; // outgoing mail is set up (Settings, Email), so a new person can be invited by email
 
 const ROLE_OPTIONS = {
   org: [
@@ -32,8 +34,12 @@ const ROLE_OPTIONS = {
   ],
 };
 
-function revealPassword(title, username, password) {
+function revealPassword(title, username, password, why) {
   dialog(title, (body, close) => {
+    if (why)
+      body.append(
+        el("p", "note", `The email could not be sent (${why}).`),
+      );
     body.append(
       el(
         "p",
@@ -73,6 +79,7 @@ async function usersTab(panel) {
     api("GET", `${A}/projects`),
   ]);
   me = users.actor;
+  emailReady = !!users.email_ready;
   const tools = el("div", "tools");
   const q = text("", {
     type: "search",
@@ -141,7 +148,9 @@ async function usersTab(panel) {
             label: "Status",
             render: (u) =>
               u.is_active
-                ? u.must_change_password
+                ? u.invite_pending
+                  ? badge("invited", "info")
+                  : u.must_change_password
                   ? badge("temp password", "medium")
                   : badge("active", "success")
                 : badge("disabled", "critical"),
@@ -213,11 +222,22 @@ function newUser(orgs, projects, done) {
     const email = text("", { type: "email" });
     const pick = scopePicker(orgs, projects);
     pick.sync();
+    const emailNote = el("p", "note", "", { style: "margin:-6px 0 12px" });
+    const showNote = () => {
+      emailNote.textContent = !emailReady
+        ? "Outgoing mail is not set up (Settings, Email), so you will be shown a temporary password to hand over."
+        : email.value.trim()
+          ? "They will get an onboarding email with their username and a link to choose a password."
+          : "Add an email address to send them an onboarding email; without one you will be shown a temporary password.";
+    };
+    email.addEventListener("input", showNote);
+    showNote();
     body.append(
       field("Account name", username, "Letters, digits and . @ + - _"),
       field("First name", first),
       field("Last name", last),
-      field("Email", email),
+      field("Email", email, null),
+      emailNote,
       field("Add them to", pick.scope),
       field("Which one", pick.target),
       field("Their role", pick.role),
@@ -237,7 +257,14 @@ function newUser(orgs, projects, done) {
           role: pick.role.value,
         });
         close();
-        revealPassword("Account created", r.username, r.temporary_password);
+        if (r.invited) toast(`Invitation sent to ${r.email}`);
+        else
+          revealPassword(
+            "Account created",
+            r.username,
+            r.temporary_password,
+            r.invite_error,
+          );
         done();
       }),
     );
@@ -369,14 +396,50 @@ function manageUser(u, orgs, projects, done) {
     }
     body.append(el("h2", "", "Account", { style: "margin-top:20px" }));
     const row = el("div", "actions", null, { style: "flex-wrap:wrap" });
+    if (emailReady && u.email && u.must_change_password)
+      row.append(
+        button(
+          "Send the link again",
+          async () => {
+            const r = await api("POST", `${A}/users/${u.id}/resend-invite`);
+            close();
+            if (r.invited) toast(`Invitation sent to ${u.email}`);
+            else
+              revealPassword(
+                "Invitation not sent",
+                u.username,
+                r.temporary_password,
+                r.invite_error,
+              );
+            done();
+          },
+          "btn ghost sm",
+        ),
+      );
     row.append(
       button(
         "Reset password",
         async () => {
-          if (!(await ask(`${u.username} will be signed out everywhere and given a temporary password.`, { title: `Reset the password for ${u.username}?`, ok: "Reset password" }))) return;
+          const byEmail = emailReady && u.email;
+          if (
+            !(await ask(
+              byEmail
+                ? `${u.username} will be signed out everywhere and locked out of the old password. They are emailed a link at ${u.email} to choose a new one.`
+                : `${u.username} will be signed out everywhere and given a temporary password.`,
+              { title: `Reset the password for ${u.username}?`, ok: "Reset password" },
+            ))
+          )
+            return;
           const r = await api("POST", `${A}/users/${u.id}/reset-password`);
           close();
-          revealPassword("Password reset", r.username, r.temporary_password);
+          if (r.invited) toast(`Reset link sent to ${r.email}`);
+          else
+            revealPassword(
+              "Password reset",
+              r.username,
+              r.temporary_password,
+              r.invite_error,
+            );
           done();
         },
         "btn ghost sm",
@@ -449,14 +512,16 @@ function openOrgApiKeys(o) {
     async function draw() {
       list.textContent = "";
       const data = await api("GET", `${A}/orgs/${o.id}/api-keys`);
-      data.results.forEach((svc) => {
+      data.results.filter((svc) => !(svc.retired && !svc.configured)).forEach((svc) => {
         const row = el("div", "access-row");
         row.append(el("span", "", svc.label));
         if (svc.configured) row.append(badge("configured", "success"));
-        if (!svc.used_in_scans) row.append(el("span", "note", "not used by scans yet"));
+        if (svc.retired) row.append(badge("retired", "queued"), el("span", "note", svc.retired));
+        else if (svc.used_by_sync) row.append(el("span", "note", "read by the scheduled sync"));
+        else if (!svc.used_in_scans) row.append(el("span", "note", "not used by scans yet"));
         row.append(
           button(
-            svc.configured ? "Edit" : "Configure",
+            svc.retired ? "Remove" : svc.configured ? "Edit" : "Configure",
             () => openOrgApiKeyEditor(o, svc, draw),
             "btn ghost sm",
           ),
@@ -476,7 +541,8 @@ function openOrgApiKeys(o) {
 
 function openOrgApiKeyEditor(o, svc, onSaved) {
   dialog(`${o.name}: ${svc.label}`, (body, close) => {
-    const inputs = svc.fields.map((f) => {
+    if (svc.retired) body.append(el("p", "note", svc.retired));
+    const inputs = (svc.retired ? [] : svc.fields).map((f) => {
       const input = text("", {
         type: f.secret ? "password" : "text",
         autocomplete: "off",
@@ -505,7 +571,7 @@ function openOrgApiKeyEditor(o, svc, onSaved) {
       remove,
       el("span", "grow"),
       cancel,
-      button("Save", async () => {
+      ...(svc.retired ? [] : [button("Save", async () => {
         const values = Object.fromEntries(
           inputs.map((i) => [i.name, i.input.value]).filter(([, v]) => v),
         );
@@ -513,7 +579,7 @@ function openOrgApiKeyEditor(o, svc, onSaved) {
         toast(`${svc.label} key saved`);
         close();
         onSaved();
-      }),
+      })]),
     );
     body.append(actions);
   });
@@ -743,6 +809,126 @@ async function timingsTab(panel) {
   panel.append(card);
 }
 
+// ---------------------------------------------------------------------------- agents
+const AG = "/api/v1";
+const csv = (value) => value.split(",").map((v) => v.trim()).filter(Boolean);
+const scopeText = (scope) =>
+  [["orgs", scope.orgs], ["projects", scope.projects], ["hosts", scope.hosts]]
+    .filter(([, list]) => list && list.length)
+    .map(([k, list]) => `${k}: ${list.slice(0, 4).join(", ")}${list.length > 4 ? ` +${list.length - 4}` : ""}`)
+    .join(" · ") || "no scope declared";
+
+function manageAgent(agent, done) {
+  dialog(`Agent ${agent.name}`, (body, close) => {
+    body.append(
+      el("p", "note", `${agent.kind} agent of ${agent.owner}, token ${agent.token.prefix}...`),
+      el("p", "note", `Scope: ${scopeText(agent.scope)}`),
+      el("p", "note", `Declared capabilities: ${agent.capabilities.join(", ") || "none"}`),
+    );
+    const eff = agent.effective;
+    if (eff) body.append(el("p", "note", `Right now it can reach ${eff.projects.length} project(s) with ${eff.capabilities.length} capability(ies)${eff.problem ? `, but ${eff.problem}` : ""}.`));
+    const note = text(agent.status_note, { maxlength: "200" });
+    const caps = text((agent.limits.capabilities || []).join(", "), { placeholder: "no limit" });
+    const projects = text((agent.limits.projects || []).join(", "), { placeholder: "no limit" });
+    const concurrent = text(agent.limits.max_concurrent || "", { type: "number", min: "1", max: "10", placeholder: `no limit (agent asks for ${agent.max_concurrent})` });
+    body.append(
+      field("Note (shown to the agent's owner)", note),
+      field("Limit to these capabilities", caps, "Comma separated. The agent keeps only the declared capabilities that are listed."),
+      field("Limit to these project slugs", projects),
+      field("Most tasks at once", concurrent),
+    );
+    const send = async (patch, message) => {
+      await api("PATCH", `${AG}/agents/${agent.id}`, { note: note.value, ...patch });
+      toast(message);
+      close();
+      done();
+    };
+    const limits = () => ({
+      capabilities: caps.value.trim() ? csv(caps.value) : null,
+      projects: projects.value.trim() ? csv(projects.value) : null,
+      max_concurrent: concurrent.value ? Number(concurrent.value) : null,
+    });
+    const actions = el("div", "actions");
+    actions.append(
+      button("Cancel", async () => close(), "btn ghost"),
+      el("span", "grow"),
+      button("Save limits", () => send({ limits: limits() }, "Limits saved"), "btn ghost"),
+    );
+    if (agent.status === "active") {
+      actions.append(
+        button("Suspend", () => send({ status: "suspended" }, "Agent suspended; its tasks went back to the queue"), "btn ghost"),
+        button("Revoke", async () => {
+          if (await ask(`Revoke ${agent.name}? It loses its tasks now and cannot register again until you reinstate it.`, { ok: "Revoke" })) {
+            await send({ status: "revoked" }, "Agent revoked");
+          }
+        }, "btn danger"),
+      );
+    } else {
+      actions.append(button(agent.status === "pending" ? "Approve" : "Reinstate", () => send({ status: "active" }, "Agent is active"), "btn"));
+    }
+    body.append(actions);
+  });
+}
+
+const liveBadge = (a) => (a.status !== "active" ? badge(a.status, a.status === "revoked" ? "failed" : "medium") : a.live ? badge("live", "success") : badge("offline", "info"));
+
+async function agentsTab(panel) {
+  const output = el("div");
+  panel.append(
+    el("p", "note", "Agents are API tokens that registered what they are responsible for and what they can do. The broker hands them validation and remediation work only inside that scope, and only while their user can still reach it. An agent that stops checking in loses its tasks to the queue."),
+    output,
+  );
+  async function load() {
+    const [agents, unassignable, tasks] = await Promise.all([
+      api("GET", `${AG}/agents?page_size=200`),
+      api("GET", `${AG}/projects/_all/agent-tasks/unassignable`),
+      api("GET", `${AG}/projects/_all/agent-tasks?status=active&page_size=50`),
+    ]);
+    if (!panel.isConnected) return;
+    output.textContent = "";
+    output.append(el("h3", "", "Agents"));
+    const waiting = agents.results.filter((a) => a.status === "pending").length;
+    if (waiting) output.append(el("p", "msg", `${waiting} agent${waiting === 1 ? " is" : "s are"} waiting for approval and get no work until you approve them (Manage, Approve).`));
+    if (!agents.results.length) output.append(el("p", "empty", "No agent has registered yet. An agent calls register_agent (MCP) or PUT /api/v1/agent."));
+    else {
+      output.append(table([
+        { label: "Agent", cls: "full", render: (a) => { const b = el("div", "row-card"); b.append(el("span", "cve-id", a.name), el("span", "note", `${a.kind} · ${a.owner} · ${a.token.prefix}...`)); return b; } },
+        { label: "State", render: liveBadge },
+        { label: "Responsible for", render: (a) => scopeText(a.scope) },
+        { label: "Can do", render: (a) => (a.capabilities.join(", ") || "nothing declared") + (a.os.length ? ` · ${a.os.join("/")}` : "") },
+        { label: "Last seen", render: (a) => shortDate(a.last_seen) },
+        { label: "Tasks", render: (a) => `${a.tasks.open} open · ${a.tasks.completed} done · ${a.tasks.failed} failed` },
+        { label: "", render: (a) => button("Manage", async () => manageAgent((await api("GET", `${AG}/agents/${a.id}`)), load), "btn ghost sm") },
+      ], agents.results));
+    }
+    output.append(el("h3", "", "Work no live agent can take"));
+    if (!unassignable.results.length) output.append(el("p", "note", "Nothing is stuck: every queued task has an agent that could take it."));
+    else {
+      output.append(table([
+        { label: "Project", render: (t) => t.project },
+        { label: "Host", render: (t) => t.host },
+        { label: "Work", render: (t) => `${t.kind} ${t.finding.cve || ""} (${t.mode})` },
+        { label: "Why", cls: "full", render: (t) => t.reason },
+        { label: "", render: (t) => button("Cancel", async () => { await api("POST", `${AG}/projects/${t.project}/agent-tasks/${t.id}/cancel`, {}); toast("Task cancelled"); await load(); }, "btn ghost sm") },
+      ], unassignable.results));
+    }
+    output.append(el("h3", "", "Queued and running"));
+    if (!tasks.results.length) output.append(el("p", "note", "No agent work is queued or running."));
+    else {
+      output.append(table([
+        { label: "Project", render: (t) => t.project },
+        { label: "Host", render: (t) => t.host },
+        { label: "Work", render: (t) => `${t.kind} ${t.finding.cve || ""} (${t.mode})` },
+        { label: "Status", render: (t) => badge(t.status, t.status === "running" ? "success" : "info") },
+        { label: "Agent", render: (t) => (t.agent ? t.agent.name : "waiting") },
+        { label: "Lease until", render: (t) => (t.lease_expires_at ? shortDate(t.lease_expires_at) : "-") },
+      ], tasks.results));
+    }
+  }
+  panel.prepend(button("Refresh", load, "btn ghost sm"));
+  await load();
+}
+
 // ---------------------------------------------------------------------------- audit
 async function auditTab(panel) {
   const rows = (await api("GET", `${A}/audit`)).results;
@@ -898,6 +1084,8 @@ async function healthTab(panel) {
   };
   if (me.is_superuser) defs.timings = { label: "Timings", open: timingsTab };
   if (me.is_superuser) defs.health = { label: "Scheduler health", open: healthTab };
+  defs.openvas = { label: "OpenVAS", open: openvasPanel };
+  defs.agents = { label: "Agents", open: agentsTab };
   defs.audit = { label: "Audit log", open: auditTab };
   defs.activity = { label: "Activity and errors", open: activityTab };
   document.getElementById("admin-sub").textContent = me.is_superuser

@@ -1,6 +1,8 @@
-// Admin settings: AI, API keys, notifications, scan engines, proxy. Superuser only (the API enforces it).
+// Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
+import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
+import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 
 const root = document.getElementById("settings");
 const csrf = root.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -81,12 +83,15 @@ function selectOf(options, value) {
 function button(label, onClick, cls = "btn") {
   const b = el("button", cls, label, { type: "button" });
   b.onclick = async () => {
+    const idle = b.textContent;
     b.disabled = true;
+    b.textContent = "Working…";
     try {
       await onClick();
     } catch (err) {
       toast(err.message, true);
     }
+    b.textContent = idle;
     b.disabled = false;
   };
   return b;
@@ -109,6 +114,7 @@ const sections = {
       openrouter: "OpenRouter",
       ollama: "Ollama",
       vllm: "vLLM",
+      lmstudio: "LM Studio",
     };
     const provider = selectOf(
       s.providers.map((p) => [p, LABELS[p] || p]),
@@ -124,6 +130,7 @@ const sections = {
     const BASE_HINT = {
       ollama: "required, e.g. http://100.64.0.5:11434 (Tailscale or remote), or http://localhost:11434 if it runs on this server",
       vllm: "required, e.g. http://100.64.0.5:8000/v1, or http://localhost:8000/v1 if it runs on this server",
+      lmstudio: "required, e.g. http://100.64.0.5:1234/v1, or http://localhost:1234/v1 if it runs on this server (the API key is only needed when you turned on authentication in LM Studio)",
       openrouter: "optional, defaults to https://openrouter.ai/api/v1",
     };
     const sync = () => {
@@ -191,8 +198,19 @@ const sections = {
       min: "0",
       max: "100000",
     });
+    const guideDaily = text(s.cve_guidance_daily, { type: "number", min: "0", max: "100000" });
+    const gp = s.cve_guidance;
+    const guideNote = el("p", "note", gp
+      ? `${gp.cves.toLocaleString()} CVEs: guidance written by rules for ${gp.rules.toLocaleString()}, by the model for ${gp.ai.toLocaleString()}, by a person for ${gp.manual.toLocaleString()}. ${gp.local_only.toLocaleString()} are only usable from the host itself and never matched. ${gp.ai_pending.toLocaleString()} still wait for the model${gp.days_left ? `: about ${gp.days_left.toLocaleString()} day${gp.days_left === 1 ? "" : "s"} at ${gp.daily_budget.toLocaleString()} a day` : ""}. The model handled ${gp.ai_last_day.toLocaleString()} in the last day.`
+      : "CVE guidance progress is not available yet.");
+    const guideNow = text("200", { type: "number", min: "1", max: "5000" });
+    const guideRun = button("Write now", async () => {
+      const r = await api("POST", "cve_guidance/run", { count: guideNow.value });
+      guideNote.textContent = `Queued: the model writes guidance for the next ${r.queued} CVEs. Progress shows here after a refresh.`;
+    }, "btn ghost sm");
     const save = async () => {
       await api("PUT", "ai", {
+        cve_guidance_daily: guideDaily.value,
         plan_daily_total: planTotal.value,
         plan_daily_per_project: planProject.value,
         provider: provider.value,
@@ -220,6 +238,14 @@ const sections = {
         enabled.wrap,
         field("Validation planning requests per day, all projects", planTotal),
         field("Validation planning requests per day, one project", planProject),
+        (() => {
+          const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
+          f.append(guideNote);
+          const row = el("div", "tools");
+          row.append(el("span", "note", "Or write the next"), guideNow, el("span", "note", "CVEs now, whatever is left of today's budget:"), guideRun);
+          f.append(row);
+          return f;
+        })(),
         button("Save", async () => {
           await save();
           toast("Saved");
@@ -234,6 +260,37 @@ const sections = {
           },
           "btn ghost",
         ),
+      ),
+    );
+    const seedState = await api("GET", "cve_seed");
+    const seedNote = el("p", "note", "");
+    const showSeed = (st) => {
+      const b = st.built;
+      seedNote.textContent = st.building
+        ? "Building the seed: this takes a few minutes. Refresh to see it."
+        : b
+          ? `Last build ${new Date(b.generated_at).toLocaleString()}: ${b.count.toLocaleString()} CVEs (fire ${b.tiers.fire.toLocaleString()}, smoke ${b.tiers.smoke.toLocaleString()}, ice ${b.tiers.ice.toLocaleString()}), ${b.with_detection.toLocaleString()} with guidance, ${Math.round(b.bytes / 1048576)} MB.`
+          : "No seed has been built on this server yet.";
+    };
+    showSeed(seedState);
+    const seedLinks = el("div", "tools");
+    if (seedState.file) {
+      seedLinks.append(
+        el("a", "btn ghost sm", "Download the seed", { href: "/cve/api/settings/cve_seed/download/seed" }),
+        el("a", "btn ghost sm", "Download its manifest", { href: "/cve/api/settings/cve_seed/download/manifest" }),
+      );
+    }
+    m.append(
+      el("div", "", null, { style: "height:16px" }),
+      card(
+        "CVE catalog seed",
+        el("p", "note", "A new install loads this file on first start, so it begins with every CVE and its guidance instead of rebuilding them one by one. Build it here once the guidance is written, then attach both files to the cve-seed release on GitHub (scripts/publish-cve-seed.sh does it from a machine with gh)."),
+        seedNote,
+        button("Build the seed", async () => {
+          showSeed(await api("POST", "cve_seed/build").then(() => ({ building: true })));
+          toast("Building the seed");
+        }),
+        seedLinks,
       ),
     );
     m.append(
@@ -364,6 +421,11 @@ const sections = {
         modeBox.append(row);
       });
       kids.push(modeBox);
+      // The web interface certificate renews itself 30 days before it ends (the host's renewal check); this speaks up only when it did not.
+      const cert = s.certificate || {};
+      if (cert.problem) kids.push(el("p", "msg err", cert.problem));
+      else if (cert.known && cert.days_left != null)
+        kids.push(el("p", "note", `Web interface certificate: valid for ${cert.days_left} more days, renewed automatically when fewer than 30 remain${cert.last_renewed_at ? ` (last renewed ${when(cert.last_renewed_at)})` : ""}.`));
       if (s.mode === "auto" && !hu.alive)
         kids.push(el("p", "msg err", "Automatic needs something on the server to install the update: the host updater (below), or automatic deployment (scripts/install-auto-deploy.sh). The host updater is not reporting; if this server uses automatic deployment you can ignore this."));
       if (["available", "dismissed", "approved", "up_to_date"].includes(s.status)) {
@@ -459,13 +521,13 @@ const sections = {
       `${s.organizations} organization${s.organizations === 1 ? "" : "s"} and ${s.projects} project${s.projects === 1 ? "" : "s"}`,
       `${s.targets} target${s.targets === 1 ? "" : "s"}, ${s.hosts} host${s.hosts === 1 ? "" : "s"} and ${s.scans} scan${s.scans === 1 ? "" : "s"} with all their results, files and screenshots`,
       `${s.users} other user${s.users === 1 ? "" : "s"}, memberships and API tokens`,
-      "the AI model settings, API vault, notification, proxy and report settings, IP allowlist and bans",
+      "the AI model settings, API keys, notification, email, proxy and report settings, IP allowlist and bans",
       "the CVE feed, matches, generated checks, AI activity, audit log, scheduled scans and update settings",
     ].forEach((t) => list.append(el("li", "", t)));
     const keep = el(
       "p",
       "note",
-      "Kept: your own account (same password and two-step sign-in), the scan engines, wordlists and installed tools. Afterwards you land in the setup wizard, as on a new install. This cannot be undone.",
+      "Kept: your own account (same password and two-step sign-in), the scan engines and installed tools. Afterwards you land in the setup wizard, as on a new install. This cannot be undone.",
       { style: "margin:0 0 18px" },
     );
     const phrase = text("", { placeholder: s.phrase, autocomplete: "off", spellcheck: "false" });
@@ -570,52 +632,145 @@ const sections = {
     await refresh();
   },
 
-  async keys(m) {
-    const s = await api("GET", "keys");
-    const rows = {};
-    const kit = [];
-    [
-      ["openai", "OpenAI API key"],
-      ["netlas", "Netlas API key"],
-      ["chaos", "Chaos API key"],
-      ["hackerone", "HackerOne API key"],
-    ].forEach(([name, label]) => {
-      const input = secret(s[name].has_key);
-      rows[name] = input;
-      kit.push(field(label, input));
-      if (name === "hackerone")
-        kit.push(
-          field(
-            "HackerOne username",
-            (rows.h1user = text(s.hackerone.username || "")),
-          ),
+  async tailscale(m) {
+    const wrap = el("div");
+    m.append(wrap);
+    const lines = (box) => box.value.split(/[\s,]+/).filter(Boolean);
+    const when = (iso) => (iso ? new Date(iso).toLocaleString() : "never");
+    const statusBadge = (l) => {
+      const cls = { ok: "", partial: "medium", error: "failed", never: "" }[l.last_status] || "";
+      const word = { ok: "synced", partial: "synced with notes", error: "error", never: "not synced yet" }[l.last_status] || l.last_status;
+      return el("span", `badge ${cls}`.trim(), l.enabled ? word : "off");
+    };
+    // one card: an existing link, or (link === null) the form that connects a tailnet to a project
+    const linkCard = (link, projects, redraw) => {
+      const l = link || {};
+      const project = link
+        ? null
+        : selectOf(projects.map((p) => [p.id, p.org ? `${p.name} (${p.org})` : p.name]), projects[0] && projects[0].id);
+      const kind = l.credential_kind;
+      const clientId = text("", { autocomplete: "off", placeholder: kind === "oauth" ? "saved (leave blank to keep)" : "OAuth client id" });
+      const clientSecret = secret(kind === "oauth", "OAuth client secret");
+      const token = secret(kind === "token", "or an API access token (tskey-api-...)");
+      const routing = selectOf(
+        [
+          ["auto", "This server's Tailscale node (the compose `tailscale` profile)"],
+          ["host", "Already routed: the Docker host is on the tailnet"],
+        ],
+        l.routing || "auto",
+      );
+      const enabled = check("Keep this project's targets in step with the tailnet (sync every 15 minutes)", link ? l.enabled : true);
+      const local = check("Also read this server's own Tailscale node (the compose `tailscale` profile), no credential needed", link ? l.use_local : true);
+      const policy = check("Read the tailnet policy file for tailnet-wide findings (needs the policy_file:read scope)", link ? l.check_policy : true);
+      const auto = check("Auto-scan: queue the normal discovery and scan pipeline for new and changed online devices", !!l.auto_scan);
+      const cap = text(l.max_devices || 100, { type: "number", min: "1", max: "5000" });
+      const onlyTags = text((l.only_tags || []).join(" "), { placeholder: "tag:server tag:prod (empty: any device)" });
+      const skipTags = text((l.skip_tags || []).join(" "), { placeholder: "tag:printer" });
+      const onlyOs = text((l.only_os || []).join(" "), { placeholder: "linux windows (empty: any)" });
+      const body = () => ({
+        enabled: enabled.box.checked,
+        use_local: local.box.checked,
+        routing: routing.value,
+        check_policy: policy.box.checked,
+        auto_scan: auto.box.checked,
+        max_devices: cap.value,
+        only_tags: lines(onlyTags),
+        skip_tags: lines(skipTags),
+        only_os: lines(onlyOs),
+        client_id: clientId.value,
+        client_secret: clientSecret.value,
+        access_token: token.value,
+      });
+      const pid = () => (link ? l.project.id : project.value);
+      const kids = [];
+      if (link) {
+        const status = el("div", "", null, { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px" });
+        status.append(
+          statusBadge(l),
+          el("span", "note", `${l.tailnet || "tailnet not named yet"}: ${l.device_count} device${l.device_count === 1 ? "" : "s"} on the tailnet, ${l.imported} imported (${l.online} online, ${l.offline} offline, ${l.departed} departed). Last sync ${when(l.last_sync_at)}.`, { style: "margin:0" }),
         );
-    });
-    m.append(
-      card(
-        "API vault",
-        ...kit,
-        button("Save", async () => {
-          const body = {};
-          ["openai", "netlas", "chaos"].forEach((n) => {
-            if (rows[n].value) body[n] = { key: rows[n].value };
-          });
-          if (rows.hackerone.value || rows.h1user.value)
-            body.hackerone = {
-              key: rows.hackerone.value,
-              username: rows.h1user.value,
-            };
-          await api("PUT", "keys", body);
-          Object.values(rows).forEach((i) => {
-            if (i.type === "password") {
-              i.value = "";
-              i.placeholder = "saved (leave blank to keep)";
-            }
-          });
+        kids.push(status);
+        if (l.last_error) kids.push(el("p", "msg err", l.last_error));
+        if (!l.scan_reachable) kids.push(el("p", "note", "Scans cannot reach this tailnet yet, so its devices are listed and checked but not scanned."));
+        const node = l.local && l.local.backend_state ? `This server's node is ${l.local.backend_state}${l.local.self_name ? ` as ${l.local.self_name}` : ""}, running Tailscale ${l.local.version || "?"}.` : "";
+        if (node) kids.push(el("p", "note", node));
+      } else {
+        kids.push(field("Project the tailnet's devices become targets of", project));
+      }
+      kids.push(
+        el("p", "note", "Credentials are stored encrypted and never shown again. Create an OAuth client with only these read-only scopes: devices:core:read, devices:routes:read, policy_file:read and devices:posture_attributes:read (policy_file:read needs the other two).", { style: "margin:0 0 10px" }),
+        field("OAuth client id", clientId),
+        field("OAuth client secret", clientSecret),
+        field("API access token (alternative to an OAuth client)", token, "An access token expires after at most 90 days; an OAuth client does not and can be revoked."),
+        enabled.wrap,
+        field("How scans reach the tailnet", routing, "Scanning needs a route: with the compose profile this server joins the tailnet itself. Choose Already routed only if the Docker host is on the tailnet and containers can reach 100.x addresses through it; that is taken on your word. Without a route devices are still listed and checked from API data, but never scanned."),
+        local.wrap,
+        policy.wrap,
+        auto.wrap,
+        field("Most devices one sync imports or queues for scanning", cap, "The rest follow on the next sync. Existing devices are always kept up to date."),
+        field("Only devices tagged", onlyTags),
+        field("Never devices tagged", skipTags),
+        field("Only these operating systems", onlyOs),
+        el("p", "note", "Devices shared into your tailnet from another tailnet are never imported, and neither is this server's own node. Hosts excluded for the organization are never added or scanned.", { style: "margin:0 0 12px" }),
+      );
+      const out = el("p", "note", "", { style: "margin:8px 0 0" });
+      const actions = el("div", "", null, { style: "display:flex;gap:8px;flex-wrap:wrap" });
+      actions.append(
+        button(link ? "Save" : "Connect", async () => {
+          if (!link && !project.value) throw new Error("Choose a project first");
+          await api("PUT", `tailscale/${pid()}`, body());
           toast("Saved");
+          await redraw();
         }),
-      ),
-    );
+        button("Test connection", async () => {
+          const r = await api("POST", `tailscale/${pid()}/test`, body());
+          out.className = r.ok ? "note" : "msg err";
+          out.textContent = r.ok
+            ? `Connected${r.tailnet ? ` to ${r.tailnet}` : ""}: ${r.devices} device${r.devices === 1 ? "" : "s"}.${r.policy ? ` Policy file: ${r.policy}.` : ""}${r.local && r.local.backend_state ? ` This server's node: ${r.local.backend_state}.` : ""}${r.local && r.local.error ? ` This server's node: ${r.local.error}.` : ""}`
+            : r.error;
+        }, "btn ghost"),
+      );
+      if (link) {
+        actions.append(
+          button("Sync now", async () => {
+            await api("POST", `tailscale/${pid()}/sync`);
+            toast("Sync queued: refresh in a minute");
+          }, "btn ghost"),
+          button("Disconnect", async () => {
+            if (!(await ask("The project keeps its targets and findings; the devices are archived and their tailnet addresses can no longer be scanned.", { title: "Disconnect this tailnet?", ok: "Disconnect" }))) return;
+            await api("DELETE", `tailscale/${pid()}`);
+            toast("Disconnected");
+            await redraw();
+          }, "btn ghost"),
+        );
+      }
+      return card(link ? `Tailnet of ${l.project.name}` : "Connect a tailnet", ...kids, actions, out);
+    };
+    const draw = async () => {
+      wrap.textContent = "";
+      const s = await api("GET", "tailscale");
+      wrap.append(
+        card(
+          "Tailscale",
+          el("p", "note", "Connect a tailnet to a project and its devices become targets automatically, are scanned like any other host and are checked for Tailscale-specific problems (outdated clients with known security fixes, key expiry, stale devices, broad subnet routes, an allow-all policy, broad SSH rules). Connecting is what authorises scanning the addresses of the devices it imports (100.64.0.0/10 and fd7a:115c:a1e0::/48), and nothing else in those ranges."),
+          el("p", "note", "Scanning needs this server's own Tailscale node (the compose `tailscale` profile, see docs/TAILSCALE.md) or a Docker host that is already on the tailnet. Without a route, devices are still listed and checked from API data, but never scanned."),
+        ),
+        el("div", "", null, { style: "height:16px" }),
+      );
+      s.links.forEach((link) => {
+        wrap.append(linkCard(link, [], draw), el("div", "", null, { style: "height:16px" }));
+      });
+      if (s.projects.length) wrap.append(linkCard(null, s.projects, draw));
+    };
+    await draw();
+  },
+
+  async openvas(m) {
+    await openvasPanel(m);
+  },
+
+  async keys(m) {
+    await apiKeysPanel(m);
   },
 
   async notifications(m) {
@@ -696,10 +851,139 @@ const sections = {
     );
   },
 
-  async engines(m) {
+  async email(m) {
+    const s = await api("GET", "email");
+    const on = check(
+      "Send email (people you add get an onboarding email with a link to choose their password)",
+      s.enabled,
+    );
+    const host = text(s.host, {
+      autocomplete: "off",
+      spellcheck: "false",
+      autocapitalize: "none",
+      placeholder: "smtp.example.com",
+    });
+    const port = text(String(s.port), { inputmode: "numeric" });
+    const security = selectOf(
+      [
+        ["starttls", "STARTTLS (usually port 587)"],
+        ["ssl", "SSL/TLS (usually port 465)"],
+        ["none", "None (port 25 relay, no login)"],
+      ],
+      s.security,
+    );
+    const user = text(s.username, {
+      autocomplete: "off",
+      spellcheck: "false",
+      autocapitalize: "none",
+    });
+    const pass = secret(s.has_password, "not set");
+    const fromAddress = text(s.from_address, {
+      type: "email",
+      autocomplete: "off",
+      placeholder: "cvengine@example.com",
+    });
+    const fromName = text(s.from_name, { placeholder: "cvENGINE" });
+    const verify = check(
+      "Verify the server certificate (turn off only for a relay you trust that uses a private or self-signed certificate)",
+      s.verify_certificate,
+    );
+    const linkBase = text(s.link_base, {
+      autocomplete: "off",
+      spellcheck: "false",
+      autocapitalize: "none",
+      placeholder: s.link_effective,
+    });
+    const status = el("p", "note", "", { style: "margin:12px 0 0" });
+    const showTest = (t) => {
+      status.textContent = t
+        ? `Last test ${t.ok ? "worked" : "failed"} (${new Date(t.at).toLocaleString()}, to ${t.to})${t.ok ? "." : `: ${t.error}`}`
+        : "No test message sent yet.";
+      status.className = `note${t && !t.ok ? " err" : ""}`;
+    };
+    showTest(s.last_test);
+    const body = () => {
+      const b = {
+        enabled: on.box.checked,
+        host: host.value,
+        port: port.value,
+        security: security.value,
+        username: user.value,
+        from_address: fromAddress.value,
+        from_name: fromName.value,
+        verify_certificate: verify.box.checked,
+        link_base: linkBase.value,
+      };
+      if (pass.value) b.password = pass.value;
+      return b;
+    };
+    const save = async () => {
+      await api("PUT", "email", body());
+      pass.value = "";
+      pass.placeholder = "saved (leave blank to keep)";
+    };
+    const to = text("", {
+      type: "email",
+      autocomplete: "off",
+      placeholder: "your own address",
+    });
+    m.append(
+      card(
+        "Email",
+        el(
+          "p",
+          "note",
+          "The mail server cvENGINE sends through. When someone is added with an email address, they receive their username and a one-time link to choose a password, so no password is handed around. With mail off, or no address on the account, you are shown a temporary password as before. The password is write-only: once saved it is never shown again.",
+          { style: "margin:0 0 12px" },
+        ),
+        on.wrap,
+        field("Mail server", host),
+        field("Port", port),
+        field("Security", security),
+        field("User name", user, "Leave empty for a relay that needs no login."),
+        field("Password", pass),
+        field("From address", fromAddress),
+        field("From name", fromName),
+        verify.wrap,
+        field(
+          "Link address (optional)",
+          linkBase,
+          `Links in the email start with this address. Leave empty to use ${s.link_effective}, built from this server's DOMAIN_NAME. Set it when people reach cvENGINE at a different address, such as https://scanner.example.com.`,
+        ),
+        button("Save", async () => {
+          await save();
+          toast("Saved");
+        }),
+        el("h3", "", "Send a test message", {
+          style: "font-size:14px;margin:20px 0 8px",
+        }),
+        field(
+          "Send it to",
+          to,
+          "Saves the settings above first. Empty sends it to the address on your own account.",
+        ),
+        button(
+          "Send test message",
+          async () => {
+            await save();
+            const r = await api("POST", "email/test", { to: to.value });
+            showTest(r.last_test);
+            toast(
+              r.ok ? `Test message sent to ${r.to}` : r.error,
+              !r.ok,
+            );
+          },
+          "btn ghost",
+        ),
+        status,
+      ),
+    );
+  },
+
+  async scan_policy(m) {
     const policy = await api("GET", "scan_policy");
     const everything = check(
-      "Let scans run every Nuclei template that is installed, not only the read-only ones",
+      "Let scans run every Nuclei template that is installed (turn off to run only the read-only ones)",
       policy.nuclei_all_templates,
     );
     const policyCard = card(
@@ -707,7 +991,7 @@ const sections = {
       el(
         "p",
         "note",
-        "By default only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host) run. Turn this on to run the whole template library Nuclei ships, including checks that send other requests. Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
+        "By default scans run the whole template library Nuclei ships, including checks that send requests other than plain reads. Turn this off to run only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host). Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
       ),
       everything.wrap,
       button("Save", async () => {
@@ -719,81 +1003,13 @@ const sections = {
     );
     policyCard.style.maxWidth = "none";
     m.append(policyCard);
-    const list = el("div", "grid");
-    m.append(list);
-    const draw = async () => {
-      list.textContent = "";
-      const data = await api("GET", "engines");
-      data.results.forEach((e) => {
-        const area = Object.assign(
-          el("textarea", "", null, {
-            rows: "10",
-            spellcheck: "false",
-            "aria-label": `${e.name} configuration`,
-            style:
-              "width:100%;font:13px/1.5 var(--mono);padding:10px 12px;border:0;border-radius:6px;box-shadow:var(--ring)",
-          }),
-          { value: e.yaml },
-        );
-        const name = text(e.name);
-        const row = el("div");
-        row.append(
-          button("Save", async () => {
-            await api("PUT", `engines/${e.id}`, {
-              name: name.value,
-              yaml: area.value,
-            });
-            toast("Engine saved");
-          }),
-          document.createTextNode(" "),
-          button(
-            "Delete",
-            async () => {
-              if (!(await ask("Scans already run with it keep their history.", { title: `Delete engine "${e.name}"?`, ok: "Delete engine" }))) return;
-              await api("DELETE", `engines/${e.id}`);
-              toast("Engine deleted");
-              await draw();
-            },
-            "btn ghost",
-          ),
-        );
-        const c = card(
-          e.name,
-          field("Name", name),
-          field("Configuration (YAML)", area),
-          row,
-        );
-        c.style.maxWidth = "none";
-        list.append(c);
-      });
-      const nName = text("", { placeholder: "e.g. Weekly deep scan" });
-      const nYaml = Object.assign(
-        el("textarea", "", null, {
-          rows: "8",
-          spellcheck: "false",
-          placeholder: "subdomain_discovery:\n  uses_tools: [subfinder]",
-          style:
-            "width:100%;font:13px/1.5 var(--mono);padding:10px 12px;border:0;border-radius:6px;box-shadow:var(--ring)",
-        }),
-        { value: "" },
-      );
-      const add = card(
-        "New engine",
-        field("Name", nName),
-        field("Configuration (YAML)", nYaml),
-        button("Create", async () => {
-          await api("POST", "engines", {
-            name: nName.value,
-            yaml: nYaml.value,
-          });
-          toast("Engine created");
-          await draw();
-        }),
-      );
-      add.style.maxWidth = "none";
-      list.append(add);
-    };
-    await draw();
+    m.append(
+      el(
+        "p",
+        "note",
+        "Every scan runs the same fixed pipeline (discovery, nmap, the read-only checks, correlation, triage). There are no per-scan engines to edit: earlier versions listed editable engine configurations inherited from reNgine, but nothing ever read them, so they were removed.",
+      ),
+    );
   },
 
   async ip_allowlist(m) {
@@ -938,6 +1154,21 @@ const sections = {
     m.append(
       card(
         "Proxy",
+        el(
+          "p",
+          "note",
+          "When on, scans that run on this server send their traffic to your targets through one of these proxies, picked per request in turn: the web probes and checks, nuclei, bbot, WPScan, testssl.sh and wafw00f. If a proxy is down the request fails; it never falls back to a direct connection.",
+        ),
+        el(
+          "p",
+          "note",
+          "Not covered, still sent directly from this server: nmap, naabu, the UDP sweeps, the database and RDP checks and OpenVAS, because they need raw sockets that an HTTP or SOCKS proxy cannot carry. A Sentinel runs on its own machine and keeps its own connection; it does not use this list. Calls to outside services (CVE feeds, AI providers, Shodan, GitHub and the like) are not proxied either. Do not rely on this setting for anonymity of those.",
+        ),
+        el(
+          "p",
+          "note",
+          "Use http://host:port, socks5://host:port or socks5h://host:port. An https:// proxy works for the external tools only, and testssl.sh takes only an http:// proxy without a login. When no proxy suits a tool, that tool does not run. Loopback and this stack's own services are never proxied; the server's CVENGINE_PROXY_BYPASS lists more.",
+        ),
         use.wrap,
         field("Proxies (one per line)", list),
         button("Save", async () => {
@@ -953,15 +1184,29 @@ const sections = {
 };
 
 // --- tabs ------------------------------------------------------------------------
+// Thirteen tabs never fit on one line, so they are grouped: a column beside the panel on a wide screen, wrapped rows on a narrow one.
 const view = root.querySelector("#view");
-const tabs = el("div", "tools", null, { role: "tablist" });
-const panel = el("div");
+view.classList.add("set-layout");
+const tabs = el("nav", "set-nav", null, {
+  role: "tablist",
+  "aria-label": "Settings",
+});
+const panel = el("div", "set-panel");
 view.append(tabs, panel);
+const groups = [
+  ["AI and access", ["ai", "keys", "tailscale"]],
+  ["Scanning", ["scan_policy", "openvas", "ip_allowlist", "proxy", "resources"]],
+  ["Alerts and reports", ["notifications", "email", "reports"]],
+  ["System", ["updates", "reset"]],
+];
 const labels = {
   ai: "AI model",
-  keys: "API vault",
+  keys: "API keys",
+  tailscale: "Tailscale",
+  openvas: "OpenVAS",
   notifications: "Notifications",
-  engines: "Scan engines",
+  email: "Email",
+  scan_policy: "Scan policy",
   ip_allowlist: "IP allowlist",
   proxy: "Proxy",
   reports: "Reports",
@@ -984,14 +1229,22 @@ async function open(name) {
     panel.append(el("p", "msg err", err.message));
   }
 }
-Object.entries(labels).forEach(([name, label]) => {
-  const b = el("button", "btn ghost sm", label, {
-    role: "tab",
-    "data-tab": name,
-    "aria-selected": "false",
+groups.forEach(([title, names]) => {
+  const group = el("div", "set-group", null, { role: "presentation" });
+  group.append(el("span", "set-group-title", title, { "aria-hidden": "true" }));
+  names.forEach((name) => {
+    const b = el("button", "btn ghost sm", labels[name], {
+      role: "tab",
+      "data-tab": name,
+      "aria-selected": "false",
+    });
+    b.type = "button";
+    b.onclick = () => open(name);
+    group.append(b);
   });
-  b.type = "button";
-  b.onclick = () => open(name);
-  tabs.append(b);
+  tabs.append(group);
 });
-open(sections[location.hash.slice(1)] ? location.hash.slice(1) : "ai");
+// an old link to #engines (the tab this replaced) opens the scan policy
+const legacyTabs = { engines: "scan_policy" };
+const hashTab = legacyTabs[location.hash.slice(1)] || location.hash.slice(1);
+open(sections[hashTab] ? hashTab : "ai");

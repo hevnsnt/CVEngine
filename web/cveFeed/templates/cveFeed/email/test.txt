@@ -1,0 +1,4 @@
+{% autoescape off %}Outgoing mail works.
+
+{{ by }} sent this test from cvENGINE on {{ instance }} through {{ host }}:{{ port }}. New people will now get their onboarding email from this address.
+{% endautoescape %}

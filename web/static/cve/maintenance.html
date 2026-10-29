@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Rebuilding cvENGINE</title>
+    <script>
+      // the same rule as the application (static/cve/theme.js): light unless the person chose dark, or auto and the system is dark
+      (function () {
+        var pref = "light";
+        try {
+          pref = localStorage.getItem("cve.theme") || "light";
+        } catch (e) {}
+        var dark =
+          pref === "dark" ||
+          (pref === "auto" &&
+            window.matchMedia &&
+            matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute(
+          "data-theme",
+          dark ? "dark" : "light",
+        );
+      })();
+    </script>
+    <style>
+      /* One self-contained file: the application is the thing that is down, so nothing here is fetched from it or anywhere else. */
+      :root {
+        color-scheme: light;
+        --bg: #f3f2ef;
+        --card: #ffffff;
+        --ink: #0d0d10;
+        --muted: #5b5b63;
+        --line: #e2e1dc;
+        --brand: #ff5a00;
+        --stage: #f7f6f2;
+        --grid: rgba(13, 13, 16, 0.05);
+        --grid-major: rgba(13, 13, 16, 0.08);
+        --faint: rgba(13, 13, 16, 0.16);
+        --plan: #1d3f73;
+        --plan-deep: #16325c;
+        --plan-line: #d7e5ff;
+        --plan-soft: rgba(215, 229, 255, 0.35);
+        --wood: #3a3a40;
+        --wood-hi: #4b4b52;
+        --navy: #262b3a;
+        --navy-hi: #343a4d;
+        --slate: #5d6779;
+        --slate-hi: #6f7a8e;
+        --vest: #ff6a14;
+        --reflect: #e9edf3;
+        --skin-a: #f0c8a4;
+        --skin-a-sh: #dcae86;
+        --skin-b: #a8714a;
+        --skin-b-sh: #8f5d3b;
+        --hair: #2a211c;
+        --hat: #ff5a00;
+        --hat-hi: #ff8b4d;
+        --hat-sh: #d94b00;
+        --hat-b: #f4f4f2;
+        --hat-b-sh: #d9d9d4;
+        --shoe: #16161a;
+        --shadow: rgba(13, 13, 16, 0.12);
+        --steel: #9aa0ab;
+        --denim: #4a6fa5;
+        --denim-sh: #3b5b8c;
+        --char: #33363f;
+        --char-hi: #434752;
+        --boot: #3a2a1f;
+        --sole: #1c1512;
+        --belt: #2a2a2e;
+        --face: #2a211c;
+        --blush: #f29a8a;
+        --blush-b: #d77b63;
+        --brand-sh: #d94b00;
+        --box: #c0392b;
+        --box-hi: #e0503f;
+        --rule: #c9ccd3;
+        --lamp: #2f3138;
+        --cup: #e7e4dd;
+        --vest-sh: #e4560a;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #0b0b0d;
+        --card: #141417;
+        --ink: #f3f3f5;
+        --muted: #a3a3ab;
+        --line: #26262c;
+        --stage: #101013;
+        --grid: rgba(243, 243, 245, 0.04);
+        --grid-major: rgba(243, 243, 245, 0.07);
+        --faint: rgba(243, 243, 245, 0.14);
+        --plan: #1b3a6a;
+        --plan-deep: #142d54;
+        --wood: #2b2b31;
+        --wood-hi: #3a3a41;
+        --navy: #2c3244;
+        --navy-hi: #3b4258;
+        --slate: #4f586a;
+        --slate-hi: #616b7f;
+        --shoe: #050507;
+        --shadow: rgba(0, 0, 0, 0.45);
+        --steel: #6d727c;
+        --denim: #456694;
+        --denim-sh: #36527c;
+        --char: #2a2c33;
+        --char-hi: #383b45;
+        --rule: #8a8f99;
+        --lamp: #4a4c55;
+        --cup: #cfccc4;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.55 Inter,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 16px;
+        -webkit-font-smoothing: antialiased;
+      }
+      main {
+        position: relative;
+        width: 100%;
+        max-width: 880px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.04),
+          0 24px 60px -28px rgba(0, 0, 0, 0.25);
+      }
+      main::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto;
+        height: 3px;
+        background: linear-gradient(
+          90deg,
+          var(--brand),
+          #ffb27a 55%,
+          transparent
+        );
+      }
+      .head {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 18px;
+        align-items: end;
+        padding: 30px 34px 22px;
+      }
+      .brand {
+        font:
+          800 13px/1 ui-monospace,
+          "SF Mono",
+          Menlo,
+          Consolas,
+          monospace;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .brand b {
+        color: var(--brand);
+      }
+      h1 {
+        margin: 12px 0 10px;
+        font-size: clamp(28px, 4.6vw, 42px);
+        line-height: 1.05;
+        letter-spacing: -0.035em;
+        font-weight: 800;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+        max-width: 54ch;
+      }
+      .eta {
+        text-align: right;
+        font:
+          600 11px/1.5 ui-monospace,
+          "SF Mono",
+          Menlo,
+          Consolas,
+          monospace;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .eta b {
+        display: block;
+        font:
+          800 22px/1.1 Inter,
+          system-ui,
+          sans-serif;
+        letter-spacing: -0.03em;
+        text-transform: none;
+        color: var(--ink);
+      }
+      .stage {
+        position: relative;
+        margin: 0 18px;
+        border-radius: 12px;
+        background-color: var(--stage);
+        background-image:
+          linear-gradient(var(--grid-major) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid-major) 1px, transparent 1px),
+          linear-gradient(var(--grid) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+        background-size:
+          100px 100px,
+          100px 100px,
+          20px 20px,
+          20px 20px;
+        background-position: -1px -1px;
+        border: 1px solid var(--line);
+        overflow: hidden;
+      }
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .foot {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 18px 34px 24px;
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 1;
+        min-width: 0;
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .pulse {
+        position: relative;
+        flex: none;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--brand);
+      }
+      .pulse::after {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        border: 2px solid var(--brand);
+        opacity: 0;
+        animation: ring 2s ease-out infinite;
+      }
+      .track {
+        flex: 0 0 160px;
+        height: 4px;
+        border-radius: 4px;
+        background: var(--line);
+        overflow: hidden;
+      }
+      .track i {
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: 4px;
+        background: var(--brand);
+        animation: slide 1.8s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+      }
+      @keyframes ring {
+        0% {
+          transform: scale(0.6);
+          opacity: 0.7;
+        }
+        100% {
+          transform: scale(1.6);
+          opacity: 0;
+        }
+      }
+      @keyframes slide {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(260%);
+        }
+      }
+
+      /* the engineers' banter: one random exchange at a time, a line every 2 seconds */
+      .banter { position: absolute; inset: 0; pointer-events: none; }
+      .say {
+        position: absolute;
+        bottom: 77%;
+        max-width: 36%;
+        margin: 0;
+        padding: 9px 13px;
+        border-radius: 14px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        box-shadow: 0 6px 18px -10px rgba(0, 0, 0, 0.35);
+        font: 600 13.5px/1.35 Inter, system-ui, sans-serif;
+        color: var(--ink);
+        opacity: 0;
+        transform: translateY(6px) scale(0.96);
+        transition: opacity 0.25s ease, transform 0.25s ease;
+      }
+      .say::after {
+        content: "";
+        position: absolute;
+        top: 100%;
+        width: 14px;
+        height: 14px;
+        background: var(--card);
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        transform: translateY(-7px) rotate(45deg);
+      }
+      .say-a { left: 14%; transform-origin: 20% 100%; }
+      .say-a::after { left: 22px; }
+      .say-b { right: 14%; text-align: right; transform-origin: 80% 100%; }
+      .say-b::after { right: 22px; }
+      .say.on { opacity: 1; transform: none; }
+      /* the scene */
+      .faint { fill: none; stroke: var(--faint); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+      .plan-line { fill: none; stroke: var(--plan-line); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+      .draw { stroke-dasharray: 260; stroke-dashoffset: 260; animation: draw 7s ease-in-out infinite; }
+      .draw.d2 { animation-delay: 0.9s; }
+      .draw.d3 { animation-delay: 1.8s; }
+      .draw.d4 { animation-delay: 2.7s; }
+      @keyframes draw {
+        0% { stroke-dashoffset: 260; }
+        35%, 80% { stroke-dashoffset: 0; }
+        100% { stroke-dashoffset: -260; }
+      }
+      .node { fill: var(--plan-line); animation: glow 3.5s ease-in-out infinite; }
+      .node.n2 { animation-delay: 1.2s; }
+      .node.n3 { animation-delay: 2.4s; }
+      @keyframes glow {
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 1; }
+      }
+      .beamlight { animation: lamp 5s ease-in-out infinite; }
+      @keyframes lamp {
+        0%, 100% { opacity: 0.75; }
+        50% { opacity: 1; }
+      }
+      .steam { stroke-dasharray: 22; animation: steam 3.4s ease-in-out infinite; }
+      @keyframes steam {
+        0% { stroke-dashoffset: 22; opacity: 0; }
+        40% { opacity: 1; }
+        100% { stroke-dashoffset: -22; opacity: 0; }
+      }
+      .sheet { transform-origin: 480px 152px; animation: flutter 5s ease-in-out infinite; }
+      @keyframes flutter {
+        0%, 100% { transform: skewY(0deg) scaleY(1); }
+        50% { transform: skewY(0.4deg) scaleY(0.99); }
+      }
+      .chin { animation: chin 4s ease-in-out infinite; }
+      @keyframes chin {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(2px); }
+      }
+      .blink { transform-box: fill-box; transform-origin: center; animation: blink 5s infinite; }
+      @keyframes blink {
+        0%, 94%, 100% { transform: scaleY(1); }
+        96% { transform: scaleY(0.1); }
+      }
+      .look { transform-origin: 231px 166px; animation: look 6s ease-in-out infinite; }
+      @keyframes look {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(3deg); }
+      }
+      .nod { transform-origin: 231px 166px; animation: nod 5s ease-in-out infinite; }
+      @keyframes nod {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(4deg); }
+      }
+      .load { transform-origin: 330px 56px; animation: swing 6s ease-in-out infinite; }
+      @keyframes swing {
+        0%, 100% { transform: rotate(1.4deg); }
+        50% { transform: rotate(-1.4deg); }
+      }
+      .rise { animation: rise 6s ease-in-out infinite; }
+      @keyframes rise {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-7px); }
+      }
+      .beacon { fill: var(--brand); animation: glow 1.6s ease-in-out infinite; }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation: none !important;
+        }
+        .draw {
+          stroke-dashoffset: 0;
+        }
+      }
+      @media (max-width: 620px) {
+        .banter { position: static; padding: 10px 6px 4px; }
+        .say { position: static; max-width: none; display: none; text-align: left; transform: none; transition: none; }
+        .say.on { display: block; }
+        .say::after { display: none; }
+        .say-a::before { content: "Left: "; color: var(--muted); }
+        .say-b::before { content: "Right: "; color: var(--muted); }
+        .head {
+          grid-template-columns: 1fr;
+          padding: 24px 20px 18px;
+        }
+        .eta {
+          text-align: left;
+        }
+        .stage {
+          margin: 0 10px;
+        }
+        .foot {
+          flex-direction: column;
+          align-items: stretch;
+          padding: 16px 20px 20px;
+        }
+        .track {
+          flex: none;
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="head">
+        <div>
+          <div class="brand"><b>cv</b>ENGINE</div>
+          <h1>We are rebuilding cvENGINE.</h1>
+          <p>
+            A new version is going in right now. This page comes back by itself
+            the moment the site answers, and scans pick up where they left off.
+          </p>
+        </div>
+        <div class="eta">Usually<b>2 to 5 min</b></div>
+      </div>
+
+      <div class="stage">
+<svg viewBox="0 0 960 390" role="img" aria-label="Two engineers in hard hats hold up a blueprint between them and talk it over while a crane lifts the next piece into place">
+  <defs>
+    <linearGradient id="board" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--plan)"/><stop offset="1" stop-color="var(--plan-deep)"/></linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.16"/><stop offset="0.45" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <radialGradient id="floor" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="var(--shadow)"/><stop offset="1" stop-color="var(--shadow)" stop-opacity="0"/></radialGradient>
+    <pattern id="plangrid" width="11" height="11" patternUnits="userSpaceOnUse"><path d="M11 0H0V11" fill="none" stroke="var(--plan-soft)" stroke-width="0.5"/></pattern>
+  </defs>
+  
+<g class="faint">
+  <path d="M58 362V44M76 362V44"/>
+  <path d="M58 362L76 336L58 310L76 284L58 258L76 232L58 206L76 180L58 154L76 128L58 102L76 76L58 50"/>
+  <path d="M20 44H350M20 56H350"/>
+  <path d="M32 56L46 44L60 56L74 44L88 56L102 44L116 56L130 44L144 56L158 44L172 56L186 44L200 56L214 44L228 56L242 44L256 56L270 44L284 56L298 44L312 56L326 44L340 56"/>
+  <path d="M67 44V18L20 44M67 18L340 44"/>
+</g>
+<rect x="22" y="56" width="24" height="16" rx="2" fill="var(--faint)"/>
+<circle class="beacon" cx="67" cy="15" r="2.8"/>
+<g class="load">
+  <path d="M330 56V82" stroke="var(--steel)" stroke-width="1.2"/>
+  <g class="rise">
+    <path d="M322 82L330 74L338 82" fill="none" stroke="var(--steel)" stroke-width="1.2"/>
+    <rect x="300" y="82" width="60" height="15" rx="1.5" fill="var(--wood-hi)"/>
+    <rect x="300" y="87" width="60" height="2.5" fill="var(--brand)"/>
+  </g>
+</g>
+<g class="faint">
+  <path d="M800 362V170M846 362V150M892 362V150M938 362V170"/>
+  <path d="M790 362H948M790 320H948M790 278H948M790 236H948M790 194H948M800 170H938"/>
+  <path d="M800 320L846 278M846 320L892 278M892 278L938 236M800 236L846 194M892 194L938 170"/>
+</g>
+<g fill="var(--faint)" opacity="0.55">
+  <rect x="806" y="324" width="36" height="34" rx="1"/><rect x="852" y="324" width="36" height="34" rx="1"/><rect x="898" y="324" width="36" height="34" rx="1"/>
+  <rect x="806" y="282" width="36" height="34" rx="1"/><rect x="852" y="282" width="36" height="34" rx="1"/>
+</g>
+<path d="M16 362H944" stroke="var(--faint)" stroke-width="1.4" stroke-linecap="round"/>
+<ellipse cx="236" cy="364" rx="70" ry="8" fill="url(#floor)"/>
+<ellipse cx="724" cy="364" rx="70" ry="8" fill="url(#floor)"/>
+<!-- props: a traffic cone and a toolbox -->
+<g>
+  <path d="M470 362L482 316H490L502 362Z" fill="var(--brand)"/>
+  <path d="M476 340H496L498 348H474Z" fill="var(--reflect)"/>
+  <rect x="462" y="358" width="48" height="5" rx="2" fill="var(--brand-sh)"/>
+  <rect x="540" y="338" width="54" height="24" rx="3" fill="var(--box)"/>
+  <rect x="540" y="338" width="54" height="7" rx="3" fill="var(--box-hi)"/>
+  <path d="M556 338V330H578V338" fill="none" stroke="var(--box)" stroke-width="3" stroke-linejoin="round"/>
+</g>
+  <g class="eng-b" transform="translate(960 0) scale(-1 1)"><path d="M197.1 256.5 L197.1 258.4 L197.1 260.8 L197.0 263.5 L196.9 266.6 L196.8 269.9 L196.6 273.5 L196.5 277.2 L196.3 281.0 L196.2 285.0 L196.0 288.9 L195.9 292.8 L195.7 296.7 L195.6 300.4 L195.5 303.9 L195.4 307.4 L195.2 311.1 L195.1 315.0 L194.9 318.9 L194.8 322.8 L194.7 326.7 L194.5 330.6 L194.4 334.3 L194.3 337.9 L194.2 341.2 L194.1 344.2 L194.1 347.0 L194.0 349.3 L194.0 351.2 L220.0 352.8 L220.2 350.9 L220.5 348.6 L220.7 345.8 L221.0 342.8 L221.3 339.5 L221.6 336.0 L222.0 332.3 L222.3 328.5 L222.7 324.6 L223.0 320.7 L223.4 316.9 L223.7 313.1 L224.1 309.5 L224.5 306.1 L224.9 302.7 L225.4 299.1 L225.8 295.3 L226.3 291.5 L226.9 287.6 L227.4 283.7 L227.9 279.9 L228.4 276.3 L228.9 272.7 L229.3 269.4 L229.8 266.4 L230.2 263.7 L230.6 261.4 L230.9 259.5Z" fill="var(--char)"/><path d="M225.1 260.2 L225.5 262.0 L226.0 264.4 L226.5 267.1 L227.0 270.1 L227.5 273.4 L228.1 276.9 L228.8 280.6 L229.4 284.4 L230.0 288.3 L230.7 292.2 L231.3 296.0 L231.9 299.8 L232.5 303.4 L233.1 306.9 L233.7 310.4 L234.2 314.0 L234.8 317.8 L235.4 321.6 L236.0 325.5 L236.6 329.4 L237.2 333.2 L237.8 336.9 L238.4 340.5 L238.9 343.8 L239.4 346.8 L239.9 349.5 L240.3 351.8 L240.6 353.7 L267.4 350.3 L267.3 348.4 L267.1 346.0 L266.8 343.3 L266.5 340.2 L266.2 336.9 L265.9 333.4 L265.5 329.6 L265.1 325.8 L264.7 321.9 L264.3 318.0 L264.0 314.1 L263.6 310.3 L263.2 306.6 L262.9 303.1 L262.6 299.6 L262.3 295.9 L261.9 292.1 L261.6 288.2 L261.2 284.3 L260.8 280.4 L260.5 276.5 L260.2 272.8 L259.9 269.3 L259.6 265.9 L259.3 262.9 L259.1 260.1 L259.0 257.8 L258.9 255.8Z" fill="var(--char-hi)"/><path d="M188 362C188 351 194 346 207 346C217 346 223 350 224 355L225 362Z" fill="var(--boot)"/><path d="M240 362C240 351 246 346 258 346C268 346 278 350 281 357L282 362Z" fill="var(--boot)"/><path d="M188 359H225V362H188ZM240 359H282V362H240Z" fill="var(--sole)"/><path d="M193.5 178.4 L192.7 179.8 L191.7 181.5 L190.2 183.6 L188.4 186.2 L186.3 189.0 L184.1 192.0 L181.9 195.2 L179.6 198.6 L177.5 202.0 L175.4 205.5 L173.6 209.1 L172.0 212.8 L170.8 216.6 L170.1 220.8 L170.1 225.0 L170.9 228.9 L172.1 232.4 L173.7 235.6 L175.5 238.5 L177.3 241.2 L179.3 243.7 L181.3 245.9 L183.1 248.0 L184.9 249.8 L186.5 251.5 L187.8 252.8 L188.7 253.7 L189.3 254.4 A8.0 8.0 0 0 1 202.7 245.6 L202.7 245.6 L201.8 244.1 L200.6 242.3 L199.3 240.5 L197.9 238.7 L196.5 236.8 L195.1 234.8 L193.7 232.8 L192.4 230.9 L191.4 229.0 L190.6 227.2 L190.0 225.6 L189.8 224.4 L189.8 223.6 L189.9 223.2 L190.3 222.6 L191.1 221.2 L192.3 219.2 L193.9 217.0 L195.7 214.5 L197.9 211.9 L200.1 209.3 L202.5 206.6 L204.8 204.1 L207.1 201.6 L209.3 199.3 L211.3 197.2 L213.1 195.2 L214.5 193.6 A13.0 13.0 0 0 1 193.5 178.4Z" fill="var(--slate)"/><g transform="rotate(-62 190 262)"><rect x="160" y="257" width="64" height="11" rx="5.5" fill="var(--plan)"/><ellipse cx="161" cy="262.5" rx="3" ry="5.5" fill="var(--plan-line)" opacity="0.85"/><rect x="196" y="257" width="3.5" height="11" fill="var(--brand)"/></g><g transform="translate(198.0 252.0) rotate(40.0)"><ellipse cx="0" cy="0" rx="8.5" ry="7.0" fill="var(--skin-b)"/><ellipse cx="-1.3" cy="6.1" rx="4.2" ry="2.5" transform="rotate(-28 -1.3 6.1)" fill="var(--skin-b)"/><path d="M0.9 -3.8 Q5.1 -0.9 1.7 3.0" fill="none" stroke="var(--skin-b-sh)" stroke-width="1.1" stroke-linecap="round"/></g><path d="M196 192C196 176 206 168 226 168H236C256 168 266 176 266 192L268 252C268 262 262 268 252 268H212C202 268 196 262 196 252Z" fill="var(--slate-hi)"/><clipPath id="t-b"><path d="M196 192C196 176 206 168 226 168H236C256 168 266 176 266 192L268 252C268 262 262 268 252 268H212C202 268 196 262 196 252Z"/></clipPath><g clip-path="url(#t-b)"><path d="M190 160H221L224 270H190Z" fill="var(--vest-sh)"/><path d="M240 160H272V270H238Z" fill="var(--vest)"/><path d="M221 170L224 270H238L240 170Z" fill="var(--slate-hi)"/><path d="M190 222H272V229H190Z" fill="var(--reflect)"/><path d="M190 240H272V245H190Z" fill="var(--reflect)" opacity="0.85"/><path d="M206 160V270M254 160V270" fill="none" stroke="var(--reflect)" stroke-width="5"/><path d="M226 168C228 178 234 178 236 168" fill="var(--slate)"/><path d="M196 252H268V268H196Z" fill="var(--char-hi)"/><path d="M196 252H268V257H196Z" fill="var(--belt)"/></g><path d="M226 170L231 180L236 170" fill="none" stroke="var(--slate)" stroke-width="1.6" stroke-linejoin="round"/><path d="M222 150H240V172C236 176 226 176 222 172Z" fill="var(--skin-b-sh)"/><g class="nod"><ellipse cx="231" cy="136" rx="27" ry="29" fill="var(--skin-b)"/><ellipse cx="206" cy="140" rx="5" ry="7" fill="var(--skin-b-sh)"/><path d="M205 130C204 122 208 116 214 113L216 140C211 142 207 139 205 130Z" fill="var(--hair)"/><path d="M212 148C216 160 226 166 236 166C248 166 256 158 258 146C252 154 244 157 236 157C226 157 218 154 212 148Z" fill="var(--hair)"/><ellipse class="blink" cx="240" cy="136" rx="2.6" ry="3.4" fill="var(--face)"/><ellipse class="blink" cx="254" cy="135" rx="2.3" ry="3.1" fill="var(--face)"/><path d="M235 127Q240 124 245 126M250 125Q254 123 258 125" fill="none" stroke="var(--hair)" stroke-width="2" stroke-linecap="round"/><path d="M249 140Q253 145 249 147" fill="none" stroke="var(--skin-b-sh)" stroke-width="2" stroke-linecap="round"/><path d="M241 152Q247 156 253 152" fill="none" stroke="var(--face)" stroke-width="2" stroke-linecap="round"/><ellipse cx="236" cy="147" rx="5" ry="3" fill="var(--blush-b)" opacity="0.5"/><ellipse cx="258" cy="146" rx="3.4" ry="2.4" fill="var(--blush-b)" opacity="0.5"/><path d="M202 124C202 101 216 90 233 90C252 90 264 102 264 122Z" fill="var(--hat-b)"/><path d="M233 90C237 98 238 110 238 123" fill="none" stroke="var(--hat-b-sh)" stroke-width="5" stroke-linecap="round"/><path d="M212 108C215 99 222 95 229 94" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/><path d="M203 116H263V121H203Z" fill="var(--brand)"/><path d="M198 121C198 118 201 117 204 117H266C274 117 279 120 279 124C279 127 276 128 272 128H202C199 128 198 125 198 121Z" fill="var(--hat-b-sh)"/></g></g>
+  <g class="eng-a"><path d="M197.1 256.5 L197.1 258.4 L197.1 260.8 L197.0 263.5 L196.9 266.6 L196.8 269.9 L196.6 273.5 L196.5 277.2 L196.3 281.0 L196.2 285.0 L196.0 288.9 L195.9 292.8 L195.7 296.7 L195.6 300.4 L195.5 303.9 L195.4 307.4 L195.2 311.1 L195.1 315.0 L194.9 318.9 L194.8 322.8 L194.7 326.7 L194.5 330.6 L194.4 334.3 L194.3 337.9 L194.2 341.2 L194.1 344.2 L194.1 347.0 L194.0 349.3 L194.0 351.2 L220.0 352.8 L220.2 350.9 L220.5 348.6 L220.7 345.8 L221.0 342.8 L221.3 339.5 L221.6 336.0 L222.0 332.3 L222.3 328.5 L222.7 324.6 L223.0 320.7 L223.4 316.9 L223.7 313.1 L224.1 309.5 L224.5 306.1 L224.9 302.7 L225.4 299.1 L225.8 295.3 L226.3 291.5 L226.9 287.6 L227.4 283.7 L227.9 279.9 L228.4 276.3 L228.9 272.7 L229.3 269.4 L229.8 266.4 L230.2 263.7 L230.6 261.4 L230.9 259.5Z" fill="var(--navy)"/><path d="M225.1 260.2 L225.5 262.0 L226.0 264.4 L226.5 267.1 L227.0 270.1 L227.5 273.4 L228.1 276.9 L228.8 280.6 L229.4 284.4 L230.0 288.3 L230.7 292.2 L231.3 296.0 L231.9 299.8 L232.5 303.4 L233.1 306.9 L233.7 310.4 L234.2 314.0 L234.8 317.8 L235.4 321.6 L236.0 325.5 L236.6 329.4 L237.2 333.2 L237.8 336.9 L238.4 340.5 L238.9 343.8 L239.4 346.8 L239.9 349.5 L240.3 351.8 L240.6 353.7 L267.4 350.3 L267.3 348.4 L267.1 346.0 L266.8 343.3 L266.5 340.2 L266.2 336.9 L265.9 333.4 L265.5 329.6 L265.1 325.8 L264.7 321.9 L264.3 318.0 L264.0 314.1 L263.6 310.3 L263.2 306.6 L262.9 303.1 L262.6 299.6 L262.3 295.9 L261.9 292.1 L261.6 288.2 L261.2 284.3 L260.8 280.4 L260.5 276.5 L260.2 272.8 L259.9 269.3 L259.6 265.9 L259.3 262.9 L259.1 260.1 L259.0 257.8 L258.9 255.8Z" fill="var(--navy-hi)"/><path d="M188 362C188 351 194 346 207 346C217 346 223 350 224 355L225 362Z" fill="var(--boot)"/><path d="M240 362C240 351 246 346 258 346C268 346 278 350 281 357L282 362Z" fill="var(--boot)"/><path d="M188 359H225V362H188ZM240 359H282V362H240Z" fill="var(--sole)"/><path d="M193.8 178.0 L193.0 179.4 L191.8 181.1 L190.1 183.2 L188.1 185.8 L185.9 188.6 L183.5 191.7 L181.0 194.9 L178.6 198.2 L176.2 201.7 L174.0 205.2 L171.9 208.8 L170.2 212.5 L168.8 216.4 L168.1 220.8 L168.2 225.2 L169.1 229.2 L170.5 232.8 L172.2 236.0 L174.2 238.9 L176.3 241.6 L178.5 244.0 L180.6 246.3 L182.7 248.4 L184.7 250.2 L186.4 251.8 L187.9 253.1 L188.9 254.0 L189.6 254.8 A8.0 8.0 0 0 1 202.4 245.2 L202.4 245.2 L201.5 243.7 L200.1 242.0 L198.7 240.2 L197.1 238.4 L195.5 236.4 L193.8 234.5 L192.3 232.5 L190.8 230.5 L189.6 228.5 L188.7 226.8 L188.1 225.2 L187.8 224.1 L187.8 223.4 L187.9 223.2 L188.3 222.7 L189.1 221.4 L190.3 219.5 L192.0 217.3 L194.0 214.8 L196.3 212.3 L198.7 209.6 L201.2 207.0 L203.8 204.4 L206.2 202.0 L208.6 199.7 L210.7 197.6 L212.7 195.6 L214.2 194.0 A13.0 13.0 0 0 1 193.8 178.0Z" fill="var(--denim-sh)"/><g transform="translate(198.0 252.0) rotate(40.0)"><ellipse cx="0" cy="0" rx="8.5" ry="7.0" fill="var(--skin-a)"/><ellipse cx="-1.3" cy="6.1" rx="4.2" ry="2.5" transform="rotate(-28 -1.3 6.1)" fill="var(--skin-a)"/><path d="M0.9 -3.8 Q5.1 -0.9 1.7 3.0" fill="none" stroke="var(--skin-a-sh)" stroke-width="1.1" stroke-linecap="round"/></g><path d="M196 192C196 176 206 168 226 168H236C256 168 266 176 266 192L268 252C268 262 262 268 252 268H212C202 268 196 262 196 252Z" fill="var(--denim)"/><clipPath id="t-a"><path d="M196 192C196 176 206 168 226 168H236C256 168 266 176 266 192L268 252C268 262 262 268 252 268H212C202 268 196 262 196 252Z"/></clipPath><g clip-path="url(#t-a)"><path d="M190 160H221L224 270H190Z" fill="var(--vest-sh)"/><path d="M240 160H272V270H238Z" fill="var(--vest)"/><path d="M221 170L224 270H238L240 170Z" fill="var(--denim)"/><path d="M190 222H272V229H190Z" fill="var(--reflect)"/><path d="M190 240H272V245H190Z" fill="var(--reflect)" opacity="0.85"/><path d="M206 160V270M254 160V270" fill="none" stroke="var(--reflect)" stroke-width="5"/><path d="M226 168C228 178 234 178 236 168" fill="var(--denim-sh)"/><path d="M196 252H268V268H196Z" fill="var(--navy-hi)"/><path d="M196 252H268V257H196Z" fill="var(--belt)"/></g><path d="M226 170L231 180L236 170" fill="none" stroke="var(--denim-sh)" stroke-width="1.6" stroke-linejoin="round"/><path d="M222 150H240V172C236 176 226 176 222 172Z" fill="var(--skin-a-sh)"/><g class="look"><ellipse cx="231" cy="136" rx="27" ry="29" fill="var(--skin-a)"/><ellipse cx="206" cy="140" rx="5" ry="7" fill="var(--skin-a-sh)"/><path d="M205 130C204 122 208 116 214 113L216 140C211 142 207 139 205 130Z" fill="var(--hair)"/><ellipse class="blink" cx="240" cy="136" rx="2.6" ry="3.4" fill="var(--face)"/><ellipse class="blink" cx="254" cy="135" rx="2.3" ry="3.1" fill="var(--face)"/><path d="M235 127Q240 124 245 126M250 125Q254 123 258 125" fill="none" stroke="var(--hair)" stroke-width="2" stroke-linecap="round"/><path d="M249 140Q253 145 249 147" fill="none" stroke="var(--skin-a-sh)" stroke-width="2" stroke-linecap="round"/><path d="M241 152Q247 156 253 152" fill="none" stroke="var(--face)" stroke-width="2" stroke-linecap="round"/><ellipse cx="236" cy="147" rx="5" ry="3" fill="var(--blush)" opacity="0.5"/><ellipse cx="258" cy="146" rx="3.4" ry="2.4" fill="var(--blush)" opacity="0.5"/><path d="M202 124C202 101 216 90 233 90C252 90 264 102 264 122Z" fill="var(--hat)"/><path d="M233 90C237 98 238 110 238 123" fill="none" stroke="var(--hat-sh)" stroke-width="5" stroke-linecap="round"/><path d="M212 108C215 99 222 95 229 94" fill="none" stroke="var(--hat-hi)" stroke-width="3.5" stroke-linecap="round"/><path d="M198 121C198 118 201 117 204 117H266C274 117 279 120 279 124C279 127 276 128 272 128H202C199 128 198 125 198 121Z" fill="var(--hat-sh)"/></g></g>
+  
+<g class="sheet">
+  <path d="M338 292C420 300 540 300 622 292L620 298C540 306 420 306 340 298Z" fill="var(--plan-deep)" opacity="0.6"/>
+  <path d="M330 152C420 146 540 146 630 152L622 292C540 300 420 300 338 292Z" fill="url(#board)"/>
+  <clipPath id="sheet-clip"><path d="M330 152C420 146 540 146 630 152L622 292C540 300 420 300 338 292Z"/></clipPath>
+  <g clip-path="url(#sheet-clip)">
+    <rect x="320" y="140" width="320" height="170" fill="url(#plangrid)"/>
+    <g transform="translate(352 168) scale(0.92 0.86)">
+      <rect class="plan-line draw" x="10" y="8" width="70" height="42" rx="3"/>
+      <rect class="plan-line draw d2" x="116" y="4" width="76" height="50" rx="3"/>
+      <rect class="plan-line draw d3" x="226" y="12" width="46" height="34" rx="3"/>
+      <path class="plan-line draw d2" d="M80 29H116M192 29H226"/>
+      <path class="plan-line draw d3" d="M154 54V82H45V104M154 82H249V104"/>
+      <circle class="plan-line draw d4" cx="45" cy="114" r="10"/>
+      <path class="plan-line draw d4" d="M238 104H262V122H238Z"/>
+      <path class="plan-line" d="M130 18H176M130 27H168M130 36H174" opacity="0.6"/>
+      <circle class="node" cx="80" cy="29" r="2.8"/><circle class="node n2" cx="154" cy="82" r="2.8"/><circle class="node n3" cx="226" cy="29" r="2.8"/>
+      <rect x="170" y="98" width="96" height="34" rx="2" fill="none" stroke="var(--plan-soft)"/>
+      <path d="M170 112H266M214 112V132" stroke="var(--plan-soft)"/>
+      <text x="177" y="108" fill="var(--plan-line)" font-family="ui-monospace, Menlo, monospace" font-size="7" letter-spacing="1.2">CVENGINE</text>
+      <text x="219" y="125" fill="var(--plan-line)" font-family="ui-monospace, Menlo, monospace" font-size="6.5" letter-spacing="0.6" opacity="0.85">REV NEXT</text>
+    </g>
+    <path d="M330 152C420 146 540 146 630 152L622 292C540 300 420 300 338 292Z" fill="url(#sheen)"/>
+  </g>
+  <!-- the rolled ends -->
+  <path d="M322 150C330 148 338 150 338 156L346 292C346 298 338 300 330 298C324 296 322 292 322 288Z" fill="var(--plan)"/>
+  <path d="M326 152L334 296" stroke="var(--plan-line)" stroke-width="1.2" opacity="0.5"/>
+  <path d="M638 150C630 148 622 150 622 156L614 292C614 298 622 300 630 298C636 296 638 292 638 288Z" fill="var(--plan)"/>
+  <path d="M634 152L626 296" stroke="var(--plan-line)" stroke-width="1.2" opacity="0.5"/>
+</g>
+  <g transform="translate(960 0) scale(-1 1)"><path d="M249.9 194.8 L251.0 195.4 L252.4 196.3 L254.4 197.8 L256.8 199.7 L259.4 201.9 L262.3 204.2 L265.5 206.6 L268.8 209.0 L272.3 211.3 L276.0 213.3 L279.9 215.1 L284.3 216.4 L289.2 216.9 L294.5 216.2 L299.3 214.1 L303.1 211.4 L306.4 208.3 L309.3 204.9 L312.0 201.3 L314.6 197.5 L317.0 193.6 L319.4 189.8 L321.5 186.1 L323.5 182.6 L325.2 179.4 L326.8 176.6 L328.0 174.5 L328.9 173.0 A8.5 8.5 0 0 1 315.1 163.0 L315.1 163.0 L313.6 164.8 L311.9 167.3 L310.0 170.1 L308.0 173.1 L305.8 176.4 L303.6 179.8 L301.2 183.1 L298.8 186.4 L296.5 189.3 L294.2 191.9 L292.1 194.0 L290.4 195.4 L289.4 196.0 L289.5 195.8 L290.0 195.5 L289.8 195.2 L288.8 194.6 L287.2 193.6 L285.2 192.1 L283.1 190.2 L280.8 188.1 L278.5 185.9 L276.2 183.5 L274.0 181.2 L271.8 178.9 L269.8 176.7 L267.7 174.7 L266.1 173.2 A13.5 13.5 0 0 1 249.9 194.8Z" fill="var(--slate-hi)"/><g transform="translate(325.0 163.0) rotate(-60.0)"><ellipse cx="0" cy="0" rx="8.5" ry="7.0" fill="var(--skin-b)"/><ellipse cx="-1.3" cy="-6.1" rx="4.2" ry="2.5" transform="rotate(28 -1.3 -6.1)" fill="var(--skin-b)"/><path d="M0.9 -3.8 Q5.1 -0.9 1.7 3.0" fill="none" stroke="var(--skin-b-sh)" stroke-width="1.1" stroke-linecap="round"/></g></g>
+  <path d="M249.9 194.8 L251.0 195.4 L252.4 196.3 L254.4 197.8 L256.8 199.7 L259.4 201.9 L262.3 204.2 L265.5 206.6 L268.8 209.0 L272.3 211.3 L276.0 213.3 L279.9 215.1 L284.3 216.4 L289.2 216.9 L294.5 216.2 L299.3 214.1 L303.1 211.4 L306.4 208.3 L309.3 204.9 L312.0 201.3 L314.6 197.5 L317.0 193.6 L319.4 189.8 L321.5 186.1 L323.5 182.6 L325.2 179.4 L326.8 176.6 L328.0 174.5 L328.9 173.0 A8.5 8.5 0 0 1 315.1 163.0 L315.1 163.0 L313.6 164.8 L311.9 167.3 L310.0 170.1 L308.0 173.1 L305.8 176.4 L303.6 179.8 L301.2 183.1 L298.8 186.4 L296.5 189.3 L294.2 191.9 L292.1 194.0 L290.4 195.4 L289.4 196.0 L289.5 195.8 L290.0 195.5 L289.8 195.2 L288.8 194.6 L287.2 193.6 L285.2 192.1 L283.1 190.2 L280.8 188.1 L278.5 185.9 L276.2 183.5 L274.0 181.2 L271.8 178.9 L269.8 176.7 L267.7 174.7 L266.1 173.2 A13.5 13.5 0 0 1 249.9 194.8Z" fill="var(--denim)"/><g transform="translate(325.0 163.0) rotate(-60.0)"><ellipse cx="0" cy="0" rx="8.5" ry="7.0" fill="var(--skin-a)"/><ellipse cx="-1.3" cy="-6.1" rx="4.2" ry="2.5" transform="rotate(28 -1.3 -6.1)" fill="var(--skin-a)"/><path d="M0.9 -3.8 Q5.1 -0.9 1.7 3.0" fill="none" stroke="var(--skin-a-sh)" stroke-width="1.1" stroke-linecap="round"/></g>
+</svg>
+        <div class="banter" aria-hidden="true"><p class="say say-a" id="say-a"></p><p class="say say-b" id="say-b"></p></div>
+      </div>
+
+      <div class="foot">
+        <div class="status">
+          <span class="pulse" aria-hidden="true"></span
+          ><span id="state" role="status"
+            >Checking again every few seconds.</span
+          >
+        </div>
+        <div class="track" aria-hidden="true"><i></i></div>
+      </div>
+    </main>
+    <script>
+      // The engineers talk it over while the update runs: a random exchange, one line every 2 seconds, alternating between the two of
+      // them, then another exchange (none repeats until most of the others have had their turn). Text is set with textContent.
+      (function () {
+        var EXCHANGES = [["But the user said no mistakes."], ["I don't know what they want. That button has NEVER worked."], ["If the user is so smart, why aren't THEY doing the coding?"], ["Who approved this on a Friday?"], ["It worked on my machine.", "Then we'll ship your machine."], ["Did you back up the database?", "Define \"back up\"."], ["Relax. It's only production."], ["The blueprint says \"TODO: figure this out later\"."], ["Which one of us wrote this?", "Don't answer that."], ["Just turn it off and on again.", "Again?"], ["I see the problem. It's load-bearing spaghetti."], ["This line says \"do not touch\".", "So you touched it.", "So I touched it."], ["The ticket said \"small change\".", "It's never a small change."], ["Who named a variable \"final_final_v2\"?"], ["I'm not saying it's broken. I'm saying it has character."], ["Is that a feature or a bug?", "It's a feature now. Write it down."], ["We should have used a framework.", "We did. That's the problem."], ["The tests are green.", "Do they test anything?", "They're green."], ["I commented it out. Problem solved."], ["Who keeps putting semicolons in the YAML?"], ["Ship it, we'll fix it in the next update.", "This IS the next update."], ["The docs say this is impossible.", "We wrote the docs."], ["Have you tried asking the AI?", "The AI asked me."], ["Hold the wall. I'm deleting the old migration."], ["We renamed the table. Now nothing can find anything."], ["Why is the cache older than me?"], ["Clear the cache.", "Which one?", "All of them. Twice."], ["DNS. It's always DNS.", "It wasn't DNS.", "Okay, it was a little DNS."], ["The comment says \"temporary fix, 2019\"."], ["Measure twice, deploy once.", "Measure never, deploy constantly."], ["Is the server supposed to make that noise?"], ["The logs just say \"oops\"."], ["More logging. Then we'll know exactly how lost we are."], ["Can we blame the intern?", "We are the intern."], ["This function is 900 lines long and called \"helper\"."], ["I found the bug. It's three bugs in a trench coat."], ["Who put a sleep(30) in here?", "That sleep is load-bearing. Leave it."], ["The user wants it faster, cheaper and yesterday.", "Pick two.", "Honestly, pick one."], ["We need a meeting about the meeting."], ["I estimated two minutes.", "In engineer minutes?", "About an hour, yes."], ["Hand me the wrench. The digital one."], ["This config file has tabs AND spaces. Per line."], ["Don't look at the git blame. I'm begging you."], ["Who force-pushed to main?", "Nobody force-pushes here. We have rules.", "The rules are a suggestion box. It's empty."], ["Let's add a feature flag for the feature flag."], ["I rewrote it from scratch. It has all-new bugs."], ["It compiles!", "Ship the party hats."], ["The migration is at 99 percent.", "It's been at 99 percent for a while.", "Percent is a state of mind."], ["Wait, which environment is this?", "If you have to ask, it's production."], ["I put the semicolon back. Nobody touch anything."], ["The scanner found a vulnerability. In the coffee machine.", "Patch that one first."], ["Is this a breaking change?", "Everything is a breaking change if you believe in yourself."], ["The blueprint is upside down.", "That explains the last three releases."], ["Can we just make the button bigger?", "Making the button bigger is how we got here."], ["I asked for requirements. I got a vibe."], ["The vibe says \"make it pop\".", "\"Pop\" is not a unit of measurement."], ["Let's rewrite it in Rust.", "After lunch.", "We're out of lunch. Rewrite it in Bash."], ["The error message just says \"no\".", "At least it's honest."], ["Who wrote a regex for this?", "Now we have two problems and a hard hat."], ["I think the database is sulking.", "Say something nice to it.", "You're doing great, database."], ["It's rebooting. That's basically a hug."], ["Should we tell the user what changed?", "It's in the changelog.", "Nobody reads the changelog.", "I do. That's how I got this job."], ["Hey, this code has tests!", "They're commented out.", "Never mind."], ["Look busy, the user is refreshing the page.", "That's their fortieth refresh."], ["Refreshing does not make me type faster.", "It kind of does. Peer pressure."], ["We need more CPUs.", "We need fewer while loops."], ["Is it plugged in? Is ANYTHING plugged in?"], ["The crane operator says the load is \"probably fine\".", "\"Probably fine\" built this whole building."], ["The new version is mostly the old version, but braver."], ["I added an index. Everything's fast. I am a god.", "You added it to the wrong table.", "I am a god of the wrong table."], ["Let's just add a retry.", "Add a retry to the retry."], ["Who left console.log(\"here\") in production?", "It says \"here\" four thousand times. At least we know where."], ["This is fine. Everything is load-tested.", "By whom?", "By the users. Live. Right now."], ["What does this button do?", "Nobody knows. That's why we're rebuilding."], ["The architect drew a door in the ceiling.", "Must be for the cloud."], ["I'm putting a hard hat on the server. For morale."], ["If it breaks, it's a learning opportunity.", "I've learned so much this week. Please make it stop."], ["Almost done. Just the last thousand bolts."], ["Is this the final version?", "There is no final version. Only the next version."], ["It's coming back up. Look natural."], ["Back soon. We pinky promise."], ["Who unplugged the cloud?"], ["The load balancer is balancing. Just not the load."], ["I fixed it!", "What did you change?", "I don't know. Don't touch it."], ["Did someone say \"quick hotfix\"?", "Those words are banned on site."], ["The backup of the backup is in a folder called \"old\"."], ["Do we have a rollback plan?", "We have a \"roll forward and pray\" plan."], ["This module was written by a man who has since moved to a farm."], ["Which way is up on this flowchart?"], ["The diagram has an arrow pointing to \"magic\"."], ["Who deleted the README?", "It was holding up the whole repo."], ["I'm 80 percent sure this is the right server."], ["Just one more migration.", "You said that four migrations ago."], ["The user says it's urgent.", "Everything is urgent. That's why nothing is."], ["The firewall blocked us.", "Good firewall."], ["Is that error new?", "It's new to me."], ["I upgraded one package and now we need forty-two others."], ["Why does this need a database to say hello?"], ["I asked the linter for help and it filed a complaint."], ["Clock-in time: now. Clock-out time: when it compiles."], ["Someone wrote \"here be dragons\" in the comments.", "They weren't wrong."], ["The ops channel is just a picture of a fire."], ["Can you hear that?", "That's the fans. They're scared."], ["Did we try reading the error?", "Bold strategy. Let's try it."], ["It's not a bug, it's undocumented behavior."], ["The code review was \"looks good to me\" with no comments."], ["Who's on call?", "You are.", "Since when?", "Since you asked."], ["Is this the scaffolding or the building?", "Yes."], ["Stand back, I'm going to try a percent sign."], ["Put it in the backlog.", "The backlog has a backlog."], ["I've seen things. Like a 3,000-line switch statement."], ["Quick, what's the password?", "It's on a sticky note. On the server. In the dark."], ["Who let the cron job run at midnight on New Year's?"], ["This patch fixes everything.", "What does it break?", "Also everything."], ["The progress bar is a vibe, not a promise."], ["We're replacing the engine while the plane is flying."], ["We're also replacing the plane."], ["Okay, who scheduled the update during a scan?", "The scan scheduled itself. It's very proactive."], ["Is the coffee ready?", "Coffee is a blocker. Escalate."], ["Remind me why we didn't just use a spreadsheet."], ["That's not tech debt. That's tech mortgage."], ["I'll refactor it later.", "Famous last words, part 900."]];
+        var EVERY = 2000;
+        var bubbles = [document.getElementById("say-a"), document.getElementById("say-b")];
+        if (!bubbles[0] || !bubbles[1]) return;
+        var recent = [];
+        var queue = [];
+        var speaker = Math.random() < 0.5 ? 0 : 1;
+        function nextExchange() {
+          var pick;
+          do {
+            pick = Math.floor(Math.random() * EXCHANGES.length);
+          } while (recent.indexOf(pick) !== -1);
+          recent.push(pick);
+          if (recent.length > Math.floor(EXCHANGES.length * 0.8)) recent.shift();
+          speaker = Math.random() < 0.5 ? 0 : 1;
+          return EXCHANGES[pick].slice();
+        }
+        function say() {
+          if (!queue.length) queue = nextExchange();
+          var line = queue.shift();
+          var now = bubbles[speaker];
+          var other = bubbles[1 - speaker];
+          other.classList.remove("on");
+          now.classList.remove("on");
+          now.textContent = line;
+          void now.offsetWidth; // restart the pop-in
+          now.classList.add("on");
+          speaker = 1 - speaker;
+        }
+        say();
+        setInterval(say, EVERY);
+      })();
+    </script>
+    <script>
+      // Alone (nginx answers every path with this page, status 503, while an update is applied): a request for the same address tells us
+      // when the real site is back; anything that is not a 5xx, a redirect to the sign-in page included, means reload.
+      // Framed (any page of the application covers itself with this one when the site stops answering, static/cve/sitewatch.js, and an
+      // administrator's page does so for the whole update, static/cve/updatebar.js): that page knows when the site is back and returns by
+      // itself, so this one only shows the status line it is sent.
+      (function () {
+        var state = document.getElementById("state");
+        if (window.top !== window) {
+          window.addEventListener("message", function (e) {
+            if (
+              e.origin === location.origin &&
+              e.data &&
+              typeof e.data.state === "string"
+            )
+              state.textContent = e.data.state;
+          });
+          return;
+        }
+        var wait = 4000;
+        function check() {
+          fetch(location.pathname + "?up=" + Date.now(), {
+            cache: "no-store",
+            redirect: "manual",
+            credentials: "same-origin",
+          })
+            .then(function (res) {
+              if (res.type === "opaqueredirect" || res.status < 500) {
+                state.textContent = "Back. Reloading.";
+                location.reload();
+                return;
+              }
+              again();
+            })
+            .catch(again);
+        }
+        function again() {
+          wait = Math.min(wait + 1000, 10000);
+          setTimeout(check, wait);
+        }
+        setTimeout(check, wait);
+      })();
+    </script>
+  </body>
+</html>

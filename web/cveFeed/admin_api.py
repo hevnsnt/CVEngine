@@ -22,6 +22,7 @@ from django.utils.text import slugify
 from dashboard.models import (ApiCredential, AuditLog, Org, OrgMembership, Project, ProjectMembership, SystemTimings,
                               UserProfile)
 from tenancy import audit as audit_trail, roles
+from cveFeed import mailer, openvas_admin
 
 
 class AdminError(Exception):
@@ -33,7 +34,7 @@ class AdminError(Exception):
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, and UnicodeDecodeError for a body that is not UTF-8
         raise AdminError(400, 'body must be valid JSON')
     return data if isinstance(data, dict) else {}
 
@@ -65,8 +66,11 @@ def _need_user(actor, user_id, credentials=False):
 
 def _revoke_tokens(user):
     """A password or MFA reset must also cut off bearer tokens, which otherwise keep working."""
+    from agentapi import agent_broker
     from dashboard.models import ApiToken
-    ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
+    ids = list(ApiToken.objects.filter(user=user, revoked=False).values_list('pk', flat=True))
+    ApiToken.objects.filter(pk__in=ids).update(revoked=True)
+    agent_broker.release_for_tokens(ids)  # the agents' leases go back to the queue now, not when they run out
 
 
 def _profile(user):
@@ -93,6 +97,7 @@ def user_dict(actor, u):
             'last_login': u.last_login.isoformat() if u.last_login else None, 'date_joined': u.date_joined.isoformat(),
             'mfa_enabled': bool(p and p.mfa_enabled), 'bugbounty_enabled': u.is_superuser or bool(p and p.bugbounty_enabled),
             'must_change_password': bool(p and p.must_change_password), 'memberships': memberships,
+            'invite_pending': bool(p and p.must_change_password) and not u.has_usable_password(),
             'role_label': 'App Admin' if u.is_superuser else (memberships[0]['label'] if memberships else 'No access')}
 
 
@@ -110,7 +115,8 @@ def users_list(request, actor):
     if q:
         qs = qs.filter(username__icontains=q) | qs.filter(email__icontains=q) | qs.filter(first_name__icontains=q) | qs.filter(last_name__icontains=q)
     users = list(qs.distinct().order_by('username')[:500])
-    return {'results': [user_dict(actor, u) for u in users], 'actor': {'is_superuser': actor.is_superuser, 'id': actor.id}}
+    return {'results': [user_dict(actor, u) for u in users], 'actor': {'is_superuser': actor.is_superuser, 'id': actor.id},
+            'email_ready': mailer.ready()}
 
 
 def _membership_target(actor, scope, scope_id, role):
@@ -133,8 +139,9 @@ def _grant(scope, target, user, role):
 
 
 @transaction.atomic
-def users_create(request, actor):
-    data = _body(request)
+def _create_user(actor, data, invite):
+    """Create the account and its first access. With ``invite`` the account has no usable password until its owner chooses one from
+    the emailed link; otherwise it gets the password the administrator typed, or a temporary one they hand over."""
     username = str(data.get('username', '')).strip()
     if not re.fullmatch(r'[\w.@+-]{3,150}', username):
         raise AdminError(400, 'username must be 3 or more letters, digits or . @ + - _')
@@ -142,11 +149,13 @@ def users_create(request, actor):
         raise AdminError(409, 'that username is taken')
     scope, role = data.get('scope', 'org'), data.get('role', 'user')
     target, org = _membership_target(actor, scope, data.get('scope_id'), role)
-    password = str(data.get('password') or '').strip() or temp_password()
-    try:
-        validate_password(password)
-    except ValidationError as exc:
-        raise AdminError(400, ' '.join(exc.messages))
+    password = None
+    if not invite:
+        password = str(data.get('password') or '').strip() or temp_password()
+        try:
+            validate_password(password)
+        except ValidationError as exc:
+            raise AdminError(400, ' '.join(exc.messages))
     user = User.objects.create_user(username=username, password=password, email=str(data.get('email', '')).strip()[:254],
                                     first_name=str(data.get('first_name', '')).strip()[:150],
                                     last_name=str(data.get('last_name', '')).strip()[:150])
@@ -155,7 +164,53 @@ def users_create(request, actor):
     profile.must_change_password, profile.onboarded = True, True  # only the app admin goes through the setup wizard
     profile.save(update_fields=['must_change_password', 'onboarded'])
     audit(actor, 'user.create', username, org=org, scope=scope, role=role)
-    return {**user_dict(actor, user), 'temporary_password': password}, 201
+    return user, password
+
+
+def _send_invitation(actor, user):
+    """Email ``user`` their onboarding message. When it cannot be sent the account gets a temporary password instead, which is
+    returned so the administrator can hand it over; nobody is left with an account they have no way into."""
+    ok, error = mailer.send_onboarding(user, actor)
+    if ok:
+        audit_trail.record_for_user(actor, 'user.invite_sent', user)
+        return {'invited': True}
+    password = temp_password()
+    user.set_password(password)
+    user.save(update_fields=['password'])
+    audit_trail.record_for_user(actor, 'user.invite_failed', user, reason=error)
+    return {'invited': False, 'invite_error': error, 'temporary_password': password}
+
+
+def users_create(request, actor):
+    data = _body(request)
+    email = str(data.get('email', '')).strip()
+    if email and not mailer.EMAIL_RE.match(email):
+        raise AdminError(400, 'that does not look like an email address')
+    # an invitation replaces a password: it is sent when mail is set up, the person has an address and no password was typed
+    invite = bool(data.get('send_invite', True)) and bool(email) and not str(data.get('password') or '').strip() and mailer.ready()
+    user, password = _create_user(actor, data, invite)
+    if not invite:
+        return {**user_dict(actor, user), 'invited': False, 'temporary_password': password}, 201
+    result = _send_invitation(actor, user)
+    return {**user_dict(actor, user), **result}, 201
+
+
+def users_resend_invite(request, actor, user_id):
+    """Send a person who has not chosen a password yet (a new account, or one reset and not yet answered) a fresh email. Earlier
+    links stop working: the account's credentials change, and the links are bound to them."""
+    user = _need_user(actor, user_id, credentials=True)
+    profile = _profile(user)
+    if not profile.must_change_password:
+        raise AdminError(409, 'this person already chose a password; use Reset password if they are locked out')
+    if not mailer.ready():
+        raise AdminError(409, 'set up outgoing mail first (Settings, Email)')
+    if not mailer.EMAIL_RE.match(user.email or ''):
+        raise AdminError(409, 'this account has no valid email address; add one first')
+    user.set_unusable_password()
+    user.save(update_fields=['password'])
+    _revoke_tokens(user)
+    result = _send_invitation(actor, user)
+    return {**user_dict(actor, user), **result}
 
 
 def users_update(request, actor, user_id):
@@ -195,16 +250,24 @@ def users_bug_bounty(request, actor, user_id):
 
 
 def users_reset_password(request, actor, user_id):
+    """Lock the account out of its old password and let the person choose a new one: by an emailed link when mail is set up and the
+    account has an address, else by a temporary password the administrator hands over."""
     user = _need_user(actor, user_id, credentials=True)
-    password = temp_password()
-    user.set_password(password)  # also invalidates the user's existing sessions
-    user.save()
+    by_email = mailer.ready() and bool(mailer.EMAIL_RE.match(user.email or ''))
+    password = None if by_email else temp_password()
+    if by_email:
+        user.set_unusable_password()
+    else:
+        user.set_password(password)
+    user.save()  # either way the user's existing sessions end
     profile = _profile(user)
     profile.must_change_password = True
     profile.save(update_fields=['must_change_password'])
     _revoke_tokens(user)
-    audit_trail.record_for_user(actor, 'user.reset_password', user)
-    return {'username': user.username, 'temporary_password': password}
+    audit_trail.record_for_user(actor, 'user.reset_password', user, by_email=by_email)
+    if not by_email:
+        return {'username': user.username, 'invited': False, 'temporary_password': password}
+    return {'username': user.username, 'email': user.email, **_send_invitation(actor, user)}
 
 
 def users_reset_mfa(request, actor, user_id):
@@ -309,21 +372,20 @@ def orgs_update(request, actor, org_id):
 
 def org_api_credentials_list(request, actor, org_id):
     """What services are configured for this organization, never the secrets themselves."""
-    from cveFeed.api_credentials import SERVICES, credential_summary, used_in_scans
+    from cveFeed.api_credentials import SERVICES, service_entry
     org = _need_org(actor, org_id)
     rows = {c.service: c for c in ApiCredential.objects.filter(org=org)}
-    return {'results': [
-        {'service': service, 'label': label, 'fields': [{'name': n, 'label': d, 'secret': s} for n, d, s in fields],
-         'configured': service in rows, 'used_in_scans': used_in_scans(service), 'set': credential_summary(rows[service]) if service in rows else {}}
-        for service, (label, fields, _) in SERVICES.items()]}
+    return {'results': [service_entry(service, label, fields, rows.get(service)) for service, (label, fields, _) in SERVICES.items()]}
 
 
 def org_api_credential_set(request, actor, org_id, service):
     """Save (or update) this organization's key for ``service``. A blank field keeps what was stored."""
-    from cveFeed.api_credentials import SERVICES
+    from cveFeed.api_credentials import RETIRED, SERVICES
     org = _need_org(actor, org_id)
     if service not in SERVICES:
         raise AdminError(404, f'unknown service {service!r}')
+    if service in RETIRED:
+        raise AdminError(410, RETIRED[service])
     data = _body(request)
     _, fields, _ = SERVICES[service]
     cred = ApiCredential.objects.filter(org=org, service=service).first() or ApiCredential(org=org, service=service)
@@ -412,15 +474,19 @@ def timings_get(request, actor):
 
 
 def apply_timings(t):
-    """Push the schedule-related timings into celery beat."""
+    """Push the schedule-related timings into celery beat. Each task is saved, not bulk-updated: beat reloads its schedule only when
+    ``PeriodicTasks.last_update`` moves, which a ``QuerySet.update`` never does (a value whose schedule row already exists would be ignored)."""
     from django_celery_beat.models import CrontabSchedule, IntervalSchedule, PeriodicTask
     interval, _ = IntervalSchedule.objects.get_or_create(every=t.cve_sync_minutes, period='minutes')
-    PeriodicTask.objects.filter(name='cvengine-cve-sync').update(interval=interval)
     crontab, _ = CrontabSchedule.objects.get_or_create(minute='17', hour=str(t.hygiene_hour_utc), day_of_week='*',
                                                        day_of_month='*', month_of_year='*')
-    PeriodicTask.objects.filter(name='cvengine-hygiene-daily').update(crontab=crontab)
     ct_interval, _ = IntervalSchedule.objects.get_or_create(every=t.ct_watch_minutes, period='minutes')
-    PeriodicTask.objects.filter(name='cvengine-ct-watch').update(interval=ct_interval)
+    for name, field, schedule in (('cvengine-cve-sync', 'interval', interval), ('cvengine-hygiene-daily', 'crontab', crontab),
+                                  ('cvengine-ct-watch', 'interval', ct_interval)):
+        for task in PeriodicTask.objects.filter(name=name):
+            if getattr(task, f'{field}_id') != schedule.pk:
+                setattr(task, field, schedule)
+                task.save()
 
 
 def timings_put(request, actor):
@@ -525,6 +591,12 @@ def activity_list(request, actor):
     return {'count': count, 'page': page, 'page_size': page_size, 'results': rows}
 
 
+# django-celery-beat's scheduler writes a task's last_run_at to the database only every three minutes (its sync interval), so a task that
+# runs every minute shows a last run up to three minutes old while it is dispatching on time: a schedule is late only past that and a margin.
+BEAT_FLUSH_SECONDS = 300
+BEAT_SILENT_SECONDS = 120
+
+
 def scheduler_health(request, actor):
     """Bounded, read-only scheduler and worker snapshot for the App Admin.
 
@@ -551,7 +623,7 @@ def scheduler_health(request, actor):
                                          'seconds': 1, 'microseconds': 0.000001}.get(interval.period, 0))
             if seconds:
                 next_due = task.last_run_at + timedelta(seconds=seconds)
-        overdue = bool(next_due and next_due < now - timedelta(seconds=60))
+        overdue = bool(next_due and next_due < now - timedelta(seconds=BEAT_FLUSH_SECONDS))
         schedules.append({'name': task.name, 'task': task.task, 'queue': task.queue or 'default',
                           'last_dispatch': task.last_run_at.isoformat() if task.last_run_at else None,
                           'next_due': next_due.isoformat() if next_due else None,
@@ -641,7 +713,13 @@ def scheduler_health(request, actor):
                 'deferred': latest_inactive.deferred if latest_inactive else 0,
                 'errors': latest_inactive.errors if latest_inactive else 0,
                 'cursor': latest_inactive.cursor_hoststate_id if latest_inactive else 0}
-    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers,
+    from cveFeed.scan_control import beat_heartbeat
+    ticked = beat_heartbeat()
+    age = int(now.timestamp() - ticked) if ticked else None
+    # beat writes its heartbeat every few seconds: silent for two minutes means it is not running (the schedule rows' last_run_at lags
+    # by minutes even when it is); no heartbeat at all means beat predates it or Redis cannot be read, which proves nothing
+    beat = {'state': 'unknown' if age is None else ('running' if age <= BEAT_SILENT_SECONDS else 'silent'), 'seconds_since_tick': age}
+    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers, 'beat': beat,
             'scanning_paused': pause_requested(), 'assessment_review': review, 'archive_rediscovery': archive,
             'inactive_archive_review': inactive,
             'scheduler_process': 'unknown', 'scheduler_note': 'Last dispatch comes from Beat; this web request cannot inspect its process.',
@@ -726,6 +804,7 @@ ROUTES = [
     ('PATCH', r'users/(?P<user_id>\d+)', users_update), ('DELETE', r'users/(?P<user_id>\d+)', users_delete),
     ('PUT', r'users/(?P<user_id>\d+)/bug-bounty', users_bug_bounty),
     ('POST', r'users/(?P<user_id>\d+)/reset-password', users_reset_password),
+    ('POST', r'users/(?P<user_id>\d+)/resend-invite', users_resend_invite),
     ('POST', r'users/(?P<user_id>\d+)/reset-mfa', users_reset_mfa),
     ('POST', r'memberships', memberships_set),
     ('DELETE', r'memberships/(?P<scope>org|project)/(?P<membership_id>\d+)', memberships_delete),
@@ -741,6 +820,8 @@ ROUTES = [
     ('GET', r'activity', activity_list),
     ('GET', r'health', scheduler_health),
     ('GET', r'scan-control', scan_control_get), ('POST', r'scan-control', scan_control_set),
+    ('GET', r'openvas', lambda r, actor, **k: openvas_admin.admin_get(r, actor)), ('PUT', r'openvas', lambda r, actor, **k: openvas_admin.admin_put(r, actor)),
+    ('POST', r'openvas/check', lambda r, actor, **k: openvas_admin.admin_check(r, actor)),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]
 

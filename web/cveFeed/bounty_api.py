@@ -100,6 +100,12 @@ def asset_dict(a):
             "first_seen": _iso(a.first_seen_at)}
 
 
+def _count(engagement, relation):
+    """The related rows of an engagement: the list view annotates them (``n_<relation>``), a single one counts."""
+    annotated = getattr(engagement, f"n_{relation}", None)
+    return annotated if annotated is not None else getattr(engagement, relation).count()
+
+
 def engagement_dict(e):
     p = e.program
     project = e.project
@@ -107,8 +113,8 @@ def engagement_dict(e):
             "org": project.org.slug if project.org_id else None, "program": program_dict(p), "status": e.status, "policy_url": e.policy_url or p.url, "policy_ack_at": _iso(e.policy_ack_at),
             "policy_ack_by": e.policy_ack_by.username if e.policy_ack_by_id else None,
             "scope_changed_since_ack": bool(e.policy_ack_at and e.ack_content_hash != p.content_hash),
-            "automated_ok": e.automated_ok, "notes": e.notes, "targets": e.targets.count(), "updated": _iso(e.updated_at),
-            "reports": e.reports.count()}
+            "automated_ok": e.automated_ok, "notes": e.notes, "targets": _count(e, "targets"), "updated": _iso(e.updated_at),
+            "reports": _count(e, "reports")}
 
 
 def _program_context(report):
@@ -126,11 +132,32 @@ def _report_fields(r):
             "remediation": r.remediation, "references": r.references, "evidence": r.evidence or {}, "checklist": r.checklist or {}}
 
 
+_INDEX_CACHE = {}  # (program id, content hash) -> ScopeIndex: the scope of a program only changes when its hash does
+INDEX_CACHE_MAX = 64
+
+
+def scope_index(program):
+    """The program's ScopeIndex, built once per version of its scope: a poll of the workbench would otherwise load every asset of every
+    program (up to 20,000 rows each) on each tick. A program row with no hash is not cached (nothing says when it changed)."""
+    key = (program.pk, program.content_hash)
+    index = _INDEX_CACHE.get(key) if program.content_hash else None
+    if index is None:
+        index = bounty_scope.ScopeIndex(program.assets.filter(removed_at__isnull=True))
+        if program.content_hash:
+            if len(_INDEX_CACHE) >= INDEX_CACHE_MAX:
+                _INDEX_CACHE.pop(next(iter(_INDEX_CACHE)), None)
+            _INDEX_CACHE[key] = index
+    return index
+
+
 def verdict_for(report):
     if report.program_id is None:
         return None
-    target = report.asset or report.location_url
-    return bounty_scope.ScopeIndex(report.program.assets.filter(removed_at__isnull=True)).check(target)
+    index = scope_index(report.program)
+    # the asset and the host of the location are free text and may name different hosts: the worse of the two verdicts counts
+    rank = {bounty_scope.IN: 0, bounty_scope.AMBIGUOUS: 1, bounty_scope.NOT_LISTED: 2, bounty_scope.OUT: 3}
+    verdicts = [index.check(t) for t in (report.asset, report.location_url) if t]
+    return max(verdicts, key=lambda v: rank[v.state]) if verdicts else index.check("")
 
 
 def report_dict(r, full=False):
@@ -148,7 +175,7 @@ def report_dict(r, full=False):
         out.update({"vrt_label": bounty_report.vrt_entry(r.vrt) if r.vrt else None, "finding_kind": r.finding_kind, "finding_id": r.finding_id, "warnings": r.warnings or [], "scope": verdict.as_dict() if verdict else None,
                     "checks": findings, "can_submit": r.platform in SUBMIT_PLATFORMS and not bounty_report.blockers(findings)
                     and r.status in ("draft", "ready") and not r.platform_report_id,
-                    "next_states": list(bounty_report.TRANSITIONS.get(r.status, ())),
+                    "next_states": [s for s in bounty_report.TRANSITIONS.get(r.status, ()) if not (s == "submitted" and r.status == "ready")],  # a ready report is sent with submit or mark-submitted
                     "events": [{"kind": e.kind, "note": e.note, "at": _iso(e.at), "by": e.actor.username if e.actor_id else None}
                                for e in r.events.select_related("actor")[:200]],
                     "checklist_items": [{"key": k, "label": label} for k, label in bounty_report.CHECKLIST]})
@@ -311,7 +338,7 @@ def scope_check(request, user):
     hosts = [str(h)[:500] for h in (data.get("hosts") or [data.get("host")]) if h][:50]
     if not hosts:
         raise ApiError(400, "give a host")
-    index = bounty_scope.ScopeIndex(program.assets.filter(removed_at__isnull=True))
+    index = scope_index(program)
     return {"program": program_dict(program), "results": [{"host": h, **index.check(h).as_dict()} for h in hosts]}
 
 
@@ -327,7 +354,8 @@ def engagements_list(request, user):
         allowed_ids = roles.allowed_project_ids(user)
         if allowed_ids is not None:
             rows = rows.filter(project_id__in=allowed_ids)
-    rows = rows.select_related("program", "policy_ack_by", "project__org").order_by("-updated_at")[:500]
+    rows = rows.select_related("program", "policy_ack_by", "project__org").annotate(
+        n_targets=Count("targets", distinct=True), n_reports=Count("reports", distinct=True)).order_by("-updated_at")[:500]
     return {"results": [engagement_dict(e) for e in rows]}
 
 
@@ -386,6 +414,8 @@ def engagements_create(request, user):
                 raise ApiError(409, f"this program is already being worked in project {existing.project.slug}; ask one of its members to add you")
             return engagement_dict(existing), 200
         project, project_created = project_for_program(program, user, org)
+        if not project_created and not roles.effective_role(user, project):  # the project outlived its engagement: it is someone else's, with its targets and members
+            raise ApiError(409, f"this program's project {project.slug} already exists; ask one of its members to add you")
         eng = BountyEngagement.objects.create(project=project, program=program, created_by=user, policy_url=program.url)
         if project_created:
             audit(user, "bounty.project_create", f"{program.platform}:{program.handle}", org=org, project=project.slug)
@@ -595,7 +625,7 @@ def reports_update(request, user, report_id):
         new = data["status"]
         if new not in bounty_report.TRANSITIONS.get(r.status, ()):
             raise ApiError(409, f"a report cannot go from {r.status} to {new}")
-        if new == "submitted":
+        if new == "submitted" and r.status != "needs_info":  # answering a request for information puts a submitted report back; a first submission has its own endpoints
             raise ApiError(409, "use submit, or mark-submitted if you sent it on the platform yourself")
         if new == "ready" and bounty_report.blockers(bounty_report.lint(_report_fields(r), verdict_for(r), _program_context(r))):
             raise ApiError(409, "the report still has blocking problems; see its checks")
@@ -807,7 +837,7 @@ def workbench(request, user):
             row["hosts"] = reps.count()
             row["live"] = reps.filter(counts.LIVE_HOST_Q).distinct().count()
             row["hosts_capped"] = len(names) > WORKBENCH_HOST_CAP
-            index = bounty_scope.ScopeIndex(e.program.assets.filter(removed_at__isnull=True))
+            index = scope_index(e.program)
             for name in names[:WORKBENCH_HOST_CAP]:
                 verdict = index.check(name)
                 row["scope"][verdict.state] += 1

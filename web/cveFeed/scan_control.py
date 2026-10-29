@@ -1,6 +1,7 @@
 """Durable operator pause for scanner dispatch and active scanner processes."""
 import fcntl
 import os
+import time
 from contextlib import contextmanager
 
 from celery import Task
@@ -13,9 +14,12 @@ from django_celery_beat.schedulers import DatabaseScheduler
 # other bookkeeping. Everything else (discovery, scanners, validation, AI triage and reviews, certificate watching) waits.
 PAUSE_EXEMPT_TASKS = frozenset({
     'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'sync_bounty_catalogue', 'sync_threat_intel',
-    'check_for_updates', 'update_nuclei_templates', 'prune_asset_changes', 'report_resources', 'rescore_all_hosts',
+    'check_for_updates', 'refresh_sentinel_version', 'feed_sentinels', 'update_nuclei_templates', 'prune_asset_changes', 'report_resources', 'rescore_all_hosts',
     'reconcile_invalid_correlations', 'weekly_maintenance', 'reap_stuck_jobs', 'send_notif',
-    'send_task_notif', 'snapshot_daily_stats', 'bootstrap_first_run',
+    'send_task_notif', 'snapshot_daily_stats', 'bootstrap_first_run', 'evaluate_saved_searches',
+    # The OpenVAS step is exempt so that a pause can reach a GVM task that is already running: while scanning is paused it only stops
+    # that task (``openvas_scan.tick``), and never starts or dispatches one.
+    'openvas_sweep',
 })
 
 
@@ -31,6 +35,17 @@ def pause_requested(fail_closed=True):
         return fail_closed
 
 
+def operator_pause_requested():
+    """Whether an App Admin pressed Pause all scanning: a watchdog that stops work already running asks this, so an update's drain pause
+    (which lets running work finish) never stops it, and an unreadable control database never kills a healthy scanner."""
+    from cveFeed.models import ScanControl
+
+    try:
+        return ScanControl.objects.filter(pk=1, paused=True, paused_by_update=False).exists()
+    except Exception:
+        return False
+
+
 def defer_if_paused(task):
     if task.name in PAUSE_EXEMPT_TASKS:
         return
@@ -42,11 +57,42 @@ def defer_if_paused(task):
 
 class PauseAwareTask(Task):
     def __call__(self, *args, **kwargs):
-        defer_if_paused(self)
+        # Only a task a worker is running can be retried later. A plain function call (a scan stage, a management command, an API
+        # view) has no queued message to defer: ``retry`` would raise ``celery.exceptions.Retry`` into the caller, so it runs in-line.
+        # Whatever started it was already held by the pause (a scan is aborted, the beat entry is not due).
+        if not getattr(self.request, 'called_directly', True):
+            defer_if_paused(self)
         return super().__call__(*args, **kwargs)
 
 
+BEAT_HEARTBEAT_KEY = 'cvengine:beat:heartbeat'
+_beat = {'at': 0.0}
+
+
+def beat_heartbeat():
+    """Epoch seconds of beat's last tick, or None when it never wrote one (cannot be told, or Redis is down). Lets a status page tell a
+    beat that is not running from a schedule whose last_run_at is merely flushed to the database only every few minutes."""
+    try:
+        from reNgine import resources
+        value = resources.get_store().r.get(BEAT_HEARTBEAT_KEY)
+        return float(value) if value else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class PauseAwareScheduler(DatabaseScheduler):
+    def tick(self, *args, **kwargs):
+        wait = super().tick(*args, **kwargs)
+        now = time.time()
+        if now - _beat['at'] >= 15:  # a tick can come every few seconds; the heartbeat needs no more than this
+            _beat['at'] = now
+            try:
+                from reNgine import resources
+                resources.get_store().r.set(BEAT_HEARTBEAT_KEY, f'{now:.0f}', ex=3600)
+            except Exception:  # noqa: BLE001 - bookkeeping must never stop the scheduler
+                pass
+        return wait
+
     def is_due(self, entry):
         if getattr(entry, 'task', '') not in PAUSE_EXEMPT_TASKS and pause_requested():
             return False, 5

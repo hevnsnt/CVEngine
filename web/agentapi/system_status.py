@@ -8,14 +8,16 @@ whole server, not a project, so for anyone else it is left out and ``system_note
 
 Every probe is wrapped, so one that fails or times out turns into ``{"error": ...}`` and a line in ``problems`` instead of failing
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
+import os
+import re
 import shutil
 import time
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -53,27 +55,63 @@ def _update():
             'scans_running': phase.get('scans_running'), 'changed_at': phase.get('changed_at')}
 
 
-def _projects(ctx):
-    from agentapi.services import _allowed_ids
-    from cveFeed import counts
+STATUS_CACHE_SECONDS = 60  # CVENGINE_STATUS_CACHE_SECONDS: a project's counts are reused this long (0 turns the cache off)
+
+
+def _cache_seconds():
+    try:
+        return max(0, int(os.environ.get('CVENGINE_STATUS_CACHE_SECONDS', STATUS_CACHE_SECONDS)))
+    except ValueError:
+        return STATUS_CACHE_SECONDS
+
+
+def _project_row(project):
+    from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
-    from dashboard.models import Project
     from startScan.models import ScanHistory
     from targetApp.models import Domain
+    snap = compute_snapshot(project, with_fixed=False)  # the live counts only; never stored
+    scans = ScanHistory.objects.filter(domain__project=project)
+    return {
+        'slug': project.slug, 'name': project.name,
+        'targets': Domain.objects.filter(project=project).count(),
+        'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
+        'scans': {'running': counts.running_scans(scans).count(), 'queued': counts.queued_scans(scans).count(),
+                  'stalled': counts.stalled_scans(scans).count()},
+        'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
+        'cve_matches': snap['cve_matches'],
+        # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
+        'wordpress': wpscan_scan.status_counts([project.id]),
+        # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
+        'web_discovery': subdir_apps.status_counts([project.id]),
+    }
 
-    rows = []
+
+def _projects(ctx):
+    """One row per project the caller may see. A row costs several whole-project counts and agents poll this, so a row is kept for
+    ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per caller and project: the counts may be up to that old."""
+    from django.core.cache import cache
+
+    from agentapi.services import _allowed_ids
+    from dashboard.models import Project
+
+    seconds, rows = _cache_seconds(), []
     for project in Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS]:
-        snap = compute_snapshot(project)
-        scans = ScanHistory.objects.filter(domain__project=project)
-        rows.append({
-            'slug': project.slug, 'name': project.name,
-            'targets': Domain.objects.filter(project=project).count(),
-            'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
-            'scans': {'running': counts.running_scans(scans).count(), 'queued': counts.queued_scans(scans).count(),
-                      'stalled': counts.stalled_scans(scans).count()},
-            'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
-            'cve_matches': snap['cve_matches'],
-        })
+        key = f'sysstatus:project:{ctx.user.pk}:{project.id}'
+        row = None
+        if seconds:
+            try:
+                row = cache.get(key)
+            except Exception:  # noqa: BLE001 - a cache outage only means computing it
+                row = None
+        if row is None:
+            row = _project_row(project)
+            if seconds:
+                try:
+                    cache.set(key, row, seconds)
+                except Exception:  # noqa: BLE001
+                    pass
+        rows.append(row)
     return rows
 
 
@@ -158,13 +196,27 @@ def _disk():
             'free_percent': round(usage.free * 100 / usage.total, 1) if usage.total else None}
 
 
+def _certificate():
+    """The web interface certificate: ``known``, ``not_after``, ``days_left``, ``state`` (``ok``, ``expiring`` under 30 days, ``expired``,
+    ``unknown``), when it was last checked and renewed, the last renewal error and a ``problem`` sentence. Reported by the host's renewal
+    check (scripts/renew-certs.sh); ``known`` is False where nothing reports (the bundled certificate authority is not used)."""
+    from cveFeed import updater
+    return updater.certificate()
+
+
 def _feeds():
     from django_celery_beat.models import PeriodicTask
 
     from cveFeed.models import CVEEntry
     last = PeriodicTask.objects.filter(task='sync_cve_now_feed').values_list('last_run_at', flat=True).first()
     newest = CVEEntry.objects.order_by('-published_at').values_list('published_at', flat=True).first()
-    return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last)}
+    try:
+        from cveFeed import detection_author
+        guidance = detection_author.progress()
+    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
+        guidance = None
+    return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
+            'cve_guidance': guidance}
 
 
 def _ai():
@@ -176,12 +228,16 @@ def _ai():
             'validation_attempts_today': today}
 
 
-TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without one means it is failing
+TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without a successful one means it is failing
+TEMPLATE_REFRESH_KEY = 'nuclei_templates_refresh'  # written by the cveFeed.tasks.update_nuclei_templates worker task, read here
 _VERSION_CACHE = {}
+_VERSION_LINE = re.compile(r'\d+\.\d+')
 
 
 def _tool_version(argv):
-    """First line of ``<tool> -version`` output, cached for ten minutes; None when the tool is missing or slow."""
+    """The version line of ``<tool> -version``, cached for ten minutes; None when the tool is missing or slow. A tool may print a
+    warning of its own first (nuclei does, on a Go release its JSON library has not caught up with): the first line that is not a
+    warning and carries a version number, else the first line that is not a warning."""
     import subprocess
     now = time.monotonic()
     cached = _VERSION_CACHE.get(argv)
@@ -189,12 +245,47 @@ def _tool_version(argv):
         return cached[1]
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        text = ((proc.stdout or '') + (proc.stderr or '')).strip().splitlines()
-        value = next((line.strip()[:120] for line in text if line.strip()), None)
+        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # testssl.sh colours its banner
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
+        value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
     except (OSError, subprocess.SubprocessError):
         value = None
     _VERSION_CACHE[argv] = (now, value)
     return value
+
+
+def _template_refresh():
+    """What the last ``nuclei -update-templates`` run said, as the worker recorded it: ``{'at', 'ok', 'result'}`` or None."""
+    from django.core.cache import cache
+    try:
+        record = cache.get(TEMPLATE_REFRESH_KEY)
+    except Exception:  # noqa: BLE001 - a cache that is down must not take the status with it
+        return None
+    return record if isinstance(record, dict) and record.get('at') else None
+
+
+def _template_problem(templates):
+    """The status line for stale nuclei templates, or ''. The template files only change when a new release is published, so their age
+    says nothing about whether the refresh works; it is judged on the refresh's own last run when there is one, and on the files only
+    when no run has been recorded and none has been dispatched for a day and a half either."""
+    refresh = templates.get('last_refresh')
+    if refresh:
+        try:
+            hours = (timezone.now() - datetime.fromisoformat(refresh['at'])).total_seconds() / 3600
+        except (KeyError, TypeError, ValueError):
+            hours = None
+        if hours is not None and not refresh.get('ok'):
+            return f"nuclei templates: the last refresh failed ({str(refresh.get('result') or 'no detail')[:100]})"
+        if hours is not None and hours > TEMPLATE_STALE_HOURS:
+            return f'nuclei templates: no successful refresh for {int(hours)} hours'
+        return ''
+    age, dispatched = templates.get('age_hours'), templates.get('last_refresh_dispatch')
+    if age is None or age <= TEMPLATE_STALE_HOURS:
+        return ''
+    if dispatched and (timezone.now() - datetime.fromisoformat(dispatched)).total_seconds() / 3600 <= TEMPLATE_STALE_HOURS:
+        return ''  # the refresh was dispatched recently and has not reported yet (right after an update): not a failure
+    return f'nuclei templates: not refreshed for {int(age)} hours'
 
 
 def _tools():
@@ -208,11 +299,68 @@ def _tools():
     except OSError:
         updated = None
     last_run = PeriodicTask.objects.filter(task='update_nuclei_templates').values_list('last_run_at', flat=True).first()
-    return {'nuclei_templates': {'updated_at': _iso(updated),
+    refresh = _template_refresh()
+    return {'nuclei_templates': {'updated_at': _iso(updated),  # when the template files last changed: nothing changes between releases
                                  'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
-                                 'last_refresh_dispatch': _iso(last_run)},
+                                 'last_refresh_dispatch': _iso(last_run),
+                                 'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
+                         'testssl': _tool_version(('testssl.sh', '--version'))}}
+
+
+def _runzero(problems):
+    """Each project that has a runZero token: when it last synced and how it went. A failing sync is a problem worth seeing here."""
+    from cveFeed import runzero_sync
+    from dashboard.models import Project
+    rows = []
+    for project in Project.objects.filter(pk__in=runzero_sync.configured_project_ids()).order_by('slug')[:MAX_PROJECTS]:
+        s = runzero_sync.status(project)
+        rows.append({'project': project.slug, 'state': s['state'], 'last_sync_at': s['last_sync_at'], 'last_error': s['last_error'],
+                     'import_enabled': s['import_enabled'], 'assets': (s['counts'] or {}).get('assets')})
+        if s['state'] == 'error':
+            problems.append(f"runZero: the sync of {project.slug} is failing: {s['last_error']}")
+    return {'interval_hours': runzero_sync.interval_hours(), 'projects': rows}
+
+
+def _udp_scan(problems):
+    """The background UDP sweep: on or off, whether the worker can run it (a worker without raw sockets says so), and what it holds."""
+    from cveFeed import udp_scan
+    return udp_scan.status(problems)
+
+
+SENTINEL_RECENT_ERRORS = 10
+SENTINEL_ERROR_RATE_PROBLEM = 0.5  # failed/expired share of the last day's finished tasks that counts as a problem, once there are enough to judge
+
+
+def _sentinels(problems):
+    """Registered Sentinels (scan-stage agents, ``Agent`` ``kind='scanner'``) and the scan-stage work they have taken off
+    the queue: counts by registration status, how many are live (heartbeating within the agent live window), queue
+    depth, the last day's completed/failed/expired ``SentinelTask``s, and a short sample of the most recent errors, so
+    an admin (or an agent with only MCP access) can see Sentinel health and throughput without a separate query per
+    Sentinel. A high failure/expiry share of the last day's finished work is a problem worth surfacing here."""
+    from agentapi.agent_broker import LIVE_WINDOW
+    from agentapi.models import Agent, SentinelTask
+    from django.db.models import Count
+    now = timezone.now()
+    day_ago = now - timedelta(days=1)
+    agents = Agent.objects.filter(kind='scanner')
+    by_status = {status: 0 for status in Agent.STATUSES}
+    for row in agents.values('status').annotate(n=Count('id')):
+        by_status[row['status']] = row['n']
+    live = agents.filter(last_seen__gte=now - LIVE_WINDOW).count()
+    tasks = SentinelTask.objects
+    queue = {status: tasks.filter(status=status).count() for status in ('queued', 'claimed', 'running')}
+    finished_24h = {status: tasks.filter(status=status, finished_at__gte=day_ago).count() for status in ('done', 'failed', 'expired')}
+    finished_total = sum(finished_24h.values())
+    bad = finished_24h['failed'] + finished_24h['expired']
+    if finished_total >= 5 and bad / finished_total >= SENTINEL_ERROR_RATE_PROBLEM:
+        problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or expired")
+    recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).order_by('-finished_at')
+                         .values('id', 'kind', 'error', 'finished_at', 'agent__name')[:SENTINEL_RECENT_ERRORS])
+    return {'registered': by_status, 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+           'recent_errors': [{'task_id': r['id'], 'kind': r['kind'], 'sentinel': r['agent__name'], 'error': r['error'],
+                              'at': _iso(r['finished_at'])} for r in recent_errors]}
 
 
 def _work():
@@ -242,7 +390,11 @@ def _system(user, problems, notes):
         out['last_activity'] = health.get('last_activity')
         if health.get('workers_state') != 'responding':
             problems.append(f"workers: {health.get('worker_note')}")
-        if out['schedules']['past_due']:
+        beat = health.get('beat') or {}
+        out['schedules']['beat'] = beat
+        if beat.get('state') == 'silent':
+            problems.append(f"celery beat has not ticked for {beat.get('seconds_since_tick', 0) // 60} minutes; no schedule is being dispatched")
+        elif out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
     out['work'] = _probe(problems, 'work', _work)
     work = out['work']
@@ -258,6 +410,9 @@ def _system(user, problems, notes):
                 problems.append(f"memory: {c['host']} has {c['available_mb']} MB free, below its critical level")
             if (c['report_age_seconds'] or 0) > MEMORY_REPORT_STALE_SECONDS:
                 problems.append(f"memory: {c['host']} has not reported for {c['report_age_seconds']} seconds")
+    out['certificate'] = _probe(problems, 'certificate', _certificate)
+    if isinstance(out['certificate'], dict) and out['certificate'].get('problem'):
+        problems.append(f"certificate: {out['certificate']['problem']}")
     out['disk'] = _probe(problems, 'disk', _disk)
     if out['disk'].get('free_percent') is not None and out['disk']['free_percent'] < DISK_LOW_PERCENT:
         problems.append(f"disk: only {out['disk']['free_percent']}% free ({out['disk']['free_mb']} MB)")
@@ -268,10 +423,13 @@ def _system(user, problems, notes):
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['ai'] = _probe(problems, 'ai', _ai)
+    out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
+    out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
+    out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
     out['tools'] = _probe(problems, 'tools', _tools)
-    age = ((out['tools'] or {}).get('nuclei_templates') or {}).get('age_hours')
-    if age is not None and age > TEMPLATE_STALE_HOURS:
-        problems.append(f'nuclei templates: not refreshed for {int(age)} hours')
+    problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
+    if problem:
+        problems.append(problem)
     queues = out['queues']
     if isinstance(queues, dict) and queues.get('waiting_total'):
         notes.append(f"{queues['waiting_total']} message(s) waiting in the work queues")

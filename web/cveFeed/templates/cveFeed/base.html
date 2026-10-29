@@ -57,10 +57,11 @@
     <a data-nav="CVE matches" href="{% url 'cve_section' slug 'matches' %}" {% if active == 'matches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-match"/></svg>CVE matches</a>
     <a data-nav="Findings" href="{% url 'cve_section' slug 'vulns' %}" {% if active == 'vulns' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Findings</a>
     <a data-nav="Hygiene" href="{% url 'cve_section' slug 'hygiene' %}" {% if active == 'hygiene' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
+    <a data-nav="Suppliers" href="{% url 'cve_section' slug 'suppliers' %}" {% if active == 'suppliers' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Suppliers</a>
     <p class="rail-h">Work</p>
     <a data-nav="Targets" href="{% url 'cve_section' slug 'targets' %}" {% if active == 'targets' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
     <a data-nav="Scans" href="{% url 'cve_section' slug 'scans' %}" {% if active == 'scans' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Scans</a>
-    <a data-nav="API keys" href="{% url 'cve_section' slug 'keys' %}" {% if active == 'keys' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
+    {% if sentinels_enabled %}<a data-nav="Project Sentinels" href="{% url 'cve_section' slug 'sentinels' %}" {% if active == 'project-sentinels' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Project Sentinels</a>{% endif %}
     {% endif %}
     {% if bounty_enabled %}
     <p class="rail-h">Bug bounty</p>
@@ -68,6 +69,7 @@
     {% endif %}
     <p class="rail-h">Agents</p>
     <a data-nav="API tokens and MCP" href="{% url 'cve_agents' %}" {% if active == 'agents' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens and MCP</a>
+    <a data-nav="Sentinels" href="{% url 'cve_sentinels' %}" {% if active == 'sentinels' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Sentinels</a>
   </nav>
   <details class="acct">
     <summary aria-label="Account menu"><span class="avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span><span class="acct-name">{{ request.user.first_name|default:request.user.username }}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
@@ -124,7 +126,8 @@
     <a href="{% url 'cve_section' slug 'activity' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>Activity</a>
     <a href="{% url 'cve_section' slug 'vulns' %}"><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Findings</a>
     <a href="{% url 'cve_section' slug 'hygiene' %}"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
-    <a href="{% url 'cve_section' slug 'keys' %}"><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
+    <a href="{% url 'cve_section' slug 'suppliers' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Suppliers</a>
+    {% if sentinels_enabled %}<a href="{% url 'cve_section' slug 'sentinels' %}"><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Sentinels</a>{% endif %}
     {% endif %}
     <a href="{% url 'cve_graph' %}"><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>
     {% if bounty_enabled %}<a href="{% url 'cve_bounty' %}{% if slug and not all_projects %}?project={{ slug }}{% endif %}"><svg viewBox="0 0 24 24"><use href="#i-flag"/></svg>Bug bounty</a>{% endif %}
@@ -160,6 +163,7 @@
 <script type="module" src="{% asset 'cve/notify.js' %}"></script>
 <script type="module" src="{% asset 'cve/prefs.js' %}"></script>
 {% if slug %}<script type="module" src="{% asset 'cve/addtargets.js' %}"></script>{% endif %}
+<script type="module" src="{% asset 'cve/sitewatch.js' %}"></script>
 {% if request.user.is_superuser %}<script type="module" src="{% asset 'cve/updatebar.js' %}"></script>{% endif %}
 {% block scripts %}{% endblock %}
 </body>

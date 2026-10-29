@@ -6,6 +6,7 @@ one consistent picture regardless of which tool found what.
 """
 import logging
 import os
+import re
 import subprocess
 import tempfile
 
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 NMAP_BIN = 'nmap'
 # NSE scripts that read what a service says about itself and its host. All are in nmap's safe or discovery categories and none
 # exploits anything: banner (the raw greeting), ssh-hostkey and ssh2-enum-algos (SSH server identity), ssl-cert (certificate
-# subject, issuer, validity), http-headers and http-title, ftp-anon (whether anonymous login is accepted, and the top level
+# subject, issuer, validity), http-headers, http-title, http-server-header (the Server header when -sV could not read it) and
+# http-generator (the generator meta tag of the front page: one GET), ftp-anon (whether anonymous login is accepted, and the top level
 # listing it shows), rdp-ntlm-info (the OS build, host and domain names RDP's NTLM challenge reveals, without logging in),
 # rdp-enum-encryption (which RDP security layers the server accepts, so a server that does not insist on NLA is visible),
 # smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). mysql-info, mongodb-info, redis-info,
@@ -30,7 +32,8 @@ NMAP_BIN = 'nmap'
 # reads a credential-protected value; cveFeed.db_intel turns their output into Port.version/Port.extra, and
 # cveFeed.db_exposure separately tests whether a database answers a real query with no authentication at all. Scripts only
 # run on ports whose service matches.
-NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'ftp-anon',
+NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'http-server-header', 'http-generator',
+               'ftp-anon',
                'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat', 'mysql-info', 'ms-sql-info',
                'ms-sql-ntlm-info', 'mongodb-info', 'redis-info', 'memcached-info', 'couchdb-stats')
 NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
@@ -39,7 +42,14 @@ NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
 # selected explicitly", so there is no flag that turns them off while keeping -sV. Their output is hidden from the
 # console but still written to -oX, which is exactly what this module parses. None of them have been reviewed the way
 # NSE_SCRIPTS has, so persist_inventory drops anything -sV smuggled in before it is ever stored, searched or shown.
-NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS)
+# The UDP sweep (cveFeed.udp_scan) adds five scripts, each reviewed as read-only: snmp-sysdescr (one SNMP GET of sysDescr and the uptime
+# with the default community "public": a reply is proof that community works), snmp-info (the SNMPv3 engine ID, the probe -sV sends),
+# ntp-info (the time and the "readvar" variables: version, system, processor), upnp-info (one SSDP M-SEARCH: the server string and
+# device description) and ipmi-version (one Get Channel Authentication Capabilities request: the IPMI version and the
+# authentication types offered, no login). ntp-monlist is deliberately absent: nmap files it under "intrusive" and says the
+# target records the request. Together with nbstat above (UDP 137) they only run on UDP ports whose service matches.
+UDP_NSE_SCRIPTS = ('snmp-sysdescr', 'snmp-info', 'ntp-info', 'upnp-info', 'ipmi-version')
+NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS) | frozenset(UDP_NSE_SCRIPTS)
 
 
 def _reviewed_scripts(scripts):
@@ -123,11 +133,43 @@ def build_targets(ips, limit=MAX_TARGETS):
     return sorted({i for i in ips if i})[:limit]
 
 
+def _is_ipv6(target):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(target).strip().strip('[]')).version == 6
+    except ValueError:
+        return False
+
+
+_HOST_START = re.compile(r'<host[\s>]')
+
+
+def merge_xml(first, second):
+    """``first`` (an nmap XML report) with the ``<host>`` elements of ``second`` added before its closing tag, so one report can answer for an
+    IPv4 run and an IPv6 run (nmap takes one address family per run). A report with no hosts adds nothing."""
+    start, end = _HOST_START.search(second or ''), (second or '').rfind('</host>')
+    closing = (first or '').rfind('</nmaprun>')
+    if not start or end < 0 or closing < 0:
+        return first if closing >= 0 or not start else second
+    return first[:closing] + second[start.start():end + len('</host>')] + '\n' + first[closing:]
+
+
 def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, before_launch=None):
-    """Write ``targets`` to a scratch file and run nmap against them, returning its XML report text. The run waits its
+    """Write ``targets`` to a scratch file and run nmap against them, returning its XML report text. nmap scans one address family per run
+    and needs ``-6`` for IPv6 (without it an IPv6 address is "failed to resolve" and the report has no host), so IPv6 targets run on their own
+    with ``-6`` and their hosts are merged into the one report returned. The run waits its
     turn for memory (as heavy job ``kind``, for at most ``wait_timeout`` seconds) and raises reNgine.resources.MemoryKill if it
     had to be stopped to protect the container. ``before_launch`` may raise to revoke a job after memory admission,
     immediately before process creation; it must re-read any authorization state that could change during the wait."""
+    v6 = [t for t in targets if _is_ipv6(t)]
+    if v6:
+        v4 = [t for t in targets if not _is_ipv6(t)]
+        if v4:
+            first = run_nmap_xml(v4, flags, host_timeout, kind, wait_timeout, before_launch)
+            return merge_xml(first, run_nmap_xml(v6, flags, host_timeout, kind, wait_timeout, before_launch))
+        flags = ['-6', *[f for f in flags if f != '-6']]
+    from targetApp.target_types import refuse_local
+    refuse_local('nmap')
     from reNgine import resources
     timeout = HOST_GROUPS_ALLOWED * _minutes(host_timeout) * 60 + PROCESS_TIMEOUT_BUFFER
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
@@ -172,15 +214,26 @@ def run_nmap_args(args, label, timeout):
 
 
 def parse_xml(xml_text):
-    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable."""
+    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable.
+
+    This function also reads XML a Sentinel reported (``agentapi.sentinel_dispatch.try_nmap_udp``), not only this
+    process's own nmap subprocess, so an entity-expansion or external-entity payload must fail safe here exactly as it
+    would from any other untrusted input, never expand or fetch anything. A real nmap report never declares a custom
+    ENTITY, so one is refused outright before parsing (it is the one thing ``xmltodict.parse``'s own default entity
+    handling does not stop: that default only blocks an *external* DTD/entity fetch, not an all-internal expansion
+    bomb). No extra dependency: a hardened ``expat`` module here would need ``defusedexpat`` (an old, unmaintained C
+    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all."""
     import xmltodict
 
     from reNgine.nmap_service import extract_nmap_inventory
     if not (xml_text or '').strip():
         return []
+    if '<!ENTITY' in xml_text:
+        logger.warning('refused to parse nmap XML output: it declares a custom ENTITY')
+        return []
     try:
         data = xmltodict.parse(xml_text)
-    except Exception:  # noqa: BLE001 - a truncated/partial XML report must not crash the pipeline
+    except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
         logger.warning('could not parse nmap XML output', exc_info=True)
         return []
     return extract_nmap_inventory(data)
@@ -192,8 +245,9 @@ def persist_inventory(inventory, source='nmap', org_id=None):
     here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
     Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
     seen on one IP's 443 onto every IP's 443."""
+    from cveFeed.host_inventory import keeps_reported_os
     from startScan.ip_rows import get_or_create_ip
-    from startScan.models import IpAddress, Port
+    from startScan.models import TCP_PROTOCOLS, IpAddress, Port
     ports_written = hosts_with_os = 0
     now = timezone.now()
     for host in inventory:
@@ -201,12 +255,15 @@ def persist_inventory(inventory, source='nmap', org_id=None):
         if not ip_addr:
             continue
         ip_obj, _ = get_or_create_ip(ip_addr, org_id)
-        if host.get('os_guess'):
+        if host.get('os_guess') and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
             ip_obj.last_seen = now
             fit_columns(ip_obj)
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
+            if host.get('os_matches'):  # the runners-up: a guess a few points ahead of another family is not settled
+                ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_matches': host['os_matches']}
+                ip_obj.save(update_fields=['fingerprint'])
             hosts_with_os += 1
         host_scripts = _reviewed_scripts(host.get('hostscripts'))
         if host_scripts:
@@ -216,18 +273,35 @@ def persist_inventory(inventory, source='nmap', org_id=None):
         for rec in host.get('ports', []):
             if not rec.get('number'):
                 continue
-            port = ip_obj.ports.filter(number=rec['number']).order_by('id').first()
+            protocol = 'udp' if rec.get('protocol') == 'udp' else 'tcp'  # UDP 161 and TCP 161 are two services: two rows
+            same_protocol = ('udp',) if protocol == 'udp' else TCP_PROTOCOLS
+            port = ip_obj.ports.filter(number=rec['number'], protocol__in=same_protocol).order_by('id').first()
             if port is not None and port.ports.exclude(pk=ip_obj.pk).exists():
                 ip_obj.ports.remove(port)  # a row shared with other IPs by older code: give this IP its own
                 port = None
+            if port is not None and _unprobed(rec) and (port.product or (port.extra or {}).get('method') == 'probed'):
+                # a run with no -sV (the -p- sweep, naabu) knows only that the port is open: what a fingerprinting pass found (distro,
+                # package release, CPEs, TLS tunnel, the service name) is not what this run says, and must not be overwritten by a port-table guess
+                for field in ('protocol', 'state'):
+                    if rec.get(field):
+                        setattr(port, field, rec[field])
+                port.last_seen = now
+                port.save(update_fields=['protocol', 'state', 'last_seen'])
+                ip_obj.ports.add(port)
+                ports_written += 1
+                continue
             if port is None:
-                port = Port(number=rec['number'], service_name=rec.get('service_name') or None)
+                port = Port(number=rec['number'], protocol=protocol, service_name=rec.get('service_name') or None)
             elif rec.get('service_name'):
                 port.service_name = rec['service_name']
             if port.pk and rec.get('product') and rec['product'] != port.product:
                 # a different product answers on this port now: the version, CPE and banner belonged to the old one, and a scan that
                 # reports none for the new one must not leave them behind to be matched against its CVEs
                 port.version = port.service_extra = port.cpe = port.banner = ''
+            elif port.pk and rec.get('product') and rec.get('method') == 'probed' and not rec.get('version') and not _cpe_version(rec):
+                # the same product answered and no longer states a version (server_tokens off, an upgrade): the old version, and the CPE
+                # that carried it, are not what runs there now
+                port.version = port.cpe = ''
             for field in ('protocol', 'state', 'product', 'version', 'service_extra', 'cpe'):
                 if rec.get(field):
                     setattr(port, field, rec[field])
@@ -237,6 +311,13 @@ def persist_inventory(inventory, source='nmap', org_id=None):
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
                           'method': rec.get('method', '')}
+            for key in ('tunnel', 'hostname', 'devicetype', 'confidence'):  # only what this run stated: a service that dropped TLS is not still "ssl"
+                if rec.get(key):
+                    port.extra[key] = rec[key]
+                else:
+                    port.extra.pop(key, None)
+            if rec.get('tls'):
+                port.tls = rec['tls']  # the certificate ssl-cert read, in the same place bbot's TLS facts go
             kept_scripts = _reviewed_scripts(rec.get('scripts'))
             if kept_scripts:
                 port.extra['scripts'] = kept_scripts  # this run's reviewed NSE output; a run with none kept leaves the last in place
@@ -259,6 +340,18 @@ def persist_inventory(inventory, source='nmap', org_id=None):
     return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
 
 
+def _unprobed(rec):
+    """True for a record that carries no fingerprint: nmap did not probe the service (no -sV, so the name is the port table's guess) and
+    named no product, version or CPE."""
+    return rec.get('method') != 'probed' and not (rec.get('product') or rec.get('version') or rec.get('cpes') or rec.get('cpe'))
+
+
+def _cpe_version(rec):
+    """The version an application CPE of this record states, or ''."""
+    from cveFeed.correlation import parse_cpe
+    return next((parsed[2] for parsed in (parse_cpe(c) for c in rec.get('cpes') or [rec.get('cpe', '')]) if parsed and parsed[2]), '')
+
+
 def fit_columns(instance):
     """Clip every text value to its column, so a banner or product string a scanned host controls cannot make a save fail."""
     for field in instance._meta.concrete_fields:
@@ -274,7 +367,7 @@ def close_unreported_ports(ip_obj, host):
     came back), and only for TCP ports inside the set the run probed, so a top-1000 run never closes 8443 it did not try and a
     silent or unreachable host (everything "filtered") does not wipe what was open last time. Returns the ports closed."""
     scanned = host.get('scanned')
-    if not scanned:
+    if not scanned or host.get('timedout'):  # a host nmap gave up on was not probed to the end: what it did not list is not closed
         return 0
     reported = {rec['number'] for rec in host.get('ports', []) if rec.get('number')}
     answered = any(rec.get('state') == 'open' for rec in host.get('ports', [])) or 'closed' in (host.get('extraports') or ())
@@ -320,12 +413,19 @@ def _plural(n, word):
     return f'{n} {word}{"s" if n != 1 else ""}'
 
 
-def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=False):
+def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=False, dispatch=True):
     """Fingerprint the scan's discovered IPs that no scan has covered recently, in one ``-O -sV --top-ports 1000`` pass (the full-port
     sweep is the background task in cveFeed.fullscan). Only IPs are scanned, each at most once per TTL across all scans (see
     cveFeed.ledger); an IP another pipeline is scanning right now is left to it. ``runner(targets, flags, host_timeout) ->
     xml text`` is injectable so tests need no nmap binary. When naabu is installed (see cveFeed.naabu_scan) it finds the open TCP
-    ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged."""
+    ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged.
+
+    ``dispatch`` (on by default) is the one seam a registered Sentinel (agentapi.sentinel_dispatch) uses: before any
+    address reaches the runner or naabu above, it is offered to a live, eligible Sentinel for this project; what a
+    Sentinel actually fingerprints is persisted through the exact same ``persist_inventory`` this module already calls,
+    and whatever is left (everything, when no Sentinel is registered or none answers in time) runs locally exactly as
+    before. Callers that pass their own ``naabu_runner`` (tests) are never second-guessed: dispatch only ever supplies
+    its own naabu_runner when the caller left that argument out."""
     from cveFeed import activity, ledger
     from cveFeed.nuclei_scan import scan_targets
     from startScan.models import ScanHistory
@@ -366,11 +466,19 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
             fast_running = activity.log('run_check', f'nmap is fingerprinting {len(targets)} new IP(s) for {domain.name}{note} '
                                         f'(-O -sV, the top 1000 ports plus {len(EXTRA_PORTS)} high-risk ones), scan #{scan_id}', project=project, status='running', scan_id=scan.id)
             try:
-                ports_by_ip = naabu_scan.discover(targets, scan, naabu_runner)
+                effective_naabu_runner = naabu_runner
+                sentinel_targets, sentinel_totals = targets, {'ports': 0, 'hosts_with_os': 0}
+                if dispatch:
+                    from agentapi import sentinel_dispatch
+                    if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
+                        effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
+                    sentinel_targets, sentinel_totals = sentinel_dispatch.try_nmap(domain.project, scan, targets, org_id=org_id)
+                ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
                 flags = fast_flags()
-                fast = scan_in_chunks(runner, targets, flags, HOST_TIMEOUT_FAST,
+                fast = scan_in_chunks(runner, sentinel_targets, flags, HOST_TIMEOUT_FAST,
                                       flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None,
                                       org_id=org_id)
+                fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)
                 ledger.record('nmap-fast', targets, project, scan, 'failed')

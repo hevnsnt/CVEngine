@@ -33,16 +33,19 @@ class VersionlessNoiseTests(TestCase):
 		correlate_cves()
 		return set(CVEMatch.objects.values_list('cve_entry__cve_id', flat=True))
 
-	def test_ice_cve_with_ranges_is_dropped_but_fire_and_smoke_are_kept(self):
+	def test_a_versionless_product_matches_nothing_whatever_the_heat(self):
 		self._cve('CVE-2099-10', cvss=3.0)  # ice
 		self._cve('CVE-2099-11', kev=True)  # fire
 		self._cve('CVE-2099-12', cvss=7.5)  # smoke
-		self.assertEqual(self._matched(), {'CVE-2099-11', 'CVE-2099-12'})
+		self._cve('CVE-2099-13', affected=[{'product': 'nginx'}], cvss=3.0)  # no ranges at all
+		self.assertEqual(self._matched(), set())  # see tests.test_match_policy: a name is not evidence, the product is a lead instead
 
-	def test_ice_advisory_without_ranges_is_kept(self):
+	def test_an_advisory_with_no_usable_bound_is_no_evidence_even_for_a_known_version(self):
+		self.sub.technologies.clear()
+		self.sub.technologies.add(Technology.objects.create(name='nginx:1.18.0'))
 		self._cve('CVE-2099-13', affected=[{'product': 'nginx'}], cvss=3.0)
 		self._cve('CVE-2099-14', affected=[{'product': 'nginx', 'ranges': [{}]}], cvss=3.0)
-		self.assertEqual(self._matched(), {'CVE-2099-13', 'CVE-2099-14'})
+		self.assertEqual(self._matched(), set())
 
 	def test_a_known_version_in_range_is_kept_for_ice(self):
 		self.sub.technologies.clear()

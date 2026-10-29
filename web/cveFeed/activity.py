@@ -69,7 +69,7 @@ def log(kind, message, project=None, cve_id='', status='done', **detail):
             finished_at=None if status == 'running' else timezone.now())
         return entry
     except Exception:  # noqa: BLE001
-        logger.warning('could not record AI activity %r', message, exc_info=True)
+        logger.warning('could not record %s activity', kind, exc_info=True)  # the message is not logged: it may name what a scan found
         return None
 
 

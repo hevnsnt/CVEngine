@@ -4,12 +4,12 @@ Superuser only (the settings API enforces it, and asks for a typed phrase plus t
 
 Removed: every organization, project, target, host and scan with everything under them (IPs, ports, findings,
 screenshots, reports, notes), every user except the administrator who runs the reset, memberships, API tokens, the AI
-settings, API vault, notification/proxy/report settings, IP allowlist, bans and strikes, the audit log, the CVE feed and
+settings, API vault, notification/email/proxy/report settings, IP allowlist, bans and strikes, the audit log, the CVE feed and
 matches, generated templates, AI activity, update settings, scheduled scans, other sessions, and the files under the
 scan-results directory.
 
 Kept: the administrator's own account (password and two-step sign-in untouched, so they can still sign in; only the
-"finished onboarding" flag is cleared), scan engines, wordlists and the installed tools, and the system schedules.
+"finished onboarding" flag is cleared), scan engines and the installed tools, and the system schedules.
 Afterwards the instance has the untouched "Default" organization and project of a new install, and the first-run wizard
 starts again.
 """
@@ -25,7 +25,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 CONFIRM_PHRASE = 'FACTORY RESET'
-WIPE_APPS = ('startScan', 'targetApp', 'recon_note', 'cveFeed', 'dashboard')
+WIPE_APPS = ('startScan', 'targetApp', 'cveFeed', 'dashboard')
 # The acting administrator's own rows survive (the other users' cascade away with them).
 KEEP_MODELS = {'dashboard.userprofile', 'dashboard.userpreferences'}
 WIPE_SCAN_MODELS = ('scanEngine.notification', 'scanEngine.proxy', 'scanEngine.vulnerabilityreportsetting')

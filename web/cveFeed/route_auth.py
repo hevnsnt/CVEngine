@@ -1,12 +1,14 @@
-"""Auth state per web route: how a route answers an anonymous request.
+"""Auth state per web route: how a route answers an anonymous request (and, when the owner stored a sign-in for the target, how it answers
+signed in: see cveFeed.auth_routes).
 
 For each web host a handful of common routes (``/``, ``/login``, ``/admin``, ``/api`` ...) and the paths bbot saw are asked
 once with a plain GET and classified as open, a login page, a session requirement, single sign-on, a redirect or not found.
-The probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
+The anonymous probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
 each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the network
 helper (``probe_url``) is injectable.
 """
 import concurrent.futures
+import functools
 import http.client
 import logging
 import re
@@ -15,7 +17,7 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 
-from cveFeed import fingerprint
+from cveFeed import fingerprint, versions
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,11 @@ PER_REQUEST_GAP = 0.2  # seconds between two requests to the same host
 CONNECT_TIMEOUT, READ_TIMEOUT = 3, 6
 PROBE_TOTAL_SECONDS = 20  # wall-clock budget for one probe: the per-read timeouts alone let a host that trickles bytes hold a worker thread for good
 ROUTE_SAMPLE_BYTES = 64 * 1024
+MAX_PROBE_BYTES = 256 * 1024  # the most a version probe may ask for (a JavaScript bundle names its framework version deep inside)
+# what an ordinary browser sends. Some CDNs answer an obvious scanner request with a challenge page instead of the site, so the version
+# probes (never the route check) present as a browser; the headers say nothing a browser would not, and no cookie or credential is sent.
+BROWSER_HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+                   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9'}
 MAX_PATH_LENGTH = 200
 CHUNK = 500
 STATIC_EXT = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.map', '.pdf', '.xml', '.txt')
@@ -112,11 +119,13 @@ def web_bases(sub):
             found.add((parsed.scheme, parsed.port or (443 if parsed.scheme == 'https' else 80)))
     for ip in sub.ip_addresses.all():
         for port in ip.ports.all():
-            if (port.state or '') not in ('', 'open'):
+            if (port.state or '') not in ('', 'open') or (getattr(port, 'protocol', '') or '') not in ('', 'tcp'):  # a web service is open TCP
                 continue
             service, product = (port.service_name or '').lower(), (port.product or '').lower()
             if port.number in WEB_PORTS or service in HTTP_SERVICE_NAMES or 'http' in product:
-                https = 'https' in service or 'ssl' in service or WEB_PORTS.get(port.number) == 'https'
+                # nmap names a TLS web service "http" with tunnel="ssl", so the service name alone sends 8444 or 10443 a plain-HTTP request
+                https = ('https' in service or 'ssl' in service or WEB_PORTS.get(port.number) == 'https'
+                         or (getattr(port, 'extra', None) or {}).get('tunnel') == 'ssl')
                 found.add(('https' if https else 'http', port.number))
     order = sorted(found, key=lambda sp: (0 if sp[1] == 443 else 1 if sp[1] == 80 else 2, sp[1], sp[0]))
     return [_base(scheme, host, port) for scheme, port in order[:MAX_BASES_PER_HOST]]
@@ -196,7 +205,10 @@ def classify(probe):
             evidence[key] = str(probe[field])[:100]
     page_url = probe.get('url', '')
     scripts, local = fingerprint.script_sources(body, page_url) if (urlparse(page_url).path or '/') == '/' else ([], [])
-    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts)
+    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts,
+                                      headers=probe.get('headers'))
+    if probe.get('headers') and (urlparse(page_url).path or '/') == '/':
+        evidence['headers'] = probe['headers']  # the root page's kept response headers: host metadata for the AI and the host page
     if local:
         evidence['local_scripts'] = local  # read by run_route_auth, which removes it before anything is stored
     if found:
@@ -293,8 +305,19 @@ def _read_scripts(result, probe, scan_id):
         evidence['fingerprint_names'] = [f['name'] for f in found]
 
 
-def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET'):
-    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI."""
+class UntrustedCertificate(ValueError):
+    """A stored sign-in was not sent because the server's certificate does not verify and the target's "trust this certificate anyway" switch is
+    off. Worded for the person who reads the activity line; holds no secret."""
+
+
+def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
+              connect_ip=None, auth_scope=None):
+    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI. ``connect_ip`` connects to that vetted address instead
+    of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan).
+    ``auth_scope`` (a cveFeed.auth_checks.AuthScope) adds the stored sign-in of the target, and only when this very destination (host, scheme and
+    port) is one the sign-in was stored for; the request is a single one, redirects are never followed, so the values go nowhere else. A request that
+    carries a sign-in verifies the server certificate (a mismatch raises UntrustedCertificate, never a send) unless the owner switched on
+    ``allow_untrusted_certificate`` for that sign-in; an anonymous one never verifies, so it still inspects a broken-certificate site."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
     from urllib.parse import quote, urlsplit
@@ -302,7 +325,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
 
     if method not in ('GET', 'HEAD'):
         raise ValueError('route probes are read-only: GET or HEAD')
-    max_bytes = min(int(max_bytes), ROUTE_SAMPLE_BYTES)
+    max_bytes = min(int(max_bytes), MAX_PROBE_BYTES)
     if max_bytes < 0:
         raise ValueError('invalid probe byte limit')
     if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) == 127 for c in url):
@@ -314,20 +337,35 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         raise ValueError('only a Host override is allowed for anonymous probes')
     host = parsed.hostname.encode('idna').decode('ascii')
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
-    addresses = pinned_transport.resolve(host, port)
+    if connect_ip:
+        import ipaddress
+        from targetApp.target_types import is_scannable_ip
+        pinned = ipaddress.ip_address(str(connect_ip))
+        if not is_scannable_ip(str(pinned), project=project):
+            raise ValueError('probe destination is prohibited')
+        addresses = ((socket.AF_INET6, (str(pinned), port, 0, 0)) if pinned.version == 6 else (socket.AF_INET, (str(pinned), port)),)
+    else:
+        addresses = pinned_transport.resolve(host, port, project=project)
+    signed = dict(auth_scope.headers_for(host, parsed.scheme, port)) if auth_scope is not None else {}
     context = None
     if parsed.scheme == 'https':
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE  # scanner must inspect broken-certificate sites too
-    connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context)
+        # an anonymous check inspects broken-certificate sites too; a stored sign-in goes only to a server that proves its name, unless the
+        # owner chose, for this target's sign-in, to send it anyway
+        if not signed or auth_scope.accepts_untrusted_certificate(host, parsed.scheme, port):
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+    connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context, project=project)
     authority = f'[{host}]' if ':' in host else host
     if parsed.port is not None:
         authority += f':{port}'
     request_headers = {'User-Agent': 'CVEngine route check', 'Accept': 'text/html,*/*;q=0.5',
                        'Accept-Encoding': 'identity', 'Host': authority}
+    if browser:
+        request_headers.update(BROWSER_HEADERS)
     request_headers.update({key.title(): value for key, value in (headers or {}).items()})
+    request_headers.update(signed)
     path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
@@ -372,7 +410,14 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
                 'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
                 'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
                 'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
-                'powered_by': response.getheader('X-Powered-By', '')}
+                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items()),
+                'raw_headers': {k.lower(): ' '.join(v.split())[:200] for k, v in list(response.headers.items())[:60]
+                                if k.lower() not in ('set-cookie', 'authorization', 'proxy-authorization')}}
+    except ssl.SSLCertVerificationError as exc:
+        if signed:  # nothing was sent: the handshake failed before the request
+            raise UntrustedCertificate(f'the server certificate does not verify ({getattr(exc, "verify_message", None) or "invalid"}), so the stored sign-in was not '
+                                       f'sent; turn on "Trust this certificate anyway" for this sign-in to send it regardless') from None
+        raise
     except (OSError, http.client.HTTPException):
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget') from None
@@ -392,11 +437,12 @@ def _chunks(items, size=CHUNK):
         yield items[i:i + size]
 
 
-def host_allowed(host):
-    """The SSRF gate: an IP must be one a scanner may touch, and a name must not resolve to anything blocked."""
+def host_allowed(host, project=None):
+    """The SSRF gate: an IP must be one a scanner may touch (``project`` may authorise a tailnet device of its own), and a name must
+    not resolve to anything blocked."""
     from targetApp.target_types import IP, classify_target, is_scannable_ip, resolves_to_blocked
     if classify_target(host) == IP:
-        return is_scannable_ip(host)
+        return is_scannable_ip(host, project=project)
     return not resolves_to_blocked(host)
 
 
@@ -425,10 +471,12 @@ def _plan(scan, retired=None):
     from cveFeed.exclusions import excluded_names
     banned = excluded_names(scan.domain.project_id)  # hosts the organization excluded for good are never probed
     plan, total = {}, 0
+    from cveFeed.bounty_gate import Gate
+    gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name is never probed
     subs = Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports').order_by('name')
     for sub in subs.iterator(chunk_size=CHUNK):
         host = (sub.name or '').strip().lower()
-        if not host or host in plan or host.rstrip('.') in banned:
+        if not host or host in plan or host.rstrip('.') in banned or gate.refusal(scan.domain.project_id, host, unattended=False):
             continue
         bases = web_bases(sub)
         if not bases:
@@ -444,6 +492,17 @@ def _plan(scan, retired=None):
 
 
 def run_route_auth(scan_id, probe=probe_url, force=False):
+    """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes),
+    recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
+    from cveFeed import auth_routes
+    out = _run_route_auth(scan_id, probe, force)
+    signed = auth_routes.run_signed_in(scan_id, probe, force)
+    if signed is not None:
+        out['signed_in'] = signed
+    return out
+
+
+def _run_route_auth(scan_id, probe=probe_url, force=False):
     """Check how the scan's web routes answer an anonymous GET and store the result per project route. Routes checked inside
     the TTL (7 days, CVENGINE_TTL_ROUTE_AUTH) are not asked again. Returns
     ``{'routes', 'hosts', 'by_state', 'reused', 'errors'}``. ``force`` (a re-test of changed hosts) ignores the TTL: a version
@@ -457,6 +516,8 @@ def run_route_auth(scan_id, probe=probe_url, force=False):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     empty = {'routes': 0, 'hosts': 0, 'by_state': {}, 'reused': 0, 'errors': 0}
+    if probe is probe_url:  # the project may authorise the tailnet devices of its own
+        probe = functools.partial(probe_url, project=project)
     retired = _retired_endpoints(scan)
     plan = _plan(scan, retired)
     if not plan:
@@ -481,7 +542,7 @@ def run_route_auth(scan_id, probe=probe_url, force=False):
         probed, errors, blocked = {}, {}, 0
 
         def probe_host(host, urls):
-            if not host_allowed(host):
+            if not host_allowed(host, project):
                 return host, None
             out = []
             for i, url in enumerate(urls):

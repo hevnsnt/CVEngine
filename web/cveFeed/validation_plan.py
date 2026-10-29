@@ -15,29 +15,33 @@ from cveFeed import templategen
 from cveFeed.models import TriageCall
 from reNgine.ai_providers import clean_text, untrusted_block
 
-SYSTEM = ("Choose only checks that can distinguish a specific missing fact about this CVE and affected product. "
-          "A check being safe and available does not make it relevant. Generic HTTP banners and nmap service versions "
-          "cannot verify local kernel, driver, NIC, KVM or hardware prerequisites. If none can establish a relevant "
-          "fact, return an empty check_kinds list and explain the missing evidence. "
+SYSTEM = ("You investigate whether a CVE really applies to one product on one host. First read host_metadata: every technology with "
+          "its version and where it was seen, the ports with product, version, extra info and banners, the front page headers, any CDN, "
+          "WAF or hosting edge, certificates, the operating system guess, earlier probe and check results and the host's other CVE "
+          "matches. Then say which missing fact decides the question: the product's version, which look-alike product it is (nginx, "
+          "ingress-nginx and nginx-ui are different software), whether an edge hides the origin, or local state that no network check "
+          "can read. Choose only checks that can establish that fact. Kind fact_probe is a catalogue of read-only version and identity "
+          "probes the application runs itself; prefer it whenever a version or identity is missing. A check being safe and available "
+          "does not make it relevant. Generic HTTP banners and nmap service versions cannot verify local kernel, driver, NIC, KVM or "
+          "hardware prerequisites: say they need the host inventory reporter. Behind a CDN or WAF the Server header, X-Powered-By and "
+          "error pages describe the edge, so origin software and versions cannot be known from here; a tag such as cloudflare names "
+          "the edge, not an application: say so instead of assuming. If none can establish a relevant fact, return an empty "
+          "check_kinds list and explain the missing evidence. "
           "Reply with one JSON object only: "
           '{"check_kinds":["nuclei_template"],"generate_template":false,"reason":"..."}. '
           "check_kinds may contain only listed kinds. Choose generate_template only if no safe installed CVE "
           "template exists and a specific non-destructive detector can plausibly be written from the CVE facts. "
           "Never propose commands, URLs, hosts, credentials, or an exploit payload. An empty plan is allowed "
-          "when evidence is insufficient. A version or a generic server banner alone does not prove vulnerability.")
+          "when evidence is insufficient. A version or a generic server banner alone does not prove vulnerability, and a banner "
+          "that states no version proves nothing either way.")
 MAX_REASON = 700
 
 
 def parse_plan(reply, checks, can_generate):
     """Reject out-of-schema choices. A model cannot expand the deterministic check set."""
-    match = re.search(r'\{.*\}', reply or '', re.DOTALL)
-    if not match:
-        return None
-    try:
-        obj = json.loads(match.group(0))
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(obj, dict) or set(obj) != {'check_kinds', 'generate_template', 'reason'}:
+    from reNgine.ai_providers import extract_json
+    obj = extract_json(reply, ('check_kinds', 'generate_template', 'reason'))
+    if obj is None or set(obj) != {'check_kinds', 'generate_template', 'reason'}:
         return None
     kinds, generate, reason = obj['check_kinds'], obj['generate_template'], obj['reason']
     allowed = {c['kind'] for c in checks}
@@ -80,11 +84,14 @@ def _reserve(project_id, signature):
                                          expires_at=now + timedelta(minutes=5)), ''
 
 
-def plan(project_id, row, cve, subject, checks, template, provider=None, observations=None):
-    """Return (decision, provider). Failure cannot authorize generic checks by default."""
+def plan(project_id, row, cve, subject, checks, template, provider=None, observations=None, host=None):
+    """Return (decision, provider). Failure cannot authorize generic checks by default. ``host`` is the host's metadata
+    (cveFeed.host_context.host_context), given to the model as untrusted data. Version and identity probes need no relevance decision:
+    they are the way to learn the missing fact, so they are always part of the plan when the planner offers them."""
     can_generate = not template[0]
-    # An exact CVE template is relevant by construction; generic banners are not.
-    fallback = {'check_kinds': ['nuclei_template'] if any(c['kind'] == 'nuclei_template' for c in checks) else [],
+    probe_kinds = ['fact_probe'] if any(c['kind'] == 'fact_probe' for c in checks) else []
+    # An exact CVE template is relevant by construction; generic banners are not. A probe finds the fact itself.
+    fallback = {'check_kinds': (['nuclei_template'] if any(c['kind'] == 'nuclei_template' for c in checks) else []) + probe_kinds,
                 'generate_template': False,
                 'reason': 'No usable AI plan. Only a vetted CVE-specific template can run without an AI relevance decision.',
                 'source': 'policy_fallback'}
@@ -95,16 +102,19 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
         except Exception:
             provider = None
     if provider is None:
-        return {**fallback, 'reason': 'No AI provider is configured; generic external checks have no CVE-specific relevance decision.'}, None
+        return {**fallback, 'reason': 'No AI provider is configured; version and identity probes and a vetted CVE template run, other generic '
+                                      'checks have no CVE-specific relevance decision.'}, None
     observation_digest = hashlib.sha256(json.dumps(observations or [], sort_keys=True, default=str).encode()).hexdigest()[:12]
     signature = hashlib.sha256(f'validation-plan-v2:{project_id}:{row.signature}:{observation_digest}'.encode()).hexdigest()[:40]
     claim, why = _reserve(project_id, signature)
     if claim is None:
         return {**fallback, 'reason': why + '; generic external checks deferred.'}, provider
     try:
-        context = {'cve': templategen.cve_info_for(cve),
+        from cveFeed import detection
+        context = {'cve': {**templategen.cve_info_for(cve), 'guidance': detection.prompt_guidance(cve)},
                    'asset_evidence': {k: subject.get(k) for k in ('source', 'product', 'matched_version', 'range', 'port')},
                    'approved_checks': [{'kind': c['kind'], 'label': c['label']} for c in checks],
+                   'host_metadata': host,
                    'completed_observations': (observations or [])[:6],
                    'safe_template': bool(template[0]), 'template_unavailable_reason': template[1] if not template[0] else ''}
         # templategen's prompt cleaner treats CVE feed text as hostile input. The hostname and IP are excluded.
@@ -112,6 +122,9 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
         from reNgine.ai_providers import usage_stage
         with usage_stage('validation_plan'):
             decision = parse_plan(provider.complete(SYSTEM, untrusted_block('VALIDATION_CONTEXT', safe)), checks, can_generate)
+        if decision and probe_kinds and 'fact_probe' not in decision['check_kinds']:
+            decision['check_kinds'].append('fact_probe')  # an empty or narrow plan never ends a request while a probe can still find the fact
+            decision['reason'] = clean_text(decision['reason'] + ' (Version and identity probes still run to establish the missing fact.)', MAX_REASON)
         TriageCall.objects.filter(pk=claim.pk, status='running').update(
             status='succeeded' if decision else 'failed', finished_at=timezone.now())
         if decision:

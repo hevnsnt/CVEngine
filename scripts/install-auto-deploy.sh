@@ -23,7 +23,7 @@ interval=${CVENGINE_AUTO_DEPLOY_INTERVAL:-3min}
 [[ $interval =~ ^[0-9]+(s|min|h)$ ]] || { echo 'CVENGINE_AUTO_DEPLOY_INTERVAL must look like 90s, 3min or 1h.' >&2; exit 1; }
 
 echo 'Checking that this install can update cleanly...'
-"$root/scripts/update.sh" --check || { echo 'Fix the items above, then run this again.' >&2; exit 1; }
+env -u SUDO_UID "$root/scripts/update.sh" --check || { echo 'Fix the items above, then run this again.' >&2; exit 1; }
 
 chmod +x "$root/scripts/auto-deploy.sh"
 cat > "$unit.service" <<UNIT

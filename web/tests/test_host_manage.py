@@ -96,6 +96,7 @@ class Base(TestCase):
 
 class ProfileTests(Base):
 	def test_update_creates_then_changes_only_the_given_fields(self):
+		self.sub(self.a1, 'www.example.com')
 		out = hm.update_host_profile(self.ctx(self.admin), 'a1', 'WWW.Example.com', owner=' Ops team ', purpose='Marketing site', criticality='High')
 		self.assertEqual((out['host'], out['owner'], out['purpose'], out['criticality']), ('www.example.com', 'Ops team', 'Marketing site', 'high'))
 		out = hm.update_host_profile(self.ctx(self.admin), 'a1', 'www.example.com', criticality='critical')
@@ -353,6 +354,16 @@ class EnforcementTests(Base):
 		self.assertEqual(sorted(Subdomain.objects.filter(target_domain=d).values_list('name', flat=True)), ['ok.owned-a2.test'])
 		self.assertFalse(Port.objects.exists())
 
+	def test_a_discovery_batch_reads_its_scan_and_target_once_not_once_per_name(self):
+		from django.db import connection
+		from django.test.utils import CaptureQueriesContext
+		names = {f'n{i}.owned-a2.test' for i in range(6)}
+		with CaptureQueriesContext(connection) as queries:
+			persist_bbot_result(bbot_lib.BbotResult(subdomains=names, resolutions=set(), ports=set()), ctx=self.ctx_for('a2'))
+		self.assertEqual(Subdomain.objects.filter(target_domain=self.targets['a2']).count(), 6)
+		for table in ('startScan_scanhistory', 'targetApp_domain'):
+			self.assertLessEqual(sum(1 for q in queries.captured_queries if f'FROM "{table}"' in q['sql']), 2, table)  # not one per name
+
 	def test_new_hosts_pipeline_never_creates_it(self):
 		target = Domain.objects.create(name='hp.test', project=self.a1, insert_date=timezone.now())
 		HostExclusion.objects.create(org=self.org_a, host='gone.hp.test')
@@ -488,3 +499,106 @@ class RouteTests(Base):
 		self.assertEqual(HostExclusion.objects.get().host, HOST)
 		self.assertFalse(tool('list_exclusions', project='a1')[0])
 		self.assertFalse(tool('remove_exclusion', project='a1', host=HOST)[0])
+
+
+class MoveHostTests(Base):
+	"""Move host: the host becomes a target of the destination, its data leaves the source, and the source never brings it back."""
+
+	def test_the_host_becomes_a_target_of_the_destination_and_leaves_the_source(self):
+		from cveFeed.models import HostMove
+		self.populate(self.a1)
+		out = hm.move_host(self.ctx(self.admin), 'a1', HOST.upper(), 'a2')
+		self.assertEqual((out['host'], out['from_project'], out['to_project'], out['target_created']), (HOST, 'a1', 'a2', True))
+		self.assertTrue(Domain.objects.filter(project=self.a2, name=HOST).exists())
+		self.assertFalse(Subdomain.objects.filter(target_domain__project=self.a1, name=HOST).exists())
+		self.assertFalse(Vulnerability.objects.filter(target_domain__project=self.a1, name='Open admin', subdomain__name=HOST).exists())
+		self.assertTrue(Subdomain.objects.filter(target_domain__project=self.a1, name='notprovider.example').exists())  # lookalikes stay
+		self.assertEqual(HostMove.objects.get(project=self.a1).moved_to, self.a2)
+		self.assertTrue(AuditLog.objects.filter(action='host.move').exists())
+
+	def test_the_source_never_rediscovers_it_but_the_destination_and_the_org_still_scan_it(self):
+		self.populate(self.a1)
+		hm.move_host(self.ctx(self.admin), 'a1', HOST, 'a2')
+		self.assertTrue(is_excluded(self.a1.pk, HOST))
+		self.assertFalse(is_excluded(self.a2.pk, HOST))
+		self.assertFalse(is_excluded(self.a1.pk, 'www.provider.example'))  # exact name only
+		self.assertEqual(drop_excluded(self.a1.pk, [HOST, 'other.example']), ['other.example'])
+		self.assertEqual(save_subdomain(HOST, ctx={'scan_history_id': self.scans['a1'].id}), (None, False))  # a scan of the old target skips it
+
+	def test_moving_it_back_lifts_the_block(self):
+		from cveFeed.models import HostMove
+		self.populate(self.a1)
+		hm.move_host(self.ctx(self.admin), 'a1', HOST, 'a2')
+		hm.move_host(self.ctx(self.admin), 'a2', HOST, 'a1')
+		self.assertFalse(is_excluded(self.a1.pk, HOST))
+		self.assertTrue(is_excluded(self.a2.pk, HOST))
+		self.assertEqual(list(HostMove.objects.values_list('project__slug', flat=True)), ['a2'])
+		self.assertTrue(Domain.objects.filter(project=self.a1, name=HOST).exists())
+
+	def test_a_host_that_is_also_its_own_target_moves_within_the_org(self):
+		now = timezone.now()
+		Domain.objects.create(name=HOST, project=self.a1, insert_date=now)
+		out = hm.move_host(self.ctx(self.admin), 'a1', HOST, 'a2')
+		self.assertTrue(out['target_created'])
+		self.assertEqual(list(Domain.objects.filter(name=HOST).values_list('project__slug', flat=True)), ['a2'])
+
+	def test_a_target_of_that_name_elsewhere_in_the_org_or_with_other_hosts_is_refused_before_anything_is_deleted(self):
+		now = timezone.now()
+		self.populate(self.a1)
+		self.targets['a1'].name = HOST  # the host's own target, holding other hosts too
+		self.targets['a1'].save()
+		with self.assertRaises(ApiError) as e:
+			hm.move_host(self.ctx(self.admin), 'a1', HOST, 'a2')
+		self.assertEqual(e.exception.status, 409)
+		self.assertTrue(Subdomain.objects.filter(target_domain__project=self.a1, name=HOST).exists())
+		a3 = Project.objects.create(name='A3', slug='a3', insert_date=now, org=self.org_a)
+		self.sub(self.a1, 'solo.example')
+		Domain.objects.create(name='solo.example', project=a3, insert_date=now)  # a third project of the org holds that target name
+		with self.assertRaises(ApiError) as e:
+			hm.move_host(self.ctx(self.admin), 'a1', 'solo.example', 'a2')
+		self.assertEqual(e.exception.status, 409)
+		self.assertTrue(Subdomain.objects.filter(target_domain__project=self.a1, name='solo.example').exists())
+		OrgMembership.objects.create(user=self.admin, org=self.org_b, role='user')
+		self.assertTrue(hm.move_host(self.ctx(self.admin), 'a1', 'solo.example', 'b1')['target_created'])  # another org: no conflict
+
+	def test_it_can_move_to_another_org_the_caller_writes_to(self):
+		OrgMembership.objects.create(user=self.admin, org=self.org_b, role='user')
+		self.populate(self.a1)
+		out = hm.move_host(self.ctx(self.admin), 'a1', HOST, 'b1')
+		self.assertEqual((out['to_project'], out['to_org_name']), ('b1', 'B'))
+		self.assertTrue(Domain.objects.filter(project=self.b1, name=HOST).exists())
+
+	def test_it_needs_write_access_to_both_projects(self):
+		self.populate(self.a1)
+		for user, to in ((self.proj_user, 'a2'), (self.auditor, 'a2'), (self.admin, 'b1'), (self.outsider, 'a2')):
+			with self.assertRaises(ApiError, msg=(user.username, to)) as e:
+				hm.move_host(self.ctx(user), 'a1', HOST, to)
+			self.assertIn(e.exception.status, (403, 404))
+		self.assertTrue(Subdomain.objects.filter(target_domain__project=self.a1, name=HOST).exists())  # nothing moved
+
+	def test_refusals(self):
+		self.populate(self.a1)
+		for host, to, status in ((HOST, 'a1', 400), (HOST, '', 400), ('missing.example', 'a2', 404), ('*.provider.example', 'a2', 400)):
+			with self.assertRaises(ApiError, msg=(host, to)) as e:
+				hm.move_host(self.ctx(self.admin), 'a1', host, to)
+			self.assertEqual(e.exception.status, status)
+
+	def test_a_host_the_destination_org_excluded_is_refused_and_left_where_it_is(self):
+		OrgMembership.objects.create(user=self.admin, org=self.org_b, role='user')
+		HostExclusion.objects.create(org=self.org_b, host=HOST)
+		self.populate(self.a1)
+		with self.assertRaises(ApiError) as e:
+			hm.move_host(self.ctx(self.admin), 'a1', HOST, 'b1')
+		self.assertEqual(e.exception.status, 409)
+		self.assertTrue(Subdomain.objects.filter(target_domain__project=self.a1, name=HOST).exists())
+
+	def test_over_rest(self):
+		token = create_token(self.admin, 'mover')[1]
+		self.populate(self.a1)
+		status, out = call(token, 'POST', f'/api/v1/projects/a1/hosts/{HOST}/move', {'to_project': 'a2'})
+		self.assertEqual(status, 200, out)
+		self.assertEqual(out['to_project'], 'a2')
+
+	def test_the_project_list_names_each_projects_organization(self):
+		rows = {p['slug']: p for p in svc.list_projects(self.ctx(self.admin))['results']}
+		self.assertEqual((rows['a2']['org'], rows['a2']['org_name']), ('oa', 'A'))

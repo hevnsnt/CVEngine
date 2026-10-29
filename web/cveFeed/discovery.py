@@ -6,6 +6,7 @@ worker, and every few seconds the batch it has seen is persisted as Subdomain,
 IP and Port rows plus DiscoveryEvent rows, which the dashboard polls to draw the
 discovery graph and the live feed while it happens.
 """
+import functools
 import logging
 import os
 import shutil
@@ -36,17 +37,32 @@ def discovery_timeout():
 
 QUEUED, RUNNING, FAILED, SUCCESS, ABORTED = -1, 1, 0, 2, 3
 
+# The ScanActivity ``name`` values that mean "nuclei ran against this host's scan": the current light and AI-targeted
+# passes (see ``run_light_nuclei``/``run_targeted_nuclei`` below), plus the retired single-stage name kept so an old
+# scan's history still counts. Every "has this host been nuclei'd at all" query across the app (heat, the graph
+# overview, the host list page, the live graph) reads this one tuple, so a stage rename never again drops silently out
+# of only some of them - which is exactly how it drifted the first time (the light pass's own stage name was missing
+# from every one of these for a release, undercounting "unscanned" hosts that had, in fact, had a light pass run).
+NUCLEI_SCAN_ACTIVITY_NAMES = ('nuclei_scan', 'nuclei_light_scan', 'nuclei_targeted_scan')
+
+
+RECOMMENDED_ENGINE = 'CVEngine Recommended'
+
 
 def pick_engine():
+    """The ScanHistory.scan_type row a new scan is filed under. It is only a label: every scan runs the fixed pipeline below, and nothing
+    reads an engine's YAML (the editable engines were inherited from reNgine and never did anything). All the inherited engines are flagged
+    default, so "the first default" used to file every scan under "Full Scan", one-second host retests included; the recommended one is
+    taken by name and the order of the rest is fixed."""
     from scanEngine.models import EngineType
-    return EngineType.objects.filter(default_engine=True).first() or EngineType.objects.order_by('id').first()
+    return (EngineType.objects.filter(engine_name=RECOMMENDED_ENGINE).order_by('id').first()
+            or EngineType.objects.filter(default_engine=True).order_by('id').first() or EngineType.objects.order_by('id').first())
 
 
 FALLBACK = {'deep': ['deep', 'standard', 'passive'], 'standard': ['standard', 'passive']}  # modes tried when memory runs out
 HOST_PIPELINE_TASK = 'host_pipeline'  # marks a ScanHistory made by run_host_pipeline (in ScanHistory.tasks)
 RETEST_TASK = 'retest'  # also on a host pipeline started because its hosts changed (cveFeed.retest)
 MAX_PIPELINE_HOSTS = 200
-RUNNING_WINDOW_SECONDS = 11 * 3600  # a scan marked running for longer than this is a casualty of a restart (see views.RUNNING_WINDOW)
 DUPLICATE_WINDOW = 10 * 60  # seconds; the domain lock below is what really serialises long runs
 
 
@@ -67,10 +83,14 @@ def running_discovery(domain):
     return ScanHistory.objects.filter(_active_filter(), domain=domain).order_by('-id').first()
 
 
-def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False):
+def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_by=None):
     """Queue the streaming bbot task for each domain, in the order given, with rows created in bulk. Returns one ScanHistory
     per domain; a domain that is already being discovered returns that scan instead of a second, since two runs of one target
-    only compete for memory. Scans are created queued (-1); the pipeline marks one running when a worker starts it."""
+    only compete for memory. Scans are created queued (-1); the pipeline marks one running when a worker starts it.
+
+    ``initiated_by`` records who asked for this scan (a person behind an API/MCP call); leave it unset for a scan the
+    system itself started (the setup wizard, the work conductor, a scheduled sweep) - ``ScanHistory.initiated_by`` stays
+    null, the same as it already does for every automatic scan."""
     from cveFeed.tasks import run_bbot_discovery
     from startScan.models import ScanActivity, ScanHistory
     domains = list(domains)
@@ -88,7 +108,8 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False):
         for start in range(0, len(fresh), 500):
             part = fresh[start:start + 500]
             scans = ScanHistory.objects.bulk_create([
-                ScanHistory(domain=d, scan_type=engine, start_scan_date=now, scan_status=QUEUED, results_dir='/usr/src/scan_results')
+                ScanHistory(domain=d, scan_type=engine, start_scan_date=now, scan_status=QUEUED, results_dir='/usr/src/scan_results',
+                           initiated_by=initiated_by)
                 for d in part])
             ScanActivity.objects.bulk_create([
                 ScanActivity(scan_of=scan, title='BBOT discovery', name='bbot_discovery', time=now, status=QUEUED) for scan in scans])
@@ -106,9 +127,9 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False):
     return [created.get(d.id) or active[d.id] for d in domains]
 
 
-def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False):
+def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_by=None):
     """Queue discovery of one domain (see ``start_discoveries``). Returns the ScanHistory."""
-    return start_discoveries([domain], mode, quiet)[0]
+    return start_discoveries([domain], mode, quiet, initiated_by=initiated_by)[0]
 
 
 def queued_ids():
@@ -193,6 +214,23 @@ def persist_screenshots(scan, screenshots, bbot_scan_name):
         subdomain.save(update_fields=['screenshot_path', 'screenshot_hash'])
 
 
+def _report_key_problems(problems, extra_args, scan):
+    """One activity line per service whose key bbot rejected (or never received). bbot skips such a module and carries on, so without
+    this a stored key that is wrong looks like a service that found nothing."""
+    from cveFeed import activity
+    from cveFeed.api_credentials import service_for_module
+    configured = {a.split('=', 1)[0].split('.')[1] for prev, a in zip(extra_args, extra_args[1:])
+                  if prev == '-c' and a.startswith('modules.') and '=' in a}
+    said = set()
+    for module, reason in problems:
+        service = service_for_module(module)
+        if module not in configured or not service or service[0] in said:
+            continue
+        said.add(service[0])
+        activity.log('discovery', f'{service[1]}: the key was not accepted ({reason[:120]}); {module} did not run on {scan.domain.name}',
+                     project=scan.domain.project_id, status='failed', scan_id=scan.id)
+
+
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
     """Body of the celery task; ``stream`` is injectable so tests need no bbot binary."""
     from cveFeed.api_credentials import bbot_config_args
@@ -217,17 +255,21 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     # lighter: deep as standard, standard as passive. What the heavier run already found is kept.
     modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
+    problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
-        from targetApp.target_types import resolves_to_blocked
-        if resolves_to_blocked(scan.domain.name):
+        from targetApp.target_types import resolves_to_blocked, sentinel_only_target
+        if sentinel_only_target(scan.domain.name, scan.domain.project_id):
+            raise ValueError(f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
+                             'never this server')
+        if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
             raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
                              'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
         for attempt, run_mode in enumerate(modes):
             try:
                 for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,
-                               strict_scope=strict_scope):
+                               strict_scope=strict_scope, problems=problems):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
                     seen = bbot_lib.parse_event(event, batch, hosts)
@@ -249,6 +291,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                     continue
                 raise
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
+        _report_key_problems(problems, extra_args, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
@@ -296,6 +339,16 @@ def run_pipeline(scan_id, *args, **kwargs):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     if scan.scan_status == 3:  # aborted while it waited in the queue
         return {'scan_id': scan_id, 'status': 'aborted'}
+    if scan.scan_status in (FAILED, SUCCESS):  # a second message for a scan that already ended (the reaper may send one again) runs nothing
+        return {'scan_id': scan_id, 'status': 'finished'}
+    from targetApp.target_types import sentinel_only_target
+    if sentinel_only_target(scan.domain.name, scan.domain.project_id):  # nothing at all runs from this server against a Sentinel-only address
+        message = (f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
+                   'never this server')
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(status=FAILED, time=timezone.now(), error_message=message[:290])
+        activity.log('discovery', f'Refused discovery of {scan.domain.name}: Sentinel-only target', project=scan.domain.project_id, scan_id=scan_id)
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     with domain_lock(scan.domain_id, scan_id) as holder:
         if holder is True:
             from reNgine import resources
@@ -327,10 +380,10 @@ def ptr_names(ip, timeout=IP_LOOKUP_TIMEOUT):
         pool.shutdown(wait=False)
 
 
-def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT):
+def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT, project=None):
     """The hostnames on the certificate ``ip`` serves on 443: the subject name and the subject alternative names."""
     from cveFeed import hygiene
-    info = hygiene._fetch_cert(ip, 443, timeout=timeout)
+    info = hygiene._fetch_cert(ip, 443, timeout=timeout, project=project)
     if not info:
         return []
     names = [info.get('subject') or ''] + list(info.get('sans') or [])
@@ -354,7 +407,7 @@ def discover_ip(scan, ptr=None, certificate=None):
     try:
         persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
                             ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
-        for module, lookup in (('ptr', ptr or ptr_names), ('tls-san', certificate or tls_names)):
+        for module, lookup in (('ptr', ptr or ptr_names), ('tls-san', certificate or functools.partial(tls_names, project=domain.project_id))):
             try:
                 found[module] = [n for n in lookup(ip) if n and n != ip]
             except Exception:  # noqa: BLE001 - a dead port or a refused connection is the normal case
@@ -476,6 +529,12 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         message = f'{scan.domain.name} is excluded for this organization and is not scanned'
         ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
+    from cveFeed.bounty_gate import Gate
+    why = Gate().refusal(scan.domain.project_id, scan.domain.name, unattended=scan.initiated_by_id is None)  # a bug bounty program: confirmed automated testing (unless a person started this) and a target its scope names
+    if why:
+        message = f'{scan.domain.name} is not scanned: {why}'
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from targetApp.target_types import IP, classify_target
     covered = None
     if classify_target(scan.domain.name) == IP:  # bbot finds subdomains; a bare IP has none
@@ -501,7 +560,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None):
+                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -538,7 +597,11 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                        fallback={'checked': 0, 'exposed': 0})
     if stopped(scan_id):
         return gone
-    light_kwargs = {'stream': light_stream} if light_stream else {}
+    # A test that injects its own light_stream is never second-guessed; otherwise a registered Sentinel gets first refusal
+    # at the stage (agentapi.sentinel_dispatch), and wrap_nuclei_stream returns the real stream_nuclei, unwrapped, when
+    # none is eligible, so a project with no Sentinels runs exactly as before this existed.
+    from agentapi import sentinel_dispatch
+    light_kwargs = {'stream': light_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_light')}
     if force:
         light_kwargs['force'] = True
     light_result = _stage(scan, 'Nuclei HTTP and technology pass', 'nuclei_light_scan',
@@ -564,16 +627,25 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                           fallback={'routes': 0})
     if stopped(scan_id):
         return gone
-    from cveFeed import wpscan_scan
+    from cveFeed import probes, wpscan_scan
+    probe_kwargs = {k: v for k, v in (('get', probe_get), ('nmap_runner', probe_nmap)) if v}
+    if retest or force:
+        probe_kwargs['force'] = True
+    probe_result = _stage(scan, 'Version and identity probes', 'version_probes', lambda: probes.run_for_scan(scan_id, **probe_kwargs),
+                          fallback={'hosts': 0})  # finds the version of what the stages above saw without one, before correlation reads it
+    if stopped(scan_id):
+        return gone
+    from cveFeed import subdir_apps
+    subdir_apps.carry_forward(scan)  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
+    if probe_get:
+        wp_kwargs['probe_get'] = probe_get
     if retest or force:
         wp_kwargs['force'] = True
-    wpscan_result = None
-    if (wpscan_runner or wpscan_scan.installed()) and wpscan_scan.wordpress_sites(scan):  # only for sites already fingerprinted as WordPress
-        wpscan_result = _stage(scan, 'WPScan (WordPress sites)', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
-                               fallback={'sites': 0})
-        if stopped(scan_id):
-            return gone
+    wpscan_result = _stage(scan, 'WordPress detection and WPScan', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
+                           fallback={'sites': 0})  # every host with any sign of WordPress, and the names grouped with it
+    if stopped(scan_id):
+        return gone
     from cveFeed import node2shell_scan
     n2s_kwargs = {'checker': node2shell_checker} if node2shell_checker else {}
     if retest or force:
@@ -585,12 +657,19 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         if stopped(scan_id):
             return gone
     from cveFeed.tasks import correlate_cves, run_hygiene_task
-    correlation = _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id),
+    def correlate():
+        result = correlate_cves(scan_history_id=scan.id)
+        from cveFeed import testssl_scan
+        testssl_scan.carry_forward(scan)  # the TLS vulnerabilities the background audit proved are evidence on this scan's host rows too
+        return result
+    correlation = _stage(scan, 'CVE correlation', 'cve_correlation', correlate,
                          fallback={'subdomains': 0, 'matches': 0})  # run inline: the AI-targeted pass needs the matches
     if stopped(scan_id):
         return gone
+    from cveFeed import openvas_scan
+    openvas_scan.carry_forward(scan)  # the optional OpenVAS add-on's findings are evidence on this scan's host rows too (a no-op while it is off)
 
-    targeted_kwargs = {'stream': targeted_stream} if targeted_stream else {}
+    targeted_kwargs = {'stream': targeted_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_targeted')}
     if force:
         targeted_kwargs['force'] = True
     targeted_result = _stage(scan, 'AI-targeted nuclei scan', 'nuclei_targeted_scan',
@@ -635,8 +714,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['hygiene'] = hygiene_result
     if waf_result is not None:
         result['wafw00f'] = waf_result
-    if wpscan_result is not None:
-        result['wpscan'] = wpscan_result
+    result['version_probes'] = probe_result
+    result['wpscan'] = wpscan_result
     if node2shell_result is not None:
         result['node2shell'] = node2shell_result
     if rdp_result is not None:
@@ -676,13 +755,15 @@ def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20):
 
 
 def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, retest=False, source_scan_id=None,
-                      force=False, hygiene=False, assessment_id=None, **stage_kwargs):
+                      force=False, hygiene=False, assessment_id=None, by_person=False, **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages
     a discovery ends with: resolve and record them, then nmap, the database exposure check, the light nuclei pass, CVE
     correlation and the targeted nuclei pass. The ledger still dedupes each scanner per asset, so a host or IP covered
     recently is not scanned again. A ScanHistory carries the run (queued, then running) so it shows in Scans and can be
     stopped; the stop flag is honoured between stages. ``retest`` marks a run started because these hosts changed (see
-    cveFeed.retest): its CVE checks ignore the ledger. Returns the stage results."""
+    cveFeed.retest): its CVE checks ignore the ledger. ``by_person`` marks a run a person asked for: any other run does nothing for a bug
+    bounty project whose owner has not confirmed automated testing, and no run scans a host the program's scope does not name
+    (cveFeed.bounty_gate). Returns the stage results."""
     from cveFeed import activity
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity, ScanHistory
@@ -695,6 +776,11 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     from cveFeed.archive_rediscovery import archived_names
     archived = archived_names(domain.project_id)
     wanted = [n for n in wanted if n not in archived]
+    from cveFeed.bounty_gate import Gate
+    gate = Gate()
+    if not by_person and gate.project_blocked(domain.project_id):
+        return {'status': 'inconclusive', 'hosts': 0, 'error': 'the bug bounty engagement has not confirmed automated testing; nothing was scanned'}
+    wanted = [n for n in wanted if gate.allows(domain.project_id, n, unattended=False)]  # a host the program's scope does not name is never scanned
     if not wanted:
         return {'status': 'empty', 'hosts': 0}
     engine = pick_engine()
@@ -726,7 +812,7 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
             pairs = resolver(wanted)
             if force:
                 from targetApp.target_types import is_scannable_ip
-                pairs = {(name, address) for name, address in pairs if is_scannable_ip(address)}
+                pairs = {(name, address) for name, address in pairs if is_scannable_ip(address, project=domain.project_id if name == address else None)}
             persist_bbot_result(bbot_lib.BbotResult(subdomains=set(wanted), resolutions=pairs),
                                 ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
             ScanActivity.objects.filter(pk=step.pk).update(status=SUCCESS, time=timezone.now())

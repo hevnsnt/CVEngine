@@ -14,7 +14,6 @@ const GO_LETTERS = {
   Hygiene: "y",
   Targets: "t",
   Scans: "s",
-  "API keys": "k",
   "Bug bounty": "b",
 };
 const OPEN_DELAY_MS = 220; // moving with j/k opens the row after a pause, so holding a key does not fetch every row it passes
@@ -103,8 +102,8 @@ const SHEET = [
     "On a host or finding",
     () => [
       [
-        "1 to 6",
-        "Switch tab: Overview, Services, Web, Findings, History, Manage",
+        "1 to 7",
+        "Switch tab: Overview, Services, Web, Findings, Inventory, History, Manage",
       ],
       ["y", "Copy the name (the link, on a finding)"],
       ["Y", "Copy the link"],
@@ -222,7 +221,7 @@ document.addEventListener("keydown", (e) => {
       break;
     }
     default:
-      if (/^[1-6]$/.test(e.key)) {
+      if (/^[1-7]$/.test(e.key)) {
         const tab = $$(".host-tabs [role=tab]")[Number(e.key) - 1];
         if (tab) {
           e.preventDefault();

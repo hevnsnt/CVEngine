@@ -1,6 +1,6 @@
 # Deployment
 
-cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
+cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). Two optional parts ship in the same file as Compose profiles and are **off by default**: a `tailscale` service ([TAILSCALE.md](TAILSCALE.md)) and the OpenVAS add-on, 15 Greenbone containers on a network of their own ([OPENVAS.md](OPENVAS.md)). Until you switch one on, none of its containers exist, run, publish a port or use memory. Sentinels, the scanner agents you run on other machines, are not part of this stack: each runs from its own repository and calls this server over HTTPS on 443. The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
 
 ## Ports
 
@@ -11,7 +11,7 @@ cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `cele
 | 8000 | `127.0.0.1` | `web`, for your own reverse proxy |
 | 5432 | `127.0.0.1` | `db` |
 
-Firewall 443 and 8082 to the people who need them. The development stack publishes 8000 and 5432 on `127.0.0.1` only.
+Firewall 443 and 8082 to the people who need them. The development stack has no proxy and publishes 8000 and 5432 on `127.0.0.1` only. The optional `tailscale` and `openvas` profiles publish no ports at all.
 
 ## Install
 
@@ -41,7 +41,7 @@ To choose the password yourself instead, put it in `DJANGO_SUPERUSER_PASSWORD` i
 
 ## Linux, Mac, and Windows
 
-`install.sh` asks nothing. It checks that this is Linux, that it is root (it re-runs itself through `sudo`), the architecture, memory (it warns below about 3.5 GB), free disk on the checkout's filesystem (it warns below about 14 GiB), that ports 443 and 8082 are free (it stops if not), and whether Docker's registry and GitHub answer (it only warns). On Debian and Ubuntu it installs curl, make, python3, git, openssl, and the Compose plugin with `apt`. Docker comes from `get.docker.com` on any distribution that script supports. On other Linux it stops at the first missing one of those tools and names it, so install them and run it again, or follow the README steps. It needs Compose 2.24 or newer but does not check the version. When a step fails it prints the last 25 log lines of `web`, `proxy`, and `db`. It also installs the update watcher into root's crontab, so the Approve button works straight away (it only warns when `crontab` is missing, and skips it when automatic deployment is installed).
+`install.sh` asks nothing. It checks that this is Linux, that it is root (it re-runs itself through `sudo`), the architecture, memory (it warns below about 3.5 GB), free disk on the checkout's filesystem (it warns below about 14 GiB), that ports 443 and 8082 are free (it stops if not), and whether Docker's registry and GitHub answer (it only warns). On Debian and Ubuntu it installs curl, make, python3, git, openssl, and the Compose plugin with `apt`. Docker comes from `get.docker.com` on any distribution that script supports. On other Linux it stops at the first missing one of those tools and names it, so install them and run it again, or follow the README steps. It needs Compose 2.24 or newer and stops, naming the requirement, when the installed one is older. When a step fails it prints the last 25 log lines of `web`, `proxy`, and `db`. It also installs the update watcher into root's crontab, so the Approve button works straight away (it only warns when `crontab` is missing, and skips it when automatic deployment is installed).
 
 Running it again keeps `.env`, the certificate (unless the address changed), and your data, then rebuilds and restarts from the code in your checkout. It does not fetch new code or wait for scans ([UPDATES.md](UPDATES.md)). `make admin` then says the account already exists and changes nothing.
 
@@ -61,9 +61,15 @@ Give Docker Desktop at least the memory recommended above.
 
 ## HTTPS
 
-`make certs` creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. `install.sh` runs it only when the certificate is missing or does not match the address. Run it before `make up`, and again after changing `DOMAIN_NAME`. The built-in proxy serves HTTPS (TLS 1.2 and 1.3, HTTP/2) on 443 and redirects plain HTTP on 8082 to it. It accepts request bodies up to 4 MB. Browsers warn until you trust `secrets/certs/ca.crt`, which you copy from the server.
+`make certs` creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. `install.sh` runs it only when the certificate is missing or does not match the address. Run it before `make up`, and again after changing `DOMAIN_NAME` or `CERT_EXTRA_SANS`. It is safe to run again at any time: it issues a certificate only when one is needed (none yet, the names changed, fewer than 30 days left, or an older 10-year one), and `CERT_FORCE=1 make certs` issues one regardless. The built-in proxy serves HTTPS (TLS 1.2 and 1.3, HTTP/2) on 443 and redirects plain HTTP on 8082 to it. It accepts request bodies up to 4 MB. Browsers warn until you trust `secrets/certs/ca.crt`, which you copy from the server.
 
-The files in `secrets/certs/` are `ca.crt`, `ca.key`, `ca.srl`, `rengine.pem`, `rengine_chain.pem`, and `rengine_rsa.key`. Both certificates use RSA 4096 and are valid for 3,650 days. A new authority's key is encrypted with `AUTHORITY_PASSWORD`. Every `make certs` issues a fresh server key and reuses the authority, so browsers that trust `ca.crt` keep trusting it. An authority made by an older version keeps an unencrypted key until you delete `ca.key` and `ca.crt` and run `make certs` again, after which browsers need the new `ca.crt`.
+The files in `secrets/certs/` are `ca.crt`, `ca.key`, `ca.srl`, `rengine.pem`, `rengine_chain.pem`, and `rengine_rsa.key`. Both certificates use RSA 4096. The authority is valid for 3,650 days; the server certificate for **397 days** (browsers refuse a longer one). A new authority's key is encrypted with `AUTHORITY_PASSWORD`. A new server certificate reuses the server key, the authority and the names, so browsers that trust `ca.crt` keep trusting it and nothing has to be copied again. An authority made by an older version keeps an unencrypted key until you delete `ca.key` and `ca.crt` and run `make certs` again, after which browsers need the new `ca.crt`.
+
+**Renewal is automatic.** `scripts/renew-certs.sh` runs the same certs service twice a day and issues a new certificate when fewer than 30 days remain, so there is no expiry day and no browser warning window. It is started by the update watcher (`scripts/install-updater.sh`, which `install.sh` sets up: a cron entry that runs every minute, and the script does nothing until its next check is due), by the automatic-deployment timer, and just before an update recreates the proxy, so any of them is enough. A new certificate is written over the old files in place, and the proxy is told to reload (`nginx -s reload`: no restart, no dropped connection; if the reload fails it recreates the proxy once). The authority and its password are never touched. A certificate someone else issued (Let's Encrypt, a Cloudflare origin certificate, see [HOSTING-ONLINE.md](HOSTING-ONLINE.md)) is never replaced by this: it is reported as not renewed here, and renewing it stays with its issuer.
+
+An install made before this release holds a 10-year server certificate: it is replaced once, by the first check after the update (same key, same authority, same names), with 397 days. The first check runs within minutes of the watcher's next cron tick.
+
+**Seeing it.** **Settings > Updates** shows how many days the certificate has left and turns into a warning when a renewal failed, fewer than 30 days remain, it has expired, or no check has run for days. `get_system_status` (`GET system/status`, App Admin) reports the same under `system.certificate` (`not_after`, `days_left`, `state`, when it was last checked and renewed, the last error) and adds a line to `problems` when something needs attention. Nothing is shown on an install that does not report (no cron and no update): run `scripts/renew-certs.sh` yourself to check and publish once. The script's log is `cert.log` in `.git/cvengine-update` (and `.git/cvengine-auto-deploy` for the timer). `CVENGINE_CERT_CHECK_SECONDS` (default 43200) and `CVENGINE_CERT_RETRY_SECONDS` (default 3600, the wait after a failure) change the schedule.
 
 For a public site with a browser-trusted certificate (Let's Encrypt, Cloudflare), follow [HOSTING-ONLINE.md](HOSTING-ONLINE.md).
 
@@ -75,15 +81,16 @@ Django sends an HSTS header with a one-hour lifetime by default and does not inc
 
 ## AI models
 
-cvENGINE runs no model itself. In **Settings, AI model**, choose Anthropic, OpenAI, OpenRouter, [Ollama](https://github.com/ollama/ollama), or [vLLM](https://github.com/vllm-project/vllm). For Ollama and vLLM enter your server's **Base URL**, press **Load models**, choose one, tick **Use this model to confirm CVE matches**, and **Save**.
+cvENGINE runs no model itself. In **Settings, AI model**, choose Anthropic, OpenAI, OpenRouter, [Ollama](https://github.com/ollama/ollama), [vLLM](https://github.com/vllm-project/vllm), or [LM Studio](https://lmstudio.ai). For Ollama, vLLM and LM Studio enter your server's **Base URL**, press **Load models**, choose one, tick **Use this model to confirm CVE matches**, and **Save**.
 
 - **A remote machine**, the usual case on a VPS: use any address the server can reach, such as a Tailscale `100.x` address (`http://100.64.0.5:11434`). MagicDNS names do not resolve inside containers. Keep the port on your tailnet or behind a firewall, since Ollama has no authentication.
 - **The same machine**: enter `http://localhost:11434`. cvENGINE maps `localhost`, `127.0.0.1`, and `::1` to the Docker host. Ollama must then listen beyond 127.0.0.1 (for example `OLLAMA_HOST=0.0.0.0`) while staying firewalled.
 - **vLLM** works the same way with its `/v1` URL, such as `http://100.64.0.5:8000/v1`. An API key is optional.
+- **LM Studio** serves an OpenAI-compatible API on port 1234: use `http://100.64.0.5:1234/v1` (or `http://localhost:1234/v1` on the same machine). Start the server in LM Studio's Developer tab, or headless with `lms server start` (or the `llmster` daemon). LM Studio listens on localhost only until you switch on serving on the local network in its server settings, and a server reached over a tailnet or network should have authentication on: LM Studio 0.4 and later can require an API token (Server Settings, Manage Tokens), which you enter here as the **API key**. Leave the key blank when authentication is off. With just-in-time loading on (the default), **Load models** lists every model you have downloaded, embedding models excluded, and the first request for a model loads it, which can take a minute or more for a large one (cvENGINE waits up to five minutes). With it off, only models you have already loaded are listed. Screenshot reading needs a vision model.
 
 ## Backups
 
-Back up the database, `.env` and the secret file, but keep the keys apart from the dump. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
+Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
 
 ```bash
 docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > cvengine-$(date +%F).sql.gz
@@ -96,7 +103,27 @@ To restore, put the original `.env` (with `CVENGINE_FIELD_KEY`) and `web/secret`
 gunzip -c cvengine-2026-01-01.sql.gz | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
 ```
 
-Automatic deployment takes its own backup before every update ([UPDATES.md](UPDATES.md#automatic-deployment)).
+Every updater takes a database dump just before it migrates (`scripts/update.sh` and the in-app updater keep the last 3 in `.git/cvengine-update/backups`, mode 0700, and stop the update when a dump fails; `CVENGINE_UPDATE_BACKUPS=0` in `.env` turns that off; automatic deployment makes its own in `.git/cvengine-auto-deploy/backups`, [UPDATES.md](UPDATES.md#automatic-deployment)). These dumps stay on the same disk as the database: copy them elsewhere if the disk is what you are protecting against.
+
+## Make targets
+
+`make help` lists them. They all use `docker-compose.yml` alone, and the ones that name services (`stop`, `restart`, `rm`, `logs`, `images`, `build`, `up`) act on the six core services only.
+
+| Target | What it does |
+| --- | --- |
+| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the six core services. |
+| `make build` | Records the installed commit and builds the images. |
+| `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
+| `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one. |
+| `make username`, `make changepassword` | Create an admin account of your own choosing, or change a user's password. |
+| `make migrate` | Applies migrations. |
+| `make down`, `make stop`, `make restart`, `make rm` | Take the stack down, stop, restart or remove its containers. Volumes stay. |
+| `make logs`, `make images` | Follow the logs (last 1000 lines), or show the images. |
+| `make test` | Runs the test suite in the running `celery` container. |
+| `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
+| `make openvas-up`, `make openvas-user`, `make openvas-down` | Start the optional OpenVAS add-on, save its generated login, stop it. The app does the same from Administration, OpenVAS ([OPENVAS.md](OPENVAS.md)). |
+| `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
+| `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
 ## Development stack
 
@@ -114,11 +141,11 @@ docker compose -f docker-compose.dev.yml exec web python3 manage.py createsuperu
 
 ## Updating
 
-Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans. See [UPDATES.md](UPDATES.md). `make up` always uses `docker-compose.yml` alone, so on an install with its own overlay use `scripts/update.sh` or `docker compose` with your files instead. Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md).
+Three options, all of which keep the database and broker running: automatic deployment, approval in the app, or `scripts/update.sh` by hand. Manual updates wait for active tasks (or stop scans with `--stop-scans`), automatic deployment stops and requeues scans, and an approved update waits for running scans for 5 minutes by default and then interrupts what is left. The optional `tailscale` and `openvas` services are neither started nor stopped by an update. See [UPDATES.md](UPDATES.md). `make up` always uses `docker-compose.yml` alone, so on an install with its own overlay use `scripts/update.sh` or `docker compose` with your files instead. Moving an older install across the PostgreSQL 18 change is covered in [UPGRADE.md](UPGRADE.md). Every start of the worker container adds the built-in engine rows, keywords and tool rows the install does not have yet and never overwrites one that is there (the engine rows are kept only so that existing agents keep working: no scan reads them).
 
 ## Factory reset
 
-**Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It recreates a "Default" organization and project, ends every other session (yours stays), and records one `system.factory_reset` audit row after clearing the log. Five wrong passwords lock the button for 10 minutes. It removes every organization, project, target, host, scan, result file, other user, token, and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines, wordlists, and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
+**Settings, Factory reset** (superusers only) returns the instance to a fresh install and restarts the setup wizard. It recreates a "Default" organization and project, ends every other session (yours stays), and records one `system.factory_reset` audit row after clearing the log. Five wrong passwords lock the button for 10 minutes. It removes every organization, project, target, host, scan, result file, other user, token (so every Sentinel is removed with its token and has to be enrolled again), and setting, plus the CVE feed, the audit log, and scheduled scans. It keeps your own account, the scan engines, and installed tools. You must type `FACTORY RESET` and your password, and it refuses while scans are running unless you tick "reset anyway". It cannot be undone, so take a backup first.
 
 ## Uninstall
 

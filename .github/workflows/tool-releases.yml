@@ -1,6 +1,6 @@
 name: 🔭 Scanner tool releases
 
-# Weekly: compare the nmap, WPScan and nuclei versions this repository pins with their newest releases and keep one open issue
+# Weekly: compare the versions of every scanner tool this repository pins (nmap, WPScan, nuclei, naabu, bbot, wafw00f, Go, the Tailscale image) with their newest releases and keep one open issue
 # listing the ones that are behind. It changes nothing else.
 on:
   schedule:
@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Compare pinned versions with the newest releases
         id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}  # for api.github.com lookups: unauthenticated they are rate limited on shared runners
         run: |
           python3 scripts/check_tool_versions.py --json > "$RUNNER_TEMP/tools.json"
           python3 scripts/check_tool_versions.py | tee "$RUNNER_TEMP/tools.md"
@@ -30,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Scanner tools behind their newest release"
-          body="$(printf 'The weekly check found a pinned tool behind its newest release. Bump it in web/Dockerfile or the CI workflow, rebuild, and run the tests.\n\n'; cat "$RUNNER_TEMP/tools.md")"
+          body="$(printf 'The weekly check found a pinned tool behind its newest release. Bump it in web/Dockerfile, web/requirements.txt, docker-compose.yml or the CI workflow, rebuild, and run the tests. A pull request into master is blocked by the same check until this is done.\n\n'; cat "$RUNNER_TEMP/tools.md")"
           number=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number' || true)
           if [ -n "$number" ]; then
             gh issue edit "$number" --body "$body"

@@ -17,6 +17,7 @@
     </select>
   </div>
   <button class="btn ghost sm" id="graph-fit" type="button">Fit graph</button>
+  <button class="btn ghost sm" id="pods-toggle" type="button" aria-pressed="true" title="Fold each host's CVEs into its bubble. Double-click a host to open its pod.">Group CVEs</button>
   <button class="btn sm" id="graph-soc" type="button" aria-pressed="false" title="Full-screen wall display: the graph, live counts, and the scans running now">SOC mode</button>
 </div>
 <div class="card graph-card">
@@ -46,6 +47,7 @@
     <span><i style="border:2px solid var(--fire);background:color-mix(in srgb,var(--fire) 14%,transparent)"></i>vulnerable</span>
     <span><i style="border:2px solid var(--ok);background:var(--surface)"></i>scanned, clean</span>
     <span><i style="border:1.5px solid var(--graph-ip);background:transparent"></i>not scanned</span>
+    <span><i style="border:3px solid var(--brand);background:transparent;border-radius:50%"></i>being scanned now</span>
     <span><i style="background:var(--graph-ip)"></i>ip</span>
     <span><i style="background:var(--line-2)"></i>port</span>
     <span><i style="border:2px solid var(--graph-node-border);background:var(--graph-node-bg)"></i>project / registered domain (all domains)</span>
@@ -58,18 +60,24 @@
   import { mountGraph, showNodeDetails } from '/staticfiles/cve/graph.js';
   const box = document.getElementById('detail');
   const graph = mountGraph(document.getElementById('graph'), { onSelect: d => showNodeDetails(box, d) });
+  document.getElementById('pods-toggle').addEventListener('click', (e) => { const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', String(on)); graph.setPods(on); });
   showNodeDetails(box, null);
   const live = document.getElementById('live'), count = document.getElementById('count'),
     select = document.getElementById('domain');
   let last = null;
+  let version = '';  // the server answers 304 while the graph has not changed, so an idle page costs a few aggregate queries
+  let failures = 0;  // polls in a row that failed: the wait doubles, up to 16 times, while the server does not answer
   async function poll() {
     try {
       const key = select.value;
       const params = new URLSearchParams({project: document.body.dataset.slug || '_all'});
       if (key) params.set('domain', key);
+      if (key === last) params.set('v', version);
       const response = await fetch('/cve/api/graph?' + params, {credentials: 'same-origin'});
+      if (response.status === 304) { failures = 0; live.className = 'live'; return; }
       if (!response.ok) throw new Error(response.status);
       const data = await response.json();
+      version = data.version || '';
       const reset = key !== last;
       if (reset) {
         graph.clear();
@@ -83,13 +91,21 @@
       document.getElementById('soc-nodes').textContent = rendered.nodes;
       document.getElementById('soc-fire').textContent = hosts.filter((n) => n.heat === 'fire').length;
       document.getElementById('soc-smoke').textContent = hosts.filter((n) => n.heat === 'smoke').length;
+      failures = 0;
       live.className = 'live';
-    } catch (_) { live.className = 'live off'; }
+    } catch (_) { failures += 1; live.className = 'live off'; }
   }
-  select.addEventListener('change', () => { poll(); pollLive(); });
+  // A background tab does not poll: the loop stops while the page is hidden and visibilitychange starts it again.
+  let pollTimer = 0, polling = false;
+  async function pollLoop() {
+    if (document.hidden || polling) return;
+    polling = true;
+    try { await poll(); } finally { polling = false; pollTimer = setTimeout(pollLoop, 4000 * 2 ** Math.min(failures, 4)); }
+  }
+  select.addEventListener('change', () => { clearTimeout(pollTimer); pollLoop(); pollLive(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { clearTimeout(pollTimer); pollLoop(); pollLive(); } });
   document.getElementById('graph-fit').addEventListener('click', () => graph.fit());
-  poll();
-  setInterval(poll, 4000);
+  pollLoop();
 
   // Live scan highlighting: the domains and hosts a scan is working on right now pulse on the graph, in or out of SOC mode.
   const slug = document.body.dataset.slug || '_all';

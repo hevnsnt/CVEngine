@@ -52,6 +52,18 @@ class FindingDedupeTests(TestCase):
 		self._save(_line('d'), subdomain=other)
 		self.assertEqual(Vulnerability.objects.count(), 4)
 
+	def test_every_finding_that_cites_a_reference_is_linked_to_it_not_just_the_first(self):
+		from startScan.models import VulnerabilityReference
+		url = 'https://vendor.example.test/advisory/1'
+		first, _ = self._save({**_line('d'), 'info': {**_line('d')['info'], 'reference': [url]}})
+		other, _ = self._save({**_line('d', url='https://www.f.test/y'), 'info': {**_line('d')['info'], 'reference': [url]}})
+		self.assertEqual(VulnerabilityReference.objects.filter(url=url).count(), 1)
+		for vuln in (first, other):
+			self.assertEqual(list(vuln.references.values_list('url', flat=True)), [url])
+		VulnerabilityReference.objects.create(url=url)  # a duplicate row must not abort the save either
+		third, _ = self._save({**_line('d', url='https://www.f.test/z'), 'info': {**_line('d')['info'], 'reference': [url]}})
+		self.assertEqual(third.references.count(), 1)
+
 	def test_a_finding_seen_again_is_open_again_and_keeps_its_first_seen_date(self):
 		first, _ = self._save(_line('d'))
 		discovered = first.discovered_date

@@ -1,7 +1,11 @@
 """Checkpointed, scoped three-hour review of assessment coverage.
 
-The model sees only counts and persisted identifiers. It may choose one of four existing,
-policy-checked queue actions for each project; it cannot supply a host, command or scope.
+The model sees only counts and persisted identifiers. It may choose one of three existing,
+policy-checked queue actions for each project (triage, validate, discover); it cannot supply a
+host, command or scope. Topping up host-assessment coverage is deterministic, not a model judgment call, so it is handled
+by cveFeed.coverage_topup on its own short interval instead of being offered here; ``dispatch``'s
+``assess_host`` branch stays in place (it is still policy-checked, still no model-supplied target)
+only so a caller can ask for it directly, but ``project_facts`` never offers it to the model.
 """
 import json
 import logging
@@ -34,14 +38,22 @@ SYSTEM = (
 HOST_STAGES = ('nmap_scan', 'nuclei_light_scan', 'cve_correlation', 'nuclei_targeted_scan')
 
 
-def host_coverage_gap(project, at):
-    """Count every distinct inventory name missing a successful core stage; return one due stored row.
+def host_coverage_due(project, at, limit=1, need_count=True):
+    """Count every distinct current-inventory name missing a successful core stage; return up to ``limit`` due stored host
+    ids, ordered by id so every caller (the three-hour review, cveFeed.coverage_topup) walks the same deterministic
+    queue.
 
     A recent attempt or active scan is deferred, not falsely counted as covered. This query
     evaluates the full project population in the database, including scanless CT hosts.
+
+    ``need_count`` is on by default for the three-hour review's evidence, but a caller that only asks "is there
+    at least one" (cveFeed.coverage_topup's top-up and its full-port/UDP sweep gate) passes ``need_count=False`` to
+    skip the DISTINCT aggregate below: with it off, this is a single bounded ``LIMIT`` query.
     """
     from django.db.models import Exists, OuterRef
+    from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment, HostExclusion, HostState
+    from cveFeed.unresolved_archive import COUNTS_FOR
     from startScan.models import ScanActivity, Subdomain
 
     completed = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
@@ -56,11 +68,26 @@ def host_coverage_gap(project, at):
                                       scan_history__scan_status__in=(-1, 1))
     excluded = HostExclusion.objects.filter(org_id=project.org_id, host=OuterRef('name'))
     archived = HostState.objects.filter(project=project, host=OuterRef('name'), archived_at__isnull=False)
-    rows = (Subdomain.objects.filter(target_domain__project=project)
-            .annotate(covered=Exists(completed), recent_attempt=Exists(attempts),
-                      active_scan=Exists(active), excluded_name=Exists(excluded), archived_name=Exists(archived))
-            .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False))
-    return rows.order_by().values('name').distinct().count(), rows.order_by('id').values_list('id', flat=True).first()
+    # A host that has no scannable address (a dangling name, or one that points inside a private network) was tried and has nothing to scan: it is
+    # not a first-pass backlog. Counting it kept the full-port and UDP sweeps waiting, and the project's few assessment slots busy, for ever.
+    # unresolved_archive.recheck resolves it again every few hours and puts it back here the moment it has an address.
+    no_address = HostState.objects.filter(project=project, host=OuterRef('name'), unresolved_checks__gte=1,
+                                          unresolved_last_at__gte=at - COUNTS_FOR)
+    # the current inventory only (one row per host, from the latest scan), not every scan's copy of every name: with a long history the
+    # six correlated checks below ran once per host per scan, every minute for every project
+    rows = (Subdomain.objects.filter(latest_scan_q()).filter(target_domain__project=project)
+            .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
+                      excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
+            .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))
+    due_ids = list(rows.order_by('id').values_list('id', flat=True)[:limit]) if limit else []
+    count = (rows.order_by().values('name').distinct().count()) if need_count else None
+    return count, due_ids
+
+
+def host_coverage_gap(project, at):
+    """Single-id view of host_coverage_due: the three-hour review offers at most one due host per project per call."""
+    count, due_ids = host_coverage_due(project, at, limit=1)
+    return count, (due_ids[0] if due_ids else None)
 
 
 def parse_decision(reply, offered):
@@ -128,8 +155,9 @@ def project_facts(project_id, start, end):
         offered.append('validate')
     if due is not None and scans['active'] == 0:
         offered.append('discover')
-    if due_host_id is not None:
-        offered.append('assess_host')
+    # due_host_id stays in facts for evidence and for cveFeed.dispatch's own direct 'assess_host' entry point, but
+    # it is deliberately left out of `offered`: cveFeed.coverage_topup drains this backlog on its own short
+    # interval, without a model call, so the three-hour review no longer competes with it for a host assessment.
     return project, facts, offered
 
 

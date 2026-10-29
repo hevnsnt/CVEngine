@@ -31,6 +31,26 @@ class ResolveAndBbotArgsTests(TestCase):
 		ApiCredential.objects.create(project=self.project, service='shodan', value={'api_key': 'project-key'})
 		self.assertEqual(creds.resolve_for_project(self.project), {'shodan': {'api_key': 'project-key'}})
 
+	def test_a_partial_project_row_fills_in_over_the_org_pair_instead_of_blanking_it(self):
+		ApiCredential.objects.create(org=self.org, service='censys', value={'api_id': 'org-id', 'api_secret': 'org-secret'})
+		ApiCredential.objects.create(project=self.project, service='censys', value={'api_id': 'project-id', 'api_secret': ''})
+		self.assertEqual(creds.resolve_for_project(self.project), {'censys': {'api_id': 'project-id', 'api_secret': 'org-secret'}})
+		self.assertIn('modules.censys_dns.api_key=project-id:org-secret', creds.bbot_config_args(self.project))
+
+	def test_the_install_wide_chaos_key_is_the_fallback_and_never_overrides_a_scoped_one(self):
+		from dashboard.models import ChaosAPIKey
+		ChaosAPIKey.objects.create(key='global-chaos')
+		self.assertIn('modules.chaos.api_key=global-chaos', creds.bbot_config_args(self.project))
+		ApiCredential.objects.create(org=self.org, service='chaos', value={'api_key': 'org-chaos'})
+		args = creds.bbot_config_args(self.project)
+		self.assertIn('modules.chaos.api_key=org-chaos', args)
+		self.assertNotIn('modules.chaos.api_key=global-chaos', args)
+
+	def test_a_rejected_key_is_named_by_its_service(self):
+		self.assertEqual(creds.service_for_module('virustotal'), ('virustotal', 'VirusTotal'))
+		self.assertEqual(creds.service_for_module('github_org')[0], 'github')
+		self.assertIsNone(creds.service_for_module('crt'))
+
 	def test_org_only_services_still_apply_alongside_a_project_specific_one(self):
 		ApiCredential.objects.create(org=self.org, service='virustotal', value={'api_key': 'vt'})
 		ApiCredential.objects.create(project=self.project, service='censys', value={'api_id': 'id', 'api_secret': 'sec'})
@@ -46,7 +66,7 @@ class ResolveAndBbotArgsTests(TestCase):
 		self.assertIn('modules.shodan_dns.api_key=sk-1', args)
 		self.assertNotIn('modules.shodan_idb.api_key=sk-1', args)  # InternetDB is keyless; bbot rejects the option
 		self.assertIn('modules.censys_dns.api_key=cid:csec', args)  # bbot's Censys modules take one "id:secret" value
-		self.assertIn('modules.censys_ip.api_key=cid:csec', args)
+		self.assertFalse([a for a in args if 'censys_ip' in a])  # no scan mode enables censys_ip: a key for it would never be used
 		self.assertFalse([a for a in args if a.startswith('modules.censys.')])  # there is no bbot module named "censys"
 		self.assertNotIn('rz-1', ' '.join(args))  # runZero has nothing to feed it into yet
 		self.assertEqual(args[0::2], ['-c'] * (len(args) // 2))  # every value is preceded by -c
@@ -55,7 +75,7 @@ class ResolveAndBbotArgsTests(TestCase):
 		ApiCredential.objects.create(project=self.project, service='censys', value={'api_id': 'only-id'})
 		self.assertEqual(creds.bbot_config_args(self.project), [])
 		# module names verified against bbot 3.x; a typo here makes bbot print a preset error at startup
-		real = {'shodan_dns', 'censys_dns', 'censys_ip', 'virustotal', 'securitytrails', 'fullhunt', 'leakix', 'hunterio', 'chaos',
+		real = {'shodan_dns', 'censys_dns', 'virustotal', 'securitytrails', 'fullhunt', 'leakix', 'hunterio', 'chaos',
 		        'github_codesearch', 'github_org', 'otx', 'c99', 'bevigil', 'builtwith', 'bufferoverrun'}
 		for service, (_label, _fields, mapping) in creds.SERVICES.items():
 			for path, _field in mapping:
@@ -64,6 +84,19 @@ class ResolveAndBbotArgsTests(TestCase):
 				self.assertEqual(option, 'api_key')
 		self.assertFalse(creds.used_in_scans('binaryedge'))
 		self.assertTrue(creds.used_in_scans('shodan'))
+
+	def test_every_service_with_a_bbot_mapping_feeds_its_key_to_that_module(self):
+		"""Not just Shodan and a few others: a service listed on the keys page must reach bbot when a key exists (a dropped mapping, such as
+		Hunter.io's, must fail a test)."""
+		mapped = {name: spec for name, spec in creds.SERVICES.items() if spec[2]}
+		self.assertTrue({'shodan', 'censys', 'virustotal', 'securitytrails', 'fullhunt', 'leakix', 'hunterio', 'chaos', 'github', 'otx', 'c99',
+		                 'bevigil', 'builtwith', 'bufferoverrun'} <= set(mapped))
+		for name, (_label, fields, mapping) in mapped.items():
+			ApiCredential.objects.filter(project=self.project).delete()
+			ApiCredential.objects.create(project=self.project, service=name, value={f[0]: f'value-{f[0]}' for f in fields})
+			args = ' '.join(creds.bbot_config_args(self.project))
+			for path, _field in mapping:
+				self.assertIn(path + '=', args, f'{name} does not reach {path}')
 
 	def test_blank_fields_produce_no_args_and_credential_summary_never_leaks_the_secret(self):
 		cred = ApiCredential.objects.create(project=self.project, service='shodan', value={})
@@ -113,8 +146,18 @@ class ProjectApiKeyEndpointTests(TestCase):
 		self.other = Project.objects.create(name='O', slug='pko', insert_date=now, org=Org.objects.create(name='PO', slug='po'))
 		self.writer = User.objects.create_user('pkwriter', password='x')
 		self.auditor = User.objects.create_user('pkaudit', password='x')
-		ProjectMembership.objects.create(user=self.writer, project=self.project, role='user')
+		self.member = User.objects.create_user('pkmember', password='x')
+		ProjectMembership.objects.create(user=self.writer, project=self.project, role='admin')  # project keys are admin-only
+		ProjectMembership.objects.create(user=self.member, project=self.project, role='user')
 		ProjectMembership.objects.create(user=self.auditor, project=self.project, role='audit')
+
+	def test_a_plain_member_can_read_but_not_set_or_delete_a_project_key(self):
+		c = client_for(self.member)
+		self.assertEqual(project_api(c, 'GET', 'projects/pkp/api-keys')[1]['can_edit'], False)
+		self.assertEqual(project_api(c, 'PUT', 'projects/pkp/api-keys/shodan', {'api_key': 'x'})[0], 403)
+		ApiCredential.objects.create(project=self.project, service='shodan', value={'api_key': 'kept'})
+		self.assertEqual(project_api(c, 'DELETE', 'projects/pkp/api-keys/shodan')[0], 403)
+		self.assertEqual(ApiCredential.objects.get(project=self.project, service='shodan').value, {'api_key': 'kept'})
 
 	def test_list_shows_catalog_with_no_secrets_and_respects_can_edit(self):
 		c = client_for(self.writer)

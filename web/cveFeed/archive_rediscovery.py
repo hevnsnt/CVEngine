@@ -51,7 +51,7 @@ def observe(row, resolver=resolve_one, tcp_probe=None):
         status, addresses = resolver(host)
         if status != 'resolved':
             return {'status': status, 'addresses': []}
-        if not addresses or any(not is_scannable_ip(ip) for ip in addresses):
+        if not addresses or any(not is_scannable_ip(ip) for ip in addresses):  # answers from DNS carry no tailnet authority
             return {'status': 'blocked', 'addresses': []}
         parent = host.partition('.')[2]
         if parent:
@@ -62,7 +62,7 @@ def observe(row, resolver=resolve_one, tcp_probe=None):
             if wildcard_status == 'resolved' and addresses == wildcard_ips:
                 return {'status': 'ambiguous_wildcard', 'addresses': sorted(addresses)}
         return {'status': 'rediscovered_dns', 'addresses': sorted(addresses)}
-    if not is_scannable_ip(host):
+    if not is_scannable_ip(host, project=row.project_id):
         return {'status': 'blocked', 'addresses': []}
     from cveFeed.zombie import tcp_alive
     probe = tcp_probe or tcp_alive
@@ -96,6 +96,11 @@ def check_one(row, *, resolver=resolve_one, tcp_probe=None):
         HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
             archive_checked_at=timezone.now(), archive_check_status='out_of_scope', archive_check_error='')
         return 'deferred'
+    from cveFeed.bounty_gate import Gate
+    if Gate().refusal(row.project_id, host):  # a bug bounty program that has not confirmed automated testing, or a host outside its scope: no lookup, no probe, no assessment
+        HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
+            archive_checked_at=timezone.now(), archive_check_status='bounty_gate', archive_check_error='')
+        return 'deferred'
     result = observe(row, resolver=resolver, tcp_probe=tcp_probe)
     status = result['status']
     now = timezone.now()
@@ -126,11 +131,14 @@ def check_one(row, *, resolver=resolve_one, tcp_probe=None):
             archive_checked_at=now, archive_check_status='enqueue_deferred', archive_check_error='broker unavailable')
         return 'deferred'
     # A queued assessment is still pending. The archive is lifted because the asset was rediscovered,
-    # and the job will determine actual service coverage separately.
+    # and the job will determine actual service coverage separately; both absence streaks (the 30-day vanished-
+    # from-enumeration one and the 5-day never-resolved one, see cveFeed.unresolved_archive) start fresh so a
+    # single new attempt cannot immediately re-trip either path from a stale, pre-archive streak.
     changed = HostState.objects.filter(pk=row.pk, archived_at__isnull=True).update(
         archive_reason='', archive_checked_at=now, archive_check_status=status,
         archive_check_error='', archive_assessment=job, retired_at=None,
-        inactive_first_absent_at=None, inactive_last_absent_at=None, inactive_absent_checks=0)
+        inactive_first_absent_at=None, inactive_last_absent_at=None, inactive_absent_checks=0,
+        unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
     if changed:
         from cveFeed import activity
         activity.log('inventory', f'{host} rediscovered; host assessment #{job.pk} queued', project=row.project_id,

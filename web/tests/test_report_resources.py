@@ -21,11 +21,21 @@ class ReportResourceTests(TestCase):
         raw = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'
         chart = base64.b64encode(raw).decode('ascii')
         fetch = report_url_fetcher((chart, ''))
-        self.assertEqual(fetch(CHART_PREFIX + chart), {'string': raw, 'mime_type': 'image/svg+xml'})
+        response = fetch(CHART_PREFIX + chart)
+        self.assertEqual((response.read(), response.content_type), (raw, 'image/svg+xml'))
         with self.assertRaises(ValueError):
             fetch(CHART_PREFIX + chart + '#fragment')
         with self.assertRaises(ValueError):
             fetch('http://127.0.0.1/nested.svg')
+
+    def test_real_renderer_draws_the_chart_and_survives_a_refused_url(self):
+        """The renderer is WeasyPrint itself, not a mock: the earlier fetcher was a plain function, which WeasyPrint 68 and later rejects
+        on the first image, so every scan report with a chart failed."""
+        raw = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>'
+        chart = base64.b64encode(raw).decode('ascii')
+        html = (f'<html><body><p>ok</p><img src="{CHART_PREFIX + chart}"><img src="file:///etc/passwd">'
+                '<img src="http://127.0.0.1:9/x.png"></body></html>')
+        self.assertTrue(render_report_pdf(html, (chart,)).startswith(b'%PDF'))
 
     def test_resource_size_count_and_encoding_are_bounded(self):
         for charts in (('!',), ('A' * (4 * ((MAX_CHART_BYTES + 2) // 3) + 4),), ('', '', '')):
