@@ -1,4 +1,4 @@
-// Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, scan policy, proxy. Superuser only (the API enforces it).
+// Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
@@ -521,7 +521,7 @@ const sections = {
       `${s.organizations} organization${s.organizations === 1 ? "" : "s"} and ${s.projects} project${s.projects === 1 ? "" : "s"}`,
       `${s.targets} target${s.targets === 1 ? "" : "s"}, ${s.hosts} host${s.hosts === 1 ? "" : "s"} and ${s.scans} scan${s.scans === 1 ? "" : "s"} with all their results, files and screenshots`,
       `${s.users} other user${s.users === 1 ? "" : "s"}, memberships and API tokens`,
-      "the AI model settings, API keys, notification, proxy and report settings, IP allowlist and bans",
+      "the AI model settings, API keys, notification, email, proxy and report settings, IP allowlist and bans",
       "the CVE feed, matches, generated checks, AI activity, audit log, scheduled scans and update settings",
     ].forEach((t) => list.append(el("li", "", t)));
     const keep = el(
@@ -851,6 +851,135 @@ const sections = {
     );
   },
 
+  async email(m) {
+    const s = await api("GET", "email");
+    const on = check(
+      "Send email (people you add get an onboarding email with a link to choose their password)",
+      s.enabled,
+    );
+    const host = text(s.host, {
+      autocomplete: "off",
+      spellcheck: "false",
+      autocapitalize: "none",
+      placeholder: "smtp.example.com",
+    });
+    const port = text(String(s.port), { inputmode: "numeric" });
+    const security = selectOf(
+      [
+        ["starttls", "STARTTLS (usually port 587)"],
+        ["ssl", "SSL/TLS (usually port 465)"],
+        ["none", "None (port 25 relay, no login)"],
+      ],
+      s.security,
+    );
+    const user = text(s.username, {
+      autocomplete: "off",
+      spellcheck: "false",
+      autocapitalize: "none",
+    });
+    const pass = secret(s.has_password, "not set");
+    const fromAddress = text(s.from_address, {
+      type: "email",
+      autocomplete: "off",
+      placeholder: "cvengine@example.com",
+    });
+    const fromName = text(s.from_name, { placeholder: "cvENGINE" });
+    const verify = check(
+      "Verify the server certificate (turn off only for a relay you trust that uses a private or self-signed certificate)",
+      s.verify_certificate,
+    );
+    const linkBase = text(s.link_base, {
+      autocomplete: "off",
+      spellcheck: "false",
+      autocapitalize: "none",
+      placeholder: s.link_effective,
+    });
+    const status = el("p", "note", "", { style: "margin:12px 0 0" });
+    const showTest = (t) => {
+      status.textContent = t
+        ? `Last test ${t.ok ? "worked" : "failed"} (${new Date(t.at).toLocaleString()}, to ${t.to})${t.ok ? "." : `: ${t.error}`}`
+        : "No test message sent yet.";
+      status.className = `note${t && !t.ok ? " err" : ""}`;
+    };
+    showTest(s.last_test);
+    const body = () => {
+      const b = {
+        enabled: on.box.checked,
+        host: host.value,
+        port: port.value,
+        security: security.value,
+        username: user.value,
+        from_address: fromAddress.value,
+        from_name: fromName.value,
+        verify_certificate: verify.box.checked,
+        link_base: linkBase.value,
+      };
+      if (pass.value) b.password = pass.value;
+      return b;
+    };
+    const save = async () => {
+      await api("PUT", "email", body());
+      pass.value = "";
+      pass.placeholder = "saved (leave blank to keep)";
+    };
+    const to = text("", {
+      type: "email",
+      autocomplete: "off",
+      placeholder: "your own address",
+    });
+    m.append(
+      card(
+        "Email",
+        el(
+          "p",
+          "note",
+          "The mail server cvENGINE sends through. When someone is added with an email address, they receive their username and a one-time link to choose a password, so no password is handed around. With mail off, or no address on the account, you are shown a temporary password as before. The password is write-only: once saved it is never shown again.",
+          { style: "margin:0 0 12px" },
+        ),
+        on.wrap,
+        field("Mail server", host),
+        field("Port", port),
+        field("Security", security),
+        field("User name", user, "Leave empty for a relay that needs no login."),
+        field("Password", pass),
+        field("From address", fromAddress),
+        field("From name", fromName),
+        verify.wrap,
+        field(
+          "Link address (optional)",
+          linkBase,
+          `Links in the email start with this address. Leave empty to use ${s.link_effective}, built from this server's DOMAIN_NAME. Set it when people reach cvENGINE at a different address, such as https://scanner.example.com.`,
+        ),
+        button("Save", async () => {
+          await save();
+          toast("Saved");
+        }),
+        el("h3", "", "Send a test message", {
+          style: "font-size:14px;margin:20px 0 8px",
+        }),
+        field(
+          "Send it to",
+          to,
+          "Saves the settings above first. Empty sends it to the address on your own account.",
+        ),
+        button(
+          "Send test message",
+          async () => {
+            await save();
+            const r = await api("POST", "email/test", { to: to.value });
+            showTest(r.last_test);
+            toast(
+              r.ok ? `Test message sent to ${r.to}` : r.error,
+              !r.ok,
+            );
+          },
+          "btn ghost",
+        ),
+        status,
+      ),
+    );
+  },
+
   async scan_policy(m) {
     const policy = await api("GET", "scan_policy");
     const everything = check(
@@ -1065,6 +1194,7 @@ const labels = {
   tailscale: "Tailscale",
   openvas: "OpenVAS",
   notifications: "Notifications",
+  email: "Email",
   scan_policy: "Scan policy",
   ip_allowlist: "IP allowlist",
   proxy: "Proxy",

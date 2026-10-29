@@ -1,0 +1,29 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}{% if returning %}Choose a new password{% else %}Choose your password{% endif %} · CVEngine{% endblock %}
+{% block content %}
+{% if returning %}
+<h1>Choose a new password</h1>
+<p class="sub">Your password was reset. Pick a new one to get back in.</p>
+{% else %}
+<h1>Welcome, {{ invited.first_name|default:invited.username }}</h1>
+<p class="sub">Choose a password to finish setting up your account.</p>
+{% endif %}
+<form class="card ticks" method="post" autocomplete="off">
+  {% csrf_token %}
+  <div class="field">
+    <label for="username">Your username</label>
+    <input id="username" value="{{ invited.username }}" readonly autocomplete="username">
+  </div>
+  <div class="field">
+    <label for="password">New password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" autofocus required>
+  </div>
+  <div class="field">
+    <label for="confirm">Type it again</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+  </div>
+  <button class="btn" type="submit" style="width:100%;margin-top:4px">{% if returning %}Set new password{% else %}Set password{% endif %}</button>
+  {% if errors %}<div class="msg err" role="alert">{% for e in errors %}{{ e }}{% if not forloop.last %} {% endif %}{% endfor %}</div>{% endif %}
+</form>
+<p class="note" style="margin-top:14px">This link works once and lasts {{ days }} day{{ days|pluralize }}. You are signed in as soon as you save.</p>
+{% endblock %}

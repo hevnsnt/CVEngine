@@ -3,7 +3,7 @@ from django.urls import re_path
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
-from tenancy.views import MFALoginView, SignOutView, admin_login_redirect
+from tenancy.views import MFALoginView, SignOutView, admin_login_redirect, invite_view
 from reNgine.admin_masking import mask_secret_fields
 from django.urls import include, path
 
@@ -30,6 +30,7 @@ urlpatterns = [
     path(
         'scan/',
         include('startScan.urls')),
+    path('invite/<str:token>/', invite_view, name='invite'),
     path(
         'login/',
         MFALoginView.as_view(template_name='tenancy/login.html'),

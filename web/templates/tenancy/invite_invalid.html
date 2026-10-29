@@ -1,0 +1,13 @@
+{% extends 'tenancy/base.html' %}
+{% block title %}Link not valid · CVEngine{% endblock %}
+{% block content %}
+<h1>{% if throttled %}Too many tries{% else %}This link no longer works{% endif %}</h1>
+<div class="card ticks">
+  {% if throttled %}
+  <p style="margin:0">Too many links were tried from this address. Wait a few minutes and open the link from your email again.</p>
+  {% else %}
+  <p style="margin:0 0 10px">It has expired, or it was already used to set a password.</p>
+  <p style="margin:0">If you already chose a password, <a href="{% url 'login' %}">sign in</a>. Otherwise ask the person who added you to send a new invitation.</p>
+  {% endif %}
+</div>
+{% endblock %}
