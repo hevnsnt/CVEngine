@@ -1184,10 +1184,21 @@ const sections = {
 };
 
 // --- tabs ------------------------------------------------------------------------
+// Thirteen tabs never fit on one line, so they are grouped: a column beside the panel on a wide screen, wrapped rows on a narrow one.
 const view = root.querySelector("#view");
-const tabs = el("div", "tools", null, { role: "tablist" });
-const panel = el("div");
+view.classList.add("set-layout");
+const tabs = el("nav", "set-nav", null, {
+  role: "tablist",
+  "aria-label": "Settings",
+});
+const panel = el("div", "set-panel");
 view.append(tabs, panel);
+const groups = [
+  ["AI and access", ["ai", "keys", "tailscale"]],
+  ["Scanning", ["scan_policy", "openvas", "ip_allowlist", "proxy", "resources"]],
+  ["Alerts and reports", ["notifications", "email", "reports"]],
+  ["System", ["updates", "reset"]],
+];
 const labels = {
   ai: "AI model",
   keys: "API keys",
@@ -1218,15 +1229,20 @@ async function open(name) {
     panel.append(el("p", "msg err", err.message));
   }
 }
-Object.entries(labels).forEach(([name, label]) => {
-  const b = el("button", "btn ghost sm", label, {
-    role: "tab",
-    "data-tab": name,
-    "aria-selected": "false",
+groups.forEach(([title, names]) => {
+  const group = el("div", "set-group", null, { role: "presentation" });
+  group.append(el("span", "set-group-title", title, { "aria-hidden": "true" }));
+  names.forEach((name) => {
+    const b = el("button", "btn ghost sm", labels[name], {
+      role: "tab",
+      "data-tab": name,
+      "aria-selected": "false",
+    });
+    b.type = "button";
+    b.onclick = () => open(name);
+    group.append(b);
   });
-  b.type = "button";
-  b.onclick = () => open(name);
-  tabs.append(b);
+  tabs.append(group);
 });
 // an old link to #engines (the tab this replaced) opens the scan policy
 const legacyTabs = { engines: "scan_policy" };

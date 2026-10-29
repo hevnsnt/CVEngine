@@ -1710,3 +1710,18 @@ section.internal[hidden]{display:none}
 .ss-kind input{width:auto;min-height:0}
 .ss-msg{margin:0}
 @media (max-width:640px){.ss-row{grid-template-columns:1fr}.ss-reset{grid-column:1;grid-row:auto;justify-self:start}}
+
+/* settings: the tabs grouped in a column beside the panel; on a narrow screen the groups wrap into rows above it */
+.set-layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:24px;align-items:start}
+.set-nav[role=tablist]{display:flex;flex-direction:column;gap:14px;margin:0;padding:10px;overflow:visible;position:sticky;top:16px;border-radius:var(--r-l)}
+.set-group{display:flex;flex-direction:column;gap:2px}
+.set-group-title{font:600 10px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.14em;color:var(--muted);padding:0 10px 4px}
+.set-nav [role=tab]{justify-content:flex-start;text-align:left;width:100%;padding:0 10px!important}
+.set-panel{min-width:0}
+@media (max-width:900px){
+  .set-layout{grid-template-columns:minmax(0,1fr);gap:12px}
+  .set-nav[role=tablist]{position:static;gap:8px}
+  .set-group{flex-direction:row;flex-wrap:wrap;align-items:center}
+  .set-group-title{width:100%;padding:0 4px 2px}
+  .set-nav [role=tab]{width:auto}
+}
