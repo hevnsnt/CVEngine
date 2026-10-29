@@ -210,6 +210,9 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
                    lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light')), fallback={'targets': 0, 'techs': {}})
             _stage(scan, 'WPScan of WordPress sites (internal Sentinel)', 'internal_wpscan',
                    lambda: wpscan_scan.run_wpscan(scan.id, runner=wp_runner, internal=True), fallback={'sites': 0})
+            from cveFeed.tasks import correlate_cves
+            _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id),
+                   fallback={'subdomains': 0, 'matches': 0})
             _stage(scan, 'Nuclei targeted pass (internal Sentinel)', 'nuclei_targeted_scan',
                    lambda: nuclei_scan.run_targeted_nuclei(scan.id, stream=stream('nuclei_targeted'), provider=provider), fallback={'targets': 0})
     error = nmap.get('error')
@@ -218,7 +221,4 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     activity.settle(running, 'done' if status == SUCCESS else 'failed',
                     message=(f'Internal scan of {ip} finished: {nmap.get("ports", 0)} service(s) found' if status == SUCCESS
                              else f'Internal scan of {ip} failed: {error}'))
-    if status == SUCCESS:
-        from cveFeed.tasks import correlate_cves
-        correlate_cves.delay(scan_history_id=scan.id)
     return {'scan_id': scan_id, 'status': status, 'error': error or '', 'nmap': nmap}
