@@ -6,6 +6,8 @@ case-insensitively: never a suffix or a substring, so ``provider.example`` leave
 ``www.provider.example`` alone.
 
 * ``delete_host``: this project only. The host can be rediscovered by a later scan.
+* ``move_host``: hands the host to another project the caller can write to. It is added there as a target and scanned
+  from scratch, its data is deleted from this project, and a HostMove keeps this project from bringing it back.
 * ``exclude_host``: removes the host from every project of the organization the caller can write to, and records a
   HostExclusion so no discovery or scanner ever brings it back anywhere in the organization (see cveFeed.exclusions). That
   changes what the other projects of the org scan, so it needs an organization-level role (or an App Admin), not just a role in
@@ -293,6 +295,53 @@ def delete_host(ctx, slug, host, with_aliases=False):
     audit(ctx.user, 'host.delete', f'{name} in {slug}', project.org, project=slug, host=name, names=names,
           **{k: v for k, v in counts.items() if v})
     return {'host': name, 'names': names, 'project': project.slug, **counts}
+
+
+def move_host(ctx, slug, host, to_project, discover=True):
+    """Move a host out of this project into ``to_project`` (any project the caller can write to, in this organization or another).
+    Its data is deleted from this project (findings, CVE matches, state and asset information: its history does not move) and a
+    HostMove keeps this project's scans from finding it again; then it is added to the destination as a target and, with ``discover``,
+    scanned there. Moving it back later lifts that block. Needs write access to both projects. Everything that could refuse the move
+    is checked before anything is deleted."""
+    from cveFeed.exclusions import is_excluded
+    from cveFeed.models import HostMove
+    from startScan.models import Subdomain
+    from targetApp.models import Domain, org_domains
+    from agentapi.services import _expand_target, add_target
+    source, _ = get_project(ctx, slug, write=True)
+    if not isinstance(to_project, str) or not to_project.strip():
+        raise ApiError(400, 'to_project is required')
+    dest, _ = get_project(ctx, to_project.strip(), write=True)
+    if dest.pk == source.pk:
+        raise ApiError(400, 'the host is already in that project')
+    name = clean_host(host)
+    if not (Subdomain.objects.filter(target_domain__project=source, name__iexact=name).exists()
+            or Domain.objects.filter(project=source, name__iexact=name).exists()):
+        raise ApiError(404, 'host not found in this project')
+    _expand_target(name, dest.id)  # refused here (a blocked address, say) before anything is deleted
+    # target names are unique within an organization: a target of that name held elsewhere would keep the destination from adding it
+    holder = org_domains(dest).filter(name__iexact=name).exclude(project=dest).values_list('project_id', flat=True).first()
+    if holder and holder != source.pk:
+        raise ApiError(409, f'another project of the destination\'s organization already has a target named {name}')
+    if holder == source.pk and Subdomain.objects.filter(target_domain__project=source, target_domain__name__iexact=name).exclude(
+            name__iexact=name).exists():
+        raise ApiError(409, f'{name} is also a target of this project with other hosts under it: move or delete that target instead')
+    with transaction.atomic():  # a refusal leaves the destination's own block in place
+        HostMove.objects.filter(project=dest, host=name).delete()  # it once left the destination: moving it back lifts that block
+        if is_excluded(dest.pk, name):
+            raise ApiError(409, f'{name} is excluded in the destination\'s organization (an organization admin can lift the exclusion)')
+        HostMove.objects.update_or_create(project=source, host=name, defaults={'moved_to': dest, 'moved_by': ctx.user})
+        counts, dirs = _purge(source, name)  # first: a target of the same name here would otherwise stop the destination from adding it
+    _remove_result_dirs(dirs)
+    added = add_target(ctx, dest.slug, name, description=f'Moved from {source.name}', discover=discover)
+    from cveFeed.admin_api import audit
+    audit(ctx.user, 'host.move', f'{name} from {source.slug} to {dest.slug}', source.org, project=source.slug, host=name,
+          to_project=dest.slug, **{k: v for k, v in counts.items() if v})
+    if dest.org_id != source.org_id:
+        audit(ctx.user, 'host.move', f'{name} from {source.slug} to {dest.slug}', dest.org, project=dest.slug, host=name, from_project=source.slug)
+    return {'host': name, 'from_project': source.slug, 'to_project': dest.slug, 'to_project_name': dest.name,
+            'to_org_name': dest.org.name if dest.org_id else None, 'target_created': bool(added['created']),
+            'scan_ids': added['scan_ids'], 'findings_removed': counts.get('findings', 0)}
 
 
 def _org_level_role(user, org):

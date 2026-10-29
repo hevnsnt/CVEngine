@@ -621,6 +621,24 @@ class HostProfile(models.Model):
         return f"{self.host}: {self.criticality}"
 
 
+class HostMove(models.Model):
+    """A host moved out of this project into another ("Move host"). The source project never brings it back: its discovery and
+    scans treat the name as excluded (cveFeed.exclusions.excluded_names), while the destination scans it as its own target.
+    Exact name only, lowercase. Moving the host back into this project deletes the row."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase, no trailing dot
+    moved_to = models.ForeignKey("dashboard.Project", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    moved_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    moved_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host"], name="uniq_hostmove_project_host")]
+
+    def __str__(self):
+        return f"{self.host} moved out of project {self.project_id}"
+
+
 class HostExclusion(models.Model):
     """A host an organization never wants scanned again ("Remove & exclude"). Org-wide: it applies to every project of the org
     and to nothing outside it. The match is the whole host name, lowercase and case-insensitive; never a bare suffix or substring,

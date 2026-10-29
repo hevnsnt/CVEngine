@@ -221,6 +221,8 @@ ROUTES = [
                                                              criticality=_body(r).get('criticality'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/delete', 'Delete a host\'s data from this project only (it can be rediscovered); exact name, irreversible',
      lambda r, c, slug, host, **k: hosts.delete_host(c, slug, host, with_aliases=bool(_body(r).get('with_aliases')))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/move', 'Move a host to another project you can write to; body {to_project}. It is added there as a target and scanned; its data is deleted here and this project never brings it back',
+     lambda r, c, slug, host, **k: hosts.move_host(c, slug, host, _body(r).get('to_project'), discover=_body(r).get('discover', True) is not False)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/exclude', 'Remove a host from every project of the organization and never scan it again; body {reason, with_aliases, include_subdomains}. Needs an organization-level role',
      lambda r, c, slug, host, **k: hosts.exclude_host(c, slug, host, _body(r).get('reason', ''), include_subdomains=bool(_body(r).get('include_subdomains')),
                                                       with_aliases=bool(_body(r).get('with_aliases')))),

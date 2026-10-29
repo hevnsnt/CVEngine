@@ -52,13 +52,15 @@ class ExclusionSet(frozenset):
 
 
 def excluded_names(project_id, strict=False):
-    """The ExclusionSet of lowercase names excluded for ``project_id`` (its org's list). Empty for no project or no org. ``strict``
+    """The ExclusionSet of lowercase names excluded for ``project_id`` (its org's list, plus the hosts moved out of the project). Empty for no project or no org. ``strict``
     lets a failed lookup raise (an authorization check must stop, not carry on with nothing excluded)."""
     if not project_id:
         return ExclusionSet()
-    from cveFeed.models import HostExclusion
+    from cveFeed.models import HostExclusion, HostMove
     try:
         rows = list(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
+        # a host moved out of this project into another stays out of this one (exact name), whatever its org's list says
+        rows += [(host, False) for host in HostMove.objects.filter(project_id=project_id).values_list('host', flat=True)]
     except Exception:  # noqa: BLE001 - never let a lookup problem stop discovery
         if strict:
             raise
