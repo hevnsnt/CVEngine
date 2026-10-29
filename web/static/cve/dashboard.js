@@ -269,7 +269,7 @@ function fillTip(cell) {
   head.append(el("span", "tip-heat", HEAT_LABEL[cell.dataset.heat] || ""));
   tip.append(head);
   tip.append(el("div", "tip-name", cell.dataset.name));
-  if (info.project) tip.append(el("div", "tip-project", info.project));
+  if (info.org || info.project) tip.append(el("div", "tip-project", [info.org, info.project].filter(Boolean).join(" / ")));
   const facts = [];
   if (info.ips) facts.push(`${info.ips} IP${info.ips === 1 ? "" : "s"}`);
   if (info.cves) facts.push(`${info.cves} CVE${info.cves === 1 ? "" : "s"}`);
@@ -306,7 +306,7 @@ const MAP_SCORE_OVER = 40; // only hosts that score more than this are on the ma
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
 const MAP_TIERS = [
   { name: "rich", size: "xl", w: 116, h: 92 },
-  { name: "card", size: "xl", w: 92, h: 64 },
+  { name: "card", size: "xl", w: 92, h: 78 }, // room for the name, its domain and its "Org / Project" line
   { name: "chip", size: "l", w: 50, h: 40 },
   { name: "dot", size: "s", w: 34, h: 32 },
 ];
@@ -434,6 +434,16 @@ function hostDetails(info) {
   return box;
 }
 
+// Who the host belongs to, "Org / Project": the dashboard spans every project the viewer can see, so a tile says which one it is
+// (the organization is left out when every host on the map shares it, and on tiles too narrow for both)
+function hostOwner(info, withOrg) {
+  const box = el("span", "hx-owner");
+  if (withOrg && info.org) box.append(el("span", "hx-org", info.project ? `${info.org} / ` : info.org));
+  if (info.project) box.append(document.createTextNode(info.project));
+  box.title = [info.org, info.project].filter(Boolean).join(" / ");
+  return box;
+}
+
 function hostTag(info) {
   const tier = info.top_tier || (info.top_cve ? "cve" : "");
   return tier ? el("i", `hx-tag ${info.top_tier || ""}`, tier.toUpperCase()) : null;
@@ -469,6 +479,7 @@ function drawMap(nodes) {
     .slice()
     .sort((a, b) => (b.score || 0) - (a.score || 0) || HEAT_ORDER.indexOf(a.heat) - HEAT_ORDER.indexOf(b.heat) || a.label.localeCompare(b.label))
     .slice(0, MAP_POOL);
+  const manyOrgs = new Set(ordered.map((h) => (h.info || {}).org || "")).size > 1;
   const cellsInOrder = ordered.map((h, i) => {
     const heat = heatOf(h);
     seen.add(h.id);
@@ -496,12 +507,12 @@ function drawMap(nodes) {
     const score = h.score || 0;
     const short = tileName(h);
     const infoJson = JSON.stringify(h.info || {});
-    if (cell.dataset.score !== String(score) || cell.dataset.short !== short + String(h.target || "") || cell.dataset.info !== infoJson) {
+    if (cell.dataset.score !== String(score) || cell.dataset.short !== short + String(h.target || "") + manyOrgs || cell.dataset.info !== infoJson) {
       cell.textContent = "";
-      cell.append(el("span", "score", String(score)), hostName(short, h), hostDetails(h.info || {}));
+      cell.append(el("span", "score", String(score)), hostName(short, h), hostOwner(h.info || {}, manyOrgs), hostDetails(h.info || {}));
       const tag = hostTag(h.info || {});
       if (tag) cell.append(tag);
-      cell.dataset.short = short + String(h.target || "");
+      cell.dataset.short = short + String(h.target || "") + manyOrgs;
     }
     cell.dataset.name = h.label;
     cell.dataset.score = score;
