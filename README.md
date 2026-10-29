@@ -37,25 +37,42 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 
 | | |
 | --- | --- |
-| **Discover** | Subdomains, certificates, IPs, and ports with [bbot](https://github.com/blacklanternsecurity/bbot) and [naabu](https://github.com/projectdiscovery/naabu), plus a certificate transparency watch and weekly deep sweeps |
-| **Understand** | [nmap](https://nmap.org) service and OS fingerprints, web routes and their sign-in state, exposed databases, firewalls, WordPress, and email and DNS hygiene, plus an optional, off-by-default [OpenVAS](docs/OPENVAS.md) scanner add-on |
+| **Discover** | Subdomains, certificates, IPs, and ports with [bbot](https://github.com/blacklanternsecurity/bbot) and [naabu](https://github.com/projectdiscovery/naabu), a certificate transparency watch, weekly deep sweeps, and [Sentinels](docs/SENTINELS.md) that find hosts inside private networks |
+| **Understand** | [nmap](https://nmap.org) service and OS fingerprints, UDP exposure, a TLS audit, web routes and their sign-in state, exposed databases and cloud storage, firewalls, WordPress, email and DNS hygiene, and an optional [OpenVAS](docs/OPENVAS.md) add-on |
 | **Prioritize** | Fire, smoke, and ice ratings, a 0 to 100 score per host, and AI triage into confirmed, likely, or needs validation |
 | **Verify** | Read-only validation with [Nuclei](https://github.com/projectdiscovery/nuclei), nmap, and banner probes. **Validate now** on any match |
 | **Search** | [Shodan-style search](docs/SEARCH.md) over your own inventory: `port:3389 -host:vpn`, `tech:"apache tomcat" sev:high` |
-| **Operate** | A live dashboard, a change timeline with screenshot diffs, organizations and roles, two-step sign-in, a REST API, an MCP server, and Slack, Discord, Telegram, and Lark alerts |
+| **Operate** | A live dashboard, a change timeline with screenshot diffs, PDF reports, organizations and roles, two-step sign-in, a REST API, an MCP server, and Slack, Discord, Telegram, and Lark alerts |
 | **Hunt** | A [bug bounty workbench](docs/BUG-BOUNTY.md): program scope from HackerOne, Bugcrowd, Intigriti, and YesWeHack, and report drafts |
-| **Bring your own AI** | Anthropic, OpenAI, OpenRouter, Ollama, or vLLM. Without a model it still discovers, scans, matches, and validates |
+| **Bring your own AI** | Anthropic, OpenAI, OpenRouter, Ollama, LM Studio, or vLLM. Without a model it still discovers, scans, matches, and validates |
 
-## New in 1.2
+## New in 1.3
 
-- **Every CVE says how to prove it.** A shared detection strategy and validation profile for the whole catalog, readable through the API and MCP.
-- **A full CVE catalog on day one.** New installs download a verified catalog on first start instead of rebuilding it one request at a time.
-- **It names the firewall in front of every host,** with [wafw00f](https://github.com/EnableSecurity/wafw00f).
-- **It never sits idle.** A work conductor keeps discovery running across a thousand hosts.
-- **One host, many names.** `example.com` and `www.example.com` on the same servers are one host.
-- **Every Nuclei template, if you choose.** A switch in Settings runs the whole library (off by default).
-- **Updates in seconds,** with a CI upgrade rehearsal before every release ([updates](docs/UPDATES.md)).
-- **Hardened.** A Redis password, a rotatable key for stored secrets, hashed sessions, a sign-in throttle, and an encrypted CA key. Older installs: see [upgrading to 1.2](docs/UPGRADE.md#upgrading-to-12).
+### Sentinels: scan from anywhere, including inside your network
+
+Run a **Sentinel** on any machine and cvENGINE scans through it. Put one outside your network to see what the internet sees. Put one inside to reach what no outside scanner can: declare a private range, and the Sentinel finds the live hosts in it and runs the same nmap, naabu, Nuclei, TLS, UDP, WordPress, and OpenVAS checks on them, with the same CVE matching and the same dashboard. Provisioning is one copy-paste: press **Provision** on the Sentinels page, then `docker compose up -d` with the blob it gives you. Update and configure every Sentinel from cvENGINE. The client lives in [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel). [Sentinels guide](docs/SENTINELS.md)
+
+### OpenVAS, built in and off by default
+
+Switch on Greenbone's [OpenVAS](docs/OPENVAS.md) from Settings and its network vulnerability tests run beside Nuclei and nmap, against the hosts you choose, on a slow, throttled, safe-checks-only schedule. Every result that names a CVE becomes a finding in the same list, the same fire, smoke, and ice ratings, and the same AI triage. Switched off, it costs nothing.
+
+### And a ton more
+
+- **Hard evidence only.** A CVE match now needs the same product and a version inside a bounded affected range. A product name alone no longer makes noise, and OS and kernel flaws stay host-only.
+- **Asks the host what it is.** Safe version and identity probes fill in the version a fingerprint missed, so more of your inventory can be matched.
+- **TLS audit.** [testssl.sh](https://github.com/testssl/testssl.sh) on every TLS port: protocols, ciphers, and the named TLS vulnerabilities, with hard CVE evidence.
+- **UDP exposure scan.** DNS, NTP, SNMP, IKE, IPMI, SSDP, memcached and more, checked slowly in the background.
+- **Cloud storage.** Public and dangling S3, Google Cloud Storage, and Azure Blob buckets.
+- **More of every host.** Other sites on the same address, applications under subdirectories, and authenticated checks with stored headers or cookies.
+- **Suppliers.** The vendors you depend on get a Shodan-style host card and a technology search.
+- **One-click PDF reports** for a project or a host.
+- **Tailscale.** Attach a tailnet, import its devices, scan them, and check its configuration.
+- **Host inventory and runZero.** Hosts report their own OS, packages, and patches, and a runZero sync adds what it knows.
+- **Saved searches with alerts,** per-host check coverage, internal-host flags, and a CVE match that opens on three clear cards.
+- **Every Nuclei template by default,** LM Studio as an AI provider, one API keys page, and a friendly page while an update rebuilds.
+- **Supply chain you can audit.** Pinned scanner versions checked before every release, and a CycloneDX bill of materials with every release.
+
+Upgrading an existing install: [upgrading to 1.3](docs/UPGRADE.md#upgrading-to-13). Earlier releases are in the [changelog](CHANGELOG.md).
 
 ## How it works
 
@@ -70,7 +87,7 @@ flowchart LR
 
     subgraph PROBE["2 &nbsp; PROBE"]
         direction TB
-        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Firewall and web<br/>route checks"] --> V["Version and<br/>identity probes"] --> W["WordPress detection,<br/>WPScan, node2shell opt-in"]
+        X["Exposure checks<br/>databases, RDP screenshot"] --> N1["nuclei<br/>technology pass"] --> R["Firewall, web route<br/>and version probes"] --> W["WordPress, WPScan,<br/>node2shell opt-in"]
     end
 
     subgraph MATCH["3 &nbsp; MATCH"]
@@ -103,7 +120,7 @@ flowchart LR
     class H step
 ```
 
-Each scanner runs once per host inside a time window, so repeat scans stay fast. See the [pipeline](docs/PIPELINE.md) for every stage.
+Each scanner runs once per host inside a time window, so repeat scans stay fast. Any scanning stage can run on a [Sentinel](docs/SENTINELS.md) instead of the server. See the [pipeline](docs/PIPELINE.md) for every stage.
 
 ## Built on the best
 
@@ -111,9 +128,9 @@ cvENGINE stands on excellent open source work. Full credits and licenses are in 
 
 | | |
 | --- | --- |
-| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner), and optionally [OpenVAS](docs/OPENVAS.md) from [Greenbone](https://greenbone.github.io/docs/) |
+| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [testssl.sh](https://github.com/testssl/testssl.sh), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner), and optionally [OpenVAS](docs/OPENVAS.md) from [Greenbone](https://greenbone.github.io/docs/) |
 | **Exploitation intelligence** | [cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
-| **Also** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh), [MailFail](https://github.com/ACK-J/MailFail), [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), [Bugcrowd VRT](https://github.com/bugcrowd/vulnerability-rating-taxonomy), [Ollama](https://github.com/ollama/ollama), [vLLM](https://github.com/vllm-project/vllm), [Model Context Protocol](https://modelcontextprotocol.io) |
+| **Also** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh), [MailFail](https://github.com/ACK-J/MailFail), [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), [Bugcrowd VRT](https://github.com/bugcrowd/vulnerability-rating-taxonomy), [Tailscale](https://github.com/tailscale/tailscale), [runZero](https://www.runzero.com), [Ollama](https://github.com/ollama/ollama), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm), [Model Context Protocol](https://modelcontextprotocol.io) |
 
 ## Install in minutes
 
@@ -147,6 +164,7 @@ Read-only checks, no password lists, and no scanning of loopback, link-local, or
 | [Tenancy](docs/TENANCY.md), [Agent API](docs/AGENT-API.md), [AI usage](docs/AI-USAGE.md) | Teams, the REST API and MCP, and AI cost |
 | [Bug bounty](docs/BUG-BOUNTY.md) and [Front end](docs/FRONTEND.md) | The bounty workbench and the interface |
 | [Host inventory](docs/HOST-INVENTORY.md) | Hosts reporting their own OS, packages and patches with a script |
+| [Sentinels](docs/SENTINELS.md) | Running scanners on your own network, internal networks included |
 | [Tailscale](docs/TAILSCALE.md) | Scanning a tailnet and its Tailscale checks |
 | [OpenVAS](docs/OPENVAS.md) | The optional Greenbone scanner: enabling it, its resource floor and what it imports |
 
@@ -155,3 +173,5 @@ Read-only checks, no password lists, and no scanning of loopback, link-local, or
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x by Yogesh Ojha and its contributors, and builds on the projects above. See the [changelog](CHANGELOG.md), [contributors](CONTRIBUTORS.md), and [third-party software](THIRD-PARTY.md).
 
 Released under the GPL-3.0. See [LICENSE](LICENSE).
+
+[![M8ven Score](https://m8ven.ai/badge/mcp/hevnsnt-cvengine-s24yvi?v=8392a4bdbfdb1665e05d1484542cfff0)](https://m8ven.ai/mcp/hevnsnt-cvengine-s24yvi?s=readme)

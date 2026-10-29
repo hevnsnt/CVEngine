@@ -24,7 +24,7 @@ A sync runs every 15 minutes (and on **Sync now**) for each connected tailnet:
 
 ### How scans reach the tailnet
 
-The `tailscale` service joins the **celery container's network namespace** (`network_mode: "service:celery"`). Every scan (bbot, nmap, naabu, nuclei, the validation probes) runs in the celery container, so putting `tailscaled` in that namespace puts the `tailscale0` interface and the `100.64.0.0/10` route exactly where the scanners are. Nothing else changes: no routing rules, no extra privileges for celery (the sidecar holds `NET_ADMIN` and `/dev/net/tun`, celery does not), no change for the web, database or Redis containers. The alternatives were worse:
+The `tailscale` service joins the **celery container's network namespace** (`network_mode: "service:celery"`). Every scan (bbot, nmap, naabu, nuclei, the validation probes) runs in the celery container, so putting `tailscaled` in that namespace puts the `tailscale0` interface and the `100.64.0.0/10` route exactly where the scanners are. Nothing else changes: no routing rules, no extra privileges for celery (the sidecar holds `NET_ADMIN`, `NET_RAW` and `/dev/net/tun`, celery does not), no change for the web, database or Redis containers. The alternatives were worse:
 
 - Userspace networking (`TS_USERSPACE=true`) offers only an outbound proxy, not an interface, and nmap cannot scan through a SOCKS5 proxy.
 - Routing celery through a gateway container needs `NET_ADMIN` inside celery to add the route.
@@ -42,7 +42,7 @@ The `tailscale` service joins the **celery container's network namespace** (`net
 - **There is no default.** `is_scannable_ip` refuses these ranges unless the caller names the project (`project=`), and every scan stage that knows its project passes it (discovery, nmap, nuclei, the database exposure check, the full port sweep, change tracking, route checks, TLS checks). The IPv6 `fd7a:` address is recorded but the target is named by the IPv4 one, so only that is scannable. An address unwrapped from an IPv4-mapped, NAT64 or 6to4 spelling never carries it.
 - An address a DNS name resolved to never gets it, and neither does one a person typed: Add targets, the bug bounty import and the legacy bulk import (including the HackerOne URL import) refuse every internal literal in every spelling, and `bbot` port events for another project's host never store a tailnet device's ports.
 - Loopback, link-local, multicast and cloud metadata addresses (including `100.100.100.200`) are never allowed, and `100.100.100.0/24` (Tailscale's resolver) is never a device. `CVENGINE_BLOCKED_CIDRS` still wins.
-- Tailnets reuse the `100.x` range, so an address that devices of two connected tailnets both carry is ambiguous and authorises nothing; the second tailnet's device is not imported.
+- Tailnets reuse the `100.x` range, so an address that devices of two connected tailnets both carry is ambiguous and authorizes nothing; the second tailnet's device is not imported.
 - Connecting, changing and disconnecting are Settings actions (App Admin only) and are in the audit log (`tailscale.link.enable`, `.update`, `.remove`, `tailscale.sync`).
 
 ## Set it up
@@ -78,13 +78,13 @@ An API access token also works, but it expires after at most 90 days and carries
 printf 'TS_AUTHKEY=tskey-auth-xxxx\n' > .env.tailscale      # the key from step 2
 echo 'COMPOSE_PROFILES=tailscale' >> .env
 echo 'TAILSCALE_HOSTNAME=cvengine' >> .env                   # the name shown in your admin console
-docker compose up -d                                         # or: make up
+docker compose up -d                                         # not make up: it starts only the six core services
 docker compose exec tailscale tailscale status
 ```
 
-The key is in `.env.tailscale`, not `.env`, because every variable in `.env` is handed to every container. It is only used to enrol: once the node is signed in, its state (the `tailscale_state` volume) keeps it signed in, and you can delete the file. Updates keep the profile when `COMPOSE_PROFILES` is in `.env`. Without `.env.tailscale` (and without an already enrolled node) the service stops with a message saying so, instead of printing an interactive login URL. It starts with `--shields-up`, so other devices cannot connect into the scanner's network namespace; `TAILSCALE_EXTRA_ARGS` adds flags to that (for example `--advertise-tags=tag:cvengine`).
+The key is in `.env.tailscale`, not `.env`, because every variable in `.env` is handed to every container. It is only used to enroll: once the node is signed in, its state (the `tailscale_state` volume) keeps it signed in, and you can delete the file. Updates keep the profile when `COMPOSE_PROFILES` is in `.env`. Without `.env.tailscale` (and without an already enrolled node) the service stops with a message saying so, instead of printing an interactive login URL. It starts with `--shields-up`, so other devices cannot connect into the scanner's network namespace; `TAILSCALE_EXTRA_ARGS` adds flags to that (for example `--advertise-tags=tag:cvengine`).
 
-The service needs the `/dev/net/tun` device and `NET_ADMIN`; on a host or container platform that provides neither (some managed container hosts), use the **Already routed** option instead. The sidecar's image is pinned to a version tag (`tailscale/tailscale:v1.104.2`) on purpose, because it runs inside the scanner's namespace. To update, change the tag in `docker-compose.yml` or set `TAILSCALE_IMAGE` in `.env`, check the [security bulletins](https://tailscale.com/security-bulletins) for the version you want, and run `docker compose up -d tailscale`. If you start the dev stack (`docker-compose.dev.yml`) the profile is not in it.
+The service needs the `/dev/net/tun` device and the `NET_ADMIN` and `NET_RAW` capabilities; on a host or container platform that provides neither (some managed container hosts), use the **Already routed** option instead. The sidecar's image is pinned to a version tag (`tailscale/tailscale:v1.104.2`) on purpose, because it runs inside the scanner's namespace. To update, change the tag in `docker-compose.yml` or set `TAILSCALE_IMAGE` in `.env`, check the [security bulletins](https://tailscale.com/security-bulletins) for the version you want, and run `docker compose up -d tailscale`. If you start the dev stack (`docker-compose.dev.yml`) the profile is not in it.
 
 ### 4. Connect the tailnet
 
@@ -118,13 +118,13 @@ Findings are hygiene findings: they appear under Findings with the remediation w
 | `ts_client_security_update` | LOW to HIGH | Client version against [Tailscale's security bulletins](https://tailscale.com/security-bulletins) | The version is older than the bulletin's fixed release and the feature it needs is present on the device. Rated by cvENGINE, since Tailscale publishes no severity |
 | `ts_update_available` | INFO | The API's `updateAvailable` flag | The control plane says a newer client exists |
 | `ts_key_expiry_disabled` | LOW | API `keyExpiryDisabled` on a device with no tags | A user-owned device whose key never expires keeps access if lost or abandoned |
-| `ts_stale_device` | LOW | Last seen 90 days or more ago, not connected | An unused authorised device is unwatched attack surface; deleting it in the control plane is what contains it |
+| `ts_stale_device` | LOW | Last seen 90 days or more ago, not connected | An unused authorized device is unwatched attack surface; deleting it in the control plane is what contains it |
 | `ts_broad_subnet_router` | MEDIUM | Approved routes of /16 or wider (IPv4) | One device bridges a whole network into the tailnet |
 | `ts_exit_node` | INFO | Both default routes approved | Worth knowing: peers' internet traffic can pass through it |
 | `ts_remote_admin_exposed` | LOW or MEDIUM | Ports a scan found open on the device's tailnet address: telnet 23, Docker API 2375, VNC 5900, RDP 3389, SMB 445 | Every peer the policy lets in can try it. Whether it is authenticated is not tested |
 | `ts_acl_allow_all` | MEDIUM or HIGH | Policy: an `accept` rule or grant from `*` (HIGH) or `autogroup:member` (MEDIUM) to everything | One compromised device can reach every service, which is how a worm spreads. The default policy of a new tailnet is exactly this |
 | `ts_ssh_accept_broad` | MEDIUM | Policy: a Tailscale SSH `accept` rule that allows `root` or accepts every member | Widens who can open a root-capable session (see below) |
-| `ts_tag_owners_broad` | MEDIUM | Policy: `tagOwners` that name `autogroup:member` | Any member can enrol a device with that tag and inherit its rules |
+| `ts_tag_owners_broad` | MEDIUM | Policy: `tagOwners` that name `autogroup:member` | Any member can enroll a device with that tag and inherit its rules |
 | `ts_funnel_broad` | MEDIUM | Policy: the `funnel` node attribute for `*` or `autogroup:member` | Any member can put a service on the public internet |
 
 The bulletin check uses the bulletins whose affected clients and fixed release Tailscale states: TS-2026-004, -006 and -009 (Tailscale SSH on Linux or another Unix, fixed in 1.98.9), TS-2026-010 (SSH `acceptEnv`, 1.102.1), TS-2026-011 (4via6 subnet routers, 1.102.3, decided from an approved `fd7a:115c:a1e0:b1a::/64` route) and TS-2026-013 (all clients, 1.104.2). A bulletin that depends on a feature the data does not show (Serve, Funnel, Services, the web interface, macOS MDM) is left out, never assumed. The list is in `web/cveFeed/tailscale_checks.py`.
@@ -135,7 +135,7 @@ The request that started this integration pointed at [tailworm.com](https://tail
 
 - It is a single researcher's report. Tailscale has acknowledged it and published an SSH investigation update, and fixes for Findings 1 to 3 (SSH unix-socket forwarding), 5 (session memory), 7 (`serve --tcp` to the LocalAPI socket), 11 and the client part of 6 are merged to the `main` branches of tailscale/tailscale and its SSH library, but **as of 2026-10-27 no numbered release and no security bulletin carries them**, and the page names no CVE for Tailscale. Until a release ships, clients at or below v1.104.2 (and headscale at or below v0.29.6) are the ones the report describes, and its interim mitigations (per-pair SSH rules, no `root` or `autogroup:member` on `accept`) are the guidance. cvENGINE did not reproduce any of it. When the fixed release ships, add its bulletin to the table in `web/cveFeed/tailscale_checks.py`; the bulletin check then flags the clients below it.
 - What can be decided from a tailnet's own data is checked, and the findings say they rest on the report: broad or root SSH `accept` rules, the tag-ownership and Funnel-entitlement policy items, an allow-all policy, expiry and stale devices. Its recommended mitigations (per-pair grants, deleting devices at the control plane, enabling key expiry) are in the remediation text.
-- Most of it cannot be seen from outside a device: whether a node runs `tailscale serve --tcp` to the LocalAPI socket, `TS_SERVE_ALLOW_ALL_INTERFACES`, which users hold `conn25` entitlements, the memory behaviour of `tailscaled`. These need host access and are not guessed at. The same goes for headscale: the report says forwarding cannot be disabled in v0.29.5, but the control-plane API here is Tailscale's; with a headscale control server only the local-node view (peers the node can see) is available.
+- Most of it cannot be seen from outside a device: whether a node runs `tailscale serve --tcp` to the LocalAPI socket, `TS_SERVE_ALLOW_ALL_INTERFACES`, which users hold `conn25` entitlements, the memory behavior of `tailscaled`. These need host access and are not guessed at. The same goes for headscale: the report says forwarding cannot be disabled in v0.29.5, but the control-plane API here is Tailscale's; with a headscale control server only the local-node view (peers the node can see) is available.
 - The overlapping fixes Tailscale did publish (TS-2026-004 and TS-2026-009 for SSH socket forwarding and root bypasses, TS-2026-005 for Serve and Unix sockets) are the bulletin check above. TS-2026-005 needs a non-root operator on a host running Serve, which no source here reports, so it is not applied.
 
 Not checked, and why: `autoApprovers` (an approval is not a finding without knowing the intended range), `check`-mode periods (all valid values are the vendor's own), Tailnet Lock status, device approval and the other tailnet settings (no read endpoint or field name was verified against Tailscale's current API reference).
@@ -170,7 +170,7 @@ Connecting, changing and disconnecting a tailnet, and its credentials, are Setti
 
 ## Limits
 
-- Needs Docker Compose with `network_mode: service:` and a host that gives containers `/dev/net/tun` and `NET_ADMIN`. The compose profile was written against Tailscale's documented container variables (`TS_AUTHKEY`, `TS_STATE_DIR`, `TS_USERSPACE`, `TS_SOCKET`, `TS_EXTRA_ARGS`, `TS_ACCEPT_DNS`, `TS_AUTH_ONCE`, `TS_HOSTNAME`).
+- Needs Docker Compose with `network_mode: service:` and a host that gives containers `/dev/net/tun`, `NET_ADMIN` and `NET_RAW`. The compose profile was written against Tailscale's documented container variables (`TS_AUTHKEY`, `TS_STATE_DIR`, `TS_USERSPACE`, `TS_SOCKET`, `TS_EXTRA_ARGS`, `TS_ACCEPT_DNS`, `TS_AUTH_ONCE`, `TS_HOSTNAME`).
 - One tailnet per project, and the scanner's node is in one tailnet.
 - `fd7a:` IPv6 addresses are recorded but the pipeline scans the IPv4 address. The full-port naabu sweep skips tailnet devices (nmap's top ports and the extra service ports still run).
 - A sync that fails (credentials, a missing scope, no source) stops tailnet scanning for that project until the next good sync.

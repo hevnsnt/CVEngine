@@ -49,6 +49,10 @@ Address ranges are converted to the CIDR blocks that cover them exactly. A block
 2. **I read the policy** records who read it, when, and the scope at that time. If the scope changes later, the engagement and its reports warn.
 3. **Import scope as targets** (into the engagement's project) previews first, then needs the acknowledgement, and imports up to 200 targets. Wildcards become their base domain and URLs their host. Blocks over 64 addresses, mobile apps, source code, and prose entries are listed as not imported, with the reason. Discovery starts only if you ticked that the policy allows automated scanning. Excluded hosts stay excluded.
 
+### The scan gate
+
+An engagement is also a gate on automatic scanning, so a program's assets are never scanned in the background without your confirmation. A project that has an engagement is scanned automatically only while all three hold: you recorded that you read the policy (**I read the policy**), you ticked that the policy allows automated scanning (which needs the first), and the engagement's status is `watching` or `active` (not `paused` or `done`). Marking an engagement `active` also needs the policy to have been read. Any engagement that does not meet all three blocks its whole project, and a project with no engagement is never blocked. A blocked project is skipped by the work conductor, the host-assessment top-up, and the slow background sweeps for UDP, cloud storage, other sites, subdirectory applications, the TLS audit and third-party suppliers, and the host page counts those checks as not applicable. A scan you start by hand is not blocked, and the checks that are not listed here do not consult the gate. See [Pipeline](PIPELINE.md#the-bug-bounty-gate).
+
 ## Reports
 
 A report starts from a scanner finding or blank. A draft copies the scanner's impact text if it has any and never writes impact for you. Credentials and tokens in requests and responses are masked. Checks run on every save:

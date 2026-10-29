@@ -122,7 +122,9 @@ curl -s -H "Authorization: Bearer $CVENGINE_TOKEN" \
   | jq '.results[] | {host, score, matched}'
 ```
 
-`page_size` goes up to 200. With no `q`, the search lists every host. `heat=fire|smoke|ice|clean|unscanned` narrows the page, and `facets=port,product,tech,os,country` (with `facet_size`, 10 by default and 50 at most) returns counts per value, plus `facets.heat` over the whole match; counts stop after 5,000 hosts. The heat chips on the Hosts page filter only the rows already loaded.
+`page_size` goes up to 200. With no `q`, the search lists every host. `heat=fire|smoke|ice|clean|unscanned` narrows the whole result to hosts of that [temperature](FIRE-SMOKE-ICE.md), and `facets=port,product,tech,os,country` (with `facet_size`, 10 by default and 50 at most) returns counts per value, plus `facets.heat` over the whole match of `q` (it ignores `heat` itself, so every chip keeps its real total); counts stop after 5,000 hosts and the response says so (`facets.truncated`). `facets.unscannable` splits the *Not scanned* hosts that have no address a scanner can use (`private`: it points inside a private network, `no_dns`: no DNS answer, `unknown`: not looked at yet) from those still waiting their turn. `internal=1` keeps only hosts inside a network their project declared internal (scanned by a [Sentinel](ARCHITECTURE.md#sentinels) there), and `internal=0` only the others. Temperature and scope are API parameters and chips, not `filter:value` terms, so they are not part of a saved search's query.
+
+On the Hosts page, the **Temperature** chips (All, Fire, Smoke, Ice, Clean, Not scanned, each with its count) set `heat=` and ask the server, so they narrow the whole inventory and not only the rows on screen. The **Scope** chips (All hosts, External, Internal) set `internal=` and appear once a project you can see declares an internal network. Both live in the address (`?heat=`, `?internal=`), next to `?q=` and `?sort=`.
 
 ## Saved searches and alerts
 

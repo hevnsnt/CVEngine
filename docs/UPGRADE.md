@@ -8,6 +8,58 @@ Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The 
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.
 
+## Upgrading to 1.3
+
+Update from 1.2.x the way you always do: the in-app updater, `scripts/update.sh`, or automatic deployment ([UPDATES.md](UPDATES.md)). Nothing in 1.3 needs a manual step to start working, and a fresh install needs none of this. Back up the database first, because migrations are never rolled back; to go back, restore that backup.
+
+**Before you start**
+
+- **Free disk space.** The update rebuilds the image (a few gigabytes) and pulls the current `nginx:alpine` for the proxy. The 1.3 safeguards below do not apply to this one update, because an update is applied by the scripts of the version being replaced ([UPDATES.md](UPDATES.md#branches-and-releases)): make sure at least 6 GB are free where Docker keeps its images.
+- **The update into 1.3 is applied by the scripts you have now.** The approval updater of 1.2.1 waits for running scans with no time limit (use **Stop all** on the **Scans** page of each project, or `scripts/update.sh --stop-scans`, to shorten that), visitors see an error page while the services restart, the replaced image stays on disk (`docker image prune` removes it), and success is judged by Docker saying the services run. From the update after this one, 1.3's scripts apply: a disk check, the maintenance page, a check that the web service answers, image cleanup, and a 5-minute drain limit for the approval updater.
+- A server installed before v1.2.0 still needs its one manual update first ([Upgrading to 1.2](#upgrading-to-12)).
+
+**What changes in the database.** Every migration only adds: a new app (`agentapi`, migrations 0001 to 0005: agents, Sentinels, their tasks and settings), `dashboard` 0026 to 0030, `startScan` 0021, and `cveFeed` 0082 to 0113 (there is no 0101). They add tables for saved searches, runZero, Tailscale, host inventory, probe observations, stored sign-ins for authenticated checks, PDF report exports, OpenVAS, suppliers and internal ranges, plus new columns and indexes, and scheduled-task entries for the new sweeps. Besides schema, four things are written:
+
+- `dashboard` 0030 switches the **Nuclei templates** policy on for an install where nobody ever changed it (the audit log records every change): see below.
+- `cveFeed` 0092 rewrites the stored reason of old "invalid product correlation" closures to "different product".
+- Every existing API token gets the full scope; the new reporter tokens are separate.
+- The new schedules are created enabled, except the OpenVAS sweep, which is created **disabled** and only the OpenVAS switch turns on.
+
+**What starts, and what does not.**
+
+- The stack is the same six services (`db`, `redis`, `web`, `celery`, `celery-beat`, `proxy`) on the same ports (443, 8082, and `127.0.0.1` for 8000 and 5432). `docker compose config --services` on a plain 1.3 install lists exactly those six.
+- **Tailscale and OpenVAS are off by default.** They are Compose profiles (`tailscale` and `openvas`, 1 and 15 services). Without `COMPOSE_PROFILES` in `.env`, an update neither creates nor starts them, and `make up` and the updaters never start a profile service. OpenVAS also has no scheduled work while it is off. Turn them on only if you want them ([TAILSCALE.md](TAILSCALE.md), [OPENVAS.md](OPENVAS.md)).
+- Two empty volumes are created for the celery container even with both off: `tailscale_status` and `openvas_gvmd_socket_vol`, mounted read-only. The proxy now also mounts the maintenance page and `config/nginx/state`, and pulls its image on every `up`.
+- Sentinels, internal ranges, authenticated checks, suppliers, runZero, saved searches and reporter tokens do nothing until someone sets them up. A project with no Sentinel pays nothing for the dispatch code.
+
+**Defaults that change behavior**
+
+- **The whole Nuclei template library is now the default scan scope.** Before, scans ran only the templates that make plain GET, HEAD or OPTIONS requests. The migration turns the new default on for an install where no App Admin ever changed **Settings, Scan policy, Nuclei templates**; an install where one did keeps its choice. Validation uses the same switch, so automatic and on-demand validation can send requests other than plain reads. Denial-of-service templates stay excluded and AI-written templates stay read-only. To keep the old behavior, turn the switch off after the update (it was under **Scan engines** in 1.2; that tab is now **Scan policy**, and an old `#engines` link opens it).
+- **Matches need hard evidence, and old name-only matches close themselves.** A CVE match is made only when the product is the same one the advisory names and its version is inside a bounded range (or a template hit, a distribution verdict, a host inventory report or runZero backs it). A product seen without a version is listed as an **Unverified product** on the host instead. After the update, within about half an hour (the next run of the 30-minute guidance task or the next correlation), the open matches that rest on a name alone, an operating-system fingerprint, a different product, or a local-only CVE are closed with a stored reason ("Closed automatically: no version evidence"), the affected hosts are rescored and the counts drop. A match is never closed if anyone worked it (a status other than open, an assignee, a comment, a manual validation request, an AI "affected" verdict) or if it has a template hit, a distribution "vulnerable" verdict, a runZero report or a host report. Version probes then look for the missing versions, and matches return where a version proves them.
+- **The UDP scan is on by default** (`CVENGINE_UDPSCAN=1`): 18 ports, 20 packets a second, one address at a time, each address once a week, riding the background full port scan's schedule. Set `CVENGINE_UDPSCAN=0` to turn it off. It needs the worker to open raw sockets; if it cannot, it says so in the activity feed and does not scan.
+- **New background sweeps are on by default**, each slow, polite, paused by the global pause, and skipped for a project whose bug bounty engagement has not confirmed automated testing: the TLS audit (testssl.sh; no environment switch, `CVENGINE_TESTSSL_MAX_TARGETS` caps it), other sites on an address (`CVENGINE_VHOST`), applications under subdirectories (`CVENGINE_SUBDIR_APPS`), cloud storage exposure (`CVENGINE_BUCKETS`), and third-party suppliers (`CVENGINE_SUPPLIERS`, nothing to do until a supplier is listed). The version and identity probes run inside each scan on up to `CVENGINE_PROBE_MAX_HOSTS` hosts. Expect more findings and a little more traffic to your own hosts. The background full port scan and the UDP scan are deferred, instance-wide, while any project still has a host missing its first pass.
+- **Hosts that never resolve to a scannable address are archived** after `CVENGINE_TTL_UNRESOLVED_HOST` hours (5 days) of an unbroken streak, and restored automatically if they come back. The streak starts counting after the update.
+- **AI guidance for CVEs.** Settings, AI model has a new daily budget, "CVE guidance written by the model per day", 25 by default. With an AI model configured, that is up to 25 paid requests a day; set it to 0 to turn it off. The rule-written guidance for every CVE has no AI cost and finishes on its own after the update.
+- **Tools are pinned** (nuclei, naabu, bbot, testssl.sh, python-gvm and others), and on x86-64 the image installs the nmap project's own release binary instead of compiling nmap. The build is minutes faster on x86-64 and the same on arm64, where nmap is still compiled. New worker queues (`wpscan_queue`, `testssl_queue`, `bucketscan_queue`, `vhost_queue`, `udp_queue`, `openvas_queue`, `supplier_queue`) are consumed by the existing classic worker, which `CLASSIC_CONCURRENCY` sizes.
+- **Settings changed.** There is no API vault tab (the instance-wide Chaos key is a line on the API keys page; the Netlas and HackerOne keys keep working but have no page), BinaryEdge is retired (a saved key is kept, shown as retired and never used), and **Settings, Reports** only sets report branding.
+
+**Manual steps.** None are required. These are choices:
+
+- To keep scans read-only as in 1.2, turn off **Settings, Scan policy, Nuclei templates**.
+- To turn a new sweep off, set its variable in `.env` ([CONFIGURATION.md](CONFIGURATION.md#scanning)) and run `make up`.
+- If you want a Tailscale node or OpenVAS, follow their guides. Neither is started for you.
+- If the approval updater's cron entry needs a longer drain limit than 5 minutes, put `CVENGINE_UPDATE_DRAIN_SECONDS` in front of the command in the crontab ([CONFIGURATION.md](CONFIGURATION.md#updates)).
+- Sentinels run from their own repository and are enrolled from the Sentinels page, which also needs the new 1.3 server.
+
+**Check afterwards**
+
+1. **Settings, Updates** shows the new commit as installed and no problem, and `docker compose ps` shows the six services running and no `openvas-*` or `tailscale` container.
+2. `docker compose exec web python3 manage.py migrate --check` exits without complaint.
+3. **Settings, Scan policy** shows the Nuclei switch the way you want it.
+4. After half an hour, the open CVE count has fallen and closed matches say "Closed automatically" with a reason. Open a few hosts: technologies without a version appear as **Unverified products**.
+5. **Activity** shows the new sweeps starting over the next day, and the system status (`GET /api/v1/system/status`, or the MCP tool `get_system_status`) has no new problem. If it says the worker cannot open raw sockets, the UDP scan is not running.
+6. **Settings, Resources** shows the memory budget keeps up; raise `CELERY_MEM_LIMIT` if new work waits for memory.
+
 ## Upgrading to 1.2
 
 An update applies the migrations (it rolls back if one fails) and ends every session once, so everyone signs in again. Three protections are new-install only, because an update cannot switch them on without recreating services:
