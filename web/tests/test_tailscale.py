@@ -299,7 +299,7 @@ class DeviceCheckTests(SimpleTestCase):
         return finding_checks(tailscale_checks.evaluate_device(device(n, **over), f'100.64.0.{n}', now=NOW, ports=ports))
 
     def test_a_healthy_current_device_has_no_findings(self):
-        self.assertEqual(self.evaluate(clientVersion='1.104.2'), {})
+        self.assertEqual(self.evaluate(clientVersion='1.104.4'), {})
 
     def test_ssh_bulletins_need_tailscale_ssh_on_a_unix_host_to_apply(self):
         # TS-2026-004/006/009 are fixed in 1.98.9 and concern Tailscale SSH on Linux/Unix: not claimed while the data does not show SSH
@@ -307,22 +307,26 @@ class DeviceCheckTests(SimpleTestCase):
         self.assertEqual(set(found), {'ts_client_security_update'})  # only the unconditional one (TS-2026-013)
         self.assertEqual({b['id'] for b in found['ts_client_security_update'].evidence['bulletins']}, {'TS-2026-013'})
         ssh = tailscale_checks.client_bulletins({**device(1, clientVersion='1.98.1'), 'ssh': True})
-        self.assertEqual({b[0] for b in ssh}, {'TS-2026-004', 'TS-2026-006', 'TS-2026-009', 'TS-2026-010', 'TS-2026-013'})
+        self.assertEqual({b[0] for b in ssh}, {'TS-2026-004', 'TS-2026-006', 'TS-2026-009', 'TS-2026-010', 'TS-2026-013', 'TS-2026-014', 'TS-2026-015'})
         windows = tailscale_checks.client_bulletins({**device(1, clientVersion='1.98.1', os='windows'), 'ssh': True})
-        self.assertEqual({b[0] for b in windows}, {'TS-2026-010', 'TS-2026-013'})  # the Unix-only ones stay off
+        self.assertEqual({b[0] for b in windows}, {'TS-2026-010', 'TS-2026-013', 'TS-2026-015'})  # the Unix-only ones stay off
 
     def test_the_finding_names_the_fix_version_and_the_worst_severity(self):
         d = {**device(1, clientVersion='1.98.1'), 'ssh': True}
         f = tailscale_checks.evaluate_device(d, '100.64.0.1', now=NOW)[0]
         self.assertEqual((f.check, f.severity), ('ts_client_security_update', tailscale_checks.HIGH))
-        self.assertEqual(f.evidence['upgrade_to'], '1.104.2')
+        self.assertEqual(f.evidence['upgrade_to'], '1.104.4')
         self.assertIn('TS-2026-006', f.detail)
         self.assertIn('Fix: upgrade Tailscale', f.detail)
         self.assertTrue(f.evidence['severity_basis'])
         self.assertEqual(f.evidence['reference'], 'https://tailscale.com/security-bulletins')
 
     def test_a_current_version_clears_the_bulletins_and_a_4via6_router_is_judged_on_its_routes(self):
-        self.assertEqual(tailscale_checks.client_bulletins({**device(1, clientVersion='1.104.2'), 'ssh': True}), [])
+        self.assertEqual(tailscale_checks.client_bulletins({**device(1, clientVersion='1.104.4'), 'ssh': True}), [])
+        # 1.104.2 fixed TS-2026-013 only: the two SSH bulletins fixed in 1.104.4 still apply to an SSH device (Serve ones are not decided from the data)
+        old = tailscale_checks.client_bulletins({**device(1, clientVersion='1.104.2'), 'ssh': True})
+        self.assertEqual({b[0] for b in old}, {'TS-2026-014', 'TS-2026-015'})
+        self.assertEqual(tailscale_checks.client_bulletins({**device(1, clientVersion='1.104.2'), 'ssh': False}), [])
         router = device(1, clientVersion='1.102.0', enabledRoutes=['fd7a:115c:a1e0:b1a:0:7::/96'])
         self.assertEqual({b[0] for b in tailscale_checks.client_bulletins(router)}, {'TS-2026-011', 'TS-2026-013'})
         plain = device(1, clientVersion='1.102.0', enabledRoutes=['10.0.0.0/24'])
@@ -415,7 +419,7 @@ class PolicyCheckTests(SimpleTestCase):
         self.assertEqual(len(f.evidence['rules']), 1)  # the check rule is not flagged
         self.assertEqual(f.evidence['rules'][0]['reasons'], ['allows login as root', 'accepts every member of the tailnet'])
         self.assertIn('tailworm.com', f.detail)
-        self.assertIn('acknowledged', f.detail)  # Tailscale has acknowledged the report; no numbered release carries the fixes yet
+        self.assertIn('acknowledged', f.detail)  # Tailscale has acknowledged the report; 1.104.4 carries the SSH forwarding fix
 
     def test_tag_owners_and_funnel(self):
         found = self.evaluate({'tagOwners': {'tag:a': ['autogroup:member'], 'tag:b': ['group:eng']},

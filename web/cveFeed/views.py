@@ -828,6 +828,12 @@ def api_node(request):
     return JsonResponse(detail)
 
 
+def _public_error(text):
+    """The first line of a stored failure reason, clipped, for the live ticker: whatever follows (a traceback's frames, paths, a long chain) stays in the log."""
+    first = (text or '').strip().splitlines()[:1]
+    return first[0][:200] if first else ''
+
+
 def _serialize_activity(a):
     return {'id': a.id, 'kind': a.kind, 'message': a.message, 'status': a.status, 'cve_id': a.cve_id,
             'project': a.project.slug if a.project_id else None,  # the project a line's hosts and CVEs link into
@@ -910,7 +916,7 @@ def api_discovery(request):
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
     return JsonResponse({
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
-                 'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': scan.error_message or '',
+                 'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': _public_error(scan.error_message),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
         'counts': cached_discovery_counts((request.user.pk, request.GET.get('project', ''))),
