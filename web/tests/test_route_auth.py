@@ -544,11 +544,34 @@ class CatchAllTests(RouteFixture, TestCase):
 		def fn(url):
 			self.asked.append(url)
 			path = url.split('rt.test', 1)[1]
-			if path.startswith('/api'):
+			if path.startswith('/actuator/'):
 				return probe(url=url, status=200, content_type='application/json', body='{"error":"unknown endpoint for this service"}')
 			return probe(url=url, status=404)
 		self.run_it(self.scan(), probe=fn)
-		self.assertEqual((self.states()['/api'], self.states()['/api/']), ('catch_all', 'catch_all'))
+		self.assertEqual(self.states()['/actuator/health'], 'catch_all')
+
+	def test_a_mount_that_answers_everything_below_it_alike_is_still_a_route(self):
+		# /api exists as a mount even though every name under it gets one answer; the missing path is asked for beside a route, not below it
+		def fn(url):
+			self.asked.append(url)
+			path = url.split('rt.test', 1)[1]
+			if path == '/api' or path.startswith('/api/'):
+				return probe(url=url, status=200, content_type='application/json', body='{"error":"unknown endpoint for this service"}')
+			return probe(url=url, status=404)
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual((self.states()['/api'], self.states()['/api/']), ('open', 'open'))
+		self.assertFalse([u for u in self.extra() if '/api/cvengine-' in u])
+
+	def test_a_sign_in_page_on_a_template_the_missing_page_shares_is_still_a_login_page(self):
+		chrome = ' '.join(f'navigation link{n} footer item{n}' for n in range(80))
+		def fn(url):
+			self.asked.append(url)
+			if url.endswith('/login'):
+				return probe(url=url, status=200, title='Sign in', body=f'<html><title>Sign in</title>{chrome}<input type="password"></html>')
+			return probe(url=url, status=200, title='Sign in', body=f'<html><title>Sign in</title>{chrome}<p>Page not found</p></html>')
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual(self.states()['/login'], 'login')
+		self.assertEqual(self.states()['/admin'], 'catch_all')
 
 	def test_a_page_that_is_really_different_from_the_wildcard_stays_open(self):
 		def fn(url):

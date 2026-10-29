@@ -8,7 +8,7 @@ what comes back with what the real path gave, after taking out what changes betw
 
 What is compared: the status, the content type, where a redirect leads (with the requested path taken out of it: a server that sends
 every path to ``/login?next=<path>`` sends them all to the same place) and the body, normalised (the requested path, ids, tokens, nonces
-and times removed) and compared as a hash, or, for a page that still moves, as a set of word shingles. A title is not required.
+and times removed) and compared as a hash, or, for a page that still moves, as a set of word shingles that must also agree on the title and on whether a sign-in form is there.
 
 Pure: nothing here asks the network.
 """
@@ -30,6 +30,7 @@ _DATE = re.compile(r'\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|(?:Mon|Tue|W
 _BIG_NUMBER = re.compile(r'\b\d{6,}\b')
 _TOKEN_ATTR = re.compile(r'(?i)\b(nonce|csrf[-_\w]*|xsrf[-_\w]*|token|authenticity_token|requestid|request-id|trace-?id)\b(["\']?\s*[:=]\s*["\']?)[^"\'\s<>]{4,}')
 _META_TOKEN = re.compile(r'(?i)(<meta[^>]+name=["\'](?:csrf|xsrf)[^>]*content=["\'])[^"\']*')
+_PASSWORD_FIELD = re.compile(r'<input\b[^<>]{0,1000}?type=["\']?password', re.I)
 _WORD = re.compile(r'[A-Za-z0-9]{2,}')
 
 
@@ -78,6 +79,8 @@ def fingerprint(result, path=''):
         'type': str(result.get('content_type') or '').split(';')[0].strip().lower(),
         'redirect': _redirect_target(result.get('location'), path),
         'hash': hashlib.sha1(clean.encode('utf-8', 'replace')).hexdigest()[:16],
+        'title': normalise(result.get('title') or '', path).lower()[:120],
+        'form': bool(_PASSWORD_FIELD.search(body)),
         'length': int(result.get('bytes') if result.get('bytes') is not None else len(body)),
         'shingles': _shingles(clean),
     }
@@ -92,8 +95,8 @@ def similarity(a, b):
 
 def same(answer, missing):
     """True when ``answer`` is the server's answer for a path that is not there (``missing``, both from ``fingerprint``): the same status
-    and type, a redirect that leads to the same place, or a body that is the same after normalising, or close enough to it that only a
-    changing part differs."""
+    and type, a redirect that leads to the same place, or a body that is the same after normalising, or close enough to it (the same title and
+    the same sign-in form or none) that only a changing part differs."""
     if not answer or not missing or answer['status'] != missing['status'] or answer['type'] != missing['type']:
         return False
     if 300 <= answer['status'] < 400:
@@ -105,6 +108,8 @@ def same(answer, missing):
         return False
     if abs(answer['length'] - missing['length']) > LENGTH_SLACK * longer:
         return False
+    if answer['title'] != missing['title'] or answer['form'] != missing['form']:
+        return False  # a page of its own on the same template: another title, or a sign-in form the missing page lacks
     return similarity(answer['shingles'], missing['shingles']) >= SIMILAR
 
 

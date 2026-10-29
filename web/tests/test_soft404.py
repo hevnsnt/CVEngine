@@ -46,6 +46,13 @@ class SameTests(SimpleTestCase):
 		other = '<html><body>' + ' '.join(f'user{n} record{n} role{n}' for n in range(60)) + '</body></html>'
 		self.assertFalse(soft404.same(answer(body=SHELL), answer(body=other)))
 
+	def test_the_same_template_with_another_title_or_a_sign_in_form_is_another_page(self):
+		chrome = ' '.join(f'nav{n} footer{n} link{n}' for n in range(80))
+		missing = answer('/x', body=f'<title>Home</title>{chrome} not found', title='Home')
+		self.assertTrue(soft404.same(answer(body=f'<title>Home</title>{chrome} not here', title='Home'), missing))
+		self.assertFalse(soft404.same(answer(body=f'<title>Admin</title>{chrome} not here', title='Admin'), missing))
+		self.assertFalse(soft404.same(answer(body=f'<title>Home</title>{chrome} <input type="password">', title='Home'), missing))
+
 	def test_a_page_of_another_size_is_another_page(self):
 		self.assertFalse(soft404.same(answer(body=SHELL), answer(body=SHELL + ' extra paragraph' * 400)))
 

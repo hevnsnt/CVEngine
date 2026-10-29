@@ -285,7 +285,6 @@ def analyse(result):
 
 
 CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
-BASELINE_SHAPES = ('bare', 'slash', 'ext')
 MAX_BASELINES_PER_HOST = 8  # extra requests a host may be asked for what its missing pages look like, on top of its routes
 
 
@@ -336,13 +335,12 @@ def _against_missing_page(answer, url, probe, known):
         return answer
     base = f'{parts.scheme}://{parts.netloc}'
     directory, shape, ext = _split_route(path)
-    # where a path that cannot exist is asked for: beside the route in its own kind, as a plain name, and below the route (a server that
-    # answers everything under /api with one JSON page says nothing about /api itself)
-    own = path if path.endswith('/') else path + '/'
-    for kind, where in dict.fromkeys(((shape, directory), ('bare', directory), ('bare', own))):
-        missing = _baseline(base, where, kind, ext if kind == 'ext' else '', probe, known)
+    # where a path that cannot exist is asked for: beside the route, in its own kind and as a plain name (what ffuf, feroxbuster and
+    # dirsearch calibrate per directory). Below the route is not asked: a server that answers every path under /api alike has an /api
+    for kind in dict.fromkeys((shape, 'bare')):
+        missing = _baseline(base, directory, kind, ext if kind == 'ext' else '', probe, known)
         if missing is not None and soft404.same(fp, missing):
-            evidence = {**answer['evidence'], 'catch_all': {**soft404.public(missing), 'kind': kind if where == directory else 'below',
+            evidence = {**answer['evidence'], 'catch_all': {**soft404.public(missing), 'kind': kind,
                                                             'note': 'the same answer as for a path that cannot exist'}}
             return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0}
     return answer
