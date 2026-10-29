@@ -136,7 +136,7 @@ def _os(sub, names):
                 facts.setdefault(key, {k: _s(v, 80, names) for k, v in list(fingerprint[key].items())[:12] if isinstance(v, (str, int, float))})
     out = {'guesses': guesses[:3], 'reported_by_other_tools': facts}
     if not believe:
-        out['note'] = 'no operating system guess is given: ' + os_detection.REASON
+        out['note'] = os_detection.REASON
     return out
 
 

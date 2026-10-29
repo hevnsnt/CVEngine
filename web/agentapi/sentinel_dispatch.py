@@ -215,7 +215,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
     from cveFeed.nmap_scan import persist_inventory
     inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
                  for host in result.get('hosts', []) if host.get('ip')]
-    totals = persist_inventory(inventory, org_id=org_id, os_reliable=True)  # measured from the Sentinel's own network
+    totals = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
     return rest, totals
 
 

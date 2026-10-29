@@ -37,6 +37,19 @@ def restore_generated_templates(*args, **kwargs):
 
 
 @worker_ready.connect()
+def clear_untrusted_os_guesses(*args, **kwargs):
+    """An install behind Docker Desktop's network stored operating system guesses that describe that network (cveFeed.os_detection);
+    remove them and name each host from what its services report. Does nothing on an install that measures correctly. Never stops the
+    worker from starting."""
+    import logging
+    try:
+        from cveFeed import os_detection
+        os_detection.clear_stored_guesses()
+    except Exception:  # noqa: BLE001 - the database may not be reachable yet; the next worker start tries again
+        logging.getLogger(__name__).exception('could not clear the untrusted operating system guesses')
+
+
+@worker_ready.connect()
 def start_first_run_bootstrap(*args, **kwargs):
     """A brand-new install loads its CVE feed as soon as its workers are up, not at the first scheduled run (cveFeed.tasks.
     bootstrap_first_run does nothing on an install that already has CVEs). The delay lets the other workers and beat settle.
