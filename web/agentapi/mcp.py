@@ -17,6 +17,7 @@ from agentapi import reports
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
 from agentapi import sentinel_dispatch
+from reNgine import schema_guard
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -628,7 +629,9 @@ def _internal_error(ctx, message):
     """handle_message, with an uncaught exception answered as the JSON-RPC internal error instead of an HTML 500 page."""
     try:
         return handle_message(ctx, message)
-    except Exception:  # noqa: BLE001 - the reason stays in the log; the client gets a protocol-level answer
+    except Exception as exc:  # noqa: BLE001 - the reason stays in the log; the client gets a protocol-level answer
+        if schema_guard.behind(exc):
+            raise  # the middleware answers 503: an update is between its new files and its migration, and the client asks again
         logger.exception('MCP request failed')
         rpc_id = message.get('id') if isinstance(message, dict) else None
         if not isinstance(rpc_id, (str, int, float, type(None))) or len(str(rpc_id)) > 128:
