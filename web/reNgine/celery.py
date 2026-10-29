@@ -50,6 +50,20 @@ def clear_untrusted_os_guesses(*args, **kwargs):
 
 
 @worker_ready.connect()
+def recap_version_only_answers(*args, **kwargs):
+    """Answers stored before the ceiling that says a match on a version string alone is needs_validation at most (cveFeed.triage.ceiling)
+    are brought in line with it, with no model call. Idempotent. Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed import triage
+        changed = triage.recap_version_only()
+        if changed:
+            logging.getLogger(__name__).info('%d version-only CVE match answers kept as needs validation', changed)
+    except Exception:  # noqa: BLE001 - the database may not be reachable yet; the next worker start tries again
+        logging.getLogger(__name__).exception('could not recap the version-only answers')
+
+
+@worker_ready.connect()
 def start_first_run_bootstrap(*args, **kwargs):
     """A brand-new install loads its CVE feed as soon as its workers are up, not at the first scheduled run (cveFeed.tasks.
     bootstrap_first_run does nothing on an install that already has CVEs). The delay lets the other workers and beat settle.

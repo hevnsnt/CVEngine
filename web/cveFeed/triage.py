@@ -117,6 +117,16 @@ def hard_evidence(kind, facts):
     return floor, found
 
 
+def ceiling(kind, facts):
+    """``(level, text)``: the highest classification the evidence supports, or ``('', '')`` when it sets none. The mirror of the floor:
+    a CVE match that stands on a version string alone (``match_policy.version_only``) is needs_validation at most, whatever the model
+    says. Enforced here, in code, because a prompt is a request and a model's stated certainty is not calibrated (it is overconfident
+    on exactly this kind of claim); the evidence class decides, as OpenVEX does with ``under_investigation`` until there is more."""
+    if kind == 'cve_match' and facts.get('version_only'):
+        return 'needs_validation', 'the only evidence is a version string inside the affected range'
+    return '', ''
+
+
 def apply_rules(kind, facts, parsed):
     """The classification a finding ends with: the model's answer (``parsed`` from parse_triage, None when its reply was unusable)
     held against the hard evidence. Returns a dict with ``classification``, ``reason``, ``overridden`` (the model said something
@@ -139,6 +149,9 @@ def apply_rules(kind, facts, parsed):
         else:
             prefix = f'{"; ".join(evidence)}; classified {floor.replace("_", " ")}. '
         final = floor
+    limit, limit_text = ceiling(kind, facts)
+    if limit and rank(final) > rank(limit):
+        prefix, final = f'AI said {said.replace("_", " ")} but {limit_text}; kept as {limit.replace("_", " ")}: ', limit
     if facts.get('version_unknown') and rank(floor) <= rank('needs_validation') and final != 'needs_validation':
         # nothing to test the version against: only a person, or a published range, moves it (the model cannot raise it either)
         prefix, final = f'AI said {said.replace("_", " ")} but the advisory gives no affected version range; kept as needs validation: ', 'needs_validation'
@@ -283,6 +296,8 @@ def describe_cve_match(m):
     facts = {'version_in_range': m.version_in_range, 'distro_status': getattr(m, 'distro_status', '') or '',
              'template_result': getattr(m, 'template_result', '') or ''}
     facts['version_unknown'] = match_policy.is_version_unknown(evidence, m.version_in_range, facts['template_result'], facts['distro_status'])
+    facts['version_only'] = match_policy.version_only(getattr(m, 'source', ''), evidence, m.version_in_range, facts['template_result'],
+                                                      facts['distro_status'])
     payload = {
         'product': _s(m.matched_product, 120, names), 'version': _s(m.matched_version, 120, names),
         'version_in_range': m.version_in_range, 'source': _s(m.source, 20),
@@ -963,6 +978,10 @@ def _apply(verdict, group):
         if row.validation_status == 'hit' and rank(classification) < rank('confirmed'):
             classification, reason = 'confirmed', row.reason or reason
         match = matches_by_id.get(row.match_id) if row.match_id else None
+        limit, limit_text = ceiling(d['kind'], d['facts'])
+        if limit and rank(classification) > rank(limit) and row.validation_status != 'hit':
+            # an answer stored for this evidence before the ceiling, or by a model that ignored it: the evidence class decides
+            classification, reason = limit, (f'{limit_text.capitalize()}; kept as {limit.replace("_", " ")}. ' + reason)[:700]
         # A match is only ever made on hard evidence (the same product, its version inside a bounded range), and a name-only or
         # wrong-product candidate was already closed on its own (correlation.invalid_identity_reason), so what is left here is a match
         # that stands on its version: the model's "not applicable" cannot overrule that, while a version outside the range, a patched
@@ -1000,6 +1019,31 @@ def _apply(verdict, group):
             defaults={'ai_verdict': verdict_for(matches[0][0].classification),
                       'ai_reason': matches[0][0].reason, 'ai_model': verdict.model})
     return [row.match_id for row, _ in matches]
+
+
+def recap_version_only():
+    """Bring the answers stored before the ceiling in line with it (no model call): a triaged CVE match that stands on a version string
+    alone and was classed likely or confirmed becomes needs_validation, with its legacy verdict, and the shared verdict a new match of
+    the same version would start from stops saying affected. A validation hit, a template hit, a distribution listing, a host report and a
+    runZero report are all left as they are. Idempotent. Returns how many rows changed."""
+    from cveFeed.models import CVEMatch, MatchVerdict, Triage
+    limit, text = ceiling('cve_match', {'version_only': True})
+    rows = (Triage.objects.filter(kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'), match__version_in_range=True)
+            .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
+            .exclude(match__source='host').exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
+    ids = list(rows.values_list('pk', flat=True))
+    changed = 0
+    now = timezone.now()
+    for start in range(0, len(ids), CHUNK):
+        batch = ids[start:start + CHUNK]
+        matches = list(Triage.objects.filter(pk__in=batch).values_list('match_id', 'reason'))
+        Triage.objects.filter(pk__in=batch).update(classification=limit, updated_at=now)
+        for match_id, reason in matches:
+            CVEMatch.objects.filter(pk=match_id).update(ai_verdict=verdict_for(limit), updated_at=now,
+                                                        ai_reason=(f'{text.capitalize()}; kept as {limit.replace("_", " ")}. ' + reason)[:2000])
+        changed += len(batch)
+    MatchVerdict.objects.filter(version_in_range=True, ai_verdict='affected').exclude(source='host').update(ai_verdict=verdict_for(limit))
+    return changed
 
 
 def _mark(group, status, diagnostic=None):
