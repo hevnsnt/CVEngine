@@ -416,28 +416,6 @@ MAX_AFFECTED_ITEMS = 500
 MAX_RANGES_PER_ITEM = 100
 
 
-_PATCH_LEVEL_RE = re.compile(r"^\d+\.\d+\.\d+$")
-
-
-def _with_branch_bounds(ranges):
-    """A branch-by-branch fix list as cve.now publishes it for PHP (fixed 8.2.35, 8.3.36, 8.4.27 and 8.5.12, no lower bound): each fix
-    closes only its own branch. Without a lower bound the fix for 8.4 stands for every older version, so a patched 8.3.36 sits below
-    it and reads as vulnerable. Each range gets its branch (the major.minor of its fixed version) as ``introduced``, the shape the
-    CVE List path already produces. Only two or more fix-only ranges, each fixed at a plain major.minor.patch version on a branch of
-    its own, are rewritten; any other list is left exactly as it was."""
-    fixes = []
-    for rng in ranges:
-        fixed = str(rng.get("fixed") or "").strip()
-        if (len(ranges) < 2 or rng.get("introduced") or rng.get("lastAffected") or not _PATCH_LEVEL_RE.match(fixed)
-                or str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM")):
-            return ranges
-        fixes.append(fixed)
-    branches = [".".join(fixed.split(".")[:2]) for fixed in fixes]
-    if len(set(branches)) != len(branches):
-        return ranges  # two fixes for one branch: not a list of branches
-    return [{**rng, "introduced": branch} for rng, branch in zip(ranges, branches)]
-
-
 def clean_affected(value):
     """The dict entries of a CVE's ``affected`` list, each with a list of dict ranges. A third-party feed decides this shape, and one
     malformed entry (a string, a null, ranges that are not a list) must not stop correlation for every CVE after it."""
@@ -449,8 +427,7 @@ def clean_affected(value):
             continue
         ranges = item.get("ranges")
         if ranges is not None:
-            item = {**item, "ranges": _with_branch_bounds([r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)])
-                    if isinstance(ranges, list) else []}
+            item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
         out.append(item)
     return out
 
@@ -545,6 +522,45 @@ def branch_unlisted(ver, ranges):
     return bool(lowest and ver and _vcmp(ver[:len(lowest)], lowest) < 0)
 
 
+def fix_only_branch_list(ranges):
+    """True for a list of two or more ranges that each carry only a ``fixed`` bound: the shape some feeds give a branch-by-branch advisory
+    (PHP2Shell: fixed 8.2.35, 8.3.36, 8.4.27, 8.5.12). The lower bound was dropped, so a range read alone says "every version before
+    the fix", which for one branch's fix includes the other, older branches' already patched releases."""
+    if len(ranges) < 2:
+        return False
+    for rng in ranges:
+        if (rng.get("introduced") or rng.get("lastAffected") or not rng.get("fixed")
+                or str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM") or parse_version(rng.get("fixed"), strict=True) is None):
+            return False
+    return True
+
+
+def fix_only_branch_verdict(ver, ranges):
+    """``(verdict, fixed)`` for ``ver`` against a fix-only branch list, without inventing a lower bound: a fix only speaks for the
+    versions that are on its own line of releases. True/False/None as for ``version_in_range``; ``fixed`` is the fix the answer was
+    read against (None when none applies).
+
+    1. A fix on the host's own major.minor branch decides: vulnerable when the host is before it.
+    2. Otherwise the fixes on the host's major: exactly one decides (an advisory of release trains named by their major, such as
+       18.19.1, 20.11.1 and 21.6.2, or one fix at x.y.0), several that the host sits between or before are a branch the advisory does
+       not list: unknown, never cleared (an end-of-life branch gets no fix).
+    3. Newer than every fix: not vulnerable. Another major, older than every fix: unknown. Between majors: unknown."""
+    parsed = sorted(((parse_version(r["fixed"], strict=True), r["fixed"]) for r in ranges), key=lambda pair: pair[0])
+    if not ver or len(ver) < 1:
+        return None, None
+    own = [pair for pair in parsed if pair[0][:2] == tuple(ver[:2])]
+    if own:
+        fix = own[0]
+        return (_vcmp(ver, fix[0]) < 0), fix[1]
+    if _vcmp(ver, parsed[-1][0]) >= 0:
+        return False, None
+    same_major = [pair for pair in parsed if pair[0][:1] == tuple(ver[:1])]
+    if len(same_major) == 1:
+        fix = same_major[0]
+        return (_vcmp(ver, fix[0]) < 0), fix[1]
+    return None, None
+
+
 def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None):
     """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
     discovered product `token` (normalized) at version `ver` (tuple or None).
@@ -586,6 +602,18 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
                 ranges = [r for r in (item.get("ranges") or []) if _bounded(r)]
                 if not ranges:
                     unknown = True  # the advisory names the product but no version bound: nothing to test against
+                    continue
+                if fix_only_branch_list(ranges):
+                    # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
+                    result, fixed = fix_only_branch_verdict(ver, ranges)
+                    if result is True:
+                        in_range = True
+                        matched_product = item.get("product") or item.get("package") or name
+                        if details is not None:
+                            details[cve.id] = {"affected_index": index, "range": {"fixed": str(fixed)[:60]}, "no_lower_bound": True}
+                        break
+                    if result is None:
+                        unknown = True
                     continue
                 for rng in ranges:
                     result = version_in_range(ver, rng)

@@ -123,6 +123,11 @@ class CVEEntry(models.Model):
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
         }
+        # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
+        from cveFeed.intel import overlay_branch_ranges
+        defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
+        if overlaid and "CVE List V5" not in defaults["sources"]:
+            defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds
         for field in cls._meta.get_fields():
             limit = getattr(field, "max_length", None)
