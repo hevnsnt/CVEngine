@@ -965,10 +965,19 @@ def close_rejected():
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch
+    from cveFeed import scoring
     open_matches = CVEMatch.objects.filter(cve_entry__status__icontains="reject").exclude(
         ai_verdict="not_affected", ai_reason__startswith="Closed automatically:")
-    return open_matches.update(ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-                               ai_reason="Closed automatically: the CVE was rejected by its CNA.")
+    closed = 0
+    while rows := list(open_matches.order_by('pk').values_list('pk', 'subdomain_id')[:scoring.CHUNK]):
+        ids = [pk for pk, _ in rows]
+        updated = open_matches.filter(pk__in=ids).update(
+            ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
+            ai_reason="Closed automatically: the CVE was rejected by its CNA.")
+        closed += updated
+        if updated:
+            scoring.rescore_subdomain_ids({subdomain_id for _, subdomain_id in rows})
+    return closed
 
 
 def close_stale(current, covered):
