@@ -1309,7 +1309,8 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .map[data-tier="rich"][data-size="xl"] .hx .score::before{content:none}
 .map[data-tier="rich"][data-size="xl"] .hx .hx-name{order:2;margin-top:auto;font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .map[data-tier="rich"] .hx .hx-details{display:flex;flex-direction:column;gap:2px;order:1;min-height:0;overflow:hidden;font:500 10.5px/1.3 var(--mono);color:var(--muted)}
-.map[data-tier="rich"] .hx .hx-d{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map[data-tier="rich"] .hx .hx-d{display:block;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map[data-tier="rich"] .hx .hx-d.hx-cut{visibility:hidden}
 .map[data-tier="rich"] .hx .hx-cve{color:var(--ink)}
 .hx .hx-tag{display:none}
 .map[data-tier="rich"] .hx .hx-tag{display:block;position:absolute;top:8px;right:8px;font:700 9.5px/1 var(--mono);font-style:normal;padding:3px 5px;border-radius:3px;background:var(--sunk);color:var(--ink);letter-spacing:.04em}

@@ -354,10 +354,23 @@ function layoutMap() {
     const cell = cells.get(h.id);
     if (cell) cell.hidden = i >= plan.show;
   });
+  if (plan.tier.name === "rich") fitDetails(map);
   if (mapDrawn !== plan.show) {
     mapDrawn = plan.show;
     paintMapCount();
   }
+}
+// A tile shows only the detail lines that fit whole: a host with a target or owner line has less room than its neighbours, so the
+// lines past the bottom of each tile are dropped instead of being squeezed and cut through the middle
+function fitDetails(map) {
+  map.querySelectorAll(".hx:not([hidden]) .hx-details").forEach((box) => {
+    const lines = [...box.children];
+    lines.forEach((d) => d.classList.remove("hx-cut"));
+    const bottom = box.getBoundingClientRect().bottom + 0.5;
+    lines.forEach((d) => {
+      if (d.offsetParent && d.getBoundingClientRect().bottom > bottom) d.classList.add("hx-cut");
+    });
+  });
 }
 new ResizeObserver(() => requestAnimationFrame(layoutMap)).observe($("map"));
 // The header of the attack-surface map reads the same numbers as the Exposed hosts tile, so the two cannot disagree: the map
