@@ -9,10 +9,11 @@ from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
-from cveFeed import internal_scan
+from cveFeed import assessment_review, coverage_topup, host_assessment, internal_scan
+from cveFeed.models import HostAssessment
 from cveFeed.discovery import FAILED, QUEUED, SUCCESS
 from scanEngine.models import EngineType
-from startScan.models import IpAddress, Port, ScanHistory, Subdomain
+from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call
 from tests.test_internal_ranges import World
@@ -58,7 +59,8 @@ class RunTests(Base):
         def dispatch(project, kind, target, **kwargs):
             calls.append((kind, target, kwargs))
             return NMAP_RESULT
-        with mock.patch('cveFeed.tasks.correlate_cves') as correlate, mock.patch('cveFeed.nmap_scan.scan_in_chunks') as local_nmap:
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}) as correlate, \
+                mock.patch('cveFeed.nmap_scan.scan_in_chunks') as local_nmap:
             out = internal_scan.run(scan.id, dispatch=dispatch, nuclei_stream=lambda kind: iter_none, provider=None)
             local_nmap.assert_not_called()
         self.assertEqual(out['status'], SUCCESS, out)
@@ -67,9 +69,38 @@ class RunTests(Base):
         self.assertTrue(Subdomain.objects.filter(scan_history=scan, name='10.20.0.7').exists())
         self.assertEqual(sorted(Port.objects.filter(ports__address='10.20.0.7').values_list('number', flat=True)), [22, 443])
         self.assertEqual(IpAddress.objects.get(address='10.20.0.7').os_guess, 'Linux 5.x')
-        correlate.delay.assert_called_once_with(scan_history_id=scan.id)
+        correlate.assert_called_once_with(scan_history_id=scan.id)
         scan.refresh_from_db()
         self.assertEqual(scan.scan_status, SUCCESS)
+        self.assertTrue(ScanActivity.objects.filter(scan_of=scan, name='cve_correlation', status=SUCCESS).exists())
+        stages = list(ScanActivity.objects.filter(scan_of=scan).order_by('id').values_list('name', flat=True))
+        self.assertLess(stages.index('cve_correlation'), stages.index('nuclei_targeted_scan'))
+
+    def test_internal_inventory_is_serviced_by_its_own_pipeline_not_host_assessment(self):
+        scan = self.queued_scan()
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}):
+            internal_scan.run(scan.id, dispatch=lambda *a, **k: NMAP_RESULT, nuclei_stream=lambda kind: iter_none, provider=None)
+        sub = Subdomain.objects.get(scan_history=scan, name=self.domain.name)
+        # Even an incomplete internal stage belongs to the Sentinel scan cadence,
+        # rather than the external host-assessment queue or deep-scan gate.
+        ScanActivity.objects.filter(scan_of=scan, name='cve_correlation').update(status=FAILED)
+        self.assertEqual(assessment_review.host_coverage_due(self.pa, timezone.now()), (0, []))
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+                mock.patch('cveFeed.unresolved_archive.recheck', return_value=0), \
+                mock.patch('cveFeed.tasks.assess_host.apply_async') as external:
+            self.assertEqual(coverage_topup.top_up()['hosts_queued'], 0)
+            self.assertFalse(coverage_topup.backlog_exists())
+            external.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'internal Sentinel'):
+            host_assessment.enqueue(self.pa, sub)
+
+    def test_queued_external_assessment_is_refused_after_host_becomes_internal(self):
+        Subdomain.objects.create(target_domain=self.domain, name=self.domain.name)
+        job = HostAssessment.objects.create(project=self.pa, domain=self.domain, host=self.domain.name, status='queued')
+        with mock.patch('cveFeed.discovery.run_host_pipeline') as external:
+            outcome = host_assessment.execute(job.pk)
+            external.assert_not_called()
+        self.assertEqual(outcome['status'], 'inconclusive')
 
     def test_no_sentinel_answering_fails_the_scan_and_nothing_runs_locally(self):
         scan = self.queued_scan()
@@ -78,7 +109,7 @@ class RunTests(Base):
             out = internal_scan.run(scan.id, dispatch=lambda *a, **k: None, nuclei_stream=lambda kind: iter_none, provider=None)
             local_nmap.assert_not_called()
             local_xml.assert_not_called()
-            correlate.delay.assert_not_called()
+            correlate.assert_not_called()
         self.assertEqual(out['status'], FAILED)
         scan.refresh_from_db()
         self.assertEqual(scan.scan_status, FAILED)
@@ -96,7 +127,7 @@ class RunTests(Base):
     def test_an_answer_about_another_address_is_not_stored(self):
         scan = self.queued_scan()
         other = {'hosts': [{'ip': '10.20.0.99', 'ports': [{'number': 80, 'protocol': 'tcp', 'service_name': 'http'}]}]}
-        with mock.patch('cveFeed.tasks.correlate_cves'):
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}):
             internal_scan.run(scan.id, dispatch=lambda *a, **k: other, nuclei_stream=lambda kind: iter_none, provider=None)
         self.assertFalse(Port.objects.filter(ports__address='10.20.0.99').exists())
 
@@ -186,7 +217,7 @@ class StageTests(Base):
         def dispatch(project, kind, target, **kw):
             kinds.append(kind)
             return answers.get(kind)
-        with mock.patch('cveFeed.tasks.correlate_cves'):
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}):
             out = internal_scan.run(scan.id, dispatch=dispatch, **{'nuclei_stream': lambda kind: iter_none, 'provider': None, **kwargs})
         return scan, out, kinds
 
@@ -247,7 +278,7 @@ class StageTests(Base):
         from cveFeed import nuclei_scan
         from targetApp.target_types import internal_scope
         scan = self.queued_scan()
-        with mock.patch('cveFeed.tasks.correlate_cves'):
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}):
             internal_scan.run(scan.id, dispatch=lambda p, k, t, **kw: NMAP_RESULT if k == 'nmap' else None,
                               nuclei_stream=lambda kind: iter_none, provider=None)
         self.assertEqual(nuclei_scan.scan_targets(scan), (set(), set(), set()))
@@ -289,7 +320,8 @@ class WpscanTests(Base):
         def fake_dispatch_or_none(project, kind, target, **kw):
             calls.append((kind, target, kw))
             return wpscan_answer
-        with mock.patch('cveFeed.tasks.correlate_cves'), mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', side_effect=fake_dispatch_or_none), \
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}), \
+                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', side_effect=fake_dispatch_or_none), \
                 mock.patch('cveFeed.probes.run_http_probe') as probe, mock.patch('cveFeed.wpscan_scan.plugin_titles') as titles, \
                 mock.patch('cveFeed.wpscan_scan.run_wpscan_process') as local, mock.patch('cveFeed.wpscan_scan.queue_thorough') as thorough:
             out = internal_scan.run(scan.id, dispatch=dispatch, nuclei_stream=lambda kind: iter_none, provider=None, wp_runner=wp_runner, **kwargs)
