@@ -690,6 +690,19 @@ class ExpiryAndCleanupTests(ReportBase):
 
 
 class CapTests(ReportBase):
+    def test_alias_findings_count_in_the_host_and_project_rows(self):
+        alias = Subdomain.objects.create(target_domain=self.da, scan_history=self.scan_a, name='www2.acme.test')
+        alias.ip_addresses.add(self.www.ip_addresses.first())
+        Vulnerability.objects.create(subdomain=alias, target_domain=self.da, scan_history=self.scan_a,
+                                     name='Alias-only exposure', severity=3, source='nuclei', discovered_date=NOW)
+
+        host_report = report_data.collect(self.pa, host='www.acme.test')
+        project_report = report_data.collect(self.pa)
+        self.assertEqual(host_report['summary']['findings'], 4)
+        self.assertEqual(host_report['hosts'][0]['findings'], 5)  # four CVE or scanner findings and one hygiene finding
+        self.assertIn('Alias-only exposure', [finding['title'] for finding in host_report['findings']])
+        self.assertEqual(next(row['findings'] for row in project_report['hosts'] if row['host'] == 'www.acme.test'), 5)
+
     def extra_hosts(self, n):
         for i in range(n):
             sub = Subdomain.objects.create(target_domain=self.da, scan_history=self.scan_a, name=f'h{i:02d}.acme.test', score=50 - i)
