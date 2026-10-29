@@ -269,9 +269,20 @@ def run_wpscan_process(url, token, timeout=None, thorough=False):
         out = os.path.join(tmp, 'report.json')
         limit = timeout or (thorough_timeout() if thorough else wpscan_timeout())
         # under the resource gate: a pause or a stopped scan kills WPScan and its ruby children, and it waits for memory like nmap does
+        # stdout too: WPScan prints "Scan Aborted: --url ..." for a refused option or address there, and without it the reason was only "exit 1"
         proc = heavy_process.run('wpscan', [WPSCAN_BIN, '--url', url, *wpscan_args(limit, thorough, proxy_args), '-o', out], limit, label=url_host(url), env=env,
-                                 stderr=subprocess.PIPE)
-        return _classify(_read_report(out), proc.returncode, proc.stderr, token)
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return _classify(_read_report(out), proc.returncode, last_line(proc.stderr) or last_line(proc.stdout), token)
+
+
+def last_line(text):
+    """The last non-empty line of a process's output, clipped: what WPScan said last, for a failure that wrote no report."""
+    lines = [line.strip() for line in str(text or '').splitlines() if line.strip()]
+    return lines[-1][:300] if lines else ''
+
+
+# what WPScan's own exit codes mean (wpscan/exit_code.rb) when nothing else says why it stopped
+EXIT_MEANING = {1: 'WPScan refused its options or the address it was given', 2: 'WPScan was interrupted', 3: 'WPScan hit an unexpected error'}
 
 
 def _classify(report, returncode, stderr='', token=''):
@@ -296,7 +307,8 @@ def _classify(report, returncode, stderr='', token=''):
             raise Blocked(_redact(reason, token))
         raise RuntimeError(_redact(reason or 'the scan did not finish', token))
     if returncode not in OK_EXIT_CODES:
-        raise RuntimeError(_redact((stderr or '').strip().splitlines()[-1] if stderr else f'exit {returncode}', token))
+        said = last_line(stderr)
+        raise RuntimeError(_redact(said or f'{EXIT_MEANING.get(returncode, "WPScan stopped")} (exit {returncode})', token))
     if report is None:
         raise RuntimeError('WPScan wrote no usable report')
     return report
