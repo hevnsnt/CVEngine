@@ -180,6 +180,22 @@ class RunTests(TestCase):
 		line = AgentActivity.objects.filter(message__startswith='Threat intelligence').latest('id')
 		self.assertIn('1 CVEs imported from the CVE List (1 fire', line.message)
 
+	def test_threat_signal_changes_rescore_matches_beyond_old_limits(self):
+		from cveFeed.tasks import sync_threat_intel
+		changed = list(range(1, 5002))
+		with mock.patch('django.core.cache.cache.add', return_value=True), \
+				mock.patch('django.core.cache.cache.delete'), \
+				mock.patch('cveFeed.intel.run', return_value={'imported': [], 'signals_changed': changed, 'errors': {}, 'sources': {}}), \
+				mock.patch('cveFeed.models.CVEMatch.objects.filter') as find_matches, \
+				mock.patch('cveFeed.scoring.rescore_for_matches') as rescore, \
+				mock.patch('cveFeed.activity.log'):
+			result = sync_threat_intel()
+		self.assertEqual(result['signals_changed'], len(changed))
+		batches = [call.kwargs['cve_entry_id__in'] for call in find_matches.call_args_list]
+		self.assertEqual([cve_id for batch in batches for cve_id in batch], changed)
+		self.assertTrue(all(len(batch) <= 500 for batch in batches))
+		self.assertEqual(rescore.call_count, len(batches))
+
 	def test_the_advisory_panel_names_who_reported_each_signal(self):
 		from agentapi.services import _cve_context
 		self.run_intel()
