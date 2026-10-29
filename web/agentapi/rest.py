@@ -20,6 +20,7 @@ from agentapi import authcheck
 from agentapi import reports
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
+from reNgine import schema_guard
 from agentapi.auth import create_token
 from tenancy import audit
 from agentapi.services import ApiError, Ctx
@@ -497,7 +498,9 @@ def dispatch(request, path):
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
             return JsonResponse({'error': e.message}, status=e.status)
-        except Exception:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
+        except Exception as exc:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
+            if schema_guard.behind(exc):  # an update is between its new files and its migration: ask again shortly
+                return schema_guard.unavailable(request)
             logger.exception('API request failed: %s %s', request.method, path)
             return JsonResponse({'error': 'internal error'}, status=500)
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
