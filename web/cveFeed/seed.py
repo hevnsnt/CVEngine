@@ -224,7 +224,50 @@ def import_seed(path, batch=1000, progress=None):
             if progress:
                 progress(counts)
     flush()
+    if counts['created']:
+        note_feed_gap(_time(manifest.get('generated_at')))
     return counts
+
+
+# --- the gap behind a seed ---------------------------------------------------------------------------------------------------
+# A seed is a snapshot: the CVEs first seen between its generated_at and the first feed sync are in neither. The incremental sync
+# stops after a few hundred new entries, so it never reaches back that far, and the coverage backfill used to call the window
+# covered as soon as any entry was older than it (a seed holds entries from 1999). So the import records where the gap starts and the
+# backfill walks back to it, then closes it. The position is kept in BackgroundCursor (a lane name and a number, here epoch seconds).
+
+GAP_LANE = 'cve_feed_gap_from'          # the feed may be missing entries first seen after this time
+GAP_CHECKED_LANE = 'cve_feed_gap_checked'  # the gap behind the seed was looked at once (set when a walk reached its floor)
+
+
+def note_feed_gap(since):
+    """Record that entries first seen after ``since`` (a datetime) may be missing. The earliest recorded time stands."""
+    from cveFeed.models import BackgroundCursor
+    if since is None:
+        return
+    seconds = max(0, int(since.timestamp()))
+    row, created = BackgroundCursor.objects.get_or_create(lane=GAP_LANE, defaults={'last_pk': seconds})
+    if not created and (not row.last_pk or seconds < row.last_pk):
+        BackgroundCursor.objects.filter(lane=GAP_LANE).update(last_pk=seconds)
+    BackgroundCursor.objects.filter(lane=GAP_CHECKED_LANE).delete()  # a new seed makes the earlier check out of date
+
+
+def feed_gap_from():
+    """When the recorded gap starts (an aware datetime), or None when none is recorded."""
+    from cveFeed.models import BackgroundCursor
+    row = BackgroundCursor.objects.filter(lane=GAP_LANE).first()
+    return datetime.fromtimestamp(row.last_pk, tz=dt_timezone.utc) if row and row.last_pk else None
+
+
+def feed_gap_checked():
+    from cveFeed.models import BackgroundCursor
+    return BackgroundCursor.objects.filter(lane=GAP_CHECKED_LANE).exists()
+
+
+def close_feed_gap():
+    """The backfill read the feed back past the gap: clear it, and remember that it was looked at."""
+    from cveFeed.models import BackgroundCursor
+    BackgroundCursor.objects.filter(lane=GAP_LANE).delete()
+    BackgroundCursor.objects.get_or_create(lane=GAP_CHECKED_LANE)
 
 
 # --- download ---------------------------------------------------------------------------------------------------------------
