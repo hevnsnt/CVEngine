@@ -464,7 +464,10 @@ def sync_threat_intel():
     created, changed = result['imported'], result['signals_changed']
     if changed:
         from cveFeed import scoring
-        scoring.rescore_for_matches(list(CVEMatch.objects.filter(cve_entry_id__in=changed[:5000]).select_related('subdomain__target_domain')[:2000]))
+        for cve_ids in scoring._chunks(changed, scoring.CHUNK):
+            scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=cve_ids)
+                                        .select_related('subdomain__target_domain')
+                                        .order_by('subdomain__target_domain__project_id', 'subdomain__name'))
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
     tiers = [c.threat_tier for c in created]
