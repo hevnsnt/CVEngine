@@ -1,6 +1,6 @@
 {% include 'cveFeed/email/_head.html' %}
 <body class="page" style="margin:0;padding:0;background:#f4f4f5">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#f4f4f5">{{ by }} added you to cvENGINE. Choose your password to sign in.</div>
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#f4f4f5">{% if reset %}{{ by }} reset your cvENGINE password. Choose a new one to get back in.{% else %}{{ by }} added you to cvENGINE. Choose your password to sign in.{% endif %}</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="page" style="background:#f4f4f5">
 <tr><td align="center" class="wrap" style="padding:32px 16px">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px">
@@ -8,9 +8,9 @@
       <span style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#0a0a0b" class="ink">cv</span><span style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#0a0a0b" class="ink">ENG</span><span style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#ff5a00">I</span><span style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#0a0a0b" class="ink">NE</span>
     </td></tr>
     <tr><td class="card" style="background:#ffffff;border:1px solid #e4e4e7;border-radius:14px;padding:36px 36px 32px 36px;font:400 15px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#2e2e32">
-      <p class="soft" style="margin:0 0 6px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.6px;text-transform:uppercase;color:#68686f">Welcome aboard</p>
-      <h1 class="ink" style="margin:0 0 14px 0;font:800 26px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:-.4px;color:#0a0a0b">Hi {{ name }}, your account is ready.</h1>
-      <p class="ink" style="margin:0 0 22px 0;color:#2e2e32">{{ by }} added you to <strong>cvENGINE</strong> on <strong>{{ instance }}</strong>, where your team finds and tracks the weak spots on its internet-facing systems. One step left: choose a password.</p>
+      <p class="soft" style="margin:0 0 6px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.6px;text-transform:uppercase;color:#68686f">{% if reset %}Password reset{% else %}Welcome aboard{% endif %}</p>
+      <h1 class="ink" style="margin:0 0 14px 0;font:800 26px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:-.4px;color:#0a0a0b">{% if reset %}Hi {{ name }}, choose a new password.{% else %}Hi {{ name }}, your account is ready.{% endif %}</h1>
+      <p class="ink" style="margin:0 0 22px 0;color:#2e2e32">{% if reset %}{{ by }} reset your password for <strong>cvENGINE</strong> on <strong>{{ instance }}</strong>. Your old password no longer works. Choose a new one with the button below.{% else %}{{ by }} added you to <strong>cvENGINE</strong> on <strong>{{ instance }}</strong>, where your team finds and tracks the weak spots on its internet-facing systems. One step left: choose a password.{% endif %}</p>
 
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="box" style="background:#f7f7f8;border:1px solid #e4e4e7;border-radius:10px;margin:0 0 26px 0">
         <tr><td style="padding:14px 18px">
@@ -21,10 +21,10 @@
 
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 10px 0">
         <tr><td class="btn" align="center" style="border-radius:10px;background:#0a0a0b">
-          <a href="{{ link }}" style="display:inline-block;padding:15px 30px;font:700 16px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#ffffff;text-decoration:none;border-radius:10px;background:#0a0a0b">Set your password</a>
+          <a href="{{ link }}" style="display:inline-block;padding:15px 30px;font:700 16px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#ffffff;text-decoration:none;border-radius:10px;background:#0a0a0b">{% if reset %}Choose a new password{% else %}Set your password{% endif %}</a>
         </td></tr>
       </table>
-      <p class="soft" style="margin:0 0 24px 0;font-size:13px;color:#68686f">This link works once and expires in {{ days }} day{{ days|pluralize }}.</p>
+      <p class="soft" style="margin:0 0 24px 0;font-size:13px;color:#68686f">This link works once and expires in {{ days }} day{{ days|pluralize }}. You are signed in as soon as you save.</p>
 
       {% if access %}
       <p class="soft" style="margin:0 0 8px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">You can see</p>
@@ -34,11 +34,11 @@
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="rule" style="border-top:1px solid #e4e4e7;padding-top:18px">
         <p class="soft" style="margin:0 0 10px 0;font-size:13px;color:#68686f">The button not working? Copy this address into your browser:</p>
         <p style="margin:0 0 14px 0;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all"><a class="plain" href="{{ link }}" style="color:#0a0a0b">{{ link }}</a></p>
-        <p class="soft" style="margin:0;font-size:13px;color:#68686f">After you set it, sign in at <a class="plain" href="{{ sign_in }}" style="color:#0a0a0b">{{ sign_in }}</a> with the username above.</p>
+        <p class="soft" style="margin:0;font-size:13px;color:#68686f">Next time, sign in at <a class="plain" href="{{ sign_in }}" style="color:#0a0a0b">{{ sign_in }}</a> with the username above.</p>
       </td></tr></table>
     </td></tr>
     <tr><td style="padding:18px 8px 0 8px;text-align:center">
-      <p class="soft" style="margin:0 0 4px 0;font:400 12.5px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#68686f">Did not expect this? Ignore this email and nothing happens: no password is set until someone opens the link.</p>
+      <p class="soft" style="margin:0 0 4px 0;font:400 12.5px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#68686f">{% if reset %}Did not ask for this? Tell your administrator: until you open the link, your account stays locked.{% else %}Did not expect this? Ignore this email and nothing happens: no password is set until someone opens the link.{% endif %}</p>
       <p class="soft" style="margin:0;font:400 12px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#8e8e98">Sent by cvENGINE · {{ instance }}</p>
     </td></tr>
   </table>

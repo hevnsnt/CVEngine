@@ -276,6 +276,56 @@ class AddPersonTests(Base):
         UserProfile.objects.filter(user=user).update(must_change_password=True)
         self.assertEqual(call(self.client, 'POST', f'admin/users/{user.id}/resend-invite')[0], 409)
 
+    def test_reset_password_emails_a_link_that_lands_on_a_reset_page(self):
+        configure()
+        self.create()
+        user = User.objects.get(username='newbie')
+        user.last_login = timezone.now()  # has signed in before
+        user.set_password('Chosen-by-user-55')
+        user.save()
+        UserProfile.objects.filter(user=user).update(must_change_password=False)
+        mail.outbox = []
+        status, data = call(self.client, 'POST', f'admin/users/{user.id}/reset-password')
+        self.assertEqual((status, data['invited'], data['email']), (200, True, 'nia@example.org'))
+        self.assertNotIn('temporary_password', data)
+        user.refresh_from_db()
+        self.assertFalse(user.has_usable_password())  # the old password is dead at once
+        self.assertTrue(UserProfile.objects.get(user=user).must_change_password)
+        message = mail.outbox[0]
+        self.assertIn('Reset your cvENGINE password', message.subject)
+        self.assertIn('reset your password', message.alternatives[0][0])
+        self.assertNotIn('added you', message.alternatives[0][0])
+        link = next(line for line in message.body.splitlines() if '/invite/' in line)
+        page = Client().get(urlsplit(link).path)
+        self.assertContains(page, 'Choose a new password')
+        done = Client().post(urlsplit(link).path, {'password': 'Fresh-after-reset-31', 'confirm': 'Fresh-after-reset-31'})
+        self.assertEqual(done.status_code, 302)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password('Fresh-after-reset-31'))
+
+    def test_reset_password_falls_back_to_a_temporary_password(self):
+        user = self.create()[1]
+        target = User.objects.get(username='newbie')
+        status, data = call(self.client, 'POST', f'admin/users/{user["id"]}/reset-password')  # mail is off
+        self.assertEqual(status, 200)
+        self.assertFalse(data['invited'])
+        target.refresh_from_db()
+        self.assertTrue(target.check_password(data['temporary_password']))
+        configure()
+        User.objects.filter(pk=target.pk).update(email='')  # mail is on but there is no address
+        self.assertFalse(call(self.client, 'POST', f'admin/users/{target.pk}/reset-password')[1]['invited'])
+        self.assertEqual(mail.outbox, [])
+
+    def test_a_failed_reset_send_leaves_a_temporary_password(self):
+        configure()
+        self.create()
+        user = User.objects.get(username='newbie')
+        with mock.patch.object(mailer, '_connection', side_effect=TimeoutError()):
+            data = call(self.client, 'POST', f'admin/users/{user.id}/reset-password')[1]
+        self.assertFalse(data['invited'])
+        user.refresh_from_db()
+        self.assertTrue(user.check_password(data['temporary_password']))
+
     def test_the_people_list_says_who_is_invited_and_whether_mail_is_ready(self):
         configure()
         self.create()
@@ -307,15 +357,32 @@ class LinkTests(Base):
         self.assertEqual(response['Referrer-Policy'], 'no-referrer')
         self.assertIn('no-store', response['Cache-Control'])
 
-    def test_choosing_a_password_signs_nobody_in_but_lets_them_sign_in(self):
+    def test_choosing_a_password_signs_them_in(self):
         response = self.anon.post(self.url, {'password': 'Brand-new-pass-77', 'confirm': 'Brand-new-pass-77'})
-        self.assertEqual(response.status_code, 200)
-        self.assertNotIn('_auth_user_id', self.anon.session)
+        self.assertEqual((response.status_code, response['Location']), (302, '/cve/'))
+        self.assertEqual(int(self.anon.session['_auth_user_id']), self.user.pk)
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('Brand-new-pass-77'))
         self.assertFalse(UserProfile.objects.get(user=self.user).must_change_password)
         self.assertTrue(AuditLog.objects.filter(action='account.invite_accepted', actor=self.user).exists())
         self.assertTrue(Client().login(username='invitee', password='Brand-new-pass-77'))
+
+    def test_two_step_sign_in_is_never_skipped_by_a_reset_link(self):
+        UserProfile.objects.filter(user=self.user).update(mfa_enabled=True, mfa_secret='JBSWY3DPEHPK3PXP')
+        response = self.anon.post(self.url, {'password': 'Brand-new-pass-77', 'confirm': 'Brand-new-pass-77'})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'two-step code')
+        self.assertNotIn('_auth_user_id', self.anon.session)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('Brand-new-pass-77'))
+
+    def test_the_page_words_a_first_welcome_and_a_reset_differently(self):
+        self.assertContains(self.anon.get(self.url), 'Welcome, Ivy')
+        self.user.last_login = timezone.now()
+        self.user.save(update_fields=['last_login'])
+        reset = self.anon.get(f'/invite/{invite.make_token(self.user)}/')
+        self.assertContains(reset, 'Choose a new password')
+        self.assertNotContains(reset, 'Welcome')
 
     def test_the_link_works_once(self):
         self.anon.post(self.url, {'password': 'Brand-new-pass-77', 'confirm': 'Brand-new-pass-77'})

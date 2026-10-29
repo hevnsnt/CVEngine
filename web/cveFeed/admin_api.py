@@ -196,11 +196,11 @@ def users_create(request, actor):
 
 
 def users_resend_invite(request, actor, user_id):
-    """Send a person who has not chosen a password yet a fresh onboarding email. Earlier links stop working: the account's
-    credentials change, and the links are bound to them."""
+    """Send a person who has not chosen a password yet (a new account, or one reset and not yet answered) a fresh email. Earlier
+    links stop working: the account's credentials change, and the links are bound to them."""
     user = _need_user(actor, user_id, credentials=True)
     profile = _profile(user)
-    if not profile.must_change_password or user.is_superuser:
+    if not profile.must_change_password:
         raise AdminError(409, 'this person already chose a password; use Reset password if they are locked out')
     if not mailer.ready():
         raise AdminError(409, 'set up outgoing mail first (Settings, Email)')
@@ -250,16 +250,24 @@ def users_bug_bounty(request, actor, user_id):
 
 
 def users_reset_password(request, actor, user_id):
+    """Lock the account out of its old password and let the person choose a new one: by an emailed link when mail is set up and the
+    account has an address, else by a temporary password the administrator hands over."""
     user = _need_user(actor, user_id, credentials=True)
-    password = temp_password()
-    user.set_password(password)  # also invalidates the user's existing sessions
-    user.save()
+    by_email = mailer.ready() and bool(mailer.EMAIL_RE.match(user.email or ''))
+    password = None if by_email else temp_password()
+    if by_email:
+        user.set_unusable_password()
+    else:
+        user.set_password(password)
+    user.save()  # either way the user's existing sessions end
     profile = _profile(user)
     profile.must_change_password = True
     profile.save(update_fields=['must_change_password'])
     _revoke_tokens(user)
-    audit_trail.record_for_user(actor, 'user.reset_password', user)
-    return {'username': user.username, 'temporary_password': password}
+    audit_trail.record_for_user(actor, 'user.reset_password', user, by_email=by_email)
+    if not by_email:
+        return {'username': user.username, 'invited': False, 'temporary_password': password}
+    return {'username': user.username, 'email': user.email, **_send_invitation(actor, user)}
 
 
 def users_reset_mfa(request, actor, user_id):

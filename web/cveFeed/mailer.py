@@ -139,15 +139,18 @@ def _access_lines(user):
 
 
 def onboarding_message(user, actor, cfg=None):
-    """The welcome message for a person just added: their user name and a single-use link to choose a password."""
+    """The message with a single-use link to choose a password: a welcome for a person just added, or, for someone who has signed
+    in before (``last_login``), the reset an administrator asked for."""
     from tenancy import invite
     cfg = cfg or row()
     days = invite.valid_days()
     link = f'{base_url(cfg)}{reverse("invite", args=[invite.make_token(user)])}'
-    context = {'name': user.first_name or user.username, 'username': user.username, 'link': link, 'days': days,
+    reset = bool(user.last_login)
+    context = {'reset': reset, 'name': user.first_name or user.username, 'username': user.username, 'link': link, 'days': days,
                'by': actor.get_full_name() or actor.username, 'instance': _instance(cfg), 'access': _access_lines(user),
                'sign_in': f'{base_url(cfg)}{reverse("login")}'}
-    subject = f'You have been added to cvENGINE on {context["instance"]}'
+    subject = (f'Reset your cvENGINE password on {context["instance"]}' if reset
+               else f'You have been added to cvENGINE on {context["instance"]}')
     return _message(cfg, user.email, subject, render_to_string('cveFeed/email/onboarding.txt', context),
                     render_to_string('cveFeed/email/onboarding.html', context))
 

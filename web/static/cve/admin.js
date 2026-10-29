@@ -38,7 +38,7 @@ function revealPassword(title, username, password, why) {
   dialog(title, (body, close) => {
     if (why)
       body.append(
-        el("p", "note", `The invitation email could not be sent (${why}).`),
+        el("p", "note", `The email could not be sent (${why}).`),
       );
     body.append(
       el(
@@ -396,10 +396,10 @@ function manageUser(u, orgs, projects, done) {
     }
     body.append(el("h2", "", "Account", { style: "margin-top:20px" }));
     const row = el("div", "actions", null, { style: "flex-wrap:wrap" });
-    if (emailReady && u.email && u.must_change_password && !u.is_superuser)
+    if (emailReady && u.email && u.must_change_password)
       row.append(
         button(
-          "Send invitation again",
+          "Send the link again",
           async () => {
             const r = await api("POST", `${A}/users/${u.id}/resend-invite`);
             close();
@@ -420,10 +420,26 @@ function manageUser(u, orgs, projects, done) {
       button(
         "Reset password",
         async () => {
-          if (!(await ask(`${u.username} will be signed out everywhere and given a temporary password.`, { title: `Reset the password for ${u.username}?`, ok: "Reset password" }))) return;
+          const byEmail = emailReady && u.email;
+          if (
+            !(await ask(
+              byEmail
+                ? `${u.username} will be signed out everywhere and locked out of the old password. They are emailed a link at ${u.email} to choose a new one.`
+                : `${u.username} will be signed out everywhere and given a temporary password.`,
+              { title: `Reset the password for ${u.username}?`, ok: "Reset password" },
+            ))
+          )
+            return;
           const r = await api("POST", `${A}/users/${u.id}/reset-password`);
           close();
-          revealPassword("Password reset", r.username, r.temporary_password);
+          if (r.invited) toast(`Reset link sent to ${r.email}`);
+          else
+            revealPassword(
+              "Password reset",
+              r.username,
+              r.temporary_password,
+              r.invite_error,
+            );
           done();
         },
         "btn ghost sm",

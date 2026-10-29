@@ -1,18 +1,18 @@
 {% autoescape off %}Hi {{ name }},
 
-{{ by }} added you to cvENGINE on {{ instance }}. One step left: choose a password.
+{% if reset %}{{ by }} reset your password for cvENGINE on {{ instance }}. Your old password no longer works. Choose a new one.{% else %}{{ by }} added you to cvENGINE on {{ instance }}. One step left: choose a password.{% endif %}
 
 Your username: {{ username }}
 
-Set your password (this link works once and expires in {{ days }} day{{ days|pluralize }}):
+{% if reset %}Choose a new password{% else %}Set your password{% endif %} (this link works once, expires in {{ days }} day{{ days|pluralize }}, and signs you in when you save):
 {{ link }}
 {% if access %}
 You can see:
 {% for line in access %}  - {{ line }}
 {% endfor %}{% endif %}
-After you set it, sign in at {{ sign_in }} with your username.
+Later, sign in at {{ sign_in }} with your username.
 
-Did not expect this? Ignore this email and nothing happens: no password is set until someone opens the link.
+{% if reset %}Did not ask for this? Tell your administrator: until you open the link, your account stays locked.{% else %}Did not expect this? Ignore this email and nothing happens: no password is set until someone opens the link.{% endif %}
 
 cvENGINE · {{ instance }}
 {% endautoescape %}
