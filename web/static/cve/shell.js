@@ -10,7 +10,8 @@ const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "
 function projectHref(value, here) {
   if (here === "bounty") return `/cve/bounty/?project=${encodeURIComponent(value && value !== "_all" ? value : "")}`;
   if (here === "dashboard") return value && value !== "_all" ? `/cve/?project=${encodeURIComponent(value)}` : "/cve/";
-  return `/cve/${value}/${SECTIONS.includes(here) ? here : "hosts"}/`;
+  // The section comes from the list above, never from the page text, and the slug is encoded like the other branches.
+  return `/cve/${encodeURIComponent(value)}/${SECTIONS.find((s) => s === here) || "hosts"}/`;
 }
 
 // --- organization switcher: shown when the caller's projects span two or more organizations -----------------------
