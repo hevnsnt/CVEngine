@@ -1730,6 +1730,12 @@ section.internal[hidden]{display:none}
 #s-oldest_note{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--ink-2)!important;margin-top:2px}
 #s-oldest_host{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#s-oldest_host:empty{display:none}
 
+/* the map tile's owner, "Org / Project", under the host name on the tiles roomy enough to name a host */
+.hx .hx-owner{display:none}
+.map[data-size="xl"] .hx .hx-owner:not(:empty){display:block;order:3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 10.5px/1.3 var(--mono);color:var(--muted);margin-top:2px}
+.map[data-size="xl"] .hx .hx-name,.map[data-size="xl"] .hx .hx-owner{flex:none}
+.map[data-slim="1"] .hx .hx-org{display:none}
+
 /* host page: the host's organization and project, and the move to another project */
 .host-move{margin-top:28px;padding-top:16px;border-top:1px solid var(--line)}
 .host-move-here{font:600 14px/1.4 var(--font);margin:4px 0 10px}

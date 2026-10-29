@@ -649,6 +649,10 @@ class NucleiLedgerTests(TestCase):
 		self.p1 = Project.objects.create(name='P1', slug='nl1', insert_date=timezone.now(), org=org)
 		self.p2 = Project.objects.create(name='P2', slug='nl2', insert_date=timezone.now(), org=org)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		# no real DNS: a name that is slow to answer counts as blocked, which dropped a host from the chunk test on a loaded runner
+		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def _scan(self, project, name, host='shared.example.test'):
 		domain = Domain.objects.create(name=name, project=project, insert_date=timezone.now())
