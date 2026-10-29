@@ -4,7 +4,7 @@ HygieneFinding rows (check names start with ``ts_``) and resolves the ones that 
 
 Every rule states a fact the data proves and gives its severity with the reason. Nothing here guesses: a flag a source did not report
 is unknown and produces no finding. Where a rule rests on a published claim rather than on Tailscale's own documentation, the finding
-says so (the tailworm.com assessment of October 2026 is a single researcher's report; Tailscale has acknowledged it and merged fixes for several findings, but as of 2026-10-27 had shipped no numbered release or advisory for them).
+says so (the tailworm.com assessment of October 2026 is a single researcher's report; Tailscale acknowledged it and shipped fixes for several of its findings in 1.104.4 on 2026-10-28, with bulletins TS-2026-014 to -017).
 """
 import ipaddress
 import re
@@ -29,7 +29,7 @@ UNIX_OS = ('linux', 'freebsd', 'openbsd', 'netbsd', 'solaris', 'illumos')
 # that bypasses an ACL is HIGH, reaching host-scoped addresses or protected sockets MEDIUM, a leak or a trust-store refresh LOW.
 # "what applies": None is every client; 'ssh' needs Tailscale SSH on the device; 'ssh_unix' also Linux or another Unix; '4via6'
 # needs an approved 4via6 route. A bulletin whose condition the data does not show (Serve, Funnel, Services, the web interface, a
-# macOS MDM policy) is left out, never assumed.
+# macOS MDM policy) is left out, never assumed: TS-2026-016 and -017 (Tailscale Serve, also fixed in 1.104.4) are not listed for that reason.
 BULLETINS = (
     ('TS-2026-004', (1, 98, 9), 'ssh_unix', 'Tailscale SSH socket forwarding followed symlinks to sockets outside its allowlist', MEDIUM),
     ('TS-2026-006', (1, 98, 9), 'ssh_unix', 'a numeric UID bypassed the root restriction of SSH rules that rely on autogroup:nonroot', HIGH),
@@ -37,6 +37,9 @@ BULLETINS = (
     ('TS-2026-010', (1, 102, 1), 'ssh', 'values an SSH acceptEnv rule forwards were visible on process command lines and in session logs', LOW),
     ('TS-2026-011', (1, 102, 3), '4via6', 'peers with access to a 4via6 subnet router could reach its loopback, link-local and metadata addresses', MEDIUM),
     ('TS-2026-013', (1, 104, 2), None, 'older builds trust eight compromised eMudhra intermediate certificates', LOW),
+    ('TS-2026-014', (1, 104, 4), 'ssh_unix', 'Tailscale SSH forwarded Unix sockets as root, so an authorized peer could reach root-only sockets such as the Docker socket '
+                                           'or the tailscaled local API', MEDIUM),
+    ('TS-2026-015', (1, 104, 4), 'ssh', 'unbounded memory growth in Tailscale SSH session handling let an authenticated peer exhaust the memory of tailscaled', LOW),
 )
 # Ports whose service gives remote administration or a control API; (title, severity). Reachable on the tailnet address means every
 # peer the policy lets in can try it.
@@ -276,9 +279,9 @@ def evaluate_policy(policy, host, tailnet=''):
         out.append(_finding(
             'ssh_accept_broad', MEDIUM, 'Tailscale SSH accept rules are broad or allow root',
             (f'{len(ssh)} Tailscale SSH rule{"s" if len(ssh) != 1 else ""} accept without a re-authentication check and either allow login as root or accept '
-             'every member. The tailworm.com assessment (a single researcher\'s report that Tailscale has acknowledged, with fixes merged but no numbered release yet) says an approved '
-             'session can also forward unix sockets as root through tailscaled, and recommends per-pair SSH rules.',
-             'medium: it widens who can open a root-capable session; the forwarding fix is not in a numbered release yet, the rule scope is'),
+             'every member. The tailworm.com assessment (a single researcher\'s report that Tailscale has acknowledged) says an approved '
+             'session could also forward unix sockets as root through tailscaled (fixed in Tailscale 1.104.4, TS-2026-014), and recommends per-pair SSH rules.',
+             'medium: it widens who can open a root-capable session; the forwarding fix is in 1.104.4, the rule scope is yours to narrow'),
             'give each SSH rule a specific source and destination, avoid root and autogroup:member on accept rules, and use "check" for '
             'privileged destinations.', {'tailnet': tailnet, 'rules': ssh[:EVIDENCE_RULES]}, REF_SSH))
     tags = _broad_tag_owners(policy)
