@@ -31,6 +31,42 @@ def usage_stage(stage):
 		_usage_stage.reset(token)
 
 
+_request_options = ContextVar('cvengine_ai_request_options', default={})
+
+
+@contextmanager
+def request_options(**options):
+	"""Per-request options a stage asks for (today ``temperature``), read by the providers that take them. A self-hosted server answers
+	differently on every call unless the temperature is pinned, so a verdict is not reproducible; the hosted providers are left alone."""
+	token = _request_options.set({**_request_options.get(), **options})
+	try:
+		yield
+	finally:
+		_request_options.reset(token)
+
+
+def _env_number(name, low, high):
+	"""An integer setting between ``low`` and ``high``, or None when it is unset or not one."""
+	try:
+		value = int(os.environ.get(name, '').strip())
+	except ValueError:
+		return None
+	return value if low <= value <= high else None
+
+
+def request_timeout(default):
+	"""Seconds a completion may take: ``CVENGINE_AI_TIMEOUT`` (10 to 3600) when set, else the provider's own. A local model on a laptop
+	can take longer than the 120 seconds that suits a hosted one."""
+	return _env_number('CVENGINE_AI_TIMEOUT', 10, 3600) or default
+
+
+def output_token_cap():
+	"""The reply length limit to send to an OpenAI-compatible server or Ollama: ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768) when set, else
+	None, which leaves the server's own limit (a reasoning model spends thousands of tokens thinking before it answers, so no cap is
+	sent unless the operator chose one)."""
+	return _env_number('CVENGINE_AI_MAX_TOKENS', 64, 32768)
+
+
 def _token_number(value):
 	try:
 		n = int(value)
@@ -247,7 +283,7 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+			resp = requests.post(url, headers=headers, json=payload, timeout=request_timeout(self.timeout))
 			resp.raise_for_status()
 			try:
 				data = resp.json()
@@ -332,9 +368,13 @@ class AnthropicProvider(AIProvider):
 def _openai_text(data, name):
 	"""The text of an OpenAI-compatible chat completion, shared by complete() and complete_vision()."""
 	try:
-		return data['choices'][0]['message']['content']
+		choice = data['choices'][0]
+		text = choice['message']['content']
 	except (KeyError, IndexError, TypeError) as e:
 		raise AIProviderError(f'unexpected {name} response shape', category='provider_shape') from e
+	if isinstance(choice, dict) and choice.get('finish_reason') == 'length':  # cut off at the limit: say so, not "schema invalid" later
+		raise AIProviderError(f'{name} response exceeded the output token limit', category='output_truncated', stop_reason='length')
+	return text
 
 
 class OpenAIProvider(AIProvider):
@@ -362,12 +402,25 @@ class OpenAIProvider(AIProvider):
 				models.append({'id': m['id'], 'created': _epoch(m.get('created')), 'price': price})
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
+	def _options(self):
+		"""The limit and temperature this request carries. The limit only when the operator set one (``output_token_cap``); the temperature
+		only to a self-hosted server and only when the stage pinned it (``request_options``). OpenAI's own API names the limit
+		max_completion_tokens (every current model takes it); the compatible servers say max_tokens."""
+		out = {}
+		cap = output_token_cap()
+		if cap:
+			out['max_completion_tokens' if self.name == 'openai' else 'max_tokens'] = cap
+		temperature = _request_options.get().get('temperature')
+		if temperature is not None and self.name in SERVER_URL_PROVIDERS:
+			out['temperature'] = temperature
+		return out
+
 	@tracked_completion
 	def complete(self, system, user):
 		data = self._post(
 			f'{self._base()}/chat/completions', self._headers(),
 			{'model': self.model, 'messages': [
-				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]})
+				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}], **self._options()})
 		return _openai_text(data, self.name)
 
 	@tracked_completion
@@ -378,7 +431,7 @@ class OpenAIProvider(AIProvider):
 			f'{self._base()}/chat/completions', self._headers(),
 			{'model': self.model, 'messages': [
 				{'role': 'system', 'content': system},
-				{'role': 'user', 'content': [{'type': 'text', 'text': user}, {'type': 'image_url', 'image_url': {'url': url}}]}]})
+				{'role': 'user', 'content': [{'type': 'text', 'text': user}, {'type': 'image_url', 'image_url': {'url': url}}]}], **self._options()})
 		return _openai_text(data, self.name)
 
 
@@ -412,9 +465,12 @@ class LMStudioProvider(OpenAIProvider):
 def _ollama_text(data):
 	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
 	try:
-		return data['message']['content']
+		text = data['message']['content']
 	except (KeyError, TypeError) as e:
 		raise AIProviderError('unexpected ollama response shape', category='provider_shape') from e
+	if data.get('done_reason') == 'length':
+		raise AIProviderError('ollama response exceeded the output token limit', category='output_truncated', stop_reason='length')
+	return text
 
 
 class OllamaProvider(AIProvider):
@@ -428,12 +484,23 @@ class OllamaProvider(AIProvider):
 		models = [{'id': m['name'], 'created': _epoch(m.get('modified_at')), 'price': None} for m in data.get('models', []) if m.get('name')]
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
+	def _options(self):
+		"""Ollama's ``options``: the reply limit when the operator set one, and the temperature when the stage pinned it."""
+		options = {}
+		cap = output_token_cap()
+		if cap:
+			options['num_predict'] = cap
+		temperature = _request_options.get().get('temperature')
+		if temperature is not None:
+			options['temperature'] = temperature
+		return {'options': options} if options else {}
+
 	@tracked_completion
 	def complete(self, system, user):
 		data = self._post(
 			f'{self._base()}/api/chat', {},
 			{'model': self.model, 'stream': False, 'messages': [
-				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]})
+				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}], **self._options()})
 		return _ollama_text(data)
 
 	@tracked_completion
@@ -443,7 +510,7 @@ class OllamaProvider(AIProvider):
 			f'{self._base()}/api/chat', {},
 			{'model': self.model, 'stream': False, 'messages': [
 				{'role': 'system', 'content': system},
-				{'role': 'user', 'content': user, 'images': [base64.b64encode(image_bytes).decode()]}]})
+				{'role': 'user', 'content': user, 'images': [base64.b64encode(image_bytes).decode()]}], **self._options()})
 		return _ollama_text(data)
 
 
@@ -666,12 +733,12 @@ def triage_finding(provider, kind, payload, host_context=None):
 	with why it failed, and the second answer is the one that counts. Raises AIProviderError when the provider cannot be reached or the
 	second reply is also unusable (category schema_invalid, with the reason)."""
 	import hashlib
-	with usage_stage('finding_triage'):
+	with usage_stage('finding_triage'), request_options(temperature=0):  # a verdict from a local model should not change between runs
 		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload, host_context))
 	parsed, reason = validate_triage(reply)
 	repaired = False
 	if parsed is None:
-		with usage_stage('finding_triage_repair'):
+		with usage_stage('finding_triage_repair'), request_options(temperature=0):
 			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason, host_context))
 		parsed, second = validate_triage(reply)
 		if parsed is None:

@@ -196,6 +196,15 @@ The AI key, the instance-wide Chaos, Netlas and HackerOne keys, per-organization
 
 What this protects: a database dump, a backup, or SQL injection reads only ciphertext, and a file read in `web/` no longer includes the key. What it does not: code execution inside a container that decrypts the secrets (the web service or a worker) can use the key that container holds. The settings API never returns a secret, only whether one is set.
 
+## AI requests
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_AI_TIMEOUT` | `120` (`300` for LM Studio) | Seconds one AI request may take, 10 to 3600. A local model on a laptop can go past 120 seconds on a long stage; the setting applies to every provider. |
+| `CVENGINE_AI_MAX_TOKENS` | unset | A limit on the length of a reply, 64 to 32768, sent to OpenAI, OpenRouter, vLLM and LM Studio (`max_tokens`, `max_completion_tokens` for OpenAI) and Ollama (`num_predict`). Unset, the server's own limit applies, which suits a reasoning model that spends thousands of tokens thinking before it answers. A reply cut off at a limit is reported as truncated (category `output_truncated`), not as an invalid answer. Anthropic always gets 2048. |
+
+A finding's triage on a self-hosted server (Ollama, vLLM, LM Studio) is asked with temperature 0, so the same evidence gets the same verdict.
+
 ## Network and access
 
 | Variable | Default | Purpose |
