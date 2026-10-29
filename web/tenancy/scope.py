@@ -62,6 +62,7 @@ SCOPES = {
     'cveFeed.FindingComment': 'project_id',
     'cveFeed.FindingAuditEvent': 'project_id',
     'cveFeed.HostArchive': 'project_id',
+    'cveFeed.HostMove': 'project_id',
     'cveFeed.InternalRange': 'project_id',
     'cveFeed.RdpScreenshot': 'project_id',
     'cveFeed.TriageCall': 'project_id',

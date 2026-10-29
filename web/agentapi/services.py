@@ -216,7 +216,9 @@ def _comment_count_annotation(kind):
 
 def _project_roles(ctx):
     from dashboard.models import Project
-    return [{'slug': p.slug, 'name': p.name, 'role': roles.effective_role(ctx.user, p)} for p in Project.objects.order_by('name')]
+    return [{'slug': p.slug, 'name': p.name, 'role': roles.effective_role(ctx.user, p),
+             'org': p.org.slug if p.org_id else None, 'org_name': p.org.name if p.org_id else None}
+            for p in Project.objects.select_related('org').order_by('name')]
 
 
 def me(ctx):

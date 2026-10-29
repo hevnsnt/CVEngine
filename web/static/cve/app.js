@@ -2640,6 +2640,61 @@ const pages = {
       showHost(null);
       list.reload();
     }
+    // Where the host belongs ("Org / Project") and, for someone who can write to another project, a move there. The host is added to
+    // that project as a target and scanned from scratch; its findings and history here are deleted, and this project never brings it back.
+    function hostOwnerBox(h) {
+      const box = el("div", "host-move");
+      box.append(el("h3", "sec", "Organization and project"));
+      const here = el("p", "host-move-here", "");
+      box.append(here);
+      const pick = el("select", "", null, { "aria-label": "Move to project" });
+      const move = el("button", "btn sm", "Move host", { type: "button" });
+      const row = el("div", "host-move-row");
+      row.append(pick, move);
+      const note = el("p", "note", "Moving adds the host to that project as a target and scans it there from scratch. Its findings and history in this project are deleted, and this project's scans skip it from then on.");
+      row.hidden = true;
+      note.hidden = true;
+      box.append(row, note);
+      api("GET", "/api/v1/projects")
+        .then((data) => {
+          const all = data.results || [];
+          const mine = all.find((p) => p.slug === projectOf(h));
+          here.textContent = mine ? [mine.org_name, mine.name].filter(Boolean).join(" / ") : projectOf(h);
+          const choices = all.filter((p) => p.slug !== projectOf(h) && p.role && p.role !== "audit");
+          if (!choices.length || (mine && (!mine.role || mine.role === "audit"))) return;
+          pick.append(el("option", "", "Choose a project", { value: "" }));
+          const byOrg = new Map();
+          choices.forEach((p) => {
+            const org = p.org_name || "No organization";
+            if (!byOrg.has(org)) byOrg.set(org, el("optgroup", "", null, { label: org }));
+            byOrg.get(org).append(el("option", "", p.name, { value: p.slug }));
+          });
+          [...byOrg.values()].forEach((g) => pick.append(g));
+          row.hidden = false;
+          note.hidden = false;
+        })
+        .catch(() => (here.textContent = projectOf(h)));
+      move.onclick = async () => {
+        const to = pick.value;
+        if (!to) {
+          toast("Choose the project to move it to", true);
+          return;
+        }
+        const label = pick.selectedOptions[0].parentElement.label ? `${pick.selectedOptions[0].parentElement.label} / ${pick.selectedOptions[0].textContent}` : pick.selectedOptions[0].textContent;
+        const sure = await ask(`Move ${h.host} to ${label}? It is scanned there from scratch. Its findings and history in this project are deleted.`, { title: "Move host?", ok: "Move host", danger: false });
+        if (!sure) return;
+        move.disabled = true;
+        try {
+          const r = await api("POST", hostPath(h, "move"), { to_project: to });
+          toast(`Moved ${r.host} to ${[r.to_org_name, r.to_project_name].filter(Boolean).join(" / ")}${r.scan_ids && r.scan_ids.length ? ": a scan has started there" : ""}`);
+          afterRemoval();
+        } catch (err) {
+          toast(err.message, true);
+          move.disabled = false;
+        }
+      };
+      return box;
+    }
     function hostActions(h) {
       const box = el("div", "host-danger");
       box.append(
@@ -3081,7 +3136,7 @@ const pages = {
         })
         .catch(() => {});
       if (ALL) S.manage.append(assetInfoReadOnly(h));
-      else S.manage.append(assetInfo(h), hostActions(h));
+      else S.manage.append(assetInfo(h), hostOwnerBox(h), hostActions(h));
       foldTabs();
       const loadInventory = renderHostInventory(S.inventory, { h, project: projectOf(h), readOnly: ALL });
       const tabLabels = { overview: "Overview", services: "Services", web: "Web", findings: "Findings", inventory: "Inventory", changes: "History", manage: "Manage" };

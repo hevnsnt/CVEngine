@@ -1735,3 +1735,10 @@ section.internal[hidden]{display:none}
 .map[data-size="xl"] .hx .hx-owner:not(:empty){display:block;order:3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 10.5px/1.3 var(--mono);color:var(--muted);margin-top:2px}
 .map[data-size="xl"] .hx .hx-name,.map[data-size="xl"] .hx .hx-owner{flex:none}
 .map[data-slim="1"] .hx .hx-org{display:none}
+
+/* host page: the host's organization and project, and the move to another project */
+.host-move{margin-top:28px;padding-top:16px;border-top:1px solid var(--line)}
+.host-move-here{font:600 14px/1.4 var(--font);margin:4px 0 10px}
+.host-move-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.host-move-row select{flex:1 1 220px;max-width:360px;width:auto}
+.host-move .note{margin-top:8px}
