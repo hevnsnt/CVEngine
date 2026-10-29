@@ -239,23 +239,28 @@ def parse_xml(xml_text):
     return extract_nmap_inventory(data)
 
 
-def persist_inventory(inventory, source='nmap', org_id=None):
+def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
     """Write parsed nmap records onto Port/IpAddress, creating a Port row if nothing found it first
     (unlike reNgine.tasks.persist_nmap_service_inventory, which only enriches rows naabu already made:
     here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
     Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
-    seen on one IP's 443 onto every IP's 443."""
+    seen on one IP's 443 onto every IP's 443. ``os_reliable`` says whether the operating system guesses in ``inventory`` were measured
+    from a network that can be believed: None for a scan this server ran itself (see cveFeed.os_detection: behind Docker Desktop's
+    network the guess describes the network, so it is not stored), True for a Sentinel's result."""
+    from cveFeed import os_detection
     from cveFeed.host_inventory import keeps_reported_os
     from startScan.ip_rows import get_or_create_ip
     from startScan.models import TCP_PROTOCOLS, IpAddress, Port
     ports_written = hosts_with_os = 0
     now = timezone.now()
+    if os_reliable is None:
+        os_reliable = not os_detection.unreliable()
     for host in inventory:
         ip_addr = host.get('ip')
         if not ip_addr:
             continue
         ip_obj, _ = get_or_create_ip(ip_addr, org_id)
-        if host.get('os_guess') and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
+        if host.get('os_guess') and os_reliable and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
             ip_obj.last_seen = now

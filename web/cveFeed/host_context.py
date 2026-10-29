@@ -119,17 +119,25 @@ def _ports(sub, names):
 
 
 def _os(sub, names):
+    """The operating system evidence: nmap's guesses with their accuracy and what other tools reported. Behind Docker Desktop's network a
+    guess describes that network, not the host (cveFeed.os_detection), and a model would reason about it as a fact, so no guess is
+    given and the block says why."""
+    from cveFeed import os_detection
     guesses = []
     facts = {}
+    believe = not os_detection.unreliable()
     for ip in sub.ip_addresses.all():
         fingerprint = ip.fingerprint or {}
-        if ip.os_guess:
+        if ip.os_guess and believe:
             guesses.append({'guess': _s(ip.os_guess, 80, names), 'accuracy': ip.os_accuracy,
                             'alternatives': [_s(m.get('name'), 80, names) for m in (fingerprint.get('os_matches') or [])[1:3] if isinstance(m, dict)]})
         for key in ('runzero', 'facts'):
             if isinstance(fingerprint.get(key), dict):
                 facts.setdefault(key, {k: _s(v, 80, names) for k, v in list(fingerprint[key].items())[:12] if isinstance(v, (str, int, float))})
-    return {'guesses': guesses[:3], 'reported_by_other_tools': facts}
+    out = {'guesses': guesses[:3], 'reported_by_other_tools': facts}
+    if not believe:
+        out['note'] = 'no operating system guess is given: ' + os_detection.REASON
+    return out
 
 
 TAILSCALE_FACTS = ('os', 'client_version', 'tags', 'update_available')  # never the device name, its addresses or the signed-in user
