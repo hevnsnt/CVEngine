@@ -87,6 +87,8 @@ def _host_tip(sub, live_matches, severities, aliases=()):
                    for r in (sub.score_detail or [])[:8]] if hasattr(sub, 'score_detail') else []
     return {
         'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
+        'org': (sub.target_domain.project.org.name if sub.target_domain_id and sub.target_domain.project_id
+                and sub.target_domain.project.org_id else ''),
         'ips': len({ip.address for ip in sub.ip_addresses.all()}),
         'cves': len(live_matches),
         'top_cve': worst[0] if worst else '',
@@ -110,7 +112,7 @@ def graph_payload(domain_id=None, scan_id=None):
     # a match needs its CVE's tier fields only: never the prose columns
     matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev',
                                     'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry')
-    subs = Subdomain.objects.select_related('target_domain__project').prefetch_related(
+    subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
         'ip_addresses', Prefetch('cve_matches', queryset=matches))
     if domain_id:
         subs = subs.filter(target_domain_id=domain_id)
