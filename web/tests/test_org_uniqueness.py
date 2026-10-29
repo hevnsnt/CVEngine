@@ -104,6 +104,12 @@ class IpPerOrganizationTests(Fixture, TestCase):
 		ip_a.ports.add(Port.objects.create(number=443, banner='only-org-a'))
 		self.assertEqual(list(sb.ip_addresses.get().ports.all()), [])
 
+	def test_a_created_address_knows_whether_it_is_private(self):
+		private, created = get_or_create_ip('192.168.7.9', self.org_a.id)
+		public, _ = get_or_create_ip('203.0.113.77', self.org_a.id)
+		self.assertTrue(created)
+		self.assertEqual((private.is_private, public.is_private), (True, False))
+
 	def test_get_or_create_ip_is_per_organization_and_race_safe(self):
 		winner = IpAddress.objects.create(address='203.0.113.52', org=self.org_a)
 		with mock.patch.object(IpAddress.objects, 'get_or_create', side_effect=IntegrityError('duplicate')):

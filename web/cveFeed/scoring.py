@@ -170,10 +170,12 @@ def _cve_inputs(sub):
 
 def _has_public_ip(sub):
     from cveFeed.tailscale_scope import is_tailnet_address
-    from targetApp.target_types import is_scannable_ip
-    # a tailnet address is reachable only by the tailnet's own devices: it is never "public", however scannable it is
-    return any(ip.address and not ip.is_private and not is_tailnet_address(ip.address) and is_scannable_ip(ip.address)
-               for ip in sub.ip_addresses.all())
+    from targetApp.target_types import is_internal_address, is_scannable_ip
+    # judged from the address: the stored is_private flag was never set for an address found by a scan (issue 212), and an install
+    # that scans its own network (CVENGINE_ALLOW_PRIVATE_TARGETS) finds private ones; a tailnet address is reachable only by the
+    # tailnet's own devices, so it is never "public", however scannable it is
+    return any(ip.address and not ip.is_private and not is_internal_address(ip.address) and not is_tailnet_address(ip.address)
+               and is_scannable_ip(ip.address) for ip in sub.ip_addresses.all())
 
 
 def usable_rows(qs):

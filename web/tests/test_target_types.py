@@ -34,6 +34,34 @@ class ClassifyTargetTests(SimpleTestCase):
 		self.assertIsNone(tt.classify_target(None))
 
 
+class InternalAddressTests(SimpleTestCase):
+	"""``is_internal_address``: not an address of the public internet, whatever the operator allowed scanning (issue 212)."""
+
+	def test_private_shared_and_local_ranges_are_internal(self):
+		for value in ('10.1.2.3', '172.16.0.9', '172.31.255.1', '192.168.0.5', '100.64.0.5', '127.0.0.1', '169.254.169.254', 'fd12::5', '::1',
+		              'fe80::1', '224.0.0.1', '0.0.0.0'):
+			self.assertTrue(tt.is_internal_address(value), value)
+
+	def test_public_and_documentation_addresses_are_not(self):
+		for value in ('8.8.8.8', '1.1.1.1', '172.15.0.1', '172.32.0.1', '203.0.113.5', '198.51.100.7', '192.0.2.1', '2606:4700::1', '2001:db8::1'):
+			self.assertFalse(tt.is_internal_address(value), value)
+
+	def test_an_ipv6_address_that_carries_an_ipv4_one_is_judged_as_that_one(self):
+		self.assertTrue(tt.is_internal_address('::ffff:192.168.1.5'))
+		self.assertFalse(tt.is_internal_address('::ffff:8.8.8.8'))
+
+	def test_text_that_is_not_an_address_is_internal(self):
+		for value in ('', 'example.com', None, 'not an ip'):
+			self.assertTrue(tt.is_internal_address(value), value)
+
+	def test_it_does_not_depend_on_the_opt_in_for_private_targets(self):
+		import os
+		from unittest import mock
+		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
+			self.assertTrue(tt.is_scannable_ip('192.168.1.5'))
+			self.assertTrue(tt.is_internal_address('192.168.1.5'))
+
+
 class EmbeddedAndMetadataAddressTests(SimpleTestCase):
 	def test_embedded_ipv4_forms_are_judged_by_the_address_they_reach(self):
 		from targetApp.target_types import is_scannable_ip

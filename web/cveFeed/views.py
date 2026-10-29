@@ -25,6 +25,7 @@ from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, Disc
                             TlsCertificate)
 from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_temperature
 from startScan.models import OPEN_PORT_STATES, open_services
+from targetApp.target_types import is_internal_address
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
 
 logger = logging.getLogger(__name__)
@@ -814,7 +815,7 @@ def node_detail(node_id):
             ('OS guess', ip.os_guess), ('Reverse pointer', ip.reverse_pointer),
             ('Full port scan', f'{timezone.localtime(ip.full_scanned_at):%Y-%m-%d %H:%M} ({ip.full_scan_ports} open)'
              if ip.full_scanned_at else 'never'),
-            ('CDN', 'yes' if ip.is_cdn else ''), ('Private range', 'yes' if ip.is_private else ''))}
+            ('CDN', 'yes' if ip.is_cdn else ''), ('Private range', 'yes' if ip.is_private or is_internal_address(ip.address) else ''))}
     if kind == 'port':
         parts = rest.split(':')
         if len(parts) == 2 and all(p.isdigit() for p in parts):
