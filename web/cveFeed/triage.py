@@ -1152,7 +1152,8 @@ def run_triage(pairs, provider=False, scan_id=None):
     if applied:
         from cveFeed import scoring
         from cveFeed.models import CVEMatch
-        scoring.rescore_for_matches(list(CVEMatch.objects.filter(pk__in=set(applied)).select_related('subdomain__target_domain')[:2000]))
+        scoring.rescore_for_matches(CVEMatch.objects.filter(pk__in=set(applied)).select_related('subdomain__target_domain')
+                                    .order_by('subdomain__target_domain__project_id', 'subdomain__name'))
     return stats
 
 
