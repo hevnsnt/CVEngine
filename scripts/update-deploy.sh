@@ -5,7 +5,9 @@
 # Not run on its own: it uses the update script's COMPOSE, STATE_HELPER, phase and log, and sets DEPLOY_STAGE for its rollback decision.
 
 # The proxy shows its friendly maintenance page (web/static/cve/maintenance.html) for as long as this flag file exists. It is set after the
-# build, which keeps the running site untouched, and before the database changes, because from then until the new web service answers the
+# build and before the database changes. The build is not "untouched": ./web is a bind mount, so the new files are already under the running
+# containers, and a worker that restarts during the build loads the new code against the old schema (reNgine/schema_guard.py answers those
+# requests 503 with Retry-After instead of 500 until the migration has run). The flag is set before the database changes, because from then until the new web service answers the
 # old code runs on a new schema or nothing runs at all, and a visitor would get an error page. It is always removed when the deploy ends,
 # failed or not: a failed update must not claim "back soon", and a retry sets it again. A host that was stopped mid-update can leave it
 # behind; `rm config/nginx/state/maintenance` (or the next update, or make up) clears it.
