@@ -41,6 +41,15 @@ class OldestOpenTests(CountFixture):
 		hygiene = HygieneFinding.objects.get()
 		self.assertEqual(counts.oldest_open(), {'days': 45, 'kind': 'hygiene', 'id': hygiene.pk})
 
+	def test_the_stats_name_the_issue_its_severity_and_host(self):
+		from cveFeed.views import _oldest_open_what
+		self.age_all(match=10, finding=20, hygiene=45)
+		h = HygieneFinding.objects.get()
+		self.assertEqual(_oldest_open_what('hygiene', h.pk), {'severity': 'Critical', 'title': h.title, 'host': h.host})
+		self.assertEqual(_oldest_open_what('cve', self.m_live.pk)['title'], 'CVE-2099-1')
+		self.assertEqual(_oldest_open_what('scanner', self.high_b.pk)['severity'], 'High')
+		self.assertIsNone(_oldest_open_what('hygiene', 999999))
+
 	def test_whole_days_rounded_down(self):
 		self.age_all(match=3)  # three days and an hour
 		self.assertEqual(counts.oldest_open()['days'], 3)
