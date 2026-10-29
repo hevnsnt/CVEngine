@@ -2,6 +2,12 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## v1.3.1 (unreleased)
+
+### Fixed
+
+- **A patched release is no longer reported as vulnerable when an advisory lists one fix per branch.** cve.now publishes some advisories (PHP2Shell is one) as a list of fixed versions with no lower bound: fixed 8.2.35, 8.3.36, 8.4.27 and 8.5.12. Read as written, the fix for 8.4 stands for every older version, so PHP 8.3.36, which is patched, was matched as in range. Each fix now gets its own branch as the lower bound (8.2, 8.3, 8.4, 8.5), the shape the CVE List path already produced, so 8.3.36 is clear, 8.3.30 is still vulnerable and a version older than every listed branch is still reported as unknown. Only a list of two or more fix-only ranges, each at a plain major.minor.patch version on a branch of its own, is changed. Reported by camstork (issue 205).
+
 ## v1.3.0 (2026-10-29)
 
 ### Upgrade notes

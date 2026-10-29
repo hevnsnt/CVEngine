@@ -460,6 +460,59 @@ class TestWordBoundaryMatching(unittest.TestCase):
         self.assertEqual(len(correlation._WORDS) + len(correlation._HOST_WORDS), n)
 
 
+PHP_FIXES_ONLY = [{"fixed": "8.2.35"}, {"fixed": "8.3.36"}, {"fixed": "8.4.27"}, {"fixed": "8.5.12"}]
+
+
+class TestFixOnlyBranchList(unittest.TestCase):
+    """cve.now publishes PHP2Shell as four ``fixed`` bounds with no lower bound. Read as they stand, the fix for 8.4 stands for every
+    older version, so a patched 8.3.36 reads as vulnerable. Each bound gets its own branch as the lower bound (issue 205)."""
+
+    def _cve(self, ranges=PHP_FIXES_ONLY, cid=90):
+        from cveFeed.correlation import clean_affected
+        return FakeCVE(cid, clean_affected([{"vendor": "PHP Group", "product": "PHP", "package": "php-src", "ranges": ranges}]), kev=True)
+
+    def _verdict(self, version, cve=None):
+        rows = _hits([cve or self._cve()], "PHP", version)
+        return rows[0][1] if rows else "no match"
+
+    def test_each_fix_gets_its_branch_as_the_lower_bound(self):
+        self.assertEqual([r["introduced"] for r in self._cve().affected[0]["ranges"]], ["8.2", "8.3", "8.4", "8.5"])
+        self.assertEqual([r["fixed"] for r in self._cve().affected[0]["ranges"]], ["8.2.35", "8.3.36", "8.4.27", "8.5.12"])
+
+    def test_the_fixed_releases_are_not_vulnerable(self):
+        for fixed in ("8.2.35", "8.3.36", "8.4.27", "8.5.12", "8.5.20", "8.6.0"):
+            self.assertIs(self._verdict(fixed), False, fixed)
+
+    def test_the_releases_before_each_fix_are_vulnerable(self):
+        for version in ("8.2.34", "8.3.30", "8.4.26", "8.5.11"):
+            self.assertIs(self._verdict(version), True, version)
+
+    def test_an_older_branch_is_unknown_not_cleared(self):
+        self.assertIsNone(self._verdict("8.1.30"))
+
+    def test_other_shapes_are_left_as_they_were(self):
+        from cveFeed.correlation import clean_affected
+
+        def ranges(*items):
+            return clean_affected([{"product": "widget", "ranges": list(items)}])[0]["ranges"]
+        one = [{"fixed": "1.2.3"}]
+        self.assertEqual(ranges(*one), one)  # a single fix is not a list of branches
+        two_fixes_one_branch = [{"fixed": "1.2.3"}, {"fixed": "1.2.9"}]
+        self.assertEqual(ranges(*two_fixes_one_branch), two_fixes_one_branch)
+        short = [{"fixed": "1.2"}, {"fixed": "2.0"}]
+        self.assertEqual(ranges(*short), short)  # not patch-level versions
+        lettered = [{"fixed": "1.1.1w"}, {"fixed": "3.0.12"}]
+        self.assertEqual(ranges(*lettered), lettered)
+        bounded = [{"fixed": "1.2.3"}, {"introduced": "2.0", "fixed": "2.4.5"}]
+        self.assertEqual(ranges(*bounded), bounded)  # one range already has its lower bound
+        last = [{"fixed": "1.2.3"}, {"lastAffected": "2.4.5"}]
+        self.assertEqual(ranges(*last), last)
+
+    def test_the_cve_list_shape_is_unchanged(self):
+        from cveFeed.correlation import clean_affected
+        self.assertEqual(clean_affected([{"product": "PHP", "ranges": PHP_RANGES}])[0]["ranges"], PHP_RANGES)
+
+
 class TestUnlistedBranch(unittest.TestCase):
     """PHP2Shell lists only the branches that got a fix (8.2 to 8.5). PHP 7.4 to 8.1 are older than all of them: not cleared."""
 
