@@ -629,27 +629,6 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         result = archive_rediscovery.observe(row, resolver=lambda host: ('resolved', {'100.64.0.5'}) if host == 'evil.example.test' else ('absent', set()))
         self.assertEqual(result['status'], 'blocked')
 
-    def test_the_legacy_bulk_import_refuses_tailnet_addresses_in_every_spelling(self):
-        """Old code: store_url had no check at all, and store_ip's pre-test was blind to mapped, NAT64 and 6to4 spellings."""
-        from reNgine.database_utils import bulk_import_targets, store_ip, store_url
-        for spelling in ('100.64.1.5', '::ffff:100.64.1.5', '64:ff9b::6440:105', '2002:6440:105::', 'fd7a:115c:a1e0::9'):
-            self.assertIsNone(store_ip(spelling, self.other_project, '', None), spelling)
-        for url in ('http://100.64.1.5:8080/', 'https://[::ffff:100.64.1.5]/x', 'http://user:pw@100.64.1.5/', 'http://[64:ff9b::6440:105]:9/',
-                    'http://127.0.0.1/', 'http://169.254.169.254/latest', 'http://10.0.0.5/'):
-            self.assertIsNone(store_url(url, self.other_project, '', None), url)
-        status = bulk_import_targets([{'name': 'http://100.64.1.5:8080/'}, {'name': '100.64.1.6'}], 'q')
-        self.assertFalse(status)
-        self.assertFalse(Domain.objects.filter(project=self.other_project, name__startswith='100.').exists())
-        self.assertFalse(Domain.objects.filter(project=self.other_project, name__icontains='100.64').exists())
-
-    def test_the_legacy_import_still_accepts_public_targets_and_operators_who_allowed_internal_ranges(self):
-        from reNgine.database_utils import store_ip, store_url
-        self.assertIsNotNone(store_ip('198.51.100.9', self.other_project, '', None))
-        self.assertIsNotNone(store_url('https://www.example.test:8443/a', self.other_project, '', None))
-        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
-            self.assertIsNotNone(store_ip('100.64.0.78', self.other_project, '', None))
-            self.assertIsNotNone(store_url('http://100.64.0.79:80/', self.other_project, '', None))
-
     def test_the_other_scan_gates_are_bound_to_the_project(self):
         from targetApp.target_types import blocked_names, scannable_hosts
         self.assertEqual(scannable_hosts(['100.64.0.5', '100.64.0.6', '10.0.0.1'], project=self.project.id), ['100.64.0.5'])
@@ -1010,6 +989,20 @@ class SyncTests(SyncBase):
         self.assertEqual((self.link.last_status, self.link.last_error), ('error', self.api_error))
         self.assertEqual(TailscaleDevice.objects.filter(departed_at__isnull=True).count(), 2)
         self.assertNotIn(SECRET, self.link.last_error)
+
+    def test_a_failed_api_with_the_local_view_answering_retires_nobody(self):
+        """S08-8: the node's own peers are the subset its ACL shows; the API (complete) not answering is no ground for archiving the rest."""
+        self.sync()
+        self.link.use_local = True
+        self.link.save()
+        self.api_error = 'Tailscale rejected the credentials (expired or revoked)'
+        peer = tailscale_local.parse_peer(STATUS['Peer']['nodekey:a'], STATUS['User'])
+        with mock.patch('cveFeed.tailscale_local.available', return_value=True), \
+                mock.patch('cveFeed.tailscale_local.read', return_value=({'self_ids': [], 'tailnet': 'example.test'}, [peer])):
+            out = self.sync()
+        self.assertEqual((out['status'], out['departed']), ('partial', 0))
+        self.assertIn('no device was retired', out['error'])
+        self.assertEqual(TailscaleDevice.objects.filter(departed_at__isnull=True).count(), 2)
 
     def test_a_policy_failure_is_partial_not_fatal(self):
         self.policy_error = 'the credentials lack a scope this needs'

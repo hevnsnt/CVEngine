@@ -54,6 +54,17 @@ class ProviderTests(unittest.TestCase):
 			with self.assertRaises(ai.AIProviderError):
 				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
 
+	def test_a_non_json_reply_is_a_json_error_not_a_connection_failure(self):
+		import requests
+
+		class NotJson(FakeResp):
+			def json(self):
+				raise requests.exceptions.JSONDecodeError('Expecting value', '<html>', 0)  # a RequestException and a ValueError at once
+		with mock.patch('requests.post', return_value=NotJson({})):
+			with self.assertRaises(ai.AIProviderError) as caught:
+				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
+		self.assertEqual(caught.exception.category, 'provider_json')
+
 
 class VisionTests(unittest.TestCase):
 	"""complete_vision() attaches one image to the user turn, in each provider's own shape, and shares the text

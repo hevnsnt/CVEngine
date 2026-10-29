@@ -77,9 +77,14 @@ function ago(iso) {
 export function sourceLine(setting) {
   if (!setting) return "Not set";
   const when = setting.at ? `, ${ago(setting.at)}` : "";
-  return setting.source === "server"
-    ? `Set from this dashboard${setting.by ? ` by ${setting.by}` : ""}${when}`
-    : `Set on the Sentinel's machine${when}`;
+  const limit = setting.limited_by_machine
+    ? ` (limited by this machine's setting${setting.machine_value ? `: ${setting.machine_value}` : ""}, so this does not take effect)`
+    : "";
+  return (
+    (setting.source === "server"
+      ? `Set from this dashboard${setting.by ? ` by ${setting.by}` : ""}${when}`
+      : `Set on the Sentinel's machine${when}`) + limit
+  );
 }
 
 const shown = (key, value) => {

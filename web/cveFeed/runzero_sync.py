@@ -192,8 +192,11 @@ def _retract_matches(project):
     return changed
 
 
-def _enrich(project, by_ip, reports):
-    """Store runZero's facts on the project's matching addresses. ``(matched, updated, reports_kept, corroborated)``."""
+def _enrich(project, by_ip, reports, partial=False):
+    """Store runZero's facts on the project's matching addresses. ``(matched, updated, reports_kept, corroborated)``. ``partial`` says
+    the walk stopped early (the quota, the record cap) so the lists are not all of runZero's answer: what was read is stored, but a block
+    or a CVE report that is merely absent from it is kept, never taken to mean runZero dropped it. The same goes for an empty answer
+    while hosts carry runZero data (a token whose search scope changed): nothing is retired on silence."""
     known = _known_ips(project, by_ip)
     by_address = {}
     for report in reports:
@@ -202,9 +205,14 @@ def _enrich(project, by_ip, reports):
     for ip in known:
         mine = by_address.get(ip.address, [])
         kept += len(mine)
-        updated += _store(ip, _block(by_ip[ip.address], mine))
-    forgotten = _forget_absent(project, by_ip)
-    _retract_matches(project)
+        block = _block(by_ip[ip.address], mine)
+        if partial:
+            block['vulns'] = ((ip.fingerprint or {}).get('runzero') or {}).get('vulns', []) if not mine else block['vulns']
+        updated += _store(ip, block)
+    forgotten = 0
+    if not partial and by_ip:
+        forgotten = _forget_absent(project, by_ip)
+        _retract_matches(project)
     return len(known), updated + forgotten, kept, _corroborate_matches(project, known)
 
 
@@ -339,9 +347,10 @@ def _run(project, row, token):
     reports, reports_cut = ([], False)
     if by_ip:
         reports, reports_cut = client.fetch_vulnerabilities('')
-    matched, updated, kept, corroborated = _enrich(project, by_ip, reports)
+    partial = bool(assets_cut or reports_cut or client.quota_low)
+    matched, updated, kept, corroborated = _enrich(project, by_ip, reports, partial)
     counts = {'assets': len(assets), 'matched_hosts': matched, 'updated_hosts': updated, 'cve_reports': kept,
-              'corroborated_matches': corroborated, 'truncated': assets_cut or reports_cut or client.quota_low}
+              'corroborated_matches': corroborated, 'truncated': partial}
     if client.quota_low:
         counts['quota_low'] = True  # runZero's daily quota is nearly spent: the sync stopped early and the next one carries on
     if row.import_enabled:

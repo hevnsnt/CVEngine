@@ -305,12 +305,19 @@ def _read_scripts(result, probe, scan_id):
         evidence['fingerprint_names'] = [f['name'] for f in found]
 
 
+class UntrustedCertificate(ValueError):
+    """A stored sign-in was not sent because the server's certificate does not verify and the target's "trust this certificate anyway" switch is
+    off. Worded for the person who reads the activity line; holds no secret."""
+
+
 def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
               connect_ip=None, auth_scope=None):
     """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI. ``connect_ip`` connects to that vetted address instead
     of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan).
     ``auth_scope`` (a cveFeed.auth_checks.AuthScope) adds the stored sign-in of the target, and only when this very destination (host, scheme and
-    port) is one the sign-in was stored for; the request is a single one, redirects are never followed, so the values go nowhere else."""
+    port) is one the sign-in was stored for; the request is a single one, redirects are never followed, so the values go nowhere else. A request that
+    carries a sign-in verifies the server certificate (a mismatch raises UntrustedCertificate, never a send) unless the owner switched on
+    ``allow_untrusted_certificate`` for that sign-in; an anonymous one never verifies, so it still inspects a broken-certificate site."""
     import ssl
     from http.cookies import SimpleCookie, CookieError
     from urllib.parse import quote, urlsplit
@@ -339,12 +346,16 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         addresses = ((socket.AF_INET6, (str(pinned), port, 0, 0)) if pinned.version == 6 else (socket.AF_INET, (str(pinned), port)),)
     else:
         addresses = pinned_transport.resolve(host, port, project=project)
+    signed = dict(auth_scope.headers_for(host, parsed.scheme, port)) if auth_scope is not None else {}
     context = None
     if parsed.scheme == 'https':
         context = ssl.create_default_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE  # scanner must inspect broken-certificate sites too
+        # an anonymous check inspects broken-certificate sites too; a stored sign-in goes only to a server that proves its name, unless the
+        # owner chose, for this target's sign-in, to send it anyway
+        if not signed or auth_scope.accepts_untrusted_certificate(host, parsed.scheme, port):
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
     connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context, project=project)
     authority = f'[{host}]' if ':' in host else host
     if parsed.port is not None:
@@ -354,8 +365,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
     if browser:
         request_headers.update(BROWSER_HEADERS)
     request_headers.update({key.title(): value for key, value in (headers or {}).items()})
-    if auth_scope is not None:
-        request_headers.update(dict(auth_scope.headers_for(host, parsed.scheme, port)))
+    request_headers.update(signed)
     path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
@@ -403,6 +413,11 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
                 'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items()),
                 'raw_headers': {k.lower(): ' '.join(v.split())[:200] for k, v in list(response.headers.items())[:60]
                                 if k.lower() not in ('set-cookie', 'authorization', 'proxy-authorization')}}
+    except ssl.SSLCertVerificationError as exc:
+        if signed:  # nothing was sent: the handshake failed before the request
+            raise UntrustedCertificate(f'the server certificate does not verify ({getattr(exc, "verify_message", None) or "invalid"}), so the stored sign-in was not '
+                                       f'sent; turn on "Trust this certificate anyway" for this sign-in to send it regardless') from None
+        raise
     except (OSError, http.client.HTTPException):
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget') from None
@@ -456,10 +471,12 @@ def _plan(scan, retired=None):
     from cveFeed.exclusions import excluded_names
     banned = excluded_names(scan.domain.project_id)  # hosts the organization excluded for good are never probed
     plan, total = {}, 0
+    from cveFeed.bounty_gate import Gate
+    gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name is never probed
     subs = Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports').order_by('name')
     for sub in subs.iterator(chunk_size=CHUNK):
         host = (sub.name or '').strip().lower()
-        if not host or host in plan or host.rstrip('.') in banned:
+        if not host or host in plan or host.rstrip('.') in banned or gate.refusal(scan.domain.project_id, host, unattended=False):
             continue
         bases = web_bases(sub)
         if not bases:

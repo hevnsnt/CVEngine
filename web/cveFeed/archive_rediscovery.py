@@ -96,6 +96,11 @@ def check_one(row, *, resolver=resolve_one, tcp_probe=None):
         HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
             archive_checked_at=timezone.now(), archive_check_status='out_of_scope', archive_check_error='')
         return 'deferred'
+    from cveFeed.bounty_gate import Gate
+    if Gate().refusal(row.project_id, host):  # a bug bounty program that has not confirmed automated testing, or a host outside its scope: no lookup, no probe, no assessment
+        HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
+            archive_checked_at=timezone.now(), archive_check_status='bounty_gate', archive_check_error='')
+        return 'deferred'
     result = observe(row, resolver=resolver, tcp_probe=tcp_probe)
     status = result['status']
     now = timezone.now()

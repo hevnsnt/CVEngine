@@ -15,7 +15,7 @@
     <input id="password" name="password" type="password" autocomplete="current-password" required>
   </div>
   <button class="btn" type="submit" style="width:100%;margin-top:4px">Sign in</button>
-  {% if form.errors %}<div class="msg err" role="alert">That username and password did not match.</div>{% endif %}
+  {% if throttled %}<div class="msg err" role="alert">Too many failed sign-in attempts. Try again in a few minutes.</div>{% elif form.errors %}<div class="msg err" role="alert">That username and password did not match.</div>{% endif %}
 </form>
 <p class="note" style="margin-top:14px">First time here? The installer printed your admin username and password. Lost them? On the server, run <code>make admin-password</code>.</p>
 {% endblock %}

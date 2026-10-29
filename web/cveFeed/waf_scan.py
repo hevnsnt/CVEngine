@@ -90,13 +90,15 @@ def run_wafw00f(url, timeout_s=None):
     with tempfile.TemporaryDirectory(prefix='cvengine-waf-') as directory:
         out = os.path.join(directory, 'out.json')
         try:
-            subprocess.run(['wafw00f', '-a', '-r', '-T', str(min(timeout_s, 15)), '--no-colors', '-f', 'json', '-o', out, url],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout_s, check=False)
+            from cveFeed import egress_proxy, heavy_process  # under the resource gate: a pause or a stopped scan kills it, and memory is admitted first
+            proxy_args = egress_proxy.for_tool('wafw00f', [urlsplit(url).hostname])  # Settings > Proxy: raises when it is on and no proxy suits wafw00f
+            heavy_process.run('route-probe', ['wafw00f', '-a', '-r', '-T', str(min(timeout_s, 15)), '--no-colors', '-f', 'json', '-o', out, *proxy_args, url],
+                              timeout_s, label=urlsplit(url).hostname or '')
             with open(out, encoding='utf-8') as handle:
                 text = handle.read(200_000)
         except subprocess.TimeoutExpired:
             return {'products': [], 'generic': False, 'error': 'timed out'}
-        except (OSError, UnicodeError) as exc:
+        except (RuntimeError, OSError, UnicodeError) as exc:  # ScanAborted, MemoryBusy and MemoryKill are RuntimeErrors: stopped, asked again next scan
             return {'products': [], 'generic': False, 'error': str(exc)[:200]}
     try:
         generic = any(r.get('detected') for r in json.loads(text) if isinstance(r, dict))

@@ -2,13 +2,15 @@
 (see cveFeed.auth_checks). App Admins and the project's Org Admin only; every other role, including a project member, gets 403, because
 a stored sign-in lets the scanners act as a person inside the application. Values are write-only: nothing here returns one, only the
 header and cookie NAMES, and the audit log records names too. Every credential has an explicit scope (one host or all hosts of the target)
-and an explicit expiry (30, 90 or 120 days, or never).
+and an explicit expiry (30, 90 or 120 days, or never). A sign-in is sent only over a TLS connection whose certificate verifies, unless the
+owner switched on ``allow_untrusted_certificate`` for it (audited, with a warning).
 """
 from agentapi.services import ApiError, get_one_project
 from cveFeed import auth_checks
 from tenancy import roles
 
 MAX_PER_TARGET = 25
+MISSING = object()  # a body field left out, as opposed to sent as null
 
 
 def _admin(ctx, slug, write=False):
@@ -32,7 +34,7 @@ def _target(project, target_id):
 
 def list_credentials(ctx, slug, params=None):
     """The stored sign-ins of a project, masked: label, target, host (null with scope ``target``: every host of the target), origins, header and cookie names,
-    expiry (with the days left) and state (active or expired). Never a value. ``target_id`` narrows to one target."""
+    expiry (with the days left), state (active or expired) and ``allow_untrusted_certificate``. Never a value. ``target_id`` narrows to one target."""
     from cveFeed.models import AuthCredential
     project = _admin(ctx, slug)
     rows = AuthCredential.objects.filter(project=project).select_related('domain', 'updated_by').order_by('domain__name', 'host', 'id')
@@ -46,7 +48,8 @@ def set_credential(ctx, slug, target_id, body):
     (one host of the target) or ``"target"`` (every host of the target, chosen deliberately; ``host`` blank). ``expires`` is required: 30, 90
     or 120 (days from now) or ``"never"``. ``headers`` is a list of ``{name, secret}`` (``secret`` is the header value; blank for a name
     already stored keeps it, and names left out are removed), ``cookie_secret`` a ``name=value; ...`` string (blank keeps the stored one,
-    ``clear_cookie: true`` removes it) and ``origins`` the ``scheme:port`` list it may go to (default ``["https:443"]``). REST and the web
+    ``clear_cookie: true`` removes it) ``origins`` the ``scheme:port`` list it may go to (default ``["https:443"]``) and ``allow_untrusted_certificate`` (boolean, default false,
+    kept when left out): also send it over a connection whose certificate does not verify, which lets anyone in the network path read it. REST and the web
     page only: a secret never passes through an MCP tool."""
     from cveFeed.admin_api import audit
     from cveFeed.models import AuthCredential
@@ -69,18 +72,28 @@ def set_credential(ctx, slug, target_id, body):
             raise auth_checks.CredentialError(f'give it a label of up to {auth_checks.MAX_LABEL} characters (for example "staging test account")')
         origins = auth_checks.clean_origins(body['origins']) if 'origins' in body else (list(existing.origins) if existing else list(auth_checks.DEFAULT_ORIGINS))
         expires = auth_checks.compute_expiry(body.get('expires'))
+        allow = body.get('allow_untrusted_certificate', MISSING)
+        if allow is MISSING:
+            allow = bool(existing.allow_untrusted_certificate) if existing else False
+        elif not isinstance(allow, bool):
+            raise auth_checks.CredentialError('allow_untrusted_certificate must be true or false')
     except auth_checks.CredentialError as exc:
         raise ApiError(400, str(exc))
     if existing is None and AuthCredential.objects.filter(domain=domain).count() >= MAX_PER_TARGET:
         raise ApiError(400, f'a target holds at most {MAX_PER_TARGET} stored sign-ins')
     cred = existing or AuthCredential(project=project, domain=domain, host=host)
     cred.label, cred.origins, cred.expires_at, cred.updated_by = label, origins, expires, ctx.user
+    changed = allow != bool(cred.allow_untrusted_certificate)
+    cred.allow_untrusted_certificate = allow
     cred.secret = {'headers': headers, 'cookie': cookie}
     cred.save()
     audit(ctx.user, 'target.auth_credential.set', f'{project.slug}:{domain.name}:{host or "*"}', org=project.org_id, label=label,
           headers=[name for name, _ in headers], cookie=bool(cookie), origins=origins, scope='host' if host else 'target', expires=str(body.get('expires')).strip().lower(),
           expires_at=expires.isoformat() if expires else None,
-          created=existing is None)
+          created=existing is None, allow_untrusted_certificate=allow)
+    if changed:  # its own audit row: the switch lets the sign-in cross a connection whose server was not verified
+        audit(ctx.user, 'target.auth_credential.untrusted_certificate', f'{project.slug}:{domain.name}:{host or "*"}', org=project.org_id,
+              label=label, allow_untrusted_certificate=allow)
     return auth_checks.summary(cred)
 
 

@@ -338,6 +338,15 @@ class AdminMatrixTests(TestCase):
 		from cveFeed import discovery
 		self.assertEqual(discovery.discovery_timeout(), 8 * 3600)
 
+	def test_a_timing_whose_schedule_row_already_exists_still_reaches_beat(self):
+		from django_celery_beat.models import IntervalSchedule, PeriodicTask, PeriodicTasks
+		IntervalSchedule.objects.get_or_create(every=10, period='minutes')  # another task already uses this cadence: no new row, no signal
+		PeriodicTasks.update_changed()
+		before = PeriodicTasks.last_change()
+		self.assertEqual(api(client_for(self.root), 'PUT', 'timings', {'cve_sync_minutes': 10})[0], 200)
+		self.assertEqual(PeriodicTask.objects.get(name='cvengine-cve-sync').interval.every, 10)
+		self.assertGreater(PeriodicTasks.last_change(), before)  # beat reloads when this moves
+
 	def test_audit_log_is_scoped_to_what_the_admin_manages(self):
 		api(client_for(self.admin_a), 'POST', f'users/{self.member_a.id}/reset-mfa')
 		api(client_for(self.admin_a), 'POST', 'users', {'username': 'audited', 'scope': 'org', 'scope_id': self.org_a.id, 'role': 'user'})

@@ -19,6 +19,7 @@ jobs:
       - name: Every pinned tool is at its newest release, or the pull request is labelled tools-reviewed
         env:
           REVIEWED: ${{ contains(github.event.pull_request.labels.*.name, 'tools-reviewed') }}
+          GITHUB_TOKEN: ${{ github.token }}  # for api.github.com lookups: unauthenticated they are rate limited on shared runners
         run: |
           if python3 scripts/check_tool_versions.py --fail-if-behind; then
             exit 0

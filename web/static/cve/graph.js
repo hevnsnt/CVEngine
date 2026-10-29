@@ -410,7 +410,9 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     const m = root && /matrix\(([^)]+)\)/.exec(root.getAttribute("transform") || "");
     zoomK = Math.max(Number(m ? m[1].split(/[ ,]+/)[0] : 1) || 1, 0.02);
   };
-  const zoomTimer = setInterval(readZoom, 250);
+  const zoomTimer = setInterval(() => {
+    if (!document.hidden) readZoom();
+  }, 250);
   const driftOf = (ui, id) => {
     if (!floatOn || id === hovered || id === selected || group.has(id)) return [0, 0];
     if (ui.__p === undefined) ui.__p = [stableAngle(id), stableAngle(`${id}~`), 0.8 + (stableAngle(`${id}#`) / 6.283) * 0.5];
@@ -768,7 +770,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
   container.addEventListener("pointerdown", wake);
   const lastPos = new Map();
   const settleTimer = setInterval(() => {
-    if (resting) return;
+    if (resting || document.hidden) return;
     let moved = 0;
     let counted = 0;
     graph.forEachNode((node) => {
@@ -870,7 +872,17 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       text.setAttribute("display", show ? "" : "none");
     });
   }
-  const labelTimer = setInterval(relabel, 500);
+  // Labels are laid out from the bubbles' on-screen boxes, which forces a layout of every node: skip it in a hidden tab, and while the
+  // layout rests unless the view (pan, zoom), the selection, the picked group or the node count changed since the last pass.
+  let labelSig = "";
+  const labelTimer = setInterval(() => {
+    if (document.hidden) return;
+    const root = container.querySelector("svg > g");
+    const sig = [root && root.getAttribute("transform"), selected, group.size, clustered, graph.getNodesCount()].join("|");
+    if (resting && sig === labelSig) return;
+    labelSig = sig;
+    relabel();
+  }, 500);
 
   // Keep the whole graph in view: refit as the layout settles and nodes arrive, until the user pans,
   // zooms or drags (then they are in control; the Fit button or double-click hands it back).
@@ -936,7 +948,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     fit();
   });
   const timer = setInterval(() => {
-    if (auto) fit();
+    if (auto && !document.hidden) fit();
   }, 700);
 
   function resync() {

@@ -406,6 +406,23 @@ def _host_key(value):
 
 
 def run_template(path, hosts, secret_file=None, redact=()):
+    """``_run_template`` after one more look at the names: a name a tenant controls can answer a public address when the host list
+    is vetted and an internal one later, so the names are resolved again here, at launch, and one that now resolves to a blocked
+    address is reported as not tested instead of being handed to nuclei. (The name is still resolved by nuclei itself a moment later:
+    this narrows the window, it does not close it.)"""
+    from targetApp.target_types import IP, bare_host, blocked_names, classify_target
+    hosts = [hosts] if isinstance(hosts, str) else list(hosts)
+    names = {bare_host(h) for h in hosts}
+    blocked = blocked_names([n for n in names if n and classify_target(n) != IP]) if hosts else set()
+    if not blocked:
+        return _run_template(path, hosts, secret_file=secret_file, redact=redact)
+    allowed = [h for h in hosts if bare_host(h) not in blocked]
+    ran = iter(_run_template(path, allowed, secret_file=secret_file, redact=redact) if allowed else [])
+    return [{"host": h, "vulnerable": False, "output": "", "error": "the host name now resolves to an address that may not be scanned"}
+            if bare_host(h) in blocked else next(ran) for h in hosts]
+
+
+def _run_template(path, hosts, secret_file=None, redact=()):
     """Run one template against ``hosts`` (one nuclei process, ``-l`` a host file); returns a
     {host, vulnerable, output} per host, in order. Waits its turn for memory; if it had to be stopped to protect the
     container it raises reNgine.resources.MemoryKill. ``secret_file`` (a nuclei secrets file, see cveFeed.auth_nuclei) makes it a signed-in
@@ -431,6 +448,11 @@ def run_template(path, hosts, secret_file=None, redact=()):
                "-rl", RATE_LIMIT, "-timeout", "10", "-retries", "0"]
         if secret_file:
             cmd += ["-sf", secret_file, "-dr"]
+        from cveFeed import egress_proxy
+        try:
+            cmd += egress_proxy.for_tool("nuclei", hosts)  # Settings > Proxy: these hosts are scan targets (loopback stays direct)
+        except egress_proxy.ProxyUnavailable as exc:
+            return [{"host": host, "vulnerable": False, "output": "", "error": str(exc)} for host in hosts]
         with resources.heavy_job("template-test", label=hosts[0] if len(hosts) == 1 else f"{len(hosts)} hosts") as job:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
@@ -694,8 +716,15 @@ def _generate_template(cve, provider, project):
     with activity.step('write_check', f'Writing a nuclei check for {cve.cve_id} with {provider.name}',
                        project=project, cve_id=cve.cve_id) as handle:
         from reNgine.ai_providers import usage_stage
-        with usage_stage('template_generation'):
-            text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
+        try:
+            with usage_stage('template_generation'):
+                text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
+        except Exception as exc:
+            # a failed provider call is still a billable attempt: leave the ledger row, so the next run does not retry this CVE at once
+            GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID,
+                                             ai_model=f"{provider.name}:{provider.model}"[:128],
+                                             validation_output=f'the AI provider call failed ({type(exc).__name__}); no template was written')
+            raise
         handle.done_message = f'Wrote a nuclei check for {cve.cve_id}'
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
     tmpl = GeneratedTemplate(

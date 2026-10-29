@@ -16,6 +16,7 @@ worker restart at the scan's start left it "running" with a dead task; the next 
 wait for an hours-scale timeout, ``expire_orphaned_running`` asks the broker directly (the same check ``redispatch_queued_assessments``
 already uses) whether a still-running scan's or assessment's Celery task exists anywhere, and closes it out within one reaper tick
 once it is both past a short grace period and provably dead - the row is never closed just because the broker could not be asked."""
+import math
 import os
 from datetime import timedelta
 
@@ -31,8 +32,8 @@ LIMITS = (
     ('OnDemandValidation', 'running', 'CVENGINE_VALIDATION_RUNNING_HOURS', 2, 'started_at'),
     ('AutomaticValidation', 'queued', 'CVENGINE_VALIDATION_QUEUED_HOURS', 6, 'created_at'),
     ('AutomaticValidation', 'running', 'CVENGINE_VALIDATION_RUNNING_HOURS', 2, 'started_at'),
-    # matches discovery.RUNNING_WINDOW_SECONDS: the same age a scan itself is considered a restart casualty at
-    ('AgentActivity', 'running', 'CVENGINE_ACTIVITY_RUNNING_HOURS', 11, 'created_at'),
+    # the same age a scan itself is considered a restart casualty at (counts.running_window: 11 h with the shipped timeouts)
+    ('AgentActivity', 'running', 'CVENGINE_ACTIVITY_RUNNING_HOURS', 'running_window', 'created_at'),
 )
 VALIDATION_MODELS = ('OnDemandValidation', 'AutomaticValidation')
 NO_ERROR_FIELD = ('AgentActivity',)  # has no `error` column; the reason is appended to its own `message` instead
@@ -42,6 +43,9 @@ def _hours(name, default):
     try:
         return max(1, int(os.environ.get(name, '')))
     except ValueError:
+        if default == 'running_window':  # follows the configured discovery and nuclei timeouts, read live like the workers do
+            from cveFeed.counts import running_window
+            return max(1, math.ceil(running_window().total_seconds() / 3600))
         return default
 
 

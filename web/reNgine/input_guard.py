@@ -11,6 +11,10 @@ inspected. Two kinds of hit:
 * strict fields: values that must be a hostname, IP, CIDR, range, slug or id (``value``, ``host``, ``project``,
   ...) containing anything else, and bulk target lists with shell metacharacters inside a token (weight 1).
 
+Free-text fields of an authenticated API or MCP call (a finding comment, a remediation note, an agent's summary or tool
+output) are not scanned: they hold prose, backticked commands and tables by nature, are stored and shown as text, and never reach
+a shell, a query or a template (see API_FREE_TEXT_FIELDS).
+
 Every hit is rejected with 400 and stored as an AbuseStrike. Strikes from one user or one IP inside the window
 add up; at the threshold (``CVENGINE_GUARD_STRIKES``, default 3, so one command-injection attempt is enough) the
 account is disabled, its API tokens are revoked, and a public IP is blocked for 24 hours (``AbuseBan``). Private
@@ -84,6 +88,28 @@ BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediat
                                 'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 
 
+# The same holds for the free-text fields of an authenticated agent call (REST /api/v1 and MCP /mcp): an agent's comment or tool
+# output is ordinary prose with backticks, `; env` and markdown tables, and one such sentence used to be a command_injection strike
+# that disabled the account. Only these field names are skipped; hosts, projects, values, ids and target lists keep the full rules.
+# `text` is a comment on the comment endpoints only: on the bulk target endpoints it is a pasted target list.
+API_PATH = re.compile(r'^/(api/v1|mcp)(/|$)')
+API_FREE_TEXT_FIELDS = frozenset({'note', 'notes', 'comment', 'summary', 'output', 'message', 'reason', 'purpose'})
+API_COMMENT_PATH = re.compile(r'^/api/v1/projects/[-\w]+/findings/[a-z]+/\d+/comments/?$')
+MCP_COMMENT_TOOLS = frozenset({'add_finding_comment'})
+
+
+def _free_text_fields(request, data):
+    """The field names left out of the inspection for this request: empty unless an authenticated agent call."""
+    user = getattr(request, 'user', None)
+    if not API_PATH.match(request.path) or user is None or not user.is_authenticated:
+        return frozenset()
+    comment = bool(API_COMMENT_PATH.match(request.path))
+    if request.path.startswith('/mcp') and isinstance(data, dict):
+        params = data.get('params')
+        comment = isinstance(params, dict) and params.get('name') in MCP_COMMENT_TOOLS
+    return API_FREE_TEXT_FIELDS | {'text'} if comment else API_FREE_TEXT_FIELDS
+
+
 def _authority(token):
     """The part of a pasted token that must be a hostname or address: for a URL, the host (not its path or query,
     which legitimately hold & ? = and so on); otherwise the token up to any slash."""
@@ -151,17 +177,22 @@ def _request_pairs(request):
         length = int(request.META.get('CONTENT_LENGTH') or 0)
     except ValueError:
         length = 0
+    data = None
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and 0 < length <= MAX_BODY and not INVENTORY_PATH.match(request.path) \
             and not SENTINEL_MACHINE_PATH.match(request.path):
         if ctype == 'application/json':
             try:
-                pairs.extend(_strings(json.loads(request.body.decode('utf-8', 'replace'))))
+                data = json.loads(request.body.decode('utf-8', 'replace'))
+                pairs.extend(_strings(data))
             except ValueError:
                 pass
         elif ctype == 'application/x-www-form-urlencoded':
             pairs.extend((k, v) for k in request.POST for v in request.POST.getlist(k))
     if BOUNTY_TEXT_PATH.match(request.path):
         pairs = [(k, v) for k, v in pairs if k.rsplit('.', 1)[-1].lower() not in BOUNTY_TEXT_FIELDS]
+    free = _free_text_fields(request, data)
+    if free:
+        pairs = [(k, v) for k, v in pairs if k.rsplit('.', 1)[-1].lower() not in free]
     return pairs
 
 
@@ -216,37 +247,46 @@ def _audit(user, action, target, **detail):
 
 def record_and_maybe_ban(request, hits, ip, user):
     """Store the strikes; ban if the user's or the IP's recent total reaches the threshold. Returns True if banned."""
-    from django.db.models import Q, Sum
+    from django.db.models import Sum
 
     from dashboard.models import AbuseBan, AbuseStrike
     for category, weight, field, sample in hits[:5]:
         AbuseStrike.objects.create(user=user, username=getattr(user, 'username', '') if user else '', ip=ip, weight=weight,
                                    category=category, field=_stored(field, 80), sample=_stored(sample, 200), path=_stored(request.path, 200))
     since = timezone.now() - WINDOW
-    who = Q(ip=ip) if ip else Q(pk__in=[])
-    if user:
-        who |= Q(user=user)
-    total = AbuseStrike.objects.filter(who, created_at__gte=since).aggregate(t=Sum('weight'))['t'] or 0
-    if total < _threshold():
+    # Two separate tallies: a person's account answers for that person's strikes only, and an address for what came from it.
+    # Summing both let one user's strikes (or a neighbour behind the same NAT) disable an account that had one point.
+    recent = AbuseStrike.objects.filter(created_at__gte=since)
+    user_total = (recent.filter(user=user).aggregate(t=Sum('weight'))['t'] or 0) if user else 0
+    ip_total = (recent.filter(ip=ip).aggregate(t=Sum('weight'))['t'] or 0) if ip else 0
+    disable_user = bool(user) and user_total >= _threshold()
+    ban_ip = bool(ip) and ip_total >= _threshold()
+    if not (disable_user or ban_ip):
         return False
+    total = user_total if disable_user else ip_total
     reason = _stored(f'{hits[0][0]} in "{hits[0][2]}" ({total} strike points in {int(WINDOW.total_seconds() // 60)} min)', 300)
     if user and user.is_superuser:
-        _audit(user, 'abuse.superuser_flagged', user.username, reason=reason, ip=ip)
+        if disable_user:
+            _audit(user, 'abuse.superuser_flagged', user.username, reason=reason, ip=ip)
         return False
-    if user:
+    acted = False
+    if disable_user:
+        acted = True
         from dashboard.models import ApiToken
         user.is_active = False
         user.save(update_fields=['is_active'])
         ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
         AbuseBan.objects.create(user=user, username=user.username, ip='', reason=reason)
         _audit(user, 'abuse.account_disabled', user.username, reason=reason, ip=ip)
-    if ip and _ip_is_banable(ip) and not AbuseBan.objects.filter(ip=ip, lifted=False, expires_at__gt=timezone.now()).exists():
+    if ban_ip and _ip_is_banable(ip) and not AbuseBan.objects.filter(ip=ip, lifted=False, expires_at__gt=timezone.now()).exists():
         AbuseBan.objects.create(ip=ip, username=getattr(user, 'username', '') if user else '', reason=reason,
                                 expires_at=timezone.now() + IP_BAN)
         _audit(user, 'abuse.ip_banned', ip, reason=reason)
         invalidate_cache()
-    logger.warning('input guard banned user=%s ip=%s: %s', getattr(user, 'username', None), ip, reason)
-    return True
+        acted = True
+    if acted:
+        logger.warning('input guard banned user=%s ip=%s: %s', getattr(user, 'username', None), ip, reason)
+    return acted
 
 
 class InputGuardMiddleware:

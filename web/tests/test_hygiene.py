@@ -130,6 +130,25 @@ class DkimCaaTests(TestCase):
 		self.assertTrue(has_mx)
 		self.assertTrue({'spf_softfail', 'dmarc_none', 'dkim_not_found', 'caa_missing'} <= checks(findings))
 
+	def test_a_subdomain_inherits_the_organizational_domains_dmarc_policy(self):
+		"""S08-7: RFC 7489 6.6.3, a name with no record of its own is held to the apex's (its sp for subdomains): no false HIGH."""
+		zone = {'_dmarc.a.com': ['v=DMARC1; p=reject; rua=mailto:d@a.com']}
+		fetch = lambda n: zone.get(n, [])
+		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
+		self.assertNotIn('dmarc_missing', checks(findings))
+		zone['_dmarc.a.com'] = ['v=DMARC1; p=reject; sp=none; rua=mailto:d@a.com']
+		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
+		inherited = [f for f in findings if f.check == 'dmarc_none']
+		self.assertEqual([(f.severity, f.evidence['inherited_from']) for f in inherited], [(hy.MEDIUM, 'a.com')])  # sp=none is the policy it has
+		self.assertTrue({'dmarc_subdomain_weak', 'dmarc_no_reports'}.isdisjoint(checks(findings)))  # those are the apex's own findings
+		zone.clear()
+		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
+		self.assertIn('dmarc_missing', checks(findings))  # neither the name nor its apex publishes one
+		zone['_dmarc.mail.a.com'] = ['v=DMARC1; p=none']
+		zone['_dmarc.a.com'] = ['v=DMARC1; p=reject']
+		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
+		self.assertIn('dmarc_none', checks(findings))  # its own record wins over the apex's
+
 
 class CertTests(TestCase):
 	def test_expiry_bands(self):
@@ -151,6 +170,12 @@ class CertTests(TestCase):
 		self.assertTrue(hy.hostname_matches('WWW.Example.com.', ['www.example.com']))
 		self.assertEqual(checks(hy.evaluate_cert(cert(sans=['other.net'], subject='other.net'), now=NOW)), {'tls_hostname_mismatch'})
 		self.assertEqual(hy.evaluate_cert(cert(host='203.0.113.5', sans=['x.net'], subject='x.net'), now=NOW), [])  # IPs are not name-matched
+
+	def test_an_ip_literal_is_never_name_matched_and_an_ip_mismatch_is_not_an_untrusted_chain(self):
+		for host in ('203.0.113.5', '2001:db8:abcd::1'):
+			found = hy.evaluate_cert(cert(host=host, sans=['x.net'], subject='x.net', chain_error="IP address mismatch, certificate is not valid for '%s'" % host), now=NOW)
+			self.assertEqual(found, [], host)  # S08-15
+		self.assertEqual(checks(hy.evaluate_cert(cert(host='203.0.113.5', chain_error='self-signed certificate'), now=NOW)), {'tls_self_signed'})
 
 	def test_chain_and_crypto_findings(self):
 		self.assertEqual(checks(hy.evaluate_cert(cert(chain_error='self-signed certificate'), now=NOW)), {'tls_self_signed'})
@@ -196,6 +221,17 @@ class HygieneRunnerTests(TestCase):
 		self.assertEqual(HygieneFinding.objects.filter(domain=self.domain, status='resolved').count(), 3)  # two expiring certificates (443 and 8443) plus DMARC
 		messages = list(AgentActivity.objects.filter(kind='hygiene').order_by('id').values_list('message', flat=True))
 		self.assertTrue(messages[0].startswith('Hygiene check of example.test: 2 certificates, 3 issues (worst: high)'))
+
+	def test_a_host_only_run_resolves_a_fixed_certificate_finding(self):
+		soon = timezone.now() + datetime.timedelta(days=5)
+		bad = lambda host, port: cert(host=host, port=port, sans=[host], subject=host, not_after=soon) if host == 'www.example.test' and port == 443 else None
+		hy.run_hygiene(self.domain.id, probe=bad, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
+		row = HygieneFinding.objects.get(domain=self.domain, check_name='tls_expiring')
+		self.assertEqual((row.host, row.status), ('www.example.test:443', 'open'))
+		fixed = lambda host, port: cert(host=host, port=port, sans=[host], subject=host) if host == 'www.example.test' and port == 443 else None
+		hy.run_hygiene(self.domain.id, probe=fixed, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
+		row.refresh_from_db()
+		self.assertEqual(row.status, 'resolved')  # S08-14: not left for the next whole-target sweep
 
 	def test_a_finding_marked_fixed_that_comes_back_is_reopened(self):
 		mail = lambda name: ([hy.Finding('dmarc_none', hy.MEDIUM, 'DMARC policy is p=none', host=name)], False)

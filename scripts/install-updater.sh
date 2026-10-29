@@ -49,6 +49,14 @@ if [ -n "$PROJECT" ]; then
   ENVPREFIX="${ENVPREFIX}CVENGINE_COMPOSE_PROJECT=$PROJECT "
 fi
 
+# Prove the watcher can start the way cron starts it: a bare environment (no SUDO_UID), in this checkout. When the checkout belongs to another
+# user than the one this runs as (root, after `git clone` as a normal user), git refuses it ("dubious ownership") unless told otherwise; the
+# scripts do tell it, and this fails the install, not the first approval minutes later, if that ever stops being enough.
+if ! (cd "$ROOT" && env -i PATH="$PATH" HOME="${HOME:-/root}" python3 scripts/update-state.py directory >/dev/null 2>&1); then
+  echo "The update watcher could not find its state directory in $ROOT when started the way cron starts it (git refused the checkout, or python3 is missing). Not installing it. Run: cd $ROOT && env -i PATH=\"\$PATH\" python3 scripts/update-state.py directory" >&2
+  exit 1
+fi
+
 chmod +x "$ROOT/scripts/apply-update.sh"
 chmod +x "$ROOT/scripts/update-watch.sh"
 printf '%s\n* * * * * %s%s/scripts/update-watch.sh >/dev/null 2>&1 %s\n' "$CURRENT" "$ENVPREFIX" "$ROOT" "$MARK" | sed '/^$/d' | crontab -

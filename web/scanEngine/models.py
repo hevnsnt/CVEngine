@@ -1,5 +1,5 @@
 import yaml
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
+from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField, EncryptedTextField
 from django.db import models
 
 
@@ -39,34 +39,6 @@ class EngineType(models.Model):
             return []
         return list(yaml.safe_load(self.yaml_configuration).keys())
 
-class Wordlist(models.Model):
-    id = models.AutoField(primary_key=True)
-    name = models.CharField(max_length=200)
-    short_name = models.CharField(max_length=50, unique=True)
-    count = models.IntegerField(default=0)
-
-    def __str__(self):
-        return self.name
-
-
-class Configuration(models.Model):
-    id = models.AutoField(primary_key=True)
-    name = models.CharField(max_length=200)
-    short_name = models.CharField(max_length=50, unique=True)
-    content = models.TextField()
-
-    def __str__(self):
-        return self.name
-
-
-class InterestingLookupModel(models.Model):
-    id = models.AutoField(primary_key=True)
-    keywords = models.TextField(null=True, blank=True)
-    custom_type = models.BooleanField(default=False)
-    title_lookup = models.BooleanField(default=True)
-    url_lookup = models.BooleanField(default=True)
-    condition_200_http_lookup = models.BooleanField(default=False)
-
 
 class Notification(models.Model):
     id = models.AutoField(primary_key=True)
@@ -93,7 +65,7 @@ class Notification(models.Model):
 class Proxy(models.Model):
     id = models.AutoField(primary_key=True)
     use_proxy = models.BooleanField(default=False)
-    proxies = models.TextField(blank=True, null=True)
+    proxies = EncryptedTextField(blank=True, null=True)  # one proxy URL per line; a line may carry a password, so it is encrypted at rest
 
 
 class Hackerone(models.Model):

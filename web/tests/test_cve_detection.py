@@ -159,6 +159,25 @@ class AuthoringTests(TestCase):
 		self.assertTrue(any(c['id'].startswith('ai-') for c in row.strategy['remote_checks']))
 
 
+class RefreshKeepsGuidanceTests(TestCase):
+	def test_a_resynced_cve_keeps_the_ai_guidance_that_has_no_check_of_its_own(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-31', title='t', published_at=timezone.now(), affected=NGINX, cvss=7.5)
+		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
+			detection_author.author_rules()
+		strategy = {'summary': 'Written by the model.', 'identify': 'Only on hosts that expose the admin port.', 'scope': 'external',
+					'confirm_steps': ['Open the admin port.'], 'remote_checks': [], 'local_checks': []}
+		row = CVEDetection.objects.get(cve_entry=cve)
+		CVEDetection.objects.filter(pk=row.pk).update(source='ai', strategy={**row.strategy, **strategy, 'remote_checks': [], 'local_checks': []},
+													  ai_input_hash='abc')
+		CVEEntry.objects.filter(pk=cve.pk).update(synced_at=timezone.now())
+		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
+			self.assertEqual(detection_author.refresh_rules(), 1)
+		row = CVEDetection.objects.get(pk=row.pk)
+		self.assertEqual((row.strategy['summary'], row.strategy['scope'], row.strategy['confirm_steps']),
+						 ('Written by the model.', 'external', ['Open the admin port.']))
+		self.assertEqual(row.source, 'ai')
+
+
 class ExposureTests(TestCase):
 	def test_the_detection_is_in_get_cve_and_has_its_own_tool(self):
 		from agentapi import mcp, services
@@ -237,6 +256,29 @@ class ValidationGuidanceTests(TestCase):
 		self.assertEqual({c['platform'] for c in commands}, {'debian', 'rhel', 'alpine'})
 		self.assertTrue(all(c['read_only'] and c['expect'] and c['command'] for c in commands))
 		self.assertIn('dpkg --compare-versions', commands[0]['command'])
+
+	def test_the_dpkg_command_ignores_the_epoch_and_says_unknown_for_a_missing_package(self):
+		import os
+		import shutil
+		import subprocess
+		import tempfile
+		if not shutil.which('dpkg'):
+			self.skipTest('dpkg is not installed here')
+		from cveFeed import detection_commands
+		command = detection_commands._package_commands({'package': 'openssh', 'ecosystem': 'dpkg', 'affected_below': '9.8p1'})[0]['command']
+		with tempfile.TemporaryDirectory() as bin_dir:
+			fake = os.path.join(bin_dir, 'dpkg-query')
+			with open(fake, 'w') as f:
+				f.write('#!/bin/sh\n[ "$FAKE_VERSION" = none ] && exit 1\necho "$FAKE_VERSION"\n')
+			os.chmod(fake, 0o755)
+
+			def run(version):
+				env = {**os.environ, 'PATH': bin_dir + os.pathsep + os.environ['PATH'], 'FAKE_VERSION': version}
+				return subprocess.run(['sh', '-c', command], env=env, capture_output=True, text=True).stdout.strip()
+			self.assertEqual(run('1:9.6p1-3ubuntu13'), 'AFFECTED')  # the epoch used to make this "not less than 9.8p1"
+			self.assertEqual(run('1:9.9p1-1'), 'NOT-AFFECTED')
+			self.assertEqual(run('9.6p1-3'), 'AFFECTED')
+			self.assertEqual(run('none'), 'UNKNOWN')  # not installed under that name: never reported as not affected
 
 	def test_the_profile_says_what_can_be_decided_remotely_and_what_validates(self):
 		with_template = self.strategy()['validation']

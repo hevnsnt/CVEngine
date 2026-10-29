@@ -20,31 +20,90 @@ deploy_current() {
   return "$status"
 }
 
+# A dump just before the migrations (scripts/db-backup.sh; CVENGINE_UPDATE_BACKUPS says how many to keep, default 3, and 0 takes none). A migration
+# is never rolled back, so this is the only way back from one that goes wrong half way. A dump that cannot be made stops the update before the
+# database is touched: DEPLOY_STAGE is still datastores, so the previous version is put back.
+BACKUP_FILE=
+backup_database() {
+  BACKUP_FILE=
+  if ! BACKUP_FILE=$(scripts/db-backup.sh "$STATE" -- "${COMPOSE[@]}"); then
+    log "the database backup failed, so the database is not migrated; fix that (disk space, the database container) and approve again, or set CVENGINE_UPDATE_BACKUPS=0 to update without one"
+    return 1
+  fi
+  BACKUP_FILE=$(printf '%s\n' "$BACKUP_FILE" | tail -n1)
+  [ -z "$BACKUP_FILE" ] || log "backed up the database to $BACKUP_FILE before migrating"
+  return 0
+}
+
+# How many migrations the database has applied; fails when that cannot be read.
+applied_migrations() {
+  local plan
+  plan=$("${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+  grep -c '^\[X\]' <<<"$plan" || true
+}
+
+# Every migration runs in a transaction of its own, so a failed batch can leave the first ones applied. The previous code must never be put back
+# on a schema that is partly migrated: when the count of applied migrations changed (or cannot be read), the stage becomes "migrated", which the
+# script that applies the update answers by keeping the new code and saying so, not by rolling back.
+run_migrations() {
+  local before after
+  before=$(applied_migrations) || before=''
+  "${COMPOSE[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput && return 0
+  after=$(applied_migrations) || after=''
+  if [ -z "$before" ] || [ "$before" != "$after" ]; then
+    DEPLOY_STAGE=migrated
+    log "the migration failed after it had started changing the database (or the database cannot be read), so the previous version is NOT put back on it: the new code stays, scanning stays paused and the approval is kept"
+    if [ -n "$BACKUP_FILE" ] && mv -f "$BACKUP_FILE" "${BACKUP_FILE%/*}/premigration-failed-${BACKUP_FILE##*/}" 2>/dev/null; then
+      log "the dump taken before it is kept as ${BACKUP_FILE%/*}/premigration-failed-${BACKUP_FILE##*/} and is never removed automatically"
+    fi
+  fi
+  return 1
+}
+
 deploy_steps() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
-  local services=(web celery celery-beat) listed
+  local services=(web celery celery-beat) listed=''
   # the dev compose file has no proxy service; recreate it only where it exists (keep it if the list cannot be read)
   if listed=$("${compose[@]}" config --services 2>/dev/null); then
     if grep -qx proxy <<<"$listed"; then services+=(proxy); fi
   else
+    listed=''
     services+=(proxy)
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
   check_disk || return 1
+  # The proxy image is a moving tag and is meant to move with every update (nginx's security releases). It is fetched here, before anything is
+  # stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the migration (as
+  # `pull_policy: always` did) failed an update that was otherwise done, and an offline host could never update at all.
+  if grep -qx proxy <<<"$listed"; then
+    "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
+  fi
   "${compose[@]}" build web celery celery-beat || return 1
   maintenance_on
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1
+  phase applying backup
+  backup_database || return 1
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1
+  run_migrations || return 1
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
+  # The web interface certificate is renewed here when its check is due, so the proxy recreated below starts with the new one (a host with
+  # neither the update watcher nor cron has no other trigger). A failure is logged and never stops the update.
+  if [ -f scripts/renew-certs.sh ]; then
+    scripts/renew-certs.sh --if-due --no-reload >/dev/null 2>&1 || log "the certificate check failed (see the Settings > Updates page); the update goes on"
+  fi
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
+  # The Tailscale sidecar shares the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route
+  # for scans) when celery is recreated. Only present when the profile is on.
+  if grep -qx tailscale <<<"$listed"; then
+    "${compose[@]}" up -d --no-deps --force-recreate tailscale || log "could not restart the Tailscale sidecar: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses fail"
+  fi
   verify_running "${services[@]}" || return 1
   # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
   # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema

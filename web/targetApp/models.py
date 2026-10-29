@@ -129,21 +129,6 @@ class DomainInfo(models.Model):
 		return str(self.id)
 
 
-class Organization(models.Model):
-	id = models.AutoField(primary_key=True)
-	name = models.CharField(max_length=300, unique=True)
-	description = models.TextField(blank=True, null=True)
-	insert_date = models.DateTimeField()
-	domains = models.ManyToManyField('Domain', related_name='domains')
-	project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, blank=False)
-
-	def __str__(self):
-		return self.name
-
-	def get_domains(self):
-		return Domain.objects.filter(domains__in=Organization.objects.filter(id=self.id))
-
-
 class Domain(models.Model):
 	id = models.AutoField(primary_key=True)
 	# Unique per organization, not across the instance: two organizations may each track example.com, and neither can see, detect or
@@ -190,9 +175,6 @@ class Domain(models.Model):
 			return False
 		from targetApp.shared_domains import effective_apex
 		return effective_apex(self.name)[1]
-
-	def get_organization(self):
-		return Organization.objects.filter(domains__id=self.id)
 
 	def get_recent_scan_id(self):
 		ScanHistory = apps.get_model('startScan.ScanHistory')

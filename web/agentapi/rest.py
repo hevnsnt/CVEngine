@@ -71,8 +71,8 @@ def tokens_create(request, ctx, **_):
     data = _body(request)
     (name,) = _need(data, 'name')
     scope = data.get('scope', auth.SCOPE_FULL)
-    if scope not in auth.TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token
-        raise ApiError(400, f'scope must be one of {", ".join(auth.TOKEN_SCOPES)}')
+    if scope not in auth.USER_TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token; a sentinel token only comes from an enrollment
+        raise ApiError(400, f'scope must be one of {", ".join(auth.USER_TOKEN_SCOPES)}')
     if scope == auth.SCOPE_INVENTORY:  # a host reporter's token: one project, inventory reports only
         return inventory.create_token(ctx, str(data.get('project') or ''), name), 201
     token, raw = create_token(ctx.user, str(name), read_only=bool(data.get('read_only')))
@@ -301,7 +301,7 @@ ROUTES = [
      lambda r, c, slug, supplier_id, **k: suppliers.remove_supplier(c, slug, supplier_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/auth-credentials', 'Stored sign-ins (headers and cookie the scanners send) of the project, masked: names only, never a value (App Admin or organization admin; target_id=)',
      lambda r, c, slug, **k: authcheck.list_credentials(c, slug, r.GET)),
-    ('PUT', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/auth-credential', 'Create or replace the stored sign-in of a target or of one host of it: {label, host?, headers: [{name, secret}], cookie_secret?, origins?, expires_at?}; values are write-only (App Admin or organization admin)',
+    ('PUT', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/auth-credential', 'Create or replace the stored sign-in of a target or of one host of it: {label, scope: host|target, host? (with scope host), expires: 30|90|120|never, headers: [{name, secret}], cookie_secret?, clear_cookie?, origins?, allow_untrusted_certificate? (send the sign-in over a certificate that does not verify; off by default)}; values are write-only (App Admin or organization admin)',
      lambda r, c, slug, target_id, **k: authcheck.set_credential(c, slug, target_id, _body(r))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/auth-credentials/(?P<credential_id>\d+)', 'Remove a stored sign-in (App Admin or organization admin)',
      lambda r, c, slug, credential_id, **k: authcheck.delete_credential(c, slug, credential_id)),
@@ -412,12 +412,16 @@ ROUTES = [
     ('POST', r'sentinels/bootstrap', 'A Sentinel\'s first call: trade a one-time enrollment secret (from the project\'s sentinels/enroll) for its own API token and Agent row (kind=scanner), pre-scoped to what the secret was generated for; body {enrollment_token, name, capabilities, os, tools, max_concurrent}. No bearer token needed; the token is returned once',
      _sentinel_bootstrap),
     ('GET', r'sentinel', 'The Sentinel registered on this token: scope, capabilities, open assignments', lambda r, c, **k: sentinels.identity(c)),
-    ('PUT', r'sentinel', 'Register or update this token\'s Sentinel (kind is always scanner): {name, scope: {orgs, projects, hosts}, capabilities: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep], os, tools, max_concurrent}',
+    ('PUT', r'sentinel', 'Register or update this token\'s Sentinel (kind is always scanner): {name, scope: {orgs, projects, hosts}, capabilities: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover], os, tools, max_concurrent}',
      _register_sentinel),
     ('DELETE', r'sentinel', 'Unregister this token\'s Sentinel and hand its tasks back', lambda r, c, **k: sentinels.unregister(c)),
-    ('POST', r'sentinel/heartbeat', 'Say the Sentinel is alive; extends the leases of its running tasks (same call as agent/heartbeat)',
+    ('POST', r'sentinel/heartbeat', 'Say the Sentinel is alive; extends the leases of its running tasks (same call as agent/heartbeat). Optional {running: [task ids]}: its own tasks accepted over 120 seconds ago and not listed are ended as expired',
      lambda r, c, **k: sentinels.heartbeat(c, _body(r))),
-    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep]}',
+    ('GET', r'sentinel/template-policy', 'Sentinel token only: the Nuclei template policy in force and its approved template bundle: {rev, read_only, bundle: {sha256, bytes, templates, path}}',
+     lambda r, c, **k: sentinels.template_policy(c)),
+    ('GET', r'sentinel/template-policy/bundle', 'Sentinel token only: the approved Nuclei templates as a .tar.gz (application/gzip, ETag = the sha256 in quotes, If-None-Match answers 304)',
+     lambda r, c, **k: sentinels.template_bundle_response(c, r.headers.get('If-None-Match'))),
+    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover]}',
      lambda r, c, **k: sentinels.next_task(c, _body(r))),
     ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
@@ -440,7 +444,7 @@ ROUTES = [
     ('POST', r'sentinels/enroll', 'Same as GET: generates a fresh instance-wide one-time enrollment secret',
      _sentinel_instance_enroll),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinels', 'The Sentinels whose scope covers this project (direct, via its organization or instance-wide) with status, liveness, capabilities and this project\'s task counts; {project, results: [...]}',
-     lambda r, c, slug, **k: sentinels.list_project_sentinels(c, slug)),
+     lambda r, c, slug, **k: (svc.get_one_project(c, slug), sentinels.list_project_sentinels(c, slug))[1]),  # one project: _all is a 400
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinel-tasks', 'Scan-stage work dispatched to Sentinels for this project (status, kind, agent_id, scan_id)',
      lambda r, c, slug, **k: sentinels.list_tasks(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/sentinel-tasks/(?P<task_id>\d+)/cancel', 'Cancel a queued or leased SentinelTask',
@@ -449,15 +453,23 @@ ROUTES = [
     ('POST', r'tokens', 'Create an API token (session only); body {name, read_only} or {name, scope: "inventory", project} for a host reporter token that can only post that project\'s inventory', tokens_create),
     ('DELETE', r'tokens/(?P<token_id>\d+)', 'Revoke a token (session only)', tokens_revoke),
 ]
-READ_ONLY_POSTS = re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
+NO_TOKEN_ROUTES = ('sentinels/bootstrap',)  # authenticated by their own one-time secret, not a bearer token
+MAX_ID_DIGITS = 18  # an id in a path longer than this cannot exist (the keys are 64-bit)
+READ_ONLY_POSTS =re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
 
 
 def openapi_spec():
     paths = {}
     for method, pattern, summary, _ in ROUTES:
+        names = re.findall(r'\(\?P<(\w+)>', pattern)
         path = '/api/v1/' + re.sub(r'\(\?P<(\w+)>[^)]*\)', r'{\1}', pattern)
-        paths.setdefault(path, {})[method.lower()] = {'summary': summary, 'responses': {'200': {'description': 'OK'}}}
+        operation = {'summary': summary, 'responses': {'200': {'description': 'OK'}}}
+        if names:  # OpenAPI 3 wants every path template variable declared
+            operation['parameters'] = [{'name': n, 'in': 'path', 'required': True, 'schema': {'type': 'string'}} for n in names]
+        if pattern in NO_TOKEN_ROUTES:
+            operation['security'] = []
+        paths.setdefault(path, {})[method.lower()] = operation
     return {'openapi': '3.0.3', 'info': {'title': 'CVEngine API', 'version': '1'},
             'components': {'securitySchemes': {'bearer': {'type': 'http', 'scheme': 'bearer'}}},
             'security': [{'bearer': []}], 'paths': paths}
@@ -477,15 +489,17 @@ def dispatch(request, path):
         allowed.append(method)
         if method != request.method:
             continue
+        if any(len(v) > MAX_ID_DIGITS for k, v in match.groupdict().items() if k.endswith('id') and v.isdigit()):
+            return JsonResponse({'error': 'not found'}, status=404)  # no such id: and int() of thousands of digits is refused by Python
         try:
             if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path):
                 raise ApiError(403, 'this token is read only')
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
             return JsonResponse({'error': e.message}, status=e.status)
-        except (KeyError, TypeError, ValueError, AttributeError):  # a field of the wrong type: the caller's mistake, not a crash
-            logger.warning('API request with invalid parameters: %s %s', request.method, path, exc_info=True)
-            return JsonResponse({'error': 'invalid request parameters'}, status=400)
+        except Exception:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
+            logger.exception('API request failed: %s %s', request.method, path)
+            return JsonResponse({'error': 'internal error'}, status=500)
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
             return result
         data, status = result if isinstance(result, tuple) else (result, 200)

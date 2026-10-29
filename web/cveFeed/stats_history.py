@@ -48,17 +48,19 @@ def _fixed_stats(project):
     return len(rows), (round(sum(deltas) / len(deltas), 2) if deltas else None)
 
 
-def compute_snapshot(project, date=None):
+def compute_snapshot(project, date=None, with_fixed=True):
     """One project's snapshot dict for ``date`` (today, in the server's local date, by default): hosts, exposed_hosts,
-    open_findings, cve_matches, fixed, mean_days_to_fix. Pure read: callers decide whether and how to store it."""
+    open_findings, cve_matches, fixed, mean_days_to_fix. Pure read: callers decide whether and how to store it.
+    ``with_fixed=False`` skips the fixed-findings walk (every fixed finding of the project is read to average its age) for a caller
+    that only wants the live counts: ``fixed`` is then 0 and ``mean_days_to_fix`` None, so such a dict is never to be stored."""
     from cveFeed import counts
     from targetApp.models import Domain
     domain_ids = list(Domain.objects.filter(project=project).values_list('id', flat=True))
     host_qs = counts.host_reps(domain_ids=domain_ids)
     hosts = host_qs.count()
-    exposed_hosts = counts.exposed_among(host_qs).count()
+    exposed_hosts = counts.exposed_among(host_qs, project_ids=[project.id]).count()
     open_findings, cve_matches = _open_findings_and_cve_matches(project)
-    fixed, mean_days_to_fix = _fixed_stats(project)
+    fixed, mean_days_to_fix = _fixed_stats(project) if with_fixed else (0, None)
     return {
         'date': date or timezone.localdate(), 'hosts': hosts, 'exposed_hosts': exposed_hosts,
         'open_findings': open_findings, 'cve_matches': cve_matches, 'fixed': fixed, 'mean_days_to_fix': mean_days_to_fix,

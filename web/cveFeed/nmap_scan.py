@@ -279,6 +279,17 @@ def persist_inventory(inventory, source='nmap', org_id=None):
             if port is not None and port.ports.exclude(pk=ip_obj.pk).exists():
                 ip_obj.ports.remove(port)  # a row shared with other IPs by older code: give this IP its own
                 port = None
+            if port is not None and _unprobed(rec) and (port.product or (port.extra or {}).get('method') == 'probed'):
+                # a run with no -sV (the -p- sweep, naabu) knows only that the port is open: what a fingerprinting pass found (distro,
+                # package release, CPEs, TLS tunnel, the service name) is not what this run says, and must not be overwritten by a port-table guess
+                for field in ('protocol', 'state'):
+                    if rec.get(field):
+                        setattr(port, field, rec[field])
+                port.last_seen = now
+                port.save(update_fields=['protocol', 'state', 'last_seen'])
+                ip_obj.ports.add(port)
+                ports_written += 1
+                continue
             if port is None:
                 port = Port(number=rec['number'], protocol=protocol, service_name=rec.get('service_name') or None)
             elif rec.get('service_name'):
@@ -329,6 +340,12 @@ def persist_inventory(inventory, source='nmap', org_id=None):
     return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
 
 
+def _unprobed(rec):
+    """True for a record that carries no fingerprint: nmap did not probe the service (no -sV, so the name is the port table's guess) and
+    named no product, version or CPE."""
+    return rec.get('method') != 'probed' and not (rec.get('product') or rec.get('version') or rec.get('cpes') or rec.get('cpe'))
+
+
 def _cpe_version(rec):
     """The version an application CPE of this record states, or ''."""
     from cveFeed.correlation import parse_cpe
@@ -350,7 +367,7 @@ def close_unreported_ports(ip_obj, host):
     came back), and only for TCP ports inside the set the run probed, so a top-1000 run never closes 8443 it did not try and a
     silent or unreachable host (everything "filtered") does not wipe what was open last time. Returns the ports closed."""
     scanned = host.get('scanned')
-    if not scanned:
+    if not scanned or host.get('timedout'):  # a host nmap gave up on was not probed to the end: what it did not list is not closed
         return 0
     reported = {rec['number'] for rec in host.get('ports', []) if rec.get('number')}
     answered = any(rec.get('state') == 'open' for rec in host.get('ports', [])) or 'closed' in (host.get('extraports') or ())

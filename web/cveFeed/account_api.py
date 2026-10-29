@@ -25,7 +25,7 @@ class AccountError(Exception):
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, and UnicodeDecodeError for a body that is not UTF-8
         raise AccountError(400, 'body must be valid JSON')
     return data if isinstance(data, dict) else {}
 
@@ -125,8 +125,25 @@ def mfa_enable(request):
     return {**account_payload(user), 'recovery_codes': plain}
 
 
-@transaction.atomic
+class _WrongCode(Exception):
+    def __init__(self, locked_now):
+        super().__init__('wrong code')
+        self.locked_now = locked_now
+
+
 def mfa_disable(request):
+    """The check runs under a row lock in one transaction. A wrong code rolls that transaction back, so the lockout audit row is written
+    here, after it, or it would be rolled back with it."""
+    try:
+        return _mfa_disable(request)
+    except _WrongCode as wrong:
+        if wrong.locked_now:
+            audit.record_for_user_quietly(request.user, 'account.mfa_locked', request.user)
+        raise AccountError(400, 'that code is not valid') from None
+
+
+@transaction.atomic
+def _mfa_disable(request):
     data, user = _body(request), request.user
     initial = profile_of(user)
     profile = UserProfile.objects.select_for_update().get(pk=initial.pk)
@@ -137,8 +154,7 @@ def mfa_disable(request):
     if locked(user):
         raise AccountError(429, 'too many attempts. Try again in a few minutes.')
     if not check_second_factor(profile, str(data.get('code', ''))):
-        fail(user)
-        raise AccountError(400, 'that code is not valid')
+        raise _WrongCode(fail(user, record=False))
     clear_failures(user)
     profile.mfa_enabled, profile.mfa_secret, profile.recovery_codes = False, '', []
     profile.save(update_fields=['mfa_enabled', 'mfa_secret', 'recovery_codes'])

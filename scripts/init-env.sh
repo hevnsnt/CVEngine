@@ -18,7 +18,8 @@ set_value() {
   local key=$1 value=$2 tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/cvengine-env.XXXXXX")
   if grep -q "^${key}=" .env; then
-    awk -v key="$key" -v value="$value" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix value; next } { print }' .env > "$tmp"
+    # the value goes in through the environment, not awk's command line, where any local user could read it in `ps`
+    CVENGINE_AWK_VALUE="$value" awk -v key="$key" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix ENVIRON["CVENGINE_AWK_VALUE"]; next } { print }' .env > "$tmp"
   else
     { cat .env; echo "${key}=${value}"; } > "$tmp"
   fi
@@ -44,9 +45,24 @@ fill CVENGINE_FIELD_KEY
 # keeps its open broker until ./scripts/enable-redis-auth.sh is run, which also recreates the services: the broker and its clients
 # must change together, and the updater never recreates Redis.
 grep -q '^REDIS_PASSWORD=' .env || echo 'REDIS_PASSWORD=' >> .env
-if ! { command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q 'redis'; }; then
-  fill REDIS_PASSWORD
+# "Already has containers" means this project's own Redis (Compose's project directory and service labels), not any container on the host whose
+# name contains "redis": another stack's Redis, or the OpenVAS add-on's, must not leave a brand-new install with an open broker.
+existing_redis=''
+if command -v docker >/dev/null 2>&1; then
+  # by this directory (as given and resolved) or by the project name Compose would use; a password on an installation whose Redis is already
+  # running open would lock every client out until the services are recreated, so when in doubt this says "existing"
+  project=${COMPOSE_PROJECT_NAME:-}
+  if [ -z "$project" ]; then
+    project=$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '\r') || project=''
+    project=${project#[\"\']}; project=${project%[\"\']}
+  fi
+  project=${project:-$(basename "$(pwd -P)" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')}
+  for filter in "label=com.docker.compose.project.working_dir=$(pwd)" "label=com.docker.compose.project.working_dir=$(pwd -P)" "label=com.docker.compose.project=$project"; do
+    existing_redis=$(docker ps -a --filter "$filter" --filter "label=com.docker.compose.service=redis" -q 2>/dev/null | head -n 1) || existing_redis=''
+    [ -z "$existing_redis" ] || break
+  done
 fi
+[ -n "$existing_redis" ] || fill REDIS_PASSWORD
 
 # The address other machines reach this one on: the source of the default route, else the first non-loopback address, else localhost.
 detect_host() {

@@ -24,7 +24,7 @@ class CorrelationPerfTests(TestCase):
 		self.domain = Domain.objects.create(name='perf.test', project=project, insert_date=timezone.now())
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-1', kev=True, cvss=9.8, published_at=timezone.now(),
-			affected=NGINX, raw={'big': 'x' * 1000})
+			affected=NGINX)
 
 	def _scan(self, status=2):
 		return ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, scan_status=status,
@@ -49,10 +49,6 @@ class CorrelationPerfTests(TestCase):
 			CVEEntry.objects.filter(pk=self.cve.pk).update(synced_at=timezone.now())  # a re-sync moves the key
 			correlate_cves()
 			self.assertEqual(build.call_count, 2)
-
-	def test_pool_never_loads_raw(self):
-		by_id, _ = correlation.cve_pool()
-		self.assertIn('raw', by_id[self.cve.id].get_deferred_fields())
 
 	def test_only_hosts_with_a_matching_product_are_correlated(self):
 		scan = self._scan()
@@ -212,6 +208,14 @@ class TextualRangeTests(TestCase):
 		from cveFeed.correlation import parse_version, version_in_range
 		self.assertTrue(version_in_range(parse_version('2.2.1'), ranges[0]))  # a host on 2.2.1 is inside "2.0 through 2.3"
 		self.assertFalse(version_in_range(parse_version('2.4'), ranges[0]))
+
+	def test_a_hyphenated_revision_or_prerelease_is_one_version_not_a_range(self):
+		from cveFeed import intel
+		ranges = intel._ranges({'versions': [{'version': v, 'status': 'affected'} for v in
+											 ('2.4.1-1', '5.7.38-1', '4.0.0-beta-1', '1.0.0-2', '2.0 - 2.3', '3.0\u20133.4')]})
+		self.assertEqual([(r.get('introduced'), r.get('lastAffected')) for r in ranges],
+						 [('2.4.1-1', '2.4.1-1'), ('5.7.38-1', '5.7.38-1'), ('4.0.0-beta-1', '4.0.0-beta-1'), ('1.0.0-2', '1.0.0-2'),
+						  ('2.0', '2.3'), ('3.0', '3.4')])
 
 
 class ConfirmedMatchesStayOpenTests(CorrelationPerfTests):

@@ -27,6 +27,10 @@
 #   CVENGINE_UPDATE_POLL_SECONDS   Pause between checks while waiting, in seconds (default 5; the tests use a shorter one)
 #   CVENGINE_UPDATE_STOP_SCANS=1   Same as --stop-scans
 #   CVENGINE_UPDATE_MISSING_POLLS  Drain polls in a row a worker may miss before it counts as gone (default 12)
+#   CVENGINE_UPDATE_BACKUPS        Database dumps to keep, taken just before the migrations (default 3; 0 takes none). A dump that fails stops
+#                                  the update before the database is touched. They are in .git/cvengine-update/backups.
+#   CVENGINE_UPDATE_REQUIRE_SIGNED 1 refuses a commit that `git verify-commit` does not accept (needs the signer's key in the keyring of the
+#                                  user running this; default 0)
 # CVENGINE_COMPOSE_FILE (a single file) is still accepted.
 set -Eeuo pipefail
 
@@ -34,6 +38,10 @@ self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$self_dir/.." && pwd)
 [[ -d $repo_root/web ]] || repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$repo_root"
+# root (cron, a systemd unit) in a checkout owned by whoever cloned it: git refuses it ("dubious ownership") unless this one is named. Root
+# already runs this checkout's scripts, so naming it adds no trust.
+export GIT_CONFIG_COUNT=$(( ${GIT_CONFIG_COUNT:-0} + 1 ))
+export "GIT_CONFIG_KEY_$((GIT_CONFIG_COUNT - 1))=safe.directory" "GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT - 1))=$PWD"
 self="$repo_root/scripts/update.sh"
 started_at=$SECONDS
 
@@ -375,6 +383,9 @@ else
     from_commit=$(git rev-parse --short HEAD)
     from_sha=$(git rev-parse HEAD)
     git fetch origin master
+    if [[ $(setting CVENGINE_UPDATE_REQUIRE_SIGNED) == 1 ]]; then
+        git verify-commit origin/master || die 'CVENGINE_UPDATE_REQUIRE_SIGNED=1 and origin/master has no valid signature from a key this user trusts; nothing was merged.'
+    fi
     git merge --ff-only origin/master
     CVENGINE_UPDATE_FROM="$from_commit" CVENGINE_UPDATE_FROM_SHA="$from_sha" exec bash "$self" --after-fetch "${forward_args[@]}"
 fi
@@ -431,6 +442,11 @@ fi
 # Do the expensive, fallible build while the old workers are still processing work.
 # Only then pause dispatch and perform a bounded drain before migration/recreation.
 step 'Building application images while everything keeps running'
+# The proxy image is a moving tag that is meant to move with every update (nginx's security releases). Fetch it now, while nothing is stopped:
+# an unreachable registry only keeps the image already on the host, where a pull inside `up` after the migration would fail the update.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
+    "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
+fi
 "${compose[@]}" build web celery celery-beat
 
 # Freeze consumers, not producers: requests arriving during maintenance stay in Redis for
@@ -710,10 +726,32 @@ workers_stopped=1
 
 step 'Applying migrations; the database and broker containers stay in place'
 "${compose[@]}" up -d --no-recreate db redis
-"${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput
+# A dump of the database first: a migration is never rolled back. A dump that fails stops the update here, before anything is changed (the
+# previous workers are resumed and the checkout is put back). CVENGINE_UPDATE_BACKUPS=0 skips it.
+if backup_file=$(scripts/db-backup.sh "$STATE" -- "${compose[@]}"); then
+    [[ -z $backup_file ]] || echo "Backed up the database to $(tail -n1 <<< "$backup_file") before migrating."
+else
+    die 'The database backup failed, so the database was not migrated and nothing was changed. Fix that (disk space, the database container), or set CVENGINE_UPDATE_BACKUPS=0 to update without one.'
+fi
+applied_migrations() {
+    local plan
+    plan=$("${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+    grep -c '^\[X\]' <<< "$plan" || true
+}
+migrations_before=$(applied_migrations) || migrations_before=''
+if ! "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput; then
+    # Each migration runs in a transaction of its own, so a failed batch can leave the first ones applied. The previous code must not be put back on a
+    # schema that is part migrated: when the count of applied migrations changed (or cannot be read) the checkout stays on the new commit.
+    migrations_after=$(applied_migrations) || migrations_after=''
+    if [[ -z $migrations_before || $migrations_before != "$migrations_after" ]]; then
+        database_migrated=1
+        echo "The migration failed after it had started changing the database (or the database cannot be read), so the previous version is NOT put back on it: the checkout stays on the new commit and Beat stays paused. Restore the dump above, or fix the cause and run this again." >&2
+        [[ -z ${backup_file:-} ]] || echo "The dump taken before it: $(tail -n1 <<< "$backup_file")" >&2
+    fi
+    false
+fi
 database_migrated=1
-# The proxy reads a shared static volume. Refresh it before the new web/JS is
-# served; the Celery entrypoint can spend minutes installing optional tools.
+# The proxy reads a shared static volume. Refresh it before the new web/JS is served.
 echo 'Publishing current static assets to the proxy volume...'
 "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput
 services=(web celery celery-beat)
@@ -726,8 +764,19 @@ configured_url=$(ready_url_from_config || true)
 [[ -z $configured_url ]] || ready_url=$configured_url
 # Source is bind-mounted; recreate application processes, but never recreate the broker here.
 step "Recreating application processes: ${services[*]}"
+# The web interface certificate is renewed first when its check is due, so the proxy started below has the new one (scripts/renew-certs.sh;
+# a failure never stops the update)
+if [[ -f scripts/renew-certs.sh ]]; then
+    scripts/renew-certs.sh --if-due --no-reload >/dev/null 2>&1 || echo 'The certificate check failed (see Settings > Updates); the update goes on.' >&2
+fi
 "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 app_recreated=1
+# The Tailscale sidecar joins the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route for
+# scans) once celery is recreated. Only present when the tailscale profile is on.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx tailscale; then
+    "${compose[@]}" up -d --no-deps --force-recreate tailscale ||
+        echo 'Could not restart the Tailscale sidecar: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses fail.' >&2
+fi
 
 worker_queues_ready() {
     local queues

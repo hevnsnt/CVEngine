@@ -155,7 +155,7 @@ class CertificateTransparencyScopeTests(TestCase):
 
 	def test_a_tenant_host_is_queried_for_its_own_tree(self):
 		resp = mock.Mock(status_code=200)
-		resp.json.return_value = [{'name_value': 'acme.jfrog.com\nother.jfrog.com\napi.acme.jfrog.com'}]
+		resp.iter_content.return_value = [b'[{"name_value": "acme.jfrog.com\\nother.jfrog.com\\napi.acme.jfrog.com"}]']
 		with mock.patch.object(ctmonitor.requests, 'get', return_value=resp) as get, \
 				mock.patch.object(ctmonitor, 'reserve_slot', return_value=0), mock.patch.object(ctmonitor.time, 'sleep'):
 			names = ctmonitor.fetch_ct_names('acme.jfrog.com')

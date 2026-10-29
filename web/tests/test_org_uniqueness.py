@@ -4,6 +4,7 @@ from unittest import mock
 from django.apps import apps
 from django.contrib.auth.models import User
 from django.db import IntegrityError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
@@ -147,3 +148,40 @@ class SplitMigrationTests(Fixture, TransactionTestCase):
 		self.assertEqual(sb.ip_addresses.get().org_id, self.org_b.id)
 		self.assertEqual(IpAddress.objects.get(address='198.51.100.78').org_id, self.org_a.id)
 		self.assertNotEqual(sa.ip_addresses.get(address='198.51.100.77').pk, sb.ip_addresses.get().pk)
+
+
+class SharedIpUpgradeTests(TransactionTestCase):
+	"""Run the real 0020 from the state before it: an address linked to two organizations used to abort the upgrade with a
+	duplicate key on the old global constraint, because the clones were made before that constraint was dropped."""
+	before = [('startScan', '0019_unique_ipaddress'), ('dashboard', '0022_mfa_secret_encrypted'), ('targetApp', '0004_domain_org_unique')]
+
+	def tearDown(self):
+		executor = MigrationExecutor(connection)
+		executor.migrate(executor.loader.graph.leaf_nodes())  # leave the schema at the latest state for the next test
+
+	def test_an_address_shared_by_two_organizations_upgrades_into_one_row_each(self):
+		executor = MigrationExecutor(connection)
+		executor.migrate(self.before)
+		old = executor.loader.project_state(self.before).apps
+		Org, Project = old.get_model('dashboard', 'Org'), old.get_model('dashboard', 'Project')
+		Domain, Subdomain = old.get_model('targetApp', 'Domain'), old.get_model('startScan', 'Subdomain')
+		IpAddress, Port = old.get_model('startScan', 'IpAddress'), old.get_model('startScan', 'Port')
+		now = timezone.now()
+		ip = IpAddress.objects.create(address='198.51.100.90')
+		ip.ports.add(Port.objects.create(number=443, banner='shared-banner'))
+		orgs = []
+		for tag in ('ua', 'ub'):
+			org = Org.objects.create(name=tag, slug=tag)
+			project = Project.objects.create(name=tag, slug=tag + '-p', insert_date=now, org=org)
+			domain = Domain.objects.create(name=tag + '.example.com', project=project, insert_date=now)
+			Subdomain.objects.create(name='www.' + tag + '.example.com', target_domain=domain).ip_addresses.add(ip)
+			orgs.append(org.pk)
+		after = self.before[1:] + [('startScan', '0020_ipaddress_per_org')]
+		executor = MigrationExecutor(connection)
+		executor.migrate(after)
+		new = executor.loader.project_state(after).apps
+		rows = list(new.get_model('startScan', 'IpAddress').objects.filter(address='198.51.100.90'))
+		self.assertEqual(sorted(r.org_id for r in rows), sorted(orgs))
+		for row in rows:
+			self.assertEqual(row.ports.get().banner, 'shared-banner')
+			self.assertEqual(new.get_model('startScan', 'Subdomain').objects.filter(ip_addresses=row).count(), 1)

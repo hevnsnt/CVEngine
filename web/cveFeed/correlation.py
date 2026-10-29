@@ -77,6 +77,18 @@ _DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
 
+class _Patched(tuple):
+    """A version with a distribution-style patch suffix (OpenSSH 8.9p1, OpenSSL 1.0.2k). It compares like the plain tuple;
+    ``release`` is the same version without the suffix, for an inclusive upper bound that names only the release."""
+    release = ()
+
+
+def _patched(release, parts):
+    out = _Patched(parts)
+    out.release = tuple(release)
+    return out
+
+
 def parse_version(value, strict=False):
     """Best-effort dotted version -> tuple of ints, else None.
 
@@ -106,11 +118,11 @@ def parse_version(value, strict=False):
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
     elif _PORTABLE_PATCH_RE.match(rest):  # OpenSSH's 8.9p1 < 8.9p2 < 9.0: the patch level is a part after the release
-        parts += [0, int(_PORTABLE_PATCH_RE.match(rest).group(1))]
+        return _patched(parts, parts + [0, int(_PORTABLE_PATCH_RE.match(rest).group(1))])
     elif len(parts) == 3:
         letters = _PATCH_LETTER_RE.match(rest)
         if letters:  # OpenSSL's 1.1.1k < 1.1.1n < 1.1.1zh: the letters are a fourth component, so a patch level is not dropped
-            parts.append(sum(ord(c) - 96 for c in letters.group(1).lower()))
+            return _patched(parts, parts + [sum(ord(c) - 96 for c in letters.group(1).lower())])
     return tuple(parts)
 
 
@@ -139,31 +151,62 @@ def version_in_range(ver, rng):
         return False
     if fixed is not None and _vcmp(ver, fixed) >= 0:
         return False
-    if last is not None and _vcmp(ver, last) > 0:
-        return False
+    if last is not None:
+        # "up to 8.9" and a single listed "1.0.2" mean the whole release: a build with a patch suffix (8.9p1, 1.0.2k) is inside it,
+        # unless the bound names a patch level itself
+        within = ver.release if isinstance(ver, _Patched) and not isinstance(last, _Patched) else ver
+        if _vcmp(within, last) > 0:
+            return False
     return True
 
 
 # Normalizing a name throws its word boundaries away ("craftcms/cms" and "craftcmscms" both become one token), and a plain
 # substring test on the result matches "cms" inside "datocms" and "php" inside "phpmyadmin". The boundaries are kept here,
 # keyed by the normalized token, so name matching can require that a shorter name is a whole run of words of the longer one.
-# Bounded: product strings come from banners a target controls, and past the cap a token simply has no recorded boundaries,
-# which makes it match only itself.
+# Two registries. The catalogue's own names (CVE products, packages, CPEs) fill ``_WORDS``; the strings a scanned host reports
+# (banners, headers, technology labels) are attacker-influenced, so they fill a small separate table that drops its oldest entry
+# when full and can never use up the catalogue's slots. A token with no recorded boundaries simply matches only itself, so the
+# catalogue registry logs once when it is full: past that point names that need word boundaries stop matching.
 _WORDS = {}
 _WORDS_MAX_TOKENS = 50000
+_HOST_WORDS = {}
+_HOST_WORDS_MAX_TOKENS = 2000
 _WORDS_MAX_RAW = 200
 _WORDS_MAX_WORDS = 8
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _COORDINATE_RE = re.compile(r"^[^\s:/]+(?:[:/][^\s:/]+)*[:/]([^\s:/]+)$")  # group:artifact or vendor/package, never a name with spaces
+_words_full_logged = False
 
 
-def _norm(value):
+def _words_for(token):
+    """Every recorded word split of a normalized token (the token itself as one word when none was recorded)."""
+    known = _WORDS.get(token)
+    host = _HOST_WORDS.get(token)
+    if known and host:
+        return known | host
+    return known or host or ((token,),)
+
+
+def _norm(value, catalogue=False):
+    """The name without punctuation or case. Its word boundaries are recorded for ``name_matches_token``: in the catalogue registry
+    when ``catalogue`` (a name from a CVE record), otherwise in the bounded table of host-reported names."""
+    global _words_full_logged
     text = (value or "").lower()
     token = re.sub(r"[^a-z0-9]", "", text)
     if token and len(text) <= _WORDS_MAX_RAW:
         words = tuple(_WORD_RE.findall(text))
-        if 1 < len(words) <= _WORDS_MAX_WORDS and (token in _WORDS or len(_WORDS) < _WORDS_MAX_TOKENS):
-            known = _WORDS.setdefault(token, set())
+        if 1 < len(words) <= _WORDS_MAX_WORDS:
+            table, cap = (_WORDS, _WORDS_MAX_TOKENS) if catalogue else (_HOST_WORDS, _HOST_WORDS_MAX_TOKENS)
+            if token not in table and len(table) >= cap:
+                if not catalogue:
+                    del table[next(iter(table))]  # host-fed: the oldest name makes room
+                else:
+                    if not _words_full_logged:
+                        _words_full_logged = True
+                        logger.warning('the product word registry is full (%d names): longer product names that need word boundaries '
+                                       'will only match exactly', cap)
+                    return token
+            known = table.setdefault(token, set())
             known.add(words)
             artifact = _COORDINATE_RE.match(text)  # "org.apache.logging.log4j:log4j-core" is also just "log4j-core"
             if artifact:
@@ -179,9 +222,9 @@ def affected_product_tokens(affected_item):
     vendor+product token would match a bare "Apache" banner to Log4j and Tomcat. The vendor is only used to
     disambiguate (see _vendor_ok)."""
     tokens = set()
-    vendor = _norm(affected_item.get("vendor"))
+    vendor = _norm(affected_item.get("vendor"), True)
     for key in ("product", "package"):
-        token = _norm(affected_item.get(key))
+        token = _norm(affected_item.get(key), True)
         if len(token) < _MIN_TOKEN or token in GENERIC_PRODUCT_TOKENS:
             continue
         if key == "product" and vendor and token in GENERIC_WORDS:
@@ -234,11 +277,11 @@ def parse_cpe(cpe):
         return None
     if len(parts) < 3 or parts[0] != "a":
         return None
-    product = _norm(parts[2])
+    product = _norm(parts[2], True)
     version = parts[3] if len(parts) > 3 and parts[3] not in ("*", "-") else ""
     if len(product) < _MIN_TOKEN:
         return None
-    return _norm(parts[1]), product, version
+    return _norm(parts[1], True), product, version
 
 
 # Words that may surround a product name without making it another product: "apache http server" is Apache's server, "nginx web
@@ -274,8 +317,8 @@ def name_matches_token(tech_token, product_token):
         return False
     if tech_token == product_token:
         return True
-    for tech_words in _WORDS.get(tech_token) or ((tech_token,),):
-        for product_words in _WORDS.get(product_token) or ((product_token,),):
+    for tech_words in _words_for(tech_token):
+        for product_words in _words_for(product_token):
             inner, outer = (tech_words, product_words) if len(tech_words) <= len(product_words) else (product_words, tech_words)
             if not _word_run_ok(inner):
                 continue
@@ -359,11 +402,11 @@ class ProductIndex(dict):
         if self._by_word is None:
             self._by_word = {}
             for product_token in self:
-                for words in _WORDS.get(product_token) or ((product_token,),):
+                for words in _words_for(product_token):
                     for word in words:
                         self._by_word.setdefault(word, set()).add(product_token)
         found = {token} if token in self else set()
-        for words in _WORDS.get(token) or ((token,),):
+        for words in _words_for(token):
             for word in words:
                 found |= self._by_word.get(word, set())
         return found
@@ -423,7 +466,7 @@ def _fuzzy_ids(token, product_index):
 
 def _vendor_ok(item, *hints):
     """True when the item names no vendor, or its vendor contains one of the (normalized) hints."""
-    vendor = _norm(item.get("vendor"))
+    vendor = _norm(item.get("vendor"), True)
     return not vendor or any(h in vendor or vendor in h for h in hints)
 
 
@@ -434,7 +477,7 @@ _ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",)}
 def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
     """Whether one affected entry names the discovered product. With a CPE the product must equal it (and the vendor,
     when the entry has one, must agree); otherwise fuzzy token containment, plus exact alias names."""
-    own = {_norm(item.get(k)) for k in ("product", "package")} - {""}
+    own = {_norm(item.get(k), True) for k in ("product", "package")} - {""}
     if cpe_product:
         if cpe_product in own:
             return _vendor_ok(item, cpe_vendor, cpe_vendor[:6])
@@ -611,7 +654,9 @@ def _record_matches(subdomain, name, version, token, source, product_index,
         unbounded = False
         if not match_policy.hard_version_evidence(in_range, details.get(cve.id)):
             # The advisory gives no version bound to test this version against: product-wide, so no evidence. The host is still a lead
-            # (a template test needs no version), and an actively exploited (KEV) CVE is kept as a candidate that needs validation.
+            # (a template test needs no version), and an actively exploited (KEV) CVE is kept as a candidate that needs validation:
+            # "version unknown" (match_policy.is_version_unknown), reviewed at the lowest priority. It is not frozen: the next correlation
+            # after the CVE gains a range replaces this row's evidence, so the flag lifts and the match is judged on its version.
             if leads is not None:
                 leads.setdefault(cve.id, set()).add((subdomain.target_domain_id, subdomain.name))
             if not cve.kev:
@@ -1029,7 +1074,7 @@ def _pool(qs, cache, key):
 
 
 def cve_pool(cve_limit=None):
-    """(cve_by_id, product_index) for the stored CVEs, cached per process. Never loads ``raw`` or the prose columns."""
+    """(cve_by_id, product_index) for the stored CVEs, cached per process. Never loads the prose columns."""
     from django.db.models import Count, Max, Q
 
     from cveFeed.models import CVEEntry

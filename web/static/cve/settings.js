@@ -421,6 +421,11 @@ const sections = {
         modeBox.append(row);
       });
       kids.push(modeBox);
+      // The web interface certificate renews itself 30 days before it ends (the host's renewal check); this speaks up only when it did not.
+      const cert = s.certificate || {};
+      if (cert.problem) kids.push(el("p", "msg err", cert.problem));
+      else if (cert.known && cert.days_left != null)
+        kids.push(el("p", "note", `Web interface certificate: valid for ${cert.days_left} more days, renewed automatically when fewer than 30 remain${cert.last_renewed_at ? ` (last renewed ${when(cert.last_renewed_at)})` : ""}.`));
       if (s.mode === "auto" && !hu.alive)
         kids.push(el("p", "msg err", "Automatic needs something on the server to install the update: the host updater (below), or automatic deployment (scripts/install-auto-deploy.sh). The host updater is not reporting; if this server uses automatic deployment you can ignore this."));
       if (["available", "dismissed", "approved", "up_to_date"].includes(s.status)) {
@@ -522,7 +527,7 @@ const sections = {
     const keep = el(
       "p",
       "note",
-      "Kept: your own account (same password and two-step sign-in), the scan engines, wordlists and installed tools. Afterwards you land in the setup wizard, as on a new install. This cannot be undone.",
+      "Kept: your own account (same password and two-step sign-in), the scan engines and installed tools. Afterwards you land in the setup wizard, as on a new install. This cannot be undone.",
       { style: "margin:0 0 18px" },
     );
     const phrase = text("", { placeholder: s.phrase, autocomplete: "off", spellcheck: "false" });
@@ -1020,6 +1025,21 @@ const sections = {
     m.append(
       card(
         "Proxy",
+        el(
+          "p",
+          "note",
+          "When on, scans that run on this server send their traffic to your targets through one of these proxies, picked per request in turn: the web probes and checks, nuclei, bbot, WPScan, testssl.sh and wafw00f. If a proxy is down the request fails; it never falls back to a direct connection.",
+        ),
+        el(
+          "p",
+          "note",
+          "Not covered, still sent directly from this server: nmap, naabu, the UDP sweeps, the database and RDP checks and OpenVAS, because they need raw sockets that an HTTP or SOCKS proxy cannot carry. A Sentinel runs on its own machine and keeps its own connection; it does not use this list. Calls to outside services (CVE feeds, AI providers, Shodan, GitHub and the like) are not proxied either. Do not rely on this setting for anonymity of those.",
+        ),
+        el(
+          "p",
+          "note",
+          "Use http://host:port, socks5://host:port or socks5h://host:port. An https:// proxy works for the external tools only, and testssl.sh takes only an http:// proxy without a login. When no proxy suits a tool, that tool does not run. Loopback and this stack's own services are never proxied; the server's CVENGINE_PROXY_BYPASS lists more.",
+        ),
         use.wrap,
         field("Proxies (one per line)", list),
         button("Save", async () => {

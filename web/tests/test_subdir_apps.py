@@ -321,6 +321,23 @@ class SweepTests(SubdirFixture, TestCase):
         self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'absent')
         self.assertEqual(subdir_apps.applications_from_rows(ProbeObservation.objects.filter(probe=subdir_apps.PROBE)).__len__(), 3)
 
+    def test_a_failed_or_skipped_request_does_not_retire_what_an_earlier_sweep_found(self):
+        """S04-10: a timeout, or a sweep stopped by a challenge or a pause, learned nothing about the paths it did not get an answer for."""
+        self.run_subdirs()
+        self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'hidden')
+        self.site.table['/phpmyadmin/'] = OSError('timed out')
+        ServiceRun.objects.filter(service=subdir_apps.SERVICE).delete()
+        self.run_subdirs()
+        self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'hidden')
+        del self.site.table['/phpmyadmin/']  # answers 404 now: that is an answer
+        ServiceRun.objects.filter(service=subdir_apps.SERVICE).delete()
+        stopped = []
+        self.run_subdirs(stop=lambda: bool(stopped) or stopped.append(1) or False)  # paused after the first request
+        self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'hidden')
+        ServiceRun.objects.filter(service=subdir_apps.SERVICE).delete()
+        self.run_subdirs()
+        self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'absent')
+
     def test_the_technologies_follow_a_fresh_scan_row(self):
         self.run_subdirs()
         engine = EngineType.objects.first()

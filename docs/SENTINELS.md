@@ -24,13 +24,13 @@ Ten kinds of work, each a capability the Sentinel declares:
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
 
-Everything else (bbot, bucket checks, vhost and subdirectory sweeps, the weekly thorough WPScan pass) always runs on the server.
+Everything else (bbot, bucket checks, vhost and subdirectory sweeps, the weekly thorough WPScan pass, and any Nuclei pass that uses a stored sign-in) always runs on the server.
 
 ## External or internal, full or light
 
 You choose two things when you provision a Sentinel, and can change both later.
 
-- **Where it runs.** External (the default) is a Sentinel on the internet side, for the same targets the server scans. Internal declares the capability `network:internal`: it sits inside a private network. Only an internal Sentinel is offered work for an address in a declared internal range.
+- **Where it runs.** External (the default) is a Sentinel on the internet side, for the same targets the server scans. Internal means it sits inside a private network. The server grants it the capability `network:internal` from the choice made at provisioning; what a Sentinel says about itself never grants it, and an administrator can change it later (`PATCH agents/{id}` with `settings: {network}`, or the card's **Settings**). Only an internal Sentinel is offered work for an address in a declared internal range.
 - **Size.** Full also runs its own OpenVAS stack (several GB, hours of feed sync on first start). Light skips it and never takes OpenVAS work.
 
 ## Get one
@@ -88,14 +88,18 @@ A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md))
 
 - **Results are typed and clipped.** Each kind has one fixed shape. Strings are clipped, lists capped, and anything unexpected is a `400`. Nothing it reports is run or used to build a command.
 - **It sees little.** A task carries only its own target. A Sentinel never receives stored sign-ins, another project's data or database access. WPScan's API token travels in its task and is scrubbed once the task ends.
-- **Scope and leases.** It can only claim work in its enrolled scope and capabilities. A claimed task must be accepted within two minutes. A running task is kept by the heartbeat and lost after five minutes without one.
+- **Its own token.** A Sentinel's token has the scope `sentinel`: it reaches the Sentinel routes and nothing else (not the rest of the API, not MCP), so it is not its administrator's token. It lasts 90 days, and a heartbeat renews the same token in place when under 60 days are left. A Sentinel that was off for longer must be enrolled again.
+- **Scope and leases.** It can only claim work in its enrolled scope and capabilities. A claimed task must be accepted within two minutes. A running task is kept by the heartbeat (which can also list the task ids it is running, so a task it dropped ends early) and lost after five minutes without one.
+- **Results are bound to the task.** Ports and findings for an address that was not dispatched are dropped. A result body can be up to 24 MB; every other route takes 4 MB.
+- **Nuclei runs the server's policy.** On a Sentinel Nuclei skips denial-of-service templates (`-etags dos`) and uses the approved-template snapshot the server runs, fetched from `GET /api/v1/sentinel/template-policy` and its `/bundle`.
 - **Input guard.** Result and heartbeat bodies skip the attack-string scan, since they hold what scanned hosts said. Registration, bootstrap and every address are still checked.
 
 ## Troubleshooting
 
-- **"No Sentinel picked up work in time; it ran locally."** The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need a Sentinel with `network:internal`.
+- **"No Sentinel picked up work in time; it ran locally."** The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need an internal Sentinel (one the server granted `network:internal`).
 - **A task shows "lost (the Sentinel stopped answering)".** Its lease ran out: the Sentinel stopped heartbeating, or was suspended or revoked. Check its logs with `docker compose logs -f`. The stage already moved on.
 - **The enrollment secret is refused (`403`).** It expired, was already used, or is mistyped. Provision again.
+- **A Sentinel answers `401` after being off a long time.** Its token (90 days) expired. Enroll it again with a new secret.
 - **Version shows `unknown`.** The Sentinel reports no version, or cvENGINE cannot reach GitHub (`CVENGINE_SENTINEL_VERSION_CHECK`). The API warns when self-update is Manual or Automatic but no updater runs on that machine.
 - **Update now is refused.** Self-update is Off for that Sentinel.
 

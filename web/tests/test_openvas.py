@@ -463,31 +463,31 @@ class GatingTests(Fixture, TestCase):
 
     def test_documentation_ranges_and_this_instances_own_address_are_refused(self):
         for ip in ('192.0.2.1', '198.51.100.9', '203.0.113.200', '2001:db8::5'):
-            self.assertTrue(ov.refuse_address(ip), ip)
+            self.assertTrue(bool(ov.refuse_reason(ip)), ip)
         with mock.patch.dict(os.environ, {'CVENGINE_OWN_ADDRESSES': '93.184.216.99, 2606:4700::99'}), mock.patch.dict(ov._own, {'at': 0.0}):
-            self.assertTrue(ov.refuse_address('93.184.216.99'))
-            self.assertTrue(ov.refuse_address('2606:4700::99'))
-            self.assertFalse(ov.refuse_address('93.184.216.98'))
+            self.assertTrue(bool(ov.refuse_reason('93.184.216.99')))
+            self.assertTrue(bool(ov.refuse_reason('2606:4700::99')))
+            self.assertFalse(bool(ov.refuse_reason('93.184.216.98')))
         with mock.patch.dict(ov._own, {'at': 0.0}):
-            self.assertFalse(ov.refuse_address('93.184.216.99'))  # the cache is rebuilt from the environment
+            self.assertFalse(bool(ov.refuse_reason('93.184.216.99')))  # the cache is rebuilt from the environment
 
     def test_a_name_on_a_shared_saas_front_or_cdn_is_never_given_to_the_sidecar(self):
         sub = Subdomain.objects.filter(name='www.rt.test').first()
         mail = Subdomain.objects.create(name='autodiscover.rt.test', target_domain=sub.target_domain, scan_history=sub.scan_history,
                                         cname='autodiscover.outlook.com')
         edge = Subdomain.objects.create(name='shop.rt.test', target_domain=sub.target_domain, scan_history=sub.scan_history, is_cdn=True)
-        self.assertTrue(ov.shared_infrastructure(mail, '52.96.1.1'))
-        self.assertTrue(ov.shared_infrastructure(edge, '104.16.1.1'))
-        self.assertFalse(ov.shared_infrastructure(sub, '93.184.216.7'))
+        self.assertTrue(ov._platform_reason(mail))
+        self.assertTrue(ov._platform_reason(edge))
+        self.assertFalse(ov._platform_reason(sub))
         due = ov.due(self.project.id, ['autodiscover.rt.test', 'shop.rt.test', 'www.rt.test'], resolve=lambda h, p: {
             'autodiscover.rt.test': '52.96.1.1', 'shop.rt.test': '104.16.1.1', 'www.rt.test': '93.184.216.7'}[h], blocked=lambda h: False)
         self.assertEqual([h for h, _ip, _d in due], ['www.rt.test'])
 
     def test_the_sidecar_is_never_given_a_tailnet_address(self):
         for ip in ('100.64.0.7', '100.127.255.254', 'fd7a:115c:a1e0::7'):
-            self.assertTrue(ov.refuse_address(ip), ip)
+            self.assertTrue(bool(ov.refuse_reason(ip)), ip)
         for ip in ('93.184.216.5', '93.184.214.7', '2606:4700::5'):
-            self.assertFalse(ov.refuse_address(ip), ip)
+            self.assertFalse(bool(ov.refuse_reason(ip)), ip)
         self.assertEqual(self.due(resolve=lambda h, p: '100.64.0.9'), [])
         with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('100.64.0.9', 443))]):
             self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
@@ -645,11 +645,11 @@ class SweepTests(Fixture, TestCase):
         self.assertIn('no longer has the task', OpenvasRun.objects.get().error)
         self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 2)
 
-    def test_an_interrupted_task_is_a_failure_and_a_stopped_one_is_not(self):
+    def test_an_interrupted_task_fails_the_run_but_blames_no_host_and_a_stopped_one_is_not_a_failure(self):
         self.tick()
         self.finish_task([], 'Interrupted')
         self.assertEqual(self.tick()['status'], 'failed')
-        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 2)
+        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 0)  # gvmd or its scanner restarted: the hosts stay due
 
     def test_a_sidecar_that_is_down_is_reported_not_raised(self):
         out = ov.tick(session_factory=lambda: ov.session(creds=('a', 'b'), connection=UnixSocketConnection(path='/nonexistent/gvmd.sock', timeout=2)),
@@ -1526,6 +1526,28 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertEqual(covered, {self.project.pk, later.pk})
         self.assertNotIn(self.other.pk, covered)
 
+    def test_unticking_a_project_of_an_opted_in_organization_excludes_it_and_the_page_shows_the_truth(self):
+        self.switch_on()
+        later = Project.objects.create(name='Later', slug='later', insert_date=timezone.now(), org=self.org)
+        self.call(self.org_admin, 'PUT', body={'orgs': {str(self.org.pk): True}})
+        projects = {p['name']: p for p in self.call(self.org_admin, 'GET')[1]['orgs'][0]['projects']}
+        self.assertEqual((projects['Later']['enabled'], projects['Later']['via_org'], projects['Later']['excluded']), (True, True, False))
+        self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): False}})
+        projects = {p['name']: p for p in self.call(self.org_admin, 'GET')[1]['orgs'][0]['projects']}
+        self.assertEqual((projects[self.project.name]['enabled'], projects[self.project.name]['excluded']), (False, True))
+        self.assertEqual({l.project_id for l in ov.sweep_links()}, {later.pk})  # what the page shows is what the sweep does
+        self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})  # ticked again: back under the organization
+        link = OpenvasProject.objects.get(project=self.project)
+        self.assertEqual((link.enabled, link.excluded), (False, False))
+        self.assertEqual({l.project_id for l in ov.sweep_links()}, {later.pk, self.project.pk})
+
+    def test_unticking_a_project_while_its_organization_is_off_is_just_off(self):
+        self.switch_on()
+        self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})
+        self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): False}})
+        link = OpenvasProject.objects.get(project=self.project)
+        self.assertEqual((link.enabled, link.excluded), (False, False))  # a later organization tick still covers it
+
     def test_only_an_app_admin_may_set_sentinel_only(self):
         self.switch_on()
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'sentinel_only': True})[0], 403)
@@ -1624,7 +1646,7 @@ class HostWatcherTests(SimpleTestCase):
     def test_the_sync_script_accepts_only_on_and_off_and_lists_the_makefile_services(self):
         script = (ROOT / 'scripts' / 'openvas-sync.sh').read_text()
         self.assertIn('case $want in on | off) ;; *) exit 0 ;; esac', script)
-        self.assertIn('[ ! -L "$WANTED" ]', script)
+        self.assertIn('update-state.py openvas-wanted', script)  # the request is read without following a link planted in ./web (this runs as root)
         listed = re.search(r'^SERVICES=\((.*)\)$', script, re.M).group(1).split()
         makefile = (ROOT / 'Makefile').read_text()
         self.assertEqual(listed, re.search(r'^OPENVAS_SERVICES\s*:=\s*(.*)$', makefile, re.M).group(1).split())
@@ -1660,7 +1682,8 @@ class InternalNetworkTests(Fixture, TestCase):
         token, _raw = create_token(user, f'ov-token-{"-".join(capabilities)}')
         return Agent.objects.create(token=token, name='-'.join(capabilities), kind='scanner', status='active',
                                     scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
-                                    capabilities=list(capabilities), last_seen=timezone.now())
+                                    capabilities=list(capabilities), last_seen=timezone.now(),
+                                    network='internal' if 'network:internal' in capabilities else 'external')  # the server grants it, a Sentinel only claims it
 
     def test_the_internal_batch_holds_only_the_declared_internal_targets(self):
         self.assertEqual(ov.internal_batch(self.link), [('10.20.0.7', '10.20.0.7', self.inside.id)])
@@ -1791,8 +1814,8 @@ class HeatGateTests(Fixture, TestCase):
         ready, verdict = self.refused('www.rt.test')
         self.assertEqual(ready, [])
         self.assertIn('CDN', verdict['reason'])
-        Subdomain.objects.filter(name='api.rt.test').update(name='vropco.atlassian.net')
-        ready, verdict = self.refused('vropco.atlassian.net')
+        Subdomain.objects.filter(name='api.rt.test').update(name='client-a.atlassian.net')
+        ready, verdict = self.refused('client-a.atlassian.net')
         self.assertEqual(ready, [])
         self.assertIn('third-party platform', verdict['reason'])
 
@@ -1965,6 +1988,89 @@ class BudgetTests(Fixture, TestCase):
         cleaned = sb._clean_openvas_result({'results': [], 'scanned_addresses': [], 'partial': True})
         self.assertIs(cleaned['partial'], True)
         self.assertIs(sb._clean_openvas_result({'results': [], 'partial': 'yes'})['partial'], False)
+
+
+class InterruptedRetryTests(Fixture, TestCase):
+    """A host whose tasks gvmd keeps reporting Interrupted (it crashes gvmd or its scanner) is tried three times, then waits three days."""
+
+    def setUp(self):
+        super().setUp()
+        mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()
+        self.link.hosts, self.link.forced_hosts = ['www.rt.test'], ['www.rt.test']
+        self.link.save()
+
+    def interrupted(self):
+        """Start the next task for the host and let gvmd report it Interrupted; returns poll's answer."""
+        self.assertEqual(self.tick()['status'], 'running')
+        self.finish_task([], 'Interrupted')
+        return self.tick()
+
+    def failed(self):
+        return ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists()
+
+    def test_the_first_and_second_interruption_mark_nothing_failed(self):
+        for attempt in (1, 2):
+            self.assertEqual(self.interrupted()['status'], 'failed')
+            self.assertFalse(self.failed())
+            self.assertIn(f'attempt {attempt} of 3', OpenvasRun.objects.order_by('-id').first().error)
+            reason = {r['host']: r for r in ov.explain(self.link)}['www.rt.test']
+            self.assertTrue(reason['ready'])  # still due: the next tick tries it again
+
+    def test_the_third_marks_the_host_failed_with_the_usual_backoff_and_says_so(self):
+        for _ in range(2):
+            self.interrupted()
+        out = self.interrupted()
+        self.assertEqual((out['status'], out['gave_up']), ('failed', ['www.rt.test']))
+        self.assertTrue(self.failed())
+        run = OpenvasRun.objects.order_by('-id').first()
+        self.assertEqual(run.error, 'OpenVAS was interrupted 3 times scanning this host; asked again after three days')
+        verdict = {r['host']: r for r in ov.explain(self.link)}['www.rt.test']
+        self.assertFalse(verdict['ready'])
+        self.assertEqual(verdict['reason'], run.error)
+        self.assertEqual(self.tick(), {'skipped': 'no opted-in host is due'})  # not started again at the next tick
+        self.assertFalse(OpenvasRun.objects.filter(status='running').exists())
+        # three days later it is tried again, from a fresh count
+        ServiceRun.objects.filter(service=ov.FAILED_SERVICE).update(finished_at=timezone.now() - timedelta(days=4))
+        self.assertEqual(self.interrupted()['status'], 'failed')
+        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test', finished_at__gt=timezone.now() - timedelta(days=1)).exists())
+
+    def test_the_limit_is_tunable(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_INTERRUPTS': '2'}):
+            self.interrupted()
+            self.assertFalse(self.failed())
+            self.assertEqual(self.interrupted()['gave_up'], ['www.rt.test'])
+        self.assertTrue(self.failed())
+        self.assertIn('2 times', OpenvasRun.objects.order_by('-id').first().error)
+
+    def test_a_success_resets_the_count(self):
+        for _ in range(2):
+            self.interrupted()
+        self.assertEqual(self.run_scan([APACHE])['status'], 'done')
+        ServiceRun.objects.all().delete()
+        for _ in range(2):
+            self.assertEqual(self.interrupted()['status'], 'failed')
+            self.assertFalse(self.failed())
+        self.assertEqual(self.interrupted()['gave_up'], ['www.rt.test'])
+
+    def test_an_inconclusive_run_resets_the_count_too(self):
+        for _ in range(2):
+            self.interrupted()
+        self.assertEqual(self.run_scan([])['status'], 'done')  # finished, but reported no scanned host
+        ServiceRun.objects.all().delete()
+        self.assertEqual(self.interrupted()['status'], 'failed')
+        self.assertFalse(self.failed())
+        self.assertEqual(self.interrupted()['status'], 'failed')
+        self.assertFalse(self.failed())
+
+    def test_another_failure_between_interruptions_breaks_the_streak(self):
+        self.interrupted()
+        self.assertEqual(self.tick()['status'], 'running')
+        self.gvmd.tasks.clear()  # gvmd lost the task: a different failure, which has its own backoff
+        self.assertEqual(self.tick()['status'], 'failed')
+        ServiceRun.objects.all().delete()
+        self.interrupted()
+        self.interrupted()
+        self.assertFalse(self.failed())
 
 
 class SentinelViewTests(Fixture, TestCase):

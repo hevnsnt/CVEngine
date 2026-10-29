@@ -596,8 +596,11 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
     from cveFeed.models import CVEEntry
     from cveFeed.templategen import run_cve_tests
     from reNgine.ai_settings import get_configured_provider
+    from cveFeed.conductor import bounty_blocked_projects
 
     try:
+        if project_id in bounty_blocked_projects():  # a bug bounty project that has not confirmed automated testing is not tested on its own
+            return {"cve_pk": cve_pk, "skipped": "the bug bounty engagement has not confirmed automated testing"}
         cve = CVEEntry.objects.get(pk=cve_pk)
         try:
             provider = get_configured_provider()
@@ -868,6 +871,9 @@ def automatic_validate_finding(job_id):
     stage = 'load_finding'
     try:
         require_authority(job)
+        from cveFeed.conductor import bounty_blocked_projects
+        if job.source != 'manual' and job.project_id in bounty_blocked_projects():  # only a person's own request runs in a bug bounty project that has not confirmed automated testing
+            return _skip_automatic_validation(job, progress, 'bounty_not_confirmed')
         row = Triage.objects.get(pk=job.triage_id, project_id=job.project_id)
         fresh_row = Triage.objects.select_related(
             'match__cve_entry', 'vulnerability__target_domain', 'route', 'hygiene__domain').get(pk=row.pk)
@@ -986,7 +992,8 @@ def validate_sweep():
     if not ledger.sweep_claim("validate", 1800):
         return {"queued": 0, "skipped": "another sweep is running"}
     queued = 0
-    for project_id in Project.objects.values_list("id", flat=True):
+    from cveFeed.conductor import bounty_blocked_projects
+    for project_id in Project.objects.exclude(pk__in=bounty_blocked_projects()).values_list("id", flat=True):  # not a bug bounty project that has not confirmed automated testing
         ids = validation.due_ids(project_id)
         if ids:
             validate_findings.delay(project_id, ids)
@@ -1015,7 +1022,8 @@ def run_hygiene_all():
     from targetApp.models import Domain
     if not ledger.sweep_claim('hygiene', 1800):
         return {"queued": 0, "skipped": "another sweep is running"}
-    due = ledger.stale_first('hygiene', Domain.objects.values_list("id", "name", "project_id"))
+    from cveFeed.conductor import bounty_blocked_projects
+    due = ledger.stale_first('hygiene', Domain.objects.exclude(project_id__in=bounty_blocked_projects()).values_list("id", "name", "project_id"))  # not a bug bounty project that has not confirmed automated testing
     for domain_id, _name, _project in due[:HYGIENE_SWEEP_MAX]:
         run_hygiene_task.delay(domain_id)
     return {"queued": min(len(due), HYGIENE_SWEEP_MAX), "due": len(due)}
@@ -1046,13 +1054,18 @@ def watch_certificates_all():
         return {"queued": 0, "skipped": "another sweep is running"}
     # crt.sh has nothing on a bare IP, so only names are asked about
     # nor on a bare shared provider domain (jfrog.com): a tenant's host under it is watched, the provider's whole tree is not
+    from cveFeed.conductor import bounty_blocked_projects
+    blocked = bounty_blocked_projects()  # a bug bounty project that has not confirmed automated testing is not watched on its own
     rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
-            if classify_target(r[1]) != IP and not is_provider_domain(r[1])]
+            if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
     batch = due[:max(1, window // 3)]
     for i, (domain_id, _name, _project) in enumerate(batch):  # spread out: crt.sh blocks a burst, so each check starts a couple of seconds after the last
         watch_certificate_transparency.apply_async(args=[domain_id], countdown=int(i * 2.5))
     return {"queued": len(batch), "due": len(due)}
+
+
+DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's lock held is asked again (run_bbot_discovery)
 
 
 @app.task(name="run_bbot_discovery", bind=True, queue="discovery_queue", acks_late=True, reject_on_worker_lost=True)
@@ -1062,7 +1075,14 @@ def run_bbot_discovery(self, scan_id, mode="standard"):
     from startScan.models import ScanHistory
     if self.request.id:  # a stop revokes this id; a task still queued has none yet and is skipped when it starts
         ScanHistory.objects.filter(pk=scan_id).update(celery_ids=[self.request.id])
-    return run_pipeline(scan_id, mode)
+    out = run_pipeline(scan_id, mode)
+    if out.get('status') == 'duplicate' and self.request.id and self.request.retries < DUPLICATE_RETRIES:
+        # The queue gave this message back after a worker was killed (acks_late), and the dead worker's lock on the target is still alive for up
+        # to LOCK_TTL seconds: acking it would leave the scan "running" with nothing behind it. Ask again once that lock would have expired; if
+        # it was a live twin instead, the scan has ended by then (or it is still running and this asks again, a few times).
+        from cveFeed.discovery import LOCK_TTL
+        raise self.retry(countdown=LOCK_TTL + 15, max_retries=DUPLICATE_RETRIES)
+    return out
 
 
 @app.task(name="run_internal_scan", bind=True, queue="discovery_queue", acks_late=True, reject_on_worker_lost=True)
@@ -1083,9 +1103,11 @@ def internal_scan_sweep():
     return internal_scan.sweep()
 
 
-@app.task(name="run_internal_discovery", bind=False, queue="cve_feed_queue")
+@app.task(name="run_internal_discovery", bind=False, queue="discovery_queue")
 def run_internal_discovery(range_id):
-    """Sweep one declared internal range for live hosts through a Sentinel inside it (``cveFeed.internal_discovery``)."""
+    """Sweep one declared internal range for live hosts through a Sentinel inside it (``cveFeed.internal_discovery``). It waits on a Sentinel for each
+    of up to 64 chunks, so it runs on the discovery queue like ``run_internal_scan``: on the four-slot feed queue a few ranges would keep the
+    conductor, the Sentinel feed and the reaper from running for hours."""
     from cveFeed import internal_discovery
     return internal_discovery.discover_range(range_id)
 
@@ -1113,12 +1135,11 @@ def deep_scan_apexes():
     as ``acme.jfrog.com``, a shared domain added directly, or scope_mode='host') is skipped entirely: it is covered by
     normal discovery and the provider's apex (``jfrog.com``) is never created or scanned. scope_mode='parent' forces the
     promotion for a user who really controls the parent."""
-    from datetime import timedelta
-
     from django.utils import timezone
 
     from cveFeed import activity, ledger
-    from cveFeed.discovery import FAILED, HOST_PIPELINE_TASK, QUEUED, RUNNING, RUNNING_WINDOW_SECONDS, start_discoveries
+    from cveFeed.counts import running_window
+    from cveFeed.discovery import FAILED, HOST_PIPELINE_TASK, QUEUED, RUNNING, start_discoveries
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     from targetApp.shared_domains import effective_apex, is_shared_apex
@@ -1130,7 +1151,11 @@ def deep_scan_apexes():
         cap = DEEP_SWEEP_MAX
     if not ledger.sweep_claim("deep-apex", 1800):
         return {"queued": 0, "skipped": "another sweep is running"}
-    rows = list(Domain.objects.exclude(project=None).values_list("id", "name", "project_id", "scope_mode").order_by("id"))
+    from cveFeed.models import BountyEngagement
+    # a bug bounty project is never widened to a parent domain (the program's scope names what may be tested, and a Domain target counts as
+    # a person's confirmation of it) and, until its owner confirmed automated testing, not deep-scanned either
+    engaged = set(BountyEngagement._base_manager.values_list("project_id", flat=True))
+    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode").order_by("id"))
     own = {(project_id, name): domain_id for domain_id, name, project_id, _mode in rows}  # a project's own row for a name
     from cveFeed.exclusions import excluded_names
     banned_by_project = {}  # project id -> the names its organization excluded for good (one read per project)
@@ -1159,7 +1184,7 @@ def deep_scan_apexes():
             wanted.setdefault((project_id, apex), own.get((project_id, apex)))
     due = ledger.stale_first("bbot-deep", [(key, key[1], key[0]) for key in wanted])
     busy = set(ScanHistory.objects.filter(
-        scan_status__in=(QUEUED, RUNNING), start_scan_date__gte=timezone.now() - timedelta(seconds=RUNNING_WINDOW_SECONDS),
+        scan_status__in=(QUEUED, RUNNING), start_scan_date__gte=timezone.now() - running_window(),
         domain__name__in={key[1] for key in wanted}).exclude(tasks__contains=[HOST_PIPELINE_TASK]).values_list("domain__name", "domain__project_id"))
     todo = [key for key, apex, project_id in due if (apex, project_id) not in busy][:cap]
     domains, skipped = [], 0
@@ -1194,11 +1219,12 @@ def work_conductor():
 
 
 @app.task(name="host_pipeline", bind=True, queue="discovery_queue")
-def host_pipeline(self, domain_id, names):
+def host_pipeline(self, domain_id, names, by_person=False):
     """New hosts of a target (found by certificate transparency or named by an agent) through nmap, the exposure check,
-    nuclei and correlation, without a bbot run (see cveFeed.discovery.run_host_pipeline)."""
+    nuclei and correlation, without a bbot run (see cveFeed.discovery.run_host_pipeline). ``by_person`` is set only by a rescan a
+    person asked for; everything else is held to the bug bounty confirmation."""
     from cveFeed.discovery import run_host_pipeline
-    return run_host_pipeline(domain_id, names, celery_id=self.request.id)
+    return run_host_pipeline(domain_id, names, celery_id=self.request.id, by_person=by_person)
 
 
 @app.task(name='assess_host', bind=True, queue='discovery_queue')
@@ -1216,6 +1242,11 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
     from cveFeed.discovery import SUCCESS, run_host_pipeline
     from cveFeed.models import DeferredRetest
     from cveFeed import ledger, retest
+    from cveFeed.bounty_gate import Gate
+    from targetApp.models import Domain
+    if Gate().project_blocked(Domain.objects.values_list('project_id', flat=True).filter(pk=domain_id).first()):  # a bug bounty project that has not confirmed automated testing
+        DeferredRetest.objects.filter(pk__in=deferred_ids or [], domain_id=domain_id).update(status='failed', updated_at=timezone.now())
+        return {'status': 'skipped', 'error': 'the bug bounty engagement has not confirmed automated testing'}
     rows = list(DeferredRetest.objects.filter(pk__in=deferred_ids or [], domain_id=domain_id,
                                               status__in=['dispatching', 'queued']))
     if deferred_ids and len(rows) != len(set(deferred_ids)):
@@ -1278,8 +1309,10 @@ def weekly_deep_nuclei():
             cursor, _ = BackgroundCursor.objects.select_for_update().get_or_create(lane='weekly_nuclei')
             archived = HostState.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'),
                                                 archived_at__isnull=False)
-            base = Subdomain.objects.filter(scan_history__scan_status=2, target_domain__project__isnull=False).filter(
-                latest_scan_q()).filter(~Exists(archived)).select_related(
+            from cveFeed.bounty_gate import Gate
+            gate = Gate()  # a bug bounty project that has not confirmed automated testing is not swept; a host outside its scope is never a target
+            base = Subdomain.objects.filter(scan_history__scan_status=2, target_domain__project__isnull=False).exclude(
+                target_domain__project_id__in=gate.blocked).filter(latest_scan_q()).filter(~Exists(archived)).select_related(
                 'scan_history__domain', 'target_domain').order_by('pk')
             rows = list(base.filter(pk__gt=cursor.last_pk)[:100])
             if not rows:
@@ -1299,7 +1332,7 @@ def weekly_deep_nuclei():
             project_id = sub.target_domain.project_id
             if sub.name in ledger.fresh(host_service, [sub.name], project_id):
                 continue
-            if not scannable_hosts([sub.name], project=project_id):
+            if not scannable_hosts([sub.name], project=project_id) or gate.refusal(project_id, sub.name):
                 continue
             hostnames, _ips, ports = nuclei_scan.scan_targets(sub.scan_history)
             if sub.name not in hostnames:

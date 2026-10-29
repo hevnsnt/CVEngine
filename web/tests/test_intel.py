@@ -105,8 +105,7 @@ class RunTests(TestCase):
 		patch.start()
 		self.addCleanup(patch.stop)
 		self.feed_entry = CVEEntry.objects.create(cve_id='CVE-2099-0003', cvss=7.5, title='feed CVE', published_at=timezone.now(),
-												  epss_reached=False, kev=False, exploit_db=False,
-												  raw={'exploitation': {'kev': False, 'epssReached': False, 'exploitDb': False}})
+												  epss_reached=False, kev=False, exploit_db=False)
 
 	def run_intel(self, **env):
 		with mock.patch.dict(os.environ, env), mock.patch('cveFeed.intel.cache_dir', return_value=self.dir), \
@@ -141,6 +140,13 @@ class RunTests(TestCase):
 						   'exploitation': {'kev': False, 'epssReached': False, 'exploitDb': False}})
 		self.feed_entry.refresh_from_db()
 		self.assertTrue(self.feed_entry.epss_reached)
+
+	def test_a_signal_the_feed_set_is_kept_when_no_source_names_the_cve(self):
+		kept = CVEEntry.objects.create(cve_id='CVE-2099-0090', cvss=3.0, title='feed only', published_at=timezone.now(),
+									   kev=True, epss_reached=False, exploit_db=False)
+		self.run_intel()
+		kept.refresh_from_db()
+		self.assertEqual((kept.kev, kept.epss_reached, kept.exploit_db), (True, False, False))
 
 	def test_a_failing_source_keeps_its_last_copy_and_is_reported(self):
 		self.run_intel()

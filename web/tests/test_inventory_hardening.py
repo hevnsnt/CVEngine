@@ -33,7 +33,14 @@ def machine(letter, **host):
 
 
 class HijackTests(MatchBase):
-	"""Finding 1: a second machine (or token) must not take over, close or reopen another machine's findings."""
+	"""Finding 1: a second machine (or token) must not take over, close or reopen another machine's findings. These cases run with the
+	address check on (``CVENGINE_INVENTORY_STRICT=1``); it is off by default."""
+
+	def setUp(self):
+		super().setUp()
+		patch = mock.patch.dict(os.environ, {'CVENGINE_INVENTORY_STRICT': '1'})
+		patch.start()
+		self.addCleanup(patch.stop)
 
 	def victim(self):
 		cve('CVE-2099-7001', 'sudo', '1.8.0', '1.9.5p2')
@@ -57,11 +64,23 @@ class HijackTests(MatchBase):
 		stranger, outcome = host_inventory.ingest(self.project, schema.validate(report(host=machine('c', ips=['203.0.113.77']))), source_ip='198.51.100.200')
 		self.assertEqual((outcome, stranger.host, stranger.match_basis), ('new', '', ''))
 		self.assertEqual(stranger.details['claimed_host'], 'web01.example.test')
-		self.assertIn('none of the reported addresses', stranger.details['claim_blocked'])
-		self.assertIn('none of the reported addresses', host_inventory.brief(stranger, 14)['claim_blocked'])
-		with mock.patch.dict(os.environ, {'CVENGINE_INVENTORY_NAME_ONLY': '1'}):  # the operator's switch for an estate scanned behind a load balancer
+		self.assertIn('did not come from an address', stranger.details['claim_blocked'])
+		self.assertIn('did not come from an address', host_inventory.brief(stranger, 14)['claim_blocked'])
+		with mock.patch.dict(os.environ, {'CVENGINE_INVENTORY_STRICT': ''}):  # the default: a holder of the project's token may report for its hosts
 			again, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('c', ips=['203.0.113.77']))), source_ip='198.51.100.200')
 		self.assertEqual(again.host, 'web01.example.test')
+
+	def test_the_reporters_own_address_list_is_not_a_witness_when_the_request_address_is_known(self):
+		"""S08-4: a token holder lists the victim's addresses (and its name, or only the addresses): the request came from elsewhere."""
+		self.scanned('web01.example.test', ['192.0.2.10'])
+		by_name, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('c', ips=['192.0.2.10']))), source_ip='198.51.100.200')
+		self.assertEqual((by_name.host, by_name.details['claimed_host']), ('', 'web01.example.test'))
+		by_ip, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('d', fqdn='', hostname='odd', ips=['192.0.2.10']))), source_ip='198.51.100.200')
+		self.assertEqual((by_ip.host, by_ip.details['claimed_host']), ('', 'web01.example.test'))
+		own, _ = host_inventory.ingest(self.project, schema.validate(report(host=machine('e', fqdn='', hostname='odd2', ips=['192.0.2.10']))), source_ip='192.0.2.10')
+		self.assertEqual((own.host, own.match_basis), ('web01.example.test', 'ip'))
+		ip = IpAddress.objects.get(address='192.0.2.10')
+		self.assertEqual(ip.os_accuracy, 100)  # only the machine at that address wrote the operating system
 
 	def test_the_name_alone_is_enough_when_an_address_corroborates_it(self):
 		self.scanned('web01.example.test', ['192.0.2.10'])
@@ -118,6 +137,26 @@ class HijackTests(MatchBase):
 		self.assertEqual(self.post(self.t_rep, report(host=machine('a')))[0], 200)  # the owner still can
 		self.assertTrue(AuditLog.objects.filter(action='inventory.refused').exists())
 		self.assertNotIn('web01', json.dumps(data))
+
+	def test_a_renewed_token_takes_over_the_machines_of_one_that_expired_was_revoked_or_deleted(self):
+		"""S08-3: a token lives a year; its replacement must be able to report for the fleet the old one started."""
+		self.scanned('web01.example.test', ['192.0.2.10'])
+		old, old_raw = create_token(self.alice, 'old', scope='inventory', project=self.project)
+		self.assertEqual(self.post(old_raw, report(host=machine('a')))[0], 201)
+		fresh = create_token(self.alice, 'fresh', scope='inventory', project=self.project)[1]
+		self.assertEqual(self.post(fresh, report(host=machine('a')))[0], 409)  # the old token is still good: the machine is its
+		ApiToken.objects.filter(pk=old.pk).update(expires_at=timezone.now() - timedelta(days=1))
+		self.assertEqual(self.post(fresh, report(host=machine('a')))[0], 200)
+		row = HostInventory.objects.get()
+		self.assertEqual((row.token_id, row.host), (ApiToken.objects.get(prefix=fresh[:8]).pk, 'web01.example.test'))
+		self.assertEqual(self.post(old_raw, report(host=machine('a')))[0], 401)  # and the expired one cannot take it back
+		third = create_token(self.alice, 'third', scope='inventory', project=self.project)[1]
+		self.assertEqual(self.post(third, report(host=machine('a')))[0], 409)  # a live token holds it again
+		ApiToken.objects.filter(prefix=fresh[:8]).update(revoked=True)
+		self.assertEqual(self.post(third, report(host=machine('a')))[0], 200)
+		ApiToken.objects.filter(prefix=third[:8]).delete()  # a deleted owner owns nothing either
+		last = create_token(self.alice, 'last', scope='inventory', project=self.project)[1]
+		self.assertEqual(self.post(last, report(host=machine('a')))[0], 200)
 
 	def test_a_machine_id_cannot_adopt_another_tokens_hostname_row(self):
 		self.scanned('web01.example.test', ['192.0.2.10'])

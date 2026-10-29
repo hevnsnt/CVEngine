@@ -43,11 +43,12 @@ def hot_tier_q():
     return fire_tier_q() | Q(cvss__gte=HIGH_CVSS) | Q(epss_reached=True)
 
 
-def match_temperature(tier, cvss=None, ai_verdict=None, distro_status=None):
+def match_temperature(tier, cvss=None, ai_verdict=None, distro_status=None, version_unknown=False):
     """How hot a CVE is *on one of your hosts*. The feed tier says how dangerous the CVE is in general; a match says it is on
     your asset, so a high score (7.0 or more) that the AI confirmed affects the host reads as fire too. A match the host's
-    distribution has patched (a backported fix) is ice however dangerous the CVE is."""
-    if distro_status == "patched":
+    distribution has patched (a backported fix) is ice however dangerous the CVE is, and so is one whose CVE publishes no affected
+    version range (``match_policy.is_version_unknown``): it waits for review at the lowest priority, KEV or not."""
+    if distro_status == "patched" or version_unknown:
         return ICE
     if tier == FIRE:
         return FIRE
@@ -65,8 +66,10 @@ def match_heat_rank_expr():
     """The database form of ``HEAT_RANK[match_temperature(classify_threat_tier(...), ...)]`` over CVEMatch rows (3 fire, 2 smoke,
     1 ice), so a list can filter, count and order matches by how hot they are on the host without loading them."""
     from django.db.models import Case, IntegerField, Q, Value, When
+    from cveFeed.match_policy import version_unknown_q
     return Case(
         When(distro_status="patched", then=Value(HEAT_RANK[ICE])),
+        When(version_unknown_q(), then=Value(HEAT_RANK[ICE])),
         When(fire_tier_q("cve_entry__"), then=Value(HEAT_RANK[FIRE])),
         When(Q(ai_verdict="affected", cve_entry__cvss__gte=HIGH_CVSS), then=Value(HEAT_RANK[FIRE])),
         When(Q(cve_entry__cvss__gte=HIGH_CVSS) | Q(cve_entry__epss_reached=True), then=Value(HEAT_RANK[SMOKE])),

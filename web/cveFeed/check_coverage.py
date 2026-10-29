@@ -294,7 +294,7 @@ def load(entries, now=None):
     """``Evidence`` for a page of hosts. ``entries`` is ``[(Subdomain, [other current rows of the host], project id)]``. A fixed number of
     queries however many hosts or checks, every one limited to the page's own projects (and the ledger to the page's own assets)."""
     from cveFeed.conductor import bounty_blocked_projects
-    from cveFeed.models import AuthCredential, HostState, OpenvasProject, OpenvasSettings, RouteAuth, ServiceRun, TlsCertificate
+    from cveFeed.models import AuthCredential, HostState, OpenvasSettings, RouteAuth, ServiceRun, TlsCertificate
     from django.db.models import Max, Q
     from startScan.models import ScanActivity
     ev = Evidence(now)
@@ -347,9 +347,10 @@ def load(entries, now=None):
     ev.blocked = set(bounty_blocked_projects()) & set(pids)
     if OpenvasSettings.objects.filter(enabled=True).exists():
         from cveFeed import openvas_scan
-        for project_id, hosts, forced in OpenvasProject.objects.filter(project_id__in=pids, enabled=True).values_list('project_id', 'hosts', 'forced_hosts'):
-            ev.openvas[project_id] = {str(x).strip().lower() for x in (hosts or [])}
-            ev.openvas_forced[project_id] = {str(x).strip().lower() for x in (forced or [])}
+        for link in openvas_scan.links_for(list(pids)):  # the projects opted in one by one and through their organization, as the sweep reads them
+            project_id = link.project_id
+            ev.openvas[project_id] = {str(x).strip().lower() for x in (link.hosts or [])}
+            ev.openvas_forced[project_id] = {str(x).strip().lower() for x in (link.forced_hosts or [])}
             on_page = {h.name for h in ev.facts.values() if h.project_id == project_id}
             ev.openvas_heat.update({(project_id, name): heat for name, (heat, _n) in openvas_scan.host_heat(project_id, on_page).items()})
     for cred in AuthCredential.objects.filter(project_id__in=pids).select_related('domain').defer('secret'):
@@ -409,6 +410,8 @@ def plan_deep_discovery(h, ev):
     apex, host_scoped = effective_apex(h.name)
     if host_scoped or apex != h.name:
         return 'the weekly deep discovery covers only an owned apex domain'
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
     return _one(h, ev, ('bbot-deep',))
 
 
@@ -418,6 +421,8 @@ def plan_ct_watch(h, ev):
         return 'the certificate transparency watch runs on the target, not on each host under it'
     if is_provider_domain(h.name):
         return 'a shared provider domain is never enumerated'
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
     return _one(h, ev, ('ct-watch',))
 
 
@@ -451,6 +456,8 @@ def plan_full_ports(h, ev):
     from cveFeed import fullscan, ledger
     if not fullscan.enabled():
         return 'the background all-ports sweep is switched off (CVENGINE_FULLSCAN=0)'
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
     scannable = h.scannable()
     if not scannable:
         return _no_address(h)
@@ -500,6 +507,8 @@ def plan_nuclei(h, ev):
 
 
 def plan_nuclei_deep(h, ev):
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
     return _targetable(h) or _one(h, ev, ('nuclei-deep-host', 'nuclei-deep-target'))
 
 
@@ -568,6 +577,8 @@ def plan_wpscan(h, ev):
 
 
 def plan_wpscan_thorough(h, ev):
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
     state = _wordpress(h)
     if state is None or state['state'] == 'not_wordpress':
         return 'no sign of WordPress'
@@ -644,6 +655,8 @@ def plan_openvas(h, ev):
     platform other customers share (``openvas_scan.assess`` decides the same way, and says why a host that is ready is not chosen yet)."""
     if ev.openvas.get(h.project_id) is None:
         return 'the OpenVAS add-on is off, or this project did not opt in'
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
     heat = ev.openvas_heat.get((h.project_id, h.name))
     if heat not in ('fire', 'smoke') and h.name not in ev.openvas_forced.get(h.project_id, ()):
         return f'not Fire or Smoke ({heat or "unknown"}): OpenVAS is only spent on hosts on fire or smoke'
@@ -652,7 +665,9 @@ def plan_openvas(h, ev):
     return _one(h, ev, ('openvas', 'openvas-failed'))
 
 
-def _signed_units(h, ev, kind):
+def _signed_units(h, ev, kind, withheld=None, why_withheld=''):
+    """``withheld(cred, h, ev)``: a sign-in that is known not to be sent is no unit of the check (it is neither planned nor covered); when none
+    is left the answer is ``why_withheld``."""
     creds = _credentials_for(h, ev)
     if not creds:
         return 'no stored sign-in covers the host'
@@ -660,13 +675,30 @@ def _signed_units(h, ev, kind):
     ttl = ledger.ttl(kind)
     units = []
     for cred in creds:
+        if withheld and withheld(cred, h, ev):
+            continue
         entries = ev.signed.get((kind, h.project_id, h.name, auth_checks.revision(cred)), ())
         units.append(Unit(cred.label, [Run(when, ttl, status == 'done') for _service, status, when in entries]))
-    return units
+    return units or why_withheld
+
+
+def _withheld(cred, h, ev):
+    """Whether the stored sign-in's last recorded outcome for this host is a refusal: its origin's certificate does not verify and the sign-in
+    is not set to trust it anyway, so nuclei is never given it (``auth_nuclei.trusted_plan``), and a later run that did send it is newer."""
+    from cveFeed import auth_checks
+    if cred.allow_untrusted_certificate:
+        return False
+    key = (h.project_id, h.name, auth_checks.revision(cred))
+    refused = [when for _service, _status, when in ev.signed.get(('nuclei-auth-refused', *key), ()) if when]
+    if not refused:
+        return False
+    sent = [when for _service, _status, when in ev.signed.get(('nuclei-auth', *key), ()) if when]
+    return not sent or max(refused) > max(sent)
 
 
 def plan_auth_nuclei(h, ev):
-    return _signed_units(h, ev, 'nuclei-auth')
+    return _signed_units(h, ev, 'nuclei-auth', withheld=_withheld,
+                         why_withheld='the stored sign-in is not sent: the server certificate does not verify and "Trust this certificate anyway" is off for it')
 
 
 def plan_auth_routes(h, ev):
@@ -767,7 +799,7 @@ CHECKS = (
           ttl_kind='testssl'),
     Check('certificates', 'Certificate and legacy TLS check', plan_certificates, stages=('host_hygiene',), ttl_kind='hygiene'),
     Check('openvas', 'OpenVAS scan (optional add-on)', plan_openvas, kinds=('openvas', 'openvas-failed'), ttl_kind='openvas'),
-    Check('nuclei-signed-in', 'Nuclei, signed in', plan_auth_nuclei, kinds=('nuclei-auth',)),
+    Check('nuclei-signed-in', 'Nuclei, signed in', plan_auth_nuclei, kinds=('nuclei-auth', 'nuclei-auth-refused')),
     Check('routes-signed-in', 'Web routes, signed in', plan_auth_routes, kinds=('route-auth-signed',)),
     Check('cve-correlation', 'CVE correlation', plan_correlation, stages=('cve_correlation',)),
 )

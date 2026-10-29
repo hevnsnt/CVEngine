@@ -25,6 +25,7 @@ _DOMAIN_RE = re.compile(
     r"\.[A-Za-z][A-Za-z0-9-]{0,62}$"  # TLD must start with a letter (excludes 999.1.1.1)
 )
 _RANGE_RE = re.compile(r"^\s*([0-9.]+)\s*-\s*([0-9.]+)\s*$")
+_HOST_NAME = re.compile(r"^[\w.-]+$")
 
 
 def classify_target(value):
@@ -400,8 +401,10 @@ def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, 
 
 
 def bare_host(value):
-    """The hostname or address inside a target string: "host", "host:8443", "https://host:8443/path", "[::1]:443"."""
-    text = str(value or "").strip().lower().split("://", 1)[-1].split("/", 1)[0]
+    """The hostname or address inside a target string: "host", "host:8443", "https://host:8443/path", "[::1]:443",
+    "https://user@host?x"."""
+    text = re.split(r"[/?#]", str(value or "").strip().lower().split("://", 1)[-1], maxsplit=1)[0]
+    text = text.rsplit("@", 1)[-1]  # user:password@host connects to host: judge that, not the whole authority
     if text.startswith("["):
         return text[1:].split("]", 1)[0]
     return text.rsplit(":", 1)[0] if text.count(":") == 1 else text
@@ -424,19 +427,21 @@ def scannable_hosts(names, resolver=None, project=None):
         from cveFeed.exclusions import excluded_names
         from cveFeed.archive_rediscovery import archived_names
         banned = excluded_names(project) | archived_names(project)
+        from cveFeed.bounty_gate import Gate
+        gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name is never a scan target
     verdict, out, seen = {}, [], set()
     for entry in names:
         if entry in seen:
             continue
         seen.add(entry)
         host = bare_host(entry)
-        if not host or host.rstrip('.') in banned:
+        if not host or host.rstrip('.') in banned or (project and gate.refusal(project, host, unattended=False, derived=classify_target(host) == IP)):
             continue
         if host not in verdict:
             if classify_target(host) == IP:
                 verdict[host] = is_scannable_ip(host, project=project or None)
-            else:
-                verdict[host] = not check(host)
-        if verdict[host]:
+            else:  # anything that is not a plain host name cannot be judged by a lookup: refuse it (fail closed)
+                verdict[host] = bool(_HOST_NAME.match(host)) and not check(host)
+        if verdict[host] and '\\' not in str(entry):  # tools disagree on where an authority with a backslash ends
             out.append(entry)
     return out

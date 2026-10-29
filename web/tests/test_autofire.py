@@ -116,3 +116,17 @@ class PerProjectDispatchTests(TestCase):
 		for project, foreign in ((a, 'beta.test'), (b, 'alpha.test')):
 			text = ' '.join(AgentActivity.objects.filter(project_id=project.id).values_list('message', flat=True))
 			self.assertNotIn(foreign, text)
+
+	def test_the_host_cap_applies_to_each_project_not_to_the_cve_as_a_whole(self):
+		a = self._tenant('ta', 'alpha.test', 'www.alpha.test', '192.0.2.31')
+		b = self._tenant('tb', 'beta.test', 'www.beta.test', '192.0.2.32')
+		for i in range(3):  # project A has three more exposed hosts than the cap allows
+			sub = Subdomain.objects.create(name=f'h{i}.alpha.test', target_domain=Domain.objects.get(project=a))
+			address = IpAddress.objects.create(address=f'192.0.2.{40 + i}')
+			sub.ip_addresses.add(address)
+			address.ports.add(Port.objects.create(number=80, product='nginx', version='1.18.0'))
+		calls = []
+		fire_for_cve(self._cve('CVE-2099-79'), max_hosts=2, test_dispatcher=lambda pk, hosts, project: calls.append((project, list(hosts))))
+		by_project = {project: hosts for project, hosts in calls}
+		self.assertEqual(len(by_project[a.id]), 2)  # capped within the project
+		self.assertEqual(by_project[b.id], ['www.beta.test'])  # and B's host is not crowded out by A's

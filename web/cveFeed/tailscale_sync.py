@@ -42,7 +42,9 @@ def primary_address(device):
 
 def read_tailnet(link):
     """``(devices, policy, local_state, notes)``: the merged device records (None when neither source answered), the policy dict or
-    None, this server's own tailscaled state (``{}`` without a sidecar) and the errors met on the way, all safe to show."""
+    None, this server's own tailscaled state (``{}`` without a sidecar) and the errors met on the way, all safe to show. When credentials
+    are saved but the API did not answer, ``local_state['api_failed']`` is True: the local peers are then only the part of the tailnet this
+    node may see, so the list is no ground for retiring a device."""
     notes, api_devices, policy, local_devices, local_state = [], None, None, None, {}
     if link.credentials:
         try:
@@ -60,6 +62,7 @@ def read_tailnet(link):
             local_state, local_devices = tailscale_local.read()
         except TailscaleError as exc:
             notes.append(str(exc))
+    local_state['api_failed'] = bool(link.credentials) and api_devices is None
     if api_devices is None and local_devices is None:
         return None, None, local_state, notes
     local_state['reachable'] = scanner_reaches(link, api_devices, local_devices is not None, local_state)
@@ -391,7 +394,9 @@ def _sync(link, scan):
             pending.append(row)
     if unchanged:  # one query for every device that only moved its online state and last seen time
         TailscaleDevice.objects.bulk_update(unchanged, ['online', 'facts', 'last_seen'], batch_size=500)
-    if devices:  # an empty answer is never read as "everyone left"
+    if local_state.get('api_failed'):  # the API list is the complete one: a node's own view is a subset, so nobody is retired on it
+        notes.append('the Tailscale API did not answer, so no device was retired')
+    elif devices:  # an empty answer is never read as "everyone left"
         still_wanted = {d['node_id'] for d in wanted}  # imported, or deferred by the cap or a conflict: not gone
         for node_id, row in existing.items():
             if node_id not in still_wanted and not row.departed_at:

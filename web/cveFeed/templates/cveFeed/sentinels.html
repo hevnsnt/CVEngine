@@ -4,7 +4,7 @@
 {% block content %}
 <div class="page-head"><div>
 <h1>Sentinels</h1>
-<p class="sub">A Sentinel is a scanner you run on your own network: it registers itself, pulls nmap, naabu and nuclei work off this project's queue, runs it and reports typed results back. This phase covers nmap, naabu and the nuclei passes; a scan with no live Sentinel runs those locally exactly as before.</p>
+<p class="sub">A Sentinel is a scanner you run on your own network: it registers itself, pulls scan work off this project's queue (nmap, naabu, the nuclei passes, TLS audits, UDP sweeps, WPScan, OpenVAS and, on an internal network, host discovery), runs it and reports typed results back. A scan with no live Sentinel runs the external stages locally exactly as before; work on an internal network only ever runs on a Sentinel inside it.</p>
 </div></div>
 
 <div class="grid main" style="margin-top:0">

@@ -4,6 +4,7 @@ issued for a new subdomain shows up here on its own, without waiting for the nex
 This is purely passive: one read-only HTTPS GET to a public CT log aggregator per check, the same source
 bbot's own ``crt`` module uses. Nothing is sent to the target itself.
 """
+import json
 import logging
 import os
 import random
@@ -19,6 +20,7 @@ CRT_SH_URL = 'https://crt.sh/'
 REQUEST_TIMEOUT = 45          # crt.sh is slow on big domains
 MIN_GAP = (1.5, 2.5)          # seconds between lookups, across every worker: crt.sh blocks bursts
 MAX_ATTEMPTS = 4
+MAX_BYTES = 32 * 1024 * 1024  # a reply larger than this is refused unread: %.domain of a big target can be hundreds of MB
 MAX_BACKOFF = 120             # never wait longer than this on one retry, whatever Retry-After says
 MAX_NEW_PER_RUN = 200  # a cap, not a truncation of what gets recorded over time: the rest show up next run
 _LABEL = r'[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
@@ -109,6 +111,20 @@ def _retry_after(resp):
         return None
 
 
+def _read_json(resp):
+    """The decoded JSON of a streamed reply, read at most MAX_BYTES (ValueError above that or when it is not JSON)."""
+    body, size = [], 0
+    try:
+        for chunk in resp.iter_content(65536):
+            size += len(chunk)
+            if size > MAX_BYTES:
+                raise ValueError(f'the reply is larger than {MAX_BYTES // (1024 * 1024)} MB')
+            body.append(chunk)
+    finally:
+        resp.close()
+    return json.loads(b''.join(body).decode('utf-8', 'replace') or '[]')
+
+
 def _fetch(domain, timeout=REQUEST_TIMEOUT, sleep=time.sleep):
     """Entries for ``domain`` from crt.sh, or None when it could not be reached after several polite attempts. A shared provider
     domain (``jfrog.com``) is never queried: ``%.jfrog.com`` is every customer of the provider, not this target's tree."""
@@ -120,7 +136,7 @@ def _fetch(domain, timeout=REQUEST_TIMEOUT, sleep=time.sleep):
         sleep(reserve_slot(random.uniform(*MIN_GAP)))
         last = attempt + 1 == MAX_ATTEMPTS
         try:
-            resp = requests.get(CRT_SH_URL, params={'q': f'%.{domain}', 'output': 'json'}, timeout=timeout)
+            resp = requests.get(CRT_SH_URL, params={'q': f'%.{domain}', 'output': 'json'}, timeout=timeout, stream=True)
         except requests.Timeout as exc:
             logger.warning('crt.sh lookup for %s timed out (attempt %s of %s): %s', domain, attempt + 1, MAX_ATTEMPTS, exc)
             if last:
@@ -141,8 +157,8 @@ def _fetch(domain, timeout=REQUEST_TIMEOUT, sleep=time.sleep):
             continue
         try:
             resp.raise_for_status()
-            entries = resp.json()
-        except (requests.RequestException, ValueError) as exc:
+            entries = _read_json(resp)
+        except (requests.RequestException, ValueError, RecursionError) as exc:
             logger.warning('crt.sh lookup failed for %s: %s', domain, exc)
             return None
         return entries if isinstance(entries, list) else []
@@ -190,9 +206,13 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
             DiscoveryEvent.objects.create(scan=None, domain=domain, type='DNS_NAME', label=name, host=name,
                                           parent_host=domain.name, module='ct-monitor')
     if created:
+        from cveFeed.bounty_gate import Gate
+        gate = Gate()  # a bug bounty project is recorded but not scanned on its own: not before its owner confirmed automated testing, not outside the program's scope
+        to_scan = [s.name for s in created if gate.allows(domain.project_id, s.name)]
         try:  # the new hosts get fingerprinted and checked now, not at the next full discovery
             from cveFeed.tasks import host_pipeline
-            host_pipeline.delay(domain.id, [s.name for s in created])
+            if to_scan:
+                host_pipeline.delay(domain.id, to_scan)
         except Exception:  # noqa: BLE001 - a queue problem must not lose the finds, which are already recorded
             logger.exception('could not queue the pipeline for %s new host(s) of %s', len(created), domain.name)
         activity.log('discovery', (

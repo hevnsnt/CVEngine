@@ -249,7 +249,10 @@ class AIProvider:
 		try:
 			resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
 			resp.raise_for_status()
-			data = resp.json()
+			try:
+				data = resp.json()
+			except ValueError as e:  # requests' own JSONDecodeError is a RequestException too: it must not read as "connection failed" below
+				raise AIProviderError(f'{self.name} returned invalid JSON', category='provider_json') from e
 			if isinstance(data, dict):
 				self._last_usage = data.get('usage') or {
 					'prompt_tokens': data.get('prompt_eval_count'), 'completion_tokens': data.get('eval_count')}

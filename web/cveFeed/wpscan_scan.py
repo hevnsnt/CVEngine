@@ -76,15 +76,16 @@ def thorough_timeout():
         return DEFAULT_THOROUGH_TIMEOUT
 
 
-def wpscan_args(timeout, thorough=False):
+def wpscan_args(timeout, thorough=False, proxy_args=()):
     """The WPScan options for one site. ``--max-scan-duration`` ends the scan 30 seconds before the process would be killed, so a slow site
     still gives a partial report instead of nothing. The quick pass reads plugins and themes passively; the thorough pass asks for every one
-    WPScan knows (mixed detection) and the timthumbs."""
+    WPScan knows (mixed detection) and the timthumbs. ``proxy_args`` is the egress proxy's argument list (``cveFeed.egress_proxy.for_tool('wpscan')``,
+    empty for a direct run)."""
     mode = 'mixed' if thorough else 'passive'
     enumerate_ = THOROUGH_ENUMERATE if thorough else ENUMERATE + (',tt' if timthumbs() else '')
     return ['--format', 'json', '--no-banner', '--random-user-agent', '--throttle', str(THROTTLE_MS), '--request-timeout', '30',
             '--connect-timeout', '15', '--detection-mode', 'mixed', '--plugins-detection', mode, '--themes-detection', mode,
-            '--disable-tls-checks', '--enumerate', enumerate_, '--max-scan-duration', str(max(30, timeout - 30))]
+            '--disable-tls-checks', '--enumerate', enumerate_, '--max-scan-duration', str(max(30, timeout - 30)), *proxy_args]
 
 
 OK_EXIT_CODES = (0, 5)  # 5 means "vulnerabilities found"; 1 bad option, 2 interrupted, 3 unexpected exception, 4 the scan did not finish
@@ -251,17 +252,25 @@ def child_env(token):
     return env
 
 
+def url_host(url):
+    from urllib.parse import urlsplit
+    return (urlsplit(url).hostname or '')[:80]
+
+
 def run_wpscan_process(url, token, timeout=None, thorough=False):
     """Run WPScan on one site and return its parsed JSON report (local execution only - see ``_classify`` for what a
     Sentinel-dispatched run shares with this). The token travels in the environment."""
+    from cveFeed import egress_proxy, heavy_process
     from targetApp.target_types import refuse_local
     refuse_local('WPScan')
     env = child_env(token)
+    proxy_args = egress_proxy.for_tool('wpscan', [url_host(url)])  # Settings > Proxy: raises when it is on and no proxy suits WPScan
     with tempfile.TemporaryDirectory(prefix='wpscan-') as tmp:
         out = os.path.join(tmp, 'report.json')
         limit = timeout or (thorough_timeout() if thorough else wpscan_timeout())
-        proc = subprocess.run([WPSCAN_BIN, '--url', url, *wpscan_args(limit, thorough), '-o', out], env=env, timeout=limit,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        # under the resource gate: a pause or a stopped scan kills WPScan and its ruby children, and it waits for memory like nmap does
+        proc = heavy_process.run('wpscan', [WPSCAN_BIN, '--url', url, *wpscan_args(limit, thorough, proxy_args), '-o', out], limit, label=url_host(url), env=env,
+                                 stderr=subprocess.PIPE)
         return _classify(_read_report(out), proc.returncode, proc.stderr, token)
 
 
@@ -630,6 +639,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     it with no local fallback, the sites are the ones the Sentinel-run technology pass already tagged as WordPress (this server sends no probe of
     its own, to the site or to its plugin pages), and no thorough pass is queued (it would run from here)."""
     from cveFeed import activity, ledger, probes, wp_correlation
+    from reNgine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
@@ -700,6 +710,10 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
             record_state(project, domain.id, host, 'blocked', _hint(str(exc), token))
             errors.append(f'{host}: blocked by the edge')
             continue
+        except (resources.ScanAborted, resources.MemoryBusy):  # stopped, or no memory for it: not the site's fault, and nothing after it can run
+            for waiting in todo[index:]:
+                record_state(project, domain.id, waiting, 'waiting', 'the scan was stopped or memory was short; it goes first next time')
+            break
         except Exception as exc:  # noqa: BLE001 - one site failing must not stop the rest
             logger.warning('wpscan failed for %s: %s', host, _redact(str(exc), token))
             ledger.record(SERVICE, [host], project, scan, 'failed')
@@ -788,9 +802,13 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
     with resources.redis_claim(f'cvengine:wpscan:thorough:{project_id}', owner, 300) as holder:
         if holder is not True:
             return {**summary, 'skipped': 'another thorough pass is running for this project'}
+        from cveFeed.bounty_gate import Gate
         while True:
             if resources.global_pause_requested(fail_closed=True):
                 return {**summary, 'skipped': 'scanning is paused: the hosts stay waiting'}
+            gate = Gate()  # read again for every host: a confirmation withdrawn while the pass runs stops it at the next site
+            if gate.project_blocked(project_id):
+                return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing: the hosts stay waiting'}
             todo = _pending_hosts(project_id)
             if not todo:
                 return summary
@@ -798,6 +816,11 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
             sub = _latest_row(project_id, host)
             if sub is None or (exclusions.excluded_names(project_id) and exclusions.normalize(host) in exclusions.excluded_names(project_id)):
                 record_thorough(project_id, domain_id, host, 'failed', 'the host is no longer a target of the project')
+                summary['failed'] += 1
+                continue
+            why = gate.refusal(project_id, host)  # a bug bounty project that has not confirmed automated testing, or a host outside the program's scope
+            if why:
+                record_thorough(project_id, domain_id, host, 'failed', 'not scanned: ' + why)
                 summary['failed'] += 1
                 continue
             scan, url = sub.scan_history, _base_of(sub)
@@ -813,6 +836,10 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
                 summary['blocked'] += 1
                 activity.settle(running, 'done', message=f'Thorough WPScan pass: {host} is protected by an edge that challenged the scanner')
                 continue
+            except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped or no memory: the host stays waiting, a later run carries on
+                record_thorough(project_id, domain_id, host, 'pending', 'the pass was stopped or memory was short; it runs again later')
+                activity.settle(running, 'done', message=f'Thorough WPScan pass on {host}: stopped before it finished ({type(exc).__name__}); the host stays waiting')
+                return {**summary, 'skipped': 'scanning was stopped or memory was short: the hosts stay waiting'}
             except Exception as exc:  # noqa: BLE001 - ValueError (not WordPress), a timeout, a crash: recorded, and the next host goes on
                 reason = _redact(str(exc), token) or 'WPScan failed'
                 record_thorough(project_id, domain_id, host, 'failed', reason)

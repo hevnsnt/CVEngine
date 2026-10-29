@@ -96,7 +96,7 @@ def encrypted_fields():
     from django.apps import apps
     found = []
     for model in apps.get_models():
-        names = [f.name for f in model._meta.concrete_fields if isinstance(f, (EncryptedCharField, EncryptedJSONField))]
+        names = [f.name for f in model._meta.concrete_fields if isinstance(f, (EncryptedCharField, EncryptedTextField, EncryptedJSONField))]
         if names:
             found.append((model, names))
     return found
@@ -104,6 +104,17 @@ def encrypted_fields():
 
 class EncryptedCharField(models.CharField):
     """A CharField whose database value is encrypted; the Python value is always the plaintext."""
+
+    def from_db_value(self, value, expression, connection):
+        return decrypt_text(value)
+
+    def get_prep_value(self, value):
+        value = super().get_prep_value(value)
+        return encrypt_text(value) if isinstance(value, str) else value
+
+
+class EncryptedTextField(models.TextField):
+    """A TextField (no length limit, several lines) whose database value is encrypted; the Python value is always the plaintext."""
 
     def from_db_value(self, value, expression, connection):
         return decrypt_text(value)

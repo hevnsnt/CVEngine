@@ -25,7 +25,7 @@ class GraphPollingTests(TestCase):
 		self.domain = Domain.objects.create(name='graph.test', project=self.project, insert_date=now)
 		self.sub = Subdomain.objects.create(target_domain=self.domain, name='www.graph.test')
 		self.sub.ip_addresses.add(IpAddress.objects.create(address='192.0.2.5'))
-		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-5', kev=True, cvss=9.8, raw={'big': 'x' * 500}, affected=[])
+		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-5', kev=True, cvss=9.8, affected=[])
 		self.match = CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.sub, matched_product='nginx', confidence=0.9)
 		self.user = User.objects.create_user('gu', password='x')
 		ProjectMembership.objects.create(user=self.user, project=self.project, role='audit')
@@ -57,11 +57,9 @@ class GraphPollingTests(TestCase):
 			self.client_.get('/cve/api/graph')
 		self.assertEqual(build.call_count, 1)
 
-	def test_the_graph_never_reads_cve_raw(self):
-		with CaptureQueriesContext(connection) as ctx:
-			payload = views.graph_payload()
+	def test_the_graph_payload_names_the_matched_cve(self):
+		payload = views.graph_payload()
 		self.assertIn('cve:%d' % self.cve.pk, {n['id'] for n in payload['nodes']})
-		self.assertFalse([q['sql'] for q in ctx if '"raw"' in q['sql']])
 
 
 class StatsAndQueueTests(TestCase):

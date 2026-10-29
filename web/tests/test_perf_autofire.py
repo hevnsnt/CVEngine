@@ -36,8 +36,8 @@ class HotCveSelectionTests(TestCase):
 			tier = classify_threat_tier(kev=entry.kev, epss_reached=entry.epss_reached, exploit_db=entry.exploit_db, cvss=entry.cvss)
 			self.assertEqual(entry.id in hot_ids, tier in (FIRE, SMOKE), entry)
 
-	def test_only_unfired_hot_cves_come_back_in_one_query_without_raw(self):
-		fire = CVEEntry.objects.create(cve_id='CVE-2099-1', kev=True, affected=[], raw={'big': 'x' * 300})
+	def test_only_unfired_hot_cves_come_back_in_one_query(self):
+		fire = CVEEntry.objects.create(cve_id='CVE-2099-1', kev=True, affected=[])
 		smoke = CVEEntry.objects.create(cve_id='CVE-2099-2', cvss=7.5, affected=[])
 		CVEEntry.objects.create(cve_id='CVE-2099-3', cvss=3.0, affected=[])  # ice
 		done = CVEEntry.objects.create(cve_id='CVE-2099-4', kev=True, affected=[])
@@ -47,7 +47,6 @@ class HotCveSelectionTests(TestCase):
 			tiers = [c.threat_tier for c in found]
 		self.assertEqual({c.id for c in found}, {fire.id, smoke.id})
 		self.assertEqual(len(ctx), 1)  # classifying the rows loads nothing more
-		self.assertFalse([q['sql'] for q in ctx if '"raw"' in q['sql']])
 		self.assertEqual(sorted(tiers), [FIRE, SMOKE])
 
 	def test_a_run_that_errored_is_tried_again_for_two_days_then_left_alone(self):

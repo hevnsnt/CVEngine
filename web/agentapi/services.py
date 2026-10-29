@@ -15,7 +15,8 @@ from typing import Optional
 
 from django.utils import timezone
 
-from cveFeed.counts import RUNNING_WINDOW
+from cveFeed import match_policy
+from cveFeed.counts import running_window
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from tenancy import roles
 
@@ -149,16 +150,34 @@ def _int_param(value, name):
         raise ApiError(400, f'{name} must be an integer')
 
 
-def paginate(queryset, params, serialize):
+MAX_PAGE = 10 ** 6  # beyond this the OFFSET is past any table; an absurd page is clamped instead of overflowing the database's bigint
+
+
+def page_args(params, zero_ok=False):
+    """``(page, size)`` from ``page`` and ``page_size``: page at least 1 (and at most MAX_PAGE), size from 1 to PAGE_SIZE_MAX, a 400
+    for anything that is not a whole number. The one place the bounds live, so no list route can be asked for a negative or a giant window.
+    With ``zero_ok`` a ``page_size`` of 0 is kept: the route answers with its counts and no rows, which is all a chip or a badge needs."""
     try:
-        page = max(1, int(params.get('page', 1)))
-        size = min(PAGE_SIZE_MAX, max(1, int(params.get('page_size', PAGE_SIZE_DEFAULT))))
-    except (TypeError, ValueError):
+        page = min(MAX_PAGE, max(1, int(params.get('page', 1))))
+        size = int(params.get('page_size', PAGE_SIZE_DEFAULT))
+    except (TypeError, ValueError, OverflowError):  # OverflowError: a JSON 1e999 parses to infinity
         raise ApiError(400, 'page and page_size must be integers')
+    return page, min(PAGE_SIZE_MAX, max(0 if zero_ok and size == 0 else 1, size))
+
+
+def paginate(queryset, params, serialize):
+    """One page of ``queryset``. ``page_size=0`` returns the count and no rows."""
+    page, size = page_args(params, zero_ok=True)
     total = queryset.count()
     start = (page - 1) * size
     return {'count': total, 'page': page, 'page_size': size,
-            'results': [serialize(o) for o in queryset[start:start + size]]}
+            'results': [serialize(o) for o in queryset[start:start + size]] if size else []}
+
+
+def _digits(value, longest=9):
+    """True when ``value`` is a short run of ASCII digits, so int() of it cannot fail (str.isdigit() is also true of superscripts) or
+    run past the database's integer."""
+    return isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= longest
 
 
 def _iso(value):
@@ -265,7 +284,7 @@ def set_target_scope(ctx, slug, target_id, scope_mode):
     parent domain) or ``parent`` (the registrable domain is owned, even on the shared list: use with care)."""
     from targetApp.models import Domain
     project, _ = get_project(ctx, slug, write=True)
-    if scope_mode not in {m for m, _label in Domain.SCOPE_MODES}:
+    if not isinstance(scope_mode, str) or scope_mode not in {m for m, _label in Domain.SCOPE_MODES}:
         raise ApiError(400, 'scope_mode must be auto, host or parent')
     d = Domain.objects.filter(project=project, id=target_id).first()
     if not d:
@@ -356,6 +375,8 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
     queued for discovery, in order."""
     from targetApp.target_types import DOMAIN
     project, _ = get_project(ctx, slug, write=True)
+    if not isinstance(value, str):
+        raise ApiError(400, 'value must be text')
     kind, names = _expand_target(value, project.id)
     excluded = []
     created, existing = _create_domains(project, names, description, excluded)
@@ -382,7 +403,7 @@ def _scan(s, detail=False, queued=None):
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
            'status': s.scan_status, 'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
-           'stalled': s.scan_status == 1 and s.start_scan_date < timezone.now() - RUNNING_WINDOW,  # marked running, but older than any scan can run
+           'stalled': s.scan_status == 1 and s.start_scan_date < timezone.now() - running_window(),  # marked running, but older than any scan can run
            'kind': 'retest' if 'retest' in (s.tasks or []) else 'hosts' if 'host_pipeline' in (s.tasks or []) else 'discovery'}
     if s.scan_status == -1:  # how many scans are ahead of this one in the queue
         from cveFeed.discovery import queue_position
@@ -424,14 +445,10 @@ def list_scans(ctx, slug, params):
     qs = qs.order_by(
         Case(When(scan_status=1, then=Value(0)), When(scan_status=-1, then=Value(1)), default=Value(2), output_field=IntegerField()),
         Case(When(scan_status=-1, then=F('id')), default=-F('id'), output_field=IntegerField()))
-    try:
-        page = max(1, int(params.get('page', 1)))
-        size = min(PAGE_SIZE_MAX, max(1, int(params.get('page_size', PAGE_SIZE_DEFAULT))))
-    except (TypeError, ValueError):
-        raise ApiError(400, 'page and page_size must be integers')
+    page, size = page_args(params, zero_ok=True)  # page_size=0: the counts alone
     total = qs.count()
     start = (page - 1) * size
-    scans = list(qs[start:start + size])
+    scans = list(qs[start:start + size]) if size else []
     ids = [s.id for s in scans]
     hosts = dict(Subdomain.objects.filter(scan_history_id__in=ids).values_list('scan_history_id').annotate(n=Count('id')))
     found = {sid: (n, top) for sid, n, top in Vulnerability.objects.filter(scan_history_id__in=ids)
@@ -480,7 +497,7 @@ def list_scan_subdomains(ctx, slug, scan_id, params):
     qs = Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses', 'technologies').order_by('name')
     if params.get('q'):
         qs = qs.filter(name__icontains=params['q'])
-    if params.get('http_status', '').isdigit():
+    if _digits(params.get('http_status')):
         qs = qs.filter(http_status=int(params['http_status']))
     return paginate(qs, params, _scan_subdomain)
 
@@ -498,7 +515,7 @@ def list_scan_endpoints(ctx, slug, scan_id, params):
     qs = EndPoint.objects.filter(scan_history=scan).select_related('subdomain').order_by('http_url')
     if params.get('q'):
         qs = qs.filter(http_url__icontains=params['q'])
-    if params.get('http_status', '').isdigit():
+    if _digits(params.get('http_status')):
         qs = qs.filter(http_status=int(params['http_status']))
     return paginate(qs, params, _scan_endpoint)
 
@@ -692,7 +709,7 @@ def rescan_hosts(ctx, slug, target_id, hosts):
     if not inside:
         raise ApiError(400, f'none of the hosts is {domain.name} or under it')
     inside = inside[:RESCAN_MAX_HOSTS]
-    host_pipeline.delay(domain.id, inside)
+    host_pipeline.delay(domain.id, inside, by_person=True)
     return {'queued': len(inside), 'skipped': len(names) - len(inside), 'target_id': domain.id}
 
 
@@ -829,6 +846,7 @@ def parse_target_list(text):
 
 
 BULK_MAX_PROJECTS = 50
+BULK_MAX_EXCLUSIONS = 100  # ``-domain`` lines one Add targets paste may carry; each one purges a whole domain tree organization-wide
 
 
 def has_org_headers(text):
@@ -837,12 +855,27 @@ def has_org_headers(text):
     return any(re.match(r'^\s*#\S', line) for line in (text or '').splitlines())
 
 
-def parse_org_text(text, default_project=None):
+def parse_org_text(text, default_project=None, max_entries=None, max_projects=None):
     """Parse the grouped bulk format: an optional ``##Organization``, ``#Project`` to open a project, and the targets
     (any separator parse_target_list takes) under it. Returns (org_name or None, [(project, [targets])], errors).
     Targets above the first project header go to ``default_project`` when given, else they are reported; a second
-    ``##`` header is reported. ``# comment`` lines are ignored."""
+    ``##`` header is reported. ``# comment`` lines are ignored. Linear in the size of the paste (a set per project does
+    the de-duplication); ``max_entries`` / ``max_projects`` stop the parse with a 400 as soon as the paste carries more, so
+    an oversized paste is refused before it is walked to the end."""
     org, groups, errors, current = None, [], [], None
+    by_name, seen, total = {}, {}, 0  # project name (lower case) -> group; id(group) -> its entries as a set; entries kept so far
+
+    def open_project(name):
+        group = by_name.get(name.lower())
+        if group is None:
+            if max_projects is not None and len(groups) >= max_projects:
+                raise ApiError(400, f'more than {max_projects} projects; the limit is {max_projects} per request')
+            group = (name, [])
+            by_name[name.lower()] = group
+            seen[id(group)] = set()
+            groups.append(group)
+        return group
+
     for raw in (text or '').splitlines():
         line = raw.strip()
         if line.startswith('##'):
@@ -857,21 +890,19 @@ def parse_org_text(text, default_project=None):
         if line.startswith('#'):
             name = line[1:].strip()
             if name and not line[1:2].isspace():  # "#Name" opens a project; "# note" is a comment
-                current = next((g for g in groups if g[0].lower() == name.lower()), None)
-                if current is None:
-                    current = (name, [])
-                    groups.append(current)
+                current = open_project(name)
             continue
         for entry in parse_target_list(line):
             if current is None and default_project:
-                current = next((g for g in groups if g[0].lower() == default_project.lower()), None)
-                if current is None:
-                    current = (default_project, [])
-                    groups.append(current)
+                current = open_project(default_project)
             if current is None:
                 errors.append({'value': entry, 'error': 'no #Project header above this line'})
-            elif entry not in current[1]:
+            elif entry not in seen[id(current)]:
+                seen[id(current)].add(entry)
                 current[1].append(entry)
+                total += 1
+                if max_entries is not None and total > max_entries:
+                    raise ApiError(400, f'more than {max_entries} entries; the limit is {max_entries} per request')
     return org, groups, errors
 
 
@@ -932,15 +963,15 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     from django.utils.text import slugify
     from dashboard.models import Project
     require_write_token(ctx)
-    _, current = _current_org(ctx.user, current_project)
-    org_name, groups, errors = parse_org_text(text, default_project=current.name if current else None)
+    if not isinstance(text, str):
+        raise ApiError(400, 'text must be pasted text')
+    org, current = _current_org(ctx.user, current_project)
+    if org is None:  # authorize before the paste is read: a caller with no organization gets nothing parsed
+        raise ApiError(403, 'you are not a member of any organization')
+    org_name, groups, errors = parse_org_text(text, default_project=current.name if current else None,
+                                              max_entries=BULK_MAX_ENTRIES, max_projects=BULK_MAX_PROJECTS)
     if not groups:
         raise ApiError(400, 'no #Project sections found')
-    total = sum(len(g[1]) for g in groups)
-    if len(groups) > BULK_MAX_PROJECTS:
-        raise ApiError(400, f'{len(groups)} projects; the limit is {BULK_MAX_PROJECTS} per request')
-    if total > BULK_MAX_ENTRIES:
-        raise ApiError(400, f'{total} entries; the limit is {BULK_MAX_ENTRIES} per request')
     org, org_note = _org_for_bulk(ctx, org_name, current_project)
     can_create = roles.can_manage_org(ctx.user, org.id)
     results = []
@@ -1008,11 +1039,17 @@ def _add_targets(ctx, slug, values, discover, mode):
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
     queued for discovery, first in, first out."""
     project, _ = get_project(ctx, slug, write=True)
+    if values is not None and not isinstance(values, (str, list)):
+        raise ApiError(400, 'targets must be a list or pasted text')
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
     if not entries:
         raise ApiError(400, 'no targets found in the input')
     patterns = [e[1:] for e in entries if e.startswith('-')]  # "-example.com": exclude that domain and everything under it
     entries = [e for e in entries if not e.startswith('-')]
+    if len(entries) + len(patterns) > BULK_MAX_ENTRIES:  # before the exclusions below: each is an irreversible organization-wide purge
+        raise ApiError(400, f'{len(entries) + len(patterns)} entries; the limit is {BULK_MAX_ENTRIES} per request')
+    if len(patterns) > BULK_MAX_EXCLUSIONS:
+        raise ApiError(400, f'{len(patterns)} exclusions; the limit is {BULK_MAX_EXCLUSIONS} per request')
     excluded, refused = _exclude_patterns(ctx, slug, patterns)  # first, so nothing added below can land inside what was just excluded
     if not entries:
         return {'received': len(patterns), 'created': 0, 'created_names': [], 'domains': [], 'already_exists': [], 'invalid': refused,
@@ -1085,7 +1122,7 @@ def _heat_reasons(sub):
                         'detail': (f'CVSS {c.cvss}' if c.cvss is not None else 'no score') +
                         (', listed as exploited' if c.kev else '') + (', AI confirmed' if m.ai_verdict == 'affected' else '') +
                         (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else ''),
-                        'temp': match_temperature(tier, c.cvss, m.ai_verdict, m.distro_status),
+                        'temp': match_temperature(tier, c.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)),
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
     for v in sub.vulnerability_set.all():
         if finding_is_live(v) and v.severity in SEVERITY_HEAT:
@@ -1950,12 +1987,17 @@ def _term_q(field, value, quoted, project):
 def _search_matches(project, terms):
     """The current-inventory Subdomain rows that satisfy every term (before they are folded into one row per host). The one
     place a search is turned into a queryset, shared by the interactive search and the saved-search evaluator."""
+    from django.db.models import Exists, OuterRef
+
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
     for neg, field, value, quoted in terms:
         q = _term_q(field, value, quoted, project)
-        qs = qs.exclude(q) if neg else qs.filter(q)
+        # A negated term is "no row of this host satisfies q". exclude(q) would split q's conditions on the same relation into one
+        # subquery each (a port that is 161, and some port that is open), so a host with a closed port 161 plus any open port would
+        # drop out. One positive filter inside a single subquery keeps every condition on the same port row.
+        qs = qs.filter(~Exists(Subdomain.objects.filter(q, pk=OuterRef('pk')))) if neg else qs.filter(q)
     return qs
 
 
@@ -1985,24 +2027,33 @@ def search_hosts(ctx, slug, params):
     or name) filter one field; a filter value takes a comma-separated list for OR (``port:80,443``), unless quoted; ``-term``
     negates; quote a phrase. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
     always counts every value over the whole match of q, ignoring ``heat`` itself, so the chips keep their real totals while one is
-    selected. ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
+    selected. Counting heat walks the match (up to HEAT_FACET_CAP hosts), so ``facets=none`` skips it and every facet (``facets`` is
+    then null), and ``page_size=0`` answers with ``count`` alone (no rows, no facets): the cheap modes for a poll, a palette or a badge.
+    ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
     each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
     host. Highest score first; ``sort=name`` for names."""
     project, _ = get_project(ctx, slug)
     heat = params.get('heat') or ''
     if heat and heat not in HEAT_FACET_VALUES:
         raise ApiError(400, f'heat must be one of {", ".join(HEAT_FACET_VALUES)}')
-    facet_names = [f.strip() for f in (params.get('facets') or '').split(',') if f.strip()]
+    facet_names = [f.strip() for f in (params.get('facets') or '').split(',') if f.strip() and f.strip().lower() != 'none']  # facets=none: see below
     bad_facets = [f for f in facet_names if f not in SEARCH_FACET_FIELDS]
     if bad_facets:
         raise ApiError(400, f'facets must be among {", ".join(SEARCH_FACET_FIELDS)}: unknown {", ".join(bad_facets)}')
     try:
         facet_size = min(SEARCH_FACET_SIZE_MAX, max(1, int(params.get('facet_size', SEARCH_FACET_SIZE_DEFAULT))))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     qs = _internal_filter(search_host_rows(project, terms), params)
-    heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs)
+    # facets=none and page_size=0 are the cheap modes: no walk over the match for heat counts (a poll, a palette, an export page need none)
+    counts_only = page_args(params, zero_ok=True)[1] == 0
+    no_facets = counts_only or str(params.get('facets') or '').strip().lower() == 'none'
+    if no_facets:
+        facet_names = []
+    if counts_only and not heat:
+        return {'count': qs.count(), 'page': 1, 'page_size': 0, 'results': [], 'facets': None, 'has_internal': _any_internal()}
+    heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs) if heat or not no_facets else ({}, {}, False)
     qs_all = qs  # the whole match of q, before the heat filter narrows it
     search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
     if heat:
@@ -2010,10 +2061,15 @@ def search_hosts(ctx, slug, params):
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
-    page['facets'] = {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id), **search_facets}
-    from cveFeed import internal_view
-    page['has_internal'] = internal_view.any_visible()  # a project the caller sees declared an internal network: the page offers the scope filter
+    page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id),
+                                             **search_facets}
+    page['has_internal'] = _any_internal()  # a project the caller sees declared an internal network: the page offers the scope filter
     return page
+
+
+def _any_internal():
+    from cveFeed import internal_view
+    return internal_view.any_visible()
 
 
 def _matches_of_host():
@@ -2090,7 +2146,7 @@ def list_certificates(ctx, slug, params):
     qs = _scoped(TlsCertificate.objects.all(), project, 'domain__project').order_by('not_after', 'id')
     if everywhere:
         qs = qs.select_related('domain__project')
-    if params.get('expiring_within', '').isdigit():
+    if _digits(params.get('expiring_within'), 6):
         from cveFeed.counts import expiring_certificates
         qs = expiring_certificates(qs, int(params['expiring_within']))
     if params.get('q'):
@@ -2202,7 +2258,7 @@ def stats_history(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     try:
         days = min(MAX_STATS_HISTORY_DAYS, max(1, int(params.get('days', 90))))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ApiError(400, 'days must be an integer')
     since = timezone.localdate() - timedelta(days=days - 1)
     qs = _scoped(StatsSnapshot.objects.filter(date__gte=since), project, 'project').order_by('date')
@@ -2308,7 +2364,8 @@ def run_hygiene_checks(ctx, slug, target_id=None):
 
 def list_api_credentials(ctx, slug):
     """What services are configured for this project (and inherited from its org), never the secrets
-    themselves. Readable by anyone who can see the project; only a write-role may change them."""
+    themselves. Readable by anyone who can see the project; only a project or organization admin may change them (as the
+    organization's own keys, which a project key overrides)."""
     from cveFeed.api_credentials import SERVICES, service_entry
     from dashboard.models import ApiCredential
     project, role = get_one_project(ctx, slug)  # secrets belong to one project
@@ -2319,14 +2376,23 @@ def list_api_credentials(ctx, slug):
         cred = project_rows.get(service) or org_rows.get(service)
         results.append({**service_entry(service, label, fields, cred),
                         'scope': ('project' if service in project_rows else 'org' if cred else None)})
-    return {'results': results, 'can_edit': role != roles.AUDIT}
+    return {'results': results, 'can_edit': role == roles.ADMIN and not (ctx.token and ctx.token.read_only)}
+
+
+def _api_key_project(ctx, slug):
+    """The project for changing its API keys: a project key replaces the organization's key for every scan of the project, so it needs the
+    admin role (the project's, its organization's, or an App Admin), like the organization's own keys."""
+    project, role = get_project(ctx, slug, write=True)
+    if role != roles.ADMIN:
+        raise ApiError(403, 'project API keys are managed by a project or organization admin')
+    return project, role
 
 
 def set_api_credential(ctx, slug, service, values):
     """Save a project's own key for ``service``. A blank field keeps whatever was stored for that field."""
     from cveFeed.api_credentials import RETIRED, SERVICES
     from dashboard.models import ApiCredential
-    project, _ = get_project(ctx, slug, write=True)
+    project, _ = _api_key_project(ctx, slug)
     if service not in SERVICES:
         raise ApiError(404, f'unknown service {service!r}')
     if service in RETIRED:
@@ -2350,7 +2416,7 @@ def set_api_credential(ctx, slug, service, values):
 def delete_api_credential(ctx, slug, service):
     """Remove the project's own key for ``service`` (its organization's key, if any, still applies)."""
     from dashboard.models import ApiCredential
-    project, _ = get_project(ctx, slug, write=True)
+    project, _ = _api_key_project(ctx, slug)
     removed, _ = ApiCredential.objects.filter(project=project, service=service).delete()
     if removed:
         from cveFeed.admin_api import audit
@@ -2507,8 +2573,9 @@ def list_cve_feed(ctx, params):
     if wanted:  # tier is derived, so filter in Python over a bounded window
         window = [c for c in qs[:2000] if classify_threat_tier(
             kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss) == wanted]
-        size = min(PAGE_SIZE_MAX, int(params.get('page_size', PAGE_SIZE_DEFAULT)))
-        return {'count': len(window), 'page': 1, 'page_size': size, 'results': [_cve(c, True) for c in window[:size]]}
+        page, size = page_args(params)
+        start = (page - 1) * size
+        return {'count': len(window), 'page': page, 'page_size': size, 'results': [_cve(c, True) for c in window[start:start + size]]}
     return paginate(qs, params, lambda c: _cve(c, brief=True))
 
 
@@ -2592,7 +2659,7 @@ def _match(m):
     sub = m.subdomain
     cve = _cve(m.cve_entry, brief=True)
     cve['feed_tier'] = cve['tier']
-    cve['tier'] = match_temperature(cve['tier'], m.cve_entry.cvss, m.ai_verdict, m.distro_status)  # rated as it applies to this host
+    cve['tier'] = match_temperature(cve['tier'], m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m))  # rated as it applies to this host
     return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None,
             'product': m.matched_product, 'version': m.matched_version, 'in_affected_range': m.version_in_range,
             'confidence': m.confidence, 'source': m.source, 'host_reported': m.source == 'host',
@@ -2777,11 +2844,7 @@ def list_findings(ctx, slug, params):
     (actionable, the default, or all) and host. ``counts`` holds the total of each type under the same facets; the list itself
     pages through at most MAX_FINDINGS rows (``truncated`` says when there are more)."""
     project, _ = get_project(ctx, slug)
-    try:
-        page = max(1, int(params.get('page', 1)))
-        size = min(PAGE_SIZE_MAX, max(1, int(params.get('page_size', PAGE_SIZE_DEFAULT))))
-    except (TypeError, ValueError):
-        raise ApiError(400, 'page and page_size must be integers')
+    page, size = page_args(params, zero_ok=True)  # page_size=0: the counts alone
     sources = _finding_sources(project, params)
     counts = {key: qs.count() for key, qs in sources.items()}
     total = sum(counts.values())
@@ -2854,23 +2917,26 @@ def _record_status_change(project, kind, finding_id, before, after, actor):
                                       actor=actor, before={'status': before}, after={'status': after})
 
 
-def _apply_assignee(project, kind, obj, assignee, actor):
-    """Set or clear ``obj.assignee`` (a user id, or None/''/0 to unassign) and write the audit event. The new assignee
-    must be someone who can already see this project (the same check PATCH .../profile and everywhere else that names
-    a user by id uses); an id naming nobody, or nobody with access, is a 400."""
+def _resolve_assignee(project, assignee):
+    """The User a request names as assignee (a user id), or None for None/''/0 (unassign). The new assignee must be someone who can
+    already see this project (the same check PATCH .../profile and everywhere else that names a user by id uses); an id naming nobody,
+    or nobody with access, is a 400. Run before anything is written, so a bad assignee never leaves a half-applied update."""
     from django.contrib.auth.models import User
+    if assignee in (None, '', 0, '0'):
+        return None
+    try:
+        new_user = User.objects.get(pk=int(assignee))
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
+    if not roles.effective_role(new_user, project):
+        raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
+    return new_user
 
+
+def _apply_assignee(project, kind, obj, new_user, actor):
+    """Set or clear ``obj.assignee`` to ``new_user`` (from _resolve_assignee) and write the audit event."""
     from cveFeed.models import FindingAuditEvent
     before = _user_brief(obj.assignee)
-    if assignee in (None, '', 0, '0'):
-        new_user = None
-    else:
-        try:
-            new_user = User.objects.get(pk=int(assignee))
-        except (TypeError, ValueError, User.DoesNotExist):
-            raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
-        if not roles.effective_role(new_user, project):
-            raise ApiError(400, 'assignee must be the id of a user who can see this project, or null')
     obj.assignee = new_user
     obj.save(update_fields=['assignee'])
     FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='assignee', actor=actor,
@@ -2888,6 +2954,7 @@ def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
     m = _matches_qs(project).filter(id=match_id).first()
     if not m:
         raise ApiError(404, 'match not found')
+    new_user = _resolve_assignee(project, assignee) if assignee is not UNSET else None  # before the first write
     if status is not None:
         before = m.remediation_status
         _apply_remediation(m, status, note, ctx.user)
@@ -2895,7 +2962,7 @@ def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
         activity.log('remediation', f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
                      project=project, finding_kind='match', finding_id=m.id)
     if assignee is not UNSET:
-        _apply_assignee(project, 'match', m, assignee, ctx.user)
+        _apply_assignee(project, 'match', m, new_user, ctx.user)
     return _match(m)
 
 
@@ -2918,6 +2985,7 @@ def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, a
     if status is None and assignee is UNSET:
         raise ApiError(400, 'missing field(s): status or assignee')
     obj = _finding_obj(project, kind, finding_id)
+    new_user = _resolve_assignee(project, assignee) if assignee is not UNSET else None  # before the first write
     if status is not None:
         before = obj.remediation_status
         _apply_remediation(obj, status, note, ctx.user)
@@ -2925,7 +2993,7 @@ def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, a
         activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
                      finding_kind=kind, finding_id=finding_id)
     if assignee is not UNSET:
-        _apply_assignee(project, kind, obj, assignee, ctx.user)
+        _apply_assignee(project, kind, obj, new_user, ctx.user)
     return _vuln(obj) if kind == 'vulnerability' else _hygiene(obj)
 
 
@@ -3063,8 +3131,8 @@ def work_items(ctx, slug, params):
     order = {'fire': 0, 'smoke': 1, 'ice': 2}
     items.sort(key=lambda i: (i['triage']['classification'] in FALSE_POSITIVES, order.get(i['cve']['tier'], 3), -(i['cve']['cvss'] or 0),
                               -i['host_score']))  # likely false positives last; the host score breaks ties
-    size = min(PAGE_SIZE_MAX, int(params.get('page_size', PAGE_SIZE_DEFAULT)))
-    return {'count': len(items), 'registered_assets': patterns, 'results': items[:size]}
+    page, size = page_args(params)
+    return {'count': len(items), 'registered_assets': patterns, 'page': page, 'page_size': size, 'results': items[(page - 1) * size:page * size]}
 
 
 def _fixed_versions(cve, product):

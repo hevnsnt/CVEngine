@@ -74,12 +74,13 @@ class ScanControlTests(TestCase):
 
     def test_worker_gate_retries_without_executing_and_scheduler_holds_due_entry(self):
         from cveFeed.tasks import weekly_deep_nuclei
-        from reNgine.celery_custom_task import RengineTask
         self.assertIsInstance(weekly_deep_nuclei._get_current_object(), PauseAwareTask)
-        self.assertTrue(issubclass(RengineTask, PauseAwareTask))
         ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
         sentinel = RuntimeError('deferred')
-        with mock.patch.object(weekly_deep_nuclei._get_current_object(), 'retry', side_effect=sentinel) as retry:
+        task = weekly_deep_nuclei._get_current_object()
+        task.push_request(called_directly=False)  # what a worker does when it runs a queued message
+        self.addCleanup(task.pop_request)
+        with mock.patch.object(task, 'retry', side_effect=sentinel) as retry:
             with self.assertRaisesRegex(RuntimeError, 'deferred'):
                 weekly_deep_nuclei()
         retry.assert_called_once_with(countdown=60, max_retries=None)
@@ -90,6 +91,19 @@ class ScanControlTests(TestCase):
         root = Path(__file__).resolve().parents[2]
         for compose in ('docker-compose.yml', 'docker-compose.dev.yml'):
             self.assertIn('--scheduler cveFeed.scan_control:PauseAwareScheduler', (root / compose).read_text())
+
+    def test_a_direct_call_of_a_gated_task_runs_in_line_instead_of_raising_retry(self):
+        # an in-process caller (the CVE-correlation scan stage, manage.py correlate_cves, the legacy API views) is not a queued message
+        from celery.exceptions import Retry
+        from cveFeed.tasks import weekly_deep_nuclei
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+        task = weekly_deep_nuclei._get_current_object()
+        with mock.patch.object(task, 'run', return_value='ran') as run:
+            try:
+                self.assertEqual(task(), 'ran')
+            except Retry:
+                self.fail('a direct call raised Retry')
+        run.assert_called_once()
 
     def test_maintenance_that_never_touches_a_target_keeps_running_during_a_pause(self):
         from cveFeed import scan_control
@@ -108,6 +122,24 @@ class ScanControlTests(TestCase):
         for scanner in ('assess_host', 'host_pipeline', 'validate_match_on_demand', 'automatic_validate_finding', 'triage_sweep',
                         'template_test_for_cve', 'weekly_deep_nuclei', 'background_full_scan', 'nuclei_scan'):
             self.assertNotIn(scanner, scan_control.PAUSE_EXEMPT_TASKS)
+
+    def test_the_openvas_step_is_exempt_so_a_pause_can_stop_its_running_task(self):
+        from cveFeed import scan_control
+        self.assertIn('openvas_sweep', scan_control.PAUSE_EXEMPT_TASKS)
+        scheduler = object.__new__(PauseAwareScheduler)
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+        with mock.patch('django_celery_beat.schedulers.DatabaseScheduler.is_due', return_value=(True, 60)):
+            self.assertEqual(scheduler.is_due(mock.Mock(task='openvas_sweep')), (True, 60))
+
+    def test_only_an_operator_pause_counts_as_a_stop_request(self):
+        from cveFeed import scan_control
+        self.assertFalse(scan_control.operator_pause_requested())
+        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True})
+        self.assertFalse(scan_control.operator_pause_requested())  # an update's drain lets running work finish
+        ScanControl.objects.filter(pk=1).update(paused_by_update=False)
+        self.assertTrue(scan_control.operator_pause_requested())
+        with mock.patch('cveFeed.models.ScanControl.objects.filter', side_effect=RuntimeError('db down')):
+            self.assertFalse(scan_control.operator_pause_requested())
 
     def test_an_unreadable_control_database_gates_new_work_but_kills_nothing_running(self):
         from cveFeed import scan_control

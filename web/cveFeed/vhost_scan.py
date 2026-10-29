@@ -429,20 +429,20 @@ def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
         pool = known_names(project_id)
         addresses = web_addresses(project_id)
         resting = ledger.fresh(IP_SERVICE, list(addresses), project_id)
-        due = []
-        for address in sorted(addresses):
-            if address in resting:
-                continue
-            entry = addresses[address]
-            seen = {**pool, **names_on_address(project_id, address, entry['names'])}
-            fresh = ledger.fresh(SERVICE, [f'{address}|{n}' for n in seen], project_id)
-            names, out_of_scope = candidates(address, entry, seen, targets, banned, fresh)
-            summary['out_of_scope'] += out_of_scope
-            if names:
-                due.append((address, entry, names))
+        def due_addresses():  # lazily: a run handles at most max_ips addresses, so the ledger and certificate reads stop with them
+            for address in sorted(addresses):
+                if address in resting:
+                    continue
+                entry = addresses[address]
+                seen = {**pool, **names_on_address(project_id, address, entry['names'])}
+                fresh = ledger.fresh(SERVICE, [f'{address}|{n}' for n in seen], project_id)
+                names, out_of_scope = candidates(address, entry, seen, targets, banned, fresh)
+                summary['out_of_scope'] += out_of_scope
+                if names:
+                    yield address, entry, names
         running = None
         cache = {}
-        for address, entry, names in due:
+        for address, entry, names in due_addresses():
             if summary['ips'] >= max_ips():
                 break
             if stop():

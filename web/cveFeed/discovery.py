@@ -63,7 +63,6 @@ FALLBACK = {'deep': ['deep', 'standard', 'passive'], 'standard': ['standard', 'p
 HOST_PIPELINE_TASK = 'host_pipeline'  # marks a ScanHistory made by run_host_pipeline (in ScanHistory.tasks)
 RETEST_TASK = 'retest'  # also on a host pipeline started because its hosts changed (cveFeed.retest)
 MAX_PIPELINE_HOSTS = 200
-RUNNING_WINDOW_SECONDS = 11 * 3600  # a scan marked running for longer than this is a casualty of a restart (see views.RUNNING_WINDOW)
 DUPLICATE_WINDOW = 10 * 60  # seconds; the domain lock below is what really serialises long runs
 
 
@@ -530,6 +529,12 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         message = f'{scan.domain.name} is excluded for this organization and is not scanned'
         ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
+    from cveFeed.bounty_gate import Gate
+    why = Gate().refusal(scan.domain.project_id, scan.domain.name, unattended=scan.initiated_by_id is None)  # a bug bounty program: confirmed automated testing (unless a person started this) and a target its scope names
+    if why:
+        message = f'{scan.domain.name} is not scanned: {why}'
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from targetApp.target_types import IP, classify_target
     covered = None
     if classify_target(scan.domain.name) == IP:  # bbot finds subdomains; a bare IP has none
@@ -750,13 +755,15 @@ def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20):
 
 
 def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, retest=False, source_scan_id=None,
-                      force=False, hygiene=False, assessment_id=None, **stage_kwargs):
+                      force=False, hygiene=False, assessment_id=None, by_person=False, **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages
     a discovery ends with: resolve and record them, then nmap, the database exposure check, the light nuclei pass, CVE
     correlation and the targeted nuclei pass. The ledger still dedupes each scanner per asset, so a host or IP covered
     recently is not scanned again. A ScanHistory carries the run (queued, then running) so it shows in Scans and can be
     stopped; the stop flag is honoured between stages. ``retest`` marks a run started because these hosts changed (see
-    cveFeed.retest): its CVE checks ignore the ledger. Returns the stage results."""
+    cveFeed.retest): its CVE checks ignore the ledger. ``by_person`` marks a run a person asked for: any other run does nothing for a bug
+    bounty project whose owner has not confirmed automated testing, and no run scans a host the program's scope does not name
+    (cveFeed.bounty_gate). Returns the stage results."""
     from cveFeed import activity
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity, ScanHistory
@@ -769,6 +776,11 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     from cveFeed.archive_rediscovery import archived_names
     archived = archived_names(domain.project_id)
     wanted = [n for n in wanted if n not in archived]
+    from cveFeed.bounty_gate import Gate
+    gate = Gate()
+    if not by_person and gate.project_blocked(domain.project_id):
+        return {'status': 'inconclusive', 'hosts': 0, 'error': 'the bug bounty engagement has not confirmed automated testing; nothing was scanned'}
+    wanted = [n for n in wanted if gate.allows(domain.project_id, n, unattended=False)]  # a host the program's scope does not name is never scanned
     if not wanted:
         return {'status': 'empty', 'hosts': 0}
     engine = pick_engine()

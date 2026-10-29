@@ -434,3 +434,41 @@ class GenerationBudgetTests(TestCase):
 		self.assertEqual(outcome['source'], 'none')
 		self.assertIn('already attempted', outcome['reason'])
 		self.provider.complete.assert_not_called()
+
+
+class ProviderFailureLedgerTests(TestCase):
+	def test_a_failed_provider_call_still_counts_as_the_attempt_for_that_cve(self):
+		from django.core.cache import cache
+		cache.clear()
+		provider = mock.Mock(model='m')
+		provider.name = 'test'
+		provider.complete.side_effect = RuntimeError('provider down')
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-0303', cvss=9.8, title='t', published_at=timezone.now())
+		with self.assertRaises(RuntimeError):
+			templategen.generate_template(cve, provider)
+		row = GeneratedTemplate.objects.get(cve_entry=cve)
+		self.assertEqual(row.status, GeneratedTemplate.STATUS_INVALID)
+		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already attempted'):  # the next run does not call the provider again
+			templategen.generate_template(cve, provider)
+		self.assertEqual(provider.complete.call_count, 1)
+
+
+class LaunchTimeResolutionTests(TestCase):
+	def test_a_name_that_now_resolves_to_a_blocked_address_is_not_handed_to_nuclei(self):
+		seen = []
+
+		def fake(path, hosts, secret_file=None, redact=()):
+			seen.append(list(hosts))
+			return [{'host': h, 'vulnerable': False, 'output': ''} for h in hosts]
+		with mock.patch.object(templategen, '_run_template', side_effect=fake), \
+				mock.patch('targetApp.target_types.blocked_names', return_value={'rebind.example.test'}):
+			out = templategen.run_template('/t.yaml', ['ok.example.test', 'rebind.example.test', '203.0.113.7:8443'])
+		self.assertEqual(seen, [['ok.example.test', '203.0.113.7:8443']])
+		self.assertEqual([o['host'] for o in out], ['ok.example.test', 'rebind.example.test', '203.0.113.7:8443'])
+		self.assertIn('may not be scanned', out[1]['error'])
+		self.assertNotIn('error', out[0])
+		with mock.patch.object(templategen, '_run_template', side_effect=fake) as run, \
+				mock.patch('targetApp.target_types.blocked_names', return_value={'rebind.example.test'}):
+			out = templategen.run_template('/t.yaml', ['rebind.example.test'])
+		run.assert_not_called()
+		self.assertIn('error', out[0])

@@ -32,9 +32,9 @@
   <div class="card">
     <h2 style="margin-bottom:8px">Connect an agent</h2>
     <p class="note" style="margin-bottom:6px">Claude Code</p>
-    <pre class="code" data-copy>claude mcp add --transport http cvengine http://{{ host }}/mcp/ --header "Authorization: Bearer &lt;token&gt;"</pre>
+    <pre class="code" data-copy>claude mcp add --transport http cvengine {{ request.scheme }}://{{ host }}/mcp/ --header "Authorization: Bearer &lt;token&gt;"</pre>
     <p class="note" style="margin-bottom:6px">REST</p>
-    <pre class="code" data-copy>curl -H "Authorization: Bearer &lt;token&gt;" http://{{ host }}/api/v1/me</pre>
+    <pre class="code" data-copy>curl -H "Authorization: Bearer &lt;token&gt;" {{ request.scheme }}://{{ host }}/api/v1/me</pre>
     <p class="note">Agents that take assigned work: <code>register_agent</code> once, then <code>get_next_task</code>, <code>accept_task</code>, <code>report_task_result</code>, with <code>agent_heartbeat</code> about once a minute. <code>whoami</code> shows your agent's scope and open assignments.</p>
     <p class="note">Remediation agents that pick their own work: <code>register_assets</code>, then <code>get_remediation_work</code>, then <code>update_remediation_status</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
     <h2 style="margin:18px 0 8px">Host inventory</h2>

@@ -52,12 +52,44 @@ def top_up(now=None, only_sentinel_projects=False):
     Returns a small summary dict; never raises for an ordinary gate (paused, bounty-blocked, at capacity) or for one
     project's enqueue failure, so one bad project never stops the rest of the sweep.
     """
+    from agentapi import sentinel_broker
+    with sentinel_broker.memoised_rights():  # the Sentinels' rights and slots are worked out once for the whole sweep, not once per project and per call
+        return _top_up(now, only_sentinel_projects)
+
+
+CURSOR_KEY = 'cvengine:topup:cursor'  # the last project a sweep looked at: the next sweep carries on after it
+
+
+def _projects(blocked):
+    """The projects one sweep looks at: at most ``PROJECT_LIMIT``, starting after the one the last sweep ended on and wrapping round, so with more
+    projects than that every one gets its turn, instead of the first hundred by id being the only ones ever topped up."""
+    from django.core.cache import cache
+    from dashboard.models import Project
+    try:
+        cursor = int(cache.get(CURSOR_KEY) or 0)
+    except (TypeError, ValueError, OSError):
+        cursor = 0
+    base = Project.objects.exclude(pk__in=blocked).order_by('pk')
+    rows = list(base.filter(pk__gt=cursor)[:PROJECT_LIMIT])
+    if len(rows) < PROJECT_LIMIT:
+        rows += list(base.filter(pk__lte=cursor)[:PROJECT_LIMIT - len(rows)])
+    return rows
+
+
+def _remember_cursor(pk):
+    from django.core.cache import cache
+    try:
+        cache.set(CURSOR_KEY, pk, None)
+    except Exception:  # noqa: BLE001 - without the cache every sweep starts at the first project, as before
+        pass
+
+
+def _top_up(now, only_sentinel_projects):
     from cveFeed.assessment_review import host_coverage_due
     from cveFeed.conductor import bounty_blocked_projects
     from cveFeed.host_assessment import active_count, caps, enqueue
     from cveFeed.scan_control import pause_requested
     from cveFeed import unresolved_archive
-    from dashboard.models import Project
     from startScan.models import Subdomain
 
     now = now or timezone.now()
@@ -76,11 +108,12 @@ def top_up(now=None, only_sentinel_projects=False):
         return result
     blocked = bounty_blocked_projects()
     budget = min(global_cap - global_active, MAX_PER_RUN_BASE + (global_cap - 20))
-    projects = Project.objects.exclude(pk__in=blocked).order_by('pk')[:PROJECT_LIMIT]
     from agentapi import sentinel_broker
-    for project in projects:
+    last = None
+    for project in _projects(blocked):
         if budget <= 0:
             break
+        last = project.pk
         if only_sentinel_projects and not sentinel_broker.project_slots(project):
             continue
         result['projects_checked'] += 1
@@ -105,6 +138,8 @@ def top_up(now=None, only_sentinel_projects=False):
             if created and job.status == 'queued':
                 result['hosts_queued'] += 1
                 budget -= 1
+    if last is not None:
+        _remember_cursor(last)
     if result['hosts_queued']:
         from cveFeed import activity
         activity.log('discovery', f"Coverage top-up queued {result['hosts_queued']} host assessment"
@@ -119,15 +154,16 @@ def feed_sentinels(now=None):
     with the Sentinel-scaled caps). A Sentinel that is working through its tasks has the next ones already waiting, instead of idling until the
     five-minute top-up. Does nothing without a live Sentinel or while the queue is already deep enough."""
     from agentapi import sentinel_broker
-    slots = sentinel_broker.total_slots()
-    if not slots:
-        return {'skipped': 'no live Sentinel'}
-    waiting = sentinel_broker.waiting_tasks()
-    wanted = 2 * slots
-    if waiting >= wanted:
-        return {'skipped': 'queue is deep enough', 'slots': slots, 'waiting': waiting}
-    out = top_up(now, only_sentinel_projects=True)
-    return {**out, 'slots': slots, 'waiting': waiting, 'wanted': wanted}
+    with sentinel_broker.memoised_rights():  # top_up joins this block, so the rights built for the slot count are the ones it reuses
+        slots = sentinel_broker.total_slots()
+        if not slots:
+            return {'skipped': 'no live Sentinel'}
+        waiting = sentinel_broker.waiting_tasks()
+        wanted = 2 * slots
+        if waiting >= wanted:
+            return {'skipped': 'queue is deep enough', 'slots': slots, 'waiting': waiting}
+        out = top_up(now, only_sentinel_projects=True)
+        return {**out, 'slots': slots, 'waiting': waiting, 'wanted': wanted}
 
 
 # ----------------------------------------------------------------------------- deep-scan coverage gate

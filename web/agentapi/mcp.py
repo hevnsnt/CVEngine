@@ -133,7 +133,7 @@ TOOLS = [
     ('start_scan', 'Start a scan of a target: bbot discovery, then nmap and nuclei (work already done recently is reused). engine_id is optional and ignored.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'engine_id': {'type': 'integer'}}, ['project', 'target_id']),
      lambda c, a: svc.start_scan(c, a.get('project'), int(a['target_id']), int(a['engine_id']) if a.get('engine_id') else None), True),
-    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase". heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names).',
+    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase". heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
@@ -192,7 +192,7 @@ TOOLS = [
     ('remove_exclusion', 'Lift an exclusion so the organization can scan the host again (organization admin only).', _schema(
         {'project': SLUG, 'host': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.remove_exclusion(c, a.get('project'), a['host']), True),
-    ('list_auth_credentials', "The stored sign-ins (request headers and a cookie the scanners send, so Nuclei and the web route check see the signed-in application) of a project, masked: label, target, scope (host or target), host, origins, header and cookie NAMES, expiry and days left, state; never a value. Read only: a credential is set on the Targets page or over REST, never through a tool, because a secret must not pass through the model's context. App Admin or organization admin only. target_id narrows to one target.",
+    ('list_auth_credentials', "The stored sign-ins (request headers and a cookie the scanners send, so Nuclei and the web route check see the signed-in application) of a project, masked: label, target, scope (host or target), host, origins, header and cookie NAMES, expiry and days left, state, allow_untrusted_certificate (whether it may also be sent over a connection whose certificate does not verify; off by default); never a value. Read only: a credential is set on the Targets page or over REST, never through a tool, because a secret must not pass through the model's context. App Admin or organization admin only. target_id narrows to one target.",
      _schema({'project': SLUG, 'target_id': {'type': 'integer'}}, ['project']),
      lambda c, a: authcheck.list_credentials(c, a.get('project'), a), False),
     ('delete_auth_credential', 'Revoke (delete) a stored sign-in so the scanners stop sending it (see list_auth_credentials for the id). App Admin or organization admin only.',
@@ -296,7 +296,7 @@ TOOLS = [
      _schema({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'},
               'assignee': {'type': ['integer', 'null'], 'description': 'A member\'s user id (see list_members), or null to unassign.'}},
              ['project', 'kind', 'id', 'assignee']),
-     lambda c, a: svc.update_finding_status(c, a.get('project'), a['kind'], int(a['id']), assignee=a.get('assignee')), True),
+     lambda c, a: svc.update_finding_status(c, a.get('project'), a['kind'], int(a['id']), assignee=a['assignee']), True),
     ('list_finding_comments', 'The comments on one finding (match, vulnerability or hygiene), oldest first, a page at a time.',
      _schema(_page_props({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'}}),
              ['project', 'kind', 'id']),
@@ -414,7 +414,7 @@ TOOLS = [
      _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
     ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',
      _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]}}, ['self_update']),
-     lambda c, a: sentinel_settings.set_defaults(c.user, {'self_update': a.get('self_update')}), True),
+     lambda c, a: sentinel_settings.set_defaults(c.user, {'self_update': a['self_update']}), True),
     ('get_sentinel_dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (a Sentinel with a free slot), queue_seconds (a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) and per_target_seconds for each target beyond the first. A Sentinel row (list_sentinels, get_sentinel) carries slots {max, in_use, free, by_kind}, and get_sentinel queued_for_it (tasks waiting that it could take, by kind).',
      _schema(), lambda c, a: sentinel_dispatch.budgets(), False),
     ('get_agent', 'One agent with its effective rights and recent tasks.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
@@ -426,7 +426,7 @@ TOOLS = [
     # --- Sentinels: scan-stage agents (kind=scanner). A Sentinel is an Agent, so register_agent/agent_heartbeat/list_agents/
     # get_agent/update_agent above already work for one; the tools below are the matching scan-stage-work verbs (SentinelTask,
     # not AgentTask) and thin, kind-forced or kind-filtered aliases of the agent tools for a predictable Sentinel-only surface.
-    ('register_sentinel', 'Register this token as a Sentinel (kind is always scanner), or update the registration. Say what it covers: name, scope {orgs, projects, hosts}, capabilities drawn from nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, os, tools and max_concurrent. A new Sentinel waits for an administrator to approve it unless you are one yourself. Prefer the one-time enrollment secret from generate_sentinel_enrollment for a brand new Sentinel with no token yet (bootstrap is REST-only: POST /api/v1/sentinels/bootstrap, since this endpoint itself needs a bearer token).',
+    ('register_sentinel', 'Register this token as a Sentinel (kind is always scanner), or update the registration. Say what it covers: name, scope {orgs, projects, hosts}, capabilities drawn from nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover, os, tools and max_concurrent (network:internal is granted by the server, not claimed). A new Sentinel waits for an administrator to approve it unless you are one yourself. Prefer the one-time enrollment secret from generate_sentinel_enrollment for a brand new Sentinel with no token yet (bootstrap is REST-only: POST /api/v1/sentinels/bootstrap, since this endpoint itself needs a bearer token).',
      _schema({'name': {'type': 'string'}, 'scope': AGENT_SCOPE, 'capabilities': {'type': 'array', 'items': {'type': 'string', 'enum': list(SentinelTask.KINDS)}},
               'os': {'type': 'array', 'items': {'type': 'string', 'enum': list(broker.scope_lib.OS_FAMILIES)}},
               'tools': {'type': 'array', 'items': {'type': 'string'}}, 'max_concurrent': {'type': 'integer'}}),
@@ -485,18 +485,50 @@ def _rpc_error(rpc_id, code, message):
     return {'jsonrpc': '2.0', 'id': rpc_id, 'error': {'code': code, 'message': message}}
 
 
+_JSON_TYPES = {'string': str, 'boolean': bool, 'array': list, 'object': dict}
+
+
+def _type_ok(value, wanted):
+    """Whether ``value`` fits one JSON-schema type name. An integer or number may arrive as a numeric string (the handlers always accepted
+    that); a bool is never a number."""
+    if wanted == 'null':
+        return value is None
+    if wanted in ('integer', 'number'):
+        if isinstance(value, (bool, list, dict)):
+            return False
+        try:
+            (int if wanted == 'integer' else float)(value)
+            return True
+        except (TypeError, ValueError, OverflowError):  # OverflowError: JSON 1e999 parses to infinity
+            return False
+    return isinstance(value, _JSON_TYPES[wanted]) if wanted in _JSON_TYPES else True
+
+
+def check_arguments(schema, arguments):
+    """Refuse a call that omits a required argument or gives one the wrong JSON type, with a 400 that names it. An omitted argument must
+    never reach a handler as "not given" (a missing assignee would otherwise unassign, a missing self_update reset the policy)."""
+    missing = [k for k in schema.get('required', ()) if k not in arguments]
+    if missing:
+        raise ApiError(400, f'missing required argument(s): {", ".join(missing)}')
+    for key, spec in schema.get('properties', {}).items():
+        if key not in arguments:
+            continue
+        wanted = spec.get('type')
+        wanted = [wanted] if isinstance(wanted, str) else wanted or []
+        if wanted and not any(_type_ok(arguments[key], w) for w in wanted):
+            raise ApiError(400, f'argument {key} must be {" or ".join(wanted)}')
+
+
 def call_tool(ctx, name, arguments):
     tool = BY_NAME.get(name)
     if not tool:
         raise ApiError(404, f'unknown tool {name!r}')
-    _, _, _, handler, writes = tool
+    _, _, schema, handler, writes = tool
     if writes:
         svc.require_write_token(ctx)
-    try:
-        return handler(ctx, arguments or {})
-    except (KeyError, TypeError, ValueError, AttributeError):
-        logger.warning('MCP tool %s called with invalid arguments', name, exc_info=True)
-        raise ApiError(400, 'bad arguments: a field is missing or has the wrong type')
+    arguments = arguments or {}
+    check_arguments(schema, arguments)
+    return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
 
 
 def handle_message(ctx, msg):
@@ -578,6 +610,20 @@ def _nesting_exceeds(value, limit):
     return False
 
 
+LONG_POLL_TOOLS = ('get_next_task', 'get_next_sentinel_task')
+
+
+def _without_waiting(message):
+    """``message`` with a long poll turned into a plain poll. A batch is answered one message after another on one web thread, so each
+    ``wait`` of up to 20 seconds would add to the time that thread is held (20 messages: minutes). Only a request that carries a single
+    message may hold the call."""
+    params = message.get('params') if isinstance(message, dict) else None
+    if (isinstance(params, dict) and message.get('method') == 'tools/call' and params.get('name') in LONG_POLL_TOOLS
+            and isinstance(params.get('arguments'), dict) and params['arguments'].get('wait')):
+        return {**message, 'params': {**params, 'arguments': {**params['arguments'], 'wait': 0}}}
+    return message
+
+
 def _internal_error(ctx, message):
     """handle_message, with an uncaught exception answered as the JSON-RPC internal error instead of an HTML 500 page."""
     try:
@@ -643,7 +689,7 @@ def endpoint(request):
         item_limit = (MAX_RESPONSE_BYTES - MAX_BATCH_ITEMS - 2) // max(1, len(payload))
         responses = []
         for message in payload:
-            response = _internal_error(ctx, message)
+            response = _internal_error(ctx, _without_waiting(message))
             if response is not None:
                 responses.append(_bounded_result(response, item_limit))
         return HttpResponse(b'[' + b','.join(responses) + b']', content_type='application/json') if responses else HttpResponse(status=202)

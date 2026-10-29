@@ -13,7 +13,7 @@ record_attempt() is called from cveFeed.host_assessment.execute() after every fi
 cheap, per-host streak on HostState (unresolved_first_at/unresolved_last_at/unresolved_checks), distinct from
 and never written by the inactive_first_absent_at/retired_at fields the 30-day path owns. This module's own
 daily, checkpointed sweep (same shape as cveFeed.inactive_archive's) archives a host once that streak has lasted
-``ttl()`` (CVENGINE_TTL_UNRESOLVED_HOST hours, default 5 days) without a single success, with the same guards as
+``ttl()`` (CVENGINE_TTL_UNRESOLVED_HOST hours, default 3 days) without a single success, with the same guards as
 every other automatic archive path: scanning paused, the host excluded, pinned, already archived, or an
 assessment for it currently queued or running.
 
@@ -31,7 +31,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 PAGE = 25
 LEASE = timedelta(minutes=10)
-DEFAULT_TTL_HOURS = 5 * 24  # 5 days; a short, separate timeline from inactive_archive.MIN_ABSENCE (30 days)
+DEFAULT_TTL_HOURS = 3 * 24  # 3 days; a short, separate timeline from inactive_archive.MIN_ABSENCE (30 days)
 TTL_ENV = 'CVENGINE_TTL_UNRESOLVED_HOST'
 # A queued or running scan of the domain defers the review for the same reason inactive_archive defers: it may be
 # about to resolve the host. A scan stuck longer than this must not keep every host of its domain from review.
@@ -40,7 +40,7 @@ STUCK_SCAN_AGE = timedelta(days=3)
 
 def ttl():
     """Span of consecutive no-scannable-IP attempts before a host is archived. Override with CVENGINE_TTL_UNRESOLVED_HOST
-    (hours), the same CVENGINE_TTL_<NAME> convention cveFeed.ledger uses; defaults to 5 days."""
+    (hours), the same CVENGINE_TTL_<NAME> convention cveFeed.ledger uses; defaults to 3 days."""
     try:
         hours = float(os.environ.get(TTL_ENV, ''))
     except ValueError:
@@ -63,7 +63,7 @@ def record_attempt(project, domain, host, result, now=None):
     host = host.lower().rstrip('.')
     if result.get('resolved'):
         HostState.objects.filter(project=project, host=host).update(
-            unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
+            unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0, resolution_note='')
         return 'reset'
     row, created = HostState.objects.get_or_create(project=project, host=host, defaults={'domain': domain})
     first = now if created or not row.unresolved_first_at else row.unresolved_first_at
@@ -74,6 +74,7 @@ def record_attempt(project, domain, host, result, now=None):
 
 RECHECK_EVERY = timedelta(hours=6)  # a host with a no-address streak is resolved again this often (DNS only, no scan)
 RECHECK_BATCH = 40  # hosts re-resolved per sweep
+PRIVATE_NOTE = 'private address'  # the start of the note ``recheck`` leaves on a host whose name resolves only into a private network
 COUNTS_FOR = timedelta(days=7)  # a streak whose last check is newer than this keeps the host out of the first-pass backlog (see coverage_topup)
 
 
@@ -81,8 +82,8 @@ def recheck(now=None, batch=RECHECK_BATCH, resolver=None):
     """Resolve again the hosts that were found to have no scannable address, a few at a time, and say why they have none.
 
     A host whose name now resolves to a scannable address leaves the streak (it is due for a first pass again at once). One that still does
-    not keeps its streak and gets a note: ``private address`` (the name points inside a private network, which only a Sentinel inside that
-    network can scan, once the project declares the range) or ``no DNS answer`` (dangling). Only DNS is asked, so this costs seconds, not a
+    not keeps its streak and gets a note: ``private address`` (the name points inside a private network, which this server cannot scan; it is
+    archived with the rest after ``ttl()`` and the daily rediscovery of archived hosts looks again) or ``no DNS answer`` (dangling). Only DNS is asked, so this costs seconds, not a
     scan. Returns ``{'checked', 'resolved', 'private', 'no_dns'}``."""
     import ipaddress
     from cveFeed.discovery import resolve_names
@@ -105,7 +106,7 @@ def recheck(now=None, batch=RECHECK_BATCH, resolver=None):
             continue
         private = [a for a in addresses if not _is_global(a, ipaddress)]
         if private:
-            note, key = f'private address ({private[0]}): scannable only by a Sentinel inside that network, once the project declares the range', 'private'
+            note, key = f'{PRIVATE_NOTE} ({private[0]}): this server cannot scan it, so it is archived after the usual wait and checked daily', 'private'
         else:
             note, key = 'no DNS answer', 'no_dns'
         out[key] += 1
@@ -121,6 +122,9 @@ def _is_global(address, ipaddress):
 
 
 def candidates(now=None):
+    """Hosts whose no-scannable-IP streak has lasted ``ttl()``. A name that resolves into a private network counts like any other: nothing here
+    makes it scannable (only an IP-literal target of a declared internal range is, see ``internal_scan``), so it is archived too, with the
+    reason on the host, and ``archive_rediscovery`` looks at it again every day."""
     from cveFeed.models import HostState
     now = now or timezone.now()
     return HostState.objects.filter(archived_at__isnull=True, pinned=False,

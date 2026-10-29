@@ -257,6 +257,17 @@ class TenancyTests(SentinelBase):
         self.assertEqual(status, 404)  # the project itself is outside bob's access
 
 
+class ProjectSentinelListTests(SentinelBase):
+    def test_all_projects_is_a_400_inside_the_function_not_an_internal_error(self):
+        from agentapi import services as svc
+        from agentapi.services import Ctx
+        with self.assertRaises(svc.ApiError) as caught:
+            sentinels.list_project_sentinels(Ctx(user=self.root, token=None), '_all')
+        self.assertEqual(caught.exception.status, 400)
+        status, _ = call(self.t['root'], 'GET', '/api/v1/projects/_all/sentinels')
+        self.assertEqual(status, 400)
+
+
 class ScopeAndClaimTests(SentinelBase):
     def setUp(self):
         super().setUp()
@@ -313,6 +324,12 @@ class ScopeAndClaimTests(SentinelBase):
         call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
         status, body = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', {'outcome': 'done', 'hosts': 'not-a-list'})
         self.assertEqual(status, 400)
+        task.refresh_from_db()  # a report that does not fit will not fit when sent again: the task ends as failed, not running for ever
+        self.assertEqual(task.status, 'failed')
+        self.assertIn('rejected', task.error)
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
         status, body = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', {'outcome': 'nonsense'})
         self.assertEqual(status, 400)
 

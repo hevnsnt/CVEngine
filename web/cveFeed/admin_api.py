@@ -34,7 +34,7 @@ class AdminError(Exception):
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, and UnicodeDecodeError for a body that is not UTF-8
         raise AdminError(400, 'body must be valid JSON')
     return data if isinstance(data, dict) else {}
 
@@ -415,15 +415,19 @@ def timings_get(request, actor):
 
 
 def apply_timings(t):
-    """Push the schedule-related timings into celery beat."""
+    """Push the schedule-related timings into celery beat. Each task is saved, not bulk-updated: beat reloads its schedule only when
+    ``PeriodicTasks.last_update`` moves, which a ``QuerySet.update`` never does (a value whose schedule row already exists would be ignored)."""
     from django_celery_beat.models import CrontabSchedule, IntervalSchedule, PeriodicTask
     interval, _ = IntervalSchedule.objects.get_or_create(every=t.cve_sync_minutes, period='minutes')
-    PeriodicTask.objects.filter(name='cvengine-cve-sync').update(interval=interval)
     crontab, _ = CrontabSchedule.objects.get_or_create(minute='17', hour=str(t.hygiene_hour_utc), day_of_week='*',
                                                        day_of_month='*', month_of_year='*')
-    PeriodicTask.objects.filter(name='cvengine-hygiene-daily').update(crontab=crontab)
     ct_interval, _ = IntervalSchedule.objects.get_or_create(every=t.ct_watch_minutes, period='minutes')
-    PeriodicTask.objects.filter(name='cvengine-ct-watch').update(interval=ct_interval)
+    for name, field, schedule in (('cvengine-cve-sync', 'interval', interval), ('cvengine-hygiene-daily', 'crontab', crontab),
+                                  ('cvengine-ct-watch', 'interval', ct_interval)):
+        for task in PeriodicTask.objects.filter(name=name):
+            if getattr(task, f'{field}_id') != schedule.pk:
+                setattr(task, field, schedule)
+                task.save()
 
 
 def timings_put(request, actor):

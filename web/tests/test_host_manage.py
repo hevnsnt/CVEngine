@@ -96,6 +96,7 @@ class Base(TestCase):
 
 class ProfileTests(Base):
 	def test_update_creates_then_changes_only_the_given_fields(self):
+		self.sub(self.a1, 'www.example.com')
 		out = hm.update_host_profile(self.ctx(self.admin), 'a1', 'WWW.Example.com', owner=' Ops team ', purpose='Marketing site', criticality='High')
 		self.assertEqual((out['host'], out['owner'], out['purpose'], out['criticality']), ('www.example.com', 'Ops team', 'Marketing site', 'high'))
 		out = hm.update_host_profile(self.ctx(self.admin), 'a1', 'www.example.com', criticality='critical')
@@ -352,6 +353,16 @@ class EnforcementTests(Base):
 		persist_bbot_result(result, ctx=self.ctx_for('a2'))
 		self.assertEqual(sorted(Subdomain.objects.filter(target_domain=d).values_list('name', flat=True)), ['ok.owned-a2.test'])
 		self.assertFalse(Port.objects.exists())
+
+	def test_a_discovery_batch_reads_its_scan_and_target_once_not_once_per_name(self):
+		from django.db import connection
+		from django.test.utils import CaptureQueriesContext
+		names = {f'n{i}.owned-a2.test' for i in range(6)}
+		with CaptureQueriesContext(connection) as queries:
+			persist_bbot_result(bbot_lib.BbotResult(subdomains=names, resolutions=set(), ports=set()), ctx=self.ctx_for('a2'))
+		self.assertEqual(Subdomain.objects.filter(target_domain=self.targets['a2']).count(), 6)
+		for table in ('startScan_scanhistory', 'targetApp_domain'):
+			self.assertLessEqual(sum(1 for q in queries.captured_queries if f'FROM "{table}"' in q['sql']), 2, table)  # not one per name
 
 	def test_new_hosts_pipeline_never_creates_it(self):
 		target = Domain.objects.create(name='hp.test', project=self.a1, insert_date=timezone.now())

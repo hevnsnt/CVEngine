@@ -792,7 +792,7 @@
                     {% elif scan_object.scan_status == 1 %}
                         {{ scan_object.get_elapsed_time }}
                     {% elif scan_object.scan_status == 2 %}
-                        {% if scan_object.get_completed_time_in_sec < 60 %}
+                        {% if scan_object.get_total_scan_time_in_sec < 60 %}
                             Completed in < 1 minutes
                         {% else %}
                             Completed in {{ scan_object.start_scan_date|timesince:scan_object.stop_scan_date }}
@@ -819,42 +819,10 @@
                 <img class="center-img"
                      src="data:image/svg+xml;base64,{{ vulns_severity_chart }}" />
             {% endif %}
-            <h3 class="primary">Interesting Subdomains</h3>
-            {% if interesting_subdomains %}
-                <p>
-                    Listed below are the interesting subdomains identified on <span class="primary-color">{{ scan_object.domain.name }}</span>
-                </p>
-                <div class="interesting-subdomain-table-container">
-                    <table class="interesting-subdomain-table">
-                        <tr>
-                            <th class="number-td">#</th>
-                            <th class="interesting-subdomain-td">Subdomain</th>
-                            <th class="page-title-td">Page Title</th>
-                            <th class="status-td">HTTP Status</th>
-                        </tr>
-                        {% for subdomain in interesting_subdomains %}
-                            <tr class=" {% if subdomain.http_status >= 200 and subdomain.http_status < 300 %} low-td {% elif subdomain.http_status >= 300 and subdomain.http_status < 400 %} medium-td {% elif subdomain.http_status >= 400 and subdomain.http_status < 500 %} high-td {% else %} unknown-td {% endif %} ">
-                                <td class="number-td">{{ forloop.counter }}</td>
-                                <td class="subdomain-name-td">{{ subdomain.name }}</td>
-                                <td class="page-title-td">
-                                    {% if subdomain.page_title %}{{ subdomain.page_title }}{% endif %}
-                                </td>
-                                <td class="status-td">
-                                    {% if subdomain.http_status %}{{ subdomain.http_status }}{% endif %}
-                                </td>
-                            </tr>
-                        {% endfor %}
-                    </table>
-                </div>
-            {% else %}
-                <p>
-                    No interesting subdomains were identified on <span class="primary">{{ scan_object.domain.name }}</span>
-                </p>
-            {% endif %}
         </article>
         {% if show_vuln %}
             <h3 class="primary">Summary of Vulnerabilities Identified</h3>
-            {% if all_vulnerabilities.count == 0 %}
+            {% if all_vulnerabilities_count == 0 %}
                 <p>
                     No vulnerabilities were identified on <span class="primary">{{ scan_object.domain.name }}</span>
                 </p>
@@ -917,14 +885,6 @@
                             <li>These subdomains returned an HTTP status 200 (OK), indicating live web assets.</li>
                         </ul>
                     </li>
-                    <li>
-                        <strong>Interesting Subdomains:</strong> {{ interesting_subdomains.count }}
-                        <ul>
-                            <li>
-                                High-priority subdomains identified through keyword analysis (e.g., admin, api, test), suggesting a focused investigation.
-                            </li>
-                        </ul>
-                    </li>
                 </ol>
                 <h4>
                     {{ scan_object.get_subdomain_count }} subdomains identified on <span class="primary">{{ scan_object.domain.name }}</span>
@@ -951,8 +911,8 @@
                                 </td>
                                 {% if show_vuln %}
                                     <td class="status-td">
-                                        {% if subdomain.get_total_vulnerability_count %}
-                                            {{ subdomain.get_total_vulnerability_count }}
+                                        {% if subdomain.report_vulnerability_count %}
+                                            {{ subdomain.report_vulnerability_count }}
                                         {% else %}
                                             0
                                         {% endif %}
@@ -962,12 +922,12 @@
                         {% endfor %}
                     </table>
                 </div>
-                {% if ip_addresses.count > 0 %}
+                {% if ip_addresses_count > 0 %}
                     <h3 class="primary">IP Assets</h3>
                     <p>In addition to subdomains, various IP assets associated with the target infrastructure were also identified:</p>
                     <ol>
                         <li>
-                            <strong>Total IP Addresses:</strong> {{ ip_addresses.count }}
+                            <strong>Total IP Addresses:</strong> {{ ip_addresses_count }}
                             <ul>
                                 <li>
                                     This represents the range of unique IP addresses associated with the discovered subdomains and other network assets.
@@ -1010,6 +970,7 @@
                 <article style="page-break-before: always">
                     <h2 class="page-title" id="reconnaissance-findings">Reconnaissance Findings</h2>
                     <p>This section contains list of all the subdomains identified during the reconnaissance phase.</p>
+                    {% if hosts_cut %}<p><em>To keep the report a usable size this section lists the {{ hosts_cut }}.</em></p>{% endif %}
                     {% for subdomain in subdomains %}
                         <div class="subdomain-card" id="subdomain_{{subdomain.name}}">
                             <div class="subdomain-card-header">
@@ -1038,15 +999,14 @@
                                     </div>
                                 {% endif %}
                                 {% if show_vuln %}
-                                    {% if subdomain.get_vulnerabilities_without_info %}
+                                    {% if subdomain.report_vulnerability_names %}
                                         <div>
                                             <h4>Vulnerabilities:</h4>
-                                            {% regroup subdomain.get_vulnerabilities_without_info by name as vuln_list %}
                                             <ul>
-                                                {% for vulnerability in vuln_list %}
+                                                {% for vulnerability_name in subdomain.report_vulnerability_names %}
                                                     <li>
-                                                        <a href="#vuln_{{ vulnerability.list.0.name.split|join:'_' }}"
-                                                           class="primary">{{ vulnerability.grouper }}</a>
+                                                        <a href="#vuln_{{ vulnerability_name.split|join:'_' }}"
+                                                           class="primary">{{ vulnerability_name }}</a>
                                                     </li>
                                                 {% endfor %}
                                             </ul>
@@ -1068,6 +1028,7 @@
                     <br>
                     The information presented here is crucial for understanding your current security posture and should guide your remediation strategy to enhance overall security.</p>
                     <br>
+                    {% if findings_cut %}<p><em>To keep the report a usable size this section lists the {{ findings_cut }}, most severe first.</em></p>{% endif %}
                     {% regroup all_vulnerabilities by get_path as grouped_vulnerabilities %}
                     {% for vulnerabilities in grouped_vulnerabilities %}
                         {% for vulnerability in vulnerabilities.list %}

@@ -44,7 +44,9 @@ import time
 
 MAX_QUEUE_SCAN = 20000  # a queue longer than this is not read: "unknown" is safer than a slow or partial answer
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
-_live = {'at': 0.0, 'ids': None}
+SNAPSHOT_KEY = 'cvengine:broker:live-tasks'
+SNAPSHOT_TTL = 3600
+SNAPSHOT_MAX_AGE = 45 * 60  # three reaper periods (it runs every 15 minutes): an older answer says nothing about a row created since
 
 
 def _task_ids(raw):
@@ -131,7 +133,10 @@ def live_tasks(app=None, inspect_timeout=3):
                             scans.add(int(task['args'][0]))
                         except (ValueError, TypeError, IndexError):
                             pass
-        return (ids, scans) if answered else None
+        if not answered:
+            return None
+        _remember(ids)
+        return ids, scans
     except Exception:  # noqa: BLE001
         logger.exception('could not list the Celery tasks that still exist')
         return None
@@ -144,9 +149,31 @@ def live_task_ids(app=None, inspect_timeout=3):
     return None if found is None else found[0]
 
 
-def cached_live_task_ids(max_age=60):
-    """``live_task_ids`` at most once per ``max_age`` seconds in this process: callers ask on request paths."""
-    now = time.monotonic()
-    if now - _live['at'] > max_age:
-        _live.update(at=now, ids=live_task_ids())
-    return _live['ids']
+def _remember(ids):
+    """Keep the answer of a probe that got one, for every process (the shared cache), for ``live_snapshot``."""
+    try:
+        from django.core.cache import cache
+        cache.set(SNAPSHOT_KEY, {'at': time.time(), 'ids': sorted(ids)}, SNAPSHOT_TTL)
+    except Exception:  # noqa: BLE001 - without the cache a caller simply has no snapshot and counts every row
+        logger.info('could not keep the list of live Celery tasks')
+
+
+def live_snapshot(max_age=SNAPSHOT_MAX_AGE):
+    """``(task ids, when it was taken)`` of the last probe that got an answer (see ``live_tasks``), or None when there is none, it is older than
+    ``max_age`` seconds or the cache cannot be read. This only reads the cache: it never asks the broker or the workers, which takes seconds a
+    request or the minute-by-minute beat must not wait for. The periodic reaper is what probes and refreshes it."""
+    try:
+        from datetime import datetime, timezone
+        from django.core.cache import cache
+        found = cache.get(SNAPSHOT_KEY)
+        if not isinstance(found, dict) or time.time() - found['at'] > max_age:
+            return None
+        return set(found['ids']), datetime.fromtimestamp(found['at'], tz=timezone.utc)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def cached_live_task_ids(max_age=SNAPSHOT_MAX_AGE):
+    """The ids of ``live_snapshot`` alone, or None: what a caller on a request path may ask instead of ``live_task_ids``."""
+    found = live_snapshot(max_age)
+    return None if found is None else found[0]

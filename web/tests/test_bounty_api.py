@@ -394,6 +394,30 @@ class BugBountyOrgTests(BountyBase):
         legacy = call(self.c, 'GET', B + 'engagements?project=a1')[1]['results']
         self.assertEqual([r['project'] for r in legacy], ['a1'])
 
+    def test_the_engagement_list_does_not_count_per_row(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        bc = BountyProgram.objects.get(platform='bugcrowd')
+        self.create()
+        with CaptureQueriesContext(connection) as one:
+            self.assertEqual(len(call(self.c, 'GET', B + 'engagements')[1]['results']), 1)
+        self.create(program=bc)
+        with CaptureQueriesContext(connection) as two:
+            rows = call(self.c, 'GET', B + 'engagements')[1]['results']
+        self.assertEqual((len(rows), len(two)), (2, len(one)))  # S08-10: a second engagement adds no query
+        self.assertEqual([(r['targets'], r['reports']) for r in rows], [(0, 0), (0, 0)])
+
+    def test_a_programs_scope_index_is_built_once_per_version_of_its_scope(self):
+        from cveFeed import bounty_api
+        bounty_api._INDEX_CACHE.clear()
+        first = bounty_api.scope_index(self.acme)
+        self.assertIs(bounty_api.scope_index(self.acme), first)  # S08-9: the workbench poll does not reload every asset
+        self.assertEqual(first.check('status.acme.test').state, 'out_of_scope')
+        self.acme.content_hash = 'another'
+        self.assertIsNot(bounty_api.scope_index(self.acme), first)
+        self.acme.content_hash = ''
+        self.assertIsNot(bounty_api.scope_index(self.acme), bounty_api.scope_index(self.acme))  # no hash, no cache
+
     def test_importing_scope_adds_the_targets_to_the_engagements_own_project(self):
         _, e = self.create()
         call(self.c, 'PATCH', f'{B}engagements/{e["id"]}', {'project': e['project'], 'acknowledge': True})

@@ -24,11 +24,13 @@ The bug bounty page is available to App Admins and to users an App Admin authori
 1. The tenancy middleware works out which projects the user may see on every request.
 2. The default queryset of the main project-owned models (`SCOPES` in `tenancy/scope.py`) is filtered to those projects, for views, lookups by id, and templates. Child rows such as ports are reached through their scoped host.
 3. A project the user cannot see returns 404, the same as one that does not exist.
-4. Roles are checked per project before the view runs. The agent API checks them in its service layer.
+4. Roles are checked per project before the view runs, when the project is in the address or query string. A route that names its project only in the body or by an object id is checked against the user's best role anywhere, so its handler must check the role again for the project it resolves (the agent API does, in its service layer).
 5. Targets and IP rows (with their ports) belong to an organization. Two organizations can track the same name separately, and within one a name is held once across its projects. Host exclusions, organization API keys, and the two-step policy are organization wide.
 6. The slug `_all` is reserved. It is the read-only combined view over every project the user can see, and writes on it return 400.
 
-Background tasks and management commands run unscoped. When a model gains a project owner, add it to `SCOPES`.
+**Scan files (`/media/...`).** Screenshots and other scan artifacts are served by an authenticated view and nginx's internal redirect, never straight from the volume. A user who is not an App Admin gets a file only from the `<domain>_<scan id>/` folder of a scan in a project they can see; anything else answers 404, the same as a missing file. Behaviour change: a bare `<domain>/` folder (the layout of the upstream project, which cvENGINE never writes) used to be served to anyone who could see a target of that name and is now served to App Admins only, because it is not tied to a scan and so cannot be attributed to a project. Files created by an older upstream-style install under such a folder need an App Admin, or moving into a `<domain>_<scan id>/` folder.
+
+Background tasks and management commands run unscoped. When a model gains a project owner, add it to `SCOPES`, or to `UNSCOPED` in the same file with the reason; `tests/test_sentinel_hardening.py` fails for a model with a project, domain, scan or organization owner that is in neither. Sentinel tasks, stored sign-ins, finding comments and audit events, internal ranges, project settings and the like are scoped; an organization's own API credentials (no project) stay visible to the organization.
 
 ## Two-step sign-in
 
@@ -64,7 +66,7 @@ Who may read and who may change the features added in 1.3. "Write role" means ad
 | Sentinels, in a project (the Sentinels tab) | Any role in the project sees the Sentinels whose scope covers it and their task counts for it. | Cancel a queued or running task: a write role. Approve, suspend, revoke, limit or change the settings of a Sentinel: an administrator who manages the Sentinel's owner, never for their own Sentinel unless an App Admin (see Agents below). |
 | Sentinel enrollment (the one-time secret that provisions a Sentinel, 30 minutes, single use) | Not readable again. | Project scope: project admin. Organization scope (every project of it, present and future): an admin of that organization or an App Admin. Instance scope: an App Admin. Each is audited as `sentinel.enroll.generate`. |
 | Sentinels page and instance defaults | Each person sees the Sentinels they manage: an App Admin all of them, an organization admin those of users in their organizations, everyone else their own. | The instance-wide self-update default: an App Admin. |
-| Internal ranges (private networks declared internal to a project) | Project admin only, including the list. | Project admin only. A range never opens a public address, and only a Sentinel that declares `network:internal` scans inside one. |
+| Internal ranges (private networks declared internal to a project) | Project admin only, including the list. | Project admin only. A range never opens a public address, and only an internal Sentinel scans inside one: the server grants `network:internal` (at provisioning, or when an administrator changes the Sentinel's network), and a Sentinel's own claim is ignored. |
 | OpenVAS | **Settings, OpenVAS** is for App Admins. **Administration, OpenVAS** lists the organizations the person administers and their projects. Members and auditors have no access. | Switching the add-on on or off, and the Sentinel only choice: an App Admin. Choosing which organizations and projects to scan: an App Admin, or an organization admin for the organizations they administer, and only while the add-on is on. Audited as `openvas.*`. |
 | Saved searches | Private to the person who saved them: another member, another project or a guessed id answers 404. | Create, change, delete or run one (a run can notify): a write role. |
 | PDF reports | Any role that can read the project, the audit role and a read-only token included. A report is made for one named project (or one host of it), and only the person who asked can read its state and download it, until it expires (24 hours by default). | Asking is the same as reading, capped per user and for the installation (the API answers 429 over a cap). Audited as `report.export`. |
@@ -73,7 +75,7 @@ Who may read and who may change the features added in 1.3. "Write role" means ad
 | Suppliers | Any role in the project. | Add or remove a supplier, accept a finding: project admin. |
 | runZero sync | Project admin. | Project admin (settings, Sync now). |
 | Tailscale connection (per project) | Project admin, secrets never returned. | Project admin through the API. In the app it is set under **Settings, Tailscale**, which is for App Admins. |
-| API keys for outside services | Any role that can see the project sees which keys are set, never the values. | Organization keys: an organization admin or an App Admin. A project's own key: any write role through the API (the pages in the app, **Settings, API keys** and **Administration**, are for admins). |
+| API keys for outside services | Any role that can see the project sees which keys are set, never the values. | Organization keys: an organization admin or an App Admin. A project's own key: a project or organization admin or an App Admin, through the API and through the pages in the app (**Settings, API keys** and **Administration**). |
 
 ## Agents
 

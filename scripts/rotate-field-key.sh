@@ -18,7 +18,7 @@ set_value() {
   local key=$1 value=$2 tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/cvengine-env.XXXXXX")
   if grep -q "^${key}=" .env; then
-    awk -v key="$key" -v value="$value" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix value; next } { print }' .env > "$tmp"
+    CVENGINE_AWK_VALUE="$value" awk -v key="$key" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix ENVIRON["CVENGINE_AWK_VALUE"]; next } { print }' .env > "$tmp"  # not on awk's command line: `ps` shows that
   else
     { cat .env; echo "${key}=${value}"; } > "$tmp"
   fi
@@ -35,7 +35,10 @@ if [ -n "$old" ]; then
 fi
 set_value CVENGINE_FIELD_KEY "$new"
 echo "New key written to .env. Recreating the services so every one of them uses it..."
-compose up -d --force-recreate web celery celery-beat
+services=(web celery celery-beat)
+# the Tailscale sidecar shares celery's network namespace and is orphaned when celery is recreated (only present with the tailscale profile)
+compose config --services | grep -qx tailscale && services+=(tailscale)
+compose up -d --force-recreate "${services[@]}"
 for _ in $(seq 1 60); do
   compose exec -T web python3 -c "print('ready')" >/dev/null 2>&1 && break
   sleep 2

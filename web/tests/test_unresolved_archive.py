@@ -45,7 +45,7 @@ class UnresolvedArchiveTests(TestCase):
                                         now=self.now), 'skipped')
         self.assertFalse(HostState.objects.filter(project=self.project, host='skip.unresolved.example').exists())
 
-    def test_a_five_day_unbroken_streak_of_no_scannable_ip_is_archived(self):
+    def test_a_three_day_unbroken_streak_of_no_scannable_ip_is_archived(self):
         host = 'never.unresolved.example'
         Subdomain.objects.create(target_domain=self.domain, name=host)
         t0 = self.now - timedelta(days=6)
@@ -77,11 +77,11 @@ class UnresolvedArchiveTests(TestCase):
         self.assertEqual((row.unresolved_first_at, row.unresolved_last_at, row.unresolved_checks), (None, None, 0))
         self.assertFalse(candidates(self.now).filter(pk=row.pk).exists())
         # A new failure afterwards starts a fresh streak, not a continuation of the old one.
-        record_attempt(self.project, self.domain, host, {'status': 'inconclusive', 'resolved': 0}, now=t0 + timedelta(days=2))
+        record_attempt(self.project, self.domain, host, {'status': 'inconclusive', 'resolved': 0}, now=t0 + timedelta(days=4))
         row.refresh_from_db()
-        self.assertEqual(row.unresolved_first_at, t0 + timedelta(days=2))
+        self.assertEqual(row.unresolved_first_at, t0 + timedelta(days=4))
         self.assertEqual(row.unresolved_checks, 1)
-        self.assertFalse(candidates(self.now).filter(pk=row.pk).exists())  # not yet 5 days into the new streak
+        self.assertFalse(candidates(self.now).filter(pk=row.pk).exists())  # not yet 3 days into the new streak
 
     def test_pinned_excluded_and_actively_queued_hosts_are_never_auto_archived(self):
         old = self.now - timedelta(days=6)

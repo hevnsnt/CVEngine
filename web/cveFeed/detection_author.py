@@ -82,7 +82,8 @@ def refresh_rules(batch=None):
         old = row.strategy or {}
         kept = {**old, 'remote_checks': [c for c in old.get('remote_checks', []) if c['id'].startswith(AI_ID_PREFIX)],
                 'local_checks': [c for c in old.get('local_checks', []) if c['id'].startswith(AI_ID_PREFIX)]} if old else None
-        merged = detection.merge_strategies(fresh, kept) if kept and (kept['remote_checks'] or kept['local_checks']) else fresh
+        # the model's words are kept even when it wrote no check of its own (guidance and scope only)
+        merged = detection.merge_strategies(fresh, kept) if kept and (row.source == 'ai' or kept['remote_checks'] or kept['local_checks']) else fresh
         merged = detection.finalize(merged, row.cve_entry.cvss_vector)
         CVEDetection.objects.filter(pk=row.pk).update(strategy=merged or {}, rules_at=now, updated_at=now)
         done += 1
@@ -242,14 +243,14 @@ def _apply_answer(row, strategy, problems, provider, hash_):
     CVEDetection.objects.filter(pk=row.pk).exclude(source='manual').update(
         strategy=merged, source='ai', ai_model=f'{provider.name}:{provider.model}'[:128], ai_problems=problems[:10],
         ai_input_hash=hash_, schema_version=detection.SCHEMA_VERSION, updated_at=timezone.now())
-    locality.apply_scope(cve, merged.get('scope', ''))
+    locality.apply_scope(cve, merged.get('scope', ''), source='ai')
     return merged
 
 
 def enrich_with_ai(row, provider):
     """Ask the model for this record, once per version of the CVE: a first answer, or a revision of its own earlier answer when the CVE
-    changed. The answer is validated; what passes is merged after the rules' checks, and its scope decision (external or local only) is
-    applied. Returns True when the model's answer was stored."""
+    changed. The answer is validated; what passes is merged after the rules' checks, and its scope decision is applied when it widens
+    matching (external); a local_only answer stays on the record as a suggestion. Returns True when the model's answer was stored."""
     from reNgine.ai_providers import AIProviderError, usage_stage
     now = timezone.now()
     if not _claim_ai(row, now):

@@ -90,6 +90,24 @@ class ReaperTests(TestCase):
 		self.assertEqual(stuck.finished_at, NOW)
 		self.assertEqual(fresh.status, 'running')  # well within the window: left alone
 
+	def test_the_activity_limit_and_the_stalled_flag_follow_the_configured_timeouts(self):
+		from agentapi import services
+		from dashboard.models import SystemTimings
+		from scanEngine.models import EngineType
+		from startScan.models import ScanHistory
+		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		SystemTimings.objects.all().delete()
+		old = ScanHistory.objects.create(domain=self.domain, scan_type=engine, scan_status=1, tasks=[], start_scan_date=NOW - timedelta(hours=20))
+		self.assertTrue(services._scan(old)['stalled'])  # past the shipped 11 h
+		stuck = self.activity_row('Weekly deep Nuclei checking reap.example', 'running', 20)
+		SystemTimings.objects.create(discovery_timeout_hours=24, nuclei_timeout_hours=8)  # a 33 h window
+		self.assertFalse(services._scan(old)['stalled'])
+		self.assertEqual(reaper.reap(now=NOW), {})  # a 20 h activity line is still inside the raised window
+		stuck.refresh_from_db()
+		self.assertEqual(stuck.status, 'running')
+		with mock.patch.dict('os.environ', {'CVENGINE_ACTIVITY_RUNNING_HOURS': '5'}):  # an explicit setting still wins
+			self.assertEqual(reaper.reap(now=NOW), {'AgentActivity:running': 1})
+
 	def test_the_task_logs_what_it_expired_and_is_scheduled(self):
 		from django_celery_beat.models import PeriodicTask
 		from cveFeed.scan_control import PAUSE_EXEMPT_TASKS
@@ -228,9 +246,12 @@ class CapacityTests(TestCase):
 	setUp_base, assessment = ReaperTests.setUp, ReaperTests.assessment
 
 	def count(self, live, project=None):
+		from django.core.cache import cache
 		from cveFeed import broker_recovery, host_assessment
-		broker_recovery._live['at'] = 0.0
-		with mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=live):
+		cache.delete(broker_recovery.SNAPSHOT_KEY)
+		if live is not None:
+			broker_recovery._remember(live)  # what the reaper's probe leaves for everyone else
+		with mock.patch('cveFeed.broker_recovery.live_task_ids', side_effect=AssertionError('active_count must never ask the broker')):
 			return host_assessment.active_count(project)
 
 	def setUp(self):

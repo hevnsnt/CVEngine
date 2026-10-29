@@ -210,6 +210,10 @@ class Base(TestCase):
 		throttle.start()
 		self.addCleanup(throttle.stop)
 		self.counters = counters
+		# the test client always comes from 127.0.0.1, an address no scanned host has: these tests do not exercise the source-address witness
+		address = mock.patch('agentapi.inventory.client_ip', return_value='')
+		address.start()
+		self.addCleanup(address.stop)
 		patcher = mock.patch('cveFeed.tasks.correlate_host_inventory.delay')
 		self.queued = patcher.start()
 		self.addCleanup(patcher.stop)

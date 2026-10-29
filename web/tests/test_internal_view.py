@@ -113,7 +113,8 @@ class StatsTests(ViewBase):
         reset_rates({'t': token})
         status, out = call(token, 'PUT', '/api/v1/sentinel', {'name': 'iv-sentinel', 'scope': {'projects': ['ir-a']}, 'capabilities': capabilities})
         self.assertIn(status, (200, 201), out)
-        Agent.objects.filter(pk=out['id']).update(status='active', last_seen=timezone.now() if last_seen else None)
+        Agent.objects.filter(pk=out['id']).update(status='active', last_seen=timezone.now() if last_seen else None,
+                                                  network='internal' if 'network:internal' in capabilities else 'external')
 
     def test_the_internal_object_lists_the_networks_and_the_internal_share(self):
         internal = self.stats()['internal']
@@ -150,17 +151,12 @@ class StatsTests(ViewBase):
 
 
 class GraphTests(ViewBase):
-    def test_graph_nodes_and_overview_say_which_hosts_are_internal(self):
+    def test_graph_nodes_say_which_hosts_are_internal(self):
         client = Client()
         client.force_login(self.admin)
         nodes = {n['label']: n for n in client.get('/cve/api/graph').json()['nodes'] if n['kind'] == 'subdomain'}
         self.assertEqual((nodes['10.20.0.7']['internal'], nodes['10.20.0.7']['network']), (True, '10.20.0.0/24'))
         self.assertFalse(nodes['203.0.113.7']['internal'])
-        groups = client.get('/cve/api/graph-overview').json()['projects'][0]['roots']
-        self.assertEqual(sum(g['internal'] for g in groups), 1)
-        self.assertEqual(sum(g['hosts'] for g in groups), 2)
-        found = [h for g in groups for h in client.get('/cve/api/graph-hosts', {'owner': 'ir-a', 'root': g['root']}).json()['results']]
-        self.assertEqual({h['host']: h['internal'] for h in found}, {'10.20.0.7': True, '203.0.113.7': False})
 
 
 class SearchTests(ViewBase):

@@ -87,7 +87,8 @@ def candidates():
 
     from django.db.models import Count, Exists, F, OuterRef, Q
     from startScan.models import IpAddress
-    attached = active_attached(OuterRef('pk'))
+    from cveFeed.conductor import bounty_blocked_projects
+    attached = active_attached(OuterRef('pk')).exclude(target_domain__project_id__in=bounty_blocked_projects())  # a bug bounty project that has not confirmed automated testing is never swept
     # a sweep is in flight when it started after its last finish (or was never finished) and that start is recent
     in_flight = (Q(full_scan_started_at__isnull=False) & Q(full_scan_started_at__gte=timezone.now() - timedelta(seconds=IN_FLIGHT_SECONDS))
                  & (Q(full_scanned_at__isnull=True) | Q(full_scanned_at__lt=F('full_scan_started_at'))))
@@ -127,7 +128,9 @@ def in_scope(ip, *, strict=False):
             else:
                 banned[project] = excluded_names(project)
             banned[project] = banned[project] | archived_names(project)
-    names = [(name, project) for name, project in rows if name.lower().rstrip('.') not in banned[project]]
+    from cveFeed.bounty_gate import Gate
+    gate = Gate()  # the project's bug bounty confirmation, and the program's scope for each name on the address
+    names = [(name, project) for name, project in rows if name.lower().rstrip('.') not in banned[project] and gate.allows(project, name)]
     def blocked(name, project):  # an address is judged as that address (its project may authorise a tailnet device); a name only by DNS
         if target_types.classify_target(name) == target_types.IP:
             return not target_types.is_scannable_ip(name, project=project)
@@ -211,11 +214,17 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
                                                                        f'{type(exc).__name__}: {exc}', type(exc).__name__)
                         + (f'; next try after {retry:%Y-%m-%d %H:%M} UTC' if retry else ''))
         return {'ip': address, 'ok': False, 'error': type(exc).__name__}
-    found = set()
+    found, timedout = set(), False
     for xml in seen:
         for host in nmap_scan.parse_xml(xml):
             if host.get('ip') == address:
                 found.update(_open_tcp(host))
+                timedout = timedout or bool(host.get('timedout'))
+    if timedout:  # --host-timeout cut the sweep short: the ports above are a partial answer, not a clean sweep of 65,535
+        retry = _back_off(ip)
+        activity.settle(running, 'failed', message=f'Background full port scan of {address}: nmap gave up on the host at its time limit '
+                        f'({len(found)} open port(s) so far); next try after {retry:%Y-%m-%d %H:%M} UTC')
+        return {'ip': address, 'ok': False, 'error': 'HostTimeout'}
     _advance(ip, len(found))
     new = sorted(found - before)
     gone = sorted(before - found)
@@ -353,6 +362,8 @@ def run(runner=None, fingerprint_runner=None, pipeline=None):
     if coverage_topup.backlog_exists():
         coverage_topup.log_deferral('Full-port scan')
         return {'skipped': 'coverage backlog: first-pass hosts are still outstanding'}
+    if resources.global_pause_requested(fail_closed=True):  # a paused firing would claim an IP and fail a feed row for no work
+        return {'skipped': 'scanning is paused'}
     swept = []
     with resources.redis_claim(CLAIM_KEY, f'fullscan-{os.getpid()}', CLAIM_TTL) as held:
         if held is not True:

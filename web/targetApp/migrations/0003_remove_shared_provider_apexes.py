@@ -17,9 +17,46 @@ logger = logging.getLogger(__name__)
 
 AUTO_MARKER = "Added for the weekly deep discovery of its subdomains"
 
+# Frozen copy of targetApp.shared_domains (SHARED_DOMAINS, shared_domain_of) as of this migration.
+# Never import the live code into a migration: a later change to it must not alter (or break at import)
+# what this migration does when a fresh install replays them all.
+# An entry covers itself and everything under it.
+SHARED_DOMAINS = frozenset({
+    # artifact, issue tracking, support, status and docs SaaS
+    'jfrog.com', 'jfrog.io', 'atlassian.net', 'atlassian.com', 'jira.com', 'zendesk.com', 'freshdesk.com',
+    'statuspage.io', 'readthedocs.io', 'readthedocs.org', 'surge.sh', 'myshopify.com', 'wpengine.com',
+    'service-now.com', 'salesforce.com', 'force.com', 'okta.com', 'oktapreview.com', 'okta-emea.com',
+    'cloudflareaccess.com', 'onmicrosoft.com', 'sharepoint.com',
+    # source hosting and static pages
+    'github.io', 'gitlab.io', 'netlify.app', 'netlify.com', 'vercel.app', 'pages.dev', 'workers.dev',
+    'herokuapp.com', 'herokudns.com', 'web.app', 'firebaseapp.com',
+    # Amazon Web Services (covers s3.amazonaws.com, s3.<region>.amazonaws.com, elb, elasticbeanstalk and compute hosts)
+    'amazonaws.com', 's3.amazonaws.com', 'elasticbeanstalk.com', 'cloudfront.net', 'awsapprunner.com',
+    # Microsoft Azure
+    'azurewebsites.net', 'cloudapp.azure.com', 'cloudapp.net', 'azureedge.net', 'azurefd.net', 'trafficmanager.net',
+    'windows.net', 'blob.core.windows.net',
+    # Google Cloud
+    'appspot.com', 'cloudfunctions.net', 'run.app', 'googleusercontent.com',
+    # CDNs
+    'fastly.net', 'akamaihd.net', 'akamaized.net', 'edgekey.net', 'edgesuite.net',
+})
+
+
+def _clean(name):
+    return (name or '').strip().lower().rstrip('.')
+
+
+def shared_domain_of(name):
+    """The SHARED_DOMAINS entry that ``name`` is or sits under (the longest), or None."""
+    labels = _clean(name).split('.')
+    for i in range(len(labels)):
+        candidate = '.'.join(labels[i:])
+        if candidate in SHARED_DOMAINS:
+            return candidate
+    return None
+
 
 def remove_shared_apexes(apps, schema_editor):
-    from targetApp.shared_domains import shared_domain_of
     Domain = apps.get_model('targetApp', 'Domain')
     deleted, host_scoped = [], []
     for row in Domain.objects.all().order_by('id'):

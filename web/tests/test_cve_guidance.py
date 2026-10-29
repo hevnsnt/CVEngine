@@ -151,7 +151,7 @@ class IntakeTests(TestCase):
 		self.assertIn('not make a CVE local', system)
 		self.assertNotIn('CURRENT_RECORD', user)  # a first answer is not a revision
 		cve.refresh_from_db()
-		self.assertTrue(cve.local_only)  # no attack vector in the record, so the model's reading stands
+		self.assertFalse(cve.local_only)  # the model's local_only is a suggestion: it never overrides the deterministic result
 		row.refresh_from_db()
 		self.assertEqual(row.strategy['scope'], 'local_only')
 		self.assertEqual(len(row.ai_input_hash), 16)
@@ -165,14 +165,36 @@ class IntakeTests(TestCase):
 			cve.refresh_from_db()
 			self.assertFalse(cve.local_only, cve.cve_id)
 
-	def test_refresh_keeps_the_model_scope_for_a_record_with_no_vector(self):
+	def test_refresh_never_turns_a_cve_off_on_the_models_word_but_lets_external_widen(self):
 		from cveFeed import locality
-		cve = self.entry('CVE-2099-7104', desc='A weird flaw with no hint.')
+		cve = self.entry('CVE-2099-7104', desc='A weird flaw with no hint.', kev=False)
 		detection_author.author_rules(batch=5)
 		detection_author.enrich_with_ai(CVEDetection.objects.get(cve_entry=cve), Provider(answer(scope='local_only', scope_reason='r')))
 		CVEEntry.objects.filter(pk=cve.pk).update(synced_at=timezone.now() + timezone.timedelta(seconds=5))
 		locality.refresh()
-		self.assertTrue(CVEEntry.objects.get(pk=cve.pk).local_only)  # the text rules alone would say "not local"
+		self.assertFalse(CVEEntry.objects.get(pk=cve.pk).local_only)  # not a KEV or a network CVE, and still only a suggestion
+		self.assertEqual(CVEDetection.objects.get(cve_entry=cve).strategy['scope'], 'local_only')  # kept for an administrator to read
+		# a person's own record is a decision, so it stands; a seed or model record claiming the same does not
+		CVEDetection.objects.filter(cve_entry=cve).update(source='manual')
+		CVEEntry.objects.filter(pk=cve.pk).update(synced_at=timezone.now() + timezone.timedelta(seconds=10))
+		locality.refresh()
+		self.assertTrue(CVEEntry.objects.get(pk=cve.pk).local_only)
+		# the model may widen: a rule-based local-only flag is lifted by external
+		win = self.entry('CVE-2099-7106', desc='The Windows kernel allows an elevation of privilege.', affected=[{'product': 'Windows'}], kev=False)
+		detection_author.author_rules(batch=5)
+		locality.refresh()
+		self.assertTrue(CVEEntry.objects.get(pk=win.pk).local_only)
+		detection_author.enrich_with_ai(CVEDetection.objects.get(cve_entry=win), Provider(answer(scope='external', scope_reason='r')))
+		self.assertFalse(CVEEntry.objects.get(pk=win.pk).local_only)
+		CVEEntry.objects.filter(pk=win.pk).update(synced_at=timezone.now() + timezone.timedelta(seconds=5))
+		locality.refresh()
+		self.assertFalse(CVEEntry.objects.get(pk=win.pk).local_only)
+
+	def test_a_kev_cve_is_never_switched_off_by_a_local_only_answer(self):
+		cve = self.entry('CVE-2099-7107', desc='A flaw that is exploited.', kev=True)
+		detection_author.author_rules(batch=5)
+		detection_author.enrich_with_ai(CVEDetection.objects.get(cve_entry=cve), Provider(answer(scope='local_only', scope_reason='r')))
+		self.assertFalse(CVEEntry.objects.get(pk=cve.pk).local_only)
 
 	def test_a_changed_cve_is_revised_not_rewritten(self):
 		cve = self.entry('CVE-2099-7105')

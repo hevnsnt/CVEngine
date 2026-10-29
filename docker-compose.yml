@@ -35,6 +35,10 @@ services:
     build:
       context: ./web
     restart: always
+    # An init process (tini) as PID 1 reaps the scanners' children and passes SIGTERM on to the entrypoint, which turns it into a warm shutdown of
+    # the workers and exits when any one of them dies, so `restart: always` brings back all four. 60 s matches the update scripts' stop timeout.
+    init: true
+    stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
     volumes:
       - ./web:/usr/src/app
@@ -157,9 +161,9 @@ services:
   proxy:
     restart: always
     image: nginx:alpine
-    # A stock image is only as new as the day it was first pulled: pull on every up, so an update brings nginx's security releases
-    # whichever version of the update script is running (the one that applies an update is the one already on the host).
-    pull_policy: always
+    # A stock image is only as new as the day it was first pulled. The update scripts pull it before they build, while nothing is stopped, and
+    # keep the image on the host when the registry cannot be reached: `pull_policy: always` made the pull part of `up`, which runs after the
+    # database migration, so a registry outage failed an update that was otherwise done and an offline host could never update.
     ports:
       - 8082:8082/tcp
       - 443:443/tcp
@@ -251,6 +255,7 @@ services:
   # The first start downloads the feeds, which takes a long time and several GB of disk: no scan is possible until it ends (Settings > OpenVAS says so).
   openvas-vulnerability-tests:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/vulnerability-tests:community"
     environment:
       FEED_RELEASE: "24.10"
@@ -262,6 +267,7 @@ services:
 
   openvas-notus-data:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/notus-data:community"
     environment:
       KEEP_ALIVE: 1
@@ -272,6 +278,7 @@ services:
 
   openvas-scap-data:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/scap-data:community"
     environment:
       KEEP_ALIVE: 1
@@ -282,6 +289,7 @@ services:
 
   openvas-cert-bund-data:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/cert-bund-data:community"
     environment:
       KEEP_ALIVE: 1
@@ -292,6 +300,7 @@ services:
 
   openvas-dfn-cert-data:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/dfn-cert-data:community"
     environment:
       KEEP_ALIVE: 1
@@ -305,6 +314,7 @@ services:
 
   openvas-data-objects:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/data-objects:community"
     environment:
       FEED_RELEASE: "24.10"
@@ -316,6 +326,7 @@ services:
 
   openvas-report-formats:
     profiles: ["openvas"]
+    restart: unless-stopped  # the feed containers refresh the vulnerability tests daily: without a policy they stay down after a host reboot
     image: "registry.community.greenbone.net/community/report-formats:community"
     environment:
       FEED_RELEASE: "24.10"

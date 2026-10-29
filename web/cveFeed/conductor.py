@@ -47,27 +47,35 @@ def active_scans():
 
 def bounty_blocked_projects():
     """Projects the conductor never scans on its own: a bug bounty engagement is scanned automatically only when its owner confirmed
-    the program's policy allows it (policy acknowledged and automated testing allowed) and the engagement is still being worked. Any
-    other engagement, paused or finished ones included, keeps its whole project out: scanning a program's assets without that
-    confirmation can break its rules."""
+    the program's policy allows it (policy acknowledged and automated testing allowed), the engagement is still being worked and the
+    program's scope is the one that was acknowledged. Any other engagement, paused or finished ones included, keeps its whole project
+    out until a person acknowledges the changed scope again: scanning a program's assets without that confirmation can break its rules.
+    ``cveFeed.bounty_gate.Gate`` is how a sweep asks, and also asks per host whether the program's scope names it."""
+    from django.db.models import F, Q
+
     from cveFeed.models import BountyEngagement
-    return set(BountyEngagement.objects.exclude(automated_ok=True, policy_ack_at__isnull=False, status__in=('watching', 'active'))
-               .values_list('project_id', flat=True))
+    confirmed = Q(automated_ok=True, policy_ack_at__isnull=False, status__in=('watching', 'active'), ack_content_hash=F('program__content_hash'))
+    return set(BountyEngagement.objects.exclude(confirmed).values_list('project_id', flat=True))
 
 
 def next_targets(limit, now=None):
     """The targets to scan next, most overdue first: never scanned, then longest since the last scan. At most one per project, none
     with a scan going, none scanned inside the minimum gap, none excluded."""
-    from django.db.models import F, Max
+    from django.db.models import F, OuterRef, Subquery
     from django.utils import timezone
 
     from cveFeed.exclusions import excluded_names
+    from startScan.models import ScanHistory
     from targetApp.models import Domain
     now = now or timezone.now()
     busy = set(active_scans().values_list('domain_id', flat=True))
-    blocked_projects = bounty_blocked_projects()
+    from cveFeed.bounty_gate import Gate
+    gate = Gate()
+    blocked_projects = gate.blocked
     cutoff = now - min_gap()
-    rows = (Domain.objects.exclude(project=None).annotate(last_scan=Max('scanhistory__start_scan_date'))
+    # the newest scan date per domain by an index lookup (startScan ScanHistory (domain, start_scan_date)), not a join and group over every scan ever run
+    newest = ScanHistory.objects.filter(domain_id=OuterRef('pk')).order_by('-start_scan_date').values('start_scan_date')[:1]
+    rows = (Domain.objects.exclude(project=None).annotate(last_scan=Subquery(newest))
             .order_by(F('last_scan').asc(nulls_first=True), 'id').values_list('id', 'project_id', 'name', 'last_scan'))
     from targetApp.target_types import internal_networks, sentinel_only_target
     chosen, projects, banned, internal = [], set(), {}, {}
@@ -78,7 +86,7 @@ def next_targets(limit, now=None):
             continue
         if project_id not in banned:
             banned[project_id] = excluded_names(project_id)
-        if name.lower().rstrip('.') in banned[project_id]:
+        if name.lower().rstrip('.') in banned[project_id] or gate.refusal(project_id, name):  # a bug bounty program's scope does not name it
             continue
         if project_id not in internal:
             internal[project_id] = internal_networks(project_id)

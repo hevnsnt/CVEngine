@@ -52,7 +52,6 @@ class CVEEntry(models.Model):
     published_at = models.DateTimeField(null=True, blank=True)
     first_seen_at = models.DateTimeField(null=True, blank=True)
 
-    raw = models.JSONField(default=dict, blank=True)  # full entry, for fields not yet modelled
     intel = models.JSONField(default=dict, blank=True)  # per-source exploitation detail (cveFeed.intel): kev, epss, exploits
     needs_recorrelation = models.BooleanField(default=False)
     # A flaw an attacker can only use from the host itself (CVSS attack vector local or physical, or a kernel or operating-system
@@ -123,7 +122,6 @@ class CVEEntry(models.Model):
             "status": entry.get("status") or "",
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
-            "raw": entry,
         }
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds
         for field in cls._meta.get_fields():
@@ -1052,6 +1050,7 @@ class Triage(models.Model):
             models.Index(fields=["project", "classification"], name="triage_proj_class_idx"),
             models.Index(fields=["project", "validation_status", "next_attempt_at"], name="triage_proj_valid_idx"),
             models.Index(fields=["kind", "signature"], name="triage_kind_sig_idx"),
+            models.Index(fields=["project", "host"], name="triage_proj_host_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -1389,7 +1388,9 @@ class FindingComment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx")]
+        indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx"),
+                   # the comment count of a findings page names (kind, id) with no project (agentapi.services._comment_count_annotation)
+                   models.Index(fields=["finding_kind", "finding_id"], name="findingcomment_kind_id_idx")]
         ordering = ["created_at", "id"]
 
 
@@ -1655,6 +1656,9 @@ class AuthCredential(models.Model):
     origins = models.JSONField(default=list)  # ["https:443"]: the only scheme and port pairs the values may be sent to
     secret = EncryptedJSONField(default=dict)  # {"headers": [[name, value], ...], "cookie": "a=b; c=d"}
     expires_at = models.DateTimeField(null=True, blank=True)
+    # The owner's choice, per target: send the values over a TLS connection whose certificate does not verify (self-signed, expired, wrong name).
+    # Off by default: then a sign-in goes only to a server that proves its name, and anyone in the network path could read it otherwise.
+    allow_untrusted_certificate = models.BooleanField(default=False, db_default=False)
     updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     last_used_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1730,6 +1734,8 @@ class OpenvasProject(models.Model):
     enabled = models.BooleanField(default=False)
     hosts = models.JSONField(default=list, blank=True)
     forced_hosts = models.JSONField(default=list, blank=True)  # the listed hosts an administrator chose to scan whatever their heat (OpenVAS otherwise only scans Fire or Smoke)
+    # An explicit "not this project" that wins over the organization's opt-in (``OpenvasOrg``); ``enabled`` (the project's own opt-in) wins over this.
+    excluded = models.BooleanField(default=False, db_default=False)
     target_id = models.CharField(max_length=40, blank=True, default="")
     target_key = models.CharField(max_length=64, blank=True, default="")  # hash of the address set the target was made for
     updated_at = models.DateTimeField(auto_now=True)

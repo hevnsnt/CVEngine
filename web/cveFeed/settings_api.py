@@ -11,7 +11,7 @@ import re
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
-from cveFeed import openvas_admin, tailscale_admin
+from cveFeed import egress_proxy, openvas_admin, tailscale_admin
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
@@ -26,28 +26,40 @@ class SettingsError(Exception):
 METADATA_NAMES = frozenset({'metadata.google.internal', 'metadata', 'instance-data', 'instance-data.ec2.internal'})
 
 
-def ai_url_blocked(url):
-    """Whether an AI server URL points at a link-local or cloud metadata address. Local and private servers (LM Studio, Ollama, vLLM on this
-    machine, the LAN or a tailnet) are allowed on purpose, but nothing legitimate listens on 169.254.0.0/16 (the metadata services of the
-    clouds) or fe80::/10, and a request there would hand out the host's cloud credentials."""
+def _link_local(ip):
     import ipaddress
-    from urllib.parse import urlsplit
-    host = (urlsplit(url.strip()).hostname or '').lower().rstrip('.')
-    if host in METADATA_NAMES:
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
     if getattr(ip, 'ipv4_mapped', None):
         ip = ip.ipv4_mapped
     return ip.is_link_local or ip in ipaddress.ip_network('fd00:ec2::/32')
 
 
+def ai_url_blocked(url):
+    """Whether an AI server URL points at a link-local or cloud metadata address, whether written as one (a literal address, a metadata
+    name) or as a name that resolves to one (``169.254.169.254.nip.io``, the decimal form ``2852039166``). Local and private servers
+    (LM Studio, Ollama, vLLM on this machine, the LAN or a tailnet) are allowed on purpose, but nothing legitimate listens on
+    169.254.0.0/16 (the metadata services of the clouds) or fe80::/10, and a request there would hand out the host's cloud credentials.
+    A name that does not resolve is not blocked (the request fails by itself). The name is looked up again when the request is made."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    host = (urlsplit(url.strip()).hostname or '').lower().rstrip('.')
+    if host in METADATA_NAMES:
+        return True
+    try:
+        return _link_local(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        found = {info[4][0].split('%')[0] for info in socket.getaddrinfo(host, None)}
+    except (OSError, UnicodeError):
+        return False
+    return any(_link_local(ipaddress.ip_address(a)) for a in found)
+
+
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
-    except json.JSONDecodeError:
+    except ValueError:  # JSONDecodeError, and UnicodeDecodeError for a body that is not UTF-8
         raise SettingsError(400, 'body must be valid JSON')
     if not isinstance(data, dict):
         raise SettingsError(400, 'body must be a JSON object')
@@ -229,6 +241,8 @@ def ai_models(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    if base_url and ai_url_blocked(base_url):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
     same_service = provider == cfg.provider and base_url.strip() == (cfg.base_url or '').strip()
     key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service else '')  # the stored key goes only where it was saved for
     try:
@@ -337,9 +351,24 @@ def notifications_put(request):
 
 # --- proxy -------------------------------------------------------------------------
 
+_PROXY_USERINFO = re.compile(r'^([a-z0-9]+://)([^/\s]*)@(\S+)$', re.I)
+
+
+def _mask_proxy(line):
+    """A proxy URL with its password hidden: ``http://user:pass@host`` becomes ``http://user:***@host`` (a bare token before the @
+    is hidden whole)."""
+    m = _PROXY_USERINFO.match(line)
+    if not m:
+        return line
+    scheme, userinfo, rest = m.groups()
+    return f'{scheme}{userinfo.split(":", 1)[0]}:***@{rest}' if ':' in userinfo else f'{scheme}***@{rest}'
+
+
 def proxy_get(request):
     row = Proxy.objects.first() or Proxy()
-    return {'use_proxy': bool(row.use_proxy), 'proxies': row.proxies or ''}
+    lines = (row.proxies or '').splitlines()
+    return {'use_proxy': bool(row.use_proxy), 'proxies': '\n'.join(_mask_proxy(ln) for ln in lines),
+            'has_credentials': any(_mask_proxy(ln) != ln for ln in lines)}
 
 
 def proxy_put(request):
@@ -349,11 +378,21 @@ def proxy_put(request):
         row.use_proxy = bool(data['use_proxy'])
     if 'proxies' in data:
         lines = [ln.strip() for ln in str(data['proxies']).splitlines() if ln.strip()]
-        bad = [ln for ln in lines if not re.match(r'^(https?|socks[45]h?)://\S+$', ln)]
+        bad = [ln for ln in lines if egress_proxy.parse(ln) is None]
         if bad:
-            raise SettingsError(400, f'not a proxy URL (http, https or socks): {bad[0][:60]}')
-        row.proxies = '\n'.join(lines)
+            raise SettingsError(400, f'not a proxy URL (http, https, socks5 or socks5h, like http://host:8080): {_mask_proxy(bad[0])[:60]}')
+        # the page shows passwords as ***: a line sent back unchanged keeps the stored password
+        stored = {_mask_proxy(ln): ln for ln in (row.proxies or '').splitlines() if _mask_proxy(ln) != ln}
+        kept = []
+        for ln in lines:
+            if ln in stored:
+                ln = stored[ln]
+            elif '***@' in ln.split('/', 3)[2]:
+                raise SettingsError(400, 'a proxy password shown as *** is not stored: type the full proxy URL again')
+            kept.append(ln)
+        row.proxies = '\n'.join(kept)
     row.save()
+    egress_proxy.reset_cache()  # this process applies the change at once; the other workers within a few seconds
     return proxy_get(request)
 
 

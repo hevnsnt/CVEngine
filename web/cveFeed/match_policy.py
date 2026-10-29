@@ -9,6 +9,9 @@ A CVE match is a finding, so it needs hard evidence about *this host*, not a nam
   * one exception, kept deliberately: a version of the same product against a CISA KEV advisory that gives no usable version bound
     (empty ranges, "unspecified"). Actively exploited and untestable by version, it is kept as a low-confidence match flagged
     ``evidence.unbounded``: a candidate that needs validation, never an "affected" verdict, and the host is template-tested too.
+    It is a "version unknown" match (``is_version_unknown``): marked for review (the Needs validation list, with the reason below),
+    very low priority (heat ice, a tiny capped share of the host score, no automatic AI triage or validation spend), and re-evaluated
+    by the next correlation as soon as the CVE gains a version range.
 
 A product seen *without a version* is not evidence of anything: "nginx" is in hundreds of advisories and most of them do not
 apply to the version the host runs. It stays on the host as a technology or port (metadata is never dropped), and
@@ -33,6 +36,11 @@ REASON_NO_BOUND = (NO_EVIDENCE + '. The advisory gives no version bound to test 
                    'the product name alone is not evidence that the host is affected.')
 REASON_OS = (NO_EVIDENCE + '. An operating-system fingerprint is not matched to CVEs by name from outside; '
              'only the host\'s own inventory report can place its kernel or patch level.')
+
+REASON_VERSION_UNKNOWN = ('Version of the CVE is not known: review when the affected versions are published. The advisory gives no '
+                          'usable affected version range, so this host cannot be tested by version. It is kept for review at very '
+                          'low priority and is re-evaluated automatically when a range is published; until then only a person '
+                          'can decide it.')
 
 # an operating system named by a scanner, as a technology or an nmap product: never a CVE match by name
 _OS_NAME = re.compile(
@@ -60,6 +68,28 @@ def hard_version_evidence(in_range, detail=None):
     """Whether a version result is evidence: inside a bounded range, or older than every branch an advisory fixes (an end-of-life
     release that never got a fix, which correlation records as ``branch_unlisted``). An unknown result is not."""
     return in_range is True or bool((detail or {}).get('branch_unlisted'))
+
+
+def is_version_unknown(evidence, version_in_range, template_result='', distro_status=''):
+    """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``): kept
+    for review, never a verdict. Hard evidence that does not depend on a version (a template hit, a distribution tracker, a runZero
+    report) is not "unknown": that match is judged on it. A version inside a range cannot be unknown either."""
+    evidence = evidence or {}
+    return bool(evidence.get('unbounded')) and version_in_range is None and template_result != 'vulnerable' \
+        and distro_status != 'vulnerable' and not evidence.get('runzero')
+
+
+def version_unknown(match):
+    """``is_version_unknown`` of a CVEMatch."""
+    return is_version_unknown(match.evidence, match.version_in_range, getattr(match, 'template_result', ''), getattr(match, 'distro_status', ''))
+
+
+def version_unknown_q(prefix=''):
+    """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
+    from django.db.models import Q
+    return (Q(**{prefix + 'evidence__has_key': 'unbounded'}) & Q(**{prefix + 'version_in_range__isnull': True})
+            & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
+            & ~Q(**{prefix + 'evidence__has_key': 'runzero'}))
 
 
 def _has_other_evidence(match):

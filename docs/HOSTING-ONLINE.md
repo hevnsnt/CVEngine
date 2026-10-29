@@ -51,7 +51,7 @@ sudo install -m 644 $L/chain.pem     secrets/certs/rengine_chain.pem
 docker compose up -d --force-recreate proxy
 ```
 
-Do not run `make certs` afterwards: it writes the private authority's certificate over these files. `sudo ./install.sh` is safe to run again, because it only regenerates the certificate when the name on it no longer matches `DOMAIN_NAME`.
+The automatic renewal of the private certificate (`scripts/renew-certs.sh`, [Deployment](DEPLOYMENT.md#https)) never replaces a certificate the private authority did not issue, so it leaves these files alone; Settings > Updates and `get_system_status` still warn when such a certificate has fewer than 30 days left. Do not run `make certs` afterwards: it writes the private authority's certificate over these files. `sudo ./install.sh` is safe to run again, because it only regenerates the certificate when the name on it no longer matches `DOMAIN_NAME`.
 
 **Renewal.** Let's Encrypt certificates last 90 days. Put the copy and restart in a certbot deploy hook so renewal needs no one:
 

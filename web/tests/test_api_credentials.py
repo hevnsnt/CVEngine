@@ -146,8 +146,18 @@ class ProjectApiKeyEndpointTests(TestCase):
 		self.other = Project.objects.create(name='O', slug='pko', insert_date=now, org=Org.objects.create(name='PO', slug='po'))
 		self.writer = User.objects.create_user('pkwriter', password='x')
 		self.auditor = User.objects.create_user('pkaudit', password='x')
-		ProjectMembership.objects.create(user=self.writer, project=self.project, role='user')
+		self.member = User.objects.create_user('pkmember', password='x')
+		ProjectMembership.objects.create(user=self.writer, project=self.project, role='admin')  # project keys are admin-only
+		ProjectMembership.objects.create(user=self.member, project=self.project, role='user')
 		ProjectMembership.objects.create(user=self.auditor, project=self.project, role='audit')
+
+	def test_a_plain_member_can_read_but_not_set_or_delete_a_project_key(self):
+		c = client_for(self.member)
+		self.assertEqual(project_api(c, 'GET', 'projects/pkp/api-keys')[1]['can_edit'], False)
+		self.assertEqual(project_api(c, 'PUT', 'projects/pkp/api-keys/shodan', {'api_key': 'x'})[0], 403)
+		ApiCredential.objects.create(project=self.project, service='shodan', value={'api_key': 'kept'})
+		self.assertEqual(project_api(c, 'DELETE', 'projects/pkp/api-keys/shodan')[0], 403)
+		self.assertEqual(ApiCredential.objects.get(project=self.project, service='shodan').value, {'api_key': 'kept'})
 
 	def test_list_shows_catalog_with_no_secrets_and_respects_can_edit(self):
 		c = client_for(self.writer)

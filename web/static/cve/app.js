@@ -206,17 +206,46 @@ function createList({
   onLoaded,
   skeleton = "table",
   onReset,
+  prepare, // async (items) before the rows are drawn: what they need to know first (a project's SLA)
   pageSize = 30, // a number, or a function for a list that asks for more at a time when a filter narrows it
 }) {
   let page = 1;
   let timer = null;
+  let resume = null; // the visibilitychange listener a paused auto-refresh waits on
   let lastCount = null;
+  let lastSize = typeof pageSize === "function" ? pageSize() : pageSize;
+  let failures = 0; // background refreshes in a row that failed: each one doubles the wait for the next
+  let seq = 0; // the newest request: an answer to an older one (an earlier filter, a slower response) is dropped
   const body = el("div");
   const more = el("div", "more-row");
   mount.append(body, more);
 
+  // The auto-refresh of a list that is waiting on something (a running scan): quiet, only while the tab is visible and the reader has
+  // not asked for more rows, and backing off after a failure. A hidden tab resumes on visibilitychange.
+  let refreshing = false;
+  function disarm() {
+    clearTimeout(timer);
+    if (resume) document.removeEventListener("visibilitychange", resume);
+    resume = null;
+  }
+  function arm(ms) {
+    disarm();
+    timer = setTimeout(() => {
+      if (!body.isConnected) return;
+      if (page > 1) return arm(REFRESH_MS);
+      if (!document.hidden) return load(true, true);
+      resume = () => {
+        if (document.hidden) return;
+        disarm();
+        load(true, true);
+      };
+      document.addEventListener("visibilitychange", resume);
+    }, ms);
+  }
+
   // quiet: a refresh the reader did not ask for. The rows are swapped when the answer arrives, with no skeleton in between.
   async function load(reset, quiet = false) {
+    const mine = ++seq;
     if (reset) page = 1;
     if (reset && !quiet) {
       if (onReset) onReset();
@@ -226,17 +255,22 @@ function createList({
     }
     more.textContent = "";
     try {
-      const data = await api(
-        "GET",
-        `${path}?${query({ ...params(), page, page_size: typeof pageSize === "function" ? pageSize() : pageSize })}`,
-      );
+      const size = typeof pageSize === "function" ? pageSize() : pageSize;
+      const data = await api("GET", `${path}?${query({ ...params(), page, page_size: size })}`);
+      if (mine !== seq) return;
       const items = data.results || [];
+      if (prepare) {
+        await prepare(items);
+        if (mine !== seq) return;
+      }
       lastCount = data.count;
+      lastSize = data.page_size || size;
+      failures = 0;
       if (reset) body.textContent = "";
       body.removeAttribute("aria-busy");
       if (reset && !items.length) body.append(el("p", "empty", empty));
       else render(body, items, reset);
-      if (onLoaded) onLoaded(data, reset);
+      if (onLoaded) onLoaded(data, reset, quiet);
       more.textContent = "";
       if (data.page * data.page_size < data.count) {
         const b = el(
@@ -251,11 +285,17 @@ function createList({
         };
         more.append(b);
       }
-      clearTimeout(timer);
-      if (autoRefresh && autoRefresh(items))
-        timer = setTimeout(() => load(true), REFRESH_MS);
+      disarm();
+      refreshing = Boolean(autoRefresh && autoRefresh(items));
+      if (refreshing) arm(REFRESH_MS);
     } catch (err) {
-      if (quiet) return; // a failed background refresh keeps what is on screen
+      if (mine !== seq) return;
+      if (quiet) {
+        // a failed background refresh keeps what is on screen and tries again later, further apart each time
+        failures += 1;
+        if (refreshing) arm(REFRESH_MS * 2 ** Math.min(failures, 4));
+        return;
+      }
       body.removeAttribute("aria-busy");
       if (!reset) {
         // a failed "Load more" keeps the rows already shown and offers the same page again
@@ -272,7 +312,7 @@ function createList({
     alive: () => body.isConnected,
     atTop: () => page === 1, // someone who pressed "Load more" keeps their place
     count: () => lastCount,
-    peek: async () => (await api("GET", `${path}?${query({ ...params(), page: 1, page_size: 1 })}`)).count,
+    peek: async () => (await api("GET", `${path}?${query({ ...params(), page: 1, page_size: 0 })}`)).count, // the count alone: no rows, no facets
     reload: () => load(true, true),
   };
   return {
@@ -282,7 +322,7 @@ function createList({
       page += 1;
       return load(false);
     },
-    left: () => (lastCount == null ? 0 : Math.max(0, lastCount - page * 30)),
+    left: () => (lastCount == null ? 0 : Math.max(0, lastCount - page * lastSize)),
     start: () => {
       liveLists.add(live);
       return load(true);
@@ -291,9 +331,10 @@ function createList({
 }
 
 // --- live numbers -------------------------------------------------------------------------------
-// Every number on a page is read again every few seconds, from the same definitions the dashboard uses (/cve/api/stats and
-// the list endpoints). When a headline number moves, or a filter chip's count does, or a list's own count does, the list
-// reloads quietly. Nothing here polls while the tab is hidden.
+// The headline numbers are read again every few seconds (/cve/api/stats, one cheap request). The filter chips and each list's own
+// count cost a full list query apiece, so they are read when a headline number moved and otherwise only on every SLOW_EVERY-th tick.
+// When a headline number moves, or a filter chip's count does, or a list's own count does, the list reloads quietly. Nothing here
+// polls while the tab is hidden.
 const liveLists = new Set();
 const livePickers = new Set();
 const liveCustom = new Set();
@@ -301,17 +342,22 @@ const LIVE_KEYS = ["targets", "hosts", "hosts_live", "exposed_hosts", "matches",
   "certs_expiring", "certs_total", "hygiene_open"];
 let liveSig = null;
 let liveBusy = false;
+let liveTicks = 0;
+const SLOW_EVERY = 4;
 async function liveTick() {
   if (document.hidden || liveBusy) return;
   liveBusy = true;
   try {
     const s = await api("GET", `/cve/api/stats?project=${encodeURIComponent(slug)}`);
     const sig = LIVE_KEYS.map((k) => s[k]).join(",");
-    let moved = liveSig !== null && sig !== liveSig;
+    const statsMoved = liveSig !== null && sig !== liveSig;
+    let moved = statsMoved;
     liveSig = sig;
+    liveTicks += 1;
+    const slow = liveTicks % SLOW_EVERY === 0;
     for (const p of [...livePickers]) {
       if (!p.node.isConnected) livePickers.delete(p);
-      else if (await p.refresh()) moved = true;
+      else if ((statsMoved || slow) && (await p.refresh())) moved = true;
     }
     for (const c of [...liveCustom]) {
       if (!c.alive()) liveCustom.delete(c);
@@ -319,7 +365,7 @@ async function liveTick() {
     }
     for (const l of [...liveLists]) {
       if (!l.alive()) liveLists.delete(l);
-      else if (l.atTop() && (moved || (await l.peek()) !== l.count())) await l.reload();
+      else if (l.atTop() && (moved || (slow && (await l.peek()) !== l.count()))) await l.reload();
     }
   } catch (_) {
     /* the next tick tries again */
@@ -438,8 +484,9 @@ function searchBox(placeholder, onChange) {
   return input;
 }
 
-// A row of toggle buttons with live counts: one is always pressed, "value" is its key. count(key) -> Promise<number>.
-function picker(label, options, count, onChange) {
+// A row of toggle buttons with live counts: one is always pressed, "value" is its key. count(key) -> Promise<number>, one request per
+// chip; countAll() -> Promise<{key: number}> is the same for the whole row in one request, when the endpoint can say so.
+function picker(label, options, count, onChange, countAll) {
   const node = el("div", "picker", null, { role: "group", "aria-label": label });
   const out = { node, value: options[0][0] };
   const buttons = new Map();
@@ -456,19 +503,19 @@ function picker(label, options, count, onChange) {
     node.append(b);
   });
   // resolves true when any chip's number moved since it was last drawn (the first draw is not a move)
+  const paint = (key, n) => {
+    const label = buttons.get(key).lastChild;
+    const moved = /^\d+$/.test(label.textContent) && label.textContent !== String(n);
+    label.textContent = n;
+    return moved;
+  };
   out.refresh = () =>
-    Promise.all(
-      options.map(([key]) =>
-        count(key)
-          .then((n) => {
-            const label = buttons.get(key).lastChild;
-            const moved = /^\d+$/.test(label.textContent) && label.textContent !== String(n);
-            label.textContent = n;
-            return moved;
-          })
-          .catch(() => false),
-      ),
-    ).then((moves) => moves.some(Boolean));
+    (countAll
+      ? countAll().then((all) => options.map(([key]) => paint(key, all[key] ?? 0)))
+      : Promise.all(options.map(([key]) => count(key).then((n) => paint(key, n)).catch(() => false)))
+    )
+      .catch(() => [false])
+      .then((moves) => moves.some(Boolean));
   out.node = node;
   livePickers.add(out);
   return out;
@@ -1080,6 +1127,8 @@ function renderFinding(d, cfg, row) {
   let advisoryFold = null;
   let requestFold = null;
   const project = projectOf(row); // the finding's own project: its host, history and screenshots live there
+  // the detail has no cve_id of its own; a match's list row carries its CVE, else its title starts with the id
+  const cveId = d.kind === "match" ? (row && row.cve && row.cve.cve_id) || (d.title || "").split(" ")[0] : "";
   const head = el("div", "host-head");
   head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
   const detailAge = agingOf(row || {});
@@ -1100,7 +1149,7 @@ function renderFinding(d, cfg, row) {
     const d0 = Math.floor(detailAge.days);
     const line = el("p", `note sla-line${detailAge.overdueBy ? " overdue" : ""}`);
     line.append(el("b", "", `Open ${d0} day${d0 === 1 ? "" : "s"}`));
-    if (detailAge.sla) line.append(document.createTextNode(detailAge.overdueBy ? `. ${detailAge.overdueBy} day${detailAge.overdueBy === 1 ? "" : "s"} past the ${detailAge.sla} day target for ${row.severity}.` : `. The target for ${row.severity} is ${detailAge.sla} days, ${Math.max(0, Math.ceil(detailAge.sla - detailAge.days))} left.`));
+    if (detailAge.sla) line.append(document.createTextNode(detailAge.overdueBy ? `. ${detailAge.overdueBy} day${detailAge.overdueBy === 1 ? "" : "s"} past the ${detailAge.sla} day target for ${detailAge.severity}.` : `. The target for ${detailAge.severity} is ${detailAge.sla} days, ${Math.max(0, Math.ceil(detailAge.sla - detailAge.days))} left.`));
     out.push(line);
   }
 
@@ -1129,7 +1178,7 @@ function renderFinding(d, cfg, row) {
   }
 
   if (d.kind === "match" && d.cve) {
-    advisoryFold = fold(`About ${d.cve_id || "this CVE"}`, "What the advisory says, the products it names and its links");
+    advisoryFold = fold(`About ${cveId || "this CVE"}`, "What the advisory says, the products it names and its links");
     const advisory = advisoryFold.body;
     advisory.append(el("p", d.cve.description ? "" : "note", d.cve.description || "No description is available in the CVE feed yet."));
     if (d.cve.summary && d.cve.summary !== d.cve.description) {
@@ -1281,7 +1330,7 @@ function renderFinding(d, cfg, row) {
 
   const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}How to verify it by hand, and every check that ran`);
   const check = checkFold.body;
-  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, d.cve_id || (d.title || "").split(" ")[0]) : null;
+  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, cveId) : null;
   if (guide) check.append(guide);
   const v = d.validation;
   const none = {
@@ -1343,7 +1392,7 @@ function matchStatusControl(d) {
     ],
     async () => {
       try {
-        await api("PATCH", `${base}/matches/${d.id}`, { status: s.value, note: d.remediation.note || "" }); // the route replaces the note, so send it back
+        await api("PATCH", `${base}/matches/${d.id}`, { status: s.value }); // no note: the route leaves the stored one alone, and ours may be stale
         d.remediation.status = s.value;
         toast("Status updated");
       } catch (err) {
@@ -1459,24 +1508,44 @@ function buildHistory(box, events, project, total) {
   paint();
 }
 
-// How long a finding has been open, against how long its severity allows. The days are the defaults until the server can say
-// otherwise (requested as a project setting); a finding that is fixed, closed or accepted has no age to chase.
+// How long a finding has been open, against how long its severity allows. The days are the project's own (projects/<slug>/settings,
+// read once per project by loadSla before a list draws its rows) and these defaults until then; a finding that is fixed, closed or
+// accepted has no age to chase.
 const SLA_DAYS = { critical: 7, high: 30, medium: 90, low: 180 };
+const slaByProject = new Map();
+async function loadSla(project) {
+  if (!project || project === "_all" || slaByProject.has(project)) return;
+  try {
+    const settings = await api("GET", `${baseOf(project)}/settings`);
+    slaByProject.set(project, { ...SLA_DAYS, ...((settings && settings.sla_days) || {}) });
+  } catch (_) {
+    /* the defaults stand in; the next list asks again */
+  }
+}
 const SETTLED = ["fixed", "accepted_risk", "closed", "ruled out", "resolved", "dismissed", "not_applicable", "false_positive", "invalid"];
+// The unified Findings rows carry `detected` and `severity`; a CVE match row (the matches page) has `first_seen` and a CVSS score instead,
+// banded as the server bands a CVE inside the Findings list (9.0 critical, 7.0 high, 4.0 medium, else low).
+const detectedOf = (item) => item.detected || item.first_seen;
+const severityOf = (item) => {
+  if (item.severity) return item.severity;
+  const cvss = item.cve && item.cve.cvss;
+  return cvss == null ? undefined : cvss >= 9 ? "critical" : cvss >= 7 ? "high" : cvss >= 4 ? "medium" : "low";
+};
 function agingOf(item) {
   const status = String(item.status ?? item.remediation_status ?? "").toLowerCase();
-  const started = Date.parse(item.detected || "");
+  const started = Date.parse(detectedOf(item) || "");
   if (!Number.isFinite(started) || SETTLED.includes(status)) return null;
   const days = Math.max(0, (Date.now() - started) / 86400000);
-  const sla = SLA_DAYS[item.severity];
-  return { days, sla, overdueBy: sla && days > sla ? Math.floor(days - sla) : 0 };
+  const severity = severityOf(item);
+  const sla = (slaByProject.get(projectOf(item)) || SLA_DAYS)[severity];
+  return { days, sla, severity, overdueBy: sla && days > sla ? Math.floor(days - sla) : 0 };
 }
 const ageWord = (days) => (days < 1 ? `${Math.max(1, Math.round(days * 24))}h` : days < 60 ? `${Math.floor(days)}d` : `${Math.floor(days / 30)}mo`);
 function ageTags(item) {
   const age = agingOf(item);
   if (!age) return [];
-  const out = [el("span", "age-tag", ageWord(age.days), { title: `Open for ${Math.floor(age.days)} day${Math.floor(age.days) === 1 ? "" : "s"}${age.sla ? `. A ${item.severity} finding should be handled within ${age.sla} days.` : ""}` })];
-  if (age.overdueBy) out.push(el("span", "age-tag overdue", `overdue ${age.overdueBy}d`, { title: `${age.overdueBy} day${age.overdueBy === 1 ? "" : "s"} past the ${age.sla} day target for ${item.severity}` }));
+  const out = [el("span", "age-tag", ageWord(age.days), { title: `Open for ${Math.floor(age.days)} day${Math.floor(age.days) === 1 ? "" : "s"}${age.sla ? `. A ${age.severity} finding should be handled within ${age.sla} days.` : ""}` })];
+  if (age.overdueBy) out.push(el("span", "age-tag overdue", `overdue ${age.overdueBy}d`, { title: `${age.overdueBy} day${age.overdueBy === 1 ? "" : "s"} past the ${age.sla} day target for ${age.severity}` }));
   return out;
 }
 
@@ -1523,8 +1592,7 @@ function findingPage(mount, cfg) {
                 continue;
               }
               try {
-                const detail = await api("GET", `${where}/findings/match/${i.id}`);
-                await api("PATCH", `${where}/matches/${i.id}`, { status: value, note: (detail.remediation && detail.remediation.note) || "" });
+                await api("PATCH", `${where}/matches/${i.id}`, { status: value }); // the note stays as it is
                 ok.push(i);
               } catch (e) {
                 failed.push({ item: i, error: e.message });
@@ -1682,6 +1750,7 @@ function findingPage(mount, cfg) {
     params: cfg.params,
     empty: cfg.empty,
     onLoaded: cfg.onLoaded,
+    prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
     render: (_, items, reset) => {
       if (reset) {
         rows.textContent = "";
@@ -1697,7 +1766,7 @@ function findingPage(mount, cfg) {
         row.append(title);
         const meta = el("span", "host-meta");
         meta.append(...r.meta.filter(Boolean));
-        if (isNewSince(item.detected, lastLook)) {
+        if (isNewSince(detectedOf(item), lastLook)) {
           row.dataset.fresh = "1";
           meta.prepend(newTag());
         }
@@ -2064,7 +2133,7 @@ const pages = {
         ["failed", "Failed", "fire"],
         ["aborted", "Aborted"],
       ],
-      async (key) => (await api("GET", `${base}/scans?${query({ status: key, page_size: 1 })}`)).count,
+      async (key) => (await api("GET", `${base}/scans?${query({ status: key, page_size: 0 })}`)).count,
       () => list.reload(),
     );
     // Stop all: every running and queued scan of this project, after a confirmation
@@ -2104,7 +2173,7 @@ const pages = {
       empty: "No scans here. Start one from Targets.",
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
-      onLoaded: (_, reset) => reset && status.refresh(),
+      onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
       render: table(
         withProject(readOnlyColumns([
           {
@@ -2415,7 +2484,7 @@ const pages = {
     const metaTools = el("span", "meta-tools");
     const csv = exportButton({
       run: async (progress) => {
-        const { rows, truncated } = await collectAll((page, size) => api("GET", `${base}/search?${query({ q: q.value, sort: sortBy.value, page, page_size: size })}`), progress);
+        const { rows, truncated } = await collectAll((page, size) => api("GET", `${base}/search?${query({ q: q.value, sort: sortBy.value, facets: "none", page, page_size: size })}`), progress); // the rows only: no heat counts per page
         const kept = heatFilter === "all" ? rows : rows.filter((h) => (h.heat || "unscanned") === heatFilter);
         const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => (p.protocol === "udp" ? `${p.number}/udp` : p.number))))];
         const columns = [
@@ -2475,7 +2544,7 @@ const pages = {
         const card = el("button", "shot-card", null, { type: "button", "data-heat": h.heat || "unscanned", "aria-label": `Open ${h.host}` });
         const frame = el("span", "shot-frame");
         if (h.screenshot) {
-          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/`, alt: "", loading: "lazy", decoding: "async" });
+          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb`, alt: "", loading: "lazy", decoding: "async" });
           img.onerror = () => {
             img.remove();
             frame.append(el("span", "shot-none", "No screenshot"));
@@ -2734,7 +2803,7 @@ const pages = {
         }
         const labels = { queued: "Queued", running: "Running", completed: "Completed", inconclusive: "Inconclusive", failed: "Failed", stopped: "Stopped" };
         assessBody.append(badge(labels[job.status] || job.status, job.status === "completed" ? "success" : job.status === "failed" ? "fire" : "queued"));
-        if (job.scan_id) assessBody.append(el("a", "note", `Scan #${job.scan_id}`, { href: `/cve/${encodeURIComponent(projectOf(h))}/scans/#${job.scan_id}` }));
+        if (job.scan_id) assessBody.append(el("a", "note", `Scan #${job.scan_id}`, { href: scanHref(projectOf(h), job.scan_id) }));
         if (job.error) assessBody.append(el("p", "note", job.error));
         (job.stages || []).forEach((stage) => {
           const state = { "-1": "queued", "0": "failed", "1": "running", "2": "completed", "3": "stopped" }[String(stage.status)] || "unknown";
@@ -2893,8 +2962,8 @@ const pages = {
       });
       const appsCard = subdirectoryCard(h);
       if (appsCard) S.web.append(appsCard);
-      const history = el("div", "history");
-      S.changes.append(history);
+      const historyBox = el("div", "history");
+      S.changes.append(historyBox);
       api("GET", `${baseOf(projectOf(h))}/changes?${query({ host: h.host, since: "365d", page_size: 200 })}`)
         .then((data) => {
           if (current !== h.id) return;
@@ -2917,10 +2986,10 @@ const pages = {
             };
             compareBox.append(toggle, before);
           }
-          buildHistory(history, items, projectOf(h), data.count || items.length);
+          buildHistory(historyBox, items, projectOf(h), data.count || items.length);
           foldTabs();
         })
-        .catch(() => history.append(el("p", "note", "History could not be loaded.")));
+        .catch(() => historyBox.append(el("p", "note", "History could not be loaded.")));
       if (h.names && h.names.length) {
         S.services.append(el("h3", "sec", "Names this IP answers to"));
         h.names.forEach(([how, name]) =>
@@ -3134,7 +3203,7 @@ const pages = {
     const header = el("p", "note");
     mount.append(header);
     const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}) });
-    const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 1 })}`)).total;
+    const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 0 })}`)).total;
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
@@ -3145,6 +3214,11 @@ const pages = {
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
       countOf((key) => ({ type: key })),
       () => reload(),
+      // the response already says how many of each type match the other filters: one request for the four chips
+      async () => {
+        const r = await api("GET", `${base}/findings?${query({ ...params(), type: "all", page_size: 0 })}`);
+        return { all: r.total, ...r.counts };
+      },
     );
     const sev = picker(
       "Severity",
@@ -3295,7 +3369,7 @@ const pages = {
         ["fixed", "Fixed"],
         ["accepted_risk", "Accepted risk"],
       ],
-      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, page_size: 1 })}`)).count,
+      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, page_size: 0 })}`)).count,
       () => list.reload(),
     );
     const cls = select("AI classification", CLASS_OPTIONS, () => {
@@ -3313,7 +3387,7 @@ const pages = {
       filters: [cveNote, q, status.node, cls, verdict],
       params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly }),
       empty: "No CVE matches yet. They appear when a new CVE matches a host in your inventory.",
-      onLoaded: (_, reset) => reset && status.refresh(),
+      onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
       statusControl,
       row: (m) => ({
         heat: m.cve.tier,
@@ -3352,11 +3426,11 @@ pages.hygiene = function hygiene(mount) {
   if (!ALL) head.append(run); // running the checks is per project
   mount.append(head);
 
-  // headline numbers, each a count request with page_size 1
+  // headline numbers, each a count request with page_size 0 (the count alone)
   const tiles = el("div", "tiles");
   mount.append(tiles);
   const countOf = (path, qs) =>
-    api("GET", `${base}/${path}?${query({ ...qs, page_size: 1 })}`).then((r) => r.count).catch(() => null);
+    api("GET", `${base}/${path}?${query({ ...qs, page_size: 0 })}`).then((r) => r.count).catch(() => null);
   const paintTiles = async () => {
     const [tracked, expiring, crit, high, open] = await Promise.all([
       countOf("certificates", {}),
@@ -3462,7 +3536,7 @@ pages.hygiene = function hygiene(mount) {
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
     empty:
       "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC all look healthy.",
-    onLoaded: (_, reset) => reset && sev.refresh(),
+    onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
       {
@@ -3508,7 +3582,7 @@ pages.changes = function changes(mount) {
   });
   tools.append(host, since);
   const count = async (key) =>
-    (await api("GET", `${base}/changes?${query({ since: since.value, host: host.value, kind: key, page_size: 1 })}`)).count;
+    (await api("GET", `${base}/changes?${query({ since: since.value, host: host.value, kind: key, page_size: 0 })}`)).count;
   const kinds = picker(
     "Kind",
     [
@@ -3543,7 +3617,7 @@ pages.changes = function changes(mount) {
     path: `${base}/changes`,
     params: () => ({ since: since.value, host: host.value, kind: kinds.value }),
     empty: "No changes in this period. Changes appear when a scan finds something different from the last one.",
-    onLoaded: (_, reset) => reset && kinds.refresh(),
+    onLoaded: (_, reset, quiet) => reset && !quiet && kinds.refresh(),
     render: table(withProject([
       { label: "When", render: (c) => whenCell(c.detected) },
       { label: "Kind", render: (c) => badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)) },
@@ -3619,7 +3693,7 @@ pages.activity = function activity(mount) {
       el("p", "note", "The pause holds new scheduled and queued work. Active scanner processes stop cooperatively; a status of pause requested means shutdown is not yet confirmed. Resume does not restart stopped scans."));
     mount.append(control);
     refresh();
-    setInterval(() => { if (control.isConnected) refresh(); }, 5000);
+    setInterval(() => { if (control.isConnected && !document.hidden) refresh(); }, 5000);
   }
   const kinds = select("Kind", [["", "All kinds"], ...Object.entries(ACTIVITY_KIND)], () => list.reload());
   tools.append(kinds);
@@ -3728,7 +3802,7 @@ pages.scan = async function scanDetail(mount) {
         ["low", "Low", "ice"],
         ["info", "Info"],
       ],
-      async (key) => (await api("GET", `${scanBase}/vulnerabilities?${query({ severity: key, page_size: 1 })}`)).count,
+      async (key) => (await api("GET", `${scanBase}/vulnerabilities?${query({ severity: key, page_size: 0 })}`)).count,
       () => list.reload(),
     );
     m.append(sev.node);
@@ -3737,7 +3811,7 @@ pages.scan = async function scanDetail(mount) {
       path: `${scanBase}/vulnerabilities`,
       params: () => ({ severity: sev.value }),
       empty: "No findings in this scan.",
-      onLoaded: (_, reset) => reset && sev.refresh(),
+      onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
       render: table(
         [
           { label: "Severity", render: (v) => badge(v.severity, v.severity) },
@@ -3855,7 +3929,12 @@ pages.scan = async function scanDetail(mount) {
         m.append(card);
       }
       clearTimeout(refresh);
-      if (live) refresh = setTimeout(draw, REFRESH_MS);
+      // a hidden tab skips the round (the timer keeps its beat) and the page catches up when it is visible again
+      const again = () => {
+        if (!document.hidden) return draw();
+        refresh = setTimeout(again, REFRESH_MS);
+      };
+      if (live) refresh = setTimeout(again, REFRESH_MS);
     };
     await draw();
   }

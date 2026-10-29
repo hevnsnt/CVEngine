@@ -96,6 +96,7 @@ def run_for_scan(scan_id, checker=run_check, force=False):
     TTL-gated. A critical finding is raised only when the detector's own verdict is VULNERABLE. Returns a summary
     dict; never raises."""
     from cveFeed import activity, ledger
+    from reNgine import resources
     from startScan.models import ScanHistory
     if not enabled():
         return {'checked': 0, 'skipped': 'disabled'}
@@ -112,14 +113,21 @@ def run_for_scan(scan_id, checker=run_check, force=False):
                            '(about 23 MB uploaded per host; read-only, no credential sent)',
                            project=project, status='running', scan_id=scan.id)
     vulnerable = errors = 0
-    for sub, url in todo:
-        result = checker(url)
-        ledger.record(SERVICE, [sub.name], project.id, scan)
-        if result.get('vulnerable') is True:
-            vulnerable += 1
-            _record_finding(scan, sub, url, result)
-        elif result.get('vulnerable') is None:
-            errors += 1
+    try:
+        # under the resource gate like the other scanner stages: a global pause or a stopped scan ends the loop between hosts
+        with resources.heavy_job('route-probe', label=domain.name) as job:
+            for sub, url in todo:
+                job.raise_if_killed()
+                result = checker(url)
+                ledger.record(SERVICE, [sub.name], project.id, scan)
+                if result.get('vulnerable') is True:
+                    vulnerable += 1
+                    _record_finding(scan, sub, url, result)
+                elif result.get('vulnerable') is None:
+                    errors += 1
+    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the hosts not reached are asked again next scan
+        activity.settle(running, 'done', message=f'node2shell check for {domain.name} stopped early ({type(exc).__name__}); the remaining hosts are asked again next scan')
+        return {'checked': len(sites), 'tested': vulnerable + errors, 'skipped': 'scanning was stopped or memory was short'}
     activity.settle(running, 'done', message=(
         f'node2shell check for {domain.name}: {vulnerable} of {len(todo)} host(s) vulnerable to {CVE_ID}'
         + (f', {errors} inconclusive' if errors else '')))

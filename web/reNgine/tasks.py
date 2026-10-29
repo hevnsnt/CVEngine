@@ -2,11 +2,8 @@ import json
 import os
 import subprocess
 import validators
-import tldextract
-import concurrent.futures
 
 from urllib.parse import urlparse
-from api.serializers import SubdomainSerializer
 from celery.utils.log import get_task_logger
 from django.db import IntegrityError
 from dotted_dict import DottedDict
@@ -17,7 +14,6 @@ from reNgine.celery import app
 from reNgine.common_func import *
 from reNgine.definitions import *
 from reNgine.settings import *
-from reNgine.llm import *
 from reNgine.utilities import *
 from scanEngine.models import (EngineType, InstalledExternalTool, Notification)
 from startScan.models import *
@@ -43,9 +39,12 @@ def persist_bbot_result(result, ctx):
 	own_name = own_project = None  # the target this batch belongs to: only it can carry a tailnet device's address
 	if ctx.get('scan_history_id'):  # the organization's excluded hosts, read once for the whole batch
 		from cveFeed.exclusions import excluded_names
-		own_project, own_name = ScanHistory.objects.filter(pk=ctx['scan_history_id']).values_list('domain__project_id', 'domain__name').first() or (None, None)
+		scan = ScanHistory.objects.select_related('domain').filter(pk=ctx['scan_history_id']).first()
+		own_project, own_name = (scan.domain.project_id, scan.domain.name) if scan and scan.domain else (None, None)
 		project_id = own_project
-		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id)}
+		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id), '_scan': scan}  # read once per batch, not per name
+		if ctx.get('domain_id'):
+			ctx['_domain'] = Domain.objects.filter(id=ctx['domain_id']).first()
 	subdomains = {}
 	for name in result.subdomains:
 		subdomain, _ = save_subdomain(name, ctx=ctx)
@@ -215,24 +214,6 @@ def _persist_bbot_findings(result, ctx, subdomains):
 	# return results
 
 
-def add_gpt_description_db(title, path, description, impact, remediation, references):
-	logger.info(f'Adding GPT Report to DB for {title}, PATH: {path}')
-	if not path:
-		path = '/'
-	gpt_report = GPTVulnerabilityReport()
-	gpt_report.url_path = path
-	gpt_report.title = title
-	gpt_report.description = description
-	gpt_report.impact = impact
-	gpt_report.remediation = remediation
-	gpt_report.save()
-
-	for url in references:
-		ref, created = VulnerabilityReference.objects.get_or_create(url=url)
-		gpt_report.references.add(ref)
-		gpt_report.save()
-
-
 #---------------------#
 # Notifications tasks #
 #---------------------#
@@ -348,78 +329,6 @@ def send_task_notif(
 		**opts)
 
 
-@app.task(name='send_hackerone_report', bind=False, queue='send_hackerone_report_queue')
-def send_hackerone_report(vulnerability_id):
-	"""Send HackerOne vulnerability report.
-
-	Args:
-		vulnerability_id (int): Vulnerability id.
-
-	Returns:
-		int: HTTP response status code.
-	"""
-	vulnerability = Vulnerability.objects.get(id=vulnerability_id)
-	severities = {v: k for k,v in NUCLEI_SEVERITY_MAP.items()}
-
-	# can only send vulnerability report if team_handle exists and send_report is True and api_key exists
-	hackerone = Hackerone.objects.filter(send_report=True).first()
-	api_key = HackerOneAPIKey.objects.filter(username__isnull=False, key__isnull=False).first()
-
-	if not (vulnerability.target_domain.h1_team_handle and hackerone and api_key):
-		logger.error('Missing required data: team handle, Hackerone config, or API key.')
-		return {"status_code": 400, "message": "Missing required data"}
-
-	severity_value = severities[vulnerability.severity]
-	tpl = hackerone.report_template or ""
-
-	tpl_vars = {
-		'{vulnerability_name}': vulnerability.name,
-		'{vulnerable_url}': vulnerability.http_url,
-		'{vulnerability_severity}': severity_value,
-		'{vulnerability_description}': vulnerability.description or '',
-		'{vulnerability_extracted_results}': vulnerability.extracted_results or '',
-		'{vulnerability_reference}': vulnerability.reference or '',
-	}
-
-	# Replace syntax of report template with actual content
-	for key, value in tpl_vars.items():
-		tpl = tpl.replace(key, value)
-
-	data = {
-		"data": {
-			"type": "report",
-			"attributes": {
-				"team_handle": vulnerability.target_domain.h1_team_handle,
-				"title": f'{vulnerability.name} found in {vulnerability.http_url}',
-				"vulnerability_information": tpl,
-				"severity_rating": severity_value,
-				"impact": "More information about the impact and vulnerability can be found here: \n" + vulnerability.reference if vulnerability.reference else "NA",
-			}
-		}
-	}
-
-	headers = {
-		'Content-Type': 'application/json',
-		'Accept': 'application/json'
-	}
-
-	r = requests.post(
-		'https://api.hackerone.com/v1/hackers/reports',
-		auth=(api_key.username, api_key.key),
-		json=data,
-		headers=headers
-	)
-	response = r.json()
-	status_code = r.status_code
-	if status_code == 201:
-		vulnerability.hackerone_report_id = response['data']["id"]
-		vulnerability.open_status = False
-		vulnerability.save()
-		return {"status_code": r.status_code, "message": "Report sent successfully"}
-	logger.error(f"Error sending report to HackerOne")
-	return {"status_code": r.status_code, "message": response}
-
-
 #-------------#
 # Utils tasks #
 #-------------#
@@ -491,176 +400,6 @@ def geo_localize(host, ip_id=None):
 		return geo_json
 	logger.info(f'Geo IP lookup failed for host "{host}"')
 	return None
-
-
-@app.task(name='query_whois', bind=False, queue='query_whois_queue')
-def query_whois(target, force_reload_whois=False):
-	"""Query WHOIS information for an IP or a domain name.
-
-	Args:
-		target (str): IP address or domain name.
-		save_domain (bool): Whether to save domain or not, default False
-	Returns:
-		dict: WHOIS information.
-	"""
-	try:
-		# TODO: Implement cache whois only for 48 hours otherwise get from whois server
-		# TODO: in 3.0
-		if not force_reload_whois:
-			logger.info(f'Querying WHOIS information for {target} from db...')
-			domain_info = get_domain_info_from_db(target)
-			if domain_info:
-				return format_whois_response(domain_info)
-			
-		# Query WHOIS information as not found in db
-		logger.info(f'Whois info not found in db')
-		logger.info(f'Querying WHOIS information for {target} from WHOIS server...')
-
-		domain_info = DottedDict()
-		domain_info.target = target
-
-		whois_data = None
-		related_domains = []
-
-		with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-			futures_func = {
-				executor.submit(get_domain_historical_ip_address, target): 'historical_ips',
-				executor.submit(fetch_related_tlds_and_domains, target): 'related_tlds_and_domains',
-				executor.submit(reverse_whois, target): 'reverse_whois',
-				executor.submit(fetch_whois_data_using_netlas, target): 'whois_data',
-			}
-
-			for future in concurrent.futures.as_completed(futures_func):
-				func_name = futures_func[future]
-				try:
-					result = future.result()
-					if func_name == 'historical_ips':
-						domain_info.historical_ips = result
-					elif func_name == 'related_tlds_and_domains':
-						domain_info.related_tlds, tlsx_related_domain = result
-					elif func_name == 'reverse_whois':
-						related_domains = result
-					elif func_name == 'whois_data':
-						whois_data = result
-
-					logger.debug('*'*100)
-					logger.info(f'Task {func_name} finished for target {target}')
-					logger.debug(result)
-					logger.debug('*'*100)
-
-				except Exception as e:
-					logger.error(f'An error occurred while fetching {func_name} for {target}: {str(e)}')
-					continue
-
-		logger.info(f'All concurrent whosi lookup tasks finished for target {target}')
-
-		if 'tlsx_related_domain' in locals():
-			related_domains += tlsx_related_domain
-		
-		whois_data = whois_data.get('data', {})
-
-		# related domains can also be fetched from whois_data
-		whois_related_domains = whois_data.get('related_domains', [])
-		related_domains += whois_related_domains
-
-		# remove duplicate ones
-		related_domains = list(set(related_domains))
-		domain_info.related_domains = related_domains
-
-
-		parse_whois_data(domain_info, whois_data)
-		saved_domain_info = save_domain_info_to_db(target, domain_info)
-		return format_whois_response(domain_info)
-	except Exception as e:
-		logger.error(f'An error occurred while querying WHOIS information for {target}: {str(e)}')
-		return {
-			'status': False, 
-			'target': target, 
-			'result': f'An error occurred while querying WHOIS information for {target}: {str(e)}'
-		}
-
-
-def fetch_related_tlds_and_domains(domain):
-	"""
-	Fetch related TLDs and domains using TLSx.
-	related domains are those that are not part of related TLDs.
-	
-	Args:
-		domain (str): The domain to find related TLDs and domains for.
-	
-	Returns:
-		tuple: A tuple containing two lists (related_tlds, related_domains).
-	"""
-	logger.info(f"Fetching related TLDs and domains for {domain}")
-	related_tlds = set()
-	related_domains = set()
-	
-	# Extract the base domain
-	extracted = tldextract.extract(domain)
-	base_domain = f"{extracted.domain}.{extracted.suffix}"
-	
-	cmd = f'tlsx -san -cn -silent -ro -host {domain}'
-	_, result = run_command(cmd, shell=True)
-
-	for line in result.splitlines():
-		try:
-				line = line.strip()
-				if line == "":
-					continue
-				extracted_result = tldextract.extract(line)
-				full_domain = f"{extracted_result.domain}.{extracted_result.suffix}"
-				
-				if extracted_result.domain == extracted.domain:
-					if full_domain != base_domain:
-						related_tlds.add(full_domain)
-				elif extracted_result.domain != extracted.domain or extracted_result.subdomain:
-					related_domains.add(line)
-		except Exception as e:
-			logger.error(f"An error occurred while fetching related TLDs and domains for {domain}: {str(e)}")
-			continue
-	
-	logger.info(f"Found {len(related_tlds)} related TLDs and {len(related_domains)} related domains for {domain}")
-	return list(related_tlds), list(related_domains)
-
-
-def fetch_whois_data_using_netlas(target):
-	"""
-		Fetch WHOIS data using netlas.
-		Args:
-			target (str): IP address or domain name.
-		Returns:
-			dict: WHOIS information.
-
-		The key goes to Netlas through its Python client, in a request header: a command line would show it to every process on the host
-		(``/proc/<pid>/cmdline``) whatever the logs hide.
-	"""
-	logger.info(f'Fetching WHOIS data for {target} using Netlas...')
-	netlas_key = get_netlas_key()
-	key = netlas_key.key if netlas_key and netlas_key.key and netlas_key.key != "None" else ''
-
-	def failure(message):
-		return {'status': False, 'message': message}
-
-	try:
-		import netlas
-		data = netlas.Netlas(api_key=key).host(host=str(target))
-	except netlas.exception.ThrottlingError:
-		return failure('Netlas request limit exceeded.')
-	except netlas.exception.APIError as e:
-		text = str(e).replace(key, '***') if key else str(e)
-		if 'Failed to parse response data' in text:
-			return failure('Netlas limit exceeded.')
-		if 'api key doesn\'t exist' in text:
-			return failure('Invalid Netlas API Key!')
-		if 'Request limit' in text:
-			return failure('Netlas request limit exceeded.')
-		return failure('An error occurred while fetching WHOIS data: ' + text[:200])
-	except Exception as e:
-		text = str(e).replace(key, '***') if key else str(e)
-		return failure('An error occurred while fetching WHOIS data: ' + text[:200])
-	if not data:
-		return failure('No data available for the given domain or IP.')
-	return {'status': True, 'data': data}
 
 
 @app.task(name='run_command', bind=False, queue='run_command_queue')
@@ -787,6 +526,11 @@ def _carry_finding_state(vuln, lookup):
 			earlier.remediation_updated_at, earlier.remediation_by_id, earlier.assignee_id)
 
 
+def _reference(url):
+	"""The stored VulnerabilityReference of ``url``: the first when duplicate rows exist (``url`` is not unique), made when there is none."""
+	return VulnerabilityReference.objects.filter(url=url).order_by('id').first() or VulnerabilityReference.objects.create(url=url)
+
+
 def save_vulnerability(**vuln_data):
 	references = vuln_data.pop('references', [])
 	cve_ids = vuln_data.pop('cve_ids', [])
@@ -846,10 +590,8 @@ def save_vulnerability(**vuln_data):
 
 	# Save vuln reference
 	for url in references or []:
-		ref, ref_created = VulnerabilityReference.objects.get_or_create(url=url)
-		if ref_created:
-			vuln.references.add(ref)
-			vuln.save()
+		vuln.references.add(_reference(url))  # the table is shared and url is not unique: every finding that cites it links it
+		vuln.save()
 
 	# Save subscan id in vuln object
 	if subscan:
@@ -888,12 +630,14 @@ def save_subdomain(subdomain_name, ctx={}):
 		return None, False
 
 	if ctx.get('domain_id'):
-		domain = Domain.objects.get(id=ctx.get('domain_id'))
+		domain = ctx.get('_domain') or Domain.objects.get(id=ctx.get('domain_id'))
 		if subdomain_name != domain.name and not subdomain_name.endswith('.' + domain.name):  # dot boundary: example.com.evil.net is not in scope
 			logger.error(f"{subdomain_name} is not a subdomain of domain {domain.name}. Skipping.")
 			return None, False
 
-	scan = ScanHistory.objects.filter(pk=scan_id).first()
+	scan = ctx.get('_scan')
+	if scan is None or str(scan.pk) != str(scan_id):
+		scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
 	domain = scan.domain if scan else None
 	if domain is not None:
 		from cveFeed.exclusions import excluded_names, normalize
@@ -956,98 +700,3 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, proje
 		geo_localize.delay(ip_address, ip.id)
 
 	return ip, created
-
-
-@app.task(name='query_reverse_whois', bind=False, queue='query_reverse_whois_queue')
-def query_reverse_whois(lookup_keyword):
-	"""Queries Reverse WHOIS information for an organization or email address.
-
-	Args:
-		lookup_keyword (str): Registrar Name or email
-	Returns:
-		dict: Reverse WHOIS information.
-	"""
-
-	return reverse_whois(lookup_keyword)
-
-
-@app.task(name='query_ip_history', bind=False, queue='query_ip_history_queue')
-def query_ip_history(domain):
-	"""Queries the IP history for a domain
-
-	Args:
-		domain (str): domain_name
-	Returns:
-		list: list of historical ip addresses
-	"""
-
-	return get_domain_historical_ip_address(domain)
-
-
-@app.task(name='llm_vulnerability_description', bind=False, queue='llm_queue')
-def llm_vulnerability_description(vulnerability_id):
-	"""Generate and store Vulnerability Description using GPT.
-
-	Args:
-		vulnerability_id (Vulnerability Model ID): Vulnerability ID to fetch Description.
-	"""
-	logger.info('Getting GPT Vulnerability Description')
-	try:
-		lookup_vulnerability = Vulnerability.objects.get(id=vulnerability_id)
-		lookup_url = urlparse(lookup_vulnerability.http_url)
-		path = lookup_url.path
-	except Exception as e:
-		return {
-			'status': False,
-			'error': str(e)
-		}
-
-	# check in db GPTVulnerabilityReport model if vulnerability description and path matches
-	if not path:
-		path = '/'
-	stored = GPTVulnerabilityReport.objects.filter(url_path=path).filter(title=lookup_vulnerability.name).first()
-	if stored and stored.description and stored.impact and stored.remediation:
-		logger.info('Found cached Vulnerability Description')
-		response = {
-			'status': True,
-			'description': stored.description,
-			'impact': stored.impact,
-			'remediation': stored.remediation,
-			'references': [url.url for url in stored.references.all()]
-		}
-	else:
-		logger.info('Fetching new Vulnerability Description')
-		vulnerability_description = get_gpt_vuln_input_description(
-			lookup_vulnerability.name,
-			path
-		)
-		# one can add more description here later
-
-		gpt_generator = LLMVulnerabilityReportGenerator(logger=logger)
-		response = gpt_generator.get_vulnerability_description(vulnerability_description)
-		logger.info(response)
-		add_gpt_description_db(
-			lookup_vulnerability.name,
-			path,
-			response.get('description'),
-			response.get('impact'),
-			response.get('remediation'),
-			response.get('references', [])
-		)
-
-	# for all vulnerabilities with the same vulnerability name this description has to be stored.
-	# also the condition is that the url must contain a part of this.
-
-	for vuln in Vulnerability.objects.filter(name=lookup_vulnerability.name, http_url__icontains=path):
-		vuln.description = response.get('description', vuln.description)
-		vuln.impact = response.get('impact')
-		vuln.remediation = response.get('remediation')
-		vuln.is_gpt_used = True
-		vuln.save()
-
-		for url in response.get('references', []):
-			ref, created = VulnerabilityReference.objects.get_or_create(url=url)
-			vuln.references.add(ref)
-			vuln.save()
-
-	return response

@@ -41,7 +41,8 @@ class Base(World):
         reset_rates({'t': token})
         status, out = call(token, 'PUT', '/api/v1/sentinel', {'name': name, 'scope': {'projects': ['ir-a']}, 'capabilities': capabilities})
         self.assertIn(status, (200, 201), out)
-        Agent.objects.filter(pk=out['id']).update(status='active', last_seen=timezone.now())
+        # network:internal is the server's to grant (the enrollment an administrator provisioned, or an administrator's change), not a Sentinel's to declare
+        Agent.objects.filter(pk=out['id']).update(status='active', last_seen=timezone.now(), network='internal' if 'network:internal' in capabilities else 'external')
         return out['id']
 
     def queued_scan(self):
@@ -220,6 +221,14 @@ class StageTests(Base):
         with mock.patch('cveFeed.nuclei_scan.stream_nuclei') as local, self.assertRaises(RuntimeError):
             list(stream(handle.name))  # no Sentinel at all
         local.assert_not_called()
+
+    def test_an_internal_stream_refuses_a_secrets_file_instead_of_dropping_it(self):
+        scan = self.queued_scan()
+        stream = sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_targeted', internal=True)
+        with mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as dispatched, self.assertRaises(RuntimeError) as caught:
+            list(stream('/nonexistent', secret_file='/tmp/secrets.yaml'))
+        dispatched.assert_not_called()
+        self.assertIn('signed-in', str(caught.exception))
 
     def test_every_local_scanner_refuses_inside_an_internal_scan(self):
         from cveFeed import naabu_scan, nmap_scan, nuclei_scan, testssl_scan, wpscan_scan

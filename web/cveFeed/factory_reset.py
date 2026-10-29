@@ -9,7 +9,7 @@ matches, generated templates, AI activity, update settings, scheduled scans, oth
 scan-results directory.
 
 Kept: the administrator's own account (password and two-step sign-in untouched, so they can still sign in; only the
-"finished onboarding" flag is cleared), scan engines, wordlists and the installed tools, and the system schedules.
+"finished onboarding" flag is cleared), scan engines and the installed tools, and the system schedules.
 Afterwards the instance has the untouched "Default" organization and project of a new install, and the first-run wizard
 starts again.
 """
@@ -25,7 +25,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 CONFIRM_PHRASE = 'FACTORY RESET'
-WIPE_APPS = ('startScan', 'targetApp', 'recon_note', 'cveFeed', 'dashboard')
+WIPE_APPS = ('startScan', 'targetApp', 'cveFeed', 'dashboard')
 # The acting administrator's own rows survive (the other users' cascade away with them).
 KEEP_MODELS = {'dashboard.userprofile', 'dashboard.userpreferences'}
 WIPE_SCAN_MODELS = ('scanEngine.notification', 'scanEngine.proxy', 'scanEngine.vulnerabilityreportsetting')

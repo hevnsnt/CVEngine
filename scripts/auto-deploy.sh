@@ -15,6 +15,10 @@
 set -Euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# root (a systemd unit) in a checkout owned by whoever cloned it: git refuses it ("dubious ownership") unless this one is named. Root already
+# runs this checkout's scripts, so naming it adds no trust.
+export GIT_CONFIG_COUNT=$(( ${GIT_CONFIG_COUNT:-0} + 1 ))
+export "GIT_CONFIG_KEY_$((GIT_CONFIG_COUNT - 1))=safe.directory" "GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT - 1))=$PWD"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
 # A setting from the environment, else the last matching line of .env. .env is never sourced.
@@ -34,6 +38,9 @@ drain_seconds=$(setting CVENGINE_AUTO_DEPLOY_DRAIN_SECONDS 1800)
 state=$(git rev-parse --git-path cvengine-auto-deploy)
 mkdir -p "$state/backups"
 chmod 700 "$state" "$state/backups"
+# The web interface certificate is renewed before it expires whatever the update mode is (scripts/renew-certs.sh: a no-op until its next
+# check is due, twice a day). A host with this timer and no update watcher has no other trigger for it.
+if [[ -f scripts/renew-certs.sh ]]; then scripts/renew-certs.sh --if-due >>"$state/cert.log" 2>&1 || log "The certificate check failed; see $state/cert.log"; fi
 exec 8>"$state/lock"
 flock -n 8 || { log "Another auto-deploy run is still working."; exit 0; }
 
@@ -48,6 +55,18 @@ if [[ $mode != auto ]]; then
     exit 0
 fi
 printf auto > "$state/mode-note"
+
+# This only ever deploys master (scripts/update.sh refuses any other branch). A checkout that was moved to another branch (Settings > Updates >
+# Update source) would otherwise back up the database and fail inside update.sh at every retry.
+branch=$(git branch --show-current 2>/dev/null) || branch=''
+if [[ $branch != master ]]; then
+    if [[ $(cat "$state/branch-note" 2>/dev/null) != "${branch:-detached}" ]]; then
+        log "This checkout is on ${branch:-no branch (detached HEAD)}, not master, so automatic deployment does nothing. Updates for it are approved in Settings > Updates."
+        printf '%s' "${branch:-detached}" > "$state/branch-note"
+    fi
+    exit 0
+fi
+rm -f "$state/branch-note"
 
 latest=$(timeout 60 git ls-remote origin refs/heads/master 2>/dev/null | cut -f1) || latest=''
 if [[ ! $latest =~ ^[0-9a-f]{40}$ ]]; then
@@ -96,7 +115,8 @@ if (( keep_backups > 0 )); then
     log "Backed up the database to $backup."
 fi
 
-CVENGINE_UPDATE_DRAIN_SECONDS=$drain_seconds scripts/update.sh --stop-scans
+# (the backup above is this run's; update.sh does not take a second one)
+CVENGINE_UPDATE_BACKUPS=0 CVENGINE_UPDATE_DRAIN_SECONDS=$drain_seconds scripts/update.sh --stop-scans
 status=$?
 if (( status == 0 )); then
     rm -f "$state/failed"

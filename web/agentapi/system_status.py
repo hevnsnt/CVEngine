@@ -8,6 +8,7 @@ whole server, not a project, so for anyone else it is left out and ``system_note
 
 Every probe is wrapped, so one that fails or times out turns into ``{"error": ...}`` and a line in ``problems`` instead of failing
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
+import os
 import re
 import shutil
 import time
@@ -54,31 +55,63 @@ def _update():
             'scans_running': phase.get('scans_running'), 'changed_at': phase.get('changed_at')}
 
 
-def _projects(ctx):
-    from agentapi.services import _allowed_ids
+STATUS_CACHE_SECONDS = 60  # CVENGINE_STATUS_CACHE_SECONDS: a project's counts are reused this long (0 turns the cache off)
+
+
+def _cache_seconds():
+    try:
+        return max(0, int(os.environ.get('CVENGINE_STATUS_CACHE_SECONDS', STATUS_CACHE_SECONDS)))
+    except ValueError:
+        return STATUS_CACHE_SECONDS
+
+
+def _project_row(project):
     from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
-    from dashboard.models import Project
     from startScan.models import ScanHistory
     from targetApp.models import Domain
+    snap = compute_snapshot(project, with_fixed=False)  # the live counts only; never stored
+    scans = ScanHistory.objects.filter(domain__project=project)
+    return {
+        'slug': project.slug, 'name': project.name,
+        'targets': Domain.objects.filter(project=project).count(),
+        'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
+        'scans': {'running': counts.running_scans(scans).count(), 'queued': counts.queued_scans(scans).count(),
+                  'stalled': counts.stalled_scans(scans).count()},
+        'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
+        'cve_matches': snap['cve_matches'],
+        # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
+        'wordpress': wpscan_scan.status_counts([project.id]),
+        # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
+        'web_discovery': subdir_apps.status_counts([project.id]),
+    }
 
-    rows = []
+
+def _projects(ctx):
+    """One row per project the caller may see. A row costs several whole-project counts and agents poll this, so a row is kept for
+    ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per caller and project: the counts may be up to that old."""
+    from django.core.cache import cache
+
+    from agentapi.services import _allowed_ids
+    from dashboard.models import Project
+
+    seconds, rows = _cache_seconds(), []
     for project in Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS]:
-        snap = compute_snapshot(project)
-        scans = ScanHistory.objects.filter(domain__project=project)
-        rows.append({
-            'slug': project.slug, 'name': project.name,
-            'targets': Domain.objects.filter(project=project).count(),
-            'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
-            'scans': {'running': counts.running_scans(scans).count(), 'queued': counts.queued_scans(scans).count(),
-                      'stalled': counts.stalled_scans(scans).count()},
-            'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
-            'cve_matches': snap['cve_matches'],
-            # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
-            'wordpress': wpscan_scan.status_counts([project.id]),
-            # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
-            'web_discovery': subdir_apps.status_counts([project.id]),
-        })
+        key = f'sysstatus:project:{ctx.user.pk}:{project.id}'
+        row = None
+        if seconds:
+            try:
+                row = cache.get(key)
+            except Exception:  # noqa: BLE001 - a cache outage only means computing it
+                row = None
+        if row is None:
+            row = _project_row(project)
+            if seconds:
+                try:
+                    cache.set(key, row, seconds)
+                except Exception:  # noqa: BLE001
+                    pass
+        rows.append(row)
     return rows
 
 
@@ -161,6 +194,14 @@ def _disk():
     return {'path': 'scan results' if path == settings.RENGINE_RESULTS else 'application', 'total_mb': usage.total // mb,
             'used_mb': usage.used // mb, 'free_mb': usage.free // mb,
             'free_percent': round(usage.free * 100 / usage.total, 1) if usage.total else None}
+
+
+def _certificate():
+    """The web interface certificate: ``known``, ``not_after``, ``days_left``, ``state`` (``ok``, ``expiring`` under 30 days, ``expired``,
+    ``unknown``), when it was last checked and renewed, the last renewal error and a ``problem`` sentence. Reported by the host's renewal
+    check (scripts/renew-certs.sh); ``known`` is False where nothing reports (the bundled certificate authority is not used)."""
+    from cveFeed import updater
+    return updater.certificate()
 
 
 def _feeds():
@@ -369,6 +410,9 @@ def _system(user, problems, notes):
                 problems.append(f"memory: {c['host']} has {c['available_mb']} MB free, below its critical level")
             if (c['report_age_seconds'] or 0) > MEMORY_REPORT_STALE_SECONDS:
                 problems.append(f"memory: {c['host']} has not reported for {c['report_age_seconds']} seconds")
+    out['certificate'] = _probe(problems, 'certificate', _certificate)
+    if isinstance(out['certificate'], dict) and out['certificate'].get('problem'):
+        problems.append(f"certificate: {out['certificate']['problem']}")
     out['disk'] = _probe(problems, 'disk', _disk)
     if out['disk'].get('free_percent') is not None and out['disk']['free_percent'] < DISK_LOW_PERCENT:
         problems.append(f"disk: only {out['disk']['free_percent']}% free ({out['disk']['free_mb']} MB)")
