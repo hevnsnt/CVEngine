@@ -23,6 +23,10 @@
   <img src="docs/images/cvengine-tour.gif" alt="A 30-second tour of cvENGINE: add a domain name, watch it discover every host, port and service, see today's exploited CVEs matched and AI-validated against what you run, hosts ranked with their evidence, and a timeline of every change" width="900">
 </p>
 
+<p align="center">
+  <img src="docs/images/cvengine-tour-1.3.gif" alt="What is new in 1.3: the Live page with hosts inside private networks counted apart, the Hosts page filtered to internal hosts, the Sentinels that scan them from inside the network, provisioning a Sentinel from a list of your organizations, the regrouped Settings tabs and the new Email tab" width="900">
+</p>
+
 ## Know what you expose. Fix what's exploitable first.
 
 Attack surface tools find assets. Vulnerability scanners find flaws. Threat feeds find CVEs. **cvENGINE runs all three as one continuous loop** and hands you a verdict instead of a pile of alerts. It answers the question that matters: *of everything exploited today, what do I have exposed?*
