@@ -215,6 +215,20 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(victim.read_text(), 'keep me')
         self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.new)
 
+    def test_commit_publication_records_the_ancestor_a_fork_shares_with_upstream(self):
+        (self.work / 'web' / 'README').write_text('a change only this fork has\n')
+        self.git('commit', '-am', 'fork only', cwd=self.work)
+        mine = self.head()
+        result = subprocess.run(['python3', 'scripts/update-state.py', 'commit', mine],
+                                cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.work / 'web' / '.commit').read_text().split(), [mine, self.prev])
+        # an install that is exactly upstream keeps the single line
+        result = subprocess.run(['python3', 'scripts/update-state.py', 'commit', self.prev],
+                                cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.work / 'web' / '.commit').read_text().split(), [self.prev])
+
     def test_dev_compose_file_deploys_with_that_file_and_restarts_the_code_services(self):
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')

@@ -68,6 +68,35 @@ class StateTests(TestCase):
 		with open(os.path.join(self.dir, '.commit'), 'w') as f:
 			f.write(sha + '\n')
 
+	def test_a_fork_with_commits_of_its_own_is_compared_by_the_commit_it_shares_with_upstream(self):
+		import unittest.mock as mock
+		MINE = 'c' * 40
+		with open(os.path.join(self.dir, '.commit'), 'w') as f:
+			f.write(MINE + '\n' + OLD + '\n')
+		self.assertEqual((updater.installed_sha(), updater.upstream_sha()), (MINE, OLD))
+		asked = []
+
+		def get(url, headers=None, timeout=None):
+			asked.append(url)
+			if '/compare/' in url:
+				# GitHub has never heard of the fork's own commit
+				return FakeResp(404) if MINE in url else FakeResp(200, {'status': 'ahead', 'ahead_by': 1, 'commits': []})
+			return FakeResp(200, {'sha': NEW, 'html_url': 'u', 'commit': {'message': 'm', 'committer': {'date': ''}}})
+		row = updater.check(UpdateSettings.current(), get=get)
+		self.assertTrue(any('/compare/' + OLD + '...' in url for url in asked))
+		self.assertEqual(row.behind_by, 1)
+		self.assertEqual(updater.state(row)['installed'], MINE[:7])  # the banner still names what is running
+		# the fork is level with upstream's head: nothing to offer
+		with open(os.path.join(self.dir, '.commit'), 'w') as f:
+			f.write(MINE + '\n' + NEW + '\n')
+		row = updater.check(UpdateSettings.current(), get=get)
+		self.assertEqual((row.behind_by, updater.state(row)['status']), (0, 'up_to_date'))
+
+	def test_a_commit_file_with_a_bad_second_line_falls_back_to_the_installed_commit(self):
+		with open(os.path.join(self.dir, '.commit'), 'w') as f:
+			f.write(OLD + '\nnot a commit\n')
+		self.assertEqual(updater.upstream_sha(), OLD)
+
 	def heartbeat(self, age, raw=None):
 		import time
 		with open(os.path.join(self.dir, '.updater-heartbeat'), 'w') as f:
