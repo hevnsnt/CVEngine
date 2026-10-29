@@ -215,8 +215,13 @@ def _feeds():
         guidance = detection_author.progress()
     except Exception:  # noqa: BLE001 - status must not fail on a counting problem
         guidance = None
+    try:
+        from cveFeed import feed_watermark
+        watermark = feed_watermark.status()  # the feed is complete through this time; `behind` when it has not been read to its head in a day
+    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
+        watermark = None
     return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
-            'cve_guidance': guidance}
+            'cve_feed_watermark': watermark, 'cve_guidance': guidance}
 
 
 def _ai():

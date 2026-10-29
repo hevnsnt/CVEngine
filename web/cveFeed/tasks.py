@@ -250,10 +250,6 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
 
 
 COVERAGE_DAYS_DEFAULT = 14
-GAP_LEGACY_DAYS = 30        # an install that predates the gap record: look this far back once
-GAP_MARGIN_DAYS = 1         # a snapshot's clock and the feed's first-seen times do not agree to the minute
-GAP_ENTRIES_PER_DAY = 800   # about what the feed lists in a day at most: how deep a walk back to a gap has to read
-GAP_MAX_SCAN = 40000
 GAP_MAX_NEW = 1500
 BACKFILL_ID_RE = re.compile(r'^(CVE-\d{4}-\d{4,9}|GHSA(-[a-z0-9]{4}){3}|OSV-[A-Za-z0-9-]{4,40})$', re.IGNORECASE)
 
@@ -268,12 +264,6 @@ def _coverage_days():
 def _watch_techs():
     raw = os.environ.get('CVENGINE_CVE_WATCH_TECHS', 'php')
     return [t.strip().lower() for t in raw.split(',') if t.strip()]
-
-
-def _oldest_first_seen():
-    """When the oldest stored entry was first seen by the feed (None when nothing is stored or none carries the time)."""
-    from django.db.models import Min
-    return CVEEntry.objects.aggregate(oldest=Min('first_seen_at'))['oldest']
 
 
 def _parse_time(value):
@@ -308,30 +298,27 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     from cveFeed.threat import FIRE, SMOKE
     pause_for = sleep or time.sleep
     explicit = bool(ids or techs)
-    gap = None
+    row = cutoff = now = None
     if not explicit:
-        from cveFeed import seed
+        from cveFeed import feed_watermark
         window = _coverage_days() if days is None else int(days)
         if window <= 0:
             return {'status': 'disabled'}
         now = timezone.now()
-        cutoff = now - timedelta(days=window)
-        # a seed leaves a gap between its snapshot and the first sync: walk back to it, however old the entries already stored are
-        gap = seed.feed_gap_from()
-        if gap is None and not seed.feed_gap_checked():
-            gap = now - timedelta(days=GAP_LEGACY_DAYS)  # an install from before the gap was recorded: look once
-        if gap is not None:
-            cutoff = min(cutoff, gap - timedelta(days=GAP_MARGIN_DAYS))
-            max_scan = max(max_scan, min(GAP_MAX_SCAN, (now - cutoff).days * GAP_ENTRIES_PER_DAY + 1000))
+        row = feed_watermark.current()
+        # a walk that read back to its floor is not repeated for a few hours, so the hourly schedule costs no request in between
+        if (not force and row.covered_through is not None and not row.resume_cursor and row.checked_at
+                and now - row.checked_at < feed_watermark.RECHECK):
+            return {'status': 'covered', 'covered_through': row.covered_through.isoformat()}
+        cutoff = feed_watermark.floor_for(row, now, window)
+        max_scan = feed_watermark.scan_budget(cutoff, now, max_scan)
+        if now - cutoff > timedelta(days=2):
             max_new = max(max_new, GAP_MAX_NEW)
-        else:
-            oldest = _oldest_first_seen()
-            if not force and oldest is not None and oldest <= cutoff:
-                return {'status': 'covered', 'oldest': oldest.isoformat()}
     client = CVENowClient()
     result = {'status': 'ok', 'listed': 0, 'wanted': 0, 'created': 0, 'failed': 0, 'blocked': False, 'invalid': []}
     wanted, first_seen = [], {}
-    reached_floor = False  # the walk read back to the start of the window, with nothing left to fetch past a cap
+    # how the walk ended: it read back to the floor or to the end of the listing ("reached"), or stopped at a cap with entries left
+    reached, head, page_cursor = False, None, None
 
     def want(entry_id):
         if entry_id not in first_seen and entry_id not in wanted:
@@ -355,25 +342,38 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                 if force or entry_id not in known:
                     want(entry_id)
         if not explicit:
-            walked = 0
-            for summary, known in _known_in_batches(client.iter_entries(max_entries=max_scan, page_pause=0.3)):
-                walked += 1
-                seen_at = _parse_time(summary.get('firstSeenAt') or summary.get('publishedAt'))
-                if seen_at and seen_at < cutoff:
-                    reached_floor = True
+            from cveFeed import feed_watermark
+            resumed = row.resume_cursor or None  # a walk cut short by a cap or a failure continues where it was
+            head = row.resume_head if resumed else None
+            walked, stopped = 0, False
+            for page_cursor, page in client.iter_pages(max_entries=max_scan, page_pause=0.3, cursor=resumed):
+                known = set(CVEEntry.objects.filter(cve_id__in=[e.get('id') for e in page if e.get('id')]).values_list('cve_id', flat=True))
+                for summary in page:
+                    walked += 1
+                    published = feed_watermark.published(summary)
+                    if head is None and not resumed and published:
+                        head = published  # the first entry of a walk from the head: what a complete walk will have covered
+                    if published and published < cutoff:
+                        reached = True
+                        break
+                    entry_id = summary.get('id')
+                    if entry_id and (force or entry_id not in known):
+                        want(entry_id)
+                        first_seen[entry_id] = summary.get('firstSeenAt')
+                    if len(wanted) >= max_new:
+                        stopped = True
+                        break
+                if reached or stopped:
                     break
-                entry_id = summary.get('id')
-                if entry_id and (force or entry_id not in known):
-                    want(entry_id)
-                    first_seen[entry_id] = summary.get('firstSeenAt')
-                if len(wanted) >= max_new:
-                    break
+            else:
+                reached = walked < max_scan  # the listing ended before the budget did: everything it lists was read
             result['listed'] = walked
     except requests.RequestException as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         result['blocked'] = status in (401, 403, 429)
         result['status'] = 'blocked' if result['blocked'] else 'failed'
         logger.warning('cve.now backfill could not read the listing: %s', exc)
+        reached = False
         if not wanted:
             return result
     result['wanted'] = len(wanted)
@@ -397,11 +397,18 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             result['failed'] += 1
             logger.warning('cve.now backfill: failed to save %s: %s', entry_id, exc)
         pause_for(pause)
-    if (gap is not None and reached_floor and result['status'] == 'ok' and not result['failed']
-            and result['created'] == result['wanted'] and len(wanted) < max_new):
-        from cveFeed import seed
-        seed.close_feed_gap()  # read back past the gap and everything the feed listed there is stored
-        result['gap_closed'] = True
+    if row is not None:
+        clean = result['status'] == 'ok' and not result['failed'] and result['created'] == result['wanted'] and len(wanted) <= max_new
+        if reached and clean:
+            # everything the feed lists back to the floor is stored: the watermark moves to the head this walk started from
+            row.covered_through, row.resume_cursor, row.resume_head, row.checked_at = head or now, '', None, now
+            row.save()
+            result['covered_through'] = row.covered_through.isoformat()
+        elif clean:
+            # stopped at a cap with more to read: continue from this page next time (a failure keeps the earlier state, so nothing is skipped)
+            row.resume_cursor, row.resume_head = page_cursor or '', head
+            row.save()
+            result['continues'] = True
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"

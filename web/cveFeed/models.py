@@ -261,6 +261,21 @@ class BackgroundCursor(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
 
+class FeedWatermark(models.Model):
+    """How far the CVE feed is known to be complete (cveFeed.feed_watermark): every entry the feed lists with a publication time after
+    ``covered_through`` has been read. A snapshot (the seed) sets it to what the snapshot covers, and a walk that read back past it
+    (with a margin for entries the feed saw late) and stored everything it listed moves it to the head of the feed it read. A walk cut
+    short keeps ``resume_cursor`` (the listing's own cursor) and the head it started from, so the next run continues instead of
+    starting over; a failure never advances it."""
+
+    source = models.CharField(max_length=32, primary_key=True)
+    covered_through = models.DateTimeField(null=True, blank=True)
+    resume_cursor = models.TextField(blank=True, default="")
+    resume_head = models.DateTimeField(null=True, blank=True)
+    checked_at = models.DateTimeField(null=True, blank=True)  # when a walk last reached its floor
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class HotValidationCursor(models.Model):
     """Durable round-robin position for one bounded Fire/Smoke finding sweep."""
 
