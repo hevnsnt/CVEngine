@@ -9,15 +9,15 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [bbot](https://github.com/blacklanternsecurity/bbot) | AGPL-3.0 | Subdomain and asset discovery, run as a separate process |
 | [nuclei](https://github.com/projectdiscovery/nuclei) | MIT | Vulnerability scanning and CVE tests |
 | [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) | MIT | The community template library |
-| [nmap](https://github.com/nmap/nmap) | [Nmap Public Source License](https://nmap.org/npsl/) | Service and OS fingerprinting |
+| [nmap](https://github.com/nmap/nmap) | [Nmap Public Source License](https://nmap.org/npsl/) | Service and OS fingerprinting and the UDP exposure sweep. Pinned to one release with its checksum: on amd64 the official release package from nmap.org is unpacked, on arm64 (where nmap.org publishes no binary) the release tarball is compiled |
 | [naabu](https://github.com/projectdiscovery/naabu) | MIT | Full-port discovery ahead of nmap |
-| [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Screenshots in deep discovery |
+| [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Front-page screenshots, installed by bbot (with a Chromium that bbot downloads alongside it, under its own licenses) and used in the default and deep discovery modes |
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
 | [wafw00f](https://github.com/EnableSecurity/wafw00f) | BSD-3-Clause | Names the web application firewall in front of a web host |
 | [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial license is needed for managed or hosted use) | WordPress vulnerability scanning |
 | [testssl.sh](https://github.com/testssl/testssl.sh) | GPL-2.0 (run as a separate program, never linked) | Tests the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named TLS vulnerabilities |
 | [Tailscale](https://github.com/tailscale/tailscale) (the `tailscale/tailscale` container image) | BSD-3-Clause | The optional `tailscale` compose service that joins a tailnet so scans can reach it; read through its local status API |
-| [Greenbone Community Edition](https://greenbone.github.io/docs/latest/): gvmd (with its libraries, gvm-libs) | AGPL-3.0-or-later | The vulnerability manager of the optional `openvas` compose profile; cvENGINE drives it over GMP. Every Greenbone component runs as a separate container (image from `registry.community.greenbone.net`), never linked into the cvENGINE image |
+| [Greenbone Community Edition](https://greenbone.github.io/docs/latest/): [gvmd](https://github.com/greenbone/gvmd) (with its library [gvm-libs](https://github.com/greenbone/gvm-libs), GPL-2.0-or-later) | AGPL-3.0-or-later | The vulnerability manager of the optional `openvas` compose profile; cvENGINE drives it over GMP. Every Greenbone component runs as a separate container (image from `registry.community.greenbone.net`), never linked into the cvENGINE image |
 | [ospd-openvas](https://github.com/greenbone/ospd-openvas) | AGPL-3.0-or-later | The scanner wrapper of the `openvas` profile; the only container there with `NET_RAW` and `NET_ADMIN` |
 | [openvas-scanner](https://github.com/greenbone/openvas-scanner) | GPL-2.0 (its Rust parts GPL-2.0-or-later) | The scan engine and the notus service of the `openvas` profile |
 | [pg-gvm](https://github.com/greenbone/pg-gvm) | GPL-3.0 | The PostgreSQL database image of the `openvas` profile (PostgreSQL itself is under the PostgreSQL License) |
@@ -63,7 +63,7 @@ cvENGINE talks to [Anthropic](https://www.anthropic.com), [OpenAI](https://opena
 | [Geist and Geist Mono](https://github.com/vercel/geist-font) | SIL Open Font License 1.1 | `web/static/cve/geist.woff2`, `geist-mono.woff2`; license text in `web/static/cve/OFL.txt` |
 | [VivaGraphJS](https://github.com/anvaka/VivaGraphJS) | BSD-3-Clause | `web/static/cve/vivagraph.min.js`; notice in `web/static/cve/VIVAGRAPH-LICENSE.txt` |
 | [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) | MIT | `web/static/mfa/qrcode.js`, license header kept in the file |
-| [DejaVu Sans](https://dejavu-fonts.github.io) (Debian `fonts-dejavu-core`) | Bitstream Vera licence with public-domain DejaVu changes | Installed in the image; the PDF reports are set in it |
+| [DejaVu Sans](https://dejavu-fonts.github.io) (Debian `fonts-dejavu-core`) | Bitstream Vera license with public-domain DejaVu changes | Installed in the image; the PDF reports are set in it |
 | [pypdf](https://github.com/py-pdf/pypdf) | BSD-3-Clause | A pinned Python requirement (`web/requirements.txt`); the tests use it to read the generated report PDFs back, the application does not import it |
 | [Inter](https://github.com/rsms/inter) | SIL Open Font License 1.1 | Loaded from Google Fonts by HTML reports, not shipped |
 

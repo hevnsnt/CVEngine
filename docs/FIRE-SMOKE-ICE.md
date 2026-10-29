@@ -40,6 +40,7 @@ The 0 to 100 [host score](PIPELINE.md#host-score) reads a match's CVE tier: a fi
 ## What the tiers drive
 
 - **Dashboard.** The feed temperature bars count fire, smoke, and ice and filter the feed. The attack-surface map colors each host by its heat.
+- **Hosts and search.** The Hosts page filters by a host's temperature (fire, smoke, ice, clean, not scanned) with chips that count every host the search matches, and the search API takes `heat=` the same way ([Search](SEARCH.md#reading-the-results)).
 - **Auto-fire.** When it is on, cvENGINE acts on fire and smoke CVEs as the feed delivers them, confirming their matches and testing them on the affected hosts. Ice CVEs wait.
 - **Notifications.** New fire-tier matches with evidence (version in range, a template hit, or the distribution tracker) are announced to your Slack, Discord, Telegram, or Lark channels, along with confirmed template hits and scan summaries. Matches the AI doubts wait for a test to prove them.
 - **Remediation.** The work list for agents and teams comes fire first, so the most dangerous fixes are on top.
