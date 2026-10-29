@@ -120,7 +120,11 @@ function paintOldest(s) {
   setNum("s-oldest_open_days", days);
   $("s-oldest_unit").textContent = days === 1 ? "day" : "days";
   const kind = OLDEST_KIND[s.oldest_open_kind];
-  $("s-oldest_note").textContent = kind ? kind[0] : "";
+  // name the issue itself ("High: TLS hostname mismatch on vpn.example.com"): an age alone says nothing
+  const w = s.oldest_open_what;
+  $("s-oldest_note").textContent = w && w.title ? w.title : kind ? kind[0] : "";
+  $("s-oldest_host").textContent = (w && w.host) || "";
+  tile.title = w && w.title ? `${w.severity}: ${w.title}${w.host ? ` on ${w.host}` : ""}, unfixed for ${days} day${days === 1 ? "" : "s"}. Fixed, accepted-risk and ruled-out issues are not counted.` : tile.title;
   if (kind && slug) tile.href = `/cve/${encodeURIComponent(slug)}/${kind[1]}/${kind[2]}`;
   tile.classList.toggle("old", days >= 30);
 }

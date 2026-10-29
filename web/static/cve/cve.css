@@ -1710,3 +1710,7 @@ section.internal[hidden]{display:none}
 .ss-kind input{width:auto;min-height:0}
 .ss-msg{margin:0}
 @media (max-width:640px){.ss-row{grid-template-columns:1fr}.ss-reset{grid-column:1;grid-row:auto;justify-self:start}}
+
+/* the Live tile that names the longest unfixed issue: two lines at most */
+#s-oldest_note{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--ink-2)!important;margin-top:2px}
+#s-oldest_host{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#s-oldest_host:empty{display:none}

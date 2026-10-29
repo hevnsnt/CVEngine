@@ -246,6 +246,26 @@ def live_scan_counts():
             'scans_background_running': counts.background_running().count()}
 
 
+def _oldest_open_what(kind, row_id):
+    """What the oldest open item is, in plain words for the Live tile: ``{'severity', 'title', 'host'}``, or None when the row is gone."""
+    from startScan.models import Vulnerability
+    names = {4: 'Critical', 3: 'High'}
+    if kind == 'cve':
+        m = CVEMatch.objects.filter(pk=row_id).select_related('cve_entry', 'subdomain').first()
+        if m:
+            cvss = m.cve_entry.cvss or 0
+            return {'severity': 'Critical' if cvss >= 9 else 'High', 'title': m.cve_entry.cve_id, 'host': m.subdomain.name if m.subdomain else ''}
+    elif kind == 'scanner':
+        v = Vulnerability.objects.filter(pk=row_id).select_related('subdomain').first()
+        if v:
+            return {'severity': names.get(v.severity, 'High'), 'title': v.name or '', 'host': v.subdomain.name if v.subdomain else ''}
+    elif kind == 'hygiene':
+        h = HygieneFinding.objects.filter(pk=row_id).first()
+        if h:
+            return {'severity': names.get(h.severity, 'High'), 'title': h.title, 'host': h.host}
+    return None
+
+
 def stats_payload():
     """Every headline number, defined once in ``cveFeed.counts`` (what each one counts is in that module's docstring)."""
     from cveFeed import counts, internal_view
@@ -270,6 +290,7 @@ def stats_payload():
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
         'oldest_open_kind': oldest['kind'],  # 'cve', 'scanner' or 'hygiene'
         'oldest_open_id': oldest['id'],  # the row of that kind to link to
+        'oldest_open_what': _oldest_open_what(oldest['kind'], oldest['id']) if oldest['id'] else None,  # {severity, title, host}
         'internal': internal_view.summary(),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
