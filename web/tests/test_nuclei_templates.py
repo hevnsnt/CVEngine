@@ -46,6 +46,65 @@ class AiTagsTests(TestCase):
 		self.assertEqual(nt.ai_tags_for(['Jenkins'], provider2), set())
 
 
+class PertinentTagsTests(TestCase):
+	"""Issue 208: the targeting prompt listed every installed tag (about 41,000 tokens), so a local model could not read it."""
+
+	INSTALLED = {'nginx', 'php', 'wordpress', 'wp-plugin', 'wp-theme', 'apache', 'tomcat', 'apache-tomcat', 'jenkins', 'cms', 'tech', 'cve',
+	             'exposure', 'iis', 'oracle', 'cisco', 'kubernetes'} | {f'cve{2000 + n % 25}-{n}' for n in range(5000)}
+
+	def offered(self, *signatures, limit=nt.OFFER_MAX):
+		return nt.pertinent_tags(list(signatures), self.INSTALLED, limit)
+
+	def test_the_offer_is_the_tags_that_name_what_the_host_runs_and_the_generic_ones(self):
+		out = self.offered(('nginx 1.18.0', 'wordpress'))
+		for tag in ('nginx', 'wordpress', 'cms', 'exposure', 'cve'):
+			self.assertIn(tag, out)
+		self.assertNotIn('jenkins', out)
+		self.assertNotIn('cisco', out)
+		self.assertLess(len(out), 60)
+
+	def test_a_tag_with_a_part_that_names_the_software_is_offered(self):
+		out = self.offered(('Apache Tomcat 9.0',))
+		self.assertIn('apache-tomcat', out)
+		self.assertIn('tomcat', out)
+
+	def test_a_version_number_is_not_a_word_to_match(self):
+		self.assertNotIn('cve2000-0', self.offered(('nginx 2000',)))
+
+	def test_the_offer_is_capped(self):
+		many = {f'nginx-plugin-{n}' for n in range(2000)} | {'nginx'}
+		out = nt.pertinent_tags([('nginx',)], many, 50)
+		self.assertLessEqual(len(out), 50)
+		self.assertIn('nginx', out)  # the exact name comes before the longer tags
+
+	def test_the_prompt_lists_the_offer_and_the_answer_is_checked_against_every_installed_tag(self):
+		seen = {}
+		provider = mock.Mock()
+		provider.complete.side_effect = lambda system, user: seen.update(system=system) or '{"0": {"tags": ["php", "nginx", "made-up"], "severities": ["high"]}}'
+		offered = self.offered(('nginx 1.18.0',))
+		self.assertNotIn('php', offered)
+		out = nt.ai_plan([('nginx 1.18.0',)], provider, self.INSTALLED, offered=offered)
+		self.assertNotIn('"php"', seen['system'])
+		self.assertLess(len(seen['system']), 2500)  # not the 5,000 CVE tags
+		self.assertEqual(out[0], ({'php', 'nginx'}, ('high',)))  # php was not offered but is installed: accepted; made-up is dropped
+
+	def test_without_an_offer_the_whole_installed_list_is_listed_as_before(self):
+		seen = {}
+		provider = mock.Mock()
+		provider.complete.side_effect = lambda system, user: seen.update(system=system) or '{}'
+		nt.ai_plan([('nginx',)], provider, {'nginx', 'php'})
+		self.assertIn('["nginx", "php"]', seen['system'])
+
+	def test_planning_asks_with_the_offer(self):
+		seen = {}
+		provider = mock.Mock()
+		provider.complete.side_effect = lambda system, user: seen.update(system=system) or '{}'
+		profile = {'technologies': ['nginx'], 'services': [], 'exposure': [], 'cves': [], 'light': False}
+		with mock.patch.object(nt, 'allowed_tags', return_value=set(self.INSTALLED)), mock.patch.object(nt, 'profile_names', return_value=['nginx 1.18.0']):
+			nt.plan_targeting({'h.test': profile}, provider)
+		self.assertLess(len(seen['system']), 2500)
+
+
 class SelectTagsTests(TestCase):
 	def setUp(self):
 		org = Org.objects.create(name='T', slug='t-nuclei-tpl')
