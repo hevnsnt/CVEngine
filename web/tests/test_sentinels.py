@@ -882,3 +882,32 @@ class LiveOverviewTests(SentinelBase):
         register_sentinel(self.t['alice'], name='waiting', approve=False)
         status, out = call(self.t['alice'], 'GET', '/api/v1/sentinels/live')
         self.assertEqual([(r['name'], r['state']) for r in out['results']], [('waiting', 'pending')])
+
+
+class ProvisionPickerTests(SentinelBase):
+    """The Provision form lists the organizations its viewer may enroll an organization-wide Sentinel for, never a typed slug."""
+
+    def page(self, user):
+        from django.test import Client
+        client = Client()
+        client.force_login(user)
+        response = client.get('/cve/sentinels/')
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_an_org_admin_picks_from_their_own_organizations_only(self):
+        html = self.page(self.dana)
+        self.assertIn('<select id="enroll-org"><option value="one">One</option></select>', html)
+        self.assertNotIn('value="two"', html)
+        self.assertNotIn('value="instance"', html)
+
+    def test_an_app_admin_sees_every_organization_and_the_instance_scope(self):
+        html = self.page(self.root)
+        self.assertIn('<option value="one">One</option>', html)
+        self.assertIn('<option value="two">Two</option>', html)
+        self.assertIn('value="instance"', html)
+
+    def test_someone_who_manages_no_organization_is_not_offered_the_organization_scope(self):
+        html = self.page(self.alice)
+        self.assertNotIn('<option value="org">', html)
+        self.assertNotIn('placeholder="org-slug"', html)
