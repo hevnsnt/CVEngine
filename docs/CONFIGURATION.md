@@ -196,11 +196,21 @@ The AI key, the instance-wide Chaos, Netlas and HackerOne keys, per-organization
 
 What this protects: a database dump, a backup, or SQL injection reads only ciphertext, and a file read in `web/` no longer includes the key. What it does not: code execution inside a container that decrypts the secrets (the web service or a worker) can use the key that container holds. The settings API never returns a secret, only whether one is set.
 
+## AI requests
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_AI_TIMEOUT` | `120` (`300` for LM Studio) | Seconds one AI request may take, 10 to 3600. A local model on a laptop can go past 120 seconds on a long stage; the setting applies to every provider. |
+| `CVENGINE_AI_MAX_TOKENS` | unset | A limit on the length of a reply, 64 to 32768, sent to OpenAI, OpenRouter, vLLM and LM Studio (`max_tokens`, `max_completion_tokens` for OpenAI) and Ollama (`num_predict`). Unset, the server's own limit applies, which suits a reasoning model that spends thousands of tokens thinking before it answers. A reply cut off at a limit is reported as truncated (category `output_truncated`), not as an invalid answer. Anthropic always gets 2048. |
+
+A finding's triage on a self-hosted server (Ollama, vLLM, LM Studio) is asked with temperature 0, so the same evidence gets the same verdict.
+
 ## Network and access
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CVENGINE_ALLOW_PRIVATE_TARGETS` | `0` | `1` allows private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`). Loopback, link-local, multicast, `0.0.0.0/8`, and cloud metadata addresses are always refused. A connected Tailscale tailnet does not need this: its imported devices' addresses are allowed on their own ([Tailscale](TAILSCALE.md#which-addresses-may-be-scanned)). |
+| `CVENGINE_OS_DETECTION` | `auto` | Whether nmap's operating system guesses can be believed. `auto` distrusts them on Docker Desktop (the VM kernel is named `linuxkit`), where the container's traffic leaves through a user-space network and the guess describes that network, not the host: nothing is stored from a local scan and the AI is told no guess is available. `trust` believes them anyway; `distrust` never does. A Sentinel's guesses are always believed. See [Deployment](DEPLOYMENT.md). |
 | `CVENGINE_INTERNAL_SCAN_DAYS` | `7` | How long a target inside a declared internal range is left alone after a scan before the daily sweep queues it again (`CVENGINE_INTERNAL_SCAN_MAX`, default 20, caps one run). Only a Sentinel that declares `network:internal` ever scans these. |
 | `CVENGINE_INTERNAL_DISCOVERY_DAYS` | `7` | How long a declared internal range is left alone after a host sweep before the daily job queues it again. `CVENGINE_INTERNAL_DISCOVERY_CHUNKS` (default 64) is how many /24 chunks one run sweeps; a larger range resumes where it stopped. |
 | `CVENGINE_BLOCKED_CIDRS` | none | Extra networks that are never scanned, comma separated CIDRs. An entry that does not parse is silently skipped. |

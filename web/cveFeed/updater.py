@@ -6,7 +6,8 @@ where they approve or dismiss it. The web container never updates itself and has
 only writes the approved commit to ``.update-approved`` in the application directory (the host's ``web/``), and
 ``scripts/apply-update.sh`` on the host (cron or systemd timer, see scripts/install-updater.sh) fast-forwards the
 checkout to exactly that commit and rebuilds. The installed commit is the first line of ``.commit``, written by
-``make up`` / ``make build`` and by the updater script.
+``make up`` / ``make build`` and by the updater script; a second line, when present, is the ancestor the checkout shares with
+upstream (a fork with commits of its own), which is what GitHub is asked about.
 
 Pure helpers take their HTTP function as a parameter so they are testable without a network.
 """
@@ -49,17 +50,30 @@ def _file(name):
     return os.path.join(settings.BASE_DIR, name)
 
 
-def installed_sha():
-    """The commit this installation was built from ('' when unknown)."""
+def _commit_lines():
     try:
         with open(_file('.commit')) as f:
-            first = f.readline().strip().lower()
+            return [f.readline().strip().lower(), f.readline().strip().lower()]
     except OSError:
-        first = ''
+        return ['', '']
+
+
+def installed_sha():
+    """The commit this installation was built from ('' when unknown)."""
+    first = _commit_lines()[0]
     if SHA_RE.match(first):
         return first
     env = os.environ.get('CVENGINE_COMMIT', '').strip().lower()
     return env if SHA_RE.match(env) else ''
+
+
+def upstream_sha():
+    """The newest commit of this installation that the upstream repository has: ``installed_sha()`` for a plain install, the
+    shared ancestor (second line of ``.commit``) for a fork with commits of its own. Only the comparison with GitHub uses it."""
+    first, second = _commit_lines()
+    if SHA_RE.match(first) and SHA_RE.match(second):
+        return second
+    return installed_sha()
 
 
 def host_updater():
@@ -260,7 +274,7 @@ def check(row=None, get=requests.get):
     row = row or UpdateSettings.current()
     row.last_checked_at = timezone.now()
     try:
-        found = fetch_latest(row.repo, row.branch, row.token, installed_sha(), get=get)
+        found = fetch_latest(row.repo, row.branch, row.token, upstream_sha(), get=get)
     except UpdateError as exc:
         row.last_error = str(exc)[:300]
         row.save(update_fields=['last_checked_at', 'last_error'])
@@ -297,7 +311,7 @@ def approve(row, user):
     """Record the administrator's approval of the commit currently shown, and hand it to the host updater."""
     if not SHA_RE.match(row.latest_sha or ''):
         raise UpdateError('there is no update to approve; run a check first')
-    if not update_available(row, installed_sha()):
+    if not update_available(row, upstream_sha()):
         raise UpdateError('this installation is already up to date')
     tmp = _file('.update-approved.tmp')
     with open(tmp, 'w') as f:
@@ -330,7 +344,7 @@ def state(row):
     from cveFeed.models import ScanControl
 
     installed = installed_sha()
-    available = update_available(row, installed)
+    available = update_available(row, upstream_sha())
     if not row.enabled:
         status = 'disabled'
     elif row.approved_sha and row.approved_sha == row.latest_sha and available:

@@ -148,6 +148,14 @@ def _recently_handled(job, signature, now):
     return when > now - interval
 
 
+def _inherited_fresh(row, now):
+    """A rescan's new match row carries the validation its predecessor finished (cveFeed.triage._twins) but has no job of its own: a
+    result younger than the usual window is as good as a job of its own. Without this every rescan queued every match again."""
+    if row.validation_status not in ('hit', 'clean', 'observed', 'no_check') or not row.validated_at:
+        return False
+    return row.validated_at > now - timedelta(days=7)
+
+
 def enqueue(row, lane):
     """Idempotent dispatch of this persisted finding. No target argument reaches the broker."""
     from cveFeed.tasks import automatic_validate_finding, validate_match_on_demand
@@ -170,6 +178,8 @@ def enqueue(row, lane):
                 else:
                     return 'inflight'
             elif _recently_handled(previous, row.signature, now):
+                return 'fresh'
+            elif previous is None and _inherited_fresh(row, now):
                 return 'fresh'
             else:
                 if _active_count(row.project_id) >= cap:

@@ -42,6 +42,31 @@ def publish(web_fd, name, chunks):
             pass
 
 
+def upstream_base(web_fd, sha):
+    """The newest commit of ``sha`` that is also on the branch it tracks, or '' when there is none or git cannot say.
+
+    A fork carries commits of its own, which GitHub does not know: asked how far behind the installed commit is, it answers
+    "not found" and the banner offers an update forever. The shared ancestor is a commit it does know."""
+    branch = ''
+    try:
+        with os.fdopen(regular_fd('.update-branch', dir_fd=web_fd), 'rb') as source:
+            raw = source.read(128).strip()
+        if re.fullmatch(rb'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}', raw) and b'..' not in raw and not raw.endswith((b'/', b'.lock')):
+            branch = raw.decode('ascii')
+    except (OSError, ValueError):
+        pass
+    refs = ['@{upstream}'] + (['origin/' + branch] if branch else []) + ['origin/master', 'origin/main']
+    for ref in refs:
+        try:
+            base = subprocess.run(['git', '-c', 'safe.directory=' + os.getcwd(), 'merge-base', sha, ref],
+                                  capture_output=True, text=True, timeout=30, check=True).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if re.fullmatch(r'[0-9a-f]{40}', base):
+            return base if base != sha else ''
+    return ''
+
+
 def main():
     action = sys.argv[1]
     if action == 'directory':
@@ -138,7 +163,9 @@ def main():
             value = sys.argv[2]
             if not re.fullmatch(r'[0-9a-f]{40}', value):
                 raise ValueError('invalid commit id')
-            publish(web_fd, '.commit', [(value + '\n').encode('ascii')])
+            # the second line, when there is one, is the shared ancestor with upstream (see upstream_base); the first stays the build's commit
+            base = upstream_base(web_fd, value)
+            publish(web_fd, '.commit', [(value + '\n' + (base + '\n' if base else '')).encode('ascii')])
         elif action == 'heartbeat':
             publish(web_fd, '.updater-heartbeat', [json.dumps({'at': time.time()}).encode('ascii')])
         elif action == 'log':

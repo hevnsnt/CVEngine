@@ -199,6 +199,73 @@ class ModelSelectionTests(unittest.TestCase):
 		self.assertEqual(post.call_args[1]['headers'], {})
 
 
+class LocalModelLimitsTests(unittest.TestCase):
+	"""Issue 209: the timeout and the reply limit are settings, a cut-off reply says so, and a verdict from a local model is reproducible."""
+
+	OK = {'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}
+
+	def post(self, name, data=None, env=None, **kw):
+		base = {'ollama': 'http://h:11434', 'vllm': 'http://h:8000/v1', 'lmstudio': 'http://h:1234/v1'}.get(name)
+		with mock.patch.dict('os.environ', env or {}), mock.patch('requests.post', return_value=FakeResp(data or self.OK)) as post:
+			provider = ai.get_provider(name, model='m', api_key='k' if name in ('openai', 'openrouter') else None, base_url=base)
+			provider.complete('s', 'u')
+		return post.call_args[1]
+
+	def test_the_timeout_is_a_setting_and_the_default_is_unchanged(self):
+		self.assertEqual(self.post('vllm')['timeout'], ai.REQUEST_TIMEOUT)
+		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '300'})['timeout'], 300)
+		self.assertEqual(self.post('lmstudio', env={'CVENGINE_AI_TIMEOUT': '600'})['timeout'], 600)  # the setting wins over a provider's own
+		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': 'soon'})['timeout'], ai.REQUEST_TIMEOUT)
+		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '2'})['timeout'], ai.REQUEST_TIMEOUT)  # out of range: ignored
+
+	def test_no_reply_limit_is_sent_unless_the_operator_set_one(self):
+		for name in ('openai', 'openrouter', 'vllm', 'lmstudio'):
+			body = self.post(name)['json']
+			self.assertNotIn('max_tokens', body, name)
+			self.assertNotIn('max_completion_tokens', body, name)
+		self.assertNotIn('options', self.post('ollama', {'message': {'content': 'ok'}})['json'])
+
+	def test_the_limit_is_sent_under_the_name_each_server_uses(self):
+		env = {'CVENGINE_AI_MAX_TOKENS': '1500'}
+		self.assertEqual(self.post('openai', env=env)['json']['max_completion_tokens'], 1500)
+		for name in ('openrouter', 'vllm', 'lmstudio'):
+			self.assertEqual(self.post(name, env=env)['json']['max_tokens'], 1500, name)
+		self.assertEqual(self.post('ollama', {'message': {'content': 'ok'}}, env=env)['json']['options'], {'num_predict': 1500})
+
+	def test_a_reply_cut_at_the_limit_is_an_output_truncated_error(self):
+		cut = {'choices': [{'message': {'content': '{"classification": "lik'}, 'finish_reason': 'length'}]}
+		for name in ('openai', 'vllm', 'lmstudio'):
+			with self.assertRaises(ai.AIProviderError) as error:
+				self.post(name, cut)
+			self.assertEqual(error.exception.category, 'output_truncated', name)
+		with self.assertRaises(ai.AIProviderError) as error:
+			self.post('ollama', {'message': {'content': '{"cla'}, 'done_reason': 'length'})
+		self.assertEqual(error.exception.category, 'output_truncated')
+		self.assertEqual(self.post('vllm', {'choices': [{'message': {'content': 'ok'}}]})['json']['model'], 'm')  # no finish_reason: fine
+
+	def test_a_pinned_temperature_reaches_a_self_hosted_server_only(self):
+		with ai.request_options(temperature=0):
+			self.assertEqual(self.post('vllm')['json']['temperature'], 0)
+			self.assertEqual(self.post('lmstudio')['json']['temperature'], 0)
+			self.assertEqual(self.post('ollama', {'message': {'content': 'ok'}})['json']['options'], {'temperature': 0})
+			self.assertNotIn('temperature', self.post('openai')['json'])
+			self.assertNotIn('temperature', self.post('openrouter')['json'])
+		self.assertNotIn('temperature', self.post('vllm')['json'])  # and only inside the stage
+
+	def test_a_triage_asks_for_temperature_zero(self):
+		captured = []
+
+		class Spy:
+			name, model = 'vllm', 'm'
+
+			def complete(self, system, user):
+				captured.append(ai._request_options.get().get('temperature'))
+				return '{"classification": "needs_validation", "reason": "r", "impact": "i", "severity_adjust": 0, "severity_reason": "", "remediation": "p", "validation_steps": []}'
+		ai.triage_finding(Spy(), 'cve_match', {'product': 'nginx'})
+		self.assertEqual(captured, [0])
+		self.assertIsNone(ai._request_options.get().get('temperature'))
+
+
 class LMStudioTests(unittest.TestCase):
 	def test_it_is_an_openai_compatible_keyless_server_you_must_give_the_address_of(self):
 		self.assertIn('lmstudio', ai.SELECTABLE)
@@ -456,6 +523,15 @@ class TriagePromptTests(unittest.TestCase):
 	def test_system_prompt_carries_the_untrusted_notice_and_forbids_commands(self):
 		self.assertTrue(ai.TRIAGE_SYSTEM_PROMPT.endswith(ai.UNTRUSTED_NOTICE))
 		self.assertIn('never write commands', ai.TRIAGE_SYSTEM_PROMPT)
+
+	def test_the_triage_prompt_tells_the_model_to_abstain_on_a_version_alone(self):
+		# issue 210: a model that answered likely on a version inside a range made the finding affected; one paragraph of abstention
+		# took a local 27B model from 7 false affected in 43 to 1
+		prompt = ai.TRIAGE_SYSTEM_PROMPT
+		self.assertIn('the only evidence is a version inside the advisory range', prompt)
+		self.assertIn('answer needs_validation', prompt)
+		self.assertIn('Answer likely only when something beyond the version supports it', prompt)
+		self.assertTrue(prompt.endswith(ai.UNTRUSTED_NOTICE))
 
 
 class DetectTests(unittest.TestCase):

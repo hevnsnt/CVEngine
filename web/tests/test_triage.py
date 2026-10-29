@@ -261,6 +261,90 @@ class TriageDbBase(TestCase):
 
 
 @mock.patch('cveFeed.activity.log', return_value=None)
+class RescanTwinTests(TriageDbBase):
+	"""A rescan makes new host rows and so new match rows. The new row of an unchanged finding keeps what its predecessor earned (issue
+	206); a changed one starts over."""
+
+	def track_all(self):
+		return triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))
+
+	def judged_and_validated(self, nonce=''):
+		first = self.match('a.tr.test')
+		self.run_all(provider=self.provider())
+		if nonce:  # a validation job sets one first: the row starts over, with the nonce in its signature and evidence key
+			Triage.objects.update(review_nonce=nonce)
+			self.track_all()
+			self.run_all(provider=self.provider())
+		# and the job then writes its result on the row
+		Triage.objects.update(validation_status='clean', validation_steps=[{'kind': 'nuclei_template', 'result': 'clean'}],
+							  validation_evidence={'request': 'GET /'}, validated_at=timezone.now() - datetime.timedelta(days=1))
+		return first, Triage.objects.get(match=first)
+
+	def rows_of(self, match):
+		return Triage.objects.get(match=match)
+
+	def test_the_new_match_of_an_unchanged_finding_keeps_the_record(self, _log):
+		first, old = self.judged_and_validated()
+		second = self.match('a.tr.test')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual((new.classification, new.verdict_id, new.status), (old.classification, old.verdict_id, 'triaged'))
+		self.assertEqual((new.validation_status, new.validation_evidence, new.validated_at), ('clean', {'request': 'GET /'}, old.validated_at))
+		self.assertEqual(new.validation_steps, old.validation_steps)
+		self.assertEqual(self.provider().complete.call_count, 0)
+
+	def test_a_validation_that_set_a_review_nonce_does_not_hide_the_twin(self, _log):
+		first, old = self.judged_and_validated(nonce='41')
+		self.assertEqual(old.review_nonce, '41')
+		second = self.match('a.tr.test')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual((new.review_nonce, new.validation_status, new.classification), ('', 'clean', old.classification))
+		self.assertEqual(new.status, 'triaged')  # only the nonce differed: nothing to review again
+
+	def test_changed_asset_evidence_starts_over(self, _log):
+		self.judged_and_validated()
+		second = self.match('a.tr.test', version='1.19.0')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual((new.status, new.classification, new.verdict_id, new.validation_status), ('pending', '', None, 'none'))
+
+	def test_a_moved_feed_rereviews_and_keeps_the_record_meanwhile(self, _log):
+		first, old = self.judged_and_validated()
+		CVEEntry.objects.filter(pk=self.cve.pk).update(epss_reached=True, summary='Updated advisory text')
+		second = self.match('a.tr.test')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual(new.status, 'pending')  # asked again about the new advisory
+		self.assertEqual((new.classification, new.verdict_id, new.validation_status), (old.classification, old.verdict_id, 'clean'))
+
+	def test_another_host_or_another_cve_is_not_a_twin(self, _log):
+		self.judged_and_validated()
+		other_host = self.match('b.tr.test')
+		other_cve = self.match('a.tr.test', cve=CVEEntry.objects.create(cve_id='CVE-2099-2', cvss=7.5, published_at=timezone.now(),
+			affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]))
+		self.track_all()
+		for match in (other_host, other_cve):
+			self.assertEqual((self.rows_of(match).status, self.rows_of(match).validation_status), ('pending', 'none'))
+
+	def test_a_twin_that_was_never_judged_gives_nothing(self, _log):
+		self.match('a.tr.test')
+		self.track_all()
+		second = self.match('a.tr.test')
+		self.track_all()
+		self.assertEqual((self.rows_of(second).status, self.rows_of(second).classification), ('pending', ''))
+
+	def test_the_newest_twin_is_the_one_inherited(self, _log):
+		first, old = self.judged_and_validated()
+		second = self.match('a.tr.test')
+		self.track_all()
+		Triage.objects.filter(match=second).update(classification='needs_validation', reason='newer')
+		third = self.match('a.tr.test')
+		self.track_all()
+		self.assertEqual((self.rows_of(third).classification, self.rows_of(third).reason), ('needs_validation', 'newer'))
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
 class SignatureCacheTests(TriageDbBase):
 	def test_generic_vendor_fingerprint_closes_candidate_without_provider_call(self, _log):
 		m = self.match('a.tr.test')

@@ -115,7 +115,7 @@ def _nmap(scan, project, ip, org_id, dispatch):
         return {'error': 'no Sentinel inside the network answered (one must declare network:internal and cover this project)'}
     inventory = [{'ip': h['ip'], 'os_guess': h.get('os_guess', ''), 'os_accuracy': None, 'ports': h.get('ports', [])}
                  for h in result.get('hosts', []) if h.get('ip') == ip]
-    totals = persist_inventory(inventory, org_id=org_id)
+    totals = persist_inventory(inventory, org_id=org_id, os_reliable=True)  # measured from the Sentinel's own network
     ledger.record('nmap-fast', [ip], project.id, scan)  # what the check coverage of the host reads
     return {'hosts': len(inventory), **totals}
 

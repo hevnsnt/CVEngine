@@ -862,7 +862,7 @@ class RouteAuth(models.Model):
     for the target, the same GET is also made with it and answered under ``evidence["authenticated"]`` (cveFeed.auth_routes); the
     state and every other field stay the anonymous answer."""
 
-    STATES = ("open", "login", "session_required", "sso", "redirect", "not_found", "error")
+    STATES = ("open", "login", "session_required", "sso", "redirect", "not_found", "catch_all", "error")  # catch_all: the answer for a path that cannot exist
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)

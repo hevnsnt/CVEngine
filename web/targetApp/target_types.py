@@ -228,6 +228,18 @@ def _tailnet_authorised(ip, project):
         return False
 
 
+def is_internal_address(value):
+    """True when ``value`` is not an address of the public internet: RFC 1918, carrier-grade NAT (a tailnet), unique-local, loopback,
+    link-local and the other ranges this module never lets a scanner reach. An IPv6 address that carries an IPv4 one is judged as the
+    IPv4 address. Documentation ranges are not internal, as for ``is_scannable_ip``. Text that is not an address counts as internal
+    (nothing public can be said of it). Unlike ``is_scannable_ip`` it does not depend on the operator's opt-in for private targets."""
+    try:
+        ip = _embedded_v4(ipaddress.ip_address(str(value).strip().strip("[]")))
+    except ValueError:
+        return True
+    return any(ip in net for net in _INTERNAL + _ALWAYS_BLOCKED)
+
+
 def is_scannable_ip(value, allow_private=None, project=None):
     """True if it is safe to point a scanner at this IP address. Any text that is not an IP is False.
 
