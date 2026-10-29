@@ -45,9 +45,9 @@ def trusted_plan(plan, project, check=None):
     check = check or auth_checks.certificate_verifies
     seen, kept, refused = {}, [], []
     for item in plan:
-        url, sign_in, _key = item
+        url = item.url
         parts = urlsplit(url)
-        if parts.scheme != 'https' or sign_in.allow_untrusted_certificate:
+        if parts.scheme != 'https' or item.credential.allow_untrusted_certificate:
             kept.append(item)
             continue
         where = (parts.hostname, parts.port or 443)
@@ -113,12 +113,12 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                          status='failed')
             kept = {id(item) for item in plan}
             # a durable record of what was withheld, for the check coverage view (which says the sign-in is not sent, not that it is planned)
-            ledger.record(REFUSED_SERVICE, [_asset(item[0], item[1]) for item in planned if id(item) not in kept], project, scan, 'refused')
+            ledger.record(REFUSED_SERVICE, [_asset(item.url, item.credential) for item in planned if id(item) not in kept], project, scan, 'refused')
         if not plan:
             return {**summary, 'skipped': 'certificate not trusted'}
         stream_is_real = stream is nuclei_scan.stream_nuclei
         ledger_name = ledger_service(service, stream_is_real)
-        assets = {_asset(url, cred): (url, cred, key) for url, cred, key in plan}
+        assets = {_asset(item.url, item.credential): item for item in plan}
         done = set() if force else ledger.fresh(ledger_name, list(assets), project)
         todo = [a for a in assets if ledger._norm(a) not in done]
         if not todo:
@@ -139,7 +139,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                     chunk = won_assets[start:start + CHUNK]
                     items = [assets[a] for a in chunk]
                     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
-                        handle.write('\n'.join(url for url, _cred, _key in items) + '\n')
+                        handle.write('\n'.join(item.url for item in items) + '\n')
                         path = handle.name
                     try:
                         with auth_checks.secrets_file(auth_checks.entries_for(items)) as secret_path:
@@ -222,7 +222,7 @@ def merge_template_outcomes(path, hosts, outcomes, project):
         if not plan:
             return outcomes
         with auth_checks.secrets_file(auth_checks.entries_for(plan)) as secret_path:
-            signed_in = templategen.run_template(path, [item[0] for item in plan], secret_file=secret_path, redact=values)
+            signed_in = templategen.run_template(path, [item.url for item in plan], secret_file=secret_path, redact=values)
         scope.mark_used()
     except Exception as exc:  # noqa: BLE001 - MemoryKill, a timeout or nuclei failing: the plain result stands
         logger.error('signed-in template check could not run: %s', auth_checks.safe_error(exc, values))

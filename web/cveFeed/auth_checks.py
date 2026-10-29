@@ -482,6 +482,25 @@ def _domain_key(host, port):
     return name if port in (80, 443) else f'{name}:{port}'
 
 
+class PlanItem:
+    """One origin of a signed-in nuclei plan: ``url`` (``scheme://host[:port]``, built from the target and never from the credential), the stored
+    ``credential`` it is covered by, and the secrets-file ``domain``. It still unpacks and indexes like the ``(url, credential, domain)`` tuple it
+    replaces; a named field keeps the plain origin apart from the credential that travels beside it."""
+    __slots__ = ('url', 'credential', 'domain')
+
+    def __init__(self, url, credential, domain):
+        self.url, self.credential, self.domain = url, credential, domain
+
+    def __iter__(self):
+        return iter((self.url, self.credential, self.domain))
+
+    def __getitem__(self, index):
+        return (self.url, self.credential, self.domain)[index]
+
+    def __len__(self):
+        return 3
+
+
 def plan_nuclei(scope, targets):
     """The signed-in nuclei targets for the nuclei ``targets`` (``host`` or ``host:port`` strings) of a scan: ``[(url, credential, domain)]``.
     Each ``url`` is an explicit ``scheme://host[:port]`` for one origin a credential covers (a bare host stands for the default ports,
@@ -502,16 +521,16 @@ def plan_nuclei(scope, targets):
             if owner.setdefault(domain, cred.pk) != cred.pk:
                 continue
             url = _url(host, scheme, number)
-            if all(item[0] != url for item in items):
-                items.append((url, cred, domain))
+            if all(item.url != url for item in items):
+                items.append(PlanItem(url, cred, domain))
     return items
 
 
 def entries_for(items):
     """``[(credential, [secrets-file domain, ...])]`` for plan items, one entry per credential."""
     grouped = {}
-    for _url_, cred, domain in items:
-        grouped.setdefault(cred.pk, (cred, []))[1].append(domain)
+    for item in items:
+        grouped.setdefault(item.credential.pk, (item.credential, []))[1].append(item.domain)
     return [(cred, list(dict.fromkeys(domains))) for cred, domains in grouped.values()]
 
 

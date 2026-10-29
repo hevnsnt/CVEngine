@@ -8,7 +8,6 @@ import re
 import random
 import glob
 import shutil
-import traceback
 import ipaddress
 import humanize
 import redis
@@ -370,8 +369,6 @@ def get_traceback_path(task_name, results_dir, scan_history_id=None, subscan_id=
 	return path
 
 
-def fmt_traceback(exc):
-	return '\n'.join(traceback.format_exception(None, exc, exc.__traceback__))
 
 
 #--------------#
