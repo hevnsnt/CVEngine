@@ -416,6 +416,28 @@ MAX_AFFECTED_ITEMS = 500
 MAX_RANGES_PER_ITEM = 100
 
 
+_PATCH_LEVEL_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _with_branch_bounds(ranges):
+    """A branch-by-branch fix list as cve.now publishes it for PHP (fixed 8.2.35, 8.3.36, 8.4.27 and 8.5.12, no lower bound): each fix
+    closes only its own branch. Without a lower bound the fix for 8.4 stands for every older version, so a patched 8.3.36 sits below
+    it and reads as vulnerable. Each range gets its branch (the major.minor of its fixed version) as ``introduced``, the shape the
+    CVE List path already produces. Only two or more fix-only ranges, each fixed at a plain major.minor.patch version on a branch of
+    its own, are rewritten; any other list is left exactly as it was."""
+    fixes = []
+    for rng in ranges:
+        fixed = str(rng.get("fixed") or "").strip()
+        if (len(ranges) < 2 or rng.get("introduced") or rng.get("lastAffected") or not _PATCH_LEVEL_RE.match(fixed)
+                or str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM")):
+            return ranges
+        fixes.append(fixed)
+    branches = [".".join(fixed.split(".")[:2]) for fixed in fixes]
+    if len(set(branches)) != len(branches):
+        return ranges  # two fixes for one branch: not a list of branches
+    return [{**rng, "introduced": branch} for rng, branch in zip(ranges, branches)]
+
+
 def clean_affected(value):
     """The dict entries of a CVE's ``affected`` list, each with a list of dict ranges. A third-party feed decides this shape, and one
     malformed entry (a string, a null, ranges that are not a list) must not stop correlation for every CVE after it."""
@@ -427,7 +449,8 @@ def clean_affected(value):
             continue
         ranges = item.get("ranges")
         if ranges is not None:
-            item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
+            item = {**item, "ranges": _with_branch_bounds([r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)])
+                    if isinstance(ranges, list) else []}
         out.append(item)
     return out
 
