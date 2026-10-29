@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## v1.3.1 (unreleased)
 
+<!-- edition: camstork edition -->
+
+**The camstork edition.** Every fix in this release answers an issue written up by one reporter, camstork, with the code path, the measurements and, for several of them, a tested patch: thank you.
+
 ### Fixed
 
 - **A new install no longer misses the CVEs published between its seed and its first sync.** The published CVE seed is a snapshot, and the incremental sync stops after a few hundred new entries, so the CVEs first seen between the snapshot and the first sync were in neither (a Linux kernel network CVE with a CVSS of 9.8 was missing until it was imported by id). The coverage backfill was meant to fill that gap but called the window covered as soon as any stored entry was older than it, and a seed holds entries from 1999, so it never ran. The seed import now records where the gap starts; the backfill reads the feed back to it, as deep as the gap needs (up to 40,000 listed, 1,500 new per run), and closes it once it has read past it. An install that updates to this version looks back 30 days once. Reported by camstork (issue 207).

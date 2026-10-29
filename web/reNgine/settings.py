@@ -4,6 +4,7 @@ env = environ.FileAwareEnv()
 
 import mimetypes
 import os
+import re
 
 from reNgine.init import first_run
 from reNgine.utilities import RengineTaskFormatter
@@ -81,6 +82,16 @@ if _version.startswith('v'):
     _version = _version[1:]
 
 RENGINE_CURRENT_VERSION = _version
+
+# An optional name for a release ("camstork edition"), read from a file called .edition next to .version; empty when there is none. A
+# release's notes carry it too: see the edition comment of its CHANGELOG section, which the release workflow puts in the release title.
+EDITION_FILE = os.path.join(BASE_DIR, '.edition')
+RENGINE_EDITION = ''
+if os.path.exists(EDITION_FILE):
+    with open(EDITION_FILE, 'r') as f:
+        _edition = f.read().strip()
+    if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 .-]{0,39}', _edition):
+        RENGINE_EDITION = _edition
 
 # Databases
 DATABASES = {

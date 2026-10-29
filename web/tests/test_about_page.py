@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class AboutPageTests(TestCase):
 	def page(self):
-		return client_for(User.objects.create_user('reader', password='x')).get('/cve/about/')
+		user = User.objects.filter(username='reader').first() or User.objects.create_user('reader', password='x')
+		return client_for(user).get('/cve/about/')
 
 	def test_page_opens_for_any_signed_in_user_and_shows_the_version(self):
 		from django.conf import settings
@@ -38,3 +39,25 @@ class AboutPageTests(TestCase):
 					and match.group(2).lower() not in html.lower():
 				missing.append(match.group(1))
 		self.assertEqual(missing, [], f'on THIRD-PARTY.md but not on the About page: {missing}')
+
+	def test_a_named_release_shows_its_edition_beside_the_version(self):
+		from django.test import override_settings
+		with override_settings(RENGINE_EDITION='camstork edition'):
+			self.assertContains(self.page(), ', camstork edition')
+		with override_settings(RENGINE_EDITION=''):
+			self.assertNotContains(self.page(), 'edition')
+
+	def test_only_a_plain_name_is_accepted_as_an_edition(self):
+		# reNgine/settings.py reads .edition with this pattern: letters, digits, spaces, dots and hyphens, at most 40 characters
+		pattern = re.compile(r'[A-Za-z0-9][A-Za-z0-9 .-]{0,39}')
+		for good in ('camstork edition', 'Winter 2026'):
+			self.assertTrue(pattern.fullmatch(good))
+		for bad in ('', '<script>', 'x' * 60, '-leading'):
+			self.assertFalse(pattern.fullmatch(bad))
+
+	def test_a_changelog_edition_line_is_one_the_release_workflow_can_read(self):
+		# release.yml puts "<!-- edition: NAME -->" from a release's section in the release title: the line must have the shape its sed reads
+		text = (ROOT / 'CHANGELOG.md').read_text()
+		for line in re.findall(r'^<!-- edition: .* -->$', text, flags=re.M):
+			self.assertRegex(line, r'^<!-- edition: [A-Za-z0-9][A-Za-z0-9 .-]{0,39} -->$')
+
