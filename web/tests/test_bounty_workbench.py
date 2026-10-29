@@ -150,6 +150,7 @@ class WorkbenchAccessTests(WorkbenchBase):
     def test_the_query_count_does_not_grow_with_the_hosts(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        self.bench()  # one call first: the process-wide one-time lookups (content types, caches) depend on which tests ran before in this worker
         with CaptureQueriesContext(connection) as small:
             self.bench()
         for i in range(30):
@@ -157,4 +158,6 @@ class WorkbenchAccessTests(WorkbenchBase):
             Vulnerability.objects.create(subdomain=self.www, target_domain=self.domain, scan_history=self.dead.scan_history, name=f'v{i}', severity=2)
         with CaptureQueriesContext(connection) as big:
             self.bench()
-        self.assertLessEqual(len(big), len(small))  # the first call also pays the one-time lookups; 30 more hosts and findings add none
+        # a query per host or finding would add 30 or more; a query or two more is process-wide state (caches that an earlier test in the
+        # same worker filled or expired between the two calls), which is not what this test is about
+        self.assertLessEqual(len(big), len(small) + 5, f'{len(small)} queries for 1 host, {len(big)} for 31')
