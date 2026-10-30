@@ -1002,3 +1002,25 @@ class NucleiFindingCapTests(SimpleTestCase):
             b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS_SENT + 1)]})
         with self.assertRaises(ApiError):
             b._clean_nuclei_result({'findings': 'lots'})
+
+
+class ExplainErrorTests(SimpleTestCase):
+    def test_a_warning_that_came_first_is_dropped_and_a_kill_is_named_for_what_it_is(self):
+        raw = ("nuclei exited with status -9: WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), "
+               "but your environment is not suitable and will fallback to encoding/json")
+        out = sentinels.explain_error(raw)
+        self.assertTrue(out.startswith('nuclei exited with status -9'))
+        self.assertNotIn('sonic', out)
+        self.assertIn('out of memory', out)
+
+    def test_a_multi_line_error_keeps_the_line_that_was_not_a_warning(self):
+        self.assertEqual(sentinels.explain_error('[WRN] something minor\nconnection refused by 10.0.0.5'), 'connection refused by 10.0.0.5')
+
+    def test_an_ordinary_error_is_left_as_it_is(self):
+        self.assertEqual(sentinels.explain_error('nuclei exited with status 2: no templates found'), 'nuclei exited with status 2: no templates found')
+
+    def test_an_error_that_is_only_a_warning_is_not_made_empty(self):
+        self.assertTrue(sentinels.explain_error('WARNING: it is only this'))
+
+    def test_the_error_is_clipped(self):
+        self.assertLessEqual(len(sentinels.explain_error('x' * 1000)), 300)

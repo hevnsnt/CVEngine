@@ -1348,6 +1348,23 @@ def clean_result(kind, body, task=None):
         raise ApiError(400, 'result does not match the expected shape for this task kind')
 
 
+_KILLED = re.compile(r'(?:exited|exit(?:ed)? code|status)\D{0,12}(?:-9|-137|137)\b|\bkilled\b', re.I)
+
+
+def explain_error(text):
+    """The error of a failed task in words that say what happened. A tool's own warning that came first (nuclei prints one about its JSON library
+    on newer Go releases) is dropped: it was never the reason. A tool killed by the system (status -9 or 137, SIGKILL) almost always ran out of
+    memory, and that is capacity on the Sentinel's machine, not something wrong with the target or the template."""
+    lines = [line.strip() for line in str(text or '').splitlines() if line.strip()]
+    kept = [line for line in lines if not re.match(r'(?:\[wrn\]|(?:warning|warn)\b)', line, re.I)]
+    # a one-line message holds the warning after a colon ("nuclei exited with status -9: WARNING: sonic/ast ..."): cut it there
+    message = re.sub(r':\s*(?:\[wrn\]|warning\b).*$', '', ' '.join(kept or lines), flags=re.I | re.S).strip()
+    if _KILLED.search(message):
+        return (message + ' (killed by the system, usually out of memory on the Sentinel\'s machine: give it more memory or lower its '
+                'concurrency)')[:300]
+    return message[:300]
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -1375,7 +1392,7 @@ def report_result(ctx, task_id, body):
         if rejected is None:
             status = 'failed' if result['outcome'] == 'error' else 'done'
             SentinelTask.objects.filter(pk=task.pk).update(status=status, result=result, finished_at=now, lease_expires_at=None,
-                                                            error=result.get('error', '')[:300] if status == 'failed' else '', **_scrubbed(task))
+                                                            error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk,
                          agent=agent.name, outcome=result['outcome'])
         else:

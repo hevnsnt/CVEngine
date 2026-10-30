@@ -1500,7 +1500,10 @@ def update_nuclei_templates():
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("nuclei template update failed: %s", exc)
         return {"updated": False, "error": str(exc)[:200]}
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-1:] or [""]
+    # the line that says what happened, not a warning nuclei prints about its JSON library on a newer Go release (it was recorded as the result)
+    lines = [line.strip() for line in (proc.stdout + proc.stderr).splitlines() if line.strip()]
+    said = [line for line in lines if not re.match(r"(?:\[wrn\]|(?:warning|warn)\b)", line, re.I)]
+    tail = said[-1:] or ["ran with no message (the templates were already current)" if proc.returncode == 0 else "no message"]
     from cveFeed.templategen import invalidate_template_index
     invalidate_template_index()
     try:  # system_status judges the refresh on this, not on the age of the files (they only change when a release is published)
