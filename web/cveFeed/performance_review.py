@@ -8,13 +8,18 @@ import logging
 from collections import Counter
 from datetime import timedelta
 
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from reNgine import resources
 
 logger = logging.getLogger(__name__)
 KINDS = ('nmap', 'bbot-standard', 'bbot-passive', 'nuclei', 'template-test', 'route-probe')
+# Only stage names that identify the scanner kind can support a per-tool
+# failure adjustment. Generic discovery errors cannot justify lowering an
+# unrelated scanner's concurrency.
+STAGE_KINDS = {'nmap_scan': 'nmap', 'nuclei_light_scan': 'nuclei',
+               'nuclei_targeted_scan': 'nuclei', 'route_auth_scan': 'route-probe'}
 COOLDOWN = 6 * 3600
 KEY = 'cvengine:adaptive:decision'
 SYSTEM = ('You review measured scanner capacity for the previous three hours. Reply with exactly one JSON object '
@@ -39,7 +44,7 @@ def summarize(samples, now):
             'waiting': {kind: waits[kind] for kind in KINDS}, 'running': {kind: running[kind] for kind in KINDS}}
 
 
-def safe_candidate(metrics, *, memory_kills=0, scanner_failures=0, scanner_runs=0, provider_throttles=0,
+def safe_candidate(metrics, *, memory_kills=0, scanner_failures=0, scanner_runs=0, stage_outcomes=None, provider_throttles=0,
                    caps=None, bounds=None, previous=None, now=0):
     """Pure policy gate: one gradual change, with rollback after a harmful increase."""
     if metrics is None:
@@ -47,18 +52,30 @@ def safe_candidate(metrics, *, memory_kills=0, scanner_failures=0, scanner_runs=
     caps = caps or {}
     bounds = bounds or {}
     pressure = memory_kills > 0 or metrics['free_p10'] < 0.18
-    failing = scanner_runs >= 10 and scanner_failures / scanner_runs > 0.15
-    if previous and now - previous.get('at', 0) < COOLDOWN and not pressure:
+    stage_outcomes = stage_outcomes or {}
+    failing = sorted((kind for kind, counts in stage_outcomes.items()
+                      if kind in KINDS and counts['runs'] >= 10 and counts['failures'] / counts['runs'] > 0.15),
+                     key=lambda kind: (stage_outcomes[kind]['failures'] / stage_outcomes[kind]['runs'],
+                                       stage_outcomes[kind]['failures']), reverse=True)
+    if previous and now - previous.get('at', 0) < COOLDOWN and not pressure and not failing:
         return {'kind': 'none', 'direction': 'none', 'reason': 'Capacity cooldown is active'}
-    if pressure or failing:
+    if pressure:
         if previous and previous.get('direction') == 'up' and caps.get(previous.get('kind'), 0) > previous.get('previous', 0):
             kind = previous['kind']
-            return {'kind': kind, 'direction': 'down', 'reason': 'Rollback: pressure or scanner errors rose after capacity increase'}
+            return {'kind': kind, 'direction': 'down', 'reason': 'Rollback: memory pressure rose after capacity increase'}
         kinds = sorted(KINDS, key=lambda k: metrics['running'].get(k, 0), reverse=True)
         for kind in kinds:
             if metrics['running'].get(kind, 0) and caps.get(kind, 0) > bounds[kind][0]:
-                return {'kind': kind, 'direction': 'down', 'reason': 'Measured memory pressure or scanner failures'}
+                return {'kind': kind, 'direction': 'down', 'reason': 'Measured memory pressure'}
         return {'kind': 'none', 'direction': 'none', 'reason': 'Pressure detected but all observed active kinds are at their minimum'}
+    if failing:
+        for kind in failing:
+            if kind in bounds and caps.get(kind, 0) > bounds[kind][0]:
+                reason = ('Rollback: scanner errors rose after capacity increase' if previous and
+                          previous.get('kind') == kind and previous.get('direction') == 'up' and
+                          caps[kind] > previous.get('previous', 0) else 'Measured failures in this scanner kind')
+                return {'kind': kind, 'direction': 'down', 'reason': reason}
+        return {'kind': 'none', 'direction': 'none', 'reason': 'Failing scanner kinds are at their minimum'}
     if provider_throttles:
         return {'kind': 'none', 'direction': 'none', 'reason': 'Provider throttling was observed; no capacity increase'}
     if scanner_runs < 10 or scanner_failures:
@@ -108,20 +125,29 @@ def review(now=None):
         samples = resources.adaptive_history(since.timestamp())
         metrics = summarize(samples, now.timestamp())
         scanner_kind = (Q(name__icontains='nmap') | Q(name__icontains='nuclei') |
-                        Q(name__icontains='bbot') | Q(name__icontains='discovery'))
+                        Q(name__icontains='bbot') | Q(name__icontains='discovery') |
+                        Q(name='route_auth_scan'))
         recent = ScanActivity.objects.filter(scanner_kind, time__gte=since)
         scanner_runs = recent.filter(status__in=(0, 2)).count()
         scanner_failures = recent.filter(status=0).count()
+        stage_outcomes = {}
+        for row in recent.filter(name__in=STAGE_KINDS, status__in=(0, 2)).values('name').annotate(
+                runs=Count('id'), failures=Count('id', filter=Q(status=0))):
+            kind = STAGE_KINDS[row['name']]
+            counts = stage_outcomes.setdefault(kind, {'runs': 0, 'failures': 0})
+            counts['runs'] += row['runs']
+            counts['failures'] += row['failures']
         memory_kills = max((s.get('memory_kills_3h', 0) for s in samples), default=0)
         throttles = AIUsage.objects.filter(started_at__gte=since, error_category__in=('rate_limit', 'provider_rate_limit')).count()
         previous = json.loads(client.get(KEY) or '{}')
         caps = {kind: resources.max_concurrent(kind) for kind in KINDS}
         bounds = {kind: resources.adaptive_bounds(kind) for kind in KINDS}
         candidate = safe_candidate(metrics, memory_kills=memory_kills, scanner_failures=scanner_failures,
-            scanner_runs=scanner_runs, provider_throttles=throttles, caps=caps, bounds=bounds,
+            scanner_runs=scanner_runs, stage_outcomes=stage_outcomes, provider_throttles=throttles, caps=caps, bounds=bounds,
             previous=previous, now=now.timestamp())
         record = {'status': 'no_change', 'reason': candidate['reason'], 'metrics': metrics,
                   'scanner_runs': scanner_runs, 'scanner_failures': scanner_failures,
+                  'stage_outcomes': stage_outcomes,
                   'memory_kills': memory_kills, 'provider_throttles': throttles,
                   'active_caps_before': caps, 'bounds': bounds}
         if previous.get('metrics') and metrics:
