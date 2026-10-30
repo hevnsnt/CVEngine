@@ -507,6 +507,33 @@ def _bounded(rng):
     return version_in_range((0,), rng) is not None  # a range with at least one usable bound
 
 
+def pair_split_ranges(ranges):
+    """The ranges with each ``introduced``-only range joined to the ``fixed``-only range right after it.
+
+    The CVE List writes a branch as two ``versions`` entries when its lower bound is "7.13.0" and its upper bound is "lessThan 7.13.7", and the
+    conversion keeps them as two ranges: ``[{"introduced": "7.13.0"}, {"fixed": "7.13.7"}]``. Read alone, the first says "7.13.0 and every later
+    version", the second "every version before 7.13.7", so the fixed 7.13.7, 7.18.1 and everything in between read as vulnerable (issue 205,
+    CVE-2022-26134). Joined, they are the branch the advisory means. Only a pair that alternates in order and whose fix is newer than its
+    introduction is joined; an ``introduced`` range with no fixed range after it stays open (a branch with no fix), and any other shape is
+    returned as it was."""
+    out, i = [], 0
+    ranges = list(ranges)
+    while i < len(ranges):
+        rng = ranges[i]
+        nxt = ranges[i + 1] if i + 1 < len(ranges) else None
+        if (nxt is not None and rng.get("introduced") and not rng.get("fixed") and not rng.get("lastAffected")
+                and nxt.get("fixed") and not nxt.get("introduced") and not nxt.get("lastAffected")
+                and str(rng.get("type") or "SEMVER").upper() == str(nxt.get("type") or "SEMVER").upper()):
+            intro, fixed = parse_version(rng["introduced"], strict=True), parse_version(nxt["fixed"], strict=True)
+            if intro is not None and fixed is not None and _vcmp(fixed, intro) > 0:
+                out.append({**rng, "fixed": nxt["fixed"]})
+                i += 2
+                continue
+        out.append(rng)
+        i += 1
+    return out
+
+
 def _is_branch_range(rng):
     """One maintained branch of a branch-by-branch fix list: introduced "8.2" or "8.2.*", fixed "8.2.35"."""
     intro = parse_version(rng.get("introduced"), strict=True)
@@ -608,7 +635,7 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if ver is not None:
             in_range, unknown = False, False
             for index, item in hit:
-                ranges = [r for r in (item.get("ranges") or []) if _bounded(r)]
+                ranges = pair_split_ranges([r for r in (item.get("ranges") or []) if _bounded(r)])
                 if not ranges:
                     unknown = True  # the advisory names the product but no version bound: nothing to test against
                     continue

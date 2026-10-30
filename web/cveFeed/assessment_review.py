@@ -118,9 +118,15 @@ def project_facts(project_id, start, end):
     from startScan.models import ScanHistory, Subdomain
     from targetApp.models import Domain
     from cveFeed.validation import due_ids
+    from cveFeed.correlation import latest_scan_q
 
     project = Project.objects.get(pk=project_id)
-    triage_rows = Triage.objects.filter(project_id=project_id)
+    # CVE triage rows are retained per scan for history. Only the current
+    # inventory copy should drive the review's counts and queue actions.
+    triage_rows = Triage.objects.filter(project_id=project_id).filter(
+        ~Q(kind='cve_match') | (Q(match__isnull=False) & latest_scan_q('match__subdomain__')))
+    matches = CVEMatch.objects.filter(subdomain__target_domain__project_id=project_id).filter(
+        latest_scan_q('subdomain__'))
     findings = triage_rows.aggregate(
         total=Count('id'), pending=Count('id', filter=Q(status__in=('pending', 'error', 'not_triaged'))),
         unvalidated=Count('id', filter=Q(validation_status__in=('none', 'pending', 'failed'))))
@@ -130,7 +136,10 @@ def project_facts(project_id, start, end):
     recent = AgentActivity.objects.filter(project_id=project_id, created_at__gte=start, created_at__lt=end).aggregate(
         total=Count('id'), errors=Count('id', filter=Q(status='failed')))
     from django.db.models import OuterRef, Subquery
-    latest_success = ScanHistory.objects.filter(domain_id=OuterRef('pk'), scan_status=2).order_by('-stop_scan_date', '-id')
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    latest_success = (ScanHistory.objects.filter(domain_id=OuterRef('pk'), scan_status=2)
+                      .exclude(tasks__contains=[HOST_PIPELINE_TASK])
+                      .order_by('-stop_scan_date', '-id'))
     due = (Domain.objects.filter(project_id=project_id)
            .annotate(last_success=Subquery(latest_success.values('stop_scan_date')[:1]))
            .filter(Q(last_success__isnull=True) | Q(last_success__lt=end - timedelta(days=7)))
@@ -140,10 +149,10 @@ def project_facts(project_id, start, end):
     top_findings = list(triage_rows.filter(status__in=('pending', 'error', 'not_triaged'))
                         .order_by('id').values('id', 'kind', 'status', 'validation_status')[:5])
     facts = {'project_id': project_id, 'targets': Domain.objects.filter(project_id=project_id).count(),
-             'hosts': Subdomain.objects.filter(target_domain__project_id=project_id).values('name').distinct().count(),
-             'matched_cves': CVEMatch.objects.filter(subdomain__target_domain__project_id=project_id).count(),
-             'matched_cves_updated_in_window': CVEMatch.objects.filter(subdomain__target_domain__project_id=project_id,
-                                                                        cve_entry__synced_at__gte=start).count(),
+             'hosts': Subdomain.objects.filter(target_domain__project_id=project_id).filter(
+                 latest_scan_q()).values('name').distinct().count(),
+             'matched_cves': matches.count(),
+             'matched_cves_updated_in_window': matches.filter(cve_entry__synced_at__gte=start).count(),
              'findings': findings, 'top_pending_findings': top_findings, 'scans': scans, 'recent_activity': recent,
              'recent_scan_results': {'failed': scans['failed_recent']},
              'due_discovery_target_id': due, 'due_validation': bool(due_validation),

@@ -8,7 +8,8 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import assessment_review as ar
-from cveFeed.models import AssessmentReview, AssessmentReviewDecision, HostAssessment, HostExclusion
+from cveFeed import performance_review
+from cveFeed.models import AssessmentReview, AssessmentReviewDecision, CVEEntry, CVEMatch, HostAssessment, HostExclusion, Triage
 from cveFeed.performance_review import safe_candidate, summarize
 from dashboard.models import Org, Project
 from targetApp.models import Domain
@@ -43,9 +44,27 @@ class DecisionTests(SimpleTestCase):
         self.assertEqual(safe_candidate(sample, **args)['direction'], 'up')
         self.assertEqual(safe_candidate(sample, provider_throttles=1, **args)['direction'], 'none')
         self.assertEqual(safe_candidate(sample, previous={'at': 99999}, **args)['direction'], 'none')
-        self.assertEqual(safe_candidate(sample, scanner_failures=4, **args)['direction'], 'down')
+        # An unattributed failure cannot justify reducing the busiest, unrelated tool.
+        self.assertEqual(safe_candidate(sample, scanner_failures=4, **args)['direction'], 'none')
+        self.assertEqual(safe_candidate(sample, scanner_failures=4,
+                        stage_outcomes={'nmap': {'runs': 20, 'failures': 4}}, **args)['kind'], 'nmap')
         caps['nmap'] = 3
         self.assertEqual(safe_candidate(sample, **args)['direction'], 'none')
+
+    def test_failure_reduction_targets_the_failing_tool_and_can_rollback_during_cooldown(self):
+        sample = {'samples': 150, 'span_minutes': 170, 'free_p10': .65,
+                  'waiting': {'nmap': 60}, 'running': {'nmap': 100, 'nuclei': 5}}
+        caps = {'nmap': 3, 'nuclei': 2}
+        bounds = {'nmap': (1, 4), 'nuclei': (1, 3)}
+        outcomes = {'nmap': {'runs': 30, 'failures': 0}, 'nuclei': {'runs': 20, 'failures': 5}}
+        previous = {'kind': 'nuclei', 'direction': 'up', 'previous': 1, 'at': 99999}
+        result = safe_candidate(sample, caps=caps, bounds=bounds, scanner_runs=50, scanner_failures=5,
+                                stage_outcomes=outcomes, previous=previous, now=100000)
+        self.assertEqual((result['kind'], result['direction']), ('nuclei', 'down'))
+        self.assertIn('Rollback', result['reason'])
+        caps['nuclei'] = 1
+        self.assertEqual(safe_candidate(sample, caps=caps, bounds=bounds, scanner_runs=50,
+                         scanner_failures=5, stage_outcomes=outcomes, now=100000)['direction'], 'none')
 
     def test_rollback_after_pressure_and_two_hour_coverage_requirement(self):
         sample = {'samples': 150, 'span_minutes': 170, 'free_p10': .1,
@@ -90,6 +109,61 @@ class ScheduledReviewTests(TestCase):
         self.assertEqual(review.status, 'completed')
         self.assertEqual(AssessmentReviewDecision.objects.filter(review=review).count(), 12)
         self.assertEqual(ar.run_page()['skipped'], 'not due')
+
+    def test_performance_review_attributes_scanner_failures_before_reducing_capacity(self):
+        now = timezone.now()
+        project = self.projects[0]
+        domain = Domain.objects.create(name='performance.example', project=project, insert_date=now)
+        scan = ScanHistory.objects.create(domain=domain, scan_type=EngineType.objects.create(
+            engine_name='performance', yaml_configuration='x'), start_scan_date=now, scan_status=2)
+        ScanActivity.objects.bulk_create([
+            ScanActivity(scan_of=scan, name='nmap_scan', title='nmap', status=2, time=now)
+            for _ in range(20)
+        ] + [
+            ScanActivity(scan_of=scan, name='nuclei_light_scan', title='nuclei', status=0 if i < 5 else 2, time=now)
+            for i in range(20)
+        ])
+        samples = [{'t': now.timestamp() - 7200 + i * 60,
+                    'memory': {'total_mb': 1000, 'available_mb': 700},
+                    'waiting_by_kind': {}, 'running_by_kind': {'nmap': 4, 'nuclei': 1}} for i in range(121)]
+        client = mock.Mock()
+        client.get.return_value = None
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch.object(resources, 'get_store', return_value=mock.Mock(r=client)), \
+             mock.patch.object(resources, 'adaptive_history', return_value=samples), \
+             mock.patch.object(resources, 'max_concurrent', side_effect=lambda kind: 3 if kind == 'nmap' else 2 if kind == 'nuclei' else 1), \
+             mock.patch.object(resources, 'adaptive_bounds', side_effect=lambda kind: (1, 4) if kind == 'nmap' else (1, 3) if kind == 'nuclei' else (1, 1)), \
+             mock.patch.object(performance_review, '_model_agrees', return_value=(True, 'agreed')):
+            result = performance_review.review(now)
+        self.assertEqual((result['status'], result['kind'], result['before'], result['after']), ('changed', 'nuclei', 2, 1))
+        self.assertEqual(result['stage_outcomes'], {'nmap': {'runs': 20, 'failures': 0}, 'nuclei': {'runs': 20, 'failures': 5}})
+        self.assertEqual(client.set.call_count, 2)
+
+    def test_rescan_history_does_not_inflate_review_or_requeue_old_cve_rows(self):
+        from cveFeed import triage, validation
+        project = self.projects[0]
+        domain = Domain.objects.create(name='review.example', project=project, insert_date=timezone.now())
+        engine = EngineType.objects.create(engine_name='review-history', yaml_configuration='x')
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-100', cvss=8.0)
+        rows = []
+        for _ in range(2):
+            scan = ScanHistory.objects.create(domain=domain, scan_type=engine,
+                                              start_scan_date=timezone.now(), scan_status=2)
+            host = Subdomain.objects.create(name='app.review.example', target_domain=domain, scan_history=scan)
+            match = CVEMatch.objects.create(cve_entry=cve, subdomain=host, matched_product='Example App')
+            rows.append(Triage.objects.create(project=project, domain=domain, host=host.name,
+                                              kind='cve_match', match=match, status='pending'))
+        with mock.patch.object(ar, 'host_coverage_gap', return_value=(0, None)):
+            _, facts, offered = ar.project_facts(project.pk, timezone.now() - timedelta(hours=3), timezone.now())
+        self.assertEqual((facts['hosts'], facts['matched_cves'], facts['matched_cves_updated_in_window']), (1, 1, 1))
+        self.assertEqual((facts['findings']['total'], facts['findings']['pending']), (1, 1))
+        self.assertEqual([r['id'] for r in facts['top_pending_findings']], [rows[1].pk])
+        self.assertEqual(validation.due_ids(project.pk), [rows[1].pk])
+        self.assertIn('triage', offered)
+        with mock.patch.object(triage, 'backfill'), mock.patch.object(triage, 'run_triage', return_value={
+                'rows': 1, 'asked': 0, 'cached': 0, 'queued': 0, 'not_triaged': 1, 'errors': 0}) as run:
+            triage.sweep(project.pk)
+        self.assertEqual([r.pk for r, _ in run.call_args.args[0]], [rows[1].pk])
 
     def test_a_run_a_little_early_is_due_and_windows_are_contiguous(self):
         end = timezone.now() - timedelta(hours=2, minutes=50)  # the last run started late; this one starts on time

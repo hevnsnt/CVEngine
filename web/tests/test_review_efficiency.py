@@ -126,3 +126,27 @@ class NextTargetsTests(Fixture):
 		self.scan(hours=30)  # the newest scan of the domain is what counts, not the oldest
 		self.assertEqual(conductor.next_targets(5, now=NOW), [self.other_domain.id, self.domain.id])
 		self.assertEqual(conductor.next_targets(1, now=NOW), [self.other_domain.id])
+
+	def test_recent_host_pipeline_does_not_postpone_domain_discovery(self):
+		self.scan(hours=40)
+		partial = self.scan(hours=1)
+		from cveFeed.discovery import HOST_PIPELINE_TASK
+		ScanHistory.objects.filter(pk=partial.pk).update(tasks=[HOST_PIPELINE_TASK])
+		self.assertEqual(conductor.next_targets(5, now=NOW), [self.other_domain.id, self.domain.id])
+		self.scan(hours=1)
+		self.assertEqual(conductor.next_targets(5, now=NOW), [self.other_domain.id])
+
+	def test_three_hour_review_uses_full_discovery_recency(self):
+		from cveFeed.discovery import HOST_PIPELINE_TASK
+		old = self.scan(hours=24 * 8)
+		ScanHistory.objects.filter(pk=old.pk).update(stop_scan_date=NOW - timedelta(days=8))
+		partial = self.scan(hours=1)
+		ScanHistory.objects.filter(pk=partial.pk).update(tasks=[HOST_PIPELINE_TASK], stop_scan_date=NOW - timedelta(hours=1))
+		_, facts, offered = ar.project_facts(self.project.id, NOW - timedelta(hours=3), NOW)
+		self.assertEqual(facts['due_discovery_target_id'], self.domain.id)
+		self.assertIn('discover', offered)
+		full = self.scan(hours=1)
+		ScanHistory.objects.filter(pk=full.pk).update(stop_scan_date=NOW - timedelta(hours=1))
+		_, facts, offered = ar.project_facts(self.project.id, NOW - timedelta(hours=3), NOW)
+		self.assertIsNone(facts['due_discovery_target_id'])
+		self.assertNotIn('discover', offered)

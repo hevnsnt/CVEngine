@@ -281,7 +281,8 @@ def affected_brief(affected, names=()):
         if not isinstance(item, dict):
             continue
         row = {k: _s(item[k], 80, names) for k in ('vendor', 'product', 'package') if item.get(k)}
-        row['ranges'] = [_range(r, names) for r in (item.get('ranges') or [])[:10] if isinstance(r, dict)]
+        from cveFeed.correlation import pair_split_ranges  # a branch the CVE List split in two reads as one range, as matching reads it
+        row['ranges'] = [_range(r, names) for r in pair_split_ranges([r for r in (item.get('ranges') or []) if isinstance(r, dict)])[:10]]
         out.append(row)
     return out
 
@@ -1282,13 +1283,15 @@ def sweep(project_id=None, provider=False, limit=None):
     previously an unhandled exception here only reached the worker log (``cveFeed.tasks.triage_pending``'s own catch-all), invisible
     anywhere a person would actually look for it."""
     from cveFeed.models import Triage
+    from cveFeed.correlation import latest_scan_q
     if project_id is not None:
         backfill(project_id)
     wanted = ['pending', 'error']
     if _resolve_provider(provider) is not None:
         wanted.append('not_triaged')
     from django.db.models import Q
-    qs = Triage.objects.filter(Q(status__in=wanted) | Q(verdict__invalid_output=True))
+    qs = Triage.objects.filter(Q(status__in=wanted) | Q(verdict__invalid_output=True)).filter(
+        ~Q(kind='cve_match') | (Q(match__isnull=False) & latest_scan_q('match__subdomain__')))
     if project_id is not None:
         qs = qs.filter(project_id=project_id)
     rows = list(qs.order_by('updated_at', 'id')[:limit or cap('TRIAGE_MAX_PER_RUN') * 5])
