@@ -45,7 +45,10 @@ if [ -f "$HOME/schema-before.txt" ]; then
 fi
 # The application works on the new schema: the MCP endpoint and its token lookup, tools that read the changed tables, the main pages
 dc exec -T web python3 manage.py shell < "$GITHUB_WORKSPACE/.github/rehearsal/smoke.py" || bad "the functional smoke test failed (see the lines above)"
-if [ "$(cat "$HOME/base.sha")" != "$(cat "$HOME/candidate.sha")" ]; then
+# The rewrite is a data migration (0092): it only reaches rows that existed when the update ran, so it can be checked only when the installed
+# (base) version does not have it yet. A base that already ran it leaves the old wording the seed adds afterwards as it is.
+base_has_rewrite() { git -C "$GITHUB_WORKSPACE" cat-file -e "$(cat "$HOME/base.sha"):web/cveFeed/migrations/0092_reword_different_product_closures.py" 2>/dev/null; }
+if [ "$(cat "$HOME/base.sha")" != "$(cat "$HOME/candidate.sha")" ] && ! base_has_rewrite; then
   dc exec -T web python3 manage.py shell <<'PY' || bad "the stored closure wording was not rewritten"
 from cveFeed.models import CVEMatch, TriageVerdict
 old = CVEMatch.objects.filter(ai_reason__contains='invalid product correlation').count() + TriageVerdict.objects.filter(reason__contains='invalid product correlation').count()
