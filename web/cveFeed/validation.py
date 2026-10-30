@@ -857,6 +857,7 @@ def due_ids(project_id, limit=None):
     from django.db.models import Q
 
     from cveFeed.models import Triage
+    from cveFeed.correlation import latest_scan_q
     now = timezone.now()
     stale = now - timedelta(seconds=ledger_ttl())
     due = (Q(validation_status__in=('none', 'pending'))
@@ -864,7 +865,8 @@ def due_ids(project_id, limit=None):
            | Q(validation_status='failed', next_attempt_at__isnull=True)
            | Q(validation_status__in=('hit', 'clean', 'observed'), validated_at__lt=stale)
            | Q(validation_status__in=('no_check', 'skipped_blocked'), updated_at__lt=stale))
-    qs = Triage.objects.filter(project_id=project_id, kind__in=PLANNED_KINDS).filter(due).filter(
+    qs = Triage.objects.filter(project_id=project_id, kind__in=PLANNED_KINDS).filter(
+        ~Q(kind='cve_match') | (Q(match__isnull=False) & latest_scan_q('match__subdomain__'))).filter(due).filter(
         Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
     return list(qs.order_by('validated_at', 'id').values_list('id', flat=True)[:limit or cap('VALIDATE_MAX_PER_RUN') * 4])
 
