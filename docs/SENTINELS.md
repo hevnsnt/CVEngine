@@ -30,7 +30,7 @@ Everything else (bbot, bucket checks, vhost and subdirectory sweeps, the weekly 
 
 You choose two things when you provision a Sentinel, and can change both later.
 
-- **Where it runs.** External (the default) is a Sentinel on the internet side, for the same targets the server scans. Internal means it sits inside a private network. The server grants it the capability `network:internal` from the choice made at provisioning; what a Sentinel says about itself never grants it, and an administrator can change it later (`PATCH agents/{id}` with `settings: {network}`, or the card's **Settings**). Only an internal Sentinel is offered work for an address in a declared internal range.
+- **Where it runs.** External (the default) is a Sentinel on the internet side, for the same targets the server scans. Internal means it sits inside a private network. The server grants it the capability `network:internal` from the choice made at provisioning; what a Sentinel says about itself never grants it, and an administrator can change it later (`PATCH agents/{id}` with `settings: {network}`, or the card's **Settings**). Resetting `network` to `null` restores the provisioned grant, or external when there is no matching enrollment. An external setting on the Sentinel itself limits an internal grant, so it receives no internal work until its machine reports internal. Only a Sentinel with both the server grant and a compatible machine setting is offered work for an address in a declared internal range.
 - **Size.** Full also runs its own OpenVAS stack (several GB, hours of feed sync on first start). Light skips it and never takes OpenVAS work.
 
 ## Get one
