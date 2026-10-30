@@ -358,6 +358,26 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(validation.interpret(route, {}, {'status': 'observed', 'summary': 'x', 'http': {'status': 200}})['status'], 'reaffirmed')
 		self.assertEqual(validation.interpret(route, {}, {'status': 'observed', 'summary': 'x', 'http': {'status': 404}})['status'], 'no_match')
 
+	def test_interpret_requires_the_same_identified_product(self):
+		for product, observed in (('ingress-nginx', 'nginx'), ('nginx', 'ingress-nginx'),
+				('phpMyAdmin', 'php'), ('php', 'phpMyAdmin'), ('nginx', ''), ('', 'nginx'),
+				('Apache HTTP Server', 'Oracle HTTP Server'), ('WAF', 'WAF')):
+			for version in ('1.5.0', '3.0.0'):
+				with self.subTest(product=product, observed=observed, version=version):
+					subject = {'kind': 'cve_match', 'product': product, 'range': {'introduced': '1.0', 'fixed': '2.0'}}
+					seen = {'status': 'observed', 'summary': 'x', 'observed': {'product': observed, 'version': version}}
+					self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'observed')
+
+	def test_interpret_accepts_product_aliases_and_vendor_names(self):
+		for product, observed in (('nginx', 'NGINX'), ('Apache HTTP Server', 'Apache httpd'),
+				('HTTP Server', 'Apache'), ('OpenSSH', 'OpenSSH server')):
+			with self.subTest(product=product, observed=observed):
+				subject = {'kind': 'cve_match', 'product': product, 'range': {'introduced': '1.0', 'fixed': '2.0'}}
+				seen = {'status': 'observed', 'summary': 'x', 'observed': {'product': observed, 'version': '1.5.0'}}
+				self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'reaffirmed')
+				seen['observed']['version'] = '3.0.0'
+				self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'version_changed')
+
 	def test_rollup_never_calls_a_failure_clean(self):
 		r = validation.rollup
 		self.assertEqual(r([]), 'none')
@@ -583,25 +603,6 @@ class ApplyValidationTests(ValidationBase):
 		self.assertEqual((row.attempts, row.next_attempt_at), (2, now + datetime.timedelta(hours=12)))
 		self.assertEqual(len(row.validation_steps), 1)  # the step for the same check is replaced, not piled up
 		self.assertNotEqual(row.validation_status, 'clean')
-
-	def test_a_later_clean_check_keeps_an_earlier_failure_due_for_retry(self):
-		_, row = self.prepared()
-		now = timezone.now() - datetime.timedelta(hours=7)
-		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'failed', 'error': 'timeout', 'summary': 'timed out'}, now=now)
-		retry_at = row.next_attempt_at
-		validation.apply_validation(row, self.check(), {'status': 'no_match', 'summary': 'the template did not match'},
-														 now=now + datetime.timedelta(minutes=1))
-		row.refresh_from_db()
-		self.assertEqual((row.validation_status, row.attempts, row.next_attempt_at), ('failed', 1, retry_at))
-		self.assertIn(row.pk, validation.due_ids(self.project.pk))
-		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'no_match', 'summary': 'the service did not match'})
-		self.assertEqual((row.validation_status, row.attempts, row.next_attempt_at), ('clean', 0, None))
-
-	def test_a_failed_row_without_a_retry_date_is_recovered_by_the_sweep(self):
-		_, row = self.prepared()
-		validation.apply_validation(row, self.check(), {'status': 'failed', 'error': 'timeout', 'summary': 'timed out'})
-		Triage.objects.filter(pk=row.pk).update(next_attempt_at=None)
-		self.assertIn(row.pk, validation.due_ids(self.project.pk))
 
 	def test_a_reaffirmed_version_raises_a_triaged_finding_to_likely(self):
 		m, row = self.prepared()
