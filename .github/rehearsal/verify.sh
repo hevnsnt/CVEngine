@@ -29,11 +29,16 @@ from django.db.models import Count
 from startScan.models import Subdomain, IpAddress
 from targetApp.models import Domain
 assert Domain.objects.filter(name='rehearsal.example').exists(), 'the target is gone'
-# discovery runs in the background of an updated install and may add hosts of its own (the domain itself, say): the seeded four must all be there
-wanted = {'h0.rehearsal.example', 'h1.rehearsal.example', 'h2.rehearsal.example', 'www.rehearsal.example'}
-hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted)
-assert {h.name for h in hosts} == wanted, f'seeded hosts missing: {sorted(wanted - {h.name for h in hosts})}'
-assert all(h.ip_addresses.exists() for h in hosts), 'a host lost its address'
+# discovery and host pipelines run in the background of an updated install and add rows of their own: the domain itself, and scan-owned copies of
+# the seeded names (rehearsal.example does not resolve, so a copy holds no address). The update has to keep what the seed made: the four hosts
+# that no scan owns, each still linked to the address it was given.
+wanted = {'h0.rehearsal.example': '203.0.113.10', 'h1.rehearsal.example': '203.0.113.10', 'h2.rehearsal.example': '203.0.113.10',
+          'www.rehearsal.example': '203.0.113.11'}
+hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted, scan_history__isnull=True)
+assert {h.name for h in hosts} == set(wanted), f'seeded hosts missing: {sorted(set(wanted) - {h.name for h in hosts})}'
+for h in hosts:
+    got = sorted(h.ip_addresses.values_list('address', flat=True))
+    assert got == [wanted[h.name]], f'{h.name} has {got}, not its seeded address {wanted[h.name]}'
 dups = IpAddress.objects.values('address').annotate(c=Count('id')).filter(c__gt=1).count()
 assert dups == 0, f'{dups} addresses are still stored more than once'
 print('DATA OK')
