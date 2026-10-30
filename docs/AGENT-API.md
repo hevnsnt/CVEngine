@@ -185,7 +185,7 @@ A Sentinel is an `Agent` with `kind: "scanner"`: the same identity, scope, capab
 | --- | --- |
 | `nmap` | `hosts: [{ip, os_guess, ports: [{number, protocol, service_name, product, version, state}]}]` (at most 64 hosts, 500 ports each) |
 | `naabu` | `ports: {ip: [open port numbers]}` (at most 64 addresses, 500 ports each) |
-| `nuclei_light`, `nuclei_targeted`, `nuclei_deep` | `findings: [{template_id, name, severity, host, matched_at, description, matcher_name, extracted_results, tags}]` (at most 100 findings, 20 extracted results and 20 tags each) |
+| `nuclei_light`, `nuclei_targeted`, `nuclei_deep` | `findings: [{template_id, name, severity, host, matched_at, description, matcher_name, extracted_results, tags}]` (at most 500 findings are kept, strongest first, and a result carrying more is not rejected: the rest are counted in `dropped_findings`; more than 5000 is refused. 20 extracted results and 20 tags each) |
 | `testssl` | `items: [{id, severity, finding, cve}]` (testssl.sh's own raw report items, at most 300) - never chunked, one `host:port` per task |
 | `discover` | `hosts: [{ip, hostnames}]` (at most 512): the live addresses a Sentinel inside a private network found in one /24 chunk of a declared internal range (target `{cidr}`); the server keeps only addresses inside that chunk and drops the network and broadcast addresses |
 | `nmap_udp` | `xml: "<nmaprun>...</nmaprun>"` (nmap's own raw XML report text, at most 4 MiB) - the only kind reported as XML rather than typed JSON; parsed server-side by the same `cveFeed.nmap_scan.parse_xml` (hardened against a custom ENTITY declaration) a local `-sU` run's own XML goes through, so UDP's `open`/`open|filtered`/`closed` states and NSE script output are read identically either way |

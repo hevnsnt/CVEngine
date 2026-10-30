@@ -973,3 +973,32 @@ class ProvisionPickerTests(SentinelBase):
         html = self.page(self.alice)
         self.assertNotIn('<option value="org">', html)
         self.assertNotIn('placeholder="org-slug"', html)
+
+
+class NucleiFindingCapTests(SimpleTestCase):
+    """A nuclei result with many findings keeps the strongest instead of being rejected whole."""
+
+    def finding(self, i, severity='info'):
+        return {'template_id': f't{i}', 'name': f'n{i}', 'severity': severity, 'host': 'a.example', 'matched_at': 'https://a.example/'}
+
+    def test_a_result_within_the_cap_is_kept_whole(self):
+        from agentapi import sentinel_broker as b
+        out = b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS)]})
+        self.assertEqual(len(out['findings']), b.MAX_FINDINGS)
+        self.assertNotIn('dropped_findings', out)
+
+    def test_a_result_over_the_cap_keeps_the_strongest_and_counts_the_rest(self):
+        from agentapi import sentinel_broker as b
+        many = [self.finding(i) for i in range(b.MAX_FINDINGS + 50)] + [self.finding('crit', 'critical'), self.finding('high', 'high')]
+        out = b._clean_nuclei_result({'findings': many})
+        self.assertEqual(len(out['findings']), b.MAX_FINDINGS)
+        self.assertEqual(out['dropped_findings'], 52)
+        self.assertEqual([f['template_id'] for f in out['findings'][:2]], ['tcrit', 'thigh'])  # the strongest first, never dropped
+
+    def test_a_list_that_is_no_nuclei_result_is_still_refused(self):
+        from agentapi import sentinel_broker as b
+        from agentapi.services import ApiError
+        with self.assertRaises(ApiError):
+            b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS_SENT + 1)]})
+        with self.assertRaises(ApiError):
+            b._clean_nuclei_result({'findings': 'lots'})
