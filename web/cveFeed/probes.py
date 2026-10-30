@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import fingerprint, versions
+from cveFeed import cms, fingerprint, versions
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +96,24 @@ PROBES = (
           'confidence': 0.9, 'source': 'body:drupal-changelog'},
      )},
     {'id': 'joomla-manifest', 'label': 'Joomla version from its manifest', 'family': 'http', 'leads': r'joomla',
-     'requests': (('GET', '/administrator/manifests/files/joomla.xml'),), 'safety': 'one GET', 'rules': (
+     'requests': (('GET', '/administrator/manifests/files/joomla.xml'), ('GET', '/language/en-GB/en-GB.xml'),
+                  ('GET', '/administrator/components/com_content/content.xml')), 'safety': 'three GETs of version files', 'rules': (
          {'request': 0, 'where': 'body', 'regex': r'<version>(\d+\.\d+\.\d+)</version>', 'product': 'Joomla', 'version': 1, 'kind': 'version',
           'confidence': 0.9, 'source': 'body:joomla-manifest'},
+         {'request': 1, 'where': 'body', 'regex': r'<version>(\d+\.\d+\.\d+)</version>', 'product': 'Joomla', 'version': 1, 'kind': 'version',
+          'confidence': 0.85, 'source': 'body:joomla-language'},
+         {'request': 2, 'where': 'body', 'regex': r'<version>(\d+\.\d+\.\d+)</version>', 'product': 'Joomla', 'version': 1, 'kind': 'version',
+          'confidence': 0.8, 'source': 'body:joomla-component'},
+     )},
+    {'id': 'magento-version', 'label': 'Magento version from its admin login page and release notes', 'family': 'http', 'leads': r'magento',
+     'requests': (('GET', '/magento_version'), ('GET', '/admin'), ('GET', '/RELEASE_NOTES.txt')), 'safety': 'three GETs, no login attempt', 'rules': (
+         # /magento_version answers "Magento/2.4 (Community)": the branch, never the patch release, so it names the product and no version
+         {'request': 0, 'where': 'body', 'regex': r'^Magento/\d+\.\d+ \((?:Community|Enterprise)\)', 'product': 'Magento', 'kind': 'version',
+          'outcome': 'hidden', 'confidence': 0.7, 'source': 'body:magento_version'},
+         {'request': 1, 'where': 'body', 'regex': r'Magento ver\. (\d+\.\d+\.\d+(?:-p\d+)?)', 'product': 'Magento', 'version': 1, 'kind': 'version',
+          'confidence': 0.85, 'source': 'body:magento-admin'},
+         {'request': 2, 'where': 'body', 'regex': r'(?m)^=== (\d+\.\d+\.\d+\.\d+) ===', 'product': 'Magento', 'version': 1, 'kind': 'version',
+          'confidence': 0.85, 'source': 'body:magento-release-notes'},
      )},
     {'id': 'robots-txt', 'label': 'robots.txt hints at the CMS behind the site', 'family': 'http', 'leads': WEB, 'requests': (('GET', '/robots.txt'),),
      'safety': 'one GET', 'rules': (
@@ -338,6 +353,13 @@ def observations_from_page(response, source_prefix='page'):
                                       headers=headers)
     for item in found:
         add(item['name'], item['source'])
+    for product in cms.SOURCES:  # a version the front page already carries (Drupal's core scripts); WordPress has its own probe
+        if product != 'WordPress':
+            version, label = cms.best(product, [('/', response)])
+            if version:
+                add(f'{product}:{version}', label)
+    stated = {o['product'].lower() for o in out if o['kind'] == 'version' and o['version']}
+    out = [o for o in out if not (o['kind'] == 'version' and not o['version'] and o['product'].lower() in stated)]  # a version replaces the bare name
     for provider in versions.edges_from_headers({**headers, 'server': response.get('server', '')}):
         out.append(_observation('edge', provider, outcome='edge', confidence=0.8, source='header:edge', url='/'))
     return out
@@ -355,7 +377,7 @@ _NEXT_CHUNK = re.compile(r'/_next/static/chunks/(?:main|main-app|framework|webpa
 def _wordpress_signals(responses):
     """``(signals, version)`` for the WordPress probe: every signature found in a response's headers or body, and the core version a
     generator tag, a readme or a core asset states."""
-    signals, version = [], ''
+    signals, generator = [], ''
     for path, response in responses:
         if not response:
             continue
@@ -375,16 +397,14 @@ def _wordpress_signals(responses):
         for product, found in versions.generator_tags(body if path == '/' else ''):
             if product.lower() == 'wordpress':
                 signals.append(('meta:generator', path))
-                version = version or found
-        if path == '/readme.html' and 'wordpress' in body.lower():
-            found = re.search(r'Version (\d+\.\d+(?:\.\d+)?)', body)
-            version = version or (found.group(1) if found else '')
-        if path == '/':
-            ver = re.search(r'/wp-(?:includes|admin)/[^"\'\s>]{1,200}\?ver=(\d+\.\d+(?:\.\d+)?)', body)
-            if ver and not version:
-                signals.append(('body:core-asset-ver', path))
-                version = ver.group(1)
-    return signals, version
+                generator = generator or found
+    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cveFeed.cms: best source wins, a library's ?ver= never)
+    pages = [(path, response) for path, response in responses if response and not (path == '/readme.html' and 'wordpress' not in (response.get('body') or '').lower())]
+    candidates = cms.read('WordPress', pages) + ([(generator, 'meta:generator', 0.9)] if generator else [])
+    candidates.sort(key=lambda c: -c[2])
+    if any(label.startswith('asset:') for _v, label, _c in candidates):
+        signals.append(('body:core-asset-ver', '/'))
+    return signals, (candidates[0][0] if candidates else '')
 
 
 def wordpress_observations(responses):
@@ -395,8 +415,18 @@ def wordpress_observations(responses):
     if signals:
         order = list(dict.fromkeys(s for s, _ in signals))
         evidence = {'signals': order, 'probed': probed}
-        return [_observation('wordpress', 'WordPress', version, 'wordpress', 'found', min(0.95, 0.6 + 0.1 * len(order)), order[0],
-                             url=next(p for s, p in signals), evidence=evidence)]
+        found = [_observation('wordpress', 'WordPress', version, 'wordpress', 'found', min(0.95, 0.6 + 0.1 * len(order)), order[0],
+                              url=next(p for s, p in signals), evidence=evidence)]
+        from cveFeed import wp_core
+        answers = dict(responses)
+        if wp_core.UPGRADE_PATH in answers:  # the directory an update is extracted into: whether the web server serves it (cveFeed.wp_core)
+            state = wp_core.classify_dir(answers[wp_core.UPGRADE_PATH], answers.get(wp_core.UPGRADE_MISSING))
+            status = (answers[wp_core.UPGRADE_PATH] or {}).get('status')
+            found.append(_observation('wp-upgrade-dir', 'WordPress', variant=state, source='probe:upgrade-dir', url=wp_core.UPGRADE_PATH,
+                                      outcome='found' if state in (wp_core.LISTING, wp_core.REACHABLE) else 'absent' if state == wp_core.DENIED else 'hidden',
+                                      confidence=0.9 if state in (wp_core.LISTING, wp_core.DENIED) else 0.7 if state == wp_core.REACHABLE else 0.0,
+                                      evidence={'status': status, 'state': state}))
+        return found
     challenged = next((r['challenge'] for _p, r in responses if r and r.get('challenge')), '')
     reachable = [r for _p, r in responses if r]
     if not reachable:
@@ -466,12 +496,33 @@ def _wordpress_responses(base, get, sleep):
             responses.append((path, get(base.rstrip('/') + path)))
         except (OSError, ValueError):
             responses.append((path, None))
-    if _wordpress_signals(responses)[0]:  # only a site that is WordPress is asked for its readme
+    if _wordpress_signals(responses)[0]:  # only a site that is WordPress is asked for its readme, and for the directory updates are extracted into
         sleep(REQUEST_GAP)
         try:
             responses.append(('/readme.html', get(base.rstrip('/') + '/readme.html')))
         except (OSError, ValueError):
             pass
+        for path, _sources in cms.asked('WordPress'):
+            if path == '/readme.html' or _wordpress_signals(responses)[1]:
+                continue   # the readme was asked above; the feed only while no page states the version
+            sleep(REQUEST_GAP)
+            try:
+                responses.append((path, get(base.rstrip('/') + path)))
+            except (OSError, ValueError):
+                pass
+        from cveFeed import wp_core
+        sleep(REQUEST_GAP)
+        try:
+            answer = get(base.rstrip('/') + wp_core.UPGRADE_PATH)
+        except (OSError, ValueError):
+            answer = None
+        responses.append((wp_core.UPGRADE_PATH, answer))
+        if wp_core.classify_dir(answer) == wp_core.REACHABLE:  # an empty page: ask once for a path that cannot exist beside it, to tell a catch-all
+            sleep(REQUEST_GAP)
+            try:
+                responses.append((wp_core.UPGRADE_MISSING, get(base.rstrip('/') + wp_core.UPGRADE_MISSING)))
+            except (OSError, ValueError):
+                pass
     return responses
 
 

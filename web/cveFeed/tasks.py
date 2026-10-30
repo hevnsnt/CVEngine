@@ -59,6 +59,14 @@ def wpscan_thorough(project_id):
     return wpscan_scan.run_thorough(project_id)
 
 
+@app.task(name='wpscan_quick', bind=False, queue='wpscan_queue')
+def wpscan_quick(scan_id, hosts, attempt=1):
+    """The quick WPScan pass for WordPress sites the scan's own stage could not reach in time (over its limit, out of its time budget, no memory),
+    a little later each attempt: see ``wpscan_scan.run_quick``."""
+    from cveFeed import wpscan_scan
+    return wpscan_scan.run_quick(scan_id, hosts, attempt)
+
+
 @app.task(name='testssl_sweep', bind=False, queue='testssl_queue')
 def testssl_sweep():
     """Daily: the TLS audit (testssl.sh) of the targets that are due, one at a time (see ``cveFeed.testssl_scan``). It has a queue of its own so

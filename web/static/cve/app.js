@@ -868,7 +868,7 @@ const technologyTable = (h) => {
 // WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions WPScan read.
 const WP_STATE_LABELS = {
   scanned: "Scanned with WPScan", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
-  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting", unavailable: "WPScan not available",
+  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting for the next scan", queued: "Queued, WPScan runs on it in the background", unavailable: "WPScan not available",
   not_wordpress: "Not WordPress",
 };
 // The thorough pass asks the site for every plugin and theme WPScan knows (hours per site) after the quick pass, in the background.
