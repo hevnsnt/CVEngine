@@ -183,6 +183,16 @@ class SweepTests(FullScanBase):
 		other = self.ip('192.0.2.2')
 		self.assertEqual(fullscan.pick().pk, other.pk)  # the stuck host does not come back first
 
+	def test_invalid_output_does_not_advance_full_scan_coverage(self):
+		for report in ('', '<nmaprun><host>', '<error/>'):
+			with self.subTest(report=report):
+				ip = self.ip(f'192.0.2.{10 + len(report)}')
+				out = fullscan.sweep_ip(ip, runner=self.runner(report))
+				ip.refresh_from_db()
+				self.assertFalse(out['ok'])
+				self.assertIsNone(ip.full_scanned_at)
+				self.assertEqual(ip.full_scan_failures, 1)
+
 	def test_a_paused_scan_picks_and_claims_nothing(self):
 		ip = self.ip('192.0.2.1')
 		with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
