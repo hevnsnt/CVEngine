@@ -27,7 +27,7 @@ FAST_XML = '''<?xml version="1.0"?>
 <ports><port protocol="tcp" portid="22">
 <state state="open"/><service name="ssh" product="OpenSSH" version="8.9" extrainfo="Ubuntu"/>
 </port></ports>
-</host></nmaprun>'''
+</host><runstats><finished exit="success"/></runstats></nmaprun>'''
 
 
 def _answer_queued_task(result, status='done'):

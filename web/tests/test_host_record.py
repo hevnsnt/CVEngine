@@ -214,7 +214,7 @@ class PortScanGuardTests(Fixture):
 
 		def runner(targets, flags, host_timeout):
 			seen.append(list(targets))
-			return '<?xml version="1.0"?><nmaprun></nmaprun>'
+			return '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch('cveFeed.naabu_scan.discover', return_value=None):
 			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		self.assertEqual(seen, [['192.0.2.51']])

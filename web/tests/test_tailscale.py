@@ -721,7 +721,7 @@ class PipelineReachTests(ScopeFixture, TestCase):
 
         def runner(targets, flags, timeout):
             nmap.append(list(targets))
-            return ''
+            return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
         kwargs = dict(stream=mock.Mock(side_effect=AssertionError('no bbot for an IP')), light_stream=lambda path, **k: iter([]),
                       targeted_stream=lambda path, **k: iter([]), nmap_runner=runner, db_exposure_checks={}, provider=None,
                       route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
