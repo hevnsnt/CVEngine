@@ -300,7 +300,7 @@ class SweepTests(FullScanBase):
 
 		def runner(targets, flags, host_timeout):
 			seen.append(flags)
-			return ''
+			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch.dict(os.environ, {'CVENGINE_NMAP_FULL': '1'}):
 			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		self.assertTrue(seen)
