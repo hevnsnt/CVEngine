@@ -444,10 +444,60 @@ def _text_range(value):
     return None
 
 
+def _unaffected_interval(v):
+    """``(low, high)`` of an ``unaffected`` version entry as a half-open interval of releases (``low`` None from the first release, ``high`` None
+    to the end), or False when the entry is a shape that cannot be read exactly (one exact version, an inclusive upper bound): a hole of one
+    release cannot be written as a range, and guessing it would either hide an affected release or flag a fixed one."""
+    start = _bound(v.get("version"))[0] if v.get("version") not in (None, "*") else None
+    start = None if start in (None, "0", "0.0", "0.0.0") else start
+    upper = v.get("lessThan")
+    if upper in (None, ""):
+        return False  # a single unaffected version, or a bound that is "through": not expressible
+    if str(upper).strip() == "*":
+        return start, None
+    branch = _wildcard_base(upper)
+    if branch:  # "2.426.*": every release of the 2.426 line, so the interval ends where the next line begins
+        return start, _next_branch(branch)
+    bound, exact = _bound(upper)
+    return (start, bound) if bound and exact else False
+
+
+def _default_affected_ranges(entry, kind):
+    """Ranges for a CVE 5 entry whose ``defaultStatus`` is ``affected`` and whose ``versions`` list only the releases that are NOT (Jenkins'
+    CVE-2024-23897: unaffected below 1.606, from 2.426.3 to the end of the 2.426 line, from 2.440.1 to the end of 2.440, from 2.442 on). The
+    affected releases are what lies between those intervals. Read only when every unaffected entry is an interval that can be written exactly;
+    otherwise nothing is guessed and the entry yields no ranges, as before."""
+    from cveFeed.correlation import parse_version
+    versions = [v for v in entry.get("versions") or [] if isinstance(v, dict) and v.get("status") == "unaffected"]
+    if str(entry.get("defaultStatus") or "").lower() != "affected" or not versions:
+        return []
+    intervals = [_unaffected_interval(v) for v in versions]
+    if not all(intervals):
+        return []
+
+    def key(value):
+        return parse_version(value, strict=True) if value else ()
+    if any(value and key(value) is None for low, high in intervals for value in (low, high)):
+        return []
+    intervals.sort(key=lambda i: key(i[0]))
+    out, cursor = [], None  # cursor: the first release not yet accounted for (None: from the start)
+    for low, high in intervals:
+        if key(low) > key(cursor):
+            out.append({"type": kind, **({"introduced": cursor} if cursor else {}), "fixed": low})
+        if high is None:
+            return out  # the rest of the releases are unaffected
+        if key(high) > key(cursor):
+            cursor = high
+    out.append({"type": kind, "introduced": cursor})  # everything after the last unaffected interval
+    return out
+
+
 def _ranges(entry):
     """CVE 5 ``versions`` entries -> correlation ranges ({introduced, fixed | lastAffected}), split at ``changes``. An upper
     bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts."""
     out = []
+    kind0 = "GIT" if any(str(v.get("versionType") or "").lower() == "git" for v in entry.get("versions") or [] if isinstance(v, dict)) else "SEMVER"
+    out += _default_affected_ranges(entry, kind0)
     for v in entry.get("versions") or []:
         if not isinstance(v, dict) or v.get("status") != "affected":
             continue
