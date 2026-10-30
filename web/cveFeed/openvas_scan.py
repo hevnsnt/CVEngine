@@ -21,9 +21,10 @@ that does not pass. Tasks are throttled (``max_checks`` 4 by default, ``max_host
 
 Results. Every result that names a CVE becomes a ``ProbeObservation`` (one per host, port and NVT OID: the dedupe key and the durable record), a
 ``Vulnerability`` (source ``openvas``) and ``CVEMatch`` evidence (source ``openvas``). Only a result whose quality of detection (QoD) is at
-least ``CONFIRMED_QOD`` (80, the level of the remote and authenticated active checks, ``remote_active``, ``remote_vul``, ``package``) is hard
-evidence (``template_result`` ``vulnerable``); a lower one ("version possibly affected", a banner that may be a backport) is stored with its
-QoD and never confirms anything. A result that is absent from a later complete scan of the same host is resolved. The text of an NVT is
+least ``CONFIRMED_QOD`` (95) or of a hard type (``exploit``, ``remote_vul``, ``remote_app``, ``remote_active``, ``package``, ``registry``: the
+check ran against the service or read the installed package) is hard evidence (``template_result`` ``vulnerable``). Greenbone's QoD 80 is
+``remote_banner`` and ``executable_version``, a version read from a banner or a binary, which a backport defeats: it is stored with its QoD
+and never confirms anything. A result that is absent from a later complete scan of the same host is resolved. The text of an NVT is
 third-party text: it is clipped, stripped of control characters and stored as plain text, and nothing here marks it safe for HTML.
 
 The GMP password lives in ``OpenvasSettings`` (encrypted), is read here and nowhere else, and is never logged, never put in activity text,
@@ -49,7 +50,8 @@ OBS_KIND = 'openvas'
 SOURCE = 'openvas'  # Vulnerability.source and CVEMatch.source
 QUEUE = 'openvas_queue'
 BEAT_NAME = 'cvengine-openvas-sweep'
-CONFIRMED_QOD = 80
+CONFIRMED_QOD = 95  # the lowest QoD of a hard type when a result carries no type (remote_active is 95, package and registry 97, remote_vul 99)
+HARD_QOD_TYPES = frozenset({'exploit', 'remote_vul', 'remote_app', 'remote_active', 'package', 'registry'})
 FRESH_DAYS = 21  # an observation older than this is not carried onto a new scan's host row
 DEFAULT_MAX_HOSTS = 1  # hosts in one task: a run is slow (hours per host), so one host per task keeps what a stop or a failure costs to one host
 DEFAULT_MAX_HOURS = 24  # the time budget PER HOST: a task of n hosts gets n times this; when it runs out, what was found so far is kept
@@ -924,6 +926,11 @@ def severity_level(score):
 
 
 def confirmed(item):
+    """Whether a result is hard evidence. The type decides when gvmd gave one: QoD 80 is ``remote_banner`` / ``executable_version``, a version
+    string that a backport defeats, so the number alone must not confirm anything."""
+    qod_type = (item.get('qod_type') or '').strip().lower()
+    if qod_type:
+        return qod_type in HARD_QOD_TYPES
     return item['qod'] >= CONFIRMED_QOD
 
 
@@ -1036,7 +1043,7 @@ def apply_observations(sub):
         where = f'{sub.name}:{ev["port"]}'
         template_id = f'openvas:{ev["oid"]}'
         keep.add((template_id, where))
-        hard = ev['qod'] >= CONFIRMED_QOD
+        hard = confirmed(ev)
         save_vulnerability(
             target_domain=domain, scan_history=sub.scan_history, subdomain=sub, http_url=where, name=f'OpenVAS: {ev["name"]}'[:500],
             severity=severity_level(ev['severity']), description=_description(ev), impact=ev.get('impact') or None,
@@ -1057,7 +1064,7 @@ def apply_observations(sub):
     correlation.save_matches(rows)
     now = timezone.now()
     for row in rows:
-        hard = row['evidence']['qod'] >= CONFIRMED_QOD
+        hard = confirmed(row['evidence'])
         mine = CVEMatch.objects.filter(subdomain_id=sub.id, cve_entry_id=row['cve_entry_id'], source=SOURCE, matched_product=row['matched_product'])
         if hard:
             mine.update(template_result='vulnerable', template_id=('openvas:' + row['evidence']['oid'])[:128], template_tested_at=now)
