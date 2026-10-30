@@ -215,11 +215,19 @@ def users_resend_invite(request, actor, user_id):
 
 def users_update(request, actor, user_id):
     data = _body(request)
-    user = _need_user(actor, user_id, credentials='is_active' in data)
+    # The email address receives password-reset invitations. Changing it is a
+    # credential operation for a user who may also belong to another org.
+    user = _need_user(actor, user_id, credentials='is_active' in data or 'email' in data)
+    if 'email' in data:
+        email = str(data['email']).strip()
+        if email and not mailer.EMAIL_RE.match(email):
+            raise AdminError(400, 'that does not look like an email address')
     if 'is_active' in data:
+        if not isinstance(data['is_active'], bool):
+            raise AdminError(400, 'is_active must be true or false')
         if user.pk == actor.pk and not data['is_active']:
             raise AdminError(409, 'you cannot disable your own account')
-        user.is_active = bool(data['is_active'])
+        user.is_active = data['is_active']
     for field, limit in (('first_name', 150), ('last_name', 150), ('email', 254)):
         if field in data:
             setattr(user, field, str(data[field]).strip()[:limit])
