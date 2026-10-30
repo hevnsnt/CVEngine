@@ -1759,6 +1759,31 @@ def weekly_maintenance():
     return result
 
 
+@app.task(name="prune_scan_history", bind=False, queue="cve_feed_queue")
+def prune_scan_history():
+    """Daily: delete the finished scans older than CVENGINE_SCAN_HISTORY_RETENTION_DAYS (180 by default, 0 keeps everything) that no longer
+    back the current inventory (cveFeed.scan_retention). One run at a time, bounded in time; a large backlog is cleared over several days."""
+    from django.core.cache import cache
+
+    from cveFeed import activity, scan_retention
+    if scan_retention.retention_days() is None:
+        return {"skipped": "scan history retention is off"}
+    if not cache.add("cvengine:scan-retention", 1, timeout=3 * 3600):
+        return {"skipped": "another retention run is in progress"}
+    try:
+        result = scan_retention.run()
+    except Exception as exc:  # noqa: BLE001 - reported, and retried tomorrow; each scan is deleted in its own transaction
+        logger.exception("scan history retention failed")
+        activity.log("feed", activity.diagnostic("Scan history retention", f"{type(exc).__name__}: {exc}", type(exc).__name__), status="failed")
+        return {"error": type(exc).__name__}
+    finally:
+        cache.delete("cvengine:scan-retention")
+    if result["scans"]:
+        activity.log("feed", f'Scan history retention deleted {result["scans"]:,} scan(s) older than {result["days"]} days'
+                     + ("" if result["complete"] else "; more are left for the next run"), deleted=result["scans"])
+    return result
+
+
 @app.task(name='check_os_path', bind=False, queue='cve_feed_queue', time_limit=300, soft_time_limit=240)
 def check_os_path():
     """Daily: measure whether the network path this worker scans from loses nmap's malformed OS-detection probes (cveFeed.path_probe), and
