@@ -405,6 +405,23 @@ class AgentApiTests(TestCase):
 		self.assertEqual(checks.call_args[0][0], self.pa.id)
 		self.assertEqual(validate_match_on_demand(job_id)['skipped'], 'request is no longer queued')
 
+	def test_a_request_whose_match_went_historical_is_skipped_not_failed(self):
+		from django.db.models import Q
+		from cveFeed.models import OnDemandValidation
+		from cveFeed.tasks import validate_match_on_demand
+		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
+		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		# a rescan replaced the match while the request waited: it is no longer in the current inventory
+		with mock.patch('cveFeed.correlation.latest_scan_q', return_value=Q(pk__in=[])), \
+				mock.patch('cveFeed.validation.run_validation') as checks, mock.patch('cveFeed.triage.run_triage') as ai:
+			result = validate_match_on_demand(job_id)
+		job = OnDemandValidation.objects.get(pk=job_id)
+		self.assertEqual((job.status, job.error, job.next_attempt_at), ('skipped', '', None))
+		self.assertEqual(result['reason'], 'historical')
+		checks.assert_not_called()
+		ai.assert_not_called()
+
 	def test_a_crashed_validation_stores_a_diagnostic_not_the_exception_text(self):
 		from cveFeed.models import OnDemandValidation
 		from cveFeed.tasks import validate_match_on_demand
