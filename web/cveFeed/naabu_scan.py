@@ -58,7 +58,7 @@ def build_command(binary, list_path, packets_per_second):
 
 
 def parse_output(text):
-    """naabu JSON lines ({"ip": ..., "port": ...}) -> ``{ip: sorted ports}``; an address over MAX_OPEN_PER_IP is dropped."""
+    """naabu JSON lines -> ``{ip: sorted ports}``; ``None`` marks a tarpit result that must not count as coverage."""
     found = {}
     for line in (text or '').splitlines():
         line = line.strip()
@@ -71,7 +71,7 @@ def parse_output(text):
         ip, port = row.get('ip') or row.get('host'), row.get('port')
         if ip and isinstance(port, int) and 0 < port < 65536:
             found.setdefault(str(ip), set()).add(port)
-    return {ip: sorted(ports) for ip, ports in found.items() if len(ports) <= MAX_OPEN_PER_IP}
+    return {ip: sorted(ports) if len(ports) <= MAX_OPEN_PER_IP else None for ip, ports in found.items()}
 
 
 def run_naabu(ips, binary=None):
@@ -137,18 +137,26 @@ def discover(ips, scan=None, runner=None):
     try:
         fresh = set(ledger.fresh(SERVICE, ips, project))
         todo = [i for i in ips if i not in fresh]
-        found, lost = {}, []
+        found, lost, rejected = {}, [], set()
         if todo:
             with ledger.claim_many(f'{SERVICE}@{project}', todo) as won:
                 won = [i for i in todo if i in set(won)]
                 if won:
                     try:
-                        found = runner(won)
+                        answer = runner(won)
+                        # A tarpit is not a clean scan with no open ports. Omit it from the
+                        # nmap port map so that host keeps the default top-port fallback.
+                        rejected = {ip for ip, ports in answer.items() if ip in won and
+                                    (ports is None or len(ports) > MAX_OPEN_PER_IP)}
+                        found = {ip: ports for ip, ports in answer.items() if ip in won and ip not in rejected}
                     except Exception:  # noqa: BLE001 - an optional stage: nmap's own flags are the fallback
                         logger.warning('naabu failed; nmap keeps its default ports', exc_info=True)
                         ledger.record(SERVICE, won, project, scan, 'failed')
                         return None
-                    ledger.record(SERVICE, won, project, scan)
+                    ledger.record(SERVICE, [ip for ip in won if ip not in rejected], project, scan)
+                    if rejected:
+                        logger.warning('naabu discarded tarpit results for %s address(es)', len(rejected))
+                        ledger.record(SERVICE, rejected, project, scan, 'failed')
                     persist_open_ports(found, org_id)
                 lost = [i for i in todo if i not in won]  # another pipeline holds these: its result lands in the inventory
         before = known_open_ports(ips, org_id)
@@ -157,7 +165,8 @@ def discover(ips, scan=None, runner=None):
         return None
     lost = set(lost)
     # an address another pipeline holds, with nothing known about it, is left out: its chunk keeps nmap's default ports
-    return {ip: sorted(set(found.get(ip, [])) | set(before.get(ip, []))) for ip in ips if ip not in lost or before.get(ip)}
+    return {ip: sorted(set(found.get(ip, [])) | set(before.get(ip, []))) for ip in ips
+            if ip not in rejected and (ip not in lost or before.get(ip))}
 
 
 def persist_open_ports(found, org_id=None):
