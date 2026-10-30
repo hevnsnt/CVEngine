@@ -8,7 +8,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import assessment_review as ar
-from cveFeed.models import AssessmentReview, AssessmentReviewDecision, HostAssessment, HostExclusion
+from cveFeed.models import AssessmentReview, AssessmentReviewDecision, CVEEntry, CVEMatch, HostAssessment, HostExclusion, Triage
 from cveFeed.performance_review import safe_candidate, summarize
 from dashboard.models import Org, Project
 from targetApp.models import Domain
@@ -90,6 +90,32 @@ class ScheduledReviewTests(TestCase):
         self.assertEqual(review.status, 'completed')
         self.assertEqual(AssessmentReviewDecision.objects.filter(review=review).count(), 12)
         self.assertEqual(ar.run_page()['skipped'], 'not due')
+
+    def test_rescan_history_does_not_inflate_review_or_requeue_old_cve_rows(self):
+        from cveFeed import triage, validation
+        project = self.projects[0]
+        domain = Domain.objects.create(name='review.example', project=project, insert_date=timezone.now())
+        engine = EngineType.objects.create(engine_name='review-history', yaml_configuration='x')
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-100', cvss=8.0)
+        rows = []
+        for _ in range(2):
+            scan = ScanHistory.objects.create(domain=domain, scan_type=engine,
+                                              start_scan_date=timezone.now(), scan_status=2)
+            host = Subdomain.objects.create(name='app.review.example', target_domain=domain, scan_history=scan)
+            match = CVEMatch.objects.create(cve_entry=cve, subdomain=host, matched_product='Example App')
+            rows.append(Triage.objects.create(project=project, domain=domain, host=host.name,
+                                              kind='cve_match', match=match, status='pending'))
+        with mock.patch.object(ar, 'host_coverage_gap', return_value=(0, None)):
+            _, facts, offered = ar.project_facts(project.pk, timezone.now() - timedelta(hours=3), timezone.now())
+        self.assertEqual((facts['hosts'], facts['matched_cves'], facts['matched_cves_updated_in_window']), (1, 1, 1))
+        self.assertEqual((facts['findings']['total'], facts['findings']['pending']), (1, 1))
+        self.assertEqual([r['id'] for r in facts['top_pending_findings']], [rows[1].pk])
+        self.assertEqual(validation.due_ids(project.pk), [rows[1].pk])
+        self.assertIn('triage', offered)
+        with mock.patch.object(triage, 'backfill'), mock.patch.object(triage, 'run_triage', return_value={
+                'rows': 1, 'asked': 0, 'cached': 0, 'queued': 0, 'not_triaged': 1, 'errors': 0}) as run:
+            triage.sweep(project.pk)
+        self.assertEqual([r.pk for r, _ in run.call_args.args[0]], [rows[1].pk])
 
     def test_a_run_a_little_early_is_due_and_windows_are_contiguous(self):
         end = timezone.now() - timedelta(hours=2, minutes=50)  # the last run started late; this one starts on time
