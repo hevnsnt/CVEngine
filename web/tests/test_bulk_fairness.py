@@ -12,7 +12,9 @@ class DiscoverNewTests(SimpleTestCase):
         domains = [mock.Mock(id=i) for i in range(count)]
         env = {k: v for k, v in (env or {}).items()}
         with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(services, '_start_discoveries', side_effect=lambda d, *a, **k: list(d)) as start, \
-                mock.patch('cveFeed.conductor.wanted_depth', return_value=depth), mock.patch('cveFeed.activity.log') as log:
+                mock.patch('cveFeed.conductor.wanted_depth', return_value=depth), mock.patch('cveFeed.activity.log') as log, \
+                mock.patch('startScan.models.ScanHistory.objects') as scans:  # what the project already has queued: none
+            scans.filter.return_value.count.return_value = 0
             scans, deferred = services._discover_new(domains, 'standard', 7, initiated_by='someone')
         return scans, deferred, start, log
 
