@@ -1055,7 +1055,9 @@ def _clean_nmap_result(body):
         if ip is None:  # an address row is only ever made from an IP literal, never from free text
             continue
         out.append({'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])})
-    return {'hosts': out}
+    # Docker Desktop can make an OS guess describe its gateway instead of the target.
+    # Preserve only the explicit boolean opt-out through result sanitization.
+    return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False}
 
 
 def _clean_naabu_result(body):
