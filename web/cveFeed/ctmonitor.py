@@ -64,6 +64,7 @@ local nxt = tonumber(redis.call('GET', KEYS[1]) or '0')
 redis.call('SET', KEYS[1], math.max(nxt, tonumber(ARGV[1])), 'EX', 900)
 return 1
 """
+MAX_INLINE_WAIT = 30          # seconds a lookup may sleep inside a worker slot; a longer wait goes back to the queue (see ``CtBusy``)
 _local = {'next': 0.0}
 _local_lock = threading.Lock()
 _SLOT_KEY = 'cvengine:crtsh:next'
@@ -88,6 +89,27 @@ def reserve_slot(gap, now=time.time):
         at = max(now(), _local['next'])
         _local['next'] = at + gap
         return max(0.0, at - now())
+
+
+class CtBusy(Exception):
+    """crt.sh's shared pacing says every lookup must wait ``wait`` seconds. Sleeping that long inside a worker slot would hold the slot (hundreds
+    of new targets queue hundreds of lookups behind one rate limit), so the lookup is put back on the queue for that long instead."""
+
+    def __init__(self, wait):
+        super().__init__(f'crt.sh pacing: next free slot in {wait:.0f}s')
+        self.wait = wait
+
+
+def wait_for_slot(now=time.time):
+    """Seconds until the shared pacing would let another lookup go, without taking a slot."""
+    client = _redis()
+    if client is not None:
+        try:
+            return max(0.0, float(client.get(_SLOT_KEY) or 0) - now())
+        except Exception:  # noqa: BLE001 - a Redis hiccup must not stop the monitor
+            pass
+    with _local_lock:
+        return max(0.0, _local['next'] - now())
 
 
 def push_back(seconds, now=time.time):
@@ -133,6 +155,9 @@ def _fetch(domain, timeout=REQUEST_TIMEOUT, sleep=time.sleep):
         logger.info('crt.sh lookup for %s skipped: a shared provider domain, not an owned scope', domain)
         return []
     for attempt in range(MAX_ATTEMPTS):
+        waiting = wait_for_slot()
+        if waiting > MAX_INLINE_WAIT:  # before a slot is taken, so no reservation is left unused
+            raise CtBusy(waiting)
         sleep(reserve_slot(random.uniform(*MIN_GAP)))
         last = attempt + 1 == MAX_ATTEMPTS
         try:

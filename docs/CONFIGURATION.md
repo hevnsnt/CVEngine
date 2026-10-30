@@ -28,7 +28,7 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | `CVENGINE_SENTINEL_REPO`, `CVENGINE_SENTINEL_BRANCH` | `hevnsnt/cvENGINE-sentinel`, `main` | The repository and branch whose head is "the latest Sentinel client" for the version check on the Sentinels page. |
 | `CVENGINE_SENTINEL_VERSION_CHECK` | on | `off` stops asking GitHub for the latest Sentinel client (the page then shows `unknown`). |
 | `CVENGINE_SENTINEL_REPO_TOKEN` | none | A token for a private Sentinel repository (else the update check's token is tried). |
-| `CLASSIC_CONCURRENCY` | `20` | Most tasks at once across all other queues (the notification, API and the slow sweep queues: WPScan, TLS audit, cloud storage, other sites, UDP, OpenVAS and suppliers). The CVE feed worker is fixed at 4 and the validation lane at 1. |
+| `CLASSIC_CONCURRENCY` | `20` | Most tasks at once across all other queues (the notification, API and the slow sweep queues: WPScan, TLS audit, cloud storage, other sites, UDP, OpenVAS, suppliers and certificate transparency lookups). The CVE feed worker is fixed at 4 and the validation lane at 1. |
 | `HEAVY_MEMORY_BUDGET_MB` | 75% of the limit | Memory the job queue can hand out at once. |
 | `HEAVY_HEADROOM_MB` | larger of 256 and 5% | Free memory kept in reserve. |
 | `HEAVY_COST_SCALE`, `HEAVY_COST_<KIND>_MB` | `1`, none | Scale every estimated job cost, or set one kind's cost outright. |

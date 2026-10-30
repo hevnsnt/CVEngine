@@ -1085,12 +1085,19 @@ def run_hygiene_all():
     return {"queued": min(len(due), HYGIENE_SWEEP_MAX), "due": len(due)}
 
 
-@app.task(name="watch_certificate_transparency", bind=True, queue="cve_feed_queue")
+@app.task(name="watch_certificate_transparency", bind=True, queue="ctwatch_queue")
 def watch_certificate_transparency(self, domain_id):
     """Check one target against crt.sh for hosts not already known (see cveFeed.ctmonitor). When crt.sh could not be reached
-    (rate limit, timeout) the check is tried again later instead of the target being skipped."""
-    from cveFeed.ctmonitor import run_ct_watch
-    result = run_ct_watch(domain_id)
+    (rate limit, timeout) the check is tried again later instead of the target being skipped. It has a queue of its own, off the
+    feed queue that runs the work conductor, the reaper and the Sentinel feed: hundreds of lookups wait behind one shared rate limit,
+    and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``)."""
+    import random
+
+    from cveFeed.ctmonitor import CtBusy, run_ct_watch
+    try:
+        result = run_ct_watch(domain_id)
+    except CtBusy as busy:  # waiting for crt.sh's pacing is not a failure: it is asked again when the slot is due, with no slot held meanwhile
+        raise self.retry(exc=busy, countdown=int(busy.wait) + random.randint(1, 60), max_retries=None)
     if result.get("failed") and self.request.retries < 3:
         raise self.retry(countdown=600 * (self.request.retries + 1), max_retries=3)
     return result

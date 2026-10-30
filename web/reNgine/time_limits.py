@@ -37,6 +37,7 @@ DEFAULTS = {
     'vhost_queue': SCAN_QUEUE,
     'udp_queue': SCAN_QUEUE,
     'supplier_queue': SCAN_QUEUE,
+    'ctwatch_queue': 1 * HOUR,  # a lookup waits at most ``ctmonitor.MAX_INLINE_WAIT`` in a slot; a longer wait is a retry
     'run_command_queue': 1 * HOUR,
     'api_queue': 30 * 60,
     'send_notif_queue': 30 * 60,
