@@ -262,13 +262,16 @@ def rescore_quietly(project_id, names, scan_id=None):
         return 0
 
 
-def _rescore_name_pairs(pairs):
-    """Rescore every (name, project) pair with at most CHUNK distinct names in memory."""
+def _rescore_name_pairs(pairs, seen=None):
+    """Rescore every (name, project) pair with at most CHUNK distinct names in memory. ``seen``, shared between calls, holds the pairs
+    already rescored: a host matched by several of the CVEs a caller walks in chunks is scored once, not once per chunk."""
     pending = {}
     count = 0
     for name, project_id in pairs:
-        if not project_id:
+        if not project_id or (seen is not None and (name, project_id) in seen):
             continue
+        if seen is not None:
+            seen.add((name, project_id))
         names = pending.setdefault(project_id, set())
         if name not in names:
             names.add(name)
@@ -294,8 +297,8 @@ def rescore_subdomain_ids(subdomain_ids):
         logger.exception('could not rescore after a verdict reset')
 
 
-def rescore_for_matches(matches):
-    """Rescore every host whose CVE match verdict was just saved."""
+def rescore_for_matches(matches, seen=None):
+    """Rescore every host whose CVE match verdict was just saved (``seen``: see ``_rescore_name_pairs``)."""
     try:
         rows = matches.iterator(chunk_size=CHUNK) if hasattr(matches, 'iterator') else matches
         def pairs():
@@ -304,6 +307,6 @@ def rescore_for_matches(matches):
                 domain = getattr(sub, 'target_domain', None) if sub else None
                 if sub and domain:
                     yield sub.name, domain.project_id
-        _rescore_name_pairs(pairs())
+        _rescore_name_pairs(pairs(), seen)
     except Exception:  # noqa: BLE001
         logger.exception('could not rescore after a verdict')

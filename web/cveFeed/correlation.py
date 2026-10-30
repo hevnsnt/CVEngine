@@ -253,6 +253,15 @@ PRODUCT_ALIASES = {
     "iscbind": {"bind"},
     "bind9": {"bind"},
     "nextjs": {"next"},  # the npm package of Next.js is named "next"
+    # product strings nmap's service detection really prints, which name the product with extra words the advisory's name lacks: a version seen
+    # for one of these is the product's (validation.interpret needs the pair to agree before it reaffirms a CVE from a version)
+    "apachetomcatcoyotejspengine": {"tomcat"},
+    "apachecoyote": {"tomcat"},
+    "nodejsexpressframework": {"express"},
+    "vmwareesxisoapapi": {"esxi"},
+    "ciscoioshttpconfig": {"ios"},
+    "golangnethttpserver": {"go"},
+    "pythonbasehttpserver": {"python"},
     # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently
     "apache2": {"httpserver", "apachehttpserver"},
     "opensshserver": {"openssh"},
