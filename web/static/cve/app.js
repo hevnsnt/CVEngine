@@ -139,6 +139,7 @@ async function api(method, path, body) {
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
+    err.data = data;
     throw err;
   }
   return data;
@@ -2684,13 +2685,37 @@ const pages = {
         const sure = await ask(`Move ${h.host} to ${label}? It is scanned there from scratch. Its findings and history in this project are deleted.`, { title: "Move host?", ok: "Move host", danger: false });
         if (!sure) return;
         move.disabled = true;
-        try {
-          const r = await api("POST", hostPath(h, "move"), { to_project: to });
-          toast(`Moved ${r.host} to ${[r.to_org_name, r.to_project_name].filter(Boolean).join(" / ")}${r.scan_ids && r.scan_ids.length ? ": a scan has started there" : ""}`);
+        const done = (r) => {
+          const n = r.hosts_moved > 1 ? ` and ${r.hosts_moved - 1} host${r.hosts_moved === 2 ? "" : "s"} under it` : "";
+          toast(`Moved ${r.host}${n} to ${[r.to_org_name, r.to_project_name].filter(Boolean).join(" / ")}${r.scan_ids && r.scan_ids.length ? ": a scan has started there" : ""}`);
           afterRemoval();
+        };
+        try {
+          done(await api("POST", hostPath(h, "move"), { to_project: to }));
         } catch (err) {
-          toast(err.message, true);
-          move.disabled = false;
+          // the host is also a target here with other hosts under it: they can only go together, so say which and ask again
+          const whole = err.status === 409 && err.data && err.data.whole_target;
+          if (!whole) {
+            toast(err.message, true);
+            move.disabled = false;
+            return;
+          }
+          const shown = whole.hosts.slice(0, 6).join(", ");
+          const more = whole.count > 6 ? ` and ${whole.count - 6} more` : "";
+          const all = await ask(
+            `${whole.host} is a target in this project with ${whole.count} other host${whole.count === 1 ? "" : "s"} under it (${shown}${more}). Move the target and all of them to ${label}? They are discovered and scanned there from scratch, and their findings and history in this project are deleted.`,
+            { title: "Move the whole target?", ok: `Move ${whole.count + 1} hosts`, danger: false },
+          );
+          if (!all) {
+            move.disabled = false;
+            return;
+          }
+          try {
+            done(await api("POST", hostPath(h, "move"), { to_project: to, whole_target: true }));
+          } catch (err2) {
+            toast(err2.message, true);
+            move.disabled = false;
+          }
         }
       };
       return box;

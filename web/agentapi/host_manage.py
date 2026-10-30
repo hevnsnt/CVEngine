@@ -17,6 +17,7 @@ case-insensitively: never a suffix or a substring, so ``provider.example`` leave
 """
 import os
 import re
+import time
 
 from django.db import transaction
 from django.db.models import Q
@@ -26,6 +27,8 @@ from tenancy import roles
 
 HOST_RE = re.compile(r'^[a-z0-9_]([a-z0-9._:-]*[a-z0-9_])?$')
 MAX_OWNER, MAX_PURPOSE, MAX_REASON = 200, 500, 300
+PURGE_ATTEMPTS, PURGE_RETRY_SECONDS = 4, 2  # a removal retried while scans already under way finish writing (see _purge_settled)
+MOVE_LIST_MAX = 50  # host names a whole-target refusal lists
 PUBLIC_SUFFIX_RE = re.compile(r'^(com|net|org|edu|gov|co|ac|or|ne|go)\.[a-z]{2}$')  # co.uk, com.au ...: never a whole-domain exclusion
 
 
@@ -287,8 +290,7 @@ def delete_host(ctx, slug, host, with_aliases=False):
     project, _ = get_project(ctx, slug, write=True)
     name = clean_host(host)
     names = host_group_names(project, name) if with_aliases else [name]
-    with transaction.atomic():
-        done = [_purge(project, n) for n in names]
+    done = _purge_settled(lambda: [_purge(project, n) for n in names])
     counts = _sum_counts(c for c, _ in done)
     _remove_result_dirs([d for _, dirs in done for d in dirs])
     from cveFeed.admin_api import audit
@@ -297,12 +299,41 @@ def delete_host(ctx, slug, host, with_aliases=False):
     return {'host': name, 'names': names, 'project': project.slug, **counts}
 
 
-def move_host(ctx, slug, host, to_project, discover=True):
+def _purge_settled(purge):
+    """Run ``purge`` (a function that deletes inside one transaction) and run it again when a scan that was already under way
+    wrote a row for what is being deleted before the commit: the constraint is checked at commit, so the transaction fails whole
+    and nothing was deleted. Each retry deletes what the last attempt missed."""
+    from django.db import IntegrityError
+    for attempt in range(PURGE_ATTEMPTS):
+        try:
+            with transaction.atomic():
+                return purge()
+        except IntegrityError:
+            if attempt == PURGE_ATTEMPTS - 1:
+                raise ApiError(409, 'scans of this host kept writing results while it was being removed; try again in a minute')
+            time.sleep(PURGE_RETRY_SECONDS)
+
+
+def _target_hosts(project, name):
+    """The other host names of the target ``name`` of ``project`` (names under it, and any target of this project under it)."""
+    from startScan.models import Subdomain
+    from targetApp.models import Domain
+    names = set(Subdomain.objects.filter(target_domain__project=project, target_domain__name__iexact=name).values_list('name', flat=True))
+    names |= set(Subdomain.objects.filter(target_domain__project=project).filter(_host_q('name', name, True)).values_list('name', flat=True))
+    names |= set(Domain.objects.filter(project=project).filter(_host_q('name', name, True)).values_list('name', flat=True))
+    return sorted({n.lower() for n in names} - {name})
+
+
+def move_host(ctx, slug, host, to_project, discover=True, whole_target=False):
     """Move a host out of this project into ``to_project`` (any project the caller can write to, in this organization or another).
     Its data is deleted from this project (findings, CVE matches, state and asset information: its history does not move) and a
     HostMove keeps this project's scans from finding it again; then it is added to the destination as a target and, with ``discover``,
     scanned there. Moving it back later lifts that block. Needs write access to both projects. Everything that could refuse the move
-    is checked before anything is deleted."""
+    is checked before anything is deleted.
+
+    A host that is also a target of this project with other hosts under it moves only with ``whole_target``: the target, every host
+    under it and every target of this project under it go together (one HostMove per name), and the destination discovers them
+    again. Without it the 409 says how many hosts the target holds, so the caller can ask before moving them all."""
     from cveFeed.exclusions import is_excluded
     from cveFeed.models import HostMove
     from startScan.models import Subdomain
@@ -319,29 +350,44 @@ def move_host(ctx, slug, host, to_project, discover=True):
             or Domain.objects.filter(project=source, name__iexact=name).exists()):
         raise ApiError(404, 'host not found in this project')
     _expand_target(name, dest.id)  # refused here (a blocked address, say) before anything is deleted
-    # target names are unique within an organization: a target of that name held elsewhere would keep the destination from adding it
-    holder = org_domains(dest).filter(name__iexact=name).exclude(project=dest).values_list('project_id', flat=True).first()
-    if holder and holder != source.pk:
-        raise ApiError(409, f'another project of the destination\'s organization already has a target named {name}')
-    if holder == source.pk and Subdomain.objects.filter(target_domain__project=source, target_domain__name__iexact=name).exclude(
-            name__iexact=name).exists():
-        raise ApiError(409, f'{name} is also a target of this project with other hosts under it: move or delete that target instead')
-    with transaction.atomic():  # a refusal leaves the destination's own block in place
-        HostMove.objects.filter(project=dest, host=name).delete()  # it once left the destination: moving it back lifts that block
+    is_target = Domain.objects.filter(project=source, name__iexact=name).exists()
+    others = _target_hosts(source, name) if is_target else []
+    if others and not whole_target:
+        raise ApiError(409, f'{name} is a target of this project with {len(others)} other host{"s" if len(others) != 1 else ""} under it: '
+                            'move the whole target (whole_target) or move those hosts first', whole_target={'host': name, 'hosts': others[:MOVE_LIST_MAX],
+                            'count': len(others)})
+    whole = bool(others)
+    # target names are unique within an organization: a target of that name (or, for a whole target, under it) held by a third
+    # project would keep the destination from adding it, or would leave part of the domain behind
+    held = org_domains(dest).exclude(project__in=(dest, source)).filter(_host_q('name', name, whole) if whole else Q(name__iexact=name))
+    clash = held.values_list('name', flat=True).first()
+    if clash:
+        raise ApiError(409, f'another project of the destination\'s organization already has a target named {clash}')
+    names = [name, *others]
+    if whole:
+        _stop_scans_under([source], name, ctx.user)  # their rows go next; a running scan would keep writing into them
+
+    def purge():
+        back = HostMove.objects.filter(project=dest)  # they once left the destination: moving them back lifts that block
+        (back.filter(_host_q('host', name, True)) if whole else back.filter(host__in=names)).delete()
         if is_excluded(dest.pk, name):
             raise ApiError(409, f'{name} is excluded in the destination\'s organization (an organization admin can lift the exclusion)')
-        HostMove.objects.update_or_create(project=source, host=name, defaults={'moved_to': dest, 'moved_by': ctx.user})
-        counts, dirs = _purge(source, name)  # first: a target of the same name here would otherwise stop the destination from adding it
+        for n in names:
+            HostMove.objects.update_or_create(project=source, host=n, defaults={'moved_to': dest, 'moved_by': ctx.user})
+        return _purge(source, name, subtree=whole)  # first: a target of the same name here would otherwise stop the destination adding it
+    counts, dirs = _purge_settled(purge)  # a refusal leaves the destination's own block in place
     _remove_result_dirs(dirs)
     added = add_target(ctx, dest.slug, name, description=f'Moved from {source.name}', discover=discover)
     from cveFeed.admin_api import audit
+    extra = {'hosts_moved': len(names)} if whole else {}
     audit(ctx.user, 'host.move', f'{name} from {source.slug} to {dest.slug}', source.org, project=source.slug, host=name,
-          to_project=dest.slug, **{k: v for k, v in counts.items() if v})
+          to_project=dest.slug, **extra, **{k: v for k, v in counts.items() if v})
     if dest.org_id != source.org_id:
-        audit(ctx.user, 'host.move', f'{name} from {source.slug} to {dest.slug}', dest.org, project=dest.slug, host=name, from_project=source.slug)
+        audit(ctx.user, 'host.move', f'{name} from {source.slug} to {dest.slug}', dest.org, project=dest.slug, host=name,
+              from_project=source.slug, **extra)
     return {'host': name, 'from_project': source.slug, 'to_project': dest.slug, 'to_project_name': dest.name,
             'to_org_name': dest.org.name if dest.org_id else None, 'target_created': bool(added['created']),
-            'scan_ids': added['scan_ids'], 'findings_removed': counts.get('findings', 0)}
+            'scan_ids': added['scan_ids'], 'findings_removed': counts.get('findings', 0), 'hosts_moved': len(names)}
 
 
 def _org_level_role(user, org):
@@ -399,8 +445,10 @@ def exclude_host(ctx, slug, host, reason='', include_subdomains=False, with_alia
     names = host_group_names(project, name) if with_aliases and not subtree else [name]
     if subtree:
         _stop_scans_under(projects, name, ctx.user)
+    # the exclusion is committed before anything is deleted: from then on no new scan or discovery picks these names up, so a
+    # deletion that a scan already under way got in the way of settles when it is run again (_purge_settled)
     with transaction.atomic():
-        created_any, per_project, scan_dirs, reason_kept = False, {}, [], reason
+        created_any, reason_kept = False, reason
         for n in names:
             exclusion, created = HostExclusion.objects.get_or_create(
                 org=org, host=n, defaults={'reason': reason, 'created_by': ctx.user, 'include_subdomains': subtree})
@@ -416,12 +464,17 @@ def exclude_host(ctx, slug, host, reason='', include_subdomains=False, with_alia
                 exclusion.save(update_fields=changed)
             if n == name:
                 reason_kept = exclusion.reason
+
+    def purge():
+        per_project, scan_dirs = {}, []
+        for n in names:
             for p in projects:
                 counts, dirs = _purge(p, n, subtree)
                 scan_dirs += dirs
                 if any(v for v in counts.values()):
                     per_project.setdefault(p.slug, []).append(counts)
-        per_project = [{'project': slug_, **_sum_counts(parts)} for slug_, parts in per_project.items()]
+        return [{'project': slug_, **_sum_counts(parts)} for slug_, parts in per_project.items()], scan_dirs
+    per_project, scan_dirs = _purge_settled(purge)
     _remove_result_dirs(scan_dirs)
     from cveFeed.admin_api import audit
     audit(ctx.user, 'host.exclude', f'{name} in {org.slug}', org, host=name, names=names, include_subdomains=subtree, reason=reason,
