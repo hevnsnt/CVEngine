@@ -1,4 +1,5 @@
 import datetime
+from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -27,6 +28,18 @@ def labels(inputs):
 
 
 class ScoreHostTests(SimpleTestCase):
+	def test_verdict_rescoring_covers_more_than_one_chunk_of_hosts(self):
+		project = SimpleNamespace(project_id=7)
+		matches = SimpleNamespace(iterator=lambda chunk_size: (
+			SimpleNamespace(subdomain=SimpleNamespace(name=f'host{i}.test', target_domain=project))
+			for i in range(scoring.CHUNK * 2 + 1)))
+		with mock.patch('cveFeed.scoring.rescore_quietly') as rescore:
+			scoring.rescore_for_matches(matches)
+		self.assertEqual(rescore.call_count, 3)
+		self.assertTrue(all(call.args[0] == 7 and len(call.args[1]) <= scoring.CHUNK for call in rescore.call_args_list))
+		self.assertEqual({name for call in rescore.call_args_list for name in call.args[1]},
+						 {f'host{i}.test' for i in range(scoring.CHUNK * 2 + 1)})
+
 	def test_a_clean_host_scores_nothing_and_a_public_ip_alone_scores_ten(self):
 		self.assertEqual(scoring.score_host({}), (0, []))
 		self.assertEqual(total({'public_ip': True}), 10)
@@ -106,7 +119,7 @@ class RescoreTests(ChangeFixture, TestCase):
 		now = timezone.now()
 		self.old = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, tasks=[], results_dir='x')
 		self.new = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, tasks=[], results_dir='x')
-		self.ip = IpAddress.objects.create(address='203.0.113.5')
+		self.ip = IpAddress.objects.create(address='93.184.216.34')
 		self.rows = []
 		for scan in (self.old, self.new):
 			sub = Subdomain.objects.create(name='www.ct.test', target_domain=self.domain, scan_history=scan)
@@ -206,7 +219,7 @@ class RescoreTests(ChangeFixture, TestCase):
 
 	def test_a_ruled_out_match_and_a_private_ip_do_not_count(self):
 		CVEMatch.objects.update(ai_verdict='not_affected')
-		self.ip.is_private = True
+		self.ip.address = '192.168.1.5'  # judged from the address, not from a stored flag
 		self.ip.save()
 		AssetChange.objects.all().delete()
 		RouteAuth.objects.all().delete()
@@ -273,6 +286,25 @@ class RescoreTests(ChangeFixture, TestCase):
 		with mock.patch('cveFeed.scoring.rescore_quietly') as rescore:
 			scoring.rescore_for_matches([CVEMatch.objects.select_related('subdomain__target_domain').get(pk=match.pk)])
 		rescore.assert_called_once_with(self.project.id, ['www.ct.test'])
+
+	def test_subdomain_id_rescoring_covers_every_chunk(self):
+		extra = Subdomain.objects.bulk_create([Subdomain(name=f'bulk{i}.ct.test', target_domain=self.domain)
+																 for i in range(scoring.CHUNK + 1)])
+		with mock.patch('cveFeed.scoring.rescore_quietly') as rescore:
+			scoring.rescore_subdomain_ids((row.pk for row in extra))
+		self.assertEqual({name for call in rescore.call_args_list for name in call.args[1]},
+						 {row.name for row in extra})
+
+	def test_rejecting_a_cve_rescores_its_host_immediately(self):
+		match = CVEMatch.objects.select_related('cve_entry').get()
+		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
+		self.rows[1].refresh_from_db()
+		self.assertEqual(self.rows[1].score, 90)
+		match.cve_entry.status = 'REJECTED'
+		match.cve_entry.save(update_fields=['status'])
+		self.assertEqual(correlation.close_rejected(), 1)
+		self.rows[1].refresh_from_db()
+		self.assertEqual(self.rows[1].score, 50)
 
 	def test_the_daily_rescore_respects_the_sweep_claim(self):
 		with mock.patch('cveFeed.ledger.sweep_claim', return_value=False):

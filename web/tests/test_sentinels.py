@@ -795,6 +795,56 @@ class LiveOverviewTests(SentinelBase):
         self.assertEqual([t['status'] for t in busy_row['recent']], ['failed', 'done'])
         self.assertEqual(busy_row['recent'][0]['error'], 'timed out')
 
+    def test_the_openvas_queue_is_read_over_the_viewers_projects_only(self):
+        # it names projects and hosts, so another tenant's must never be asked for (the rest of this page is already scoped the same way)
+        from unittest import mock
+        asked = {}
+        with mock.patch('cveFeed.openvas_scan.overview', side_effect=lambda ids: asked.setdefault(len(asked), sorted(ids))) as overview:
+            self.assertEqual(call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[0], 200)
+            self.assertEqual(call(self.t['root'], 'GET', '/api/v1/sentinels/live')[0], 200)
+        self.assertEqual(overview.call_count, 2)
+        self.assertIn(self.pa.pk, asked[0])
+        self.assertNotIn(self.pb.pk, asked[0])  # dana is in sen-a only
+        self.assertIn(self.pb.pk, asked[1])  # an App Admin reads every project
+
+    def test_live_totals_include_more_than_two_thousand_finished_tasks_without_cross_tenant_history(self):
+        _, mine = register_sentinel(self.t['dana'], name='mine')
+        _, other = register_sentinel(self.t['root'], name='other', scope={'projects': ['sen-b']})
+        mine_agent, other_agent = Agent.objects.get(pk=mine['id']), Agent.objects.get(pk=other['id'])
+        now = timezone.now()
+        self._task(self.pa, mine_agent, 'done', claimed_at=now - timedelta(hours=2, minutes=2),
+                   finished_at=now - timedelta(hours=2))
+        SentinelTask.objects.bulk_create([
+            SentinelTask(project=self.pb, kind='nmap', host='b.example', target={}, status='done', agent=other_agent,
+                         claimed_at=now - timedelta(minutes=6, seconds=30), finished_at=now - timedelta(minutes=5))
+            for _ in range(2001)
+        ], batch_size=500)
+
+        status, out = call(self.t['root'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual(status, 200)
+        by_name = {row['name']: row for row in out['results']}
+        self.assertEqual(by_name['mine']['stats']['done_24h'], 1)
+        self.assertEqual(by_name['mine']['stats']['average_seconds'], 120)
+        self.assertEqual(by_name['other']['stats']['done_24h'], 2001)
+        self.assertEqual(by_name['other']['stats']['done_1h'], 2001)
+        self.assertEqual(by_name['other']['stats']['average_seconds'], 90)
+
+        status, out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual(status, 200)
+        self.assertEqual([row['name'] for row in out['results']], ['mine'])
+        self.assertNotIn('b.example', str(out))
+
+    def test_live_average_ignores_missing_start_and_clamps_clock_skew(self):
+        _, row = register_sentinel(self.t['dana'], name='timing')
+        agent = Agent.objects.get(pk=row['id'])
+        now = timezone.now()
+        self._task(self.pa, agent, 'done', claimed_at=now - timedelta(minutes=5), finished_at=now - timedelta(minutes=3))
+        self._task(self.pa, agent, 'done', claimed_at=now - timedelta(minutes=2), finished_at=now - timedelta(minutes=3))
+        self._task(self.pa, agent, 'done', finished_at=now - timedelta(minutes=3))
+        out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]
+        stats = next(row['stats'] for row in out['results'] if row['name'] == 'timing')
+        self.assertEqual((stats['done_24h'], stats['average_seconds']), (3, 60))
+
     def test_every_task_row_names_its_task_host_project_and_how_it_ended(self):
         token = create_token(self.dana, 'rows')[1]
         _, row = register_sentinel(token, name='rows')

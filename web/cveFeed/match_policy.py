@@ -79,6 +79,15 @@ def is_version_unknown(evidence, version_in_range, template_result='', distro_st
         and distro_status != 'vulnerable' and not evidence.get('runzero')
 
 
+def version_only(source, evidence, version_in_range, template_result='', distro_status=''):
+    """Whether a match stands on nothing but a version string inside an advisory's range: no template hit, no distribution tracker
+    listing, no host-reported inventory (source ``host``), no runZero report. A banner version is the weakest evidence there is (a
+    distribution backports fixes without changing it, a proxy answers for another server), so such a match is a lead to check, never a
+    finding the AI can call affected (``triage.ceiling``)."""
+    return (version_in_range is True and template_result != 'vulnerable' and distro_status != 'vulnerable'
+            and source != 'host' and not (evidence or {}).get('runzero'))
+
+
 def version_unknown(match):
     """``is_version_unknown`` of a CVEMatch."""
     return is_version_unknown(match.evidence, match.version_in_range, getattr(match, 'template_result', ''), getattr(match, 'distro_status', ''))

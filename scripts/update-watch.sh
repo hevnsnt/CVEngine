@@ -24,6 +24,25 @@ if [ -f scripts/renew-certs.sh ]; then
   setsid nohup scripts/renew-certs.sh --if-due >>"$STATE/cert.log" 2>&1 8>&- </dev/null &
 fi
 
+# Where the running build stands against the tracked branch (scripts/update-state.py upstream): GitHub cannot say for commits it has never seen
+# (a server with commits of its own), so the app asks this host. Every CVENGINE_UPSTREAM_SECONDS (default 30 minutes), and at once when the app
+# named a different source or a new build was deployed. In the background, with a log of its own: it fetches the branch, which can take a while.
+upstream_due() {
+  local now last
+  now=$(date +%s)
+  last=$(cat "$STATE/upstream-at" 2>/dev/null) || last=0
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  (( now - last >= 60 )) || return 1
+  (( now - last >= ${CVENGINE_UPSTREAM_SECONDS:-1800} )) && return 0
+  [ ! -e web/.upstream-state.json ] || [ web/.update-source -nt web/.upstream-state.json ] || [ web/.commit -nt web/.upstream-state.json ]
+}
+refresh_upstream() {
+  [ -f web/.update-source ] || return 0  # the app has not said what it tracks
+  upstream_due || return 0
+  date +%s > "$STATE/upstream-at"
+  setsid nohup python3 scripts/update-state.py upstream >>"$STATE/upstream.log" 2>&1 8>&- </dev/null &
+}
+
 end=$((SECONDS + span))
 next_beat=0
 heartbeat() {
@@ -34,6 +53,7 @@ heartbeat() {
 }
 while :; do
   heartbeat
+  refresh_upstream
   # an OpenVAS switch flipped in the app (web/.openvas-wanted newer than the answer): carry it out in the background, so a first start that pulls
   # several GB neither delays an update nor stops the heartbeat. The script takes its own lock. Its output goes to a host-private log (it
   # publishes the tail as web/.openvas-log): this runs as root, and a path inside the web mount could be a link to a host file.

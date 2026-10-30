@@ -251,8 +251,9 @@ def _hygiene(qs, cap):
 
 def _host_row(h, findings_by_host, detail):
     ports = sorted({(p['number'], p['protocol'] or '') for ip in h['ips'] for p in ip['ports']})
+    names = {h['host'].lower()} | {alias.lower() for alias in h['aliases']}
     row = {'host': clean(h['host'], 200), 'heat': h['heat'] if h['heat'] in ('fire', 'smoke', 'ice', 'clean', 'unscanned') else 'unscanned',
-           'score': int(h['score'] or 0), 'findings': findings_by_host.get(h['host'].lower(), 0), 'addresses': len(h['ips']),
+           'score': int(h['score'] or 0), 'findings': sum(findings_by_host.get(name, 0) for name in names), 'addresses': len(h['ips']),
            'ports': [f'{n}/{proto}' if proto else str(n) for n, proto in ports][:14], 'port_count': len(ports), 'ports_more': max(0, len(ports) - 14),
            'owner': clean(h['profile'].get('owner'), 80), 'criticality': clean(h['profile'].get('criticality'), 12),
            'technologies': [clean(t, 40) for t in h['technologies'][:6]]}
@@ -270,7 +271,7 @@ def _host_row(h, findings_by_host, detail):
 
 
 def _hosts(project, host, findings_by_host, cap):
-    """``(total hosts, the top ``cap`` host rows by score)``. A host report reads the one host with its services and score lines."""
+    """``(total, host rows, aliases)``. A host report reads one host and keeps its full alias list for finding scope."""
     from agentapi import services as svc
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
@@ -287,7 +288,8 @@ def _hosts(project, host, findings_by_host, cap):
             break
         rows += got
         page += 1
-    return total, [_host_row(h, findings_by_host, detail=bool(host)) for h in rows[:cap]]
+    aliases = rows[0]['aliases'] if host and rows else []
+    return total, [_host_row(h, findings_by_host, detail=bool(host)) for h in rows[:cap]], aliases
 
 
 # --- scope and method ----------------------------------------------------------------------------------------------------------
@@ -345,10 +347,11 @@ def collect(project, host=None, include_closed=False, now=None):
             raise LookupError('host not found')
         names = {host.lower()}
     sources, ruled_out = _sources(project, include_closed, names=None if names is None else sorted(names))
-    host_total, hosts = _hosts(project, host, _per_host(sources), caps['hosts'])
+    host_total, hosts, aliases = _hosts(project, host, _per_host(sources), caps['hosts'])
     if host and hosts:  # the host may answer to other names (same addresses): their findings are this host's too
-        names |= {a.lower() for a in hosts[0].get('aliases', [])}
+        names |= {a.lower() for a in aliases}
         sources, ruled_out = _sources(project, include_closed, names=sorted(names))
+        hosts[0]['findings'] = sum(_per_host(sources).values())
     total, heat, severity = _tally({k: v for k, v in sources.items() if k != 'hygiene'})
     hygiene_total, _, hygiene_severity = _tally({'hygiene': sources['hygiene']})
     detailed = _findings(sources, caps['findings'])

@@ -10,7 +10,7 @@ from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import assessment_review, coverage_topup, host_assessment, internal_scan
-from cveFeed.models import HostAssessment
+from cveFeed.models import HostAssessment, ServiceRun
 from cveFeed.discovery import FAILED, QUEUED, SUCCESS
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
@@ -127,9 +127,24 @@ class RunTests(Base):
     def test_an_answer_about_another_address_is_not_stored(self):
         scan = self.queued_scan()
         other = {'hosts': [{'ip': '10.20.0.99', 'ports': [{'number': 80, 'protocol': 'tcp', 'service_name': 'http'}]}]}
-        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}):
-            internal_scan.run(scan.id, dispatch=lambda *a, **k: other, nuclei_stream=lambda kind: iter_none, provider=None)
+        with mock.patch('cveFeed.tasks.correlate_cves') as correlate:
+            out = internal_scan.run(scan.id, dispatch=lambda *a, **k: other, nuclei_stream=lambda kind: iter_none, provider=None)
+        self.assertEqual(out['status'], FAILED)
+        self.assertIn('nothing for the address', out['error'])
+        self.assertEqual(out['failed_stages'], ['nmap_scan'])
+        correlate.assert_not_called()  # nmap failed, so no later stage ran, correlation included
+        self.assertFalse(ServiceRun.objects.filter(service='nmap-fast', asset=self.domain.name, project=self.pa).exists())
         self.assertFalse(Port.objects.filter(ports__address='10.20.0.99').exists())
+
+    def test_an_empty_nmap_answer_fails_without_recording_coverage(self):
+        scan = self.queued_scan()
+        with mock.patch('cveFeed.tasks.correlate_cves') as correlate:
+            out = internal_scan.run(scan.id, dispatch=lambda *a, **k: {'hosts': []}, nuclei_stream=lambda kind: iter_none, provider=None)
+        scan.refresh_from_db()
+        self.assertEqual((out['status'], scan.scan_status), (FAILED, FAILED))
+        self.assertIn('nothing for the address', scan.error_message)
+        self.assertFalse(ServiceRun.objects.filter(service='nmap-fast', asset=self.domain.name, project=self.pa).exists())
+        correlate.assert_not_called()  # nmap failed, so no later stage ran, correlation included
 
 
 class EligibilityTests(Base):
@@ -232,6 +247,19 @@ class StageTests(Base):
         scan, out, kinds = self.run_scan({'nmap': NMAP_RESULT})
         self.assertEqual(out['status'], SUCCESS)
         self.assertEqual(kinds, ['nmap', 'testssl', 'nmap_udp'])
+        self.assertEqual(out['failed_stages'], ['internal_testssl', 'internal_udp_scan'])
+        scan.refresh_from_db()
+        self.assertEqual(scan.error_message, 'Failed stages: internal_testssl, internal_udp_scan')
+        self.assertEqual(ScanActivity.objects.filter(scan_of=scan, status=FAILED).count(), 2)
+
+    def test_a_failed_targeted_pass_is_visible_without_losing_the_inventory(self):
+        with mock.patch('cveFeed.nuclei_scan.run_targeted_nuclei', return_value={'error': 'targeted pass unavailable'}):
+            scan, out, _kinds = self.run_scan({'nmap': NMAP_RESULT, 'testssl': TLS_ITEMS, 'nmap_udp': {'xml': UDP_XML}})
+        self.assertEqual(out['status'], SUCCESS)
+        self.assertEqual(out['failed_stages'], ['nuclei_targeted_scan'])
+        scan.refresh_from_db()
+        self.assertEqual(scan.error_message, 'Failed stages: nuclei_targeted_scan')
+        self.assertTrue(Subdomain.objects.filter(scan_history=scan, name=self.domain.name).exists())
 
     def test_nuclei_findings_from_the_sentinel_are_stored_through_the_normal_parser(self):
         from cveFeed import nuclei_scan
@@ -300,6 +328,9 @@ class UdpStageTests(StageTests):
     def test_an_empty_udp_answer_is_recorded_as_a_failed_stage_not_a_failed_scan(self):
         scan, out, kinds = self.run_scan({'nmap': NMAP_RESULT, 'nmap_udp': {'xml': ''}})
         self.assertEqual(out['status'], SUCCESS)
+        self.assertIn('internal_udp_scan', out['failed_stages'])
+        scan.refresh_from_db()
+        self.assertIn('internal_udp_scan', scan.error_message)
         self.assertFalse(Port.objects.filter(protocol='udp').exists())
 
 

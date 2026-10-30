@@ -464,53 +464,120 @@ PHP_FIXES_ONLY = [{"fixed": "8.2.35"}, {"fixed": "8.3.36"}, {"fixed": "8.4.27"},
 
 
 class TestFixOnlyBranchList(unittest.TestCase):
-    """cve.now publishes PHP2Shell as four ``fixed`` bounds with no lower bound. Read as they stand, the fix for 8.4 stands for every
-    older version, so a patched 8.3.36 reads as vulnerable. Each bound gets its own branch as the lower bound (issue 205)."""
+    """cve.now publishes PHP2Shell as four ``fixed`` bounds with no lower bound. Read alone, the fix for 8.4 stands for every older
+    version, so a patched 8.3.36 reads as vulnerable (issue 205). No lower bound is invented: a fix is compared only with the releases of
+    its own line, and the CNA's own bounds replace the list when the CVE List record has them (TestBranchBoundsFromTheCveList)."""
 
     def _cve(self, ranges=PHP_FIXES_ONLY, cid=90):
         from cveFeed.correlation import clean_affected
         return FakeCVE(cid, clean_affected([{"vendor": "PHP Group", "product": "PHP", "package": "php-src", "ranges": ranges}]), kev=True)
 
-    def _verdict(self, version, cve=None):
-        rows = _hits([cve or self._cve()], "PHP", version)
+    def _verdict(self, version, ranges=PHP_FIXES_ONLY, label="PHP"):
+        rows = _hits([self._cve(ranges)], label, version)
         return rows[0][1] if rows else "no match"
 
-    def test_each_fix_gets_its_branch_as_the_lower_bound(self):
-        self.assertEqual([r["introduced"] for r in self._cve().affected[0]["ranges"]], ["8.2", "8.3", "8.4", "8.5"])
-        self.assertEqual([r["fixed"] for r in self._cve().affected[0]["ranges"]], ["8.2.35", "8.3.36", "8.4.27", "8.5.12"])
+    def test_the_ranges_are_left_exactly_as_the_feed_gave_them(self):
+        self.assertEqual(self._cve().affected[0]["ranges"], PHP_FIXES_ONLY)
 
     def test_the_fixed_releases_are_not_vulnerable(self):
-        for fixed in ("8.2.35", "8.3.36", "8.4.27", "8.5.12", "8.5.20", "8.6.0"):
+        for fixed in ("8.2.35", "8.3.36", "8.4.27", "8.5.12", "8.5.20", "8.6.0", "9.0.0"):
             self.assertIs(self._verdict(fixed), False, fixed)
 
     def test_the_releases_before_each_fix_are_vulnerable(self):
-        for version in ("8.2.34", "8.3.30", "8.4.26", "8.5.11"):
+        for version in ("8.2.34", "8.3.30", "8.4.26", "8.5.11", "8.2.0"):
             self.assertIs(self._verdict(version), True, version)
 
-    def test_an_older_branch_is_unknown_not_cleared(self):
-        self.assertIsNone(self._verdict("8.1.30"))
+    def test_a_branch_the_advisory_does_not_list_is_unknown_not_cleared(self):
+        for version in ("8.1.30", "8.0.30", "7.4.33", "5.6.40"):
+            self.assertIsNone(self._verdict(version), version)
 
-    def test_other_shapes_are_left_as_they_were(self):
-        from cveFeed.correlation import clean_affected
+    def test_a_fix_at_a_new_minor_does_not_clear_the_older_minor_of_that_line(self):
+        # the first heuristic gave "8.13" as the lower bound of 8.13.0 and cleared 8.12.2
+        ranges = [{"fixed": "7.17.19"}, {"fixed": "8.13.0"}]
+        self.assertIs(self._verdict("8.12.2", ranges), True)
+        self.assertIs(self._verdict("8.13.0", ranges), False)
+        self.assertIs(self._verdict("7.17.18", ranges), True)
 
-        def ranges(*items):
-            return clean_affected([{"product": "widget", "ranges": list(items)}])[0]["ranges"]
-        one = [{"fixed": "1.2.3"}]
-        self.assertEqual(ranges(*one), one)  # a single fix is not a list of branches
-        two_fixes_one_branch = [{"fixed": "1.2.3"}, {"fixed": "1.2.9"}]
-        self.assertEqual(ranges(*two_fixes_one_branch), two_fixes_one_branch)
-        short = [{"fixed": "1.2"}, {"fixed": "2.0"}]
-        self.assertEqual(ranges(*short), short)  # not patch-level versions
-        lettered = [{"fixed": "1.1.1w"}, {"fixed": "3.0.12"}]
-        self.assertEqual(ranges(*lettered), lettered)
-        bounded = [{"fixed": "1.2.3"}, {"introduced": "2.0", "fixed": "2.4.5"}]
-        self.assertEqual(ranges(*bounded), bounded)  # one range already has its lower bound
-        last = [{"fixed": "1.2.3"}, {"lastAffected": "2.4.5"}]
-        self.assertEqual(ranges(*last), last)
+    def test_release_trains_named_by_their_major_are_compared_by_major(self):
+        ranges = [{"fixed": "18.19.1"}, {"fixed": "20.11.1"}, {"fixed": "21.6.2"}]
+        self.assertIs(self._verdict("20.5.0", ranges), True)  # the first heuristic cleared it
+        self.assertIs(self._verdict("20.11.1", ranges), False)
+        self.assertIs(self._verdict("20.15.0", ranges), False)
+        self.assertIs(self._verdict("21.1.0", ranges), True)
+        self.assertIsNone(self._verdict("19.0.0", ranges))  # no fix on the 19 line
+        self.assertIsNone(self._verdict("16.0.0", ranges))
+
+    def test_the_evidence_says_no_lower_bound_was_published(self):
+        from cveFeed import correlation
+        cve = self._cve()
+        details = {}
+        index = correlation.build_product_index([cve])
+        list(correlation._match_candidates("PHP", correlation.parse_version("8.3.30"), correlation._norm("PHP"), index, {cve.id: cve}, details=details))
+        self.assertEqual(details[cve.id]["range"], {"fixed": "8.3.36"})
+        self.assertTrue(details[cve.id]["no_lower_bound"])
+
+    def test_other_shapes_are_judged_as_before(self):
+        from cveFeed.correlation import fix_only_branch_list
+        self.assertFalse(fix_only_branch_list([{"fixed": "1.2.3"}]))  # one fix is a plain range
+        self.assertFalse(fix_only_branch_list([{"fixed": "1.2.3"}, {"introduced": "2.0", "fixed": "2.4.5"}]))  # one range has its lower bound
+        self.assertFalse(fix_only_branch_list([{"fixed": "1.2.3"}, {"lastAffected": "2.4.5"}]))
+        self.assertFalse(fix_only_branch_list([{"fixed": "1.2.3"}, {"fixed": "abc"}]))
+        self.assertFalse(fix_only_branch_list([{"fixed": "1.2.3", "type": "GIT"}, {"fixed": "2.0.0"}]))
+        self.assertTrue(fix_only_branch_list([{"fixed": "1.2.3"}, {"fixed": "1.2.9"}]))
 
     def test_the_cve_list_shape_is_unchanged(self):
         from cveFeed.correlation import clean_affected
         self.assertEqual(clean_affected([{"product": "PHP", "ranges": PHP_RANGES}])[0]["ranges"], PHP_RANGES)
+
+
+class TestBranchBoundsFromTheCveList(unittest.TestCase):
+    """The CNA's own per-branch bounds replace a bare fix list at ingest (cveFeed.intel.overlay_branch_ranges)."""
+
+    RECORD = {"containers": {"cna": {"affected": [{
+        "vendor": "PHP Group", "product": "PHP", "packageName": "php-src",
+        "versions": [{"version": "8.2.*", "lessThan": "8.2.35", "status": "affected", "versionType": "semver"},
+                     {"version": "8.3.*", "lessThan": "8.3.36", "status": "affected", "versionType": "semver"},
+                     {"version": "8.4.*", "lessThan": "8.4.27", "status": "affected", "versionType": "semver"}]}]}}}
+
+    def _affected(self):
+        return [{"vendor": "PHP Group", "product": "PHP", "package": "php-src", "ranges": [{"fixed": "8.2.35"}, {"fixed": "8.3.36"}, {"fixed": "8.4.27"}]}]
+
+    def test_the_published_bounds_are_taken(self):
+        from cveFeed import intel
+        out, overlaid = intel.overlay_branch_ranges("CVE-2099-1", self._affected(), get=lambda *a, **k: self._resp(self.RECORD))
+        self.assertTrue(overlaid)
+        self.assertEqual([(r["introduced"], r["fixed"]) for r in out[0]["ranges"]], [("8.2", "8.2.35"), ("8.3", "8.3.36"), ("8.4", "8.4.27")])
+        self.assertEqual(out[0]["vendor"], "PHP Group")  # the feed's naming stays
+
+    def _resp(self, doc, status=200):
+        from unittest import mock
+        import json as _json
+        body = _json.dumps(doc).encode()
+        resp = mock.Mock(status_code=status)
+        resp.iter_content = lambda size: iter([body])
+        return resp
+
+    def test_nothing_is_taken_for_a_shape_that_is_not_a_bare_fix_list(self):
+        from cveFeed import intel
+        calls = []
+        plain = [{"product": "PHP", "ranges": [{"introduced": "8.2", "fixed": "8.2.35"}, {"introduced": "8.3", "fixed": "8.3.36"}]}]
+        out, overlaid = intel.overlay_branch_ranges("CVE-2099-1", plain, get=lambda *a, **k: calls.append(1))
+        self.assertEqual((out, overlaid, calls), (plain, False, []))
+
+    def test_an_unreadable_record_leaves_the_feeds_ranges(self):
+        from cveFeed import intel
+
+        def boom(*a, **k):
+            raise OSError("offline")
+        out, overlaid = intel.overlay_branch_ranges("CVE-2099-1", self._affected(), get=boom)
+        self.assertEqual((out, overlaid), (self._affected(), False))
+
+    def test_a_record_without_both_bounds_is_not_used(self):
+        from cveFeed import intel
+        doc = {"containers": {"cna": {"affected": [{"product": "PHP", "versions": [{"version": "0", "lessThan": "8.2.35", "status": "affected"},
+                                                                                  {"version": "0", "lessThan": "8.3.36", "status": "affected"}]}]}}}
+        out, overlaid = intel.overlay_branch_ranges("CVE-2099-1", self._affected(), get=lambda *a, **k: self._resp(doc))
+        self.assertEqual((out, overlaid), (self._affected(), False))
 
 
 class TestUnlistedBranch(unittest.TestCase):

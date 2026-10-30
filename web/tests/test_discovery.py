@@ -125,6 +125,22 @@ class DiscoveryTests(TestCase):
 		correlate.assert_not_called()
 		self.assertEqual(AgentActivity.objects.filter(kind='discovery').order_by('-id').first().status, 'failed')
 
+	def test_failed_bbot_keeps_its_partial_host_without_recording_fresh_coverage(self):
+		from cveFeed.models import ServiceRun
+		from reNgine.bbot import BbotProcessError
+		scan = self._scan()
+
+		def partial(*args, **kwargs):
+			yield EVENTS[0]
+			raise BbotProcessError('bbot exited with status 1 after producing partial results')
+
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=partial)
+		self.assertEqual(out['status'], discovery.FAILED)
+		self.assertTrue(Subdomain.objects.filter(scan_history=scan, name='example.test').exists())
+		self.assertTrue(DiscoveryEvent.objects.filter(scan=scan, label='example.test').exists())
+		self.assertFalse(ServiceRun.objects.filter(service='bbot', scan=scan, status='done').exists())
+
 	def test_deep_run_stopped_for_memory_is_retried_as_standard_and_keeps_what_it_found(self):
 		from reNgine.resources import MemoryKill
 		scan = self._scan()

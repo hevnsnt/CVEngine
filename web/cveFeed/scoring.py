@@ -19,6 +19,7 @@ the Hosts page, search and the graph already read.
 import logging
 import re
 from datetime import timedelta
+from itertools import islice
 
 from django.utils import timezone
 
@@ -147,9 +148,9 @@ def score_host(inputs):
 # ----------------------------------------------------------------------------- recompute
 
 def _chunks(items, size=CHUNK):
-    items = list(items)
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
+    items = iter(items)
+    while chunk := list(islice(items, size)):
+        yield chunk
 
 
 def _cve_inputs(sub):
@@ -170,12 +171,11 @@ def _cve_inputs(sub):
 
 def _has_public_ip(sub):
     from cveFeed.tailscale_scope import is_tailnet_address
-    from targetApp.target_types import is_internal_address, is_scannable_ip
-    # judged from the address: the stored is_private flag was never set for an address found by a scan (issue 212), and an install
-    # that scans its own network (CVENGINE_ALLOW_PRIVATE_TARGETS) finds private ones; a tailnet address is reachable only by the
-    # tailnet's own devices, so it is never "public", however scannable it is
-    return any(ip.address and not ip.is_private and not is_internal_address(ip.address) and not is_tailnet_address(ip.address)
-               and is_scannable_ip(ip.address) for ip in sub.ip_addresses.all())
+    from targetApp.target_types import is_public_address
+    # judged from the address alone (issue 212): the stored is_private flag was never set for an address found by a scan, and a scanning
+    # policy (blocked ranges, the opt-in for private targets) must not change an exposure score. A tailnet address is reachable only by
+    # the tailnet's own devices, so it is never "public"
+    return any(ip.address and is_public_address(ip.address) and not is_tailnet_address(ip.address) for ip in sub.ip_addresses.all())
 
 
 def usable_rows(qs):
@@ -262,31 +262,48 @@ def rescore_quietly(project_id, names, scan_id=None):
         return 0
 
 
+def _rescore_name_pairs(pairs):
+    """Rescore every (name, project) pair with at most CHUNK distinct names in memory."""
+    pending = {}
+    count = 0
+    for name, project_id in pairs:
+        if not project_id:
+            continue
+        names = pending.setdefault(project_id, set())
+        if name not in names:
+            names.add(name)
+            count += 1
+        if count >= CHUNK:
+            for batch_project, batch_names in pending.items():
+                rescore_quietly(batch_project, sorted(batch_names))
+            pending.clear()
+            count = 0
+    for project_id, names in pending.items():
+        if names:
+            rescore_quietly(project_id, sorted(names))
+
+
 def rescore_subdomain_ids(subdomain_ids):
-    """Rescore the hosts of these Subdomain rows (at most CHUNK of them): used when a match's verdict was reset or a match was closed,
-    so the host's score does not keep the AI bonus or the exposure of a verdict that no longer stands. Never raises."""
+    """Rescore every supplied Subdomain's host after verdict resets or match closures. Never raises."""
     try:
         from startScan.models import Subdomain
-        by_project = {}
-        for name, project_id in Subdomain.objects.filter(pk__in=list(subdomain_ids)[:CHUNK], target_domain__project__isnull=False) \
-                .values_list('name', 'target_domain__project_id'):
-            by_project.setdefault(project_id, set()).add(name)
-        for project_id, names in by_project.items():
-            rescore_quietly(project_id, sorted(names)[:CHUNK])
+        for ids in _chunks(subdomain_ids):
+            _rescore_name_pairs(Subdomain.objects.filter(pk__in=ids, target_domain__project__isnull=False)
+                                .values_list('name', 'target_domain__project_id'))
     except Exception:  # noqa: BLE001
         logger.exception('could not rescore after a verdict reset')
 
 
 def rescore_for_matches(matches):
-    """Rescore the hosts of the CVE matches whose verdict was just saved (at most CHUNK hosts)."""
+    """Rescore every host whose CVE match verdict was just saved."""
     try:
-        by_project = {}
-        for m in matches:
-            sub = getattr(m, 'subdomain', None)
-            domain = getattr(sub, 'target_domain', None) if sub else None
-            if sub and domain and domain.project_id:
-                by_project.setdefault(domain.project_id, set()).add(sub.name)
-        for project_id, names in by_project.items():
-            rescore_quietly(project_id, sorted(names)[:CHUNK])
+        rows = matches.iterator(chunk_size=CHUNK) if hasattr(matches, 'iterator') else matches
+        def pairs():
+            for match in rows:
+                sub = getattr(match, 'subdomain', None)
+                domain = getattr(sub, 'target_domain', None) if sub else None
+                if sub and domain:
+                    yield sub.name, domain.project_id
+        _rescore_name_pairs(pairs())
     except Exception:  # noqa: BLE001
         logger.exception('could not rescore after a verdict')

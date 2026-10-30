@@ -103,3 +103,55 @@ test('a count or a badge asks for the count alone, and an export or a palette pr
   // the dashboard coverage line reads the heat facets, so it keeps them
   assert.match(read('dashboard.js'), /search\?q=&page_size=1`/);
 });
+
+class SentinelElement {
+  constructor(tag, cls = '', text = '') {
+    this.tag = tag;
+    this.cls = cls;
+    this.text = text == null ? '' : String(text);
+    this.children = [];
+  }
+  append(...children) { this.children.push(...children); }
+}
+
+const sentinelEl = (tag, cls, text) => new SentinelElement(tag, cls, text);
+const sentinelText = (node) => typeof node === 'string' ? node : [node.text, ...node.children.map(sentinelText)].join(' ');
+globalThis.localStorage = {getItem: () => null};
+globalThis.document = {createTextNode: (text) => new SentinelElement('#text', '', text), getElementById: () => null};
+globalThis.__sentinelUi = {el: sentinelEl, badge: (text) => sentinelEl('span', 'badge', text)};
+const sentinelSource = read('sentinel-live.js');
+const sentinelModule = sentinelSource.replace(/^import .*;\n/gm, '');
+const {task, recent, openvasQueue} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge} = globalThis.__sentinelUi;\n${sentinelModule}\nexport {task, recent, openvasQueue};`,
+)}`);
+
+test('current and recent Sentinel tasks prefer the server label for multi-host work', () => {
+  const item = {kind: 'openvas', status: 'running', host: '', label: 'a.example.test, b.example.test', project: 'north'};
+  assert.match(sentinelText(task(item)), /a\.example\.test, b\.example\.test/);
+  assert.match(sentinelText(recent(item)), /a\.example\.test, b\.example\.test/);
+  assert.match(sentinelText(task({...item, label: '', host: 'fallback.example.test'})), /fallback\.example\.test/);
+});
+
+test('Sentinel page renders OpenVAS running, due and deferred hosts with reasons', () => {
+  const panel = openvasQueue({
+    running: {project: 'north', hosts: ['a.example.test', 'b.example.test'], via: 'sentinel', progress: 40, budget_hours: 3},
+    next: [{host: 'next.example.test', project: 'south', heat: 'fire'}],
+    not_due: [{host: 'later.example.test', project: 'north', reason: 'scanned yesterday'}],
+    counts: {next: 2, not_due: 1},
+  });
+  const content = sentinelText(panel);
+  for (const expected of ['OpenVAS queue', 'Scanning north', 'a.example.test', '40%', 'next.example.test',
+    'fire', 'later.example.test', 'scanned yesterday', 'Showing 1 of 2 due hosts']) {
+    assert.ok(content.includes(expected), expected);
+  }
+  assert.equal(panel.tag, 'section');
+  assert.match(sentinelSource, /if \(data\.openvas\) mount\.append\(openvasQueue\(data\.openvas\)\)/);
+});
+
+test('Sentinel page shows the OpenVAS idle state without a deferred list', () => {
+  const panel = openvasQueue({running: null, next: [], not_due: [], counts: {next: 0, not_due: 0}});
+  const content = sentinelText(panel);
+  assert.match(content, /No OpenVAS scan is running/);
+  assert.match(content, /No hosts are due/);
+  assert.equal(panel.children.some((child) => child.cls === 'sl-openvas-deferred'), false);
+});

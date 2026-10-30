@@ -115,6 +115,8 @@ def _nmap(scan, project, ip, org_id, dispatch):
         return {'error': 'no Sentinel inside the network answered (one must declare network:internal and cover this project)'}
     inventory = [{'ip': h['ip'], 'os_guess': h.get('os_guess', ''), 'os_accuracy': None, 'ports': h.get('ports', [])}
                  for h in result.get('hosts', []) if h.get('ip') == ip]
+    if not inventory:
+        return {'error': 'the Sentinel reported nothing for the address'}
     totals = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
     ledger.record('nmap-fast', [ip], project.id, scan)  # what the check coverage of the host reads
     return {'hosts': len(inventory), **totals}
@@ -179,7 +181,7 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     from reNgine.tasks import persist_bbot_result
     from reNgine import bbot as bbot_lib
     from startScan.ip_rows import org_id_of_project
-    from startScan.models import ScanHistory
+    from startScan.models import ScanActivity, ScanHistory
     from targetApp.target_types import sentinel_only_target
     dispatch = dispatch or sentinel_dispatch.dispatch_or_none
     mark_running(scan_id)
@@ -215,10 +217,11 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
                    fallback={'subdomains': 0, 'matches': 0})
             _stage(scan, 'Nuclei targeted pass (internal Sentinel)', 'nuclei_targeted_scan',
                    lambda: nuclei_scan.run_targeted_nuclei(scan.id, stream=stream('nuclei_targeted'), provider=provider), fallback={'targets': 0})
-    error = nmap.get('error')
-    status = FAILED if error else SUCCESS
+    failed_names = list(ScanActivity.objects.filter(scan_of=scan, status=FAILED).order_by('id').values_list('name', flat=True))
+    status = FAILED if nmap.get('error') else SUCCESS
+    error = nmap.get('error') or (('Failed stages: ' + ', '.join(failed_names)) if failed_names else '')
     ScanHistory.objects.filter(pk=scan_id).update(scan_status=status, stop_scan_date=timezone.now(), error_message=(error or '')[:290] or None)
     activity.settle(running, 'done' if status == SUCCESS else 'failed',
-                    message=(f'Internal scan of {ip} finished: {nmap.get("ports", 0)} service(s) found' if status == SUCCESS
+                    message=(f'Internal scan of {ip} finished: {nmap.get("ports", 0)} service(s) found{("; " + error) if error else ""}' if status == SUCCESS
                              else f'Internal scan of {ip} failed: {error}'))
-    return {'scan_id': scan_id, 'status': status, 'error': error or '', 'nmap': nmap}
+    return {'scan_id': scan_id, 'status': status, 'error': error or '', 'failed_stages': failed_names, 'nmap': nmap}

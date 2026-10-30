@@ -381,6 +381,24 @@ class ManualUpdateTests(UpdateScriptCase):
                 self.assertIn('Returned the checkout', result.stderr)
                 (self.stub / flag).unlink()
 
+    def test_fetched_script_preflight_failure_returns_the_checkout_to_the_previous_commit(self):
+        script = self.other / 'scripts' / 'update.sh'
+        script.write_text(script.read_text().replace(
+            'for command in git docker flock curl python3; do',
+            "die 'new script preflight refused'\nfor command in git docker flock curl python3; do",
+            1,
+        ))
+        self.git('add', 'scripts/update.sh', cwd=self.other)
+        self.git('commit', '-m', 'new preflight', cwd=self.other)
+        self.git('push', 'origin', 'master', cwd=self.other)
+
+        result = self.run_update('--stop-scans')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('new script preflight refused', result.stderr)
+        self.assertIn('Returned the checkout', result.stderr)
+        self.assertEqual(self.readme(), 'v1\n')
+        self.assertFalse(any(' migrate --noinput' in call for call in self.calls()))
+
     def test_a_drain_timeout_returns_the_checkout_before_beat_restarts(self):
         (self.stub / 'active').write_text('{' + ','.join(f'"{name}@local":[{{"id":"work"}}]' for name in
             ('discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker')) + '}')
@@ -664,6 +682,34 @@ class UpdateLayoutAndScanTests(UpdateScriptCase):
         self.assertIn('is available', result.stdout)
         self.assertIn('Scans:     1 running, 2 queued', result.stdout)
         self.assertIn('Result: ready', result.stdout)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD', cwd=self.work))
+        self.assertFalse(any(' build ' in c or ' stop ' in c or 'cancel_consumer' in c for c in self.calls()))
+
+    def test_check_says_a_checkout_that_has_merged_master_is_up_to_date_and_one_that_diverged_must_be_merged_by_hand(self):
+        (self.stub / 'web_up').touch()
+        (self.work / 'web' / 'local-change').write_text('only this checkout has it\n')
+        self.git('add', 'web/local-change', cwd=self.work)
+        self.git('commit', '-m', 'local', cwd=self.work)
+
+        def check():
+            return subprocess.run(['bash', 'scripts/update.sh', '--check'], cwd=self.work, env=self.env, capture_output=True, text=True, timeout=45)
+        diverged = check()
+        self.assertIn('is available', diverged.stdout)
+        self.assertIn('has to be merged by hand', diverged.stdout)
+        self.git('fetch', 'origin', 'master', cwd=self.work)
+        self.git('merge', '-m', 'merge master', 'origin/master', cwd=self.work)
+        level = check()
+        self.assertIn('GitHub:    up to date (2 commits of this checkout', level.stdout)
+
+    def test_an_update_of_a_diverged_checkout_stops_before_touching_anything(self):
+        (self.stub / 'web_up').touch()
+        (self.work / 'web' / 'local-change').write_text('only this checkout has it\n')
+        self.git('add', 'web/local-change', cwd=self.work)
+        self.git('commit', '-m', 'local', cwd=self.work)
+        before = self.git('rev-parse', 'HEAD', cwd=self.work)
+        result = subprocess.run(['bash', 'scripts/update.sh'], cwd=self.work, env=self.env, capture_output=True, text=True, timeout=45)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot be fast-forwarded', result.stdout + result.stderr)
         self.assertEqual(before, self.git('rev-parse', 'HEAD', cwd=self.work))
         self.assertFalse(any(' build ' in c or ' stop ' in c or 'cancel_consumer' in c for c in self.calls()))
 

@@ -123,6 +123,11 @@ class CVEEntry(models.Model):
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
         }
+        # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
+        from cveFeed.intel import overlay_branch_ranges
+        defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
+        if overlaid and "CVE List V5" not in defaults["sources"]:
+            defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds
         for field in cls._meta.get_fields():
             limit = getattr(field, "max_length", None)
@@ -253,6 +258,21 @@ class BackgroundCursor(models.Model):
 
     lane = models.CharField(max_length=32, primary_key=True)
     last_pk = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class FeedWatermark(models.Model):
+    """How far the CVE feed is known to be complete (cveFeed.feed_watermark): every entry the feed lists with a publication time after
+    ``covered_through`` has been read. A snapshot (the seed) sets it to what the snapshot covers, and a walk that read back past it
+    (with a margin for entries the feed saw late) and stored everything it listed moves it to the head of the feed it read. A walk cut
+    short keeps ``resume_cursor`` (the listing's own cursor) and the head it started from, so the next run continues instead of
+    starting over; a failure never advances it."""
+
+    source = models.CharField(max_length=32, primary_key=True)
+    covered_through = models.DateTimeField(null=True, blank=True)
+    resume_cursor = models.TextField(blank=True, default="")
+    resume_head = models.DateTimeField(null=True, blank=True)
+    checked_at = models.DateTimeField(null=True, blank=True)  # when a walk last reached its floor
     updated_at = models.DateTimeField(auto_now=True)
 
 
@@ -1057,6 +1077,9 @@ class Triage(models.Model):
     attempts = models.IntegerField(default=0)
     next_attempt_at = models.DateTimeField(null=True, blank=True)
     confidence_adjust = models.FloatField(default=0.0)
+    # the CVE match this row took its record from when a rescan made a new match for the same finding (cveFeed.triage._twins); its
+    # validation jobs are this finding's job history (cveFeed.hot_validation.enqueue). A plain id: the older match may be pruned.
+    carried_from = models.PositiveBigIntegerField(null=True, blank=True)
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1101,6 +1124,7 @@ class UpdateSettings(models.Model):
     latest_url = models.CharField(max_length=300, blank=True, default="")
     latest_date = models.DateTimeField(null=True, blank=True)
     behind_by = models.IntegerField(null=True, blank=True)  # commits between the installed version and latest
+    reference_unknown = models.BooleanField(default=False)  # GitHub has never seen the installed commit and the host has not named a shared one
     commits = models.JSONField(default=list, blank=True)  # [{sha, message}] newest first, capped
     last_checked_at = models.DateTimeField(null=True, blank=True)
     last_error = models.CharField(max_length=300, blank=True, default="")

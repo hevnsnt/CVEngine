@@ -20,7 +20,8 @@ class PureTests(unittest.TestCase):
 		lines = ['{"ip":"198.51.100.1","port":22}', '{"ip":"198.51.100.1","port":8443}', 'noise', '{"ip":"198.51.100.1","port":22}',
 			'{"host":"198.51.100.2","port":9200}', '{"ip":"198.51.100.3","port":0}', '{"ip":"198.51.100.3","port":70000}']
 		lines += [f'{{"ip":"198.51.100.9","port":{n}}}' for n in range(1, naabu_scan.MAX_OPEN_PER_IP + 2)]
-		self.assertEqual(naabu_scan.parse_output('\n'.join(lines)), {'198.51.100.1': [22, 8443], '198.51.100.2': [9200]})
+		self.assertEqual(naabu_scan.parse_output('\n'.join(lines)),
+			{'198.51.100.1': [22, 8443], '198.51.100.2': [9200], '198.51.100.9': None})
 
 	def test_the_port_argument_is_compact(self):
 		self.assertEqual(naabu_scan.port_argument([8080, 22, 80, 81, 82, 443, 22]), '22,80-82,443,8080')
@@ -181,6 +182,18 @@ class PipelineTests(TestCase):
 		self.assertEqual(self.calls[0][1], nmap_scan.FAST_FLAGS)
 		self.assertNotIn('error', out)  # the pipeline does not depend on naabu
 		self.assertEqual(ServiceRun.objects.get(service='naabu').status, 'failed')
+
+	def test_a_tarpit_keeps_the_nmap_fallback_and_does_not_refresh_naabu_coverage(self):
+		IpAddress.objects.create(address='198.51.100.51', org=self.ip.org)
+		ports = list(range(1, naabu_scan.MAX_OPEN_PER_IP + 2))
+		result = naabu_scan.discover(['198.51.100.50', '198.51.100.51'], self.scan,
+			runner=lambda ips: {'198.51.100.50': None, '198.51.100.51': [8443]})
+		self.assertEqual(result, {'198.51.100.51': [8443]})
+		self.assertEqual(naabu_scan.flags_for(result, nmap_scan.FAST_FLAGS)(['198.51.100.50']), nmap_scan.FAST_FLAGS)
+		self.assertEqual(ServiceRun.objects.get(service='naabu', asset='198.51.100.50').status, 'failed')
+		self.assertEqual(ServiceRun.objects.get(service='naabu', asset='198.51.100.51').status, 'done')
+		self.assertEqual(naabu_scan.parse_output('\n'.join(f'{{"ip":"198.51.100.50","port":{p}}}' for p in ports)),
+			{'198.51.100.50': None})
 
 	def test_a_fresh_naabu_result_is_not_asked_for_again_inside_the_ttl(self):
 		calls = []
