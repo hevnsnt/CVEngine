@@ -147,6 +147,24 @@ class NmapDispatchTests(DispatchBase):
         ports = IpAddress.objects.get(address='192.0.2.10', org_id=self.org.id).ports
         self.assertEqual((ports.get(number=22).product, ports.get(number=8443).product), ('OpenSSH', 'nginx'))
 
+    def test_the_closed_probe_port_goes_only_to_addresses_no_sentinel_fingerprinted(self):
+        # nmap's OS detection needs a closed port, and the Sentinel's own guess must not be replaced by a weaker local one
+        self.make_sentinel(['nmap'])
+        Subdomain.objects.get(scan_history=self.scan).ip_addresses.add(IpAddress.objects.create(address='192.0.2.11'))
+        answer = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'os_guess': 'Linux 6.X',
+                  'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'product': 'OpenSSH', 'version': '8.9'}]}]}
+        calls = []
+
+        def local_runner(targets, flags, host_timeout):
+            calls.append((sorted(targets), flags[flags.index('-p') + 1]))
+            return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
+
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
+            nmap_scan.run_nmap_for_scan(self.scan.id, runner=local_runner,
+                naabu_runner=lambda ips: {'192.0.2.10': [22, 8443], '192.0.2.11': [80]})
+        self.assertIn((['192.0.2.11'], '1,3,80'), calls)  # nobody else fingerprinted it: a closed port lets nmap identify the system
+        self.assertIn((['192.0.2.10'], '8443'), calls)  # the Sentinel did: only the port it missed, and no OS detection to replace its guess
+
     def test_timeout_falls_back_to_local_and_the_task_is_marked_expired(self):
         self.make_sentinel(['nmap'])
         remaining, totals, local_ports = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=0.2)
