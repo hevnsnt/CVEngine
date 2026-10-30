@@ -1692,9 +1692,28 @@ def parse_search(query):
             if len(value) > MAX_SEARCH_VALUE:
                 raise ApiError(400, f'a search term is longer than {MAX_SEARCH_VALUE} characters')
             terms.append((bool(neg), field.lower() or None, value, is_quoted))
+    terms = _bind_versions(terms)
     if len(terms) > MAX_SEARCH_TERMS:
         raise ApiError(400, f'a search may have at most {MAX_SEARCH_TERMS} terms')
     return terms
+
+
+_SEARCH_VERSION = re.compile(r'^v?\d+(?:\.\d+)+$')
+
+
+def _bind_versions(terms):
+    """A bare word followed by a bare dotted version (``wordpress 7.1``, ``nginx 1.24.0``) is one term, the product at that version: the version
+    alone ("7.1") matches any address, banner or title that happens to contain it, which is never what a search for a release means. The term is
+    ``('techver', 'wordpress 7.1')``. A version on its own, a quoted phrase, a negation or a field filter keeps its old meaning."""
+    out = []
+    for neg, field, value, quoted in terms:
+        previous = out[-1] if out else None
+        if (field is None and not quoted and not neg and _SEARCH_VERSION.match(value) and previous is not None
+                and previous[1] is None and not previous[0] and not previous[3] and ' ' not in previous[2] and not _SEARCH_VERSION.match(previous[2])):
+            out[-1] = (False, 'techver', f'{previous[2]} {value.lstrip("v")}', False)
+            continue
+        out.append((neg, field, value, quoted))
+    return out
 
 
 def _ip_filter(value):
@@ -1779,6 +1798,11 @@ def _term_filter(field, value, project=None):
         return q
     if field == 'tech':
         return _running_q(value, project)
+    if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4), on a technology row or an open port, on the same row
+        product, version = value.rsplit(' ', 1)
+        at_release = lambda prefix: Q(**{prefix + 'version': version}) | Q(**{prefix + 'version__startswith': version + '.'})  # noqa: E731
+        return (Q(technologies__name__icontains=product) & at_release('technologies__')) | \
+            (Q(**{ports + 'product__icontains': product}) & at_release(ports) & open_port)
     if field == 'banner':
         return _banner_q(value)
     if field == 'port':
@@ -1895,6 +1919,14 @@ def _why_matched(sub, terms):
                         hit = False
                     if hit:
                         reasons.append(f'IP {ip.address}')
+        if field == 'techver':
+            product, version = v.rsplit(' ', 1)
+            reasons += [f'technology {t.name}' for t in sub.technologies.all()
+                        if product in (t.name or '').lower() and (t.version == version or (t.version or '').startswith(version + '.'))]
+            for ip in sub.ip_addresses.all():
+                for p in open_services(ip):
+                    if product in (p.product or '').lower() and (p.version == version or (p.version or '').startswith(version + '.')):
+                        reasons.append(f'port {p.number} {p.product} {p.version}')
         if field in (None, 'tech'):
             reasons += [f'technology {t.name}' for t in sub.technologies.all() if has(t.name)]
             if has(sub.webserver):
@@ -2034,7 +2066,10 @@ def _search_matches(project, terms):
         # A negated term is "no row of this host satisfies q". exclude(q) would split q's conditions on the same relation into one
         # subquery each (a port that is 161, and some port that is open), so a host with a closed port 161 plus any open port would
         # drop out. One positive filter inside a single subquery keeps every condition on the same port row.
-        qs = qs.filter(~Exists(Subdomain.objects.filter(q, pk=OuterRef('pk')))) if neg else qs.filter(q)
+        # A positive term is the same subquery, not a join on the outer query: a bare word joins technologies, addresses, ports, findings and CVE
+        # matches at once, and the rows multiply (hosts x addresses x ports x findings x matches) before they are folded back into one per host.
+        # That is what made a search over every project time out; a semi-join per term costs the host's own rows only.
+        qs = qs.filter(~Exists(Subdomain.objects.filter(q, pk=OuterRef('pk')))) if neg else qs.filter(Exists(Subdomain.objects.filter(q, pk=OuterRef('pk'))))
     return qs
 
 
@@ -2062,7 +2097,8 @@ def search_hosts(ctx, slug, params):
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
     session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``zombie:`` (yes, no) and ``country:`` (ISO code
     or name) filter one field; a filter value takes a comma-separated list for OR (``port:80,443``), unless quoted; ``-term``
-    negates; quote a phrase. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
+    negates; quote a phrase; a bare word followed by a dotted version (``wordpress 7.1``) is that product at that release, a version on its own
+    keeps matching any text that contains it. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
     always counts every value over the whole match of q, ignoring ``heat`` itself, so the chips keep their real totals while one is
     selected. Counting heat walks the match (up to HEAT_FACET_CAP hosts), so ``facets=none`` skips it and every facet (``facets`` is
     then null), and ``page_size=0`` answers with ``count`` alone (no rows, no facets): the cheap modes for a poll, a palette or a badge.
