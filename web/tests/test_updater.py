@@ -403,6 +403,26 @@ class UpdatesApiTests(TestCase):
 			self.assertEqual(tasks.check_for_updates()['status'], 'approved')
 			self.assertTrue(os.path.exists(os.path.join(self.dir, '.update-approved')))
 
+	def test_a_branch_that_is_not_a_release_branch_is_warned_about_and_audited_but_not_refused(self):
+		from dashboard.models import AuditLog
+		self.assertEqual(updater.branch_warning('master'), '')
+		self.assertEqual(updater.branch_warning('main'), '')
+		self.assertIn('"develop"', updater.branch_warning('develop'))
+		self.assertIn('not a release branch', updater.branch_warning('my-fork/feature'))
+		open(os.path.join(self.dir, '.commit'), 'w').write(OLD + '\n')
+		admin = client_for(self.admin)
+		self.put(admin, repo='o/r', branch='develop')
+		row = UpdateSettings.current()
+		updater.check(row, get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		self.assertIn('"develop"', admin.get('/cve/api/settings/updates').json()['branch_warning'])
+		done = admin.post('/cve/api/settings/updates/approve', '{}', content_type='application/json')
+		self.assertEqual(done.status_code, 200)  # a warning, not a refusal
+		self.assertEqual(done.json()['status'], 'approved')
+		entry = AuditLog.objects.get(action='update.approved')
+		self.assertEqual((entry.detail['branch'], entry.detail['release_branch']), ('develop', False))
+		self.put(admin, branch='master')
+		self.assertEqual(admin.get('/cve/api/settings/updates').json()['branch_warning'], '')
+
 	def test_approve_without_an_update_is_refused(self):
 		admin = client_for(self.admin)
 		self.assertEqual(admin.post('/cve/api/settings/updates/approve', '{}', content_type='application/json').status_code, 400)
