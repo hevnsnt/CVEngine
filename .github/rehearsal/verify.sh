@@ -33,7 +33,15 @@ assert Domain.objects.filter(name='rehearsal.example').exists(), 'the target is 
 wanted = {'h0.rehearsal.example', 'h1.rehearsal.example', 'h2.rehearsal.example', 'www.rehearsal.example'}
 hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted)
 assert {h.name for h in hosts} == wanted, f'seeded hosts missing: {sorted(wanted - {h.name for h in hosts})}'
-assert all(h.ip_addresses.exists() for h in hosts), 'a host lost its address'
+from startScan.models import Subdomain as _S
+_through = _S.ip_addresses.through
+_state = {h.name: (h.pk, h.scan_history_id, list(h.ip_addresses.values_list('address', flat=True))) for h in hosts}
+if not all(v[2] for v in _state.values()):
+    print('DIAG hosts', _state)
+    print('DIAG ips', list(IpAddress.objects.values_list('pk', 'address', 'org_id')))
+    print('DIAG links', list(_through.objects.filter(subdomain__target_domain__name='rehearsal.example').values_list('subdomain_id', 'ipaddress_id')))
+    print('DIAG all rehearsal subdomains', list(Subdomain.objects.filter(target_domain__name='rehearsal.example').values_list('pk', 'name', 'scan_history_id')))
+assert all(v[2] for v in _state.values()), 'a host lost its address'
 dups = IpAddress.objects.values('address').annotate(c=Count('id')).filter(c__gt=1).count()
 assert dups == 0, f'{dups} addresses are still stored more than once'
 print('DATA OK')
