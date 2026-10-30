@@ -326,7 +326,7 @@ class InvestigationTests(FullScanBase):
 		def run(domain_id, names):
 			self.pipelines.append(list(names))
 			return discovery.run_host_pipeline(domain_id, names, retest=True, resolver=lambda n: {(x, '192.0.2.1') for x in n},
-				light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda t, f, h: '',
+				light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda t, f, h: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>',
 				db_exposure_checks=checks if checks is not None else {}, provider=None,
 				route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		return run

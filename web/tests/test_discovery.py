@@ -460,7 +460,7 @@ class NucleiStageTests(TestCase):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		kwargs = dict(stream=lambda *a, **k: iter(events), light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-			nmap_runner=lambda *a, **k: '', db_exposure_checks={}, provider=None,
+			nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 			route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		kwargs.update(overrides)
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
@@ -798,7 +798,7 @@ class QueuedScanTests(TestCase):
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			discovery.run_pipeline(scan.id, stream=stream, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-				nmap_runner=lambda *a, **k: '', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertEqual(seen, [(discovery.RUNNING, discovery.RUNNING)])
 
 	def test_a_queued_scan_blocks_a_duplicate_whatever_its_age_but_a_stale_running_one_does_not(self):
