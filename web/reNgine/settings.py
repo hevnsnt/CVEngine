@@ -271,7 +271,11 @@ LOGGING settings
 '''
 LOGGING = {
     'version': 1,
-    'disable_existing_loggers': True,
+    # False: this configuration is applied more than once in a process (django.setup() runs again when reNgine.celery is imported and when a
+    # Celery worker starts, and the setup_logging handler runs it a third time). True switched off every module logger that already existed at
+    # that moment, so a worker lost the log lines of reNgine.ai_providers, cveFeed.templategen and others, and a test run that started the
+    # Celery loader silenced cveFeed.correlation and cveFeed.nuclei_scan for the rest of its process.
+    'disable_existing_loggers': False,
     'handlers': {
         'file': {
             'level': 'ERROR',
