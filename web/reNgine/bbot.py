@@ -391,9 +391,7 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
                    problems=None):
     """Run bbot and yield decoded JSON events as they arrive (kills bbot after ``timeout`` seconds).
 
-    A process that exits with a nonzero status and never produced a single event is a silent failure
-    (a crash, a worker restart killing it, a bad preset), not "discovery found nothing": that must
-    surface as an error rather than a scan quietly marked finished with 0 hosts.
+    A nonzero exit or timeout is a failed discovery even if it emitted partial events.
 
     The run waits its turn for memory (reNgine.resources) and is stopped cleanly if the container runs low:
     ``MemoryKill`` is raised so the caller can retry lighter instead of losing the worker to the OOM killer.
@@ -424,9 +422,16 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
         drain = threading.Thread(target=_drain_stderr, daemon=True)
         drain.start()
         timed_out = threading.Event()
-        timer = threading.Timer(timeout, lambda: (timed_out.set(), resources.terminate_group(proc, grace=5)))
+
+        def stop_on_timeout():
+            if proc.poll() is None:
+                timed_out.set()
+                resources.terminate_group(proc, grace=5)
+
+        timer = threading.Timer(timeout, stop_on_timeout)
         timer.start()
         produced_any = False
+        completed = False
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -437,6 +442,7 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
                         continue
                     produced_any = True
                     yield event
+            completed = True
         finally:
             timer.cancel()
             if proc.poll() is None:
@@ -446,11 +452,18 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
             proc.stdout.close()
             proc.stderr.close()
             job.raise_if_killed()
-            if not produced_any and not timed_out.is_set() and proc.returncode not in (0, None):
-                error = BbotProcessError(failure_message(proc.returncode, list(stderr_tail)))
+            if completed and timed_out.is_set():
+                error = BbotProcessError(f'bbot timed out after {timeout} seconds')
                 error.returncode = proc.returncode
                 raise error
-            if not produced_any and not timed_out.is_set() and any(_CONFIG_REJECTED.search(ln) for ln in stderr_tail):
+            if completed and proc.returncode not in (0, None):
+                message = failure_message(proc.returncode, list(stderr_tail))
+                if produced_any:
+                    message = message.replace('before producing any results', 'after producing partial results')
+                error = BbotProcessError(message)
+                error.returncode = proc.returncode
+                raise error
+            if completed and not produced_any and any(_CONFIG_REJECTED.search(ln) for ln in stderr_tail):
                 # bbot prints this, runs no scan and exits 0: that is a failed run, not a discovery that found nothing
                 error = BbotProcessError(failure_message(0, list(stderr_tail)).replace('before producing any results', 'without scanning'))
                 error.returncode = 0
