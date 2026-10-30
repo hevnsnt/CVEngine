@@ -318,6 +318,14 @@ class ConcurrentQueueTests(RetestFixture, TransactionTestCase):
 
 
 class EndToEndTests(RetestFixture, TestCase):
+	def setUp(self):
+		super().setUp()
+		# These tests use synthetic .test hosts and stage doubles. Their result
+		# must not depend on an external DNS resolver's treatment of .test.
+		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def test_a_retest_run_is_marked_forces_the_cve_checks_and_never_queues_another(self):
 		HostState.objects.create(project=self.project, domain=self.domain, host='known.ct.test', state={})  # not a baseline run
 		_, kwargs = _stages()
