@@ -20,12 +20,33 @@ KINDS = ('nmap', 'bbot-standard', 'bbot-passive', 'nuclei', 'template-test', 'ro
 # unrelated scanner's concurrency.
 STAGE_KINDS = {'nmap_scan': 'nmap', 'nuclei_light_scan': 'nuclei',
                'nuclei_targeted_scan': 'nuclei', 'route_auth_scan': 'route-probe'}
+# What a failed stage's stored message says about its cause (the texts the scanners raise: see resources.MemoryBusy, the nmap and Nuclei
+# wrappers, route_auth). Only a failure that points at load can justify a lower admission cap; one that points at configuration (a missing
+# template library, a policy refusal, an invalid argument, a missing key) will fail again at any concurrency, and a message that says
+# neither is not acted on.
+CAPACITY_PATTERN = (r'waited too long for memory|timed out|timeout|exceeded its total time budget|out of memory|cannot allocate memory|'
+                    r'too many open files|resource temporarily unavailable|exited with status (-9|-11|137|139)( |:|$)|killed')
+CONFIGURATION_PATTERN = (r'unavailable|not installed|not found|no such file|passed the read-only policy|permission denied|invalid|'
+                         r'unknown flag|unrecognized|missing|api key|unauthori[sz]ed|forbidden|not scanned:|is excluded|prohibited|'
+                         r'is not allowed|not permitted|unsupported')
 COOLDOWN = 6 * 3600
 KEY = 'cvengine:adaptive:decision'
 SYSTEM = ('You review measured scanner capacity for the previous three hours. Reply with exactly one JSON object '
           '{"kind":"nmap","direction":"up","reason":"..."} or '
           '{"kind":"none","direction":"none","reason":"..."}. Choose only the candidate the safety controller offers; '
           'do not propose changing scope, coverage, external rate limits or worker process counts.')
+
+
+def failure_cause(message):
+    """``capacity``, ``configuration`` or ``other`` for a failed stage's stored message. A message that matches both reads as capacity
+    (the stage ran out of something), because lowering a cap on a misjudged configuration error costs less than missing a real overload."""
+    import re
+    text = str(message or '')
+    if re.search(CAPACITY_PATTERN, text, re.I):
+        return 'capacity'
+    if re.search(CONFIGURATION_PATTERN, text, re.I):
+        return 'configuration'
+    return 'other'
 
 
 def summarize(samples, now):
@@ -53,10 +74,19 @@ def safe_candidate(metrics, *, memory_kills=0, scanner_failures=0, scanner_runs=
     bounds = bounds or {}
     pressure = memory_kills > 0 or metrics['free_p10'] < 0.18
     stage_outcomes = stage_outcomes or {}
-    failing = sorted((kind for kind, counts in stage_outcomes.items()
-                      if kind in KINDS and counts['runs'] >= 10 and counts['failures'] / counts['runs'] > 0.15),
-                     key=lambda kind: (stage_outcomes[kind]['failures'] / stage_outcomes[kind]['runs'],
-                                       stage_outcomes[kind]['failures']), reverse=True)
+
+    def share(kind, key='capacity_failures'):
+        counts = stage_outcomes[kind]
+        return counts.get(key, 0) / counts['runs']
+
+    def eligible(kind, counts):
+        return kind in KINDS and counts['runs'] >= 10
+
+    # a kind is lowered for the failures that point at load only: its other failures leave the cap alone (see CAPACITY_PATTERN)
+    failing = sorted((kind for kind, counts in stage_outcomes.items() if eligible(kind, counts) and share(kind) > 0.15),
+                     key=lambda kind: (share(kind), stage_outcomes[kind]['capacity_failures']), reverse=True)
+    misconfigured = sorted((kind for kind, counts in stage_outcomes.items()
+                            if eligible(kind, counts) and share(kind, 'configuration_failures') > 0.15 and kind not in failing))
     if previous and now - previous.get('at', 0) < COOLDOWN and not pressure and not failing:
         return {'kind': 'none', 'direction': 'none', 'reason': 'Capacity cooldown is active'}
     if pressure:
@@ -76,6 +106,9 @@ def safe_candidate(metrics, *, memory_kills=0, scanner_failures=0, scanner_runs=
                           caps[kind] > previous.get('previous', 0) else 'Measured failures in this scanner kind')
                 return {'kind': kind, 'direction': 'down', 'reason': reason}
         return {'kind': 'none', 'direction': 'none', 'reason': 'Failing scanner kinds are at their minimum'}
+    if misconfigured:
+        return {'kind': 'none', 'direction': 'none',
+                'reason': f'{misconfigured[0]} failures look like configuration, not capacity; the cap is unchanged'}
     if provider_throttles:
         return {'kind': 'none', 'direction': 'none', 'reason': 'Provider throttling was observed; no capacity increase'}
     if scanner_runs < 10 or scanner_failures:
@@ -131,12 +164,18 @@ def review(now=None):
         scanner_runs = recent.filter(status__in=(0, 2)).count()
         scanner_failures = recent.filter(status=0).count()
         stage_outcomes = {}
+        failed = Q(status=0)
         for row in recent.filter(name__in=STAGE_KINDS, status__in=(0, 2)).values('name').annotate(
-                runs=Count('id'), failures=Count('id', filter=Q(status=0))):
+                runs=Count('id'), failures=Count('id', filter=failed),
+                capacity=Count('id', filter=failed & Q(error_message__iregex=CAPACITY_PATTERN)),
+                configuration=Count('id', filter=failed & ~Q(error_message__iregex=CAPACITY_PATTERN)
+                                    & Q(error_message__iregex=CONFIGURATION_PATTERN))):
             kind = STAGE_KINDS[row['name']]
-            counts = stage_outcomes.setdefault(kind, {'runs': 0, 'failures': 0})
+            counts = stage_outcomes.setdefault(kind, {'runs': 0, 'failures': 0, 'capacity_failures': 0, 'configuration_failures': 0})
             counts['runs'] += row['runs']
             counts['failures'] += row['failures']
+            counts['capacity_failures'] += row['capacity']
+            counts['configuration_failures'] += row['configuration']
         memory_kills = max((s.get('memory_kills_3h', 0) for s in samples), default=0)
         throttles = AIUsage.objects.filter(started_at__gte=since, error_category__in=('rate_limit', 'provider_rate_limit')).count()
         previous = json.loads(client.get(KEY) or '{}')
