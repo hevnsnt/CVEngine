@@ -48,6 +48,7 @@ class ApiError(Exception):
 class Ctx:
     user: object
     token: Optional[object] = None
+    org: str = ''  # the organization the All projects view is narrowed to ('' = every organization; see roles.scope_org)
 
 
 # --- access ------------------------------------------------------------------
@@ -98,7 +99,7 @@ def get_project(ctx, slug, write=False):
         role = roles.user_best_role(ctx.user)
         if not role:
             raise ApiError(404, 'project not found')
-        return AllProjects(_allowed_ids(ctx.user)), role
+        return AllProjects(roles.org_project_ids(list(_allowed_ids(ctx.user)), getattr(ctx, 'org', ''))), role
     project = Project.objects.filter(slug=slug or '').first()
     role = roles.effective_role(ctx.user, project) if project else None
     if not role:

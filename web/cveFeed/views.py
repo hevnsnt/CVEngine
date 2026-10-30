@@ -356,6 +356,15 @@ def ui_context(request, active, slug=None, remember=True):
             orgs.append({'slug': p['org_slug'], 'name': p['org_name'] or 'No organization'})
     orgs.sort(key=lambda o: o['name'].lower())
     current_org = next((p['org_slug'] for p in projects if p['slug'] == current), '') if slug != ALL_PROJECTS else None
+    # All projects narrowed to one organization (chosen in the switcher; ?org= names it and the session keeps it)
+    scope_org = ''
+    if slug == ALL_PROJECTS and len(orgs) >= 2:
+        from tenancy.roles import SCOPE_ORG_KEY, scope_org as requested_org
+        want = requested_org(request)
+        scope_org = want if any(o['slug'] == want and want for o in orgs) else ''
+        if remember and 'org' in request.GET and hasattr(request, 'session') and request.session.get(SCOPE_ORG_KEY, '') != scope_org:
+            request.session[SCOPE_ORG_KEY] = scope_org
+    in_scope = [p for p in projects if p['org_slug'] == scope_org] if scope_org else projects
     from tenancy.roles import is_admin_anywhere
     from dashboard.models import AIProviderSettings
     ai_cfg = AIProviderSettings.objects.first()
@@ -369,7 +378,9 @@ def ui_context(request, active, slug=None, remember=True):
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
-            'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2}
+            'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2,
+            'scope_org': scope_org, 'scope_org_name': next((o['name'] for o in orgs if o['slug'] == scope_org), '') if scope_org else '',
+            'scope_projects': len(in_scope)}
 
 
 def _bounty_allowed(user):
@@ -421,11 +432,13 @@ def graph(request):
     allowed = set(Project.objects.values_list('slug', flat=True))
     project = request.GET.get('project') or remembered_scope(request, allowed) or ''  # no ?project: the session's last choice
     selected = project if project in allowed else ALL_PROJECTS if len(allowed) > 1 else next(iter(allowed), None)
-    return render(request, 'cveFeed/graph.html', {
-        'domains': Domain.objects.filter(project__slug=selected).select_related('project').order_by('name')
-                   if selected != ALL_PROJECTS else Domain.objects.select_related('project').order_by('name'),
-        **ui_context(request, 'graph', selected),
-    })
+    shell = ui_context(request, 'graph', selected)
+    domains = Domain.objects.select_related('project').order_by('name')
+    if selected != ALL_PROJECTS:
+        domains = domains.filter(project__slug=selected)
+    elif shell['scope_org']:
+        domains = domains.filter(project__org__slug=shell['scope_org'])
+    return render(request, 'cveFeed/graph.html', {'domains': domains, **shell})
 
 
 def scan_page(request, slug, scan_id):
@@ -611,11 +624,21 @@ def project_scoped(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
         slug = request.GET.get('project', '')
-        if not slug or slug == ALL_PROJECTS:  # "_all": everything the caller may see, which is the default
-            return view(request, *args, **kwargs)
         from dashboard.models import Project
-        from tenancy import scope
+        from tenancy import roles, scope
         allowed = scope.current_allowed()
+        if not slug or slug == ALL_PROJECTS:  # "_all": everything the caller may see, which is the default
+            org = roles.scope_org(request)  # unless the switcher narrowed All projects to one organization
+            ids = set(Project.objects.filter(org__slug=org).values_list('id', flat=True)) if org else set()
+            if allowed is not None:
+                ids &= set(allowed)
+            if not ids:
+                return view(request, *args, **kwargs)
+            tokens = scope.set_scope(ids, scope.current_user())
+            try:
+                return view(request, *args, **kwargs)
+            finally:
+                scope.reset_scope(tokens)
         project = Project.objects.filter(slug=slug).only('id').first()
         if not project or (allowed is not None and project.id not in allowed):
             return JsonResponse({'error': 'project not found'}, status=404)
@@ -690,7 +713,8 @@ def api_alive(request):
 @require_GET
 @project_scoped
 def api_stats(request):
-    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''))), **live_scan_counts()})
+    from tenancy.roles import scope_org
+    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''), scope_org(request))), **live_scan_counts()})
 
 
 GRAPH_CACHE_SECONDS = 30
@@ -733,7 +757,8 @@ def api_graph(request):
     version = graph_version(domain_id, scan_id)
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    key = f'cve-graph:{request.user.pk}:{request.GET.get("project", "")}:{domain_id}:{scan_id}:{version}'
+    from tenancy.roles import scope_org
+    key = f'cve-graph:{request.user.pk}:{request.GET.get("project", "")}:{scope_org(request)}:{domain_id}:{scan_id}:{version}'
     payload = cache.get(key)
     if payload is None:
         payload = {**graph_payload(domain_id, scan_id), 'version': version}
