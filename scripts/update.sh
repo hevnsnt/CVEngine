@@ -65,6 +65,25 @@ forward_args=()
 (( stop_scans )) && forward_args+=(--stop-scans)
 (( force )) && forward_args+=(--force)
 
+from_commit=${CVENGINE_UPDATE_FROM:-unknown}
+from_sha=${CVENGINE_UPDATE_FROM_SHA:-}
+database_migrated=0
+# The fetched script runs preflight again before it reaches the migration path. If any of those
+# checks fail, put the checkout back before the old containers read new bind-mounted code.
+revert_unmigrated() {
+    (( database_migrated )) && return 0
+    [[ -n $from_sha ]] || return 0
+    [[ $(git rev-parse HEAD 2>/dev/null) != "$from_sha" ]] || return 0
+    if git reset --keep "$from_sha" >/dev/null 2>&1; then
+        echo "Returned the checkout to $from_commit because the update stopped before the database was migrated." >&2
+    else
+        echo "Could not return the checkout to $from_commit; run: git reset --keep $from_sha" >&2
+    fi
+}
+if (( after_fetch )); then
+    trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT
+fi
+
 die() {
     echo "ERROR: $*" >&2
     [[ -z ${diagnostic_log:-} || ! -s $diagnostic_log ]] || echo "Command diagnostics: $diagnostic_log (private; review before sharing)." >&2
@@ -81,7 +100,9 @@ failure() {
     trap - ERR
     echo "Update failed at $(git rev-parse --short HEAD 2>/dev/null || echo unknown). No database rollback was attempted." >&2
     [[ -z ${diagnostic_log:-} || ! -s $diagnostic_log ]] || echo "Command diagnostics: $diagnostic_log (private; review before sharing)." >&2
-    "${compose[@]}" ps >&2 || true
+    if declare -p compose >/dev/null 2>&1; then
+        "${compose[@]}" ps >&2 || true
+    fi
     exit "$status"
 }
 trap failure ERR
@@ -400,24 +421,12 @@ else
         die "This checkout has $(git rev-list --count origin/master..HEAD) commit(s) that are not on origin/master, and origin/master has $(git rev-list --count HEAD..origin/master) that it lacks, so it cannot be fast-forwarded. Merge it by hand (git merge origin/master), then run this again."
     fi
     git merge --ff-only origin/master
+    trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT
     CVENGINE_UPDATE_FROM="$from_commit" CVENGINE_UPDATE_FROM_SHA="$from_sha" exec bash "$self" --after-fetch "${forward_args[@]}"
 fi
-from_commit=${CVENGINE_UPDATE_FROM:-unknown}
-from_sha=${CVENGINE_UPDATE_FROM_SHA:-}
-database_migrated=0
 # The checkout was fast-forwarded before the build and the migration, and ./web is bind-mounted into web, celery and
 # Beat. Until the migration succeeds, a failed or interrupted update puts the previous commit back, so restarted
 # workers and Beat never run new code on the old schema (Beat's "migrate --check" would then fail forever).
-revert_unmigrated() {
-    (( database_migrated )) && return 0
-    [[ -n $from_sha ]] || return 0
-    [[ $(git rev-parse HEAD 2>/dev/null) != "$from_sha" ]] || return 0
-    if git reset --keep "$from_sha" >/dev/null 2>&1; then
-        echo "Returned the checkout to $from_commit because the update stopped before the database was migrated." >&2
-    else
-        echo "Could not return the checkout to $from_commit; run: git reset --keep $from_sha" >&2
-    fi
-}
 trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT
 python3 scripts/update-state.py migrate-requeue "$requeue_file"
 "${compose[@]}" config --quiet

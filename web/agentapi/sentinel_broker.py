@@ -25,7 +25,8 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Avg, Count, DurationField, F, Q, Value
+from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
@@ -1441,17 +1442,16 @@ def live_overview(ctx):
         held.setdefault(t.agent_id, []).append(t)
     day = now - timedelta(hours=24)
     hour = now - timedelta(hours=1)
-    stats = {}
-    for t in tasks.filter(finished_at__gte=day, status__in=('done', 'failed')).defer('result', 'target').order_by('-finished_at')[:2000]:  # the counts need no result bodies (an OpenVAS one is thousands of rows)
-        row = stats.setdefault(t.agent_id, {'done_1h': 0, 'failed_1h': 0, 'done_24h': 0, 'failed_24h': 0, 'seconds': 0, 'timed': 0})
-        key = 'done' if t.status == 'done' else 'failed'
-        row[f'{key}_24h'] += 1
-        if t.finished_at >= hour:
-            row[f'{key}_1h'] += 1
-        started = t.accepted_at or t.claimed_at
-        if t.status == 'done' and started:
-            row['seconds'] += max(0, (t.finished_at - started).total_seconds())
-            row['timed'] += 1
+    duration = Greatest(F('finished_at') - Coalesce('accepted_at', 'claimed_at'),
+                        Value(timedelta(0), output_field=DurationField()))
+    stats = {row['agent_id']: row for row in
+             tasks.filter(finished_at__gte=day, status__in=('done', 'failed')).order_by().values('agent_id').annotate(
+                 done_1h=Count('id', filter=Q(status='done', finished_at__gte=hour)),
+                 failed_1h=Count('id', filter=Q(status='failed', finished_at__gte=hour)),
+                 done_24h=Count('id', filter=Q(status='done')),
+                 failed_24h=Count('id', filter=Q(status='failed')),
+                 average_duration=Avg(duration, filter=Q(status='done') &
+                                      (Q(accepted_at__isnull=False) | Q(claimed_at__isnull=False))))}
     for agent_id in ids:
         finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
@@ -1480,7 +1480,8 @@ def live_overview(ctx):
                         'seconds': int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None,
                         'error': t.error} for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
-                      'failed_24h': st.get('failed_24h', 0), 'average_seconds': int(st['seconds'] / st['timed']) if st.get('timed') else None}})
+                      'failed_24h': st.get('failed_24h', 0),
+                      'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None}})
     from cveFeed import internal_view, openvas_scan
     from dashboard.models import Project
     networks = internal_view.declared_networks()

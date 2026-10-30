@@ -381,6 +381,24 @@ class ManualUpdateTests(UpdateScriptCase):
                 self.assertIn('Returned the checkout', result.stderr)
                 (self.stub / flag).unlink()
 
+    def test_fetched_script_preflight_failure_returns_the_checkout_to_the_previous_commit(self):
+        script = self.other / 'scripts' / 'update.sh'
+        script.write_text(script.read_text().replace(
+            'for command in git docker flock curl python3; do',
+            "die 'new script preflight refused'\nfor command in git docker flock curl python3; do",
+            1,
+        ))
+        self.git('add', 'scripts/update.sh', cwd=self.other)
+        self.git('commit', '-m', 'new preflight', cwd=self.other)
+        self.git('push', 'origin', 'master', cwd=self.other)
+
+        result = self.run_update('--stop-scans')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('new script preflight refused', result.stderr)
+        self.assertIn('Returned the checkout', result.stderr)
+        self.assertEqual(self.readme(), 'v1\n')
+        self.assertFalse(any(' migrate --noinput' in call for call in self.calls()))
+
     def test_a_drain_timeout_returns_the_checkout_before_beat_restarts(self):
         (self.stub / 'active').write_text('{' + ','.join(f'"{name}@local":[{{"id":"work"}}]' for name in
             ('discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker')) + '}')
