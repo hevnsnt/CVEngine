@@ -69,3 +69,41 @@ class DashboardDefaultTests(AllProjectsBase):
 	def test_stats_rejects_a_project_the_viewer_cannot_see(self):
 		r = client_for(self.ann).get('/cve/api/stats?project=gadgets')
 		self.assertEqual(r.status_code, 404)
+
+
+class ScopeCarriesTests(AllProjectsBase):
+	"""What the viewer picked in the switcher carries to the pages that name no project (Sentinels, Settings ...), to a bare /cve/
+	and to the section links on them; a project the viewer can no longer see is forgotten."""
+
+	def setUp(self):
+		cache.clear()
+		views._STATS_CACHE.clear()
+
+	def _page(self, c, path):
+		r = c.get(path)
+		self.assertEqual(r.status_code, 200, path)
+		return r.content.decode()
+
+	def test_all_projects_stays_selected_on_a_page_with_no_project(self):
+		c = client_for(self.ann)
+		self._page(c, '/cve/')  # Live opens on All projects
+		html = self._page(c, '/cve/about/')
+		self.assertIn('value="_all" selected', html)
+		self.assertIn('href="/cve/_all/hosts/"', html)  # and the section links keep it
+
+	def test_a_chosen_project_carries_to_other_pages_and_back_to_live(self):
+		c = client_for(self.ann)
+		self._page(c, '/cve/widgets/hosts/')
+		for path in ('/cve/about/', '/cve/', '/cve/graph/'):
+			html = self._page(c, path)
+			self.assertIn('value="widgets" selected', html, path)
+			self.assertNotIn('value="_all" selected', html, path)
+		self.assertIn('data-slug="_all"', self._page(c, '/cve/?project=_all'))  # picking All projects again is remembered too
+		self.assertIn('value="_all" selected', self._page(c, '/cve/about/'))
+
+	def test_a_project_the_viewer_cannot_see_any_more_is_forgotten(self):
+		c = client_for(self.ann)
+		session = c.session
+		session[views.SCOPE_KEY] = 'gadgets'  # another org's project
+		session.save()
+		self.assertIn('value="_all" selected', self._page(c, '/cve/about/'))

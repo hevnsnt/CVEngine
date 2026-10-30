@@ -317,12 +317,36 @@ SECTIONS = {
 }
 
 
-def ui_context(request, active, slug=None):
+SCOPE_KEY = 'cve_scope'  # the session's last chosen project (or ALL_PROJECTS): pages with no project in their address keep it
+
+
+def remembered_scope(request, visible):
+    """The project (or ALL_PROJECTS) this session last chose, when the caller can still see it; otherwise None. ``visible`` is
+    the slugs the caller can see."""
+    want = request.session.get(SCOPE_KEY) if hasattr(request, 'session') else None
+    if want == ALL_PROJECTS:
+        return want if len(visible) >= 2 else None
+    return want if want in visible else None
+
+
+def remember_scope(request, slug):
+    if slug and hasattr(request, 'session') and request.session.get(SCOPE_KEY) != slug:
+        request.session[SCOPE_KEY] = slug
+
+
+def ui_context(request, active, slug=None, remember=True):
     """Shell context shared by every UI page: active nav item and the project switcher. ``slug`` may be the reserved ``_all``
     (the read-only combined view): the switcher then marks "All projects" selected. That option is offered only to a caller who
-    can see two or more projects; with one there is nothing to combine."""
+    can see two or more projects; with one there is nothing to combine. A page that names a project remembers it for the
+    session (unless ``remember`` is false: a page that fell back to a project nobody chose); a page that names none (Sentinels,
+    Settings, About ...) shows the remembered one, so the switcher and the section links carry the choice everywhere."""
     from dashboard.models import Project
     projects = list(Project.objects.order_by('name').values('slug', 'name', org_slug=F('org__slug'), org_name=F('org__name')))  # scoped to the caller
+    if slug:
+        if remember:
+            remember_scope(request, slug)
+    else:
+        slug = remembered_scope(request, [p['slug'] for p in projects]) or (ALL_PROJECTS if len(projects) >= 2 else None)
     current = slug or (projects[0]['slug'] if projects else None)
     # the organizations the caller's projects belong to; the switcher shows an organization choice only when there are two or more
     orgs = []
@@ -363,8 +387,11 @@ def bounty_page(request):
         raise PermissionDenied
     projects = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
     want = request.GET.get('project') or ''
-    slug = want if want in projects and want != ALL_PROJECTS else (projects[0] if projects else None)
-    return render(request, 'cveFeed/bounty.html', ui_context(request, 'bounty', slug))
+    if not (want in projects and want != ALL_PROJECTS):
+        want = remembered_scope(request, projects) or ''
+    chosen = want in projects and want != ALL_PROJECTS
+    slug = want if chosen else (projects[0] if projects else None)
+    return render(request, 'cveFeed/bounty.html', ui_context(request, 'bounty', slug, remember=chosen))
 
 
 def dashboard(request):
@@ -376,7 +403,7 @@ def dashboard(request):
     # The dashboard spans every project the viewer can see by default (the combined "All projects" view); a
     # ?project=<slug> they may see narrows every panel to that one. The switcher stays here when it changes.
     projects = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
-    want = request.GET.get('project') or ''
+    want = request.GET.get('project') or remembered_scope(request, projects) or ''  # no ?project: the session's last choice
     if want and want != ALL_PROJECTS and want in projects:
         slug = want
     elif len(projects) >= 2:
@@ -391,8 +418,8 @@ def dashboard(request):
 def graph(request):
     from targetApp.models import Domain
     from dashboard.models import Project
-    project = request.GET.get('project', '')
     allowed = set(Project.objects.values_list('slug', flat=True))
+    project = request.GET.get('project') or remembered_scope(request, allowed) or ''  # no ?project: the session's last choice
     selected = project if project in allowed else ALL_PROJECTS if len(allowed) > 1 else next(iter(allowed), None)
     return render(request, 'cveFeed/graph.html', {
         'domains': Domain.objects.filter(project__slug=selected).select_related('project').order_by('name')
