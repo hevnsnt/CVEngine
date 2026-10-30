@@ -508,11 +508,20 @@ def remaining_requests(report):
 # ----------------------------------------------------------------------------- states: what happened to each candidate, on the host
 
 def record_state(project_id, domain_id, host, state, reason='', **extra):
-    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no WPScan result."""
+    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no WPScan result.
+
+    The core version the last successful scan read stays on the row through a run that could not read one (blocked by the edge, failed, waiting,
+    queued): the host page shows the state with the version it last knew, and only a scan that read the site (``scanned``) or found it is not
+    WordPress replaces or clears it."""
     from cveFeed.models import ProbeObservation
+    host = host.lower()
+    version = str(extra.get('version') or '')[:100]
+    if not version and state not in ('scanned', 'not_wordpress'):
+        previous = ProbeObservation.objects.filter(project_id=project_id, host=host, probe='wpscan', port=0, kind='wordpress', product='WordPress').first()
+        version = previous.version if previous else ''
     ProbeObservation.objects.update_or_create(
-        project_id=project_id, host=host.lower(), probe='wpscan', port=0, kind='wordpress', product='WordPress',
-        defaults={'domain_id': domain_id, 'version': str(extra.get('version') or '')[:100], 'variant': state,
+        project_id=project_id, host=host, probe='wpscan', port=0, kind='wordpress', product='WordPress',
+        defaults={'domain_id': domain_id, 'version': version, 'variant': state,
                   'outcome': {'scanned': 'found', 'blocked': 'challenged', 'not_wordpress': 'absent'}.get(state, 'hidden'),
                   'confidence': 1.0 if state == 'scanned' else 0.0, 'source': 'wpscan',
                   'evidence': {'state': state, 'reason': str(reason)[:300], **{k: v for k, v in extra.items() if k != 'version'}},
