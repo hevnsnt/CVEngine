@@ -11,11 +11,10 @@ was stored for (or, for a target-wide one, the target's own name or one of its s
 its origins, and it has not expired. Callers run the normal vetting first (``pinned_transport.resolve``,
 ``target_types.scannable_hosts``, exclusions); this module never widens what those allow.
 
-A stored sign-in goes only over a TLS connection whose certificate verifies, unless the owner switched on ``allow_untrusted_certificate`` for
-it (a self-signed, expired or wrong-name certificate, typical of a staging host): then anyone in the network path can read the values,
-which the settings say in so many words. ``AuthScope.accepts_untrusted_certificate`` answers that per destination; the senders are
-``route_auth.probe_url`` (the handshake itself verifies) and nuclei (its HTTP client never verifies, so ``certificate_verifies`` checks
-the server first, see ``auth_nuclei.trusted_plan``).
+The in-process route check sends a stored sign-in over HTTPS only when its own TLS connection verifies, unless the owner switched on
+``allow_untrusted_certificate``. Nuclei's HTTP client does not verify TLS on its request, so a separate certificate preflight cannot
+protect the sign-in. For HTTPS, the Nuclei pass withholds it unless the owner explicitly enabled that same switch; see
+``auth_nuclei.trusted_plan``. A plain HTTP origin must also be explicitly named by the owner.
 
 ``redact_text`` and ``redact_obj`` remove every secret value (and the usual encodings of it) from anything that is about to be stored
 or shown: scanner request and response dumps, evidence, error messages. Nothing in this module logs a value.
@@ -448,8 +447,8 @@ def target_parts(target):
 
 def certificate_verifies(host, port, project=None, timeout=3):
     """``(True, '')`` when a TLS handshake with ``host:port`` (vetted and pinned like every scanner connection) verifies the certificate
-    chain and name, else ``(False, reason)``; the reason is the verifier's own words and holds no secret. Used before a stored sign-in is
-    handed to nuclei, whose HTTP client does not verify certificates itself."""
+    chain and name, else ``(False, reason)``; the reason is the verifier's own words and holds no secret. This one-off check must not
+    authorize a later Nuclei request, because Nuclei does not verify the certificate on its separate credential-bearing connection."""
     import ssl
     from cveFeed import pinned_transport
     try:

@@ -6,7 +6,7 @@ import { api, badge, button, dialog, el, field, selectOf, shortDate, text, toast
 
 const EXPIRY_CHOICES = [["30", "30 days"], ["90", "90 days"], ["120", "120 days"], ["never", "Never (I chose this on purpose)"]];
 const UNTRUSTED_WARNING =
-  "Warning: with this on, the sign-in is also sent to a server whose certificate does not verify (self-signed, expired or for another name), so the sign-in can be read by anyone in the network path. Leave it off unless you know the server and the network.";
+  "Warning: with this on, the sign-in may be sent when the server certificate is invalid. Nuclei does not verify TLS on its signed-in request, even after a separate check succeeds. Anyone in the network path may read the sign-in. Leave this off unless you accept that risk.";
 const ORIGIN_HELP = "Where the values may be sent, as scheme:port, comma separated. Default https:443. Plain http only if you name it.";
 
 // The stored sign-ins of the project, or null when the viewer may not see them (not an App Admin or the organization's admin).
@@ -182,7 +182,7 @@ function openSignIn(state, target, changed) {
         scopeTarget.wrap,
         scopeWarn,
         field("Origins", origins, ORIGIN_HELP),
-        el("p", "note", "By default the sign-in is sent only to a server whose TLS certificate verifies. If this target uses a self-signed, expired or mismatched certificate (a typical staging host), the sign-in is not sent and the activity feed says why.", { style: "margin:10px 0 0;font-size:13px" }),
+        el("p", "note", "The web route check verifies TLS on its own connection. Nuclei cannot verify TLS on the request carrying the sign-in, so its signed-in HTTPS pass stays off unless you enable the switch below. Anonymous Nuclei checks still run.", { style: "margin:10px 0 0;font-size:13px" }),
         untrustedWrap,
         untrustedWarn,
         el("p", "note", "Headers (for example Authorization or X-Api-Key). A blank value for a stored name keeps it.", { style: "margin:10px 0 0" }),
