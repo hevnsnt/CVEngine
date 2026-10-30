@@ -599,6 +599,77 @@ class MoveHostTests(Base):
 		self.assertEqual(status, 200, out)
 		self.assertEqual(out['to_project'], 'a2')
 
+	def whole_target_setup(self):
+		"""a1 holds the target root.example with two hosts and a target under it; a2 already holds a host moved out of it earlier."""
+		now = timezone.now()
+		root = Domain.objects.create(name='root.example', project=self.a1, insert_date=now)
+		scan = ScanHistory.objects.create(domain=root, scan_type=self.engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
+		for name in ('root.example', 'mail.root.example'):
+			Subdomain.objects.create(target_domain=root, scan_history=scan, name=name)
+		HostLabel.objects.create(project=self.a1, domain=root, host='mail.root.example', label='WAF')
+		Domain.objects.create(name='api.root.example', project=self.a1, insert_date=now)
+		Domain.objects.create(name='staging.root.example', project=self.a2, insert_date=now)
+		return root
+
+	def test_a_target_with_hosts_under_it_is_refused_with_what_it_holds_and_nothing_is_deleted(self):
+		self.whole_target_setup()
+		with self.assertRaises(ApiError) as e:
+			hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2')
+		self.assertEqual(e.exception.status, 409)
+		self.assertEqual(e.exception.extra['whole_target'], {'host': 'root.example', 'hosts': ['api.root.example', 'mail.root.example'], 'count': 2})
+		self.assertEqual(Domain.objects.filter(project=self.a1, name__endswith='root.example').count(), 2)
+		token = create_token(self.admin, 'mover')[1]
+		status, out = call(token, 'POST', '/api/v1/projects/a1/hosts/root.example/move', {'to_project': 'a2'})
+		self.assertEqual((status, out['whole_target']['count']), (409, 2), out)
+
+	def test_the_whole_target_moves_with_every_host_under_it(self):
+		from cveFeed.models import HostMove
+		self.whole_target_setup()
+		out = hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
+		self.assertEqual((out['hosts_moved'], out['target_created']), (3, True))
+		self.assertFalse(Domain.objects.filter(project=self.a1, name__endswith='root.example').exists())
+		self.assertFalse(Subdomain.objects.filter(target_domain__project=self.a1, name__endswith='root.example').exists())
+		self.assertFalse(HostLabel.objects.filter(project=self.a1, host='mail.root.example').exists())
+		self.assertEqual(sorted(Domain.objects.filter(project=self.a2, name__endswith='root.example').values_list('name', flat=True)),
+			['root.example', 'staging.root.example'])  # what was moved there before stays
+		self.assertEqual(sorted(HostMove.objects.filter(project=self.a1).values_list('host', flat=True)),
+			['api.root.example', 'mail.root.example', 'root.example'])
+		self.assertTrue(is_excluded(self.a1.pk, 'mail.root.example'))
+		self.assertFalse(is_excluded(self.a2.pk, 'mail.root.example'))
+		hm.move_host(self.ctx(self.admin), 'a2', 'root.example', 'a1', whole_target=True)  # and back: the blocks lift
+		self.assertFalse(HostMove.objects.filter(project=self.a1).exists())
+		self.assertTrue(Domain.objects.filter(project=self.a1, name='root.example').exists())
+
+	def test_a_whole_target_is_refused_when_a_third_project_holds_a_target_under_it(self):
+		self.whole_target_setup()
+		a3 = Project.objects.create(name='A3', slug='a3', insert_date=timezone.now(), org=self.org_a)
+		Domain.objects.create(name='dev.root.example', project=a3, insert_date=timezone.now())
+		with self.assertRaises(ApiError) as e:
+			hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
+		self.assertEqual(e.exception.status, 409)
+		self.assertIn('dev.root.example', e.exception.message)
+		self.assertTrue(Domain.objects.filter(project=self.a1, name='root.example').exists())
+
+	def test_a_removal_a_running_scan_got_in_the_way_of_is_run_again(self):
+		"""A scan already under way can write a row for a target being deleted; the commit then fails whole and is retried."""
+		from django.db import IntegrityError
+		self.whole_target_setup()
+		real, calls = hm._purge, []
+
+		def flaky(*a, **k):
+			calls.append(a[1])
+			if len(calls) == 1:
+				raise IntegrityError('still referenced')
+			return real(*a, **k)
+		with mock.patch.object(hm, '_purge', side_effect=flaky), mock.patch.object(hm.time, 'sleep'):
+			out = hm.exclude_host(self.ctx(self.admin), 'a1', 'root.example', include_subdomains=True)
+		self.assertTrue(out['excluded'])
+		self.assertFalse(Domain.objects.filter(name__endswith='root.example').exists())
+		with mock.patch.object(hm, '_purge', side_effect=IntegrityError('still referenced')), mock.patch.object(hm.time, 'sleep'):
+			with self.assertRaises(ApiError) as e:
+				hm.delete_host(self.ctx(self.admin), 'a1', 'owned-a1.test')
+		self.assertEqual(e.exception.status, 409)
+
 	def test_the_project_list_names_each_projects_organization(self):
 		rows = {p['slug']: p for p in svc.list_projects(self.ctx(self.admin))['results']}
 		self.assertEqual((rows['a2']['org'], rows['a2']['org_name']), ('oa', 'A'))

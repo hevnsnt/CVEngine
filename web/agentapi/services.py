@@ -39,9 +39,9 @@ FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')
 
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, **extra):
         super().__init__(message)
-        self.status, self.message = status, message
+        self.status, self.message, self.extra = status, message, extra  # extra: fields the caller can act on, sent beside the error
 
 
 @dataclass
