@@ -27,7 +27,7 @@ FAST_XML = '''<?xml version="1.0"?>
 <ports><port protocol="tcp" portid="22">
 <state state="open"/><service name="ssh" product="OpenSSH" version="8.9" extrainfo="Ubuntu"/>
 </port></ports>
-</host></nmaprun>'''
+</host><runstats><finished exit="success"/></runstats></nmaprun>'''
 
 
 def _answer_queued_task(result, status='done'):
@@ -135,7 +135,8 @@ class NmapDispatchTests(DispatchBase):
             calls.append((targets, flags))
             return ('<nmaprun><host><address addr="192.0.2.10" addrtype="ipv4"/><ports>'
                     '<port protocol="tcp" portid="8443"><state state="open"/>'
-                    '<service name="https" product="nginx" version="1.25"/></port></ports></host></nmaprun>')
+                    '<service name="https" product="nginx" version="1.25"/></port></ports></host>'
+                    '<runstats><finished exit="success"/></runstats></nmaprun>')
 
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
             result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=local_runner,

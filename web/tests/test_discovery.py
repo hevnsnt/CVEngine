@@ -563,7 +563,7 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(set(ScanActivity.objects.filter(scan_of=scan).values_list('status', flat=True)), {2})
 
 	MYSQL_XML = """<?xml version="1.0"?><nmaprun><host><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="3306">
-		<state state="open"/><service name="mysql" product="MySQL" version="8.0"/></port></ports></host></nmaprun>"""
+		<state state="open"/><service name="mysql" product="MySQL" version="8.0"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>"""
 	WORDPRESS = {'template-id': 'tech-detect', 'matcher-name': 'WordPress', 'host': 'https://www.example.test',
 	             'info': {'name': 'Wappalyzer Technology Detection', 'severity': 'info'}}
 

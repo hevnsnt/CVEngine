@@ -18,7 +18,7 @@ def xml(ip, ports, closed=True):
 	body = ''.join(f'<port protocol="tcp" portid="{n}"><state state="open"/><service name="{s}"/></port>' for n, s in ports)
 	extra = '<extraports state="closed" count="65000"/>' if closed else ''
 	return (f'<?xml version="1.0"?><nmaprun><scaninfo type="syn" protocol="tcp" services="1-65535"/><host><status state="up"/>'
-		f'<address addr="{ip}" addrtype="ipv4"/><ports>{extra}{body}</ports></host></nmaprun>')
+		f'<address addr="{ip}" addrtype="ipv4"/><ports>{extra}{body}</ports></host><runstats><finished exit="success"/></runstats></nmaprun>')
 
 
 class FullScanBase(TestCase):

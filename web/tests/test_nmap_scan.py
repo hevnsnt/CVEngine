@@ -313,7 +313,7 @@ def _report(ports, scanned='22,80,443,3306,8080', extraports='closed', status='u
 		f'<service name="svc" product="{product}" version="{version}"/></port>' for n, state, product, version in ports)
 	extra = f'<extraports state="{extraports}" count="3"/>' if extraports else ''
 	return (f'<?xml version="1.0"?><nmaprun><scaninfo type="syn" protocol="tcp" numservices="5" services="{scanned}"/>'
-		f'<host><status state="{status}"/><address addr="192.0.2.77" addrtype="ipv4"/><ports>{extra}{body}</ports></host></nmaprun>')
+		f'<host><status state="{status}"/><address addr="192.0.2.77" addrtype="ipv4"/><ports>{extra}{body}</ports></host><runstats><finished exit="success"/></runstats></nmaprun>')
 
 
 class OpenPortStateTests(TestCase):
