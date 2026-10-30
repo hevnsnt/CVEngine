@@ -29,11 +29,16 @@ from django.db.models import Count
 from startScan.models import Subdomain, IpAddress
 from targetApp.models import Domain
 assert Domain.objects.filter(name='rehearsal.example').exists(), 'the target is gone'
-# discovery runs in the background of an updated install and may add hosts of its own (the domain itself, say): the seeded four must all be there
-wanted = {'h0.rehearsal.example', 'h1.rehearsal.example', 'h2.rehearsal.example', 'www.rehearsal.example'}
-hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted)
-assert {h.name for h in hosts} == wanted, f'seeded hosts missing: {sorted(wanted - {h.name for h in hosts})}'
-assert all(h.ip_addresses.exists() for h in hosts), 'a host lost its address'
+# discovery and host pipelines run in the background of an updated install and add rows of their own: the domain itself, and scan-owned copies of
+# the seeded names (rehearsal.example does not resolve, so a copy holds no address). The update has to keep what the seed made: the four hosts
+# that no scan owns, each still linked to the address it was given.
+wanted = {'h0.rehearsal.example': '203.0.113.10', 'h1.rehearsal.example': '203.0.113.10', 'h2.rehearsal.example': '203.0.113.10',
+          'www.rehearsal.example': '203.0.113.11'}
+hosts = Subdomain.objects.filter(target_domain__name='rehearsal.example', name__in=wanted, scan_history__isnull=True)
+assert {h.name for h in hosts} == set(wanted), f'seeded hosts missing: {sorted(set(wanted) - {h.name for h in hosts})}'
+for h in hosts:
+    got = sorted(h.ip_addresses.values_list('address', flat=True))
+    assert got == [wanted[h.name]], f'{h.name} has {got}, not its seeded address {wanted[h.name]}'
 dups = IpAddress.objects.values('address').annotate(c=Count('id')).filter(c__gt=1).count()
 assert dups == 0, f'{dups} addresses are still stored more than once'
 print('DATA OK')
@@ -45,7 +50,10 @@ if [ -f "$HOME/schema-before.txt" ]; then
 fi
 # The application works on the new schema: the MCP endpoint and its token lookup, tools that read the changed tables, the main pages
 dc exec -T web python3 manage.py shell < "$GITHUB_WORKSPACE/.github/rehearsal/smoke.py" || bad "the functional smoke test failed (see the lines above)"
-if [ "$(cat "$HOME/base.sha")" != "$(cat "$HOME/candidate.sha")" ]; then
+# The rewrite is a data migration (0092): it only reaches rows that existed when the update ran, so it can be checked only when the installed
+# (base) version does not have it yet. A base that already ran it leaves the old wording the seed adds afterwards as it is.
+base_has_rewrite() { git -C "$GITHUB_WORKSPACE" cat-file -e "$(cat "$HOME/base.sha"):web/cveFeed/migrations/0092_reword_different_product_closures.py" 2>/dev/null; }
+if [ "$(cat "$HOME/base.sha")" != "$(cat "$HOME/candidate.sha")" ] && ! base_has_rewrite; then
   dc exec -T web python3 manage.py shell <<'PY' || bad "the stored closure wording was not rewritten"
 from cveFeed.models import CVEMatch, TriageVerdict
 old = CVEMatch.objects.filter(ai_reason__contains='invalid product correlation').count() + TriageVerdict.objects.filter(reason__contains='invalid product correlation').count()

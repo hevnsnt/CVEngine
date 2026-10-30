@@ -10,6 +10,6 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='updatesettings',
             name='reference_unknown',
-            field=models.BooleanField(default=False),
+            field=models.BooleanField(default=False, db_default=False),  # a database default: the old code, still running between the migration and the restart, inserts without this column
         ),
     ]
