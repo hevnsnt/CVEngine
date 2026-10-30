@@ -47,6 +47,18 @@ def valid_branch(branch):
     return bool(BRANCH_RE.match(branch or '')) and '..' not in branch and not branch.endswith(('/', '.lock'))
 
 
+RELEASE_BRANCHES = ('master', 'main')  # the branches a release is cut from; any other branch is a development line
+
+
+def branch_warning(branch):
+    """Why an administrator should look twice before updating from ``branch``, or '' for a release branch. Any branch may be tracked
+    (a fork's own, develop for a test server); nothing is refused, but the approval says plainly that it is not a release."""
+    if (branch or '') in RELEASE_BRANCHES:
+        return ''
+    return (f'This server tracks the branch "{branch}", not a release branch ({" or ".join(RELEASE_BRANCHES)}). '
+            'It gets work in progress that has not been released or fully tested.')
+
+
 def _file(name):
     return os.path.join(settings.BASE_DIR, name)
 
@@ -423,7 +435,8 @@ def state(row):
     # phase it last wrote, and an admin's manual resume can clear it between runs without rewriting the phase file.
     control = ScanControl.current()
     return {
-        'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'has_token': bool(row.token),
+        'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'branch_warning': branch_warning(row.branch),
+        'has_token': bool(row.token),
         'installed': installed[:7], 'installed_known': bool(installed),
         'local_commits': host['ahead'] if host else None, 'common': host['base'][:7] if host else '', 'host_comparison': note,
         'latest': row.latest_sha[:7], 'latest_message': row.latest_message, 'latest_url': row.latest_url,

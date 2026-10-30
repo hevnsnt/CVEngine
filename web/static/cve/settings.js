@@ -463,6 +463,7 @@ const sections = {
         }
         if (s.latest_url) kids.push(el("a", "note", "View on GitHub", { href: s.latest_url, target: "_blank", rel: "noopener noreferrer", style: "display:block;margin:0 0 14px" }));
       }
+      if (s.branch_warning) kids.push(el("p", "msg err", s.branch_warning, { style: "margin-top:10px" }));
       if (s.status === "approved") {
         kids.push(
           el("p", "note", s.approved_by === "automatic" ? `Approved automatically at ${when(s.approved_at)} because updates are set to Automatic.` : `Approved by ${s.approved_by} at ${when(s.approved_at)}.`, { style: "margin-top:10px" }),
@@ -471,9 +472,9 @@ const sections = {
       } else if (["available", "dismissed"].includes(s.status)) {
         kids.push(
           button("Approve update", async () => {
-            const note = hu.alive
+            const note = (s.branch_warning ? s.branch_warning + " " : "") + (hu.alive
               ? "Scans are paused, running ones finish, then the host rebuilds and restarts the services."
-              : "The host updater is not reporting, so nothing will start until it is installed on the server (scripts/install-updater.sh).";
+              : "The host updater is not reporting, so nothing will start until it is installed on the server (scripts/install-updater.sh).");
             if (!(await ask(note, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
             draw(await api("POST", "updates/approve"));
             toast("Approved");

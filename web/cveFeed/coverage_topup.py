@@ -31,6 +31,7 @@ before picking their next deep-scan target: first-pass coverage everywhere outra
 port sweep or UDP exposure check. It reuses host_coverage_due() rather than a second query.
 """
 import logging
+from datetime import timedelta
 
 from django.utils import timezone
 
@@ -149,10 +150,102 @@ def _top_up(now, only_sentinel_projects):
     return result
 
 
+REFRESH_GAP_DEFAULT_HOURS = 6  # a host is not assessed again by the refresh until this long after its last assessment started
+REFRESH_PER_RUN = 20           # most assessments one refresh pass queues across all projects
+
+
+def refresh_gap():
+    """How long a host rests between refresh assessments (``CVENGINE_SENTINEL_REFRESH_GAP_HOURS``, default 6; ``0`` turns the refresh off)."""
+    import os
+    try:
+        hours = float(os.environ.get('CVENGINE_SENTINEL_REFRESH_GAP_HOURS', REFRESH_GAP_DEFAULT_HOURS))
+    except ValueError:
+        hours = REFRESH_GAP_DEFAULT_HOURS
+    return None if hours <= 0 else timedelta(hours=hours)
+
+
+def stalest_hosts(project, now, limit, gap):
+    """Up to ``limit`` ``Subdomain`` rows of ``project``'s current inventory whose last host assessment started longest ago (never assessed first),
+    leaving out a host assessed inside ``gap``. One row per host name. This is for hosts that already have their first-pass coverage: the ones that
+    miss it are ``host_coverage_due``'s."""
+    from django.db.models import F, OuterRef, Q, Subquery
+    from django.db.models.functions import Lower
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import HostAssessment
+    from startScan.models import Subdomain
+
+    last = HostAssessment._base_manager.filter(project=project, host=OuterRef('lowered')).order_by('-created_at').values('created_at')[:1]
+    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
+            .annotate(lowered=Lower('name')).annotate(last_assessed=Subquery(last))
+            .filter(Q(last_assessed__isnull=True) | Q(last_assessed__lt=now - gap))
+            .order_by(F('last_assessed').asc(nulls_first=True), 'id')[:limit * 4])
+    seen, out = set(), []
+    for row in rows:
+        if row.lowered in seen:
+            continue
+        seen.add(row.lowered)
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def refresh_for_sentinels(now=None):
+    """Keep the Sentinels busy when no host is missing first-pass coverage. Every host assessment sends its stages to a Sentinel first, so a
+    Sentinel works only while assessments are in flight, and once every host has its first pass nothing creates one: it would sit idle. For each
+    project a live Sentinel covers, this fills the project's Sentinel-scaled assessment cap (``host_assessment.caps``) with the hosts assessed
+    longest ago, none inside ``refresh_gap()``. The stages go to a Sentinel and fall back to this server only when it cannot take them. The usual
+    gates apply in ``host_assessment.enqueue`` (exclusions, archived hosts, bug bounty scope and its confirmation, internal hosts). Returns a
+    summary; never raises for one project."""
+    from agentapi import sentinel_broker
+    from cveFeed.conductor import bounty_blocked_projects
+    from cveFeed.host_assessment import active_count, caps, enqueue
+    from cveFeed.scan_control import pause_requested
+
+    now = now or timezone.now()
+    gap = refresh_gap()
+    out = {'refreshed': 0, 'skipped': None}
+    if gap is None:
+        out['skipped'] = 'refresh is off'
+        return out
+    if pause_requested(fail_closed=True):
+        out['skipped'] = 'paused'
+        return out
+    global_cap, _ = caps()
+    budget = min(global_cap - active_count(), REFRESH_PER_RUN)
+    if budget <= 0:
+        out['skipped'] = 'global capacity'
+        return out
+    for project in _projects(bounty_blocked_projects()):
+        if budget <= 0:
+            break
+        if not sentinel_broker.project_slots(project):
+            continue
+        free = min(caps(project)[1] - active_count(project), budget)
+        if free <= 0:
+            continue
+        cand = stalest_hosts(project, now, free, gap)
+        for sub in cand:
+            try:
+                job, created = enqueue(project, sub, source='refresh')
+            except (ValueError, RuntimeError) as exc:
+                logger.info('refresh could not queue host %s of project %s: %s', sub.pk, project.pk, exc)
+                continue
+            if created and job.status == 'queued':
+                out['refreshed'] += 1
+                budget -= 1
+    if out['refreshed']:
+        from cveFeed import activity
+        activity.log('discovery', f"Refresh queued {out['refreshed']} host assessment{'s' if out['refreshed'] != 1 else ''} so the Sentinels keep working",
+                     status='done', hosts_queued=out['refreshed'])
+    return out
+
+
 def feed_sentinels(now=None):
-    """Once a minute: when the work waiting for the Sentinels is less than twice their slots, queue more (``top_up`` over the projects they cover,
-    with the Sentinel-scaled caps). A Sentinel that is working through its tasks has the next ones already waiting, instead of idling until the
-    five-minute top-up. Does nothing without a live Sentinel or while the queue is already deep enough."""
+    """Once a minute, keep the Sentinels working: first the hosts missing a first pass (``top_up`` over the projects they cover, with the
+    Sentinel-scaled caps), then, with the pool still short of those caps, the stalest hosts again (``refresh_for_sentinels``). A Sentinel that
+    works through its tasks has the next ones already waiting, and one that has run out of new hosts is given old ones to re-check, instead of
+    idling. Does nothing without a live Sentinel."""
     from agentapi import sentinel_broker
     with sentinel_broker.memoised_rights():  # top_up joins this block, so the rights built for the slot count are the ones it reuses
         slots = sentinel_broker.total_slots()
@@ -162,8 +255,9 @@ def feed_sentinels(now=None):
         wanted = 2 * slots
         if waiting >= wanted:
             return {'skipped': 'queue is deep enough', 'slots': slots, 'waiting': waiting}
-        out = top_up(now, only_sentinel_projects=True)
-        return {**out, 'slots': slots, 'waiting': waiting, 'wanted': wanted}
+        out = {**top_up(now, only_sentinel_projects=True), 'slots': slots, 'waiting': waiting, 'wanted': wanted}
+        out['refresh'] = refresh_for_sentinels(now)
+        return out
 
 
 # ----------------------------------------------------------------------------- deep-scan coverage gate
