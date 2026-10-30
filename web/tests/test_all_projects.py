@@ -480,3 +480,37 @@ class ReservedSlugTests(AllProjectsBase):
 		r = c.post('/cve/api/admin/projects', json.dumps({'org_id': self.org1.id, 'name': 'All hands'}), content_type='application/json')
 		self.assertEqual(r.status_code, 201)
 		self.assertEqual(r.json()['slug'], 'all-hands')
+
+
+class OrgAllProjectsTests(AllProjectsBase):
+	"""All projects narrowed to one organization: chosen in the switcher (?org=), remembered by the browser session for the pages and
+	polls that do not name it, and named per call by a token caller. An unknown organization never empties the view."""
+
+	def hosts(self, c, qs=''):
+		return {h['project'] for h in c.get('/api/v1/projects/_all/hosts' + qs).json()['results']}
+
+	def test_choosing_an_organization_then_all_projects_shows_only_its_projects(self):
+		c = client_for(self.boss)  # sees every project: Acme and Widgets in Acme Corp, Gadgets in Widgets Inc
+		html = c.get('/cve/_all/hosts/?org=acme-corp').content.decode()
+		self.assertIn('<option value="acme-corp" data-projects="acme widgets " selected>', html)
+		self.assertIn('All projects in Acme Corp · 2 you can access', html)
+		self.assertNotIn('<option value="gadgets"', html)  # the project list is that organization's
+		self.assertEqual(self.hosts(c), {'acme', 'widgets'})  # the page's own calls name no organization: the session does
+		self.assertEqual(c.get('/cve/api/stats?project=_all').json()['targets'], 2)
+		self.assertIn('value="acme-corp" data-projects="acme widgets " selected', c.get('/cve/about/').content.decode())
+		html = c.get('/cve/_all/hosts/?org=').content.decode()  # All organizations again
+		self.assertIn('<option value="" selected>All organizations</option>', html)
+		self.assertEqual(self.hosts(c), {'acme', 'widgets', 'gadgets'})
+		self.assertEqual(c.get('/cve/api/stats?project=_all').json()['targets'], 3)
+
+	def test_an_explicit_org_wins_and_an_unknown_one_is_ignored(self):
+		c = client_for(self.boss)
+		self.assertEqual(self.hosts(c, '?org=widgets-inc'), {'gadgets'})
+		self.assertEqual(self.hosts(c, '?org=no-such-org'), {'acme', 'widgets', 'gadgets'})
+		_, token = create_token(self.boss, 'boss')
+		status, body = bearer(token, 'GET', '/api/v1/projects/_all/hosts?org=acme-corp')
+		self.assertEqual((status, {h['project'] for h in body['results']}), (200, {'acme', 'widgets'}))
+
+	def test_it_never_widens_what_the_caller_may_see(self):
+		c = client_for(self.ann)  # Acme Corp only
+		self.assertEqual(self.hosts(c, '?org=widgets-inc'), {'acme', 'widgets'})

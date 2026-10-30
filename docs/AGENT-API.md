@@ -244,7 +244,7 @@ Each target carries `scope_mode` and `host_scoped`. See [Shared provider domains
 
 ## All projects
 
-The reserved slug `_all` means every project you can see. The list endpoints and tools accept it in place of a project slug and return one combined, read-only list: `targets`, `scans`, `hosts`, `search`, `findings`, `vulnerabilities`, `matches`, `changes`, `activity`, `hygiene`, `certificates`, and `routes`. Every row carries `project` (use this slug for anything you do next) and `project_name`. Only your own projects contribute rows, and `count` is the total. Everything else needs a real project: a write or a per-item call with `_all` is a `400`.
+The reserved slug `_all` means every project you can see. The list endpoints and tools accept it in place of a project slug and return one combined, read-only list: `targets`, `scans`, `hosts`, `search`, `findings`, `vulnerabilities`, `matches`, `changes`, `activity`, `hygiene`, `certificates`, and `routes`. Every row carries `project` (use this slug for anything you do next) and `project_name`. Only your own projects contribute rows, and `count` is the total. Everything else needs a real project: a write or a per-item call with `_all` is a `400`. Add `?org=<organization slug>` to narrow `_all` to that organization's projects (an organization you have no projects in is ignored, so it never widens or empties the view). In the web app the switcher sets it: choose an organization, then **All projects**; the browser session remembers it for the pages and polls that do not name it, and **All organizations** clears it.
 
 ## Host management
 

@@ -20,6 +20,7 @@ from agentapi import authcheck
 from agentapi import reports
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
+from tenancy import roles
 from reNgine import schema_guard
 from agentapi.auth import create_token
 from tenancy import audit
@@ -484,7 +485,7 @@ def dispatch(request, path):
     path = path.strip('/')
     if path == 'openapi.json':
         return JsonResponse(openapi_spec())
-    ctx = Ctx(user=request.user, token=getattr(request, 'api_token', None))
+    ctx = Ctx(user=request.user, token=getattr(request, 'api_token', None), org=roles.scope_org(request))
     allowed = []
     for method, regex, _, fn in COMPILED:
         match = regex.match(path)
