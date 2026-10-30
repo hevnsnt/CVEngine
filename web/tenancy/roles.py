@@ -14,6 +14,32 @@ SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
 ALL_PROJECTS = '_all'
 
 
+# The All projects view can be narrowed to one organization ("All projects" with that organization chosen in the switcher). A
+# page or API call names it with ?org=<slug> (empty: every organization); a browser session remembers the last choice under this
+# key, so the polls a page makes without repeating it get the same answer. A bearer-token caller has no session: only ?org=.
+SCOPE_ORG_KEY = 'cve_scope_org'
+
+
+def scope_org(request):
+    """The organization slug the All projects view is narrowed to for ``request``, or '' for every organization."""
+    if 'org' in request.GET:
+        return (request.GET.get('org') or '').strip()
+    if getattr(request, 'api_token', None):
+        return ''
+    session = getattr(request, 'session', None)
+    return str(session.get(SCOPE_ORG_KEY) or '') if session is not None else ''
+
+
+def org_project_ids(ids, org_slug):
+    """``ids`` (allowed project ids) cut down to the projects of the organization ``org_slug``; ``ids`` unchanged when no
+    organization is named or none of the caller's projects is in it (an unknown or stale slug never empties the view)."""
+    if not org_slug:
+        return ids
+    from dashboard.models import Project
+    narrowed = list(Project.objects.filter(id__in=list(ids), org__slug=org_slug).values_list('id', flat=True))
+    return narrowed or ids
+
+
 def is_reserved_project(*values):
     """True when any of ``values`` (a project name or slug) is the reserved all-projects slug, ignoring case and padding."""
     return any(str(v or '').strip().lower() == ALL_PROJECTS for v in values)
