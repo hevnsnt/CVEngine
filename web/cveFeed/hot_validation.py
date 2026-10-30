@@ -144,8 +144,8 @@ def _job_current(job, now):
         # Evidence changes get a new signature. Closure can be reversed without a
         # signature change, so a reopened eligible finding is allowed a new job.
         reason = (job.result or {}).get('reason')
-        if reason == 'no_longer_eligible':
-            return False
+        if reason in ('no_longer_eligible', 'historical'):
+            return False  # a replaced match's job says nothing about the match that replaced it
         if reason == 'out_of_scope':
             return when > now - timedelta(minutes=30)
         return True

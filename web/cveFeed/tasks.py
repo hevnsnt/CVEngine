@@ -668,6 +668,23 @@ def validate_findings(project_id, triage_ids, scan_id=None):
         return {"error": str(exc)[:200]}
 
 
+def _skip_on_demand_validation(job, progress, cve_id, reason):
+    """A queued request whose match is no longer the host's current finding is superseded work: it spends no attempt, schedules no retry
+    and is not logged as a failure (the automatic path does the same, ``_skip_automatic_validation``)."""
+    from django.utils import timezone
+    from cveFeed import activity
+    from cveFeed.models import OnDemandValidation
+
+    text = {'historical': 'the match was replaced by a newer scan before the request ran',
+            'out_of_scope': 'the host is outside the scannable project scope'}[reason]
+    result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason, 'next_action': text}
+    OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
+        status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
+    activity.settle(progress, 'done', f'Validation request #{job.pk} skipped for {cve_id}: {text}',
+                    check_state='not_run', ai_state='not_run', reason=reason)
+    return result
+
+
 @app.task(name="validate_match_on_demand", bind=False, queue="validation_priority_queue")
 def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
@@ -688,10 +705,14 @@ def validate_match_on_demand(request_id):
                             project=job.project_id, cve_id=cve_id, status='running', **detail)
     try:
         require_authority(job)
-        match = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id).filter(
-            latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
-        if not match or not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
-            raise ValueError('match is no longer current or the host is outside scannable project scope')
+        owned = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id)
+        match = owned.filter(latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
+        if not match:
+            # a rescan replaced the match while the job waited (or the host left the inventory): superseded work, not a worker failure.
+            # The rescan's own match is queued by the next sweep, which does not count this job against it.
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
+        if not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
+            return _skip_on_demand_validation(job, progress, cve_id, 'out_of_scope')
         invalid_reason = correlation.invalid_identity_reason(match)
         if invalid_reason:
             correlation.close_invalid_correlation(match, invalid_reason)
