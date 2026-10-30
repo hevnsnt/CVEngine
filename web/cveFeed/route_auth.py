@@ -19,7 +19,7 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 
-from cveFeed import fingerprint, versions
+from cveFeed import fingerprint, soft404, versions
 
 logger = logging.getLogger(__name__)
 
@@ -280,45 +280,70 @@ def analyse(result):
     found = sensitive.scan_text(body) if sensitive.is_text(content_type) else {}
     return {'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
             'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
-            # what the page was, for comparing it with the answer to a path that cannot exist; never stored
-            'digest': hashlib.sha1(body.encode('utf-8', 'replace')).hexdigest()[:16], 'bytes': result.get('bytes', len(body))}
+            # what the page was, for comparing it with the answer to a path that cannot exist (cveFeed.soft404); held in memory, never stored
+            'fp': soft404.fingerprint(result, urlparse(result.get('url') or '').path), 'bytes': result.get('bytes', len(body))}
 
 
-CATCH_ALL = 'catch_all'  # answers exactly as the server answers for a path that does not exist: no evidence that the route is there
+CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
+MAX_BASELINES_PER_HOST = 8  # extra requests a host may be asked for what its missing pages look like, on top of its routes
 
 
-def same_as_missing_page(answer, missing):
-    """True when ``answer`` (a route's analysed response) is the server's answer for a path that cannot exist (``missing``): the same
-    status and type and the same body, or, for a page that carries a changing token or time, the same title and nearly the same size."""
-    if not missing or answer.get('status') != missing.get('status') or answer.get('content_type') != missing.get('content_type'):
-        return False
-    if answer.get('digest') == missing.get('digest'):
-        return True
-    a, b = answer.get('bytes') or 0, missing.get('bytes') or 0
-    return bool(answer.get('title') and answer.get('title') == missing.get('title') and abs(a - b) <= max(32, b // 50))
+def _split_route(path):
+    """``(directory, shape, extension)`` of a route path: the directory it is in (``/api/v1/``), and how a name for it that cannot exist
+    should look, because servers answer a missing ``.php`` file, a missing directory and a missing bare name differently."""
+    directory = path.rsplit('/', 1)[0] + '/'
+    name = path.rsplit('/', 1)[1]
+    if path.endswith('/') and path != '/':
+        return path.rsplit('/', 2)[0] + '/', 'slash', ''
+    ext = name.rsplit('.', 1)[1].lower() if '.' in name else ''
+    return directory, ('ext' if re.fullmatch(r'[a-z0-9]{1,5}', ext) else 'bare'), ext
+
+
+def _baseline_path(directory, shape, ext):
+    name = f'cvengine-{secrets.token_hex(6)}'
+    return directory + (name + '/' if shape == 'slash' else f'{name}.{ext}' if shape == 'ext' else name)
+
+
+def _baseline(base, directory, shape, ext, probe, known):
+    """The fingerprint of the server's answer for a path that cannot exist in ``directory``, of the kind ``shape`` names, read once per
+    web base, directory and shape. None when it could not be read or this host has used up its requests for it."""
+    key = (base, directory, shape, ext if shape == 'ext' else '')
+    if key not in known:
+        if sum(1 for k in known if k[0] == base) >= MAX_BASELINES_PER_HOST:
+            return None
+        time.sleep(PER_REQUEST_GAP)
+        path = _baseline_path(directory, shape, ext)
+        try:
+            known[key] = soft404.fingerprint(probe(base + path), path)
+        except Exception:  # noqa: BLE001 - no answer to compare with: the route stands as it was read
+            known[key] = None
+    return known[key]
 
 
 def _against_missing_page(answer, url, probe, known):
-    """``answer`` for ``url`` as it stands, or as ``catch_all`` when the server gives the same answer for a path that cannot exist
-    (many appliances and single-page apps answer every path with one page, which says nothing about the route). Only a non-root route
-    that came out open is compared, and the one extra request per web base (a random path) is made the first time one does."""
-    path = urlparse(url).path or '/'
-    if answer.get('state') != 'open' or path == '/':
-        return answer
+    """``answer`` for ``url`` as it stands, or as ``catch_all`` when the server gives the same answer for a path that cannot exist in the
+    same directory and of the same kind (soft404). Every answer that could be a route's own is compared, not only an open one: a server
+    that sends every path to its login page, or answers 403 to all of them, says as little about a route as one that serves a shell.
+    The root is never compared."""
     parts = urlparse(url)
-    base = f'{parts.scheme}://{parts.netloc}'
-    if base not in known:
-        time.sleep(PER_REQUEST_GAP)
-        try:
-            known[base] = analyse(probe(f'{base}/cvengine-{secrets.token_hex(6)}'))
-        except Exception:  # noqa: BLE001 - no answer to compare with: the route stands as it was read
-            known[base] = None
-    missing = known[base]
-    if not same_as_missing_page(answer, missing):
+    path = parts.path or '/'
+    status = answer.get('status') or 0
+    if path == '/' or status in (404, 410) or not (200 <= status < 400 or status in (401, 403, 405)) or answer.get('state') == 'error':
         return answer
-    evidence = {**answer['evidence'], 'catch_all': {'status': missing.get('status'), 'bytes': missing.get('bytes'),
-                                                    'note': 'the same answer as for a path that cannot exist'}}
-    return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0}
+    fp = answer.get('fp')
+    if fp is None:
+        return answer
+    base = f'{parts.scheme}://{parts.netloc}'
+    directory, shape, ext = _split_route(path)
+    # where a path that cannot exist is asked for: beside the route, in its own kind and as a plain name (what ffuf, feroxbuster and
+    # dirsearch calibrate per directory). Below the route is not asked: a server that answers every path under /api alike has an /api
+    for kind in dict.fromkeys((shape, 'bare')):
+        missing = _baseline(base, directory, kind, ext if kind == 'ext' else '', probe, known)
+        if missing is not None and soft404.same(fp, missing):
+            evidence = {**answer['evidence'], 'catch_all': {**soft404.public(missing), 'kind': kind,
+                                                            'note': 'the same answer as for a path that cannot exist'}}
+            return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0}
+    return answer
 
 
 # ----------------------------------------------------------------------------- network
@@ -686,7 +711,7 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
         elif row.zombie_since is not None and not answers:
             row.zombie_since = None
         old_rows.append(row)
-        if was != state and not explained and not (was == 'open' and state == CATCH_ALL):  # a reading corrected, nothing changed on the server
+        if was != state and not explained and state != CATCH_ALL:  # a reading corrected (the server answers every path alike), nothing changed on the server
             changes.record_auth_change(project, scan.domain_id, scan.id, host.lower(), url, was, state,
                                        {'http_status': result.get('status'), 'provider': evidence.get('provider', '')})
     for part in _chunks(new_rows):

@@ -366,8 +366,18 @@ if (( check_only )); then
     echo "  Checkout:  $(git rev-parse --short HEAD) on master"
     latest=$(git ls-remote origin refs/heads/master 2>/dev/null | cut -f1) || latest=''
     if [[ -z $latest ]]; then echo "  GitHub:    could not reach origin"; problems=1
-    elif [[ $latest == "$(git rev-parse HEAD)" ]]; then echo "  GitHub:    up to date"
-    else echo "  GitHub:    ${latest:0:8} is available"; fi
+    elif git cat-file -e "$latest^{commit}" 2>/dev/null && git merge-base --is-ancestor "$latest" HEAD; then
+        # a checkout with commits of its own is level with master once it has merged it: its HEAD never equals master's
+        note=''
+        own=$(git rev-list --count "$latest..HEAD" 2>/dev/null) || own=0
+        if (( own > 0 )); then note=" ($own commits of this checkout's own on top)"; fi
+        echo "  GitHub:    up to date$note"
+    else
+        note=''
+        own=$(git rev-list --count origin/master..HEAD 2>/dev/null) || own=0
+        if (( own > 0 )); then note=" (this checkout has $own commits that are not on origin/master, so it has to be merged by hand: git fetch origin && git merge origin/master)"; fi
+        echo "  GitHub:    ${latest:0:8} is available$note"
+    fi
     echo "  Compose:   ${compose[*]}"
     if ! "${compose[@]}" config --quiet 2>/dev/null; then echo "  Config:    INVALID"; problems=1; fi
     layout_drift
@@ -406,6 +416,9 @@ else
     git fetch origin master
     if [[ $(setting CVENGINE_UPDATE_REQUIRE_SIGNED) == 1 ]]; then
         git verify-commit origin/master || die 'CVENGINE_UPDATE_REQUIRE_SIGNED=1 and origin/master has no valid signature from a key this user trusts; nothing was merged.'
+    fi
+    if ! git merge-base --is-ancestor HEAD origin/master && ! git merge-base --is-ancestor origin/master HEAD; then
+        die "This checkout has $(git rev-list --count origin/master..HEAD) commit(s) that are not on origin/master, and origin/master has $(git rev-list --count HEAD..origin/master) that it lacks, so it cannot be fast-forwarded. Merge it by hand (git merge origin/master), then run this again."
     fi
     git merge --ff-only origin/master
     trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT

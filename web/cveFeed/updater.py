@@ -6,8 +6,9 @@ where they approve or dismiss it. The web container never updates itself and has
 only writes the approved commit to ``.update-approved`` in the application directory (the host's ``web/``), and
 ``scripts/apply-update.sh`` on the host (cron or systemd timer, see scripts/install-updater.sh) fast-forwards the
 checkout to exactly that commit and rebuilds. The installed commit is the first line of ``.commit``, written by
-``make up`` / ``make build`` and by the updater script; a second line, when present, is the ancestor the checkout shares with
-upstream (a fork with commits of its own), which is what GitHub is asked about.
+``make up`` / ``make build`` and by the updater script. Only the host has git: it compares that commit with the tracked branch and
+publishes the answer as ``.upstream-state.json`` (see ``upstream_state``), so a server with commits of its own is compared by the commit it
+shares with the branch, GitHub being unable to say anything about commits it has never seen.
 
 Pure helpers take their HTTP function as a parameter so they are testable without a network.
 """
@@ -50,30 +51,60 @@ def _file(name):
     return os.path.join(settings.BASE_DIR, name)
 
 
-def _commit_lines():
-    try:
-        with open(_file('.commit')) as f:
-            return [f.readline().strip().lower(), f.readline().strip().lower()]
-    except OSError:
-        return ['', '']
-
-
 def installed_sha():
     """The commit this installation was built from ('' when unknown)."""
-    first = _commit_lines()[0]
+    try:
+        with open(_file('.commit')) as f:
+            first = f.readline().strip().lower()
+    except OSError:
+        first = ''
     if SHA_RE.match(first):
         return first
     env = os.environ.get('CVENGINE_COMMIT', '').strip().lower()
     return env if SHA_RE.match(env) else ''
 
 
-def upstream_sha():
-    """The newest commit of this installation that the upstream repository has: ``installed_sha()`` for a plain install, the
-    shared ancestor (second line of ``.commit``) for a fork with commits of its own. Only the comparison with GitHub uses it."""
-    first, second = _commit_lines()
-    if SHA_RE.match(first) and SHA_RE.match(second):
-        return second
-    return installed_sha()
+UPSTREAM_STALE_SECONDS = 3 * 86400  # the host refreshes it every half hour while its updater runs; this is days of silence
+
+
+def write_source(row):
+    """Tell the host which repository and branch to compare the build with (``.update-source``: ``owner/name branch``)."""
+    tmp = _file('.update-source.tmp')
+    try:
+        with open(tmp, 'w') as f:
+            f.write(f'{row.repo} {row.branch}\n')
+        os.replace(tmp, _file('.update-source'))
+    except OSError:
+        pass  # a read-only mount: the host then compares nothing, and the banner works from what GitHub says
+
+
+def upstream_state(row):
+    """What the host found when it compared the running build with the tracked branch (scripts/update-state.py ``upstream``), as
+    ``(state, note)``. ``state`` is ``{base, upstream, ahead, behind}``: ``base`` the newest commit the build shares with the branch,
+    ``ahead`` the commits of this server's own, ``behind`` the branch's commits it lacks; None when there is nothing usable. ``note`` says
+    why not when an administrator should know (the host could not fetch the branch, or its answer is for another source or an older build)."""
+    try:
+        with open(_file('.upstream-state.json')) as f:
+            data = json.loads(f.read(4096))
+        at = float(data['at'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, ''
+    if not isinstance(data, dict) or not math.isfinite(at):
+        return None, ''
+    if str(data.get('repo', '')).lower() != row.repo.lower() or data.get('branch') != row.branch:
+        return None, ''  # about a source that is no longer the one tracked; the next host run replaces it
+    installed = installed_sha()
+    if installed and data.get('installed') != installed:
+        return None, ''  # about the build before this one
+    if time.time() - at > UPSTREAM_STALE_SECONDS:
+        return None, 'The host has not compared this server with the update source for days (is the host updater running?).'
+    if data.get('error'):
+        return None, f'The host could not compare this server with {row.repo} {row.branch}: {str(data["error"])[:160]}'
+    base, tip = str(data.get('base', '')), str(data.get('upstream', ''))
+    ahead, behind = data.get('ahead'), data.get('behind')
+    if not (SHA_RE.match(base) and SHA_RE.match(tip) and isinstance(ahead, int) and isinstance(behind, int) and ahead >= 0 and behind >= 0):
+        return None, ''
+    return {'base': base, 'upstream': tip, 'ahead': ahead, 'behind': behind}, ''
 
 
 def host_updater():
@@ -221,11 +252,14 @@ def _first_line(text):
     return (text or '').strip().splitlines()[0][:300] if (text or '').strip() else ''
 
 
-def fetch_latest(repo, branch, token='', installed='', get=requests.get):
+def fetch_latest(repo, branch, token='', installed='', get=None):
     """Ask GitHub for the branch head and how far ahead of ``installed`` it is.
-    Returns {sha, message, url, date, behind_by (None if unknown), commits}. Raises UpdateError with a readable reason."""
+    Returns {sha, message, url, date, behind_by (None if unknown), commits, reference_known}: ``reference_known`` is False when GitHub answered "not
+    found" for ``installed`` (it has never seen that commit: a fork's own, or a server's unpushed one), which is not the same as not being able to
+    ask. Raises UpdateError with a readable reason."""
     if not valid_repo(repo) or not valid_branch(branch):
         raise UpdateError('the repository or branch name is not valid')
+    get = get or requests.get  # looked up now, so a test that replaces requests.get is heard
     try:
         resp = get(f'{API}/repos/{repo}/commits/{branch}', headers=_headers(token), timeout=20)
     except requests.RequestException as exc:
@@ -243,7 +277,7 @@ def fetch_latest(repo, branch, token='', installed='', get=requests.get):
     commit = data.get('commit') or {}
     date = ((commit.get('committer') or {}).get('date')) or ''
     out = {'sha': sha, 'message': _first_line(commit.get('message')), 'url': str(data.get('html_url', ''))[:300],
-           'date': date, 'behind_by': None, 'commits': []}
+           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True}
     if not installed:
         return out
     if installed == sha:
@@ -253,6 +287,8 @@ def fetch_latest(repo, branch, token='', installed='', get=requests.get):
         cmp = get(f'{API}/repos/{repo}/compare/{installed}...{sha}', headers=_headers(token), timeout=20)
     except requests.RequestException:
         return out
+    if cmp.status_code == 404:
+        out['reference_known'] = False
     if cmp.status_code == 200:
         body = cmp.json()
         if body.get('status') in ('behind', 'identical'):
@@ -265,16 +301,20 @@ def fetch_latest(repo, branch, token='', installed='', get=requests.get):
 
 
 def update_available(row, installed):
-    return bool(row.latest_sha and row.latest_sha != installed and row.behind_by != 0)
+    """Whether the branch has commits the build lacks. Not known when GitHub has never seen the build's commit and the host has not said which
+    commit the build shares with the branch: then nothing is claimed either way (``state`` reports it as ``unknown``)."""
+    return bool(row.latest_sha and row.latest_sha != installed and row.behind_by != 0 and not row.reference_unknown)
 
 
-def check(row=None, get=requests.get):
+def check(row=None, get=None):
     """Run one check and store the result on the settings row."""
     from cveFeed.models import UpdateSettings
     row = row or UpdateSettings.current()
     row.last_checked_at = timezone.now()
+    write_source(row)
+    shared = (upstream_state(row)[0] or {}).get('base')  # what GitHub knows of a build with commits of its own
     try:
-        found = fetch_latest(row.repo, row.branch, row.token, upstream_sha(), get=get)
+        found = fetch_latest(row.repo, row.branch, row.token, shared or installed_sha(), get=get)
     except UpdateError as exc:
         row.last_error = str(exc)[:300]
         row.save(update_fields=['last_checked_at', 'last_error'])
@@ -285,7 +325,7 @@ def check(row=None, get=requests.get):
         row.latest_date = datetime.fromisoformat(found['date'].replace('Z', '+00:00')) if found['date'] else None
     except ValueError:
         row.latest_date = None
-    row.behind_by, row.commits = found['behind_by'], found['commits']
+    row.behind_by, row.commits, row.reference_unknown = found['behind_by'], found['commits'], not found['reference_known']
     row.save()
     sync_applied(row)
     return row
@@ -307,12 +347,22 @@ def _remove_flag():
             pass
 
 
+def local_commits(row):
+    """How many commits of its own the build has on top of the tracked branch (0 when none or not known)."""
+    host, _ = upstream_state(row)
+    return host['ahead'] if host else 0
+
+
 def approve(row, user):
     """Record the administrator's approval of the commit currently shown, and hand it to the host updater."""
     if not SHA_RE.match(row.latest_sha or ''):
         raise UpdateError('there is no update to approve; run a check first')
-    if not update_available(row, upstream_sha()):
-        raise UpdateError('this installation is already up to date')
+    if not update_available(row, installed_sha()):
+        raise UpdateError('this installation is already up to date, or cannot tell whether it is (see its status)')
+    own = local_commits(row)
+    if own:
+        raise UpdateError(f'this server has {own} commit{"s" if own != 1 else ""} of its own, so the update cannot be applied for you (it moves the checkout '
+                          f'forward, never merges): merge {row.branch} into it by hand, then deploy')
     tmp = _file('.update-approved.tmp')
     with open(tmp, 'w') as f:
         f.write(row.latest_sha + '\n')
@@ -340,19 +390,27 @@ def dismiss(row):
 
 
 def state(row):
-    """What the API and the banner show. ``status``: disabled | error | up_to_date | available | approved | dismissed."""
+    """What the API and the banner show. ``status``: disabled | error | up_to_date | available | approved | dismissed | diverged (the branch has new
+    commits and this server has commits of its own, so nothing can fast-forward it) | unknown (GitHub has never seen the build's commit and
+    the host has not said which commit it shares with the branch)."""
     from cveFeed.models import ScanControl
 
     installed = installed_sha()
-    available = update_available(row, upstream_sha())
+    available = update_available(row, installed)
+    own = local_commits(row)
+    host, note = upstream_state(row)
     if not row.enabled:
         status = 'disabled'
-    elif row.approved_sha and row.approved_sha == row.latest_sha and available:
+    elif row.approved_sha and row.approved_sha == row.latest_sha and available and not own:
         status = 'approved'
     elif available and row.dismissed_sha == row.latest_sha:
         status = 'dismissed'
+    elif available and own:
+        status = 'diverged'  # the branch moved and so did this server: nothing can fast-forward it
     elif available:
         status = 'available'
+    elif row.reference_unknown and row.latest_sha and row.latest_sha != installed:
+        status = 'unknown'
     elif row.last_error and not row.latest_sha:
         status = 'error'
     else:
@@ -367,6 +425,7 @@ def state(row):
     return {
         'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'has_token': bool(row.token),
         'installed': installed[:7], 'installed_known': bool(installed),
+        'local_commits': host['ahead'] if host else None, 'common': host['base'][:7] if host else '', 'host_comparison': note,
         'latest': row.latest_sha[:7], 'latest_message': row.latest_message, 'latest_url': row.latest_url,
         'latest_date': row.latest_date.isoformat() if row.latest_date else None, 'behind_by': row.behind_by,
         'commits': row.commits, 'last_checked_at': row.last_checked_at.isoformat() if row.last_checked_at else None,

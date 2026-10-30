@@ -648,7 +648,7 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         sub = mock.Mock()
         sub.ip_addresses.all.return_value = [mock.Mock(address='100.64.0.5', is_private=False)]
         self.assertFalse(_has_public_ip(sub))  # a tailnet address is never "public"
-        sub.ip_addresses.all.return_value = [mock.Mock(address='198.51.100.7', is_private=False)]
+        sub.ip_addresses.all.return_value = [mock.Mock(address='93.184.216.34', is_private=False)]
         self.assertTrue(_has_public_ip(sub))
 
     def test_a_private_address_is_never_public_even_when_the_install_scans_its_own_network(self):
@@ -660,10 +660,12 @@ class ScopePolicyTests(ScopeFixture, TestCase):
             for private in ('192.168.1.5', '10.0.0.7', '172.20.1.1', 'fd12::5'):
                 sub.ip_addresses.all.return_value = [mock.Mock(address=private, is_private=False)]
                 self.assertFalse(_has_public_ip(sub), private)
-            sub.ip_addresses.all.return_value = [mock.Mock(address='192.168.1.5', is_private=False), mock.Mock(address='198.51.100.7', is_private=False)]
+            sub.ip_addresses.all.return_value = [mock.Mock(address='192.168.1.5', is_private=False), mock.Mock(address='93.184.216.34', is_private=False)]
             self.assertTrue(_has_public_ip(sub))  # one public address among them still counts
-            sub.ip_addresses.all.return_value = [mock.Mock(address='198.51.100.7', is_private=True)]
-            self.assertFalse(_has_public_ip(sub))  # a flag that was set is still honoured
+        # a scanning policy never changes an exposure score: a blocked range does not make a public address private
+        with mock.patch.dict(os.environ, {'CVENGINE_BLOCKED_CIDRS': '93.184.216.0/24'}):
+            sub.ip_addresses.all.return_value = [mock.Mock(address='93.184.216.34', is_private=False)]
+            self.assertTrue(_has_public_ip(sub))
 
     def test_nuclei_db_exposure_and_the_change_log_pass_the_owning_project(self):
         from cveFeed import changes, db_exposure, nuclei_scan

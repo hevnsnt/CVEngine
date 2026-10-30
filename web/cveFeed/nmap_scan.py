@@ -299,6 +299,10 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
                 ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_matches': host['os_matches']}
                 ip_obj.save(update_fields=['fingerprint'])
             hosts_with_os += 1
+        if host.get('closed_tcp'):
+            # a port this host answered with a reset, and when: the path check (cveFeed.path_probe) probes it, from this server, later
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'closed_tcp': host['closed_tcp'], 'closed_tcp_at': now.isoformat()}
+            ip_obj.save(update_fields=['fingerprint'])
         host_scripts = _reviewed_scripts(host.get('hostscripts'))
         if host_scripts:
             # smb-os-discovery and nbstat describe the host, not one port

@@ -101,6 +101,89 @@ class HotValidationTests(TestCase):
         with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
             self.assertEqual(hot_validation.enqueue(row, 'fire'), 'queued')
 
+    def _rescan_with_job(self, **job):
+        """A rescan's new match whose predecessor had a validation job in the given state."""
+        Triage.objects.filter(match=self.fire_match).update(status='triaged', classification='likely')
+        OnDemandValidation.objects.create(match=self.fire_match, project=self.project, evidence_signature='old-nonce-signature', **job)
+        later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+        match = CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')
+        row = triage.track([match])[0][0]
+        self.assertEqual(row.carried_from, self.fire_match.pk)
+        return row
+
+    def _enqueue(self, row):
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as dispatch:
+            return hot_validation.enqueue(row, 'fire'), dispatch
+
+    def test_a_job_that_failed_for_good_is_not_started_again_at_attempt_one_by_every_rescan(self):
+        row = self._rescan_with_job(status='failed', attempts=hot_validation.MAX_ATTEMPTS, next_attempt_at=None, finished_at=timezone.now())
+        outcome, dispatch = self._enqueue(row)
+        self.assertEqual(outcome, 'fresh')
+        dispatch.assert_not_called()
+
+    def test_a_job_that_is_backing_off_keeps_its_backoff(self):
+        row = self._rescan_with_job(status='failed', attempts=2, next_attempt_at=timezone.now() + timedelta(hours=1), finished_at=timezone.now())
+        self.assertEqual(self._enqueue(row)[0], 'fresh')
+
+    def test_the_attempt_count_goes_on_after_the_backoff(self):
+        row = self._rescan_with_job(status='failed', attempts=2, next_attempt_at=timezone.now() - timedelta(minutes=1),
+                                    finished_at=timezone.now() - timedelta(hours=1))
+        outcome, _ = self._enqueue(row)
+        self.assertEqual(outcome, 'queued')
+        self.assertEqual(OnDemandValidation.objects.get(match=row.match).attempts, 3)
+
+    def test_a_job_finished_inside_the_window_stands_for_the_new_match(self):
+        row = self._rescan_with_job(status='completed', result={'ai_state': 'ok'}, finished_at=timezone.now() - timedelta(days=2))
+        self.assertEqual(self._enqueue(row)[0], 'fresh')
+
+    def test_the_shorter_window_applies_when_the_ai_could_not_answer(self):
+        row = self._rescan_with_job(status='completed', result={'ai_state': 'unavailable'}, finished_at=timezone.now() - timedelta(days=2))
+        self.assertEqual(self._enqueue(row)[0], 'queued')
+
+    def test_a_job_still_running_on_the_old_match_does_not_hold_the_new_one_back(self):
+        # its result goes to the old match's row, so the new match needs a job of its own
+        row = self._rescan_with_job(status='running', started_at=timezone.now())
+        self.assertEqual(self._enqueue(row)[0], 'queued')
+
+    def test_the_history_is_followed_through_matches_that_never_had_a_job(self):
+        Triage.objects.filter(match=self.fire_match).update(status='triaged', classification='likely')
+        OnDemandValidation.objects.create(match=self.fire_match, project=self.project, evidence_signature='x', status='failed',
+                                          attempts=hot_validation.MAX_ATTEMPTS, finished_at=timezone.now())
+        row = None
+        for _ in range(3):  # three more scans, none of which queued anything
+            later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+            row = triage.track([CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')])[0][0]
+            Triage.objects.filter(pk=row.pk).update(status='triaged')  # reviewed, so the next scan's row takes its record from this one
+        self.assertNotEqual(row.carried_from, self.fire_match.pk)
+        self.assertEqual(self._enqueue(row)[0], 'fresh')
+
+    def test_a_row_that_took_nothing_from_an_earlier_one_has_no_history(self):
+        row = Triage.objects.get(match=self.fire_match)
+        self.assertIsNone(row.carried_from)
+        self.assertEqual(self._enqueue(row)[0], 'queued')
+
+    def test_a_record_older_than_the_window_is_not_inherited(self):
+        Triage.objects.filter(match=self.fire_match).update(status='triaged', classification='likely')
+        Triage.objects.filter(match=self.fire_match).update(updated_at=timezone.now() - triage.TWIN_WINDOW - timedelta(days=1))
+        later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+        row = triage.track([CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')])[0][0]
+        self.assertEqual((row.status, row.classification, row.carried_from), ('pending', '', None))
+
+    def test_the_twin_lookup_reads_one_row_per_finding_however_many_scans_there_were(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        Triage.objects.filter(match=self.fire_match).update(status='triaged', classification='likely')
+        for _ in range(6):
+            later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+            triage.track([CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')])
+        fresh = CVEMatch.objects.create(cve_entry=self.fire, subdomain=Subdomain.objects.create(name=self.sub.name, target_domain=self.domain),
+                                        matched_product='nginx')
+        description = triage.describe(fresh)
+        with CaptureQueriesContext(connection) as queries:
+            found = triage._twins([(fresh, description)])
+        self.assertEqual(len(found), 1)
+        self.assertIn('DISTINCT ON', ' '.join(q['sql'] for q in queries.captured_queries))
+
     def test_cursor_keeps_work_over_the_per_sweep_cap(self):
         with mock.patch('cveFeed.hot_validation._backfill_projects', return_value=0), \
                 mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'), \

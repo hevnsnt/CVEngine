@@ -1,0 +1,33 @@
+# Give the scanners their own address on your LAN (macvlan), so nmap's operating system probes reach the targets unchanged.
+#
+#   1. Pick an address on the LAN that nothing else uses (outside the router's DHCP range) and set, in .env:
+#        CVENGINE_SCANNER_IP=192.168.1.250
+#        CVENGINE_SCANNER_SUBNET=192.168.1.0/24
+#        CVENGINE_SCANNER_GATEWAY=192.168.1.1
+#        CVENGINE_SCANNER_PARENT=eth0            # the host's network interface on that LAN
+#   2. docker compose -f docker-compose.yml -f docker-compose.macvlan.yml up -d
+#
+# On Docker's default bridge network every scan is address-translated, and the translation loses some of nmap's malformed probes, so
+# operating system detection is unreliable and CVEngine stops using it. With a macvlan address the same scan gave the exact direct
+# result. See docs/DEPLOYMENT.md, "Operating system detection and the scan path".
+#
+# Linux only (Docker's own documentation: macvlan is not supported on Docker Desktop for Mac or Windows). The switch port must accept more
+# than one MAC address, and Wi-Fi access points usually refuse that: use ipvlan (driver: ipvlan, driver_opts: ipvlan_mode: l2) there. The
+# scanner cannot reach the Docker host itself over macvlan (a kernel restriction); it keeps the bridge network for Redis and PostgreSQL.
+services:
+  celery:
+    networks:
+      rengine_network: {}
+      lan:
+        ipv4_address: ${CVENGINE_SCANNER_IP:?set CVENGINE_SCANNER_IP in .env}
+        gw_priority: 1  # the LAN, not the bridge, carries the scans' default route
+networks:
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: ${CVENGINE_SCANNER_PARENT:-eth0}
+    ipam:
+      config:
+        - subnet: ${CVENGINE_SCANNER_SUBNET:?set CVENGINE_SCANNER_SUBNET in .env}
+          gateway: ${CVENGINE_SCANNER_GATEWAY:?set CVENGINE_SCANNER_GATEWAY in .env}
+          ip_range: ${CVENGINE_SCANNER_IP}/32
