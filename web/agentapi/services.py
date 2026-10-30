@@ -2327,7 +2327,7 @@ def _route(r):
 
 
 def list_routes(ctx, slug, params):
-    """Web routes and how they answer an anonymous GET: open, login, session_required, sso, redirect, not_found, error."""
+    """Web routes and how they answer an anonymous GET: open, login, session_required, sso, redirect, not_found, catch_all (the server answers every path alike), error."""
     from cveFeed.models import RouteAuth
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)

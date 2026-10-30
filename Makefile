@@ -36,6 +36,7 @@ up: check-env		## Build and start all services.
 	@rm -f config/nginx/state/maintenance
 	@./scripts/upgrade-postgres.sh
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
+	@python3 scripts/update-state.py upstream || true
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
 	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi

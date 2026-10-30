@@ -1,0 +1,24 @@
+# Run the scanners on the host's own network, so nmap's operating system probes reach the targets unchanged.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
+#
+# On Docker's default bridge network every scan is address-translated, and the translation loses some of nmap's malformed probes (conntrack
+# marks them INVALID and does not translate them), so operating system detection is unreliable and CVEngine stops using it (Settings, or
+# get_system_status: os_detection). With the celery container on the host network the same scan gave the exact direct result. See
+# docs/DEPLOYMENT.md, "Operating system detection and the scan path".
+#
+# Linux only: host networking on Docker Desktop (macOS, Windows) works at layer 4 and cannot send these probes. Without Docker's DNS the
+# container reaches Redis and PostgreSQL on the host's loopback, where this file publishes them. The optional tailscale profile joins the
+# celery container's namespace, which would then be the host's: do not combine the two (run Tailscale on the host instead). If something
+# on the host already uses port 6379, set CVENGINE_REDIS_HOST_PORT in .env to another one.
+services:
+  celery:
+    network_mode: host
+    networks: !reset []
+    environment:
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
+      - POSTGRES_HOST=127.0.0.1
+  redis:
+    ports:
+      - "127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}:6379"

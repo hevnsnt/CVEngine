@@ -6,6 +6,9 @@ clock, so the two can be compared): ``Agent.reported_settings`` is what the Sent
 what an administrator set. The effective value of each setting is the one changed last; a Sentinel that restarts with an unchanged
 configuration does not override a later edit made here, and an edit made on the machine after the last dashboard edit wins.
 
+Network access is an exception: only enrollment or an administrator grants internal access. Clearing an administrator's network setting
+restores the grant recorded at enrollment, or external if no matching enrollment exists. A local external setting can still limit that grant.
+
 The Sentinel reports only its *local* values, never the effective ones it applied (it would otherwise look like a new local change every
 time), and applies the effective ones the server sends back in its registration and heartbeat replies. Settings are plain data the Sentinel
 validates; nothing in them is a command. What a Sentinel may do for a project is still decided by its scope and an administrator's approval
@@ -19,7 +22,7 @@ from django.utils import timezone
 
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
-from agentapi.models import Agent, SentinelDefaults, SentinelTask
+from agentapi.models import Agent, SentinelDefaults, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError
 from tenancy import audit
 
@@ -77,8 +80,7 @@ def _when(entry):
 
 
 def detail(agent):
-    """``{setting: {value, source, at, by}}`` for every setting either side has a value for. ``source`` is ``server`` (set from cvENGINE) or
-    ``sentinel`` (its own configuration); a tie goes to the server, because an administrator's explicit edit is the more deliberate act."""
+    """Setting values and sources. Network reports its usable value, server grant and the machine's local limit."""
     out = {}
     managed, reported = agent.managed_settings or {}, agent.reported_settings or {}
     for key in SETTINGS:
@@ -88,6 +90,22 @@ def detail(agent):
         pick = 'sentinel' if m is None else 'server' if r is None else ('sentinel' if (_when(r) and _when(m) and _when(r) > _when(m)) else 'server')
         entry = m if pick == 'server' else r
         out[key] = {'value': entry['value'], 'source': pick, 'at': entry.get('at'), 'by': entry.get('by') if pick == 'server' else None}
+    if agent.kind == 'scanner':
+        managed_network = managed.get('network')
+        reported_network = reported.get('network')
+        machine_value = (reported_network or {}).get('value')
+        grant = 'internal' if agent.network == 'internal' else 'external'
+        limited_by_machine = grant == 'internal' and machine_value == 'external'
+        source_entry = reported_network if limited_by_machine else managed_network
+        network = {'value': effective_network(agent), 'source': 'sentinel' if limited_by_machine else 'server',
+                   'at': (source_entry or {}).get('at'), 'by': None if limited_by_machine else (managed_network or {}).get('by'),
+                   'server_grant': grant, 'machine_value': machine_value, 'managed': managed_network is not None,
+                   'grant_at': (managed_network or {}).get('at'), 'grant_by': (managed_network or {}).get('by')}
+        if limited_by_machine:
+            network['limited_by_machine'] = True
+        if grant == 'external' and machine_value == 'internal':
+            network['limited_by_server'] = True
+        out['network'] = network
     _limits(agent, out)
     return out
 
@@ -114,14 +132,8 @@ def disabled_kinds(agent):
 
 
 def _limits(agent, entries):
-    """Mark the settings a Sentinel's own machine holds below what cvENGINE asks for (its local settings are limits): ``network`` cannot be raised to
-    internal from here, and a ``self_update`` of off or manual on the machine caps what cvENGINE can ask for. The administrator is told, so an
-    internal or automatic that does not take effect is not a surprise. Adds ``limited_by_machine`` and ``machine_value`` to the entry."""
+    """Mark a local self-update setting that caps what cvENGINE can ask for."""
     reported = agent.reported_settings or {}
-    local = (reported.get('network') or {}).get('value')
-    if agent.kind == 'scanner' and agent.network == 'internal' and local == 'external':
-        entry = entries.setdefault('network', {'value': 'internal', 'source': 'server', 'at': None, 'by': None})
-        entry.update(limited_by_machine=True, machine_value='external')
     local = (reported.get('self_update') or {}).get('value')
     if local in RANK:
         managed = ((agent.managed_settings or {}).get('self_update') or {}).get('value')
@@ -142,8 +154,9 @@ def instance_self_update():
 
 
 def explicit(agent):
-    """``{setting: value}`` for the settings someone actually set (the Sentinel's own configuration or an administrator), without the instance default."""
-    return {key: entry['value'] for key, entry in detail(agent).items()}
+    """``{setting: value}`` for settings either side set, without the instance default. Network uses its authorized effective value."""
+    has_network = 'network' in (agent.managed_settings or {}) or 'network' in (agent.reported_settings or {})
+    return {key: entry['value'] for key, entry in detail(agent).items() if key != 'network' or has_network}
 
 
 def effective(agent):
@@ -151,11 +164,7 @@ def effective(agent):
     out = explicit(agent)
     out.setdefault('self_update', instance_self_update())
     if agent.kind == 'scanner':
-        # the server decides whether a Sentinel is inside a private network, whatever the Sentinel reports: internal only where it provisioned it so
-        if agent.network == 'internal':
-            out['network'] = 'internal'
-        elif out.get('network') == 'internal':
-            out['network'] = 'external'
+        out['network'] = effective_network(agent)
     return out
 
 
@@ -181,22 +190,31 @@ def record_reported(agent, raw, now=None):
 
 
 def set_managed(agent, raw, actor, now=None):
-    """An administrator's change from cvENGINE. A value of ``null`` clears the server's value for that setting, so the Sentinel's own applies."""
+    """An administrator's change from cvENGINE. Clearing network restores its enrollment grant, never the Sentinel's claim."""
     from agentapi import sentinel_broker as sb
     now = now or timezone.now()
     values = clean_settings(raw)
     managed, before = dict(agent.managed_settings or {}), explicit(agent)
-    if values.get('network') in sb.NETWORKS:  # only an administrator moves a Sentinel in or out of a private network
-        agent.network = values['network']
-        Agent.objects.filter(pk=agent.pk).update(network=agent.network)
+    network_before = agent.network
+    if 'network' in values:  # the Sentinel cannot grant itself access to private networks
+        if values['network'] is None:
+            enrolled = SentinelEnrollment.objects.filter(used_by_agent=agent, token_id=agent.token_id).values_list('network', flat=True).first()
+            agent.network = enrolled if enrolled in sb.NETWORKS else 'external'
+        else:
+            agent.network = values['network']
     for key, value in values.items():
         if value is None:
             managed.pop(key, None)
         elif (managed.get(key) or {}).get('value') != value:
             managed[key] = {'value': value, 'at': now.isoformat(), 'by': actor.username}
     agent.managed_settings = managed
-    Agent.objects.filter(pk=agent.pk).update(managed_settings=managed)
-    audit.record_for_user(actor, 'agent.settings', agent.token.user, target=agent.name, agent_id=agent.pk, before=before, after=explicit(agent))
+    updates = {'managed_settings': managed}
+    if 'network' in values:
+        updates['network'] = agent.network
+    Agent.objects.filter(pk=agent.pk).update(**updates)
+    grant_change = {'network_grant_before': network_before, 'network_grant_after': agent.network} if 'network' in values else {}
+    audit.record_for_user(actor, 'agent.settings', agent.token.user, target=agent.name, agent_id=agent.pk,
+                          before=before, after=explicit(agent), **grant_change)
     return effective(agent)
 
 

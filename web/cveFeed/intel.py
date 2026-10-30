@@ -511,6 +511,37 @@ def convert_affected(entries):
     return out[:50]
 
 
+def overlay_branch_ranges(cve_id, affected, get=None):
+    """``(affected, overlaid)``: where a feed gave an advisory as a bare list of fixes with no lower bounds (cve.now's PHP2Shell: fixed
+    8.2.35, 8.3.36, 8.4.27, 8.5.12), read the bounds the CNA published in the CVE List V5 record (``version: 8.2.*, lessThan: 8.2.35``
+    per branch, which ``convert_affected`` turns into introduced and fixed). Nothing is inferred: the ranges are the CNA's own, taken only
+    for an entry that names the same product and only when every one of its ranges has both bounds. A record that cannot be read, or has
+    no such entry, leaves the feed's ranges as they were; correlation then compares each fix only with its own line of releases."""
+    from cveFeed.correlation import affected_product_tokens, fix_only_branch_list
+    targets = [i for i, item in enumerate(affected) if fix_only_branch_list([r for r in (item.get("ranges") or []) if isinstance(r, dict)])]
+    if not targets:
+        return affected, False
+    try:
+        doc = fetch_cve5(cve_id, get=get)
+    except Exception as exc:  # noqa: BLE001 - the feed's own ranges stand; the next refresh asks again
+        logger.info("CVE List record of %s not read for its branch bounds: %s", cve_id, exc)
+        return affected, False
+    containers = (doc or {}).get("containers") or {}
+    cna = containers.get("cna") or {}
+    published = convert_affected(cna.get("affected")) + convert_affected(
+        [a for adp in containers.get("adp") or [] if isinstance(adp, dict) for a in adp.get("affected") or []])
+    out, overlaid = list(affected), False
+    for i in targets:
+        wanted = affected_product_tokens(affected[i])
+        for item in published:
+            ranges = item.get("ranges") or []
+            if (wanted & affected_product_tokens(item) and len(ranges) >= 2 and all(r.get("introduced") and r.get("fixed") for r in ranges)):
+                out[i] = {**affected[i], "ranges": ranges}
+                overlaid = True
+                break
+    return out, overlaid
+
+
 CVSS_PREFERENCE = ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0")
 
 

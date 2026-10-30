@@ -55,6 +55,21 @@ def _host_os(host):
     return name, accuracy
 
 
+def _closed_tcp_port(host):
+    """The closed TCP port nmap's OS detection used on this host (``<os><portused state="closed" proto="tcp">``), or None. A host that
+    answers a closed port with a reset is one a later check can probe (cveFeed.path_probe) without guessing a port."""
+    os_el = host.get("os") or {}
+    for used in _as_list(os_el.get("portused")):
+        if isinstance(used, dict) and used.get("@state") == "closed" and used.get("@proto") == "tcp":
+            try:
+                number = int(used.get("@portid"))
+            except (TypeError, ValueError):
+                continue
+            if 0 < number < 65536:
+                return number
+    return None
+
+
 SCRIPT_OUTPUT_CAP = 4000  # one NSE script's text, stored on the port; keeps a chatty script from bloating the row
 BANNER_CAP = 1024
 
@@ -201,6 +216,7 @@ def extract_nmap_inventory(nmap_results):
             "os_guess": os_guess,
             "os_accuracy": os_accuracy,
             "os_matches": _os_alternatives(host),
+            "closed_tcp": _closed_tcp_port(host),
             "ports": records,
             "hostscripts": _scripts(host.get("hostscript")),  # smb-os-discovery, nbstat: attach to the host, not a port
             "status": (host.get("status") or {}).get("@state", "up") if isinstance(host.get("status"), dict) else "up",

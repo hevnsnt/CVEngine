@@ -45,7 +45,7 @@ Use the slug `_all` to search every project you can see.
 | `cve:` | Hosts matched by a CVE (a full id or a prefix) | `cve:CVE-2026-111497` |
 | `vuln:` | A finding by name, open or closed | `vuln:jenkins` |
 | `sev:` | A finding of this severity, open or closed: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
-| `auth:` | A web route's sign-in state: `open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `error` | `auth:open` |
+| `auth:` | A web route's sign-in state: `open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `catch_all`, `error` | `auth:open` |
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
