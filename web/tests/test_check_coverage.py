@@ -646,7 +646,7 @@ class SignedInTests(TestCase):
 		project = Project.objects.create(name='S', slug='cov-ps', insert_date=now, org=org)
 		domain = Domain.objects.create(name='signed.example.test', project=project, insert_date=now)
 		cred = AuthCredential.objects.create(project=project, domain=domain, host='', label='tester', origins=['https:443'],
-			secret={'headers': [['X-Test', 'v']]})
+			allow_untrusted_certificate=True, secret={'headers': [['X-Test', 'v']]})  # Nuclei gets an HTTPS sign-in only with this switch on
 		ev = cc.Evidence(now)
 		ev.credentials = {project.id: [cred]}
 		host = cc.HostFacts('app.signed.example.test', project.id, target_name='signed.example.test', target_is_domain=True,
@@ -661,6 +661,23 @@ class SignedInTests(TestCase):
 		cred.expires_at = now - timedelta(days=1)
 		self.assertEqual(state_of(host, 'nuclei-signed-in', ev)[0], 'not_applicable')
 
+	def test_an_https_only_sign_in_without_the_switch_is_never_planned_for_nuclei(self):
+		from cveFeed.models import AuthCredential
+		now = timezone.now()
+		org = Org.objects.create(name='H', slug='cov-h')
+		project = Project.objects.create(name='H', slug='cov-ph', insert_date=now, org=org)
+		domain = Domain.objects.create(name='httpsonly.example.test', project=project, insert_date=now)
+		cred = AuthCredential.objects.create(project=project, domain=domain, host='', label='tester', origins=['https:443'],
+			secret={'headers': [['X-Test', 'v']]})
+		ev = cc.Evidence(now)
+		ev.credentials = {project.id: [cred]}
+		host = cc.HostFacts('app.httpsonly.example.test', project.id, target_name='httpsonly.example.test', target_is_domain=True,
+			addresses=[cc.Addr('203.0.113.9')])
+		state, row = state_of(host, 'nuclei-signed-in', ev)
+		self.assertEqual(state, 'not_applicable')
+		self.assertIn('is not sent', row['detail'])
+		self.assertEqual(state_of(host, 'routes-signed-in', ev)[0], 'due')  # the route check verifies TLS on its own connection
+
 	def test_a_sign_in_withheld_for_its_certificate_is_not_reported_as_planned_or_covered(self):
 		from cveFeed import auth_checks
 		from cveFeed.models import AuthCredential
@@ -668,8 +685,8 @@ class SignedInTests(TestCase):
 		org = Org.objects.create(name='W', slug='cov-w')
 		project = Project.objects.create(name='W', slug='cov-pw', insert_date=now, org=org)
 		domain = Domain.objects.create(name='withheld.example.test', project=project, insert_date=now)
-		cred = AuthCredential.objects.create(project=project, domain=domain, host='', label='tester', origins=['https:443'],
-			secret={'headers': [['X-Test', 'v']]})
+		cred = AuthCredential.objects.create(project=project, domain=domain, host='', label='tester', origins=['https:443', 'http:80'],
+			secret={'headers': [['X-Test', 'v']]})  # a mixed sign-in: the last recorded outcome decides, since its HTTP origin may still run
 		ev = cc.Evidence(now)
 		ev.credentials = {project.id: [cred]}
 		host = cc.HostFacts('app.withheld.example.test', project.id, target_name='withheld.example.test', target_is_domain=True,
