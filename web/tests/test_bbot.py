@@ -174,11 +174,11 @@ class StreamEventsProcessTests(unittest.TestCase):
 
 	def test_a_timeout_after_an_event_is_failed(self):
 		script = ('import time; print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\', flush=True); '
-		          'time.sleep(2)')
+		          'time.sleep(3)')
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
 			events = []
 			with self.assertRaises(BbotProcessError) as cm:
-				for event in stream_events(['example.com'], timeout=0.1):
+				for event in stream_events(['example.com'], timeout=1):
 					events.append(event)
 		self.assertEqual(len(events), 1)
 		self.assertIn('timed out', str(cm.exception))
