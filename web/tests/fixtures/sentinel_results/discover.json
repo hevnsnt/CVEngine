@@ -1,0 +1,11 @@
+{
+  "outcome": "done",
+  "hosts": [
+    {
+      "ip": "192.0.2.20",
+      "hostnames": [
+        "nas.example.com"
+      ]
+    }
+  ]
+}

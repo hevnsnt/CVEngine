@@ -94,6 +94,12 @@ A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md))
 - **Nuclei runs the server's policy.** On a Sentinel Nuclei skips denial-of-service templates (`-etags dos`) and uses the approved-template snapshot the server runs, fetched from `GET /api/v1/sentinel/template-policy` and its `/bundle`.
 - **Input guard.** Result and heartbeat bodies skip the attack-string scan, since they hold what scanned hosts said. Registration, bootstrap and every address are still checked.
 
+## The result contract
+
+What a Sentinel sends back for each task kind is written down once, as a JSON Schema: [`web/agentapi/sentinel_contract.json`](../web/agentapi/sentinel_contract.json) (`contract_version` inside). The Sentinel repo copies the file at the version it targets and validates its own results against it, so a field the server needs is not a thing a client author finds out about from a rejected result. The server still clips and validates everything it receives (`clean_result`); the contract is what a correct client keeps to, so nothing a good Sentinel sends is ever clipped or dropped.
+
+The tests tie the file to the server: every task kind has a schema, one fixture per kind (`web/tests/fixtures/sentinel_results/`) is valid and passes through the server unchanged, and every list bound, string length and enum in the file equals the broker's own limit, so changing one side alone fails CI. A change a client must follow bumps `contract_version` and is named in the CHANGELOG. This covers results (Sentinel to server); the targets the server hands out are the next piece.
+
 ## Troubleshooting
 
 - **"No Sentinel picked up work in time; it ran locally."** The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need an internal Sentinel (one the server granted `network:internal`).

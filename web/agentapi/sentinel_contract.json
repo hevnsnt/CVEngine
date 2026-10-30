@@ -1,0 +1,682 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hevnsnt/CVEngine/agentapi/sentinel_contract.json",
+  "title": "cvENGINE Sentinel result contract",
+  "description": "What a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result for each task kind. The server clips and validates every field anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds here are asserted equal to the server's own limits by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
+  "contract_version": 1,
+  "$defs": {
+    "envelope": {
+      "type": "object",
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "done",
+            "error"
+          ]
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 300
+        }
+      }
+    },
+    "port": {
+      "type": "object",
+      "required": [
+        "number"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocol": {
+          "enum": [
+            "tcp",
+            "udp"
+          ]
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "filtered"
+          ]
+        },
+        "service_name": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "product": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 80
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "template_id": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "low",
+            "medium",
+            "high",
+            "critical",
+            "unknown"
+          ]
+        },
+        "host": {
+          "type": "string",
+          "maxLength": 260
+        },
+        "matched_at": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "matcher_name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "extracted_results": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "maxLength": 40
+          }
+        }
+      }
+    },
+    "results": {
+      "nmap": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "ip"
+                  ],
+                  "properties": {
+                    "ip": {
+                      "type": "string",
+                      "maxLength": 60
+                    },
+                    "os_guess": {
+                      "type": "string",
+                      "maxLength": 120
+                    },
+                    "ports": {
+                      "type": "array",
+                      "maxItems": 500,
+                      "items": {
+                        "$ref": "#/$defs/port"
+                      }
+                    }
+                  }
+                }
+              },
+              "os_reliable": {
+                "type": "boolean",
+                "description": "send the literal false on Docker Desktop; anything else means reliable"
+              }
+            }
+          }
+        ]
+      },
+      "naabu": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ports": {
+                "type": "object",
+                "maxProperties": 64,
+                "additionalProperties": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "nuclei_light": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "required": [
+              "findings"
+            ],
+            "properties": {
+              "findings": {
+                "type": "array",
+                "maxItems": 5000,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "template_id": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "severity": {
+                      "enum": [
+                        "info",
+                        "low",
+                        "medium",
+                        "high",
+                        "critical",
+                        "unknown"
+                      ]
+                    },
+                    "host": {
+                      "type": "string",
+                      "maxLength": 260
+                    },
+                    "matched_at": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "description": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "matcher_name": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "extracted_results": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 300
+                      }
+                    },
+                    "tags": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 40
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "nuclei_targeted": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "required": [
+              "findings"
+            ],
+            "properties": {
+              "findings": {
+                "type": "array",
+                "maxItems": 5000,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "template_id": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "severity": {
+                      "enum": [
+                        "info",
+                        "low",
+                        "medium",
+                        "high",
+                        "critical",
+                        "unknown"
+                      ]
+                    },
+                    "host": {
+                      "type": "string",
+                      "maxLength": 260
+                    },
+                    "matched_at": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "description": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "matcher_name": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "extracted_results": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 300
+                      }
+                    },
+                    "tags": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 40
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "nuclei_deep": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "required": [
+              "findings"
+            ],
+            "properties": {
+              "findings": {
+                "type": "array",
+                "maxItems": 5000,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "template_id": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "severity": {
+                      "enum": [
+                        "info",
+                        "low",
+                        "medium",
+                        "high",
+                        "critical",
+                        "unknown"
+                      ]
+                    },
+                    "host": {
+                      "type": "string",
+                      "maxLength": 260
+                    },
+                    "matched_at": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "description": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "matcher_name": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "extracted_results": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 300
+                      }
+                    },
+                    "tags": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 40
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "testssl": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "maxItems": 300,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 60
+                    },
+                    "severity": {
+                      "enum": [
+                        "",
+                        "INFO",
+                        "LOW",
+                        "MEDIUM",
+                        "HIGH",
+                        "CRITICAL",
+                        "WARN",
+                        "FATAL",
+                        "DEBUG",
+                        "OK"
+                      ]
+                    },
+                    "finding": {
+                      "type": "string",
+                      "maxLength": 600
+                    },
+                    "cve": {
+                      "type": "string",
+                      "maxLength": 300
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "nmap_udp": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "xml": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4194304
+              }
+            }
+          }
+        ]
+      },
+      "wpscan": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "report": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "the raw WPScan JSON report; at most 8 MiB serialised"
+              },
+              "returncode": {
+                "type": "integer"
+              },
+              "stderr_tail": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
+        ]
+      },
+      "discover": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "maxItems": 512,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "ip"
+                  ],
+                  "properties": {
+                    "ip": {
+                      "type": "string",
+                      "maxLength": 60
+                    },
+                    "hostnames": {
+                      "type": "array",
+                      "maxItems": 5,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 260
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "openvas": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "results": {
+                "type": "array",
+                "maxItems": 5000,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "oid",
+                    "address"
+                  ],
+                  "properties": {
+                    "oid": {
+                      "type": "string",
+                      "pattern": "^[0-9.]{3,64}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "family": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "address": {
+                      "type": "string",
+                      "maxLength": 60
+                    },
+                    "hostname": {
+                      "type": "string",
+                      "maxLength": 255
+                    },
+                    "port": {
+                      "type": "string",
+                      "pattern": "^[0-9]{1,5}/(tcp|udp)$"
+                    },
+                    "severity": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 10
+                    },
+                    "threat": {
+                      "type": "string",
+                      "maxLength": 20
+                    },
+                    "qod": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "qod_type": {
+                      "type": "string",
+                      "maxLength": 40
+                    },
+                    "result": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "summary": {
+                      "type": "string",
+                      "maxLength": 1500
+                    },
+                    "insight": {
+                      "type": "string",
+                      "maxLength": 1500
+                    },
+                    "impact": {
+                      "type": "string",
+                      "maxLength": 1500
+                    },
+                    "affected": {
+                      "type": "string",
+                      "maxLength": 800
+                    },
+                    "solution": {
+                      "type": "string",
+                      "maxLength": 1500
+                    },
+                    "solution_type": {
+                      "type": "string",
+                      "maxLength": 30
+                    },
+                    "cvss_vector": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "cves": {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 40
+                      }
+                    },
+                    "urls": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 500
+                      }
+                    }
+                  }
+                }
+              },
+              "scanned_addresses": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 60
+                }
+              },
+              "without_cve": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unusable": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "partial": {
+                "type": "boolean"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
