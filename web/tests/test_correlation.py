@@ -530,6 +530,55 @@ class TestFixOnlyBranchList(unittest.TestCase):
         self.assertEqual(clean_affected([{"product": "PHP", "ranges": PHP_RANGES}])[0]["ranges"], PHP_RANGES)
 
 
+CONFLUENCE_SPLIT = [{"fixed": "7.4.17"}, {"introduced": "7.13.0"}, {"fixed": "7.13.7"}, {"introduced": "7.14.0"}, {"fixed": "7.14.3"},
+                    {"introduced": "7.15.0"}, {"fixed": "7.15.2"}, {"introduced": "7.18.0"}, {"fixed": "7.18.1"}]
+
+
+class TestSplitBranchRanges(unittest.TestCase):
+    """The CVE List writes a branch as two entries, one with its lower bound and one with its fix, and the conversion keeps two ranges
+    (CVE-2022-26134, 43 entries of the feed, 14 of them in KEV). Read alone each half matched every version (issue 205)."""
+
+    def _verdict(self, version, ranges=CONFLUENCE_SPLIT, label="Confluence Server"):
+        from cveFeed.correlation import clean_affected
+        cve = FakeCVE(91, clean_affected([{"vendor": "Atlassian", "product": "Confluence Server", "ranges": ranges}]), kev=True)
+        rows = _hits([cve], label, version)
+        return rows[0][1] if rows else "no match"
+
+    def test_the_fixed_releases_are_not_vulnerable(self):
+        for fixed in ("7.4.17", "7.13.7", "7.14.3", "7.15.2", "7.18.1", "7.19.0", "8.0.0"):
+            self.assertIsNot(self._verdict(fixed), True, fixed)
+
+    def test_the_releases_inside_a_branch_before_its_fix_are_vulnerable(self):
+        for version in ("7.4.16", "6.0.1", "7.13.0", "7.13.6", "7.14.2", "7.15.1", "7.18.0"):
+            self.assertIs(self._verdict(version), True, version)
+
+    def test_a_release_between_listed_branches_is_not_matched_by_either_half(self):
+        self.assertIsNot(self._verdict("7.12.0"), True)
+        self.assertIsNot(self._verdict("7.16.4"), True)
+
+    def test_pairs_are_joined_only_when_they_alternate_and_the_fix_is_newer(self):
+        from cveFeed.correlation import pair_split_ranges
+        self.assertEqual(pair_split_ranges([{"introduced": "1.0"}, {"fixed": "1.5"}]), [{"introduced": "1.0", "fixed": "1.5"}])
+        self.assertEqual(pair_split_ranges([{"introduced": "2.0"}, {"fixed": "1.5"}]), [{"introduced": "2.0"}, {"fixed": "1.5"}])  # fix before the start
+        self.assertEqual(pair_split_ranges([{"introduced": "1.0"}]), [{"introduced": "1.0"}])  # a branch with no fix stays open
+        self.assertEqual(pair_split_ranges([{"introduced": "1.0"}, {"introduced": "2.0"}, {"fixed": "2.5"}]),
+                         [{"introduced": "1.0"}, {"introduced": "2.0", "fixed": "2.5"}])
+        self.assertEqual(pair_split_ranges([{"introduced": "1.0", "fixed": "1.5"}, {"fixed": "2.5"}]),
+                         [{"introduced": "1.0", "fixed": "1.5"}, {"fixed": "2.5"}])  # a whole range is never joined
+        self.assertEqual(pair_split_ranges([{"introduced": "1.0", "type": "GIT"}, {"fixed": "1.5"}]),
+                         [{"introduced": "1.0", "type": "GIT"}, {"fixed": "1.5"}])
+
+    def test_the_evidence_names_the_joined_range(self):
+        from cveFeed import correlation
+        from cveFeed.correlation import clean_affected
+        cve = FakeCVE(92, clean_affected([{"vendor": "Atlassian", "product": "Confluence Server", "ranges": CONFLUENCE_SPLIT}]), kev=True)
+        details = {}
+        index = correlation.build_product_index([cve])
+        list(correlation._match_candidates("Confluence Server", correlation.parse_version("7.13.2"), correlation._norm("Confluence Server"), index,
+                                           {cve.id: cve}, details=details))
+        self.assertEqual(details[cve.id]["range"], {"introduced": "7.13.0", "fixed": "7.13.7"})
+
+
 class TestBranchBoundsFromTheCveList(unittest.TestCase):
     """The CNA's own per-branch bounds replace a bare fix list at ingest (cveFeed.intel.overlay_branch_ranges)."""
 

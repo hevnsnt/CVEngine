@@ -281,7 +281,8 @@ def affected_brief(affected, names=()):
         if not isinstance(item, dict):
             continue
         row = {k: _s(item[k], 80, names) for k in ('vendor', 'product', 'package') if item.get(k)}
-        row['ranges'] = [_range(r, names) for r in (item.get('ranges') or [])[:10] if isinstance(r, dict)]
+        from cveFeed.correlation import pair_split_ranges  # a branch the CVE List split in two reads as one range, as matching reads it
+        row['ranges'] = [_range(r, names) for r in pair_split_ranges([r for r in (item.get('ranges') or []) if isinstance(r, dict)])[:10]]
         out.append(row)
     return out
 
