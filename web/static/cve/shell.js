@@ -5,11 +5,13 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "suppliers"];
 
-// Where the switcher sends you when the project changes. On the dashboard it stays on the dashboard
-// (bare /cve/ for the combined view, ?project= for one project); on a section page it keeps the section.
+// Where the switcher sends you when the project changes. On the dashboard and the asset graph it stays there (?project= names
+// the project or "_all"); on a section page it keeps the section. The server remembers the choice for pages with no project.
 function projectHref(value, here) {
   if (here === "bounty") return `/cve/bounty/?project=${encodeURIComponent(value && value !== "_all" ? value : "")}`;
-  if (here === "dashboard") return value && value !== "_all" ? `/cve/?project=${encodeURIComponent(value)}` : "/cve/";
+  // "_all" is named in the address: a bare /cve/ opens the project this session last chose
+  if (here === "dashboard") return `/cve/?project=${encodeURIComponent(value || "_all")}`;
+  if (here === "graph") return `/cve/graph/?project=${encodeURIComponent(value || "_all")}`;
   // The section comes from the list above, never from the page text, and the slug is encoded like the other branches.
   return `/cve/${encodeURIComponent(value)}/${SECTIONS.find((s) => s === here) || "hosts"}/`;
 }
