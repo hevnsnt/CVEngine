@@ -48,11 +48,45 @@ class CarryRemediationTests(TestCase):
 		correlation.save_matches([self.row(source='port')])
 		self.assertEqual(CVEMatch.objects.get(subdomain=self.new).remediation_status, 'fixed')
 
-	def test_the_newest_decision_wins_and_an_open_match_carries_nothing(self):
+	def test_the_newest_decision_wins(self):
 		self.worked(status='accepted_risk', product='nginx')
 		self.worked(status='fixed', product='NGINX Plus')
 		correlation.save_matches([self.row(product='something else')])
 		self.assertEqual(CVEMatch.objects.get(subdomain=self.new).remediation_status, 'fixed')
+
+	def test_reopening_the_latest_scan_match_survives_another_scan(self):
+		self.worked()
+		correlation.save_matches([self.row()])
+		reopened_at = timezone.now()
+		CVEMatch.objects.filter(subdomain=self.new).update(remediation_status='open', remediation_note='reopened after verification',
+			remediation_updated_at=reopened_at)
+		scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.scans[1].scan_type,
+			start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='x')
+		sub = Subdomain.objects.create(name=self.new.name, target_domain=self.domain, scan_history=scan)
+		row = {**self.row(), 'subdomain_id': sub.id, 'scan_history_id': scan.id}
+		correlation.save_matches([row])
+		match = CVEMatch.objects.get(subdomain=sub)
+		self.assertEqual((match.remediation_status, match.remediation_note, match.remediation_updated_at),
+			('open', 'reopened after verification', reopened_at))
+
+	def test_an_open_decision_and_note_survive_a_changed_product_label(self):
+		self.worked(status='fixed', product='nginx')
+		latest = self.worked(status='open', product='NGINX Plus')
+		latest.remediation_note = 'reopened by ops'
+		latest.save(update_fields=['remediation_note'])
+		correlation.save_matches([self.row(product='NGINX Open Source')])
+		match = CVEMatch.objects.get(subdomain=self.new)
+		self.assertEqual((match.remediation_status, match.remediation_note), ('open', 'reopened by ops'))
+
+	def test_latest_host_decision_beats_older_exact_product_decision(self):
+		self.worked(status='fixed', product='nginx')
+		latest = self.worked(status='open', product='NGINX Plus')
+		latest.remediation_note = 'reopened after verification'
+		latest.save(update_fields=['remediation_note'])
+		correlation.save_matches([self.row(product='nginx')])
+		match = CVEMatch.objects.get(subdomain=self.new)
+		self.assertEqual((match.remediation_status, match.remediation_note),
+			('open', 'reopened after verification'))
 
 	def test_a_decision_about_another_cve_or_host_is_not_inherited(self):
 		other = CVEEntry.objects.create(cve_id='CVE-2099-1', title='other', published_at=timezone.now())
