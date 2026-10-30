@@ -19,7 +19,7 @@ FAST_XML = '''<?xml version="1.0"?>
 <ports><port protocol="tcp" portid="22">
 <state state="open"/><service name="ssh" product="OpenSSH" version="8.9" extrainfo="Ubuntu"/>
 </port></ports>
-</host></nmaprun>'''
+</host><runstats><finished exit="success"/></runstats></nmaprun>'''
 
 FULL_XML = '''<?xml version="1.0"?>
 <nmaprun><host>
@@ -27,7 +27,7 @@ FULL_XML = '''<?xml version="1.0"?>
 <ports><port protocol="tcp" portid="8080">
 <state state="open"/><service name="http" product="nginx" version="1.18"/>
 </port></ports>
-</host></nmaprun>'''
+</host><runstats><finished exit="success"/></runstats></nmaprun>'''
 
 
 class ProcessExitTests(SimpleTestCase):
@@ -68,7 +68,8 @@ class BuildTargetsTests(TestCase):
 
 class ParseXmlTests(TestCase):
 	def test_coverage_parser_rejects_missing_malformed_and_failed_reports(self):
-		bad_reports = ('', '<nmaprun><host>', '<other/>', '<nmaprun>error</nmaprun>',
+		bad_reports = ('', '<nmaprun><host>', '<other/>', '<nmaprun>error</nmaprun>', '<nmaprun/>',
+			'<nmaprun><runstats><finished/></runstats></nmaprun>',
 			'<nmaprun><runstats><finished exit="error"/></runstats></nmaprun>',
 			'<!DOCTYPE nmaprun [<!ENTITY x "x">]><nmaprun/>')
 		for report in bad_reports:
@@ -81,8 +82,8 @@ class ParseXmlTests(TestCase):
 			'<runstats><finished exit="success"/></runstats></nmaprun>')
 		self.assertEqual(nmap_scan.parse_xml(report, strict=True)[0]['ports'], [])
 
-	def test_an_empty_nmap_root_is_a_valid_empty_report(self):
-		self.assertEqual(nmap_scan.parse_xml('<nmaprun/>', strict=True), [])
+	def test_a_completed_empty_nmap_report_is_valid(self):
+		self.assertEqual(nmap_scan.parse_xml('<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', strict=True), [])
 
 	def test_blank_output_is_empty(self):
 		self.assertEqual(nmap_scan.parse_xml(''), [])
@@ -239,7 +240,7 @@ class RunNmapForScanTests(TestCase):
 
 	def test_invalid_output_does_not_record_successful_coverage(self):
 		from cveFeed.models import ServiceRun
-		for report in ('', '<nmaprun><host>', '<error/>'):
+		for report in ('', '<nmaprun><host>', '<error/>', '<nmaprun/>'):
 			with self.subTest(report=report):
 				result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=lambda *a: report,
 					naabu_runner=mock.Mock(side_effect=RuntimeError('unavailable')), dispatch=False, force=True)

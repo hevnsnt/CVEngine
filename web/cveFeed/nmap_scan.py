@@ -257,8 +257,11 @@ def parse_xml(xml_text, strict=False):
         data['nmaprun'] = run
         if strict:
             finished = (run.get('runstats') or {}).get('finished') or {}
-            if finished.get('@exit') not in (None, 'success'):
-                raise ValueError('nmap report declares an unsuccessful run')
+            # Nmap writes this terminal marker even when no hosts or ports are
+            # reported. A bare root can be a truncated process output, not a
+            # completed empty scan, so it must never establish coverage.
+            if not isinstance(finished, dict) or finished.get('@exit') != 'success':
+                raise ValueError('nmap report has no successful completion marker')
     except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
         logger.warning('could not parse nmap XML output', exc_info=True)
         if strict:
