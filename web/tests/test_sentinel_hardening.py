@@ -11,7 +11,7 @@ from agentapi import sentinel_broker as sentinels
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelEnrollment, SentinelTask
 from cveFeed.models import InternalRange
-from dashboard.models import ApiToken, Org, OrgMembership, Project, ProjectMembership
+from dashboard.models import ApiToken, AuditLog, Org, OrgMembership, Project, ProjectMembership
 from tests.test_agentapi import call, rpc
 from tests.test_sentinels import SentinelBase, register_sentinel
 
@@ -498,6 +498,75 @@ class NetworkAuthorityTests(SentinelBase):
         sentinels.sentinel_settings.set_managed(agent, {'network': 'external'}, self.dana)
         agent.refresh_from_db()
         self.assertEqual(agent.network, 'external')
+
+    def test_reset_of_external_enrollment_revokes_the_admin_internal_grant(self):
+        boot = self.boot('external')
+        agent = Agent.objects.get(pk=boot['id'])
+        sentinels.sentinel_settings.record_reported(agent, {'network': 'internal'})
+        sentinels.sentinel_settings.set_managed(agent, {'network': 'internal'}, self.dana)
+        self.assertIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
+
+        status, out = call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})
+        self.assertEqual(status, 200, out)
+        agent.refresh_from_db()
+        self.assertEqual(agent.network, 'external')
+        self.assertNotIn('network', agent.managed_settings)
+        self.assertEqual(agent.reported_settings['network']['value'], 'internal')
+        self.assertEqual(sentinels.sentinel_settings.effective(agent)['network'], 'external')
+        self.assertEqual(sentinels.sentinel_settings.reply(agent)['values']['network'], 'external')
+        self.assertEqual(out['settings']['network']['value'], 'external')
+        self.assertEqual(out['settings']['network']['server_grant'], 'external')
+        self.assertEqual(out['settings']['network']['machine_value'], 'internal')
+        self.assertTrue(out['settings']['network']['limited_by_server'])
+        self.assertFalse(out['settings']['network']['managed'])
+        audit_entry = AuditLog.objects.filter(action='agent.settings').latest('id')
+        self.assertEqual((audit_entry.detail['network_grant_before'], audit_entry.detail['network_grant_after']), ('internal', 'external'))
+        self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
+
+    def test_reset_of_internal_enrollment_restores_its_provisioned_grant(self):
+        boot = self.boot('internal')
+        agent = Agent.objects.get(pk=boot['id'])
+        SentinelEnrollment.objects.filter(used_by_agent=agent).update(expires_at=timezone.now() - timedelta(days=1))
+        sentinels.sentinel_settings.record_reported(agent, {'network': 'internal'})
+        sentinels.sentinel_settings.set_managed(agent, {'network': 'external'}, self.dana)
+        self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
+
+        status, out = call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})
+        self.assertEqual(status, 200, out)
+        agent.refresh_from_db()
+        self.assertEqual(agent.network, 'internal')
+        self.assertNotIn('network', agent.managed_settings)
+        self.assertEqual(sentinels.sentinel_settings.reply(agent)['values']['network'], 'internal')
+        self.assertEqual(out['settings']['network']['server_grant'], 'internal')
+        self.assertEqual(out['settings']['network']['value'], 'internal')
+        self.assertFalse(out['settings']['network']['managed'])
+        audit_entry = AuditLog.objects.filter(action='agent.settings').latest('id')
+        self.assertEqual((audit_entry.detail['network_grant_before'], audit_entry.detail['network_grant_after']), ('external', 'internal'))
+        self.assertIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
+        sentinels.sentinel_settings.record_reported(agent, {'network': 'external'})
+        agent.refresh_from_db()
+        status, detail = call(self.t['root'], 'GET', f'/api/v1/agents/{agent.pk}')
+        self.assertEqual(status, 200, detail)
+        self.assertEqual(detail['settings']['network']['value'], 'external')
+        self.assertEqual(detail['settings']['network']['server_grant'], 'internal')
+        self.assertEqual(detail['settings']['network']['machine_value'], 'external')
+        self.assertTrue(detail['settings']['network']['limited_by_machine'])
+        status, beat = call(boot['token'], 'POST', '/api/v1/sentinel/heartbeat')
+        self.assertEqual(status, 200, beat)
+        self.assertEqual(beat['settings']['values']['network'], 'external')
+        self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
+
+    def test_reset_without_matching_enrollment_falls_back_to_external(self):
+        out = register_sentinel(self.t['dana'], name='no-enrollment')[1]
+        agent = Agent.objects.get(pk=out['id'])
+        sentinels.sentinel_settings.record_reported(agent, {'network': 'internal'})
+        sentinels.sentinel_settings.set_managed(agent, {'network': 'internal'}, self.dana)
+
+        sentinels.sentinel_settings.set_managed(agent, {'network': None}, self.dana)
+        agent.refresh_from_db()
+        self.assertEqual(agent.network, 'external')
+        self.assertEqual(sentinels.sentinel_settings.reply(agent)['values']['network'], 'external')
+        self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
 
     def test_a_sentinel_that_declared_internal_before_the_server_decided_keeps_its_place(self):
         import importlib
