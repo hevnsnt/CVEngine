@@ -391,10 +391,12 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
         watch_certificate_transparency.delay(created[0].id)
     scan_ids = []
     created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
+    deferred = 0
     if discover and created_for_discovery:  # bbot discovery streams into the dashboard as it runs
-        from cveFeed.discovery import start_discoveries
-        scan_ids = [scan.id for scan in start_discoveries(created_for_discovery, **({'mode': mode} if mode else {}))]
-    return {'kind': kind, 'created': [_target(d) for d in created], 'already_exists': existing, 'excluded': excluded, 'scan_ids': scan_ids}
+        scans, deferred = _discover_new(created_for_discovery, mode, project.id, initiated_by=ctx.user)
+        scan_ids = [scan.id for scan in scans]
+    return {'kind': kind, 'created': [_target(d) for d in created], 'already_exists': existing, 'excluded': excluded, 'scan_ids': scan_ids,
+            'discovery_deferred': deferred}
 
 
 SCAN_STATUS_FILTER = {'queued': -1, '-1': -1, 'failed': 0, '0': 0, 'running': 1, '1': 1, 'finished': 2, 'success': 2, '2': 2,
@@ -796,6 +798,31 @@ def _start_discoveries(domains, mode, project_id, initiated_by=None):
     return scans
 
 
+BULK_DISCOVER_NOW = 50  # targets one add queues for discovery at once (CVENGINE_BULK_DISCOVER_NOW); the work conductor takes the rest
+
+
+def _discover_new(domains, mode, project_id, initiated_by=None):
+    """Queue discovery for the first ``BULK_DISCOVER_NOW`` of ``domains`` and leave the rest to the work conductor. Returns ``(scans, deferred)``.
+
+    One request that adds hundreds of targets used to queue hundreds of scans in the same second: first in, first out, so every other project's
+    scans waited behind them. The conductor already feeds the discovery queue with the targets that have never been scanned or have waited
+    longest, one per project per minute, so the targets left for it are scanned all the same and interleaved with everyone else's. With the
+    conductor off (``CVENGINE_WORK_DEPTH=0``) nothing would pick them up, so then every target is queued now."""
+    from cveFeed import activity, conductor
+    try:
+        cap = max(1, int(os.environ.get('CVENGINE_BULK_DISCOVER_NOW', BULK_DISCOVER_NOW)))
+    except ValueError:
+        cap = BULK_DISCOVER_NOW
+    if not conductor.wanted_depth():
+        cap = len(domains) or 1
+    now, rest = domains[:cap], domains[cap:]
+    scans = _start_discoveries(now, mode, project_id, initiated_by=initiated_by) if now else []
+    if rest:
+        activity.log('discovery', f'{len(rest)} more new target{"s" if len(rest) != 1 else ""} will be scanned by the work conductor, one project at a '
+                                  f'time, instead of all being queued at once ({len(now)} were queued now)', project=project_id)
+    return scans, len(rest)
+
+
 _SCHEME_RE = re.compile(r'^[a-z][a-z0-9+.\-]*://', re.I)
 # Both parts are bounded and cannot contain another '[' or '(': a long run of '[' with no ']' then costs one short scan per '[',
 # not a scan to the end of the line for each (the unbounded form was quadratic, and it runs before any authorization).
@@ -982,7 +1009,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     can_create = roles.can_manage_org(ctx.user, org.id)
     results = []
     used, note = mode, None
-    scan_ids = []
+    scan_ids, deferred = [], 0
     for pname, entries in groups:
         res = {'project': pname, 'slug': None, 'project_created': False, 'received': len(entries), 'created': 0,
                'already_exists': [], 'invalid': [], 'excluded': [], 'error': None}
@@ -1009,12 +1036,14 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             added = _add_targets(ctx, project.slug, entries, False, None)
             res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
             if discover and added['domains']:
-                scan_ids += [scan.id for scan in _start_discoveries(added['domains'], used, project.id, initiated_by=ctx.user)]
+                scans, left = _discover_new(added['domains'], used, project.id, initiated_by=ctx.user)
+                scan_ids += [scan.id for scan in scans]
+                deferred += left
         except ApiError as exc:
             res['error'] = exc.message
     return {'organization': org.name, 'organization_note': org_note, 'projects': results, 'created': sum(r['created'] for r in results),
             'projects_created': sum(r['project_created'] for r in results), 'invalid': errors,
-            'discovery_started': len(scan_ids), 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
+            'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
 
 
 def add_targets(ctx, slug, values, discover=True, mode=None):
@@ -1102,13 +1131,14 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
         wanted = [d for d in created if d.name in names_wanted]
         for i, d in enumerate(wanted):  # crt.sh blocks a burst, so each check starts a couple of seconds after the last
             watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
-    scan_ids, used, note = [], mode, None
+    scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
     if discover and to_discover:
-        scan_ids = [scan.id for scan in _start_discoveries(to_discover, used, project.id, initiated_by=initiated_by)]
+        scans, deferred = _discover_new(to_discover, used, project.id, initiated_by=initiated_by)
+        scan_ids = [scan.id for scan in scans]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
             'domains': created, 'already_exists': existing, 'invalid': invalid, 'excluded': excluded,
-            'discovery_started': len(scan_ids), 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
+            'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
 
 
 # --- inventory and findings ----------------------------------------------------

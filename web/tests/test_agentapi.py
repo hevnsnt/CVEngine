@@ -1494,23 +1494,23 @@ class BulkTargetTests(TestCase):
 		self.assertEqual(call(self.tok_audit, 'POST', '/api/v1/projects/ba/targets/bulk', {'text': 'x.example'})[0], 403)
 		self.assertEqual(call(self.tok, 'POST', '/api/v1/projects/bb/targets/bulk', {'text': 'x.example'})[0], 404)
 
-	def test_bulk_adding_120_targets_queues_120_discoveries_in_insertion_order(self):
+	def test_bulk_adding_120_targets_queues_the_first_50_discoveries_in_insertion_order_and_leaves_the_rest_to_the_conductor(self):
 		text = '\n'.join(f'q{i:03d}.example' for i in range(120))
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
 			status, data = call(self.tok, 'POST', '/api/v1/projects/ba/targets/bulk', {'text': text})
-		self.assertEqual((status, data['created'], data['discovery_started']), (201, 120, 120))
+		self.assertEqual((status, data['created'], data['discovery_started'], data['discovery_deferred']), (201, 120, 50, 70))
 		sent = [c[0][0] for c in queued.call_args_list]
-		self.assertEqual(len(sent), 120)
+		self.assertEqual(len(sent), 50)
 		self.assertEqual(sent, sorted(sent))  # first in, first out
 		from startScan.models import ScanHistory
-		self.assertEqual([ScanHistory.objects.get(pk=i).domain.name for i in sent], [f'q{i:03d}.example' for i in range(120)])
+		self.assertEqual([ScanHistory.objects.get(pk=i).domain.name for i in sent], [f'q{i:03d}.example' for i in range(50)])
 		self.assertEqual(set(ScanHistory.objects.filter(id__in=sent).values_list('scan_status', flat=True)), {-1})
 
-	def test_a_slash_24_queues_254_discoveries_and_every_ip(self):
+	def test_a_slash_24_adds_every_ip_and_queues_the_first_50_discoveries(self):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
 			status, data = call(self.tok, 'POST', '/api/v1/projects/ba/targets', {'value': '203.0.113.0/24', 'discover': True})
-		self.assertEqual((status, len(data['created']), len(data['scan_ids'])), (201, 254, 254))
-		self.assertEqual(queued.call_count, 254)
+		self.assertEqual((status, len(data['created']), len(data['scan_ids']), data['discovery_deferred']), (201, 254, 50, 204))
+		self.assertEqual(queued.call_count, 50)
 
 	def test_a_cidr_larger_than_the_cap_is_refused_before_it_is_expanded(self):
 		status, data = call(self.tok, 'POST', '/api/v1/projects/ba/targets', {'value': '203.0.0.0/8'})
