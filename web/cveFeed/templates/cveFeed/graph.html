@@ -86,7 +86,8 @@
       graph.setClustered(!key);
       const rendered = graph.sync(data);
       if (reset) graph.fit();
-      count.textContent = `${rendered.nodes} nodes · ${rendered.edges} links`;
+      const hostsInfo = data.hosts || {};
+      count.textContent = `${rendered.nodes} nodes · ${rendered.edges} links` + (hostsInfo.total > hostsInfo.drawn ? ` · showing ${hostsInfo.drawn} of ${hostsInfo.total} hosts, highest score first: pick a domain to see the rest` : '');
       const hosts = data.nodes.filter((n) => n.kind === 'subdomain');
       document.getElementById('soc-nodes').textContent = rendered.nodes;
       document.getElementById('soc-fire').textContent = hosts.filter((n) => n.heat === 'fire').length;
