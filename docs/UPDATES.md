@@ -46,7 +46,7 @@ With backups turned on (the default) it never deploys without one. A failed back
 
 cvENGINE checks its GitHub repository twice a day (05:23 and 17:23 UTC) and tells superusers when something newer exists. In Manual mode (the default) it installs nothing by itself; in Automatic mode it approves what the check finds, as an administrator would, and the host script below installs it.
 
-1. **Check.** The check reads the head of the configured branch (default `hevnsnt/CVEngine@master`) and compares it with the installed commit (the first line of `web/.commit`). `make up`, `make build`, `update.sh`, and `apply-update.sh` write it. A plain `docker compose up` does not, and the installed commit then shows as unknown. A private repository needs a fine-grained read-only token under **Settings, Updates, Update source**, stored write-only.
+1. **Check.** The check reads the head of the configured branch (default `hevnsnt/CVEngine@master`) and compares it with the installed commit (the first line of `web/.commit`; for a server with commits of its own see "A server with commits of its own" below). `make up`, `make build`, `update.sh`, and `apply-update.sh` write it. A plain `docker compose up` does not, and the installed commit then shows as unknown. A private repository needs a fine-grained read-only token under **Settings, Updates, Update source**, stored write-only.
 2. **Ask.** A bar at the top of every page shows the newest commit message and how many commits are new. **Settings, Updates** lists up to 20 of them and is the only place to **Check now**. Superusers can approve, dismiss (offered while an update is available, until a newer commit appears), or check again.
 3. **Apply.** Approving writes the commit id to `web/.update-approved`. The web container has no Git or Docker access, so the host script `scripts/apply-update.sh` does the work. It turns on the global scanning pause, waits for running scans (5 minutes by default, then goes ahead and interrupts what is left), fast-forwards to that commit, checks that there is room for the new image, builds, takes a database dump (`scripts/db-backup.sh`), migrates, and recreates the application containers, then checks that the web service answers. Migrations are not rolled back: the dump is the way back. It recreates only `web`, the workers, the scheduler, and the proxy: it never touches `db`, `redis`, the `tailscale` service, or the OpenVAS add-on.
 
@@ -90,6 +90,21 @@ It:
 `--force` skips the wait. It stops scans (discovery scans are queued again afterwards), pauses what it can, and stops the workers with a 10-second grace. Any other task running at that moment is lost and runs again when its schedule next fires. A failed migration still stops the update.
 
 New work stays queued in Redis throughout. If the wait times out or the update stops before the migration, the checkout is put back with `git reset --keep`, the previous workers resume untouched, and stopped scans wait in a private file under `.git/cvengine-update` for the next successful update. A failure after the migration leaves the new code in place and says what to check.
+
+### A server with commits of its own
+
+An installation that carries commits on top of a release (a fork, a local patch) never has the commit GitHub's branch has, and GitHub has never seen its own commits: asked how far behind such a build is, it answers "not found". Only the host has git, so the host compares instead: every 30 minutes while the watcher runs, after each deploy and as soon as Settings names another source, `scripts/update-state.py upstream` fetches the tracked branch (from `origin` when that is the tracked repository, otherwise from `https://github.com/<repo>.git`, public repositories only, objects checked, into a private ref `refs/cvengine/upstream/<branch>`) and compares the running build (`web/.commit`) with it. It publishes `web/.upstream-state.json`: the commit the build shares with the branch (`base`), the commits of its own (`ahead`) and the branch's commits it lacks (`behind`). The check then asks GitHub about `base`, which it knows, and Settings, Updates reports one of:
+
+| Status | Meaning | Banner | Approve |
+| --- | --- | --- | --- |
+| up to date | the branch has nothing the build lacks, with or without commits of its own on top | none | no |
+| available | the branch has commits the build lacks and the build has none of its own | yes | yes |
+| diverged | the branch has new commits and the build has commits of its own | yes, dismissable, no Approve | refused, with the merge to run by hand |
+| unknown | GitHub has never seen the build's commit and the host has not said which commit it shares with the branch (no host updater, or it could not fetch) | none | refused |
+
+An update moves the checkout forward and never merges: a checkout with commits of its own that the approved commit lacks is refused before scanning is paused or anything is rebuilt, with the phase naming what to run (`git fetch origin`, `git merge origin/<branch>`, then `make up`). A checkout that has already merged the branch is level with it: nothing is offered and nothing is retried. `update.sh --check`, `update.sh` and automatic deployment use the same test (is the remote head contained in this checkout), so a checkout with commits of its own is no longer redeployed, and backed up, at every run; automatic deployment says once, per remote commit, that a merge by hand is needed.
+
+The tracked repository and branch come from the app (`web/.update-source`, one line, written by every check) and are validated again on the host. The host fetches nothing else, and writes only into the checkout's object store and `web/.upstream-state.json`.
 
 ### What the host trusts
 

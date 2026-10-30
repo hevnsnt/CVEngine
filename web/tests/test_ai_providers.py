@@ -212,11 +212,11 @@ class LocalModelLimitsTests(unittest.TestCase):
 		return post.call_args[1]
 
 	def test_the_timeout_is_a_setting_and_the_default_is_unchanged(self):
-		self.assertEqual(self.post('vllm')['timeout'], ai.REQUEST_TIMEOUT)
-		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '300'})['timeout'], 300)
-		self.assertEqual(self.post('lmstudio', env={'CVENGINE_AI_TIMEOUT': '600'})['timeout'], 600)  # the setting wins over a provider's own
-		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': 'soon'})['timeout'], ai.REQUEST_TIMEOUT)
-		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '2'})['timeout'], ai.REQUEST_TIMEOUT)  # out of range: ignored
+		self.assertEqual(self.post('vllm')['timeout'], (ai.CONNECT_TIMEOUT, ai.REQUEST_TIMEOUT))  # a server that is down fails at once, one that is loading a model is waited for
+		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '300'})['timeout'], (ai.CONNECT_TIMEOUT, 300))
+		self.assertEqual(self.post('lmstudio', env={'CVENGINE_AI_TIMEOUT': '600'})['timeout'], (ai.CONNECT_TIMEOUT, 600))  # the setting wins over a provider's own
+		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': 'soon'})['timeout'], (ai.CONNECT_TIMEOUT, ai.REQUEST_TIMEOUT))
+		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '2'})['timeout'], (ai.CONNECT_TIMEOUT, ai.REQUEST_TIMEOUT))  # out of range: ignored
 
 	def test_no_reply_limit_is_sent_unless_the_operator_set_one(self):
 		for name in ('openai', 'openrouter', 'vllm', 'lmstudio'):
@@ -266,6 +266,164 @@ class LocalModelLimitsTests(unittest.TestCase):
 		self.assertIsNone(ai._request_options.get().get('temperature'))
 
 
+class RefusingResp(FakeResp):
+	"""A server's HTTP error, with the body it sent."""
+
+	def __init__(self, status, body):
+		super().__init__({})
+		self.status_code, self.text = status, body
+
+	def raise_for_status(self):
+		import requests
+		raise requests.HTTPError('refused', response=self)
+
+
+class LocalModelGapsTests(unittest.TestCase):
+	"""What a second look at issue 209 found: the limit's name follows the address, an empty reply is its own error, a reply cut off at a
+	limit is asked again with a longer one, an unreachable server is not waited for, the seed is pinned and Ollama's context is a setting."""
+
+	OK = {'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}
+
+	def provider(self, name, base):
+		return ai.get_provider(name, model='m', api_key='k' if name in ('openai', 'openrouter') else None, base_url=base)
+
+	def test_a_proxy_in_front_of_openai_gets_max_tokens(self):
+		with mock.patch.dict('os.environ', {'CVENGINE_AI_MAX_TOKENS': '900'}), mock.patch('requests.post', return_value=FakeResp(self.OK)) as post:
+			self.provider('openai', 'https://llm-proxy.example.test/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['json']['max_tokens'], 900)
+			self.assertNotIn('max_completion_tokens', post.call_args[1]['json'])
+			self.provider('openai', None).complete('s', 'u')
+			self.assertEqual(post.call_args[1]['json']['max_completion_tokens'], 900)
+
+	def test_a_reply_with_no_text_is_an_empty_reply_not_a_schema_error(self):
+		for data in ({'choices': [{'message': {'content': None}, 'finish_reason': 'stop'}]},
+					 {'choices': [{'message': {'content': '  '}, 'finish_reason': 'stop'}]}):
+			with mock.patch('requests.post', return_value=FakeResp(data)), self.assertRaises(ai.AIProviderError) as error:
+				self.provider('openai', None).complete('s', 'u')
+			self.assertEqual(error.exception.category, 'empty_response')
+		with mock.patch('requests.post', return_value=FakeResp({'message': {'content': ''}})), self.assertRaises(ai.AIProviderError) as error:
+			self.provider('ollama', 'http://h:11434').complete('s', 'u')
+		self.assertEqual(error.exception.category, 'empty_response')
+
+	def test_a_triage_cut_off_at_the_limit_is_asked_again_with_a_longer_one(self):
+		cut = FakeResp({'choices': [{'message': {'content': '{"classif'}, 'finish_reason': 'length'}]})
+		good = FakeResp({'choices': [{'message': {'content': TRIAGE_OK}, 'finish_reason': 'stop'}]})
+		with mock.patch.dict('os.environ', {'CVENGINE_AI_MAX_TOKENS': '600'}), mock.patch('requests.post', side_effect=[cut, good]) as post:
+			out = ai.triage_finding(self.provider('vllm', 'http://h:8000/v1'), 'cve_match', {'product': 'nginx'})
+		self.assertEqual(out['parsed']['classification'], 'needs_validation')
+		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [600, 1200])
+
+	def test_without_a_limit_set_a_cut_off_reply_is_not_asked_again(self):
+		cut = FakeResp({'choices': [{'message': {'content': '{"classif'}, 'finish_reason': 'length'}]})
+		with mock.patch.dict('os.environ', {}, clear=False), mock.patch('requests.post', return_value=cut) as post:
+			import os
+			os.environ.pop('CVENGINE_AI_MAX_TOKENS', None)
+			with self.assertRaises(ai.AIProviderError) as error:
+				ai.triage_finding(self.provider('vllm', 'http://h:8000/v1'), 'cve_match', {'product': 'nginx'})
+		self.assertEqual((error.exception.category, post.call_count), ('output_truncated', 1))
+
+	def test_a_pinned_seed_reaches_a_self_hosted_server_only(self):
+		with ai.request_options(temperature=0, seed=7), mock.patch('requests.post', return_value=FakeResp(self.OK)) as post:
+			self.provider('vllm', 'http://h:8000/v1').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['json']['seed'], 7)
+			self.provider('openai', None).complete('s', 'u')
+			self.assertNotIn('seed', post.call_args[1]['json'])
+		with ai.request_options(temperature=0, seed=7), mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
+			self.provider('ollama', 'http://h:11434').complete('s', 'u')
+			self.assertEqual(post.call_args[1]['json']['options'], {'temperature': 0, 'seed': 7})
+
+	def test_ollamas_context_window_is_a_setting_and_a_full_one_is_reported(self):
+		with mock.patch.dict('os.environ', {'CVENGINE_OLLAMA_NUM_CTX': '8192'}), \
+				mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}, 'prompt_eval_count': 8000})) as post, \
+				mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('reNgine.ai_providers', level='WARNING') as logs:
+			self.provider('ollama', 'http://h:11434').complete('s', 'u')
+		self.assertEqual(post.call_args[1]['json']['options'], {'num_ctx': 8192})
+		self.assertIn('CVENGINE_OLLAMA_NUM_CTX', logs.output[0])
+		with mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
+			self.provider('ollama', 'http://h:11434').complete('s', 'u')
+		self.assertNotIn('options', post.call_args[1]['json'])
+
+
+TRIAGE_OK = ('{"classification": "needs_validation", "reason": "r", "impact": "i", "severity_adjust": 0, "severity_reason": "", '
+			 '"remediation": "p", "validation_steps": []}')
+
+
+class StructuredOutputTests(unittest.TestCase):
+	"""A schema for the reply goes to a self-hosted server that takes one, steps down when it does not, and never goes to a hosted provider."""
+
+	def setUp(self):
+		ai._STRUCTURED.clear()
+		self.addCleanup(ai._STRUCTURED.clear)
+
+	def ask(self, name, base, responses, env=None):
+		provider = ai.get_provider(name, model='m', api_key='k' if name in ('openai', 'openrouter') else None, base_url=base)
+		with mock.patch.dict('os.environ', env or {}), mock.patch('requests.post', side_effect=responses) as post:
+			out = ai.triage_finding(provider, 'cve_match', {'product': 'nginx'})
+		return out, post
+
+	def good(self):
+		return FakeResp({'choices': [{'message': {'content': TRIAGE_OK}, 'finish_reason': 'stop'}]})
+
+	def test_the_schema_covers_exactly_what_the_validator_accepts(self):
+		schema = ai.triage_schema()
+		self.assertEqual(set(schema['properties']), ai.TRIAGE_KEYS)
+		self.assertEqual(set(schema['required']), ai.TRIAGE_KEYS)
+		self.assertFalse(schema['additionalProperties'])
+		self.assertEqual(schema['properties']['classification']['enum'], list(ai.TRIAGE_CLASSIFICATIONS))
+		self.assertEqual(schema['properties']['validation_steps']['items']['properties']['kind']['enum'], list(ai.TRIAGE_STEP_KINDS))
+		parsed, reason = ai.validate_triage(TRIAGE_OK)
+		self.assertEqual(reason, '')
+
+	def test_a_self_hosted_server_is_sent_the_schema(self):
+		out, post = self.ask('vllm', 'http://h:8000/v1', [self.good()])
+		body = post.call_args[1]['json']
+		self.assertEqual(body['response_format']['type'], 'json_schema')
+		self.assertTrue(body['response_format']['json_schema']['strict'])
+		self.assertEqual(body['response_format']['json_schema']['schema'], ai.triage_schema())
+		self.assertEqual((body['temperature'], body['seed']), (0, ai.TRIAGE_SEED))
+		self.assertEqual(out['parsed']['classification'], 'needs_validation')
+
+	def test_ollama_takes_it_as_format(self):
+		_, post = self.ask('ollama', 'http://h:11434', [FakeResp({'message': {'content': TRIAGE_OK}})])
+		self.assertEqual(post.call_args[1]['json']['format'], ai.triage_schema())
+
+	def test_hosted_providers_are_not_sent_it_unless_asked(self):
+		for name in ('openai', 'openrouter'):
+			_, post = self.ask(name, None, [self.good()])
+			self.assertNotIn('response_format', post.call_args[1]['json'], name)
+		_, post = self.ask('openrouter', None, [self.good()], env={'CVENGINE_AI_STRUCTURED': 'all'})
+		self.assertEqual(post.call_args[1]['json']['response_format']['type'], 'json_schema')
+		self.assertEqual(post.call_args[1]['json']['provider'], {'require_parameters': True})
+
+	def test_it_can_be_turned_off(self):
+		_, post = self.ask('vllm', 'http://h:8000/v1', [self.good()], env={'CVENGINE_AI_STRUCTURED': 'off'})
+		self.assertNotIn('response_format', post.call_args[1]['json'])
+
+	def test_a_server_that_refuses_the_schema_is_asked_in_json_mode_then_plainly_and_remembers(self):
+		refuse = lambda: RefusingResp(400, '{"error": "unsupported response_format: json_schema"}')  # noqa: E731
+		out, post = self.ask('lmstudio', 'http://h:1234/v1', [refuse(), refuse(), self.good()])
+		self.assertEqual([c[1]['json'].get('response_format', {}).get('type') for c in post.call_args_list], ['json_schema', 'json_object', None])
+		self.assertEqual(out['parsed']['classification'], 'needs_validation')
+		_, again = self.ask('lmstudio', 'http://h:1234/v1', [self.good()])
+		self.assertNotIn('response_format', again.call_args[1]['json'])  # remembered: no refused request first
+
+	def test_an_error_that_has_nothing_to_do_with_the_schema_is_not_retried_without_it(self):
+		for status, body in ((401, 'bad key'), (429, 'slow down'), (500, 'boom'), (400, 'context length exceeded')):
+			with self.assertRaises(ai.AIProviderError, msg=status):
+				self.ask('vllm', 'http://h:8000/v1', [RefusingResp(status, body)])
+			ai._STRUCTURED.clear()
+
+	def test_an_empty_answer_under_a_schema_is_asked_again_without_it(self):
+		empty = FakeResp({'choices': [{'message': {'content': ''}, 'finish_reason': 'stop'}]})
+		_, post = self.ask('vllm', 'http://h:8000/v1', [empty, self.good()])
+		self.assertEqual([c[1]['json'].get('response_format', {}).get('type') for c in post.call_args_list], ['json_schema', 'json_object'])
+
+	def test_ollama_steps_down_to_plain_json_then_nothing(self):
+		refuse = lambda: RefusingResp(400, '{"error":"invalid format"}')  # noqa: E731
+		_, post = self.ask('ollama', 'http://h:11434', [refuse(), refuse(), FakeResp({'message': {'content': TRIAGE_OK}})])
+		self.assertEqual([c[1]['json'].get('format') for c in post.call_args_list], [ai.triage_schema(), 'json', None])
+
+
 class LMStudioTests(unittest.TestCase):
 	def test_it_is_an_openai_compatible_keyless_server_you_must_give_the_address_of(self):
 		self.assertIn('lmstudio', ai.SELECTABLE)
@@ -290,9 +448,9 @@ class LMStudioTests(unittest.TestCase):
 		reply = FakeResp({'choices': [{'message': {'content': 'ok'}}]})
 		with mock.patch('requests.post', return_value=reply) as post:
 			ai.get_provider('lmstudio', model='m', base_url='http://h:1234/v1').complete('s', 'u')
-			self.assertEqual(post.call_args[1]['timeout'], 300)
+			self.assertEqual(post.call_args[1]['timeout'], (ai.CONNECT_TIMEOUT, 300))
 			ai.get_provider('vllm', model='m', base_url='http://h:8000/v1').complete('s', 'u')
-			self.assertEqual(post.call_args[1]['timeout'], ai.REQUEST_TIMEOUT)
+			self.assertEqual(post.call_args[1]['timeout'], (ai.CONNECT_TIMEOUT, ai.REQUEST_TIMEOUT))
 
 	def test_embedding_models_are_left_out_of_the_choice_and_one_chat_model_is_the_default(self):
 		listing = {'data': [{'id': 'text-embedding-nomic-embed-text-v1.5'}, {'id': 'qwen3-8b'}]}

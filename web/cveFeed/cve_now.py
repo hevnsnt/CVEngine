@@ -105,6 +105,22 @@ class CVENowClient:
             if not cursor:
                 return
 
+    def iter_pages(self, max_entries=500, page_size=100, page_pause=0, cursor=None):
+        """Yield ``(cursor, entries)`` per page, newest first, where ``cursor`` is the one that fetched the page (None for the first), so a
+        walk that stops part way can continue from that page later. At most ``max_entries`` entries are read."""
+        seen = 0
+        while seen < max_entries:
+            if seen and page_pause:
+                self.sleep(page_pause)
+            page, following = self.list_entries(limit=min(page_size, max_entries - seen), cursor=cursor)
+            if not page:
+                return
+            yield cursor, page
+            seen += len(page)
+            cursor = following
+            if not cursor:
+                return
+
     def status(self):
         """Return the feed's polling / historical-coverage status."""
         return self._get("/status")
