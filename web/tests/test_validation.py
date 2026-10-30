@@ -358,6 +358,26 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(validation.interpret(route, {}, {'status': 'observed', 'summary': 'x', 'http': {'status': 200}})['status'], 'reaffirmed')
 		self.assertEqual(validation.interpret(route, {}, {'status': 'observed', 'summary': 'x', 'http': {'status': 404}})['status'], 'no_match')
 
+	def test_interpret_requires_the_same_identified_product(self):
+		for product, observed in (('ingress-nginx', 'nginx'), ('nginx', 'ingress-nginx'),
+				('phpMyAdmin', 'php'), ('php', 'phpMyAdmin'), ('nginx', ''), ('', 'nginx'),
+				('Apache HTTP Server', 'Oracle HTTP Server'), ('WAF', 'WAF')):
+			for version in ('1.5.0', '3.0.0'):
+				with self.subTest(product=product, observed=observed, version=version):
+					subject = {'kind': 'cve_match', 'product': product, 'range': {'introduced': '1.0', 'fixed': '2.0'}}
+					seen = {'status': 'observed', 'summary': 'x', 'observed': {'product': observed, 'version': version}}
+					self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'observed')
+
+	def test_interpret_accepts_product_aliases_and_vendor_names(self):
+		for product, observed in (('nginx', 'NGINX'), ('Apache HTTP Server', 'Apache httpd'),
+				('HTTP Server', 'Apache'), ('OpenSSH', 'OpenSSH server')):
+			with self.subTest(product=product, observed=observed):
+				subject = {'kind': 'cve_match', 'product': product, 'range': {'introduced': '1.0', 'fixed': '2.0'}}
+				seen = {'status': 'observed', 'summary': 'x', 'observed': {'product': observed, 'version': '1.5.0'}}
+				self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'reaffirmed')
+				seen['observed']['version'] = '3.0.0'
+				self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'version_changed')
+
 	def test_rollup_never_calls_a_failure_clean(self):
 		r = validation.rollup
 		self.assertEqual(r([]), 'none')
