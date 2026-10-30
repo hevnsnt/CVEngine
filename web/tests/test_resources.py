@@ -1,7 +1,10 @@
 """reNgine.resources: memory reading, the admission queue, the watchdog, and how callers react to a memory kill."""
 import os
+import json
 import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -255,6 +258,46 @@ class WatchdogTests(unittest.TestCase):
         self.assertIsNotNone(proc.poll())
         time.sleep(0.3)
         self.assertEqual(res.group_rss_mb(proc.pid), 0)  # the children are gone too
+
+    def test_celery_gevent_timeout_stops_scanner_tree_before_releasing_capacity(self):
+        # Celery's gevent timeout is a BaseException. Run it in a child interpreter
+        # because monkey.patch_all() must not alter the Django test runner.
+        script = textwrap.dedent('''
+            from gevent import monkey
+            monkey.patch_all()
+            import importlib.util, json, os, subprocess, sys, time
+            from unittest.mock import patch
+            from celery.concurrency.gevent import apply_timeout
+
+            spec = importlib.util.spec_from_file_location('resources', sys.argv[1])
+            resources = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(resources)
+            store, children = resources.MemoryStore(), []
+            def task():
+                with resources.heavy_job('nmap', store=store,
+                                         state_fn=lambda: {'total_mb': 4096, 'available_mb': 4096}) as job:
+                    proc = subprocess.Popen(['sh', '-c', 'sleep 30 & sleep 30 & wait'], start_new_session=True)
+                    children.append(proc)
+                    job.attach(proc)
+                    proc.communicate(timeout=20)
+            try:
+                with patch.object(resources, 'global_pause_requested', return_value=False), \\
+                     patch.object(resources.Job, 'start_watchdog'):
+                    result = apply_timeout(task, timeout=0.3, getpid=os.getpid,
+                                           timeout_callback=lambda *args: 'celery timed out')
+                proc = children[0]
+                print(json.dumps({'result': result, 'child_stopped': proc.poll() is not None,
+                                  'tree_rss_mb': resources.group_rss_mb(proc.pid),
+                                  'reservations': len(store.live(time.time()))}))
+            finally:
+                for proc in children:
+                    resources.terminate_group(proc, grace=0)
+                    proc.wait()
+        ''')
+        result = subprocess.run([sys.executable, '-c', script, res.__file__], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'result': 'celery timed out', 'child_stopped': True,
+                                                       'tree_rss_mb': 0, 'reservations': 0})
 
 
 class CallerReactionTests(unittest.TestCase):

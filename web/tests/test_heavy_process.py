@@ -25,8 +25,11 @@ class RunTests(SimpleTestCase):
 		child = int(open(pidfile).read())
 		for _ in range(40):  # the grandchild goes with the group (a plain subprocess.run would have left it running)
 			try:
-				os.kill(child, 0)
-			except ProcessLookupError:
+				with open(f'/proc/{child}/stat') as status:
+					state = status.read().rsplit(')', 1)[1].split()[0]
+			except FileNotFoundError:
+				break
+			if state == 'Z':  # a reparented zombie cannot run; the container's PID 1 may reap it later
 				break
 			time.sleep(0.25)
 		else:

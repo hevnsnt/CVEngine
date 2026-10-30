@@ -723,6 +723,16 @@ def heavy_job(kind, label='', cost=None, wait_timeout=None, store=None, state_fn
     job.start_watchdog()
     try:
         yield job
+    except BaseException:
+        # Celery's gevent hard timeout interrupts a scanner with a BaseException, not
+        # subprocess.TimeoutExpired. Stop the attached process tree before releasing
+        # its memory reservation or another scanner may start beside the orphan.
+        if job.proc is not None:
+            try:
+                terminate_group(job.proc, grace=5)
+            except Exception:  # noqa: BLE001 - preserve the original task failure
+                logger.exception('could not stop scanner process after heavy job failed')
+        raise
     finally:
         job.stop_watchdog()
         store.release(job.token)
