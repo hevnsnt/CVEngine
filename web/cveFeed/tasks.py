@@ -1192,6 +1192,7 @@ def internal_discovery_sweep():
 
 
 DEEP_SWEEP_MAX = 50  # apexes queued per run (CVENGINE_DEEP_SWEEP_MAX)
+DEEP_SWEEP_PER_PROJECT = 10  # of them, at most this many for one project (CVENGINE_DEEP_SWEEP_PER_PROJECT)
 
 
 @app.task(name="deep_scan_apexes", bind=False, queue="cve_feed_queue")
@@ -1257,7 +1258,18 @@ def deep_scan_apexes():
     busy = set(ScanHistory.objects.filter(
         scan_status__in=(QUEUED, RUNNING), start_scan_date__gte=timezone.now() - running_window(),
         domain__name__in={key[1] for key in wanted}).exclude(tasks__contains=[HOST_PIPELINE_TASK]).values_list("domain__name", "domain__project_id"))
-    todo = [key for key, apex, project_id in due if (apex, project_id) not in busy][:cap]
+    try:
+        per_project = max(1, int(os.environ.get("CVENGINE_DEEP_SWEEP_PER_PROJECT", DEEP_SWEEP_PER_PROJECT)))
+    except ValueError:
+        per_project = DEEP_SWEEP_PER_PROJECT
+    todo, taken = [], {}
+    for key, apex, project_id in due:  # oldest first, but one project's apexes cannot fill the whole run: the others wait behind them otherwise
+        if (apex, project_id) in busy or taken.get(project_id, 0) >= per_project:
+            continue
+        taken[project_id] = taken.get(project_id, 0) + 1
+        todo.append(key)
+        if len(todo) >= cap:
+            break
     domains, skipped = [], 0
     for project_id, apex in todo:
         domain = Domain.objects.filter(pk=wanted[(project_id, apex)]).first() if wanted[(project_id, apex)] else None
@@ -1500,7 +1512,10 @@ def update_nuclei_templates():
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("nuclei template update failed: %s", exc)
         return {"updated": False, "error": str(exc)[:200]}
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-1:] or [""]
+    # the line that says what happened, not a warning nuclei prints about its JSON library on a newer Go release (it was recorded as the result)
+    lines = [line.strip() for line in (proc.stdout + proc.stderr).splitlines() if line.strip()]
+    said = [line for line in lines if not re.match(r"(?:\[wrn\]|(?:warning|warn)\b)", line, re.I)]
+    tail = said[-1:] or ["ran with no message (the templates were already current)" if proc.returncode == 0 else "no message"]
     from cveFeed.templategen import invalidate_template_index
     invalidate_template_index()
     try:  # system_status judges the refresh on this, not on the age of the files (they only change when a release is published)

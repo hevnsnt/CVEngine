@@ -56,7 +56,8 @@ ENROLLMENT_TTL = timedelta(minutes=30)  # long enough to copy the token into a S
 ENROLLMENT_PREFIX = 'senr_'
 MAX_ADDRESSES = 64  # a dispatched nmap/naabu task names at most this many addresses (one task per stage per Sentinel, this phase)
 MAX_PORTS_PER_HOST = 500
-MAX_FINDINGS = 100
+MAX_FINDINGS = 500  # findings of one result that are kept (strongest first)
+MAX_FINDINGS_SENT = 5000  # a result carrying more than this is not a nuclei result: it is refused
 MAX_EXTRACTED = 20
 MAX_TAGS = 20
 MAX_OPENVAS_RESULTS = 5000  # matches cveFeed.openvas_scan.MAX_RESULTS: a dispatched GVM task reports no more than one task's own cap
@@ -1122,9 +1123,21 @@ def _clean_naabu_result(body):
     return {'ports': out}
 
 
+_SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, 'unknown': 0}
+
+
 def _clean_findings(findings):
-    if not isinstance(findings, list) or len(findings) > MAX_FINDINGS:
-        raise ApiError(400, f'findings must be a list of at most {MAX_FINDINGS} entries')
+    """``(findings, dropped)`` for a nuclei result: at most ``MAX_FINDINGS`` findings, strongest first. A pass over many hosts can legitimately
+    report more than that (most of them informational), and rejecting the whole result for it lost every finding and sent the stage back to run
+    nuclei locally; the rest are counted in ``dropped``. A list beyond ``MAX_FINDINGS_SENT`` is no nuclei result and is still refused."""
+    if not isinstance(findings, list) or len(findings) > MAX_FINDINGS_SENT:
+        raise ApiError(400, f'findings must be a list of at most {MAX_FINDINGS_SENT} entries')
+    dropped = 0
+    if len(findings) > MAX_FINDINGS:
+        dicts = [f for f in findings if isinstance(f, dict)]
+        dicts.sort(key=lambda f: -_SEVERITY_ORDER.get(f.get('severity'), 0))  # stable: equal severities keep the order they were reported in
+        dropped = max(0, len(dicts) - MAX_FINDINGS)
+        findings = dicts[:MAX_FINDINGS]
     out = []
     for item in findings:
         if not isinstance(item, dict):
@@ -1138,11 +1151,12 @@ def _clean_findings(findings):
                     'matcher_name': _clip(item.get('matcher_name'), 'matcher_name'),
                     'extracted_results': [_text(v, 300) for v in extracted[:MAX_EXTRACTED] if isinstance(v, str)],
                     'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)]})
-    return out
+    return out, dropped
 
 
 def _clean_nuclei_result(body):
-    return {'findings': _clean_findings(body.get('findings') or [])}
+    findings, dropped = _clean_findings(body.get('findings') or [])
+    return {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
 
 
 MAX_TESTSSL_ITEMS = 300  # a testssl.sh run of one host:port is a few dozen tests; well above any real report
@@ -1334,6 +1348,23 @@ def clean_result(kind, body, task=None):
         raise ApiError(400, 'result does not match the expected shape for this task kind')
 
 
+_KILLED = re.compile(r'(?:exited|exit(?:ed)? code|status)\D{0,12}(?:-9|-137|137)\b|\bkilled\b', re.I)
+
+
+def explain_error(text):
+    """The error of a failed task in words that say what happened. A tool's own warning that came first (nuclei prints one about its JSON library
+    on newer Go releases) is dropped: it was never the reason. A tool killed by the system (status -9 or 137, SIGKILL) almost always ran out of
+    memory, and that is capacity on the Sentinel's machine, not something wrong with the target or the template."""
+    lines = [line.strip() for line in str(text or '').splitlines() if line.strip()]
+    kept = [line for line in lines if not re.match(r'(?:\[wrn\]|(?:warning|warn)\b)', line, re.I)]
+    # a one-line message holds the warning after a colon ("nuclei exited with status -9: WARNING: sonic/ast ..."): cut it there
+    message = re.sub(r':\s*(?:\[wrn\]|warning\b).*$', '', ' '.join(kept or lines), flags=re.I | re.S).strip()
+    if _KILLED.search(message):
+        return (message + ' (killed by the system, usually out of memory on the Sentinel\'s machine: give it more memory or lower its '
+                'concurrency)')[:300]
+    return message[:300]
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -1361,7 +1392,7 @@ def report_result(ctx, task_id, body):
         if rejected is None:
             status = 'failed' if result['outcome'] == 'error' else 'done'
             SentinelTask.objects.filter(pk=task.pk).update(status=status, result=result, finished_at=now, lease_expires_at=None,
-                                                            error=result.get('error', '')[:300] if status == 'failed' else '', **_scrubbed(task))
+                                                            error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk,
                          agent=agent.name, outcome=result['outcome'])
         else:

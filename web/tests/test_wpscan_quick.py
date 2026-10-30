@@ -104,3 +104,33 @@ class RunQuickTests(WordPressFixture, TestCase):
 
     def test_a_scan_that_is_gone_is_skipped(self):
         self.assertEqual(wpscan_scan.run_quick(0, ['rt.test']), {'skipped': 'the scan is gone'})
+
+
+class StateKeepsTheLastCoreTests(WordPressFixture, TestCase):
+    def core(self):
+        return ProbeObservation.objects.get(project=self.project, host='www.rt.test', probe='wpscan').version
+
+    def record(self, state, **kw):
+        wpscan_scan.record_state(self.project.id, self.domain.id, 'www.rt.test', state, **kw)
+
+    def test_a_run_that_could_not_read_the_site_keeps_the_version_the_last_scan_read(self):
+        self.record('scanned', version='7.1.4')
+        for state in ('blocked', 'failed', 'waiting', 'queued'):
+            self.record(state, reason='the edge refused WPScan')
+            self.assertEqual(self.core(), '7.1.4', state)
+        self.assertEqual(self.state('www.rt.test')['state'], 'queued')
+
+    def test_a_scan_that_read_a_new_version_replaces_it(self):
+        self.record('scanned', version='7.1.4')
+        self.record('blocked')
+        self.record('scanned', version='7.2.0')
+        self.assertEqual(self.core(), '7.2.0')
+
+    def test_a_site_that_turns_out_not_to_be_wordpress_clears_it(self):
+        self.record('scanned', version='7.1.4')
+        self.record('not_wordpress')
+        self.assertEqual(self.core(), '')
+
+    def test_a_host_never_scanned_has_no_version_to_keep(self):
+        self.record('blocked')
+        self.assertEqual(self.core(), '')

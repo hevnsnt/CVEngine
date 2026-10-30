@@ -973,3 +973,54 @@ class ProvisionPickerTests(SentinelBase):
         html = self.page(self.alice)
         self.assertNotIn('<option value="org">', html)
         self.assertNotIn('placeholder="org-slug"', html)
+
+
+class NucleiFindingCapTests(SimpleTestCase):
+    """A nuclei result with many findings keeps the strongest instead of being rejected whole."""
+
+    def finding(self, i, severity='info'):
+        return {'template_id': f't{i}', 'name': f'n{i}', 'severity': severity, 'host': 'a.example', 'matched_at': 'https://a.example/'}
+
+    def test_a_result_within_the_cap_is_kept_whole(self):
+        from agentapi import sentinel_broker as b
+        out = b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS)]})
+        self.assertEqual(len(out['findings']), b.MAX_FINDINGS)
+        self.assertNotIn('dropped_findings', out)
+
+    def test_a_result_over_the_cap_keeps_the_strongest_and_counts_the_rest(self):
+        from agentapi import sentinel_broker as b
+        many = [self.finding(i) for i in range(b.MAX_FINDINGS + 50)] + [self.finding('crit', 'critical'), self.finding('high', 'high')]
+        out = b._clean_nuclei_result({'findings': many})
+        self.assertEqual(len(out['findings']), b.MAX_FINDINGS)
+        self.assertEqual(out['dropped_findings'], 52)
+        self.assertEqual([f['template_id'] for f in out['findings'][:2]], ['tcrit', 'thigh'])  # the strongest first, never dropped
+
+    def test_a_list_that_is_no_nuclei_result_is_still_refused(self):
+        from agentapi import sentinel_broker as b
+        from agentapi.services import ApiError
+        with self.assertRaises(ApiError):
+            b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS_SENT + 1)]})
+        with self.assertRaises(ApiError):
+            b._clean_nuclei_result({'findings': 'lots'})
+
+
+class ExplainErrorTests(SimpleTestCase):
+    def test_a_warning_that_came_first_is_dropped_and_a_kill_is_named_for_what_it_is(self):
+        raw = ("nuclei exited with status -9: WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), "
+               "but your environment is not suitable and will fallback to encoding/json")
+        out = sentinels.explain_error(raw)
+        self.assertTrue(out.startswith('nuclei exited with status -9'))
+        self.assertNotIn('sonic', out)
+        self.assertIn('out of memory', out)
+
+    def test_a_multi_line_error_keeps_the_line_that_was_not_a_warning(self):
+        self.assertEqual(sentinels.explain_error('[WRN] something minor\nconnection refused by 10.0.0.5'), 'connection refused by 10.0.0.5')
+
+    def test_an_ordinary_error_is_left_as_it_is(self):
+        self.assertEqual(sentinels.explain_error('nuclei exited with status 2: no templates found'), 'nuclei exited with status 2: no templates found')
+
+    def test_an_error_that_is_only_a_warning_is_not_made_empty(self):
+        self.assertTrue(sentinels.explain_error('WARNING: it is only this'))
+
+    def test_the_error_is_clipped(self):
+        self.assertLessEqual(len(sentinels.explain_error('x' * 1000)), 300)
