@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
-    dependencies = [("cveFeed", "0120_hostmove")]
+    dependencies = [("cveFeed", "0125_updatesettings_reference_unknown")]
 
     operations = [
         migrations.RemoveConstraint(model_name="deferredretest", name="uniq_retest_evidence"),
