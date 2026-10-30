@@ -150,13 +150,13 @@ def _nmap(scan, project, ip, org_id, dispatch):
     return {'hosts': len(inventory), **totals}
 
 
-def _testssl(scan, project, domain, ip, dispatch):
+def _testssl(scan, project, domain, ip, org_id, dispatch):
     """A TLS audit of each TLS port nmap found open on ``ip``, through an internal Sentinel; findings and CVE evidence are stored by the
     same functions the external sweep uses."""
     from cveFeed import ledger, testssl_scan
     from startScan.models import IpAddress, Subdomain, open_ports
     sub = Subdomain.objects.filter(scan_history=scan, name=ip).select_related('target_domain').first()
-    ip_obj = IpAddress.objects.filter(address=ip).first()
+    ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     ports = {p.number: p for p in open_ports(ip_obj)} if ip_obj else {}
     tested = failed = issues = 0
     for number, starttls in testssl_scan.tls_ports(ports):
@@ -182,7 +182,7 @@ def _testssl(scan, project, domain, ip, dispatch):
     return out
 
 
-def _udp(scan, project, ip, dispatch):
+def _udp(scan, project, ip, org_id, dispatch):
     """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw nmap XML is parsed and stored by the external sweep's own functions."""
     from cveFeed import ledger, nmap_scan, udp_scan
     from startScan.models import IpAddress
@@ -190,7 +190,7 @@ def _udp(scan, project, ip, dispatch):
     if result is None:
         return {'error': 'no Sentinel inside the network answered'}
     host = next((h for h in nmap_scan.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
-    ip_obj = IpAddress.objects.filter(address=ip).first()
+    ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     if host is None or ip_obj is None:
         if ip_obj is not None:
             ledger.record(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip_obj)])
@@ -245,8 +245,8 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
         if not nmap.get('error'):
             def stream(kind):
                 return nuclei_stream(kind) if nuclei_stream else sentinel_dispatch.wrap_nuclei_stream(scan, kind, internal=True)
-            _stage(scan, 'TLS audit (internal Sentinel)', 'internal_testssl', lambda: _testssl(scan, project, domain, ip, dispatch), fallback={'tested': 0})
-            _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'internal_udp_scan', lambda: _udp(scan, project, ip, dispatch), fallback={'open': 0})
+            _stage(scan, 'TLS audit (internal Sentinel)', 'internal_testssl', lambda: _testssl(scan, project, domain, ip, org_id, dispatch), fallback={'tested': 0})
+            _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'internal_udp_scan', lambda: _udp(scan, project, ip, org_id, dispatch), fallback={'open': 0})
             _stage(scan, 'Nuclei HTTP and technology pass (internal Sentinel)', 'nuclei_light_scan',
                    lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light')), fallback={'targets': 0, 'techs': {}})
             _stage(scan, 'WPScan of WordPress sites (internal Sentinel)', 'internal_wpscan',
