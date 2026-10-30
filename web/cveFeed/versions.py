@@ -118,6 +118,9 @@ HEADER_FACTS = (
     ('x-aspnetmvc-version', 'ASP.NET MVC', 'value'),
     ('x-drupal-cache', 'Drupal', None),
     ('x-drupal-dynamic-cache', 'Drupal', None),
+    ('x-umbraco-version', 'Umbraco', 'value'),
+    ('x-magento-tags', 'Magento', None),
+    ('x-magento-cache-debug', 'Magento', None),
     ('x-nextjs-cache', 'Next.js', None),
     ('x-nextjs-matched-path', 'Next.js', None),
     ('x-nextjs-prerender', 'Next.js', None),
@@ -125,7 +128,7 @@ HEADER_FACTS = (
     ('x-litespeed-cache', 'LiteSpeed', None),
 )
 # headers kept as host metadata (never cookies or anything that can carry a session): short, clipped, lowercase names
-KEPT_HEADERS = ('server', 'x-powered-by', 'via', 'x-generator', 'x-aspnet-version', 'x-aspnetmvc-version', 'x-drupal-cache',
+KEPT_HEADERS = ('server', 'x-powered-by', 'via', 'x-generator', 'x-aspnet-version', 'x-aspnetmvc-version', 'x-drupal-cache', 'x-umbraco-version', 'x-magento-tags', 'x-magento-cache-debug',
                 'x-nextjs-cache', 'x-nextjs-matched-path', 'x-vercel-id', 'x-nf-request-id', 'cf-ray', 'cf-cache-status', 'x-amz-cf-id',
                 'x-amz-cf-pop', 'x-served-by', 'x-fastly-request-id', 'x-akamai-transformed', 'x-azure-ref', 'x-sucuri-id', 'x-iinfo',
                 'x-envoy-upstream-service-time', 'x-cache', 'x-pingback', 'link', 'x-litespeed-cache', 'strict-transport-security',

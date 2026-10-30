@@ -96,9 +96,24 @@ PROBES = (
           'confidence': 0.9, 'source': 'body:drupal-changelog'},
      )},
     {'id': 'joomla-manifest', 'label': 'Joomla version from its manifest', 'family': 'http', 'leads': r'joomla',
-     'requests': (('GET', '/administrator/manifests/files/joomla.xml'),), 'safety': 'one GET', 'rules': (
+     'requests': (('GET', '/administrator/manifests/files/joomla.xml'), ('GET', '/language/en-GB/en-GB.xml'),
+                  ('GET', '/administrator/components/com_content/content.xml')), 'safety': 'three GETs of version files', 'rules': (
          {'request': 0, 'where': 'body', 'regex': r'<version>(\d+\.\d+\.\d+)</version>', 'product': 'Joomla', 'version': 1, 'kind': 'version',
           'confidence': 0.9, 'source': 'body:joomla-manifest'},
+         {'request': 1, 'where': 'body', 'regex': r'<version>(\d+\.\d+\.\d+)</version>', 'product': 'Joomla', 'version': 1, 'kind': 'version',
+          'confidence': 0.85, 'source': 'body:joomla-language'},
+         {'request': 2, 'where': 'body', 'regex': r'<version>(\d+\.\d+\.\d+)</version>', 'product': 'Joomla', 'version': 1, 'kind': 'version',
+          'confidence': 0.8, 'source': 'body:joomla-component'},
+     )},
+    {'id': 'magento-version', 'label': 'Magento version from its admin login page and release notes', 'family': 'http', 'leads': r'magento',
+     'requests': (('GET', '/magento_version'), ('GET', '/admin'), ('GET', '/RELEASE_NOTES.txt')), 'safety': 'three GETs, no login attempt', 'rules': (
+         # /magento_version answers "Magento/2.4 (Community)": the branch, never the patch release, so it names the product and no version
+         {'request': 0, 'where': 'body', 'regex': r'^Magento/\d+\.\d+ \((?:Community|Enterprise)\)', 'product': 'Magento', 'kind': 'version',
+          'outcome': 'hidden', 'confidence': 0.7, 'source': 'body:magento_version'},
+         {'request': 1, 'where': 'body', 'regex': r'Magento ver\. (\d+\.\d+\.\d+(?:-p\d+)?)', 'product': 'Magento', 'version': 1, 'kind': 'version',
+          'confidence': 0.85, 'source': 'body:magento-admin'},
+         {'request': 2, 'where': 'body', 'regex': r'(?m)^=== (\d+\.\d+\.\d+\.\d+) ===', 'product': 'Magento', 'version': 1, 'kind': 'version',
+          'confidence': 0.85, 'source': 'body:magento-release-notes'},
      )},
     {'id': 'robots-txt', 'label': 'robots.txt hints at the CMS behind the site', 'family': 'http', 'leads': WEB, 'requests': (('GET', '/robots.txt'),),
      'safety': 'one GET', 'rules': (
@@ -338,6 +353,13 @@ def observations_from_page(response, source_prefix='page'):
                                       headers=headers)
     for item in found:
         add(item['name'], item['source'])
+    for product in cms.SOURCES:  # a version the front page already carries (Drupal's core scripts); WordPress has its own probe
+        if product != 'WordPress':
+            version, label = cms.best(product, [('/', response)])
+            if version:
+                add(f'{product}:{version}', label)
+    stated = {o['product'].lower() for o in out if o['kind'] == 'version' and o['version']}
+    out = [o for o in out if not (o['kind'] == 'version' and not o['version'] and o['product'].lower() in stated)]  # a version replaces the bare name
     for provider in versions.edges_from_headers({**headers, 'server': response.get('server', '')}):
         out.append(_observation('edge', provider, outcome='edge', confidence=0.8, source='header:edge', url='/'))
     return out

@@ -62,6 +62,7 @@ cvENGINE talks to [Anthropic](https://www.anthropic.com), [OpenAI](https://opena
 | --- | --- | --- |
 | [Geist and Geist Mono](https://github.com/vercel/geist-font) | SIL Open Font License 1.1 | `web/static/cve/geist.woff2`, `geist-mono.woff2`; license text in `web/static/cve/OFL.txt` |
 | [VivaGraphJS](https://github.com/anvaka/VivaGraphJS) | BSD-3-Clause | `web/static/cve/vivagraph.min.js`; notice in `web/static/cve/VIVAGRAPH-LICENSE.txt` |
+| [CMSeeK](https://github.com/Tuhinshubhra/CMSeeK) | GPL-3.0 | Not run and not copied: its per-CMS version routines (the generator tag, version headers, and the files Drupal, Joomla and Magento state a release in) were the reference for the version sources in `web/cveFeed/cms.py` and the version probes in `web/cveFeed/probes.py` |
 | [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) | MIT | `web/static/mfa/qrcode.js`, license header kept in the file |
 | [DejaVu Sans](https://dejavu-fonts.github.io) (Debian `fonts-dejavu-core`) | Bitstream Vera license with public-domain DejaVu changes | Installed in the image; the PDF reports are set in it |
 | [pypdf](https://github.com/py-pdf/pypdf) | BSD-3-Clause | A pinned Python requirement (`web/requirements.txt`); the tests use it to read the generated report PDFs back, the application does not import it |

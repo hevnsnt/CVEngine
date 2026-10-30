@@ -12,7 +12,11 @@ confidence, not by position in the page. The asset patterns name the files whose
 library's own version (jQuery, jquery-migrate, the ``dist`` script packages) says nothing about the core and is never listed. Reading the
 first ``?ver=`` of any asset under ``/wp-includes/`` would store jQuery's 3.7.1 as the WordPress version of a site that runs 7.1.4.
 
-Adding a product is adding a row to ``SOURCES``.
+Adding a product is adding a row to ``SOURCES`` (a version a page already carries) and, for a file a product serves its version in, a probe to
+``cveFeed.probes.PROBES`` (Drupal's change log, Joomla's manifests, Magento's release notes). ``MARKERS`` is how a page says which product it is
+(read by ``cveFeed.fingerprint``, so the name is a lead for those probes). The places to look were taken from CMSeeK's per-CMS version routines
+(https://github.com/Tuhinshubhra/CMSeeK, GPL-3.0, credited in THIRD-PARTY.md), written here as data with the false-positive guards this scanner
+needs: a bare major ("Drupal 10") is no version, and a library's own version is never a product's.
 """
 import re
 
@@ -22,6 +26,24 @@ VERSION = r'(\d{1,2}\.\d{1,2}(?:\.\d{1,3})?)'
 def _asset(path_pattern):
     """The core file ``path_pattern`` (a regex for the part after /wp-includes/ or /wp-admin/) with its version query string."""
     return re.compile(r'/wp-(?:includes|admin)/' + path_pattern + r'\?ver=' + VERSION + r'(?![\w.-])')
+
+
+def _attr(path_pattern):
+    """A page marker: the path appears in a src or href attribute (a post that merely mentions it in text is not a site that serves it)."""
+    return re.compile(r"""(?:src|href|action)=["'][^"'\s]*""" + path_pattern, re.I)
+
+
+# (pattern, product, source): how a page says which product serves it. The name alone is a lead: the probes that follow it find the version.
+MARKERS = (
+    (re.compile(r'/wp-content/|/wp-includes/'), 'WordPress', 'page:wp-content'),
+    (re.compile(r'Drupal\.settings|drupalSettings|/sites/default/files/|/core/misc/drupal\.js'), 'Drupal', 'page:drupal'),
+    (_attr(r'/(?:media/(?:system|jui|vendor)/|components/com_[a-z0-9_]+/|templates/[\w-]+/(?:css|js)/)'), 'Joomla', 'page:joomla'),
+    (re.compile(r'index\.php\?option=com_[a-z0-9_]+'), 'Joomla', 'page:joomla'),
+    (_attr(r'/(?:static/version\d{6,}/|skin/frontend/|media/catalog/product/|js/mage/)'), 'Magento', 'page:magento'),
+    (re.compile(r'\bMage\.Cookies\b|mage/cookies'), 'Magento', 'page:magento'),
+    (_attr(r'/(?:typo3temp/|typo3conf/)'), 'TYPO3', 'page:typo3'),
+    (_attr(r'/umbraco/'), 'Umbraco', 'page:umbraco'),
+)
 
 
 class Source:
@@ -43,6 +65,10 @@ SOURCES = {
         # asked: the feed prints the core version in its generator element unless a plugin removed it
         Source('feed:generator', r'<generator>\s*https?://wordpress\.org/\?v=' + VERSION + r'\s*</generator>', 0.9, path='/feed/'),
         Source('readme', r'Version\s+' + VERSION, 0.6, path='/readme.html'),
+    ),
+    'Drupal': (
+        # Drupal 8 and later version their own core scripts with the core release; the vendored libraries beside them carry the library's version
+        Source('asset:drupal.js', r'/core/misc/(?:drupal|drupalSettingsLoader|drupal\.init)(?:\.min)?\.js\?v=' + VERSION + r'(?![\w.-])', 0.85),
     ),
 }
 
