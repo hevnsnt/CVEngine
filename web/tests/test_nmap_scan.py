@@ -194,6 +194,11 @@ class PersistInventoryTests(TestCase):
 
 class RunNmapForScanTests(TestCase):
 	def setUp(self):
+		# The fixtures use reserved .test names; scanner behavior must not
+		# depend on the runner's external DNS response for those names.
+		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
+		patcher.start()
+		self.addCleanup(patcher.stop)
 		org = Org.objects.create(name='N', slug='nm')
 		self.project = Project.objects.create(name='P', slug='pnm', insert_date=timezone.now(), org=org)
 		self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
@@ -312,6 +317,11 @@ def _report(ports, scanned='22,80,443,3306,8080', extraports='closed', status='u
 
 
 class OpenPortStateTests(TestCase):
+	def setUp(self):
+		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	"""Review 2.5: only open ports are scanned, correlated and listed, and a port that closed is closed."""
 
 	def _sub_with_ip(self):
