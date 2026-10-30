@@ -12,6 +12,8 @@ app = Celery('reNgine')
 from cveFeed.scan_control import PauseAwareTask
 app.Task = PauseAwareTask
 app.config_from_object('django.conf:settings', namespace='CELERY')
+from reNgine.time_limits import QueueTimeLimits
+app.conf.task_annotations = (QueueTimeLimits(),)  # the limits of each task's queue (reNgine/time_limits.py)
 app.autodiscover_tasks()
 
 
