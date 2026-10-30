@@ -604,27 +604,29 @@ def _twins(pending):
     """``{match pk: Triage row}`` for the CVE matches in ``pending`` (``[(match, description)]``, none with a Triage row yet). A rescan
     makes new host rows and so new match rows, and a new row used to start with no record: every match was judged and validated again
     although nothing about it had changed (issue 206). The twin of a match is the newest row of another match with the same project,
-    host and CVE whose asset evidence is the same. That test is made with the twin's own review nonce, because a validation sets one
-    on its row and the nonce is part of the stored evidence key."""
+    host, CVE, source and matched product whose asset evidence is the same: one CVE can be matched twice on one host (Apache 2.4.58 from the
+    port scan and again from the web fingerprint, with different evidence), and each of the two inherits from its own predecessor, not from
+    whichever row of the pair is newest. That test is made with the twin's own review nonce, because a validation sets one on its row and
+    the nonce is part of the stored evidence key."""
     from cveFeed.models import Triage
     pending = [(f, d) for f, d in pending if d['kind'] == 'cve_match']
     if not pending:
         return {}
     from django.db.models import Q
-    # one row per finding: the newest that holds a record, within the window. DISTINCT ON keeps the read to the number of findings in
-    # the chunk however many scans have run since (every rescan adds a row per finding and nothing prunes the old ones)
+    # one row per finding (host, CVE, source, matched product): the newest that holds a record, within the window. DISTINCT ON keeps the read to
+    # the number of findings in the chunk however many scans have run since (every rescan adds a row per finding and nothing prunes the old ones)
     rows = (Triage.objects.filter(Q(status='triaged') | ~Q(validation_status='none'), kind='cve_match', match__isnull=False,
                                   updated_at__gte=timezone.now() - TWIN_WINDOW,
                                   project_id__in={d['project_id'] for _, d in pending},
                                   host__in={d['host'][:500] for _, d in pending},
                                   match__cve_entry_id__in={f.cve_entry_id for f, _ in pending})
             .exclude(match_id__in=[f.pk for f, _ in pending]).select_related('match')
-            .order_by('project_id', 'host', 'match__cve_entry_id', '-updated_at', '-id')
-            .distinct('project_id', 'host', 'match__cve_entry_id'))
-    newest = {(row.project_id, row.host, row.match.cve_entry_id): row for row in rows}
+            .order_by('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', '-updated_at', '-id')
+            .distinct('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product'))
+    newest = {(row.project_id, row.host, row.match.cve_entry_id, row.match.source, row.match.matched_product): row for row in rows}
     out = {}
     for f, d in pending:
-        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id))
+        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id, f.source, f.matched_product))
         if row is not None and row.evidence_key == evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce):
             out[f.pk] = row
     return out
