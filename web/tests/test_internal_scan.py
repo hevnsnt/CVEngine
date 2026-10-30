@@ -195,7 +195,7 @@ class StartAndSweepTests(Base):
         failed.save(update_fields=['stop_scan_date'])
         self.assertEqual([d.id for d in internal_scan.due_targets()], [self.domain.id])
         ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(),
-                start_scan_date=timezone.now() - timedelta(days=1), scan_status=SUCCESS, results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+                start_scan_date=timezone.now() - timedelta(minutes=10), scan_status=SUCCESS, results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
         self.assertEqual(internal_scan.due_targets(), [])
 
     def test_failed_optional_stage_retries_after_backoff_despite_successful_scan_status(self):
