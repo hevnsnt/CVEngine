@@ -27,13 +27,23 @@ class PureTests(unittest.TestCase):
 		self.assertEqual(naabu_scan.port_argument([8080, 22, 80, 81, 82, 443, 22]), '22,80-82,443,8080')
 		self.assertEqual(naabu_scan.port_argument([5]), '5')
 
+	def test_a_pass_over_open_ports_gets_closed_probe_ports_so_nmap_can_fingerprint_the_system(self):
+		# nmap's -O --osscan-limit needs an open and a closed TCP port; with naabu's open ports alone no host was ever OS-fingerprinted
+		with_probe = naabu_scan.flags_for({'a': [22]}, nmap_scan.FAST_FLAGS)(['a'])
+		self.assertEqual(with_probe[with_probe.index('-p') + 1], '1,3,22')
+		without = naabu_scan.flags_for({'a': [22]}, nmap_scan.FAST_FLAGS, os_probe=False)(['a'])
+		self.assertEqual(without[without.index('-p') + 1], '22')  # a top-up pass must not replace another scanner's OS guess with a weaker one
+		no_os = naabu_scan.flags_for({'a': [22]}, ['-sV', '--top-ports', '1000', '-Pn'])(['a'])
+		self.assertEqual(no_os[no_os.index('-p') + 1], '22')  # no OS detection asked for, nothing to probe
+		self.assertIsNone(naabu_scan.flags_for({'a': []}, nmap_scan.FAST_FLAGS)(['a']))  # nothing open: still nothing to fingerprint
+
 	def test_flags_replace_top_ports_with_the_open_ports(self):
 		build = naabu_scan.flags_for({'a': [22, 8443], 'b': [8443, 9200], 'c': []}, nmap_scan.FAST_FLAGS)
 		flags = build(['a', 'b'])
 		self.assertIn('-p', flags)
-		self.assertEqual(flags[flags.index('-p') + 1], '22,8443,9200')
+		self.assertEqual(flags[flags.index('-p') + 1], '1,3,22,8443,9200')
 		self.assertNotIn('--top-ports', flags)
-		self.assertEqual([f for f in flags if f != '-p' and f != '22,8443,9200'], [f for f in nmap_scan.FAST_FLAGS if f not in ('--top-ports', '1000')])
+		self.assertEqual([f for f in flags if f != '-p' and f != '1,3,22,8443,9200'], [f for f in nmap_scan.FAST_FLAGS if f not in ('--top-ports', '1000')])
 		self.assertIsNone(build(['c']))  # nothing open: nothing to fingerprint
 		self.assertEqual(build(['a', 'unknown']), nmap_scan.FAST_FLAGS)  # an address with no answer keeps the default ports
 
@@ -154,7 +164,7 @@ class PipelineTests(TestCase):
 		def run(targets, flags, host_timeout):
 			self.calls.append((list(targets), list(flags)))
 			return xml if xml is not None else _report([(22, 'open', 'OpenSSH', '8.9'), (8443, 'open', 'nginx', '1.18.0')],
-				scanned='22,8443,9200').replace('192.0.2.77', '198.51.100.50')
+				scanned='1,3,22,8443,9200').replace('192.0.2.77', '198.51.100.50')
 		return run
 
 	def test_without_naabu_the_flags_are_todays(self):
@@ -166,7 +176,7 @@ class PipelineTests(TestCase):
 	def test_naabu_ports_become_the_nmap_port_list_and_open_ports_are_persisted(self):
 		out = nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner(), naabu_runner=lambda ips: {'198.51.100.50': [22, 8443, 9200]})
 		flags = self.calls[0][1]
-		self.assertEqual(flags[flags.index('-p') + 1], '22,8443,9200')
+		self.assertEqual(flags[flags.index('-p') + 1], '1,3,22,8443,9200')
 		self.assertNotIn('--top-ports', flags)
 		self.assertIn('-sV', flags)
 		self.assertEqual(out['fast']['ports'], 2)
@@ -202,7 +212,7 @@ class PipelineTests(TestCase):
 		ServiceRun.objects.filter(service='nmap-fast').update(finished_at=timezone.now() - timedelta(days=8))  # nmap is due, naabu is not
 		nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner(), naabu_runner=runner)
 		self.assertEqual(len(calls), 1)
-		self.assertEqual(self.calls[1][1][self.calls[1][1].index('-p') + 1], '22,8443')  # the inventory's open ports are re-checked
+		self.assertEqual(self.calls[1][1][self.calls[1][1].index('-p') + 1], '1,3,22,8443')  # the inventory's open ports are re-checked
 		ServiceRun.objects.filter(service='naabu').update(finished_at=timezone.now() - timedelta(days=8))
 		ServiceRun.objects.filter(service='nmap-fast').update(finished_at=timezone.now() - timedelta(days=8))
 		nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner(), naabu_runner=runner)
@@ -210,10 +220,10 @@ class PipelineTests(TestCase):
 
 	def test_a_port_naabu_no_longer_sees_is_rechecked_by_nmap_and_closed(self):
 		self.ip.ports.add(Port.objects.create(number=8080, product='nginx', version='1.18.0', state='open'))
-		xml = _report([(22, 'open', 'OpenSSH', '8.9')], scanned='22,8080').replace('192.0.2.77', '198.51.100.50')
+		xml = _report([(22, 'open', 'OpenSSH', '8.9')], scanned='1,3,22,8080').replace('192.0.2.77', '198.51.100.50')
 		nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner(xml), naabu_runner=lambda ips: {'198.51.100.50': [22]})
 		flags = self.calls[0][1]
-		self.assertEqual(flags[flags.index('-p') + 1], '22,8080')  # the previously open port is part of the check
+		self.assertEqual(flags[flags.index('-p') + 1], '1,3,22,8080')  # the previously open port is part of the check
 		self.assertEqual(self.ip.ports.get(number=8080).state, 'closed')
 
 	def test_an_address_with_nothing_open_is_not_fingerprinted_but_is_recorded(self):

@@ -40,6 +40,17 @@ class ScoreHostTests(SimpleTestCase):
 		self.assertEqual({name for call in rescore.call_args_list for name in call.args[1]},
 						 {f'host{i}.test' for i in range(scoring.CHUNK * 2 + 1)})
 
+	def test_a_host_matched_in_several_chunks_is_scored_once_when_the_caller_shares_what_it_has_seen(self):
+		project = SimpleNamespace(project_id=7)
+
+		def matches(names):
+			return [SimpleNamespace(subdomain=SimpleNamespace(name=n, target_domain=project)) for n in names]
+		seen = set()
+		with mock.patch('cveFeed.scoring.rescore_quietly') as rescore:
+			scoring.rescore_for_matches(matches(['a.test', 'b.test']), seen)
+			scoring.rescore_for_matches(matches(['b.test', 'c.test']), seen)
+		self.assertEqual(sorted(name for call in rescore.call_args_list for name in call.args[1]), ['a.test', 'b.test', 'c.test'])
+
 	def test_a_clean_host_scores_nothing_and_a_public_ip_alone_scores_ten(self):
 		self.assertEqual(scoring.score_host({}), (0, []))
 		self.assertEqual(total({'public_ip': True}), 10)

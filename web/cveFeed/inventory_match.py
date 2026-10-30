@@ -181,8 +181,11 @@ def collect(inv, sub, fix_lookup=None):
                     if in_range is not True:
                         continue
                     row = _row(inv, sub, component, ver, cve, product, details.get(cve.id, {}), local, fix_lookup)
+                    # the same CVE product by name: both sides name it as the advisory does, so equal names are the same product whatever the
+                    # token rules say of its length or wording
                     matching = ([match for match in external.get(cve.id, ())
-                                 if correlation.name_matches_token(correlation._norm(match.matched_product),
+                                 if correlation._norm(match.matched_product) == correlation._norm(row['matched_product'])
+                                 or correlation.name_matches_token(correlation._norm(match.matched_product),
                                                                    correlation._norm(row['matched_product']))]
                                 if not local else [])
                     if matching:

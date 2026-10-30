@@ -788,6 +788,11 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                 except Exception:  # noqa: BLE001 - a suggestion is advisory; it must never break the validation sweep
                     logger.exception('local-check suggestion failed for %s', row.pk)
                 continue
+            # A failed step of a check the plan no longer holds (a template removed, a port gone) is never run again to replace it, so it would
+            # keep the row failed, and due for a retry every day, for ever.
+            planned = {(c['kind'], c['target']) for c in checks}
+            row.validation_steps = [s for s in (row.validation_steps or [])
+                                    if s.get('result') != 'failed' or (s.get('kind'), s.get('target')) in planned]
             for check in checks:
                 # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
                 # stopped by its watchdog)

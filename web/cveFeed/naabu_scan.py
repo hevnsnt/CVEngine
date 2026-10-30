@@ -193,9 +193,16 @@ def port_argument(ports):
     return ','.join(parts)
 
 
-def flags_for(ports_by_ip, base_flags):
+# nmap's OS detection (-O --osscan-limit) needs one open and one CLOSED TCP port, and a pass over naabu's open ports alone has no closed one, so the
+# host was never OS-fingerprinted. These unassigned ports are nearly always answered with a reset when the host answers at all: one is enough, two
+# tolerate a firewall that drops one of them.
+CLOSED_PROBE_PORTS = (1, 3)
+
+
+def flags_for(ports_by_ip, base_flags, os_probe=True):
     """A function ``chunk of addresses -> nmap flags``: the base flags with ``--top-ports 1000`` replaced by ``-p <the open ports of
-    those addresses>``. None for a chunk with nothing open anywhere (nothing to fingerprint); the base flags when an address has no
+    those addresses>``, plus (``os_probe``, when the flags ask for OS detection) the ports in CLOSED_PROBE_PORTS, so nmap has a closed port to
+    fingerprint the system with. None for a chunk with nothing open anywhere (nothing to fingerprint); the base flags when an address has no
     naabu answer or the port list would be unreasonably long."""
     def build(chunk):
         if any(ip not in ports_by_ip for ip in chunk):
@@ -203,6 +210,8 @@ def flags_for(ports_by_ip, base_flags):
         ports = sorted({p for ip in chunk for p in ports_by_ip[ip]})
         if not ports:
             return None
+        if os_probe and '-O' in base_flags:
+            ports = sorted(set(ports) | set(CLOSED_PROBE_PORTS))
         argument = port_argument(ports)
         flag = '--top-ports' if '--top-ports' in base_flags else '-p' if '-p' in base_flags else None
         if len(argument) > MAX_PORT_ARG or not flag:
