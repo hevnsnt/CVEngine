@@ -8,7 +8,8 @@ the inventory tables only grew. A scan older than ``CVENGINE_SCAN_HISTORY_RETENT
 * some of its hosts are in the domain's current inventory (``correlation.latest_scan_q``): the latest successful full scan and the host
   scans after it are what every listing, count and match reads;
 * it is one of the newest ``KEEP_LATEST`` scans of its domain, whatever their age (a domain scanned rarely keeps its last few);
-* a person worked on something in it: a finding with a remediation status other than open, a note, an assignee or a comment.
+* a person worked on something in it: a finding with a remediation status other than open, a note, an assignee, a comment or an
+  audit event (including a change later reverted to open).
 
 The work is done in small steps (one scan per transaction) inside a time budget, so a large backlog is cleared over several runs and no run
 holds a long lock. IP addresses, ports and technologies that only the deleted scans used are left in place."""
