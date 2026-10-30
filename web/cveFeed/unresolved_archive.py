@@ -92,13 +92,17 @@ def recheck(now=None, batch=RECHECK_BATCH, resolver=None):
     now = now or timezone.now()
     rows = list(HostState.objects.filter(archived_at__isnull=True, unresolved_checks__gte=1, unresolved_last_at__lte=now - RECHECK_EVERY)
                 .order_by('unresolved_last_at')[:batch])
-    out = {'checked': len(rows), 'resolved': 0, 'private': 0, 'no_dns': 0}
+    out = {'checked': len(rows), 'resolved': 0, 'private': 0, 'no_dns': 0, 'dns_errors': 0}
     if not rows:
         return out
-    found = {}
-    for name, address in (resolver or resolve_names)({r.host for r in rows}):
+    found, errored = {}, {}
+    lookup = resolver or resolve_names
+    for name, address in (lookup({r.host for r in rows}, errors=errored) if lookup is resolve_names else lookup({r.host for r in rows})):
         found.setdefault(name, set()).add(address)
     for row in rows:
+        if row.host in errored and row.host not in found:  # the resolver could not answer: that says nothing about the host, so its streak is left as it was
+            out['dns_errors'] += 1
+            continue
         addresses = sorted(found.get(row.host, ()))
         if any(is_scannable_ip(a, project=row.project_id if a == row.host else None) for a in addresses):
             HostState.objects.filter(pk=row.pk).update(unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0, resolution_note='')

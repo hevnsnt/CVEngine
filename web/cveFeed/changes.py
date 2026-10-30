@@ -179,7 +179,7 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
     standard or passive run that finds fewer names than a deep one did must not retire hosts that are still there. A candidate
     whose last known web address still answers is a zombie (reported once, not retired); one that answers nowhere is retired.
     Returns ``(changes, retired, zombies)``."""
-    from cveFeed import zombie
+    from cveFeed import discovery, zombie
     from cveFeed.models import AssetChange, HostState
     project = scan.domain.project_id
     candidates = []
@@ -191,7 +191,9 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
                 break
     if not candidates:
         return [], 0, 0
-    resolved = {name for name, _ in resolver(candidates)}
+    errored = {}
+    resolved = {name for name, _ in (resolver(candidates, errors=errored) if resolver is discovery.resolve_names else resolver(candidates))}
+    resolved |= set(errored)  # a lookup the resolver could not answer does not say the host is gone
     gone = [h for h in candidates if h not in resolved]
     rows = {r.host: r for r in HostState.objects.filter(project_id=project, host__in=gone, retired_at__isnull=True)}
     alive, checked = zombie.check_hosts([h for h in gone if h in rows], {h: r.state for h, r in rows.items()}, checker)
