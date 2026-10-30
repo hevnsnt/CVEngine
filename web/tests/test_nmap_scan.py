@@ -31,6 +31,12 @@ FULL_XML = '''<?xml version="1.0"?>
 
 
 class ProcessExitTests(SimpleTestCase):
+	def test_incomplete_chunk_report_never_persists_inventory(self):
+		with mock.patch.object(nmap_scan, 'persist_inventory') as persist:
+			with self.assertRaisesRegex(RuntimeError, 'invalid or failed XML report'):
+				nmap_scan.scan_in_chunks(lambda *_: '<nmaprun/>', ['192.0.2.10'], [], '1m')
+		persist.assert_not_called()
+
 	def test_both_runners_raise_on_process_failure(self):
 		for invoke in (lambda: nmap_scan.run_nmap_xml(['192.0.2.10'], [], '8m'),
 				lambda: nmap_scan.run_nmap_args([], 'test', 10)):
