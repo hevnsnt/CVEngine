@@ -461,8 +461,8 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
     xml text`` is injectable so tests need no nmap binary. When naabu is installed (see cveFeed.naabu_scan) it finds the open TCP
     ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged.
 
-    ``dispatch`` (on by default) is the one seam a registered Sentinel (agentapi.sentinel_dispatch) uses: before any
-    address reaches the runner or naabu above, it is offered to a live, eligible Sentinel for this project; what a
+    ``dispatch`` (on by default) is the one seam a registered Sentinel (agentapi.sentinel_dispatch) uses: after naabu
+    discovers ports, each address is offered to a live, eligible Sentinel for this project; what a
     Sentinel actually fingerprints is persisted through the exact same ``persist_inventory`` this module already calls,
     and whatever is left (everything, when no Sentinel is registered or none answers in time) runs locally exactly as
     before. Callers that pass their own ``naabu_runner`` (tests) are never second-guessed: dispatch only ever supplies
@@ -513,12 +513,24 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                     from agentapi import sentinel_dispatch
                     if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
                         effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
-                    sentinel_targets, sentinel_totals = sentinel_dispatch.try_nmap(domain.project, scan, targets, org_id=org_id)
                 ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
+                local_ports = ports_by_ip
+                if dispatch:
+                    sentinel_targets, sentinel_totals, local_ports = sentinel_dispatch.try_nmap(
+                        domain.project, scan, targets, org_id=org_id, ports_by_ip=ports_by_ip)
                 flags = fast_flags()
-                fast = scan_in_chunks(runner, sentinel_targets, flags, HOST_TIMEOUT_FAST,
-                                      flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None,
-                                      org_id=org_id)
+                # An address a Sentinel already fingerprinted has its operating system from the Sentinel: its top-up pass over the ports the
+                # Sentinel missed gets no closed probe port, so nmap's OS detection does not run and cannot replace that guess with a weaker one.
+                topped_up = {ip for ip in sentinel_targets if local_ports is not None and ports_by_ip is not None and ip in local_ports
+                             and local_ports[ip] != ports_by_ip.get(ip)}
+                fast = {'ports': 0, 'hosts_with_os': 0}
+                for group, os_probe in (([i for i in sentinel_targets if i not in topped_up], True), ([i for i in sentinel_targets if i in topped_up], False)):
+                    if not group:
+                        continue
+                    done = scan_in_chunks(runner, group, flags, HOST_TIMEOUT_FAST,
+                                          flags_for=naabu_scan.flags_for(local_ports, flags, os_probe) if local_ports is not None else None,
+                                          org_id=org_id)
+                    fast = {key: fast.get(key, 0) + done.get(key, 0) for key in set(fast) | set(done)}
                 fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)

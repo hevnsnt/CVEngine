@@ -481,13 +481,17 @@ def interpret(subject, check, result):
     Returns the result, with its status refined. Pure."""
     if result.get('status') != 'observed':
         return result
-    from cveFeed.correlation import parse_version, version_in_range
+    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, parse_version, version_in_range
     out = dict(result)
     if subject['kind'] == 'cve_match':
         observed = (result.get('observed') or {})
-        product = (subject.get('product') or '').lower()
-        if observed.get('version') and (not observed.get('product') or observed['product'].lower() in product
-                                        or product in observed['product'].lower()):
+        product = _norm(subject.get('product') or '', catalogue=True)
+        observed_product = _norm(observed.get('product') or '')
+        # A version belongs to the identified product, never to a sibling or an unidentified banner.
+        same_product = (name_matches_token(observed_product, product)
+                        or product in PRODUCT_ALIASES.get(observed_product, ())
+                        or observed_product in PRODUCT_ALIASES.get(product, ()))
+        if observed.get('version') and same_product:
             inside = version_in_range(parse_version(observed['version']), subject.get('range') or {})
             if inside is True:
                 out.update(status='reaffirmed', summary=result['summary'] + '; that version is inside the affected range')
@@ -784,6 +788,11 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                 except Exception:  # noqa: BLE001 - a suggestion is advisory; it must never break the validation sweep
                     logger.exception('local-check suggestion failed for %s', row.pk)
                 continue
+            # A failed step of a check the plan no longer holds (a template removed, a port gone) is never run again to replace it, so it would
+            # keep the row failed, and due for a retry every day, for ever.
+            planned = {(c['kind'], c['target']) for c in checks}
+            row.validation_steps = [s for s in (row.validation_steps or [])
+                                    if s.get('result') != 'failed' or (s.get('kind'), s.get('target')) in planned]
             for check in checks:
                 # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
                 # stopped by its watchdog)

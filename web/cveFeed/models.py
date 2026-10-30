@@ -1020,7 +1020,7 @@ class AIPriceRate(models.Model):
 
 
 class DeferredRetest(models.Model):
-    """One durable pending retest per project/host/evidence revision."""
+    """A durable retest episode; equal evidence shares active work, not all future occurrences."""
 
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
@@ -1034,7 +1034,11 @@ class DeferredRetest(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["project", "host", "signature"], name="uniq_retest_evidence")]
+        constraints = [
+            models.UniqueConstraint(fields=["project", "host", "signature"], name="uniq_retest_active_evidence",
+                                    condition=models.Q(status__in=["pending", "dispatching", "queued", "running"])),
+            models.UniqueConstraint(fields=["project", "host", "signature", "scan"], name="uniq_retest_scan_evidence"),
+        ]
         indexes = [models.Index(fields=["status", "created_at"], name="retest_pending_age_idx")]
 
 

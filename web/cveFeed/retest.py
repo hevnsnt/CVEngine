@@ -3,7 +3,7 @@
 When a scan's changes are recorded, the hosts whose exposure grew (a new or returned host, a port opened, a version changed, a
 technology added, a route that became open, a zombie) go through the host pipeline once more, with the CVE checks forced: a
 version bump must be tested even if that CVE was checked for the host yesterday. At most RETEST_MAX_HOSTS hosts per source scan,
-one re-test per host per 24 hours, and a re-test never triggers another (it is a partial scan, which is the loop breaker).
+equal evidence coalesces for 24 hours (new evidence can run sooner), and a re-test never triggers another because it is a partial scan.
 """
 import logging
 import os
@@ -18,7 +18,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 RETEST_TASK = 'retest'  # marker in ScanHistory.tasks next to HOST_PIPELINE_TASK
-RETEST_SERVICE = 'retest'  # ledger: one re-test per host per 24 hours (CVENGINE_TTL_RETEST)
+RETEST_SERVICE = 'retest'  # equal evidence coalesces for CVENGINE_TTL_RETEST hours
 DEFAULT_MAX_HOSTS = 25
 MAX_CHANGE_ROWS = 2000  # change rows read per scan
 TRIGGER_KINDS = ('host_new', 'host_returned', 'port_opened', 'service_changed', 'tech_added', 'tech_version_changed', 'auth_changed',
@@ -146,23 +146,35 @@ def dispatch_deferred_retests(limit=None):
 
 def queue_retests(scan):
     """Queue one re-test of the hosts that changed in ``scan``. Guards, in order: a partial scan (a new-hosts pipeline, and a
-    re-test itself) never queues one, which is what stops a loop; a scan with nothing to re-test queues nothing. The ledger is
-    recorded only after broker acceptance, so a failed enqueue cannot suppress a later retry."""
+    re-test itself) never queues one, which is what stops a loop; a scan with nothing to re-test queues nothing. Active work
+    and recent terminal episodes coalesce equal evidence; a later recurrence gets a new row and its own retry budget."""
     from cveFeed import activity, discovery, ledger
     from cveFeed.models import DeferredRetest
+    from dashboard.models import Project
     if discovery.HOST_PIPELINE_TASK in (scan.tasks or []) or RETEST_TASK in (scan.tasks or []):
         return {'queued': 0, 'reason': 'partial scan'}
     evidence = _changed_evidence(scan)
     if not evidence:
         return {'queued': 0, 'reason': 'nothing changed'}
     domain, project = scan.domain, scan.domain.project_id
-    prior = set(DeferredRetest.objects.filter(project_id=project, host__in=evidence).values_list('host', 'signature'))
-    # Preserve the legacy TTL for rows from before the durable queue existed.
-    legacy_fresh = ledger.fresh(RETEST_SERVICE, evidence, project)
-    known_hosts = {h for h, _ in prior}
-    to_add = [DeferredRetest(project_id=project, domain=domain, scan=scan, host=host, signature=sig)
-              for host, sig in evidence.items() if (host, sig) not in prior and not (host in legacy_fresh and host not in known_hosts)]
-    DeferredRetest.objects.bulk_create(to_add, ignore_conflicts=True)
+    with transaction.atomic():
+        # Serialize producers even when no episode exists yet. A fast worker may finish between two producers;
+        # the second must see that terminal episode before deciding whether it is time for another one.
+        Project.objects.select_for_update().get(pk=project)
+        prior_rows = DeferredRetest.objects.filter(project_id=project, host__in=evidence)
+        known_hosts = set(prior_rows.values_list('host', flat=True).distinct())
+        cutoff = min(timezone.now() - timedelta(seconds=ledger.ttl(RETEST_SERVICE)), scan.start_scan_date)
+        prior = set(prior_rows.filter(
+            models.Q(status__in=['pending', 'dispatching', 'queued', 'running']) |
+            models.Q(updated_at__gte=cutoff) | models.Q(scan=scan)
+        ).values_list('host', 'signature'))
+        # Keep legacy coverage and source-scan replay protection. A delayed scan that began before the last
+        # episode finished is still part of that episode, even if its callback arrives after the TTL.
+        legacy_fresh = ledger.fresh(RETEST_SERVICE, evidence, project)
+        to_add = [DeferredRetest(project_id=project, domain=domain, scan=scan, host=host, signature=sig)
+                  for host, sig in evidence.items()
+                  if (host, sig) not in prior and not (host in legacy_fresh and host not in known_hosts)]
+        DeferredRetest.objects.bulk_create(to_add, ignore_conflicts=True)
     dispatched = dispatch_deferred_retests()
     if dispatched['queued']:
         names = dispatched['hosts']

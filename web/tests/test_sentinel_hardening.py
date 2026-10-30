@@ -174,6 +174,14 @@ class ResultBindingTests(SimpleTestCase):
         self.assertEqual([h['ip'] for h in clean['hosts']], ['192.0.2.50', '2001:db8::5', '192.0.2.50'])
         self.assertEqual(clean['dropped'], 1)  # the one valid address nobody asked about; the free text never gets that far
 
+    def test_nmap_os_reliability_survives_sanitization_and_task_binding(self):
+        task = self._task('nmap', {'addresses': ['192.0.2.50']})
+        body = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.50', 'os_guess': 'Linux', 'ports': []}],
+                'os_reliable': False}
+        self.assertIs(sentinels.clean_result('nmap', body, task)['os_reliable'], False)
+        self.assertIs(sentinels.clean_result('nmap', {**body, 'os_reliable': True}, task)['os_reliable'], True)
+        self.assertIs(sentinels.clean_result('nmap', {**body, 'os_reliable': 'false'}, task)['os_reliable'], True)
+
     def test_naabu_keys_must_be_dispatched_addresses(self):
         task = self._task('naabu', {'addresses': ['192.0.2.50']})
         clean = sentinels.clean_result('naabu', {'outcome': 'done', 'ports': {'192.0.2.50': [22, 80], 'not an ip': [1], '192.0.2.77': [3389]}}, task)

@@ -244,7 +244,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     shown = set()  # bbot reports the same name from several modules; show each thing once
     bbot_scan_name = ''  # bbot's own directory name for this run (~/.bbot/scans/<name>/), from its SCAN event
     last_flush = time.time()
-    status, error = SUCCESS, ''
+    status, error, partial = SUCCESS, '', ''
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
     from reNgine.resources import MemoryKill, ScanAborted
@@ -298,8 +298,19 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('bbot discovery failed for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]
+        if isinstance(exc, bbot_lib.BbotProcessError) and (observed or any(vars(batch).values()) or stored):
+            # bbot crashed or reached the time limit part way. What it found is real: keep it AND let the scan go on with it (a failed scan's
+            # hosts are not the domain's current inventory, so failing here would hide everything bbot did find and keep the previous scan's
+            # picture). The incompleteness is recorded on the discovery stage and in the scan's failed stages, and it is not counted as a
+            # finished discovery, so another target does not reuse it as a parent's.
+            try:
+                _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
+                partial = error
+                status, error = SUCCESS, ''
+            except Exception:  # noqa: BLE001 - a persistence fault must not hide the scanner failure
+                logger.exception('could not persist partial bbot evidence for scan %s', scan_id)
     ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
-        status=status, time=timezone.now(), error_message=error or None)
+        status=FAILED if partial else status, time=timezone.now(), error_message=(partial or error) or None)
     if finalize or status == FAILED:
         scan.scan_status, scan.stop_scan_date, scan.error_message = status, timezone.now(), error or None
         scan.save(update_fields=['scan_status', 'stop_scan_date', 'error_message'])
@@ -307,8 +318,9 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     found = Subdomain.objects.filter(scan_history=scan).count()
     activity.settle(running, 'done' if status == SUCCESS else 'failed', message=(
         f'Discovery of {scan.domain.name} finished: {found} host{"s" if found != 1 else ""} found'
+        + (f', but incomplete ({partial})' if partial else '')
         if status == SUCCESS else f'Discovery of {scan.domain.name} failed: {error}'), hosts=found)
-    if status == SUCCESS:
+    if status == SUCCESS and not partial:
         from cveFeed import ledger
         ledger.record('bbot', [scan.domain.name], scan.domain.project_id, scan)
         if finished_mode == 'deep':  # the weekly deep sweep (tasks.deep_scan_apexes) counts only runs that really were deep
@@ -316,7 +328,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     if status == SUCCESS and finalize:
         from cveFeed.tasks import correlate_cves
         correlate_cves.delay(scan_history_id=scan.id)
-    return {'scan_id': scan.id, 'status': status, 'error': error}
+    return {'scan_id': scan.id, 'status': status, 'error': error, **({'partial': partial} if partial else {})}
 
 
 LOCK_TTL = 180  # seconds; refreshed while the pipeline runs, so a crashed worker frees its target within minutes

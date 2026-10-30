@@ -765,6 +765,18 @@ class ProjectSentinelsTabTests(SentinelBase):
         self.assertEqual(client.get('/cve/_all/sentinels/').status_code, 404)
 
 
+class NaabuResultTests(SimpleTestCase):
+    def test_a_tarpit_is_kept_as_none_not_clipped_to_a_port_list_and_not_dropped(self):
+        tarpit = list(range(1, 601))
+        clean = sentinels.clean_result('naabu', {'outcome': 'done', 'ports': {'192.0.2.1': [22, 8443], '192.0.2.2': tarpit, '192.0.2.3': None, '192.0.2.4': []}})
+        self.assertEqual(clean['ports'], {'192.0.2.1': [22, 8443], '192.0.2.2': None, '192.0.2.3': None})  # nothing open is left out, as before
+
+    def test_naabu_discover_hands_a_sentinel_tarpit_to_nmaps_default_ports(self):
+        from cveFeed import naabu_scan
+        self.assertTrue(all(ports is None or len(ports) <= naabu_scan.MAX_OPEN_PER_IP
+                            for ports in sentinels.clean_result('naabu', {'outcome': 'done', 'ports': {'192.0.2.2': list(range(1, 601))}})['ports'].values()))
+
+
 class LiveOverviewTests(SentinelBase):
     def _task(self, project, agent, status, **extra):
         return SentinelTask.objects.create(project=project, kind='nmap', host=f'h.{project.slug}.example', target={}, status=agent and status,
