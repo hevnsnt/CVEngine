@@ -389,6 +389,9 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(admin, 'PATCH', f'users/{self.pm_a.pk}', {'email': 'other@example.test'})[0], 403)
 		self.assertEqual(api(admin, 'PATCH', f'users/{self.member_a.pk}', {'email': 'invalid'})[0], 400)
 		self.assertEqual(api(admin, 'PATCH', f'users/{self.member_a.pk}', {'email': 'member@example.test'})[0], 200)
+		self.assertEqual(api(admin, 'PATCH', f'users/{self.member_a.pk}', {'is_active': 'false'})[0], 400)
+		self.member_a.refresh_from_db()
+		self.assertTrue(self.member_a.is_active)
 
 	def test_deleting_an_account_is_visible_to_its_organizations_admins(self):
 		api(client_for(self.root), 'DELETE', f'users/{self.member_a.id}')
