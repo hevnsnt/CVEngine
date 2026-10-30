@@ -131,6 +131,10 @@ function card(s, reload, detail, group) {
   const kinds = s.capabilities.filter((k) => k !== INTERNAL);
   const tools = kinds.length ? kinds.map(kindName).join(", ") : "no capabilities";
   c.append(el("p", "sl-foot", `${tools}${s.os ? ` · ${s.os}` : ""} · up to ${s.max_concurrent} at once`));
+  Object.entries(s.withheld_kinds || {}).forEach(([k, w]) => {
+    const retry = new Date(w.retry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    c.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
+  });
   return c;
 }
 

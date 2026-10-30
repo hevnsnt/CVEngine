@@ -309,7 +309,45 @@ def _hash_enrollment(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def effective_capabilities(agent):
+FAIL_STREAK_DEFAULT = 3            # consecutive failures of one kind that withhold it from a Sentinel
+FAIL_COOLDOWN_DEFAULT_MINUTES = 15  # how long it is withheld before one more try
+
+
+def _env_int(name, default):
+    import os
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def failing_kinds(agent, now=None):
+    """``{kind: {'failures': n, 'since': when, 'retry_at': when}}`` for the kinds this Sentinel has failed ``FAIL_STREAK`` times running, the
+    latest inside the cool-off. Such a kind is not offered to it (``effective_capabilities``): a Sentinel whose nuclei is killed, whose OpenVAS
+    socket is gone or whose tool is missing would otherwise be handed the same work again and again, each failing and then running on this server
+    after the round trip. Work of that kind goes straight to this server (``capacity_state`` finds no Sentinel) until the cool-off ends; then the
+    next task of the kind is the one more try, and a success clears the streak while a failure withholds it for another cool-off. Needs no state of
+    its own: it reads the last tasks the Sentinel finished. ``CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES=0`` turns it off."""
+    streak = max(2, _env_int('CVENGINE_SENTINEL_KIND_FAIL_STREAK', FAIL_STREAK_DEFAULT))
+    cooldown = _env_int('CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES', FAIL_COOLDOWN_DEFAULT_MINUTES)
+    if cooldown <= 0 or not agent.pk:
+        return {}
+    now = now or timezone.now()
+    window = timedelta(minutes=cooldown)
+    recent = list(SentinelTask.objects.filter(agent=agent, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
+                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at')[:200])
+    by_kind = {}
+    for kind, status, finished in recent:
+        by_kind.setdefault(kind, []).append((status, finished))
+    out = {}
+    for kind, rows in by_kind.items():
+        last = rows[:streak]
+        if len(last) == streak and all(status == 'failed' for status, _ in last) and now - last[0][1] < window:
+            out[kind] = {'failures': streak, 'since': last[-1][1], 'retry_at': last[0][1] + window}
+    return out
+
+
+def effective_capabilities(agent, withheld=None):
     """The capabilities this server credits a Sentinel with: what it declared, except ``network:internal``, which only the server grants (the
     Sentinel's ``network`` is ``internal``: set from its enrollment, or by an administrator). A Sentinel outside the network that declares
     it anyway would be offered work it cannot reach and report an empty result as clean."""
@@ -318,6 +356,7 @@ def effective_capabilities(agent):
         if sentinel_settings.effective_network(agent) == 'internal':
             caps.add(INTERNAL_CAPABILITY)
         caps -= sentinel_settings.disabled_kinds(agent)  # a kind the machine or an administrator switched off is never offered (it would only be refused)
+        caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
     return caps
 
 
@@ -562,7 +601,8 @@ class SentinelEff:
         if agent.kind != 'scanner':
             self.problem = self.problem or "this agent is not a Sentinel (kind='scanner')"
         limits = agent.limits or {}
-        caps = effective_capabilities(agent)
+        self.withheld = failing_kinds(agent, now) if agent.kind == 'scanner' else {}
+        caps = effective_capabilities(agent, self.withheld)
         if limits.get('capabilities') is not None:
             caps &= set(limits['capabilities'])
         self.caps = caps
@@ -1486,6 +1526,7 @@ def live_overview(ctx):
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
             'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
+            'withheld_kinds': {k: {'failures': v['failures'], 'retry_at': svc._iso(v['retry_at'])} for k, v in eff.withheld.items()},
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
