@@ -1225,18 +1225,15 @@ def latest_scan_q(prefix=""):
                                          name=OuterRef(prefix + "name"))
     newer_row = same_host.filter(scan_history_id__in=after_full,
                                  scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
-    # Before the first successful full scan, keep the newest scanned copy of each host. A scanless CT row is useful
-    # until that host has a current scanned copy, but must not duplicate it once a scan has observed the host.
+    # Before the first successful full scan, keep the newest scanned copy of each host. A scanless row (certificate transparency,
+    # an import) is not a copy of a scan: its own addresses and findings fold into the host, so it stays current beside the scanned copy.
     newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
-    current_scanned = same_host.filter(scan_history__isnull=False).filter(
-        Q(scan_history_id__in=latest_full) | Q(scan_history_id__in=after_full)
-        | ~Q(target_domain_id__in=full.values("domain_id")))
     return ((Q(**{prefix + "scan_history_id__in": latest_full}) | Q(**{prefix + "scan_history_id__in": after_full})
              | Q(**{prefix + "scan_history__isnull": True})
              | ~Q(**{prefix + "target_domain_id__in": full.values("domain_id")}))
             & ~Q(Exists(newer_row))
-            & (Q(**{prefix + "scan_history__isnull": False}) | ~Q(Exists(current_scanned)))
-            & (Q(**{prefix + "target_domain_id__in": full.values("domain_id")}) | ~Q(Exists(newer_fallback))))
+            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in": full.values("domain_id")})
+               | ~Q(Exists(newer_fallback))))
 
 
 def candidate_subdomains(product_index, base=None):

@@ -90,10 +90,11 @@ class CurrentInventoryTests(TestCase):
 		newer = self.scan(status=0, names=['www.acme.example'])
 		self.assertEqual(self.current(), [('old.acme.example', old.id), ('www.acme.example', newer.id)])
 
-	def test_a_scanned_host_supersedes_its_scanless_discovery_row(self):
-		Subdomain.objects.create(name='www.acme.example', target_domain=self.domain)
+	def test_a_scanless_discovery_row_stays_beside_the_scanned_host(self):
+		scanless = Subdomain.objects.create(name='www.acme.example', target_domain=self.domain)
 		partial = self.scan(tasks=HP, names=['www.acme.example'])
-		self.assertEqual(self.current(), [('www.acme.example', partial.id)])
+		self.assertEqual(self.current(), [('www.acme.example', None), ('www.acme.example', partial.id)])
+		self.assertIsNotNone(scanless.id)
 
 	def test_scanless_rediscovery_survives_when_latest_full_scan_omitted_host(self):
 		self.scan(names=['www.acme.example'])
