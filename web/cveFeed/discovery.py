@@ -297,6 +297,11 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('bbot discovery failed for scan %s', scan_id)
+        if isinstance(exc, bbot_lib.BbotProcessError) and (observed or any(vars(batch).values())):
+            try:
+                _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
+            except Exception:  # noqa: BLE001 - a persistence fault must not hide the scanner failure
+                logger.exception('could not persist partial bbot evidence for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]
     ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
         status=status, time=timezone.now(), error_message=error or None)
