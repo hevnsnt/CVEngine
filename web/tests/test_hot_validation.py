@@ -241,6 +241,15 @@ class HotValidationTests(TestCase):
         self.assertEqual(result['reason'], 'no_longer_eligible')
         self.assertIsNone(AutomaticValidation.objects.get(pk=again.pk).next_attempt_at)
 
+    def test_a_skipped_job_of_a_replaced_match_does_not_stand_for_its_successor(self):
+        from cveFeed.models import OnDemandValidation
+        now = timezone.now()
+        job = OnDemandValidation(status='skipped', result={'reason': 'historical'}, created_at=now, finished_at=now)
+        self.assertFalse(hot_validation._job_current(job, now))
+        job.result = {'reason': 'out_of_scope'}
+        self.assertTrue(hot_validation._job_current(job, now))
+        self.assertFalse(hot_validation._job_current(job, now + timedelta(minutes=31)))
+
     def test_stale_evidence_is_superseded_without_false_worker_failure(self):
         from cveFeed.tasks import automatic_validate_finding
         row = Triage.objects.get(vulnerability=self.high)
@@ -400,7 +409,9 @@ class HotValidationTests(TestCase):
         row = Triage.objects.get(match=self.fire_match)
         job = OnDemandValidation.objects.create(match=self.fire_match, project=self.project, evidence_signature=row.signature,
                                                 priority=0)
-        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[]):
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
+                mock.patch('cveFeed.correlation.invalid_identity_reason', return_value=''), \
+                mock.patch('cveFeed.validation.resolve_template', side_effect=OSError('boom')), self.assertLogs('cveFeed.tasks', 'ERROR'):
             validate_match_on_demand(job.pk)
         job.refresh_from_db()
         self.assertEqual(job.status, 'failed')
@@ -418,7 +429,9 @@ class HotValidationTests(TestCase):
         row = Triage.objects.get(match=self.fire_match)
         job = OnDemandValidation.objects.create(match=self.fire_match, project=self.project, evidence_signature=row.signature,
                                                 priority=0, attempts=hot_validation.MAX_ATTEMPTS)
-        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[]):
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
+                mock.patch('cveFeed.correlation.invalid_identity_reason', return_value=''), \
+                mock.patch('cveFeed.validation.resolve_template', side_effect=OSError('boom')), self.assertLogs('cveFeed.tasks', 'ERROR'):
             validate_match_on_demand(job.pk)
         job.refresh_from_db()
         self.assertEqual(job.status, 'failed')
