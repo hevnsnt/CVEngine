@@ -79,11 +79,13 @@ def candidates(now=None, days=None, kept=None):
 
 
 def _newest(domain_ids):
+    from django.db.models import F, Window
+    from django.db.models.functions import RowNumber
     from startScan.models import ScanHistory
-    keep = set()
-    for domain_id in domain_ids:
-        keep.update(ScanHistory.objects.filter(domain_id=domain_id).order_by('-id').values_list('id', flat=True)[:KEEP_LATEST])
-    return keep
+    # One ranked query for the batch instead of a query for every domain.
+    return set(ScanHistory.objects.filter(domain_id__in=domain_ids)
+               .annotate(position=Window(expression=RowNumber(), partition_by=[F('domain_id')], order_by=F('id').desc()))
+               .filter(position__lte=KEEP_LATEST).values_list('id', flat=True))
 
 
 def run(now=None, days=None, dry_run=False, budget_seconds=DEFAULT_BUDGET_SECONDS, clock=time.monotonic):

@@ -116,6 +116,14 @@ class ScanRetentionTests(TestCase):
         scan_retention.run(self.now, days=180)
         self.assertTrue({s.id for s in theirs} <= self.ids())  # only two scans: both are among the newest three of their domain
 
+    def test_newest_scans_for_many_domains_use_one_ranked_query(self):
+        other = Domain.objects.create(name='other.example', project=self.project, insert_date=self.now)
+        mine = [self.scan(age=OLD + timedelta(days=i), names=()) for i in range(5)]
+        theirs = [self.scan(age=OLD + timedelta(days=i), domain=other, names=()) for i in range(5)]
+        with self.assertNumQueries(1):
+            kept = scan_retention._newest({self.domain.id, other.id})
+        self.assertEqual(kept, {s.id for s in mine[-3:] + theirs[-3:]})
+
     def test_a_dry_run_counts_and_deletes_nothing(self):
         self.history()
         before = self.ids()
