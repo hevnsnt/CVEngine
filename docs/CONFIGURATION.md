@@ -28,7 +28,7 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | `CVENGINE_SENTINEL_REPO`, `CVENGINE_SENTINEL_BRANCH` | `hevnsnt/cvENGINE-sentinel`, `main` | The repository and branch whose head is "the latest Sentinel client" for the version check on the Sentinels page. |
 | `CVENGINE_SENTINEL_VERSION_CHECK` | on | `off` stops asking GitHub for the latest Sentinel client (the page then shows `unknown`). |
 | `CVENGINE_SENTINEL_REPO_TOKEN` | none | A token for a private Sentinel repository (else the update check's token is tried). |
-| `CLASSIC_CONCURRENCY` | `20` | Most tasks at once across all other queues (the notification, API and the slow sweep queues: WPScan, TLS audit, cloud storage, other sites, UDP, OpenVAS and suppliers). The CVE feed worker is fixed at 4 and the validation lane at 1. |
+| `CLASSIC_CONCURRENCY` | `20` | Most tasks at once across all other queues (the notification, API and the slow sweep queues: WPScan, TLS audit, cloud storage, other sites, UDP, OpenVAS, suppliers and certificate transparency lookups). The CVE feed worker is fixed at 4 and the validation lane at 1. |
 | `HEAVY_MEMORY_BUDGET_MB` | 75% of the limit | Memory the job queue can hand out at once. |
 | `HEAVY_HEADROOM_MB` | larger of 256 and 5% | Free memory kept in reserve. |
 | `HEAVY_COST_SCALE`, `HEAVY_COST_<KIND>_MB` | `1`, none | Scale every estimated job cost, or set one kind's cost outright. |
@@ -49,6 +49,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CVENGINE_WORK_DEPTH`, `CVENGINE_WORK_MIN_GAP_HOURS` | `3`, `2` | The work conductor keeps this many discovery scans running or queued, starting the targets that have waited longest, and never rescans a target inside the minimum gap. `0` for the depth turns it off. See [PIPELINE.md](PIPELINE.md#the-work-conductor). |
+| `CVENGINE_BULK_DISCOVER_NOW` | `50` | How many of the targets one add (the Add targets page, `add_target`, `add_targets`, `add_targets_by_org`) queues for discovery at once. The rest are created as targets and left to the work conductor, which scans never-scanned targets first, one per project per minute, so a single paste of hundreds of names cannot put every other project's scans behind it. The response says how many were left (`discovery_deferred`). With the conductor off (`CVENGINE_WORK_DEPTH=0`) every new target is queued at once. |
 | `CVENGINE_TTL_NMAP_FAST`, `_BBOT`, `_BBOT_DEEP`, `_ROUTE_AUTH`, `_NAABU`, `_WAFW00F`, `_NUCLEI_DEEP_HOST`, `_NUCLEI_DEEP_TARGET` | `168` | nmap fingerprint, discovery, deep discovery of an apex, route checks, naabu, firewall identification, and deep nuclei. Windows are kept per project. |
 | `CVENGINE_TTL_NUCLEI`, `_NUCLEI_LIGHT`, `_NUCLEI_CVE`, `_CT_WATCH`, `_HYGIENE`, `_VALIDATE`, `_RETEST` | `24` | Nuclei runs, certificate watch, hygiene, validation checks, and re-tests, per host. |
 | `CVENGINE_TTL_NUCLEI_AUTH`, `_ROUTE_AUTH_SIGNED` | `24` | Signed-in nuclei runs and signed-in route checks of a target with a stored sign-in, per host (see [PIPELINE.md](PIPELINE.md#authenticated-checks)). |

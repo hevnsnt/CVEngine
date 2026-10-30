@@ -748,21 +748,40 @@ def _announce(scan, result, summary=True):
 
 # --- new hosts found between scans -------------------------------------------------------------------------------
 
-def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20):
-    """{(name, ip)} for the names that resolve. getaddrinfo has no timeout of its own, so each lookup runs in a pool."""
+def _no_such_name(exc):
+    """True when a lookup error is the resolver's definitive answer that the name has no address (NXDOMAIN, or the name exists with no A or AAAA
+    record), as opposed to a resolver that could not answer (a timeout, a temporary failure, an unreachable server)."""
+    import socket
+    return isinstance(exc, socket.gaierror) and exc.errno in {code for code in (getattr(socket, 'EAI_NONAME', None), getattr(socket, 'EAI_NODATA', None))
+                                                              if code is not None}
+
+
+def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
+    """{(name, ip)} for the names that resolve. getaddrinfo has no timeout of its own, so each lookup runs in a pool.
+
+    A name the resolver answers "no such name" for is simply absent. A lookup that could not be answered (a timeout, a temporary resolver
+    failure) is not an answer about the name: it is put in ``errors`` (``{name: reason}``) when the caller passes one, so it is never mistaken for
+    a host that has no address, and it is counted in the log either way."""
     import concurrent.futures
     import socket
     pairs = set()
+    failed = errors if errors is not None else {}
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {pool.submit(socket.getaddrinfo, name, None, 0, socket.SOCK_STREAM): name for name in names}
         for future, name in futures.items():
             try:
                 pairs.update((name, info[4][0]) for info in future.result(timeout=timeout))
-            except Exception:  # noqa: BLE001 - no record, a resolver error or a timeout: the name stays unresolved
-                continue
+            except concurrent.futures.TimeoutError:
+                failed[name] = f'no answer within {timeout} seconds'
+            except Exception as exc:  # noqa: BLE001 - one lookup failing never stops the rest
+                if not _no_such_name(exc):
+                    failed[name] = f'{type(exc).__name__}: {exc}'[:120]
     finally:
         pool.shutdown(wait=False)
+    if failed:
+        logger.warning('DNS lookup could not be answered for %s of %s names (for example %s: %s)', len(failed), len(list(names)),
+                       next(iter(failed)), next(iter(failed.values())))
     return pairs
 
 
@@ -821,7 +840,13 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                                        + (f' after scan #{source_scan_id}' if source_scan_id else '')) if retest else
                          f'Scanning {len(wanted)} new host{"s" if len(wanted) != 1 else ""} of {domain.name} {hosts_text}',
                          project=domain.project_id, scan_id=scan.id)
-            pairs = resolver(wanted)
+            lookup_errors = {}
+            pairs = resolver(wanted, errors=lookup_errors) if resolver is resolve_names else resolver(wanted)
+            if lookup_errors:  # a name whose lookup was not answered is not recorded as a host with no address: the next pass looks again
+                wanted = [n for n in wanted if n not in lookup_errors]
+                activity.log('discovery', f'DNS could not answer {len(lookup_errors)} lookup{"s" if len(lookup_errors) != 1 else ""} for {domain.name} '
+                                          f'({next(iter(lookup_errors.values()))}); those hosts are not recorded and are looked up again later',
+                             project=domain.project_id, scan_id=scan.id)
             if force:
                 from targetApp.target_types import is_scannable_ip
                 pairs = {(name, address) for name, address in pairs if is_scannable_ip(address, project=domain.project_id if name == address else None)}
@@ -829,6 +854,12 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                                 ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
             ScanActivity.objects.filter(pk=step.pk).update(status=SUCCESS, time=timezone.now())
             found['resolved'] = len({name for name, _ in pairs})
+            if lookup_errors:
+                found['lookup_errors'] = len(lookup_errors)
+                if not wanted:  # every lookup failed: nothing was learned, and the run says so instead of reporting success
+                    message = f'DNS could not answer any lookup ({next(iter(lookup_errors.values()))}); nothing was recorded'
+                    ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+                    return {**found, 'status': 'inconclusive', 'error': message}
             if force and not pairs:
                 message = 'No scannable IP address resolved; no active checks ran'
                 ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
