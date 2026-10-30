@@ -184,12 +184,13 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
             try:
-                out, _err = proc.communicate(timeout=timeout)
+                out, err = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 resources.terminate_group(proc, grace=5)
                 proc.communicate()
                 raise
             job.raise_if_killed()
+            _check_exit(proc.returncode, err)
             return out
     finally:
         os.unlink(path)
@@ -204,16 +205,24 @@ def run_nmap_args(args, label, timeout):
         proc = subprocess.Popen([NMAP_BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         job.attach(proc)
         try:
-            out, _err = proc.communicate(timeout=timeout)
+            out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             resources.terminate_group(proc, grace=5)
             proc.communicate()
             raise
         job.raise_if_killed()
+        _check_exit(proc.returncode, err)
         return out
 
 
-def parse_xml(xml_text):
+def _check_exit(returncode, stderr):
+    """A failed process is not evidence that the target has no services."""
+    if returncode:
+        logger.error('nmap exited with status %s: %s', returncode, (stderr or '').strip()[-500:])
+        raise RuntimeError(f'nmap exited with status {returncode}')
+
+
+def parse_xml(xml_text, strict=False):
     """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable.
 
     This function also reads XML a Sentinel reported (``agentapi.sentinel_dispatch.try_nmap_udp``), not only this
@@ -222,19 +231,38 @@ def parse_xml(xml_text):
     ENTITY, so one is refused outright before parsing (it is the one thing ``xmltodict.parse``'s own default entity
     handling does not stop: that default only blocks an *external* DTD/entity fetch, not an all-internal expansion
     bomb). No extra dependency: a hardened ``expat`` module here would need ``defusedexpat`` (an old, unmaintained C
-    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all."""
+    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all.
+
+    ``strict`` is for a scan that will record coverage: missing, invalid or explicitly failed output must raise so
+    its caller records failure and leaves the target due. Display and import callers retain the tolerant default."""
     import xmltodict
 
     from reNgine.nmap_service import extract_nmap_inventory
     if not (xml_text or '').strip():
+        if strict:
+            raise RuntimeError('nmap returned no XML report')
         return []
     if '<!ENTITY' in xml_text:
         logger.warning('refused to parse nmap XML output: it declares a custom ENTITY')
+        if strict:
+            raise RuntimeError('nmap returned an unsafe XML report')
         return []
     try:
         data = xmltodict.parse(xml_text)
+        if not isinstance(data, dict) or 'nmaprun' not in data:
+            raise ValueError('missing nmaprun root')
+        run = data['nmaprun'] or {}
+        if not isinstance(run, dict):
+            raise ValueError('invalid nmaprun root')
+        data['nmaprun'] = run
+        if strict:
+            finished = (run.get('runstats') or {}).get('finished') or {}
+            if finished.get('@exit') not in (None, 'success'):
+                raise ValueError('nmap report declares an unsuccessful run')
     except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
         logger.warning('could not parse nmap XML output', exc_info=True)
+        if strict:
+            raise RuntimeError('nmap returned an invalid or failed XML report') from None
         return []
     return extract_nmap_inventory(data)
 
@@ -409,7 +437,7 @@ def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_
             logger.warning('nmap was stopped for memory on %s hosts; retrying as %s + %s', len(chunk), half, len(chunk) - half)
             pending[0:0] = [chunk[:half], chunk[half:]]
             continue
-        result = persist_inventory(parse_xml(xml), org_id=org_id)
+        result = persist_inventory(parse_xml(xml, strict=True), org_id=org_id)
         for key in totals:
             totals[key] += result.get(key, 0)
     return totals
