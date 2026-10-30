@@ -395,8 +395,18 @@ def wordpress_observations(responses):
     if signals:
         order = list(dict.fromkeys(s for s, _ in signals))
         evidence = {'signals': order, 'probed': probed}
-        return [_observation('wordpress', 'WordPress', version, 'wordpress', 'found', min(0.95, 0.6 + 0.1 * len(order)), order[0],
-                             url=next(p for s, p in signals), evidence=evidence)]
+        found = [_observation('wordpress', 'WordPress', version, 'wordpress', 'found', min(0.95, 0.6 + 0.1 * len(order)), order[0],
+                              url=next(p for s, p in signals), evidence=evidence)]
+        from cveFeed import wp_core
+        answers = dict(responses)
+        if wp_core.UPGRADE_PATH in answers:  # the directory an update is extracted into: whether the web server serves it (cveFeed.wp_core)
+            state = wp_core.classify_dir(answers[wp_core.UPGRADE_PATH], answers.get(wp_core.UPGRADE_MISSING))
+            status = (answers[wp_core.UPGRADE_PATH] or {}).get('status')
+            found.append(_observation('wp-upgrade-dir', 'WordPress', variant=state, source='probe:upgrade-dir', url=wp_core.UPGRADE_PATH,
+                                      outcome='found' if state in (wp_core.LISTING, wp_core.REACHABLE) else 'absent' if state == wp_core.DENIED else 'hidden',
+                                      confidence=0.9 if state in (wp_core.LISTING, wp_core.DENIED) else 0.7 if state == wp_core.REACHABLE else 0.0,
+                                      evidence={'status': status, 'state': state}))
+        return found
     challenged = next((r['challenge'] for _p, r in responses if r and r.get('challenge')), '')
     reachable = [r for _p, r in responses if r]
     if not reachable:
@@ -466,12 +476,25 @@ def _wordpress_responses(base, get, sleep):
             responses.append((path, get(base.rstrip('/') + path)))
         except (OSError, ValueError):
             responses.append((path, None))
-    if _wordpress_signals(responses)[0]:  # only a site that is WordPress is asked for its readme
+    if _wordpress_signals(responses)[0]:  # only a site that is WordPress is asked for its readme, and for the directory updates are extracted into
         sleep(REQUEST_GAP)
         try:
             responses.append(('/readme.html', get(base.rstrip('/') + '/readme.html')))
         except (OSError, ValueError):
             pass
+        from cveFeed import wp_core
+        sleep(REQUEST_GAP)
+        try:
+            answer = get(base.rstrip('/') + wp_core.UPGRADE_PATH)
+        except (OSError, ValueError):
+            answer = None
+        responses.append((wp_core.UPGRADE_PATH, answer))
+        if wp_core.classify_dir(answer) == wp_core.REACHABLE:  # an empty page: ask once for a path that cannot exist beside it, to tell a catch-all
+            sleep(REQUEST_GAP)
+            try:
+                responses.append((wp_core.UPGRADE_MISSING, get(base.rstrip('/') + wp_core.UPGRADE_MISSING)))
+            except (OSError, ValueError):
+                pass
     return responses
 
 
