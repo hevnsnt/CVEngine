@@ -1,3 +1,4 @@
+import contextlib
 import os
 from unittest import mock
 
@@ -29,6 +30,29 @@ FULL_XML = '''<?xml version="1.0"?>
 </host></nmaprun>'''
 
 
+class ProcessExitTests(SimpleTestCase):
+	def test_both_runners_raise_on_process_failure(self):
+		for invoke in (lambda: nmap_scan.run_nmap_xml(['192.0.2.10'], [], '8m'),
+				lambda: nmap_scan.run_nmap_args([], 'test', 10)):
+			for code in (2, -9):
+				proc = mock.Mock(returncode=code)
+				proc.communicate.return_value = ('', 'raw socket permission denied')
+				with self.subTest(code=code, runner=invoke), \
+						mock.patch('targetApp.target_types.refuse_local'), \
+						mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **kw: contextlib.nullcontext(mock.Mock())), \
+						mock.patch.object(nmap_scan.subprocess, 'Popen', return_value=proc):
+					with self.assertRaisesRegex(RuntimeError, f'status {code}'):
+						invoke()
+
+	def test_a_successful_process_preserves_its_report(self):
+		proc = mock.Mock(returncode=0)
+		proc.communicate.return_value = (FAST_XML, '')
+		with mock.patch('targetApp.target_types.refuse_local'), \
+				mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **kw: contextlib.nullcontext(mock.Mock())), \
+				mock.patch.object(nmap_scan.subprocess, 'Popen', return_value=proc):
+			self.assertEqual(nmap_scan.run_nmap_xml(['192.0.2.10'], [], '8m'), FAST_XML)
+
+
 class BuildTargetsTests(TestCase):
 	def test_dedupes_and_sorts_ips(self):
 		self.assertEqual(nmap_scan.build_targets(['192.0.2.2', '192.0.2.1', '192.0.2.2']), ['192.0.2.1', '192.0.2.2'])
@@ -43,6 +67,23 @@ class BuildTargetsTests(TestCase):
 
 
 class ParseXmlTests(TestCase):
+	def test_coverage_parser_rejects_missing_malformed_and_failed_reports(self):
+		bad_reports = ('', '<nmaprun><host>', '<other/>', '<nmaprun>error</nmaprun>',
+			'<nmaprun><runstats><finished exit="error"/></runstats></nmaprun>',
+			'<!DOCTYPE nmaprun [<!ENTITY x "x">]><nmaprun/>')
+		for report in bad_reports:
+			with self.subTest(report=report), self.assertRaises(RuntimeError):
+				nmap_scan.parse_xml(report, strict=True)
+
+	def test_coverage_parser_accepts_a_valid_report_with_no_open_ports(self):
+		report = ('<nmaprun><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/>'
+			'<ports><extraports state="closed" count="1000"/></ports></host>'
+			'<runstats><finished exit="success"/></runstats></nmaprun>')
+		self.assertEqual(nmap_scan.parse_xml(report, strict=True)[0]['ports'], [])
+
+	def test_an_empty_nmap_root_is_a_valid_empty_report(self):
+		self.assertEqual(nmap_scan.parse_xml('<nmaprun/>', strict=True), [])
+
 	def test_blank_output_is_empty(self):
 		self.assertEqual(nmap_scan.parse_xml(''), [])
 		self.assertEqual(nmap_scan.parse_xml('   '), [])
@@ -195,6 +236,15 @@ class RunNmapForScanTests(TestCase):
 			raise RuntimeError('nmap exploded')
 		result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		self.assertEqual(result, {'targets': 1, 'reused': 0, 'error': 'nmap exploded'})
+
+	def test_invalid_output_does_not_record_successful_coverage(self):
+		from cveFeed.models import ServiceRun
+		for report in ('', '<nmaprun><host>', '<error/>'):
+			with self.subTest(report=report):
+				result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=lambda *a: report,
+					naabu_runner=mock.Mock(side_effect=RuntimeError('unavailable')), dispatch=False, force=True)
+				self.assertIn('error', result)
+				self.assertEqual(ServiceRun.objects.get(service='nmap-fast', asset='192.0.2.10').status, 'failed')
 
 	def _runner(self, calls):
 		def runner(targets, flags, host_timeout):
