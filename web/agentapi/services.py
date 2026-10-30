@@ -570,7 +570,10 @@ def _internal_scan(ctx, project, domain):
     if not sentinel_only_target(domain.name, project.id):
         return None
     from cveFeed import internal_scan
-    scan = internal_scan.start(domain, initiated_by=ctx.user)
+    try:
+        scan = internal_scan.start(domain, initiated_by=ctx.user)
+    except ValueError as exc:  # the range, exclusion, or bounty policy changed after the request's first check
+        raise ApiError(409, str(exc)) from exc
     return {'scan_id': scan.id, 'status': 'queued', 'internal': True}
 
 

@@ -12,6 +12,7 @@ from agentapi.models import Agent, SentinelTask
 from cveFeed import internal_scan
 from cveFeed.models import ServiceRun
 from cveFeed.discovery import FAILED, QUEUED, SUCCESS
+from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram, HostExclusion
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
@@ -49,6 +50,11 @@ class Base(World):
     def queued_scan(self):
         return ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(),
                                           scan_status=QUEUED, results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+
+    def block_bounty_automation(self):
+        program = BountyProgram.objects.create(platform='hackerone', handle='internal-test', name='Internal test')
+        BountyAsset.objects.create(program=program, kind='ip', identifier=self.domain.name, in_scope=True)
+        BountyEngagement.objects.create(project=self.pa, program=program, status='active', automated_ok=False)
 
 
 class RunTests(Base):
@@ -93,6 +99,28 @@ class RunTests(Base):
         self.assertEqual(out['status'], FAILED)
         self.assertEqual(seen, [])
         self.assertIn('no longer inside', out['error'])
+
+    def test_an_exclusion_added_after_queueing_prevents_dispatch(self):
+        scan = self.queued_scan()
+        HostExclusion.objects.create(org=self.pa.org, host=self.domain.name)
+        seen = []
+        out = internal_scan.run(scan.id, dispatch=lambda *a, **k: seen.append(a) or NMAP_RESULT)
+        scan.refresh_from_db()
+        self.assertEqual((out['status'], scan.scan_status), (FAILED, FAILED))
+        self.assertIn('excluded', out['error'])
+        self.assertEqual(seen, [])
+        self.assertFalse(Subdomain.objects.filter(scan_history=scan).exists())
+
+    def test_an_unacknowledged_bounty_project_added_after_queueing_prevents_dispatch(self):
+        scan = self.queued_scan()
+        self.block_bounty_automation()
+        seen = []
+        out = internal_scan.run(scan.id, dispatch=lambda *a, **k: seen.append(a) or NMAP_RESULT)
+        scan.refresh_from_db()
+        self.assertEqual((out['status'], scan.scan_status), (FAILED, FAILED))
+        self.assertIn('not confirmed automated testing', out['error'])
+        self.assertEqual(seen, [])
+        self.assertFalse(Subdomain.objects.filter(scan_history=scan).exists())
 
     def test_an_answer_about_another_address_is_not_stored(self):
         scan = self.queued_scan()
@@ -157,6 +185,61 @@ class StartAndSweepTests(Base):
         ScanHistory.objects.filter(domain=self.domain).update(start_scan_date=timezone.now() - timedelta(days=8))
         self.assertEqual([d.id for d in internal_scan.due_targets()], [self.domain.id])
 
+    def test_failed_scan_retries_after_a_short_backoff_without_resetting_success_cadence(self):
+        self.sentinel('inside', ['nmap', 'network:internal'])
+        failed = ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(),
+                start_scan_date=timezone.now() - timedelta(hours=2), stop_scan_date=timezone.now() - timedelta(minutes=30),
+                scan_status=FAILED, results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+        self.assertEqual(internal_scan.due_targets(), [])
+        failed.stop_scan_date = timezone.now() - timedelta(hours=2)
+        failed.save(update_fields=['stop_scan_date'])
+        self.assertEqual([d.id for d in internal_scan.due_targets()], [self.domain.id])
+        ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(),
+                start_scan_date=timezone.now() - timedelta(minutes=10), scan_status=SUCCESS, results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+        self.assertEqual(internal_scan.due_targets(), [])
+
+    def test_failed_optional_stage_retries_after_backoff_despite_successful_scan_status(self):
+        self.sentinel('inside', ['nmap', 'network:internal'])
+        ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(),
+                start_scan_date=timezone.now() - timedelta(days=1), scan_status=SUCCESS,
+                results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+        partial = ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(),
+                start_scan_date=timezone.now() - timedelta(hours=2), stop_scan_date=timezone.now() - timedelta(minutes=30),
+                scan_status=SUCCESS, results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+        ScanActivity.objects.create(scan_of=partial, title='TLS audit', name='internal_testssl',
+                time=timezone.now() - timedelta(minutes=30), status=FAILED)
+        self.assertEqual(internal_scan.due_targets(), [])
+        partial.stop_scan_date = timezone.now() - timedelta(hours=2)
+        partial.save(update_fields=['stop_scan_date'])
+        self.assertEqual([d.id for d in internal_scan.due_targets()], [self.domain.id])
+        ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(),
+                start_scan_date=timezone.now() - timedelta(minutes=10), scan_status=SUCCESS,
+                results_dir='/tmp', tasks=[internal_scan.TASK_TAG])
+        self.assertEqual(internal_scan.due_targets(), [])
+
+    def test_excluded_target_is_neither_due_nor_queued(self):
+        self.sentinel('inside', ['nmap', 'network:internal'])
+        HostExclusion.objects.create(org=self.pa.org, host=self.domain.name)
+        self.assertEqual(internal_scan.due_targets(), [])
+        with mock.patch('cveFeed.tasks.run_internal_scan') as task, self.assertRaises(ValueError):
+            internal_scan.start(self.domain)
+        task.delay.assert_not_called()
+
+    def test_unacknowledged_bounty_target_is_neither_due_nor_queued(self):
+        self.sentinel('inside', ['nmap', 'network:internal'])
+        self.block_bounty_automation()
+        self.assertEqual(internal_scan.due_targets(), [])
+        with mock.patch('cveFeed.tasks.run_internal_scan') as task, self.assertRaises(ValueError):
+            internal_scan.start(self.domain)
+        task.delay.assert_not_called()
+
+    def test_a_person_can_start_an_in_scope_bounty_scan_without_automation_acknowledgement(self):
+        self.block_bounty_automation()
+        with mock.patch('cveFeed.tasks.run_internal_scan') as task:
+            scan = internal_scan.start(self.domain, initiated_by=self.admin)
+        self.assertEqual(scan.initiated_by, self.admin)
+        task.delay.assert_called_once_with(scan.id)
+
     def test_the_sweep_queues_and_skips_while_paused(self):
         self.sentinel('inside', ['nmap', 'network:internal'])
         with mock.patch('cveFeed.tasks.run_internal_scan') as task:
@@ -177,6 +260,12 @@ class HandStartedTests(Base):
             bbot.assert_not_called()
         self.assertEqual(out['scan_id'], out2['scan_id'])
         self.assertEqual(task.delay.call_count, 1)
+
+    def test_a_policy_change_during_queueing_returns_conflict(self):
+        with mock.patch('cveFeed.internal_scan.start', side_effect=ValueError('the target is now excluded')):
+            status, out = call(self.t['admin'], 'POST', f'/api/v1/projects/ir-a/targets/{self.domain.pk}/discover', {})
+        self.assertEqual(status, 409)
+        self.assertIn('excluded', out['error'])
 
 
 class StorageTests(Base):
