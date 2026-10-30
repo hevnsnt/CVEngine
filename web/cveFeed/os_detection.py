@@ -1,18 +1,25 @@
 """Whether an operating system guess made from this server's network can be believed.
 
-nmap's OS detection reads how a host answers crafted TCP, UDP and ICMP packets. On Docker Desktop (macOS, and Windows) a container's traffic
-leaves through the VM's user-space network stack, which answers for itself, so every host gets a guess that describes that stack (one install
-saw Google Fuchsia on an Ubuntu server and a NAS, and an Apple OS X release on an iDRAC). The open ports and services are right; the OS guess
-is not. A Linux host, or a Sentinel on the network, measures the real host.
+nmap's OS detection reads how a host answers sixteen crafted TCP, UDP and ICMP probes, some of them malformed on purpose. It is only as good
+as the path: the probes must arrive as sent and the answers come back as sent. Two things in a container's path break that, and neither is
+a setting of CVEngine's:
 
-``unreliable()`` is True when this server runs behind such a network: Docker Desktop on macOS (the VM kernel is named linuxkit), on Windows
-(WSL 2, "microsoft-standard-WSL2") and OrbStack. ``CVENGINE_OS_DETECTION`` overrides the check: ``trust`` believes the guesses anyway (a setup
-known to pass packets through unchanged), ``distrust`` never believes them.
+* **Docker Desktop (macOS, Windows).** Container traffic leaves through the VM's user-space network stack, which terminates each connection
+  and answers for the remote host itself ("How Docker Desktop Networking Works Under the Hood"). The open ports and services are right, since
+  the stack makes the real connection; every OS guess describes the stack (one install saw Google Fuchsia on an Ubuntu server and a NAS, and
+  an Apple OS X release on an iDRAC). Recognised from the VM kernel (linuxkit, WSL 2, OrbStack).
+* **A translating path** (Docker's default bridge network on Linux, iptables NAT with conntrack). A probe with an impossible flag combination
+  is marked INVALID by conntrack, is not translated, and its answer is lost: in a measured lab the FIN+PSH+URG probe was answered directly and
+  lost behind the NAT, and the top guess for a Linux host changed from "Linux 5.3 - 5.4 (97%)" to "HP P2000 G3 NAS device (93%)". Measured
+  by ``cveFeed.path_probe`` (``check_os_path``, daily), which sends that probe and a plain SYN to closed ports of hosts the scans reach.
 
-What does cross that network is a full TCP connection, so what the services say about themselves still arrives: the distribution in an SSH or
-HTTP banner, the operating system CPE and ``ostype`` of nmap's service detection. ``from_services()`` reads the host's operating system from
-that, so a host behind Docker Desktop still has one, named for what it is and marked as service evidence rather than a packet fingerprint.
-``clear_stored_guesses()`` removes the packet guesses an earlier version stored on such an install.
+Both are fixed by taking the translation out of the path (host networking or macvlan on a Linux engine, a Sentinel on the network): the same
+lab gave the direct result exactly with either. ``unreliable()`` is True for either cause. ``CVENGINE_OS_DETECTION`` overrides it: ``trust``
+believes the guesses anyway, ``distrust`` never does.
+
+What does cross either path is a full TCP connection, so what the services say about themselves still arrives: the distribution in an SSH
+or HTTP banner, the operating system CPE and ``ostype`` of nmap's service detection. ``from_services()`` reads the host's operating system
+from that, marked as service evidence and not as a packet fingerprint. ``clear_stored_guesses()`` removes the packet guesses stored before.
 """
 import logging
 import os
@@ -22,9 +29,21 @@ import re
 logger = logging.getLogger(__name__)
 
 KERNEL_MARKERS = ('linuxkit', 'microsoft', 'wsl2', 'orbstack')
+PATH_CACHE_KEY = 'cvengine:os-path'
+PATH_TTL = 8 * 86400  # a verdict is kept this long; the daily check renews it
 
-REASON = ("packet-based operating system detection was measured through Docker Desktop's network, which answers for itself and not for the "
-          "host, so no guess is given; the operating system below, where there is one, comes from what the services report")
+REASONS = {
+    'docker-desktop': ("packet-based operating system detection ran through Docker Desktop's network, which answers for itself and not for "
+                       "the host, so no guess is given; the operating system below, where there is one, comes from what the services report"),
+    'translated': ("packet-based operating system detection ran through a network path that translates addresses (Docker's default bridge "
+                   "network), which loses some of its probes, so no guess is given; the operating system below, where there is one, comes "
+                   "from what the services report"),
+    'override': 'packet-based operating system detection is switched off (CVENGINE_OS_DETECTION=distrust); the operating system below, '
+                'where there is one, comes from what the services report',
+}
+REASON = REASONS['docker-desktop']
+REMEDY = ("Run the scanners on the host's network or give the container its own address on the LAN (docker-compose.hostnet.yml, "
+          "docker-compose.macvlan.yml), or run a Sentinel on a Linux machine on the network to be measured. See docs/DEPLOYMENT.md.")
 
 
 def _kernel():
@@ -35,14 +54,72 @@ def _kernel():
         return platform.release()
 
 
-def unreliable():
+def path_state():
+    """The last measured verdict of the path check (``cveFeed.path_probe.check`` plus ``at``), ``{'state': 'unknown'}`` when none."""
+    try:
+        from django.core.cache import cache
+        return cache.get(PATH_CACHE_KEY) or {'state': 'unknown'}
+    except Exception:  # noqa: BLE001 - a cache problem is "not measured", never a failed scan
+        return {'state': 'unknown'}
+
+
+def cause():
+    """Why guesses are not believed, or None when they are: ``override`` (CVENGINE_OS_DETECTION=distrust), ``docker-desktop`` (the VM
+    kernel), ``translated`` (the measured path)."""
     mode = os.environ.get('CVENGINE_OS_DETECTION', 'auto').strip().lower()
     if mode == 'trust':
-        return False
+        return None
     if mode == 'distrust':
-        return True
+        return 'override'
     kernel = _kernel().lower()
-    return any(marker in kernel for marker in KERNEL_MARKERS)
+    if any(marker in kernel for marker in KERNEL_MARKERS):
+        return 'docker-desktop'
+    if path_state().get('state') == 'interfering':
+        return 'translated'
+    return None
+
+
+def unreliable():
+    return cause() is not None
+
+
+def reason():
+    return REASONS.get(cause() or 'docker-desktop', REASON)
+
+
+def record_path(result, now=None):
+    """Keep the path check's verdict. A change to or from ``interfering`` is logged, and a new ``interfering`` removes the packet guesses
+    stored while it was not known. Returns the stored dict."""
+    from django.core.cache import cache
+    from django.utils import timezone
+    earlier = path_state()
+    before = earlier.get('state')
+    stamp = (now or timezone.now()).isoformat()
+    after = result.get('state')
+    if after == 'unknown' and before not in (None, 'unknown'):
+        # not enough to say this time: the earlier verdict stands until it expires
+        kept = {**earlier, 'checked_at': stamp}
+        cache.set(PATH_CACHE_KEY, kept, PATH_TTL)
+        return kept
+    stored = {**result, 'at': stamp}
+    cache.set(PATH_CACHE_KEY, stored, PATH_TTL)
+    if after != before:
+        logger.warning('operating system detection path: %s -> %s %s', before or 'unmeasured', after,
+                       f"({result.get('lost')} of {result.get('answered')} hosts lost the malformed probe)" if after in ('interfering', 'direct') else '')
+        if after == 'interfering':
+            clear_stored_guesses()
+    return stored
+
+
+def status():
+    """What an operator sees (get_system_status): whether guesses are believed, why not, how it was measured, and what to do."""
+    why = cause()
+    measured = path_state()
+    out = {'trusted': why is None, 'cause': why, 'path': {k: measured.get(k) for k in ('state', 'answered', 'lost', 'hosts', 'at', 'why')
+                                                         if measured.get(k) is not None}}
+    if why in ('docker-desktop', 'translated'):
+        out['remedy'] = REMEDY
+    return out
 
 
 DISTRO_NAMES = {'ubuntu': 'Ubuntu', 'debian': 'Debian', 'rhel': 'Red Hat Enterprise Linux', 'centos': 'CentOS', 'alpine': 'Alpine Linux'}

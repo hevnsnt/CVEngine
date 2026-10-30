@@ -68,34 +68,111 @@ class StateTests(TestCase):
 		with open(os.path.join(self.dir, '.commit'), 'w') as f:
 			f.write(sha + '\n')
 
-	def test_a_fork_with_commits_of_its_own_is_compared_by_the_commit_it_shares_with_upstream(self):
-		import unittest.mock as mock
-		MINE = 'c' * 40
-		with open(os.path.join(self.dir, '.commit'), 'w') as f:
-			f.write(MINE + '\n' + OLD + '\n')
-		self.assertEqual((updater.installed_sha(), updater.upstream_sha()), (MINE, OLD))
+	MINE = 'c' * 40
+
+	def host_state(self, **fields):
+		"""What scripts/update-state.py upstream publishes for the build in .commit."""
+		import time
+		row = UpdateSettings.current()
+		data = {'repo': row.repo, 'branch': row.branch, 'installed': self.MINE, 'upstream': NEW, 'base': OLD, 'ahead': 1, 'behind': 1, 'at': time.time(), **fields}
+		with open(os.path.join(self.dir, '.upstream-state.json'), 'w') as f:
+			json.dump(data, f)
+
+	def github(self, ahead_by=1, known=(OLD,)):
+		"""A GitHub that has the branch head and knows only the commits in ``known``."""
 		asked = []
 
 		def get(url, headers=None, timeout=None):
 			asked.append(url)
 			if '/compare/' in url:
-				# GitHub has never heard of the fork's own commit
-				return FakeResp(404) if MINE in url else FakeResp(200, {'status': 'ahead', 'ahead_by': 1, 'commits': []})
+				base = url.split('/compare/')[1].split('...')[0]
+				if base not in known:
+					return FakeResp(404)
+				return FakeResp(200, {'status': 'ahead' if ahead_by else 'identical', 'ahead_by': ahead_by, 'commits': []})
+			return FakeResp(200, {'sha': NEW, 'html_url': 'u', 'commit': {'message': 'm', 'committer': {'date': ''}}})
+		get.asked = asked
+		return get
+
+	def test_a_server_with_commits_of_its_own_is_compared_by_the_commit_it_shares_with_the_branch(self):
+		self.install(self.MINE)
+		self.host_state(ahead=1, behind=0, base=NEW)  # the fork carries one commit and has merged everything upstream has
+		get = self.github(ahead_by=0, known=(NEW,))
+		row = updater.check(UpdateSettings.current(), get=get)
+		self.assertEqual(row.behind_by, 0)  # the branch head is the commit they share: nothing to ask GitHub about
+		state = updater.state(row)
+		self.assertEqual((state['status'], state['local_commits'], state['installed']), ('up_to_date', 1, self.MINE[:7]))
+		self.assertFalse(row.reference_unknown)
+
+	def test_a_server_with_commits_of_its_own_and_a_branch_that_moved_is_diverged_and_cannot_be_approved(self):
+		self.install(self.MINE)
+		self.host_state()  # one commit of its own, one it lacks
+		row = updater.check(UpdateSettings.current(), get=self.github(ahead_by=1))
+		state = updater.state(row)
+		self.assertEqual((state['status'], state['behind_by'], state['local_commits'], state['common']), ('diverged', 1, 1, OLD[:7]))
+		with self.assertRaises(updater.UpdateError) as caught:
+			updater.approve(row, self.admin)
+		self.assertIn('merge', str(caught.exception))
+		self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-approved')))
+
+	def test_automatic_mode_does_not_approve_what_cannot_be_fast_forwarded(self):
+		self.install(self.MINE)
+		self.host_state()
+		self.mode_file('auto')
+		row = updater.check(UpdateSettings.current(), get=self.github(ahead_by=1))
+		self.assertFalse(updater.auto_approve(row))
+		self.assertEqual(row.approved_sha, '')
+
+	def test_a_build_github_has_never_seen_is_unknown_not_behind(self):
+		self.install(self.MINE)  # no host answer: nothing says which commit it shares with the branch
+		row = updater.check(UpdateSettings.current(), get=self.github(ahead_by=1, known=()))
+		state = updater.state(row)
+		self.assertEqual(state['status'], 'unknown')
+		self.assertTrue(row.reference_unknown)
+		with self.assertRaises(updater.UpdateError):
+			updater.approve(row, self.admin)
+		self.assertFalse(updater.auto_approve(row))
+
+	def test_a_failed_comparison_is_not_unknown_the_installed_commit_is_still_offered_the_latest(self):
+		self.install(OLD)
+		def get(url, headers=None, timeout=None):
+			if '/compare/' in url:
+				return FakeResp(502)
 			return FakeResp(200, {'sha': NEW, 'html_url': 'u', 'commit': {'message': 'm', 'committer': {'date': ''}}})
 		row = updater.check(UpdateSettings.current(), get=get)
-		self.assertTrue(any('/compare/' + OLD + '...' in url for url in asked))
-		self.assertEqual(row.behind_by, 1)
-		self.assertEqual(updater.state(row)['installed'], MINE[:7])  # the banner still names what is running
-		# the fork is level with upstream's head: nothing to offer
-		with open(os.path.join(self.dir, '.commit'), 'w') as f:
-			f.write(MINE + '\n' + NEW + '\n')
-		row = updater.check(UpdateSettings.current(), get=get)
-		self.assertEqual((row.behind_by, updater.state(row)['status']), (0, 'up_to_date'))
+		self.assertEqual((updater.state(row)['status'], row.reference_unknown), ('available', False))
 
-	def test_a_commit_file_with_a_bad_second_line_falls_back_to_the_installed_commit(self):
-		with open(os.path.join(self.dir, '.commit'), 'w') as f:
-			f.write(OLD + '\nnot a commit\n')
-		self.assertEqual(updater.upstream_sha(), OLD)
+	def test_the_check_tells_the_host_what_it_tracks(self):
+		self.install(OLD)
+		row = UpdateSettings.current()
+		updater.check(row, get=self.github())
+		with open(os.path.join(self.dir, '.update-source')) as f:
+			self.assertEqual(f.read(), f'{row.repo} {row.branch}\n')
+
+	def test_the_hosts_answer_is_used_only_when_it_is_about_this_source_and_this_build_and_recent(self):
+		import time
+		self.install(self.MINE)
+		row = UpdateSettings.current()
+		self.host_state()
+		self.assertEqual(updater.upstream_state(row)[0]['ahead'], 1)
+		self.host_state(branch='other')
+		self.assertEqual(updater.upstream_state(row), (None, ''))
+		self.host_state(repo='someone/else')
+		self.assertEqual(updater.upstream_state(row), (None, ''))
+		self.host_state(installed=OLD)  # the build before this one
+		self.assertEqual(updater.upstream_state(row), (None, ''))
+		self.host_state(at=time.time() - 4 * 86400)
+		self.assertIn('days', updater.upstream_state(row)[1])
+		self.host_state(ahead=-1)
+		self.assertEqual(updater.upstream_state(row), (None, ''))
+		self.host_state(base='zz')
+		self.assertEqual(updater.upstream_state(row), (None, ''))
+
+	def test_a_comparison_the_host_could_not_make_is_explained_not_guessed(self):
+		self.install(self.MINE)
+		self.host_state(error='could not fetch hevnsnt/CVEngine master (network, a private repository, or no such branch)')
+		state = updater.state(UpdateSettings.current())
+		self.assertIn('could not fetch', state['host_comparison'])
+		self.assertIsNone(state['local_commits'])
 
 	def heartbeat(self, age, raw=None):
 		import time

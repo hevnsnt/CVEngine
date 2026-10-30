@@ -6,13 +6,13 @@ from cveFeed.correlation import ai_confirm_match
 from reNgine.ai_providers import AIProviderError
 
 
-def make_match():
+def make_match(**extra):
 	cve = SimpleNamespace(cve_id='CVE-1', title='t', original_description='d', summary='', cvss=9.8, affected=[], kev=False, epss_reached=False, exploit_db=False, references=[], sources=[],
 		published_at=None, stated_severity='')
 	return SimpleNamespace(
 		pk=1, cve_entry=cve, subdomain=SimpleNamespace(name='a.example.com'),
 		matched_product='nginx', matched_version='1.18', version_in_range=True, source='port',
-		ai_verdict='', ai_reason='', ai_model='', save=mock.Mock())
+		ai_verdict='', ai_reason='', ai_model='', save=mock.Mock(), **extra)
 
 
 @mock.patch('cveFeed.activity.log', return_value=None)  # these tests must not write to a real database
@@ -21,9 +21,18 @@ class AIConfirmTests(unittest.TestCase):
 		provider = mock.Mock(model='m')
 		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely", "reason": "in range"}'
-		m = ai_confirm_match(make_match(), provider=provider)
-		self.assertEqual((m.ai_verdict, m.ai_reason, m.ai_model), ('affected', 'in range', 'anthropic:m'))
+		m = ai_confirm_match(make_match(template_result='vulnerable'), provider=provider)  # a template hit is evidence beyond the version
+		self.assertEqual((m.ai_verdict, m.ai_model), ('affected', 'anthropic:m'))
+		self.assertTrue(m.ai_reason)
 		m.save.assert_called_once()
+
+	def test_a_version_alone_is_never_called_affected_by_the_model(self, _log):
+		provider = mock.Mock(model='m')
+		provider.name = 'anthropic'
+		provider.complete.return_value = '{"classification": "likely", "reason": "in range"}'
+		m = ai_confirm_match(make_match(), provider=provider)  # a banner version inside the range and nothing else
+		self.assertEqual(m.ai_verdict, 'uncertain')
+		self.assertIn('version', m.ai_reason.lower())
 
 	def test_the_model_alone_never_confirms_and_a_bad_reply_is_uncertain(self, _log):
 		provider = mock.Mock(model='m')

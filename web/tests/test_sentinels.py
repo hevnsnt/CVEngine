@@ -795,6 +795,18 @@ class LiveOverviewTests(SentinelBase):
         self.assertEqual([t['status'] for t in busy_row['recent']], ['failed', 'done'])
         self.assertEqual(busy_row['recent'][0]['error'], 'timed out')
 
+    def test_the_openvas_queue_is_read_over_the_viewers_projects_only(self):
+        # it names projects and hosts, so another tenant's must never be asked for (the rest of this page is already scoped the same way)
+        from unittest import mock
+        asked = {}
+        with mock.patch('cveFeed.openvas_scan.overview', side_effect=lambda ids: asked.setdefault(len(asked), sorted(ids))) as overview:
+            self.assertEqual(call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[0], 200)
+            self.assertEqual(call(self.t['root'], 'GET', '/api/v1/sentinels/live')[0], 200)
+        self.assertEqual(overview.call_count, 2)
+        self.assertIn(self.pa.pk, asked[0])
+        self.assertNotIn(self.pb.pk, asked[0])  # dana is in sen-a only
+        self.assertIn(self.pb.pk, asked[1])  # an App Admin reads every project
+
     def test_live_totals_include_more_than_two_thousand_finished_tasks_without_cross_tenant_history(self):
         _, mine = register_sentinel(self.t['dana'], name='mine')
         _, other = register_sentinel(self.t['root'], name='other', scope={'projects': ['sen-b']})

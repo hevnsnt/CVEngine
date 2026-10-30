@@ -34,32 +34,40 @@ class ClassifyTargetTests(SimpleTestCase):
 		self.assertIsNone(tt.classify_target(None))
 
 
-class InternalAddressTests(SimpleTestCase):
-	"""``is_internal_address``: not an address of the public internet, whatever the operator allowed scanning (issue 212)."""
+class PublicAddressTests(SimpleTestCase):
+	"""``is_public_address``: the exposure question, from the address alone (issue 212). The rows are the IANA special-purpose registries
+	(iana.org/assignments/iana-ipv4-special-registry and iana-ipv6-special-registry, "Globally Reachable" = False, read 2026-10); a Python
+	upgrade or a registry change that moves one shows up here."""
 
-	def test_private_shared_and_local_ranges_are_internal(self):
-		for value in ('10.1.2.3', '172.16.0.9', '172.31.255.1', '192.168.0.5', '100.64.0.5', '127.0.0.1', '169.254.169.254', 'fd12::5', '::1',
-		              'fe80::1', '224.0.0.1', '0.0.0.0'):
-			self.assertTrue(tt.is_internal_address(value), value)
+	NOT_PUBLIC = (
+		'0.0.0.0', '0.1.2.3', '10.1.2.3', '100.64.0.1', '100.127.255.255', '127.0.0.1', '169.254.169.254', '172.16.0.1', '172.31.255.255',
+		'192.0.0.8', '192.0.2.1', '192.88.99.1', '192.168.1.1', '198.18.0.1', '198.19.255.255', '198.51.100.7', '203.0.113.5', '224.0.0.1',
+		'239.255.255.250', '240.0.0.1', '255.255.255.255', '::', '::1', 'fc00::1', 'fd12::5', 'fe80::1', 'fec0::1', 'ff02::1', '100::1',
+		'100:0:0:1::1', '2001::1', '2001:2::1', '2001:10::1', '2001:db8::1', '3fff::1', '5f00::1', '64:ff9b:1::1',
+		# an IPv4 address carried inside an IPv6 one is judged as the IPv4 address
+		'::ffff:10.0.0.1', '::ffff:0:10.0.0.1', '::10.0.0.1', '64:ff9b::a00:1', '2002:a00:1::1', '[::1]',
+	)
+	PUBLIC = ('8.8.8.8', '1.1.1.1', '93.184.216.34', '172.15.0.1', '172.32.0.1', '100.63.255.255', '100.128.0.1', '2606:4700::1', '2a00:1450::1',
+	          '::ffff:8.8.8.8', '64:ff9b::808:808', '2002:808:808::1')
 
-	def test_public_and_documentation_addresses_are_not(self):
-		for value in ('8.8.8.8', '1.1.1.1', '172.15.0.1', '172.32.0.1', '203.0.113.5', '198.51.100.7', '192.0.2.1', '2606:4700::1', '2001:db8::1'):
-			self.assertFalse(tt.is_internal_address(value), value)
+	def test_nothing_in_a_non_global_registry_row_is_public(self):
+		for value in self.NOT_PUBLIC:
+			self.assertFalse(tt.is_public_address(value), value)
 
-	def test_an_ipv6_address_that_carries_an_ipv4_one_is_judged_as_that_one(self):
-		self.assertTrue(tt.is_internal_address('::ffff:192.168.1.5'))
-		self.assertFalse(tt.is_internal_address('::ffff:8.8.8.8'))
+	def test_global_addresses_are_public(self):
+		for value in self.PUBLIC:
+			self.assertTrue(tt.is_public_address(value), value)
 
-	def test_text_that_is_not_an_address_is_internal(self):
-		for value in ('', 'example.com', None, 'not an ip'):
-			self.assertTrue(tt.is_internal_address(value), value)
+	def test_text_that_is_not_an_address_is_not_public(self):
+		for value in ('', 'example.com', None, 'not an ip', '8.8.8.8:443', 'fe80::1%eth0'):
+			self.assertFalse(tt.is_public_address(value), value)
 
-	def test_it_does_not_depend_on_the_opt_in_for_private_targets(self):
+	def test_no_setting_changes_the_answer(self):
 		import os
 		from unittest import mock
-		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
-			self.assertTrue(tt.is_scannable_ip('192.168.1.5'))
-			self.assertTrue(tt.is_internal_address('192.168.1.5'))
+		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1', 'CVENGINE_BLOCKED_CIDRS': '8.8.8.0/24'}):
+			self.assertFalse(tt.is_public_address('192.168.1.5'))
+			self.assertTrue(tt.is_public_address('8.8.8.8'))
 
 
 class EmbeddedAndMetadataAddressTests(SimpleTestCase):

@@ -241,6 +241,9 @@ running_scans() {
 # Both are best-effort: a failure here never blocks the update itself, since nothing this script already did
 # without them was any less safe.
 phase() { python3 "$STATE_HELPER" phase "$1" "${2:-}" "${3:-}" >>"$LOG" 2>&1 || true; }
+# Where the new build stands against the tracked branch, for the app's banner (scripts/update-state.py upstream). The checkout's own copy of the
+# helper, not the one kept at the start of this run: the update may be what brings the action. Best-effort; the watcher repeats it every half hour.
+refresh_upstream() { if [ -f scripts/update-state.py ]; then python3 scripts/update-state.py upstream >>"$LOG" 2>&1 || true; fi; }
 
 pause_scanning() {
   local compose=("${COMPOSE[@]}")
@@ -340,6 +343,16 @@ if [ "$WANT" != "$BRANCH" ]; then
   fi
   SWITCH=1
 fi
+# The update moves the checkout forward and never merges. Commits of this server's own that the approved commit does not have cannot be moved
+# past, and finding out only at the merge below would first pause scanning and wait for the running scans to drain. (An approved commit this
+# checkout already contains is fine: nothing moves, and the services are rebuilt.)
+if [ "$SWITCH" = 0 ] && ! git merge-base --is-ancestor HEAD "$SHA" && ! git merge-base --is-ancestor "$SHA" HEAD; then
+  OWN=$(git rev-list --count "$SHA..HEAD" 2>/dev/null || echo some)
+  log "refusing: this checkout has $OWN commit(s) of its own that $SHA does not have, so it cannot be fast-forwarded to it"
+  phase failed "this server has $OWN commit(s) of its own, so it cannot be fast-forwarded: on the server run git fetch origin, git merge origin/$WANT, then make up"
+  clear_approval
+  exit 1
+fi
 DIRTY=$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?$' || true)
 if [ -n "$DIRTY" ]; then
   names=$(printf '%s\n' "$DIRTY" | sed 's/^...//' | head -n 5 | paste -sd, -)
@@ -427,9 +440,11 @@ restore_branch() { if [ "$SWITCHED" = 1 ]; then git checkout -q -f "$BRANCH" >>"
 # The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
 # without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
 BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
-if [ "$PREV" = "$SHA" ] && [ "$BUILT" = "$SHA" ] && [ "$(deployed_commit)" = "$SHA" ] && schema_current; then
+# (HEAD contains the approved commit: it is $SHA itself, or a checkout with commits of its own that has merged it, and what is built is HEAD)
+if git merge-base --is-ancestor "$SHA" HEAD && [ "$BUILT" = "$PREV" ] && [ "$(deployed_commit)" = "$PREV" ] && schema_current; then
   log "already at $SHA"
-  python3 "$STATE_HELPER" commit "$SHA"
+  python3 "$STATE_HELPER" commit "$PREV"
+  refresh_upstream
   clear_approval
   resume_scanning
   phase done
@@ -452,6 +467,7 @@ else
     restore_branch
     resume_scanning
     log "refusing: $SHA is not a fast-forward of the local branch"
+    phase failed "$SHA cannot be fast-forwarded onto this server's checkout (see the update log); merge it by hand with git merge, then scripts/update.sh or make up"
     clear_approval
     exit 1
   fi
@@ -459,8 +475,9 @@ else
 fi
 
 if deploy >>"$LOG" 2>&1; then
-  python3 "$STATE_HELPER" commit "$SHA"
-  mark_deployed "$SHA"
+  python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)"
+  refresh_upstream
+  mark_deployed "$(git rev-parse HEAD)"
   rm -f "$ATTEMPTS_FILE"
   clear_approval
   resume_scanning
@@ -470,8 +487,9 @@ elif [ "$DEPLOY_STAGE" = migrated ]; then
   # The database already has $SHA's schema (or part of it), so $PREV's code must not run on it: keep $SHA and retry the restart.
   log "restarting $SHA failed after its migrations ran; keeping $SHA and retrying the restart"
   if deploy >>"$LOG" 2>&1; then
-    python3 "$STATE_HELPER" commit "$SHA"
-    mark_deployed "$SHA"
+    python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)"
+    refresh_upstream
+    mark_deployed "$(git rev-parse HEAD)"
     rm -f "$ATTEMPTS_FILE"
     clear_approval
     resume_scanning
