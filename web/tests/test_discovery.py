@@ -493,7 +493,7 @@ class NucleiStageTests(TestCase):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		kwargs = dict(stream=lambda *a, **k: iter(events), light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-			nmap_runner=lambda *a, **k: '', db_exposure_checks={}, provider=None,
+			nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 			route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		kwargs.update(overrides)
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
@@ -563,7 +563,8 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(set(ScanActivity.objects.filter(scan_of=scan).values_list('status', flat=True)), {2})
 
 	MYSQL_XML = """<?xml version="1.0"?><nmaprun><host><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="3306">
-		<state state="open"/><service name="mysql" product="MySQL" version="8.0"/></port></ports></host></nmaprun>"""
+		<state state="open"/><service name="mysql" product="MySQL" version="8.0"/></port></ports></host>
+		<runstats><finished exit="success"/></runstats></nmaprun>"""
 	WORDPRESS = {'template-id': 'tech-detect', 'matcher-name': 'WordPress', 'host': 'https://www.example.test',
 	             'info': {'name': 'Wappalyzer Technology Detection', 'severity': 'info'}}
 
@@ -791,7 +792,7 @@ class BbotCoverageTests(TestCase):
 
 		def nmap_runner(targets, flags, timeout):
 			nmap.append(list(targets))
-			return ''
+			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_pipeline(scan.id, stream=bbot, light_stream=lambda path, **k: nuclei.append(open(path).read().split()) or iter([]),
 				targeted_stream=lambda path, **k: iter([]), nmap_runner=nmap_runner, db_exposure_checks={}, provider=None,
@@ -850,7 +851,7 @@ class QueuedScanTests(TestCase):
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			discovery.run_pipeline(scan.id, stream=stream, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-				nmap_runner=lambda *a, **k: '', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertEqual(seen, [(discovery.RUNNING, discovery.RUNNING)])
 
 	def test_a_queued_scan_blocks_a_duplicate_whatever_its_age_but_a_stale_running_one_does_not(self):
@@ -881,7 +882,7 @@ class IpTargetTests(TestCase):
 
 		def runner(targets, flags, timeout):
 			nmap.append(list(targets))
-			return ''
+			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		kwargs = dict(stream=bbot, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=runner,
 			db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 			ip_lookups={'ptr': lambda ip: ['host-5.example.net'], 'certificate': lambda ip: ['shop.example.org', 'www.example.org']})

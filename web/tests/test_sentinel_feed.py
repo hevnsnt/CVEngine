@@ -25,6 +25,8 @@ class NmapIpv6Tests(SimpleTestCase):
         commands, replies = [], list(answers)
 
         class Proc:
+            returncode = 0
+
             def __init__(self, cmd, **kw):
                 commands.append(cmd)
 

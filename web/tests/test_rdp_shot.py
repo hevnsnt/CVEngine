@@ -294,7 +294,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 			return b'\x89PNG\r\nreal-enough-content-0123456789'
 		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True), mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '', db_exposure_checks={}, provider=None,
+								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 								  rdp_capturer=capturer, rdp_reader=lambda png: {'logged_in_user': '', 'summary': ''})
@@ -308,7 +308,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		scan = self.scan(names=('plain.rt.test',), ports=((443, 'https'),))
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '', db_exposure_checks={}, provider=None,
+								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='rdp_screenshot').exists())

@@ -20,7 +20,7 @@ def _stages(**over):
 
 	def runner(targets, flags, timeout):
 		nmap.append(list(targets))
-		return ''
+		return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'  # an empty report is a failed scan
 	kwargs = dict(resolver=lambda names: {(n, '192.0.2.%d' % (10 + i)) for i, n in enumerate(sorted(names))},
 		light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=runner,
 		db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
