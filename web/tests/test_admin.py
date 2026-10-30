@@ -371,6 +371,28 @@ class AdminMatrixTests(TestCase):
 		self.assertTrue(AuditLog.objects.filter(action='user.reset_password', target='loner', org__isnull=True).exists())
 		self.assertNotIn('loner', {r['target'] for r in api(client_for(self.admin_a), 'GET', 'audit')[1]['results']})
 
+	def test_email_change_uses_credential_scope_for_shared_and_privileged_accounts(self):
+		shared = User.objects.create_user('shared', email='owner@example.test', password='pw-Secret-1')
+		OrgMembership.objects.create(user=shared, org=self.org_a, role='user')
+		OrgMembership.objects.create(user=shared, org=self.org_b, role='user')
+		admin = client_for(self.admin_a)
+		self.assertEqual(api(admin, 'PATCH', f'users/{shared.pk}', {'email': 'other@example.test'})[0], 403)
+		shared.refresh_from_db()
+		self.assertEqual(shared.email, 'owner@example.test')
+		self.assertEqual(api(admin, 'PATCH', f'users/{shared.pk}', {'first_name': 'Updated'})[0], 200)
+		shared.refresh_from_db()
+		self.assertEqual((shared.first_name, shared.email), ('Updated', 'owner@example.test'))
+		self.assertEqual(api(client_for(self.root), 'PATCH', f'users/{shared.pk}', {'email': 'new@example.test'})[0], 200)
+		shared.refresh_from_db()
+		self.assertEqual(shared.email, 'new@example.test')
+		UserProfile.objects.create(user=self.pm_a, bugbounty_enabled=True)
+		self.assertEqual(api(admin, 'PATCH', f'users/{self.pm_a.pk}', {'email': 'other@example.test'})[0], 403)
+		self.assertEqual(api(admin, 'PATCH', f'users/{self.member_a.pk}', {'email': 'invalid'})[0], 400)
+		self.assertEqual(api(admin, 'PATCH', f'users/{self.member_a.pk}', {'email': 'member@example.test'})[0], 200)
+		self.assertEqual(api(admin, 'PATCH', f'users/{self.member_a.pk}', {'is_active': 'false'})[0], 400)
+		self.member_a.refresh_from_db()
+		self.assertTrue(self.member_a.is_active)
+
 	def test_deleting_an_account_is_visible_to_its_organizations_admins(self):
 		api(client_for(self.root), 'DELETE', f'users/{self.member_a.id}')
 		self.assertIn('user.delete', {r['action'] for r in api(client_for(self.admin_a), 'GET', 'audit')[1]['results']})
