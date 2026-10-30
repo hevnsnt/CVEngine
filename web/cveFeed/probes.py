@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import fingerprint, versions
+from cveFeed import cms, fingerprint, versions
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +355,7 @@ _NEXT_CHUNK = re.compile(r'/_next/static/chunks/(?:main|main-app|framework|webpa
 def _wordpress_signals(responses):
     """``(signals, version)`` for the WordPress probe: every signature found in a response's headers or body, and the core version a
     generator tag, a readme or a core asset states."""
-    signals, version = [], ''
+    signals, generator = [], ''
     for path, response in responses:
         if not response:
             continue
@@ -375,16 +375,14 @@ def _wordpress_signals(responses):
         for product, found in versions.generator_tags(body if path == '/' else ''):
             if product.lower() == 'wordpress':
                 signals.append(('meta:generator', path))
-                version = version or found
-        if path == '/readme.html' and 'wordpress' in body.lower():
-            found = re.search(r'Version (\d+\.\d+(?:\.\d+)?)', body)
-            version = version or (found.group(1) if found else '')
-        if path == '/':
-            ver = re.search(r'/wp-(?:includes|admin)/[^"\'\s>]{1,200}\?ver=(\d+\.\d+(?:\.\d+)?)', body)
-            if ver and not version:
-                signals.append(('body:core-asset-ver', path))
-                version = ver.group(1)
-    return signals, version
+                generator = generator or found
+    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cveFeed.cms: best source wins, a library's ?ver= never)
+    pages = [(path, response) for path, response in responses if response and not (path == '/readme.html' and 'wordpress' not in (response.get('body') or '').lower())]
+    candidates = cms.read('WordPress', pages) + ([(generator, 'meta:generator', 0.9)] if generator else [])
+    candidates.sort(key=lambda c: -c[2])
+    if any(label.startswith('asset:') for _v, label, _c in candidates):
+        signals.append(('body:core-asset-ver', '/'))
+    return signals, (candidates[0][0] if candidates else '')
 
 
 def wordpress_observations(responses):
@@ -482,6 +480,14 @@ def _wordpress_responses(base, get, sleep):
             responses.append(('/readme.html', get(base.rstrip('/') + '/readme.html')))
         except (OSError, ValueError):
             pass
+        for path, _sources in cms.asked('WordPress'):
+            if path == '/readme.html' or _wordpress_signals(responses)[1]:
+                continue   # the readme was asked above; the feed only while no page states the version
+            sleep(REQUEST_GAP)
+            try:
+                responses.append((path, get(base.rstrip('/') + path)))
+            except (OSError, ValueError):
+                pass
         from cveFeed import wp_core
         sleep(REQUEST_GAP)
         try:

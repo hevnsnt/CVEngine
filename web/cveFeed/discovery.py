@@ -658,11 +658,6 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                            fallback={'sites': 0})  # every host with any sign of WordPress, and the names grouped with it
     if stopped(scan_id):
         return gone
-    from cveFeed import wp_core
-    if wp_core.applicable(scan):  # a WordPress core older than its branch's fix for the October 2026 update-window RCE (reads what the stage above stored)
-        _stage(scan, 'WordPress core security release check', 'wp_core', lambda: wp_core.run_for_scan(scan_id), fallback={'hosts': 0})
-        if stopped(scan_id):
-            return gone
     from cveFeed import node2shell_scan
     n2s_kwargs = {'checker': node2shell_checker} if node2shell_checker else {}
     if retest or force:

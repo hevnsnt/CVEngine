@@ -637,6 +637,8 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
         probes.record(project, domain.id, host, 'wordpress-detect', found[:1])
         if found[1:]:  # the upgrade directory's state is its own probe: the rows that read 'wordpress-detect' as the host's WordPress state stay one
             probes.record(project, domain.id, host, 'wp-upgrade-dir', found[1:])
+            from cveFeed import wp_core
+            wp_core.record_exposure(scan, sub, found[1].get('variant'), found[0].get('version', ''))
         if found[0]['outcome'] == 'found':
             probes.apply_to_subdomain(sub, found)
         ledger.record(PROBE_SERVICE, [host], project, scan, 'failed' if found[0]['outcome'] == 'challenged' else 'done')
