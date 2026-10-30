@@ -1485,15 +1485,28 @@ def _viewer_project_ids(user):
     return list(Project.objects.values_list('id', flat=True)) if allowed is None else list(allowed)
 
 
+def _live_task(task, allowed, **fields):
+    """One task row of the Sentinels page. A task of a project the viewer may not read keeps only its kind, status and timing: no host,
+    label, project, organization or error text, so the card reads "nuclei (targeted) on a target" and another tenant's work stays theirs."""
+    row = {'id': task.pk, 'kind': task.kind, 'status': task.status, **fields}
+    if allowed is not None and task.project_id not in allowed:
+        return {**row, 'hidden': True, 'host': '', 'label': '', 'project': '', 'project_name': '', 'scan_id': None, 'error': ''}
+    return {**row, 'host': task.host, 'label': task_label(task), 'project': task.project.slug, 'project_name': task.project.name,
+            'scan_id': task.scan_id, 'error': task.error}
+
+
 def live_overview(ctx):
     """What every Sentinel the caller may manage is doing right now, for the Sentinels page: liveness, the task each one holds,
-    its last few finished tasks and how much it has done lately. Hosts and projects come only from tasks the caller's tenancy
-    already lets them read (the scoped ``SentinelTask.objects``), so another tenant's work never shows."""
+    its last few finished tasks and how much it has done lately. Every task counts, but hosts, projects and errors show only for
+    projects the caller may read (``_live_task``): another tenant's work shows as its kind on a target and nothing more."""
     reap_expired()
     now = timezone.now()
     agents = list(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES])
     ids = [a.pk for a in agents]
-    tasks = _for_viewer(SentinelTask.objects.filter(agent_id__in=ids), ctx.user).select_related('project', 'agent')
+    allowed = roles.allowed_project_ids(ctx.user)
+    allowed = None if allowed is None else set(allowed)
+    # unscoped on purpose: a Sentinel busy for another tenant is shown busy, its tasks redacted by _live_task rather than left out
+    tasks = SentinelTask._base_manager.filter(agent_id__in=ids).select_related('project', 'agent')
     held, finished = {}, {}
     for t in tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES).order_by('claimed_at', 'id'):
         held.setdefault(t.agent_id, []).append(t)
@@ -1530,13 +1543,11 @@ def live_overview(ctx):
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
-            'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
-                         'project_name': t.project.name, 'scan_id': t.scan_id, 'since': svc._iso(t.accepted_at or t.claimed_at),
-                         'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],
-            'recent': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
-                        'project_name': t.project.name, 'finished': svc._iso(t.finished_at), 'outcome': task_outcome(t),
-                        'seconds': int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None,
-                        'error': t.error} for t in finished.get(agent.pk, [])],
+            'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
+                        for t in mine],
+            'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),
+                                  seconds=int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None)
+                       for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
                       'failed_24h': st.get('failed_24h', 0),
                       'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None}})
