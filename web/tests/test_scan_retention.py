@@ -9,7 +9,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import discovery, scan_retention
-from cveFeed.models import CVEEntry, CVEMatch, FindingComment
+from cveFeed.models import CVEEntry, CVEMatch, FindingAuditEvent, FindingComment
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
@@ -94,12 +94,35 @@ class ScanRetentionTests(TestCase):
             self.assertTrue(Vulnerability.objects.filter(pk=finding.pk).exists())
         self.assertTrue(CVEMatch.objects.filter(pk=match.pk).exists())
 
+    def test_an_audit_trail_stays_when_the_current_remediation_fields_are_open_again(self):
+        old, _ = self.history(6)
+        finding = Vulnerability.objects.create(name='Reviewed then reopened', severity=2, scan_history=old[0],
+                                                target_domain=self.domain)
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='vulnerability', finding_id=finding.pk,
+                                         event='status', before={'status': 'in_progress'}, after={'status': 'open'})
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-8', cvss=7.5, title='t', published_at=self.now)
+        match = CVEMatch.objects.create(cve_entry=cve, subdomain=old[1].subdomain_set.first(), scan_history=old[1])
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='match', finding_id=match.pk,
+                                         event='assignee', before={'assignee': 1}, after={'assignee': None})
+        scan_retention.run(self.now, days=180)
+        self.assertTrue({old[0].pk, old[1].pk} <= self.ids())
+        self.assertTrue(Vulnerability.objects.filter(pk=finding.pk).exists())
+        self.assertTrue(CVEMatch.objects.filter(pk=match.pk).exists())
+
     def test_one_domain_does_not_protect_or_expose_another(self):
         other = Domain.objects.create(name='other.example', project=self.project, insert_date=timezone.now())
         theirs = [self.scan(age=OLD + timedelta(days=i), domain=other, names=('www.other.example',)) for i in range(2)]
         old, _ = self.history(5)
         scan_retention.run(self.now, days=180)
         self.assertTrue({s.id for s in theirs} <= self.ids())  # only two scans: both are among the newest three of their domain
+
+    def test_newest_scans_for_many_domains_use_one_ranked_query(self):
+        other = Domain.objects.create(name='other.example', project=self.project, insert_date=self.now)
+        mine = [self.scan(age=OLD + timedelta(days=i), names=()) for i in range(5)]
+        theirs = [self.scan(age=OLD + timedelta(days=i), domain=other, names=()) for i in range(5)]
+        with self.assertNumQueries(1):
+            kept = scan_retention._newest({self.domain.id, other.id})
+        self.assertEqual(kept, {s.id for s in mine[-3:] + theirs[-3:]})
 
     def test_a_dry_run_counts_and_deletes_nothing(self):
         self.history()

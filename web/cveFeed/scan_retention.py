@@ -8,7 +8,8 @@ the inventory tables only grew. A scan older than ``CVENGINE_SCAN_HISTORY_RETENT
 * some of its hosts are in the domain's current inventory (``correlation.latest_scan_q``): the latest successful full scan and the host
   scans after it are what every listing, count and match reads;
 * it is one of the newest ``KEEP_LATEST`` scans of its domain, whatever their age (a domain scanned rarely keeps its last few);
-* a person worked on something in it: a finding with a remediation status other than open, a note, an assignee or a comment.
+* a person worked on something in it: a finding with a remediation status other than open, a note, an assignee, a comment or an
+  audit event (including a change later reverted to open).
 
 The work is done in small steps (one scan per transaction) inside a time budget, so a large backlog is cleared over several runs and no run
 holds a long lock. IP addresses, ports and technologies that only the deleted scans used are left in place."""
@@ -44,19 +45,23 @@ def retention_days(environ=None):
 
 
 def _worked(model, kind, scan_field):
-    """The scans that hold a ``model`` row a person worked on, or commented on."""
-    from cveFeed.models import FindingComment
-    worked = model.objects.filter(**{f'{scan_field}__isnull': False}).filter(~Q(remediation_status='open') | ~Q(remediation_note='') | Q(assignee__isnull=False))
-    commented = model.objects.filter(**{f'{scan_field}__isnull': False},
-                                     pk__in=FindingComment.objects.filter(finding_kind=kind).values('finding_id'))
-    return list(worked.values_list(scan_field, flat=True)) + list(commented.values_list(scan_field, flat=True))
+    """Lazy scan-id subquery for findings with any human work, including audit history later reverted to open."""
+    from django.db.models import Exists, OuterRef
+    from cveFeed.models import FindingAuditEvent, FindingComment
+    comments = FindingComment.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
+    audit = FindingAuditEvent.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
+    return (model.objects.filter(**{f'{scan_field}__isnull': False})
+            .filter(~Q(remediation_status='open') | ~Q(remediation_note='') | Q(assignee__isnull=False)
+                    | Q(Exists(comments)) | Q(Exists(audit)))
+            .values(scan_field))
 
 
 def worked_scans():
-    """The ids of the scans that hold work a person did (read once per run: it does not change while the run deletes)."""
+    """Two database subqueries, so retention never loads every worked scan id into worker memory."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    return set(_worked(Vulnerability, 'vulnerability', 'scan_history_id')) | set(_worked(CVEMatch, 'match', 'scan_history_id'))
+    return (_worked(Vulnerability, 'vulnerability', 'scan_history_id'),
+            _worked(CVEMatch, 'match', 'scan_history_id'))
 
 
 def candidates(now=None, days=None, kept=None):
@@ -70,15 +75,17 @@ def candidates(now=None, days=None, kept=None):
     current = Subdomain.objects.filter(latest_scan_q(), scan_history__isnull=False).values('scan_history_id')
     kept = worked_scans() if kept is None else kept
     return (ScanHistory.objects.filter(start_scan_date__lt=now - timedelta(days=days), scan_status__in=TERMINAL)
-            .exclude(pk__in=current).exclude(pk__in=kept))
+            .exclude(pk__in=current).exclude(pk__in=kept[0]).exclude(pk__in=kept[1]))
 
 
 def _newest(domain_ids):
+    from django.db.models import F, Window
+    from django.db.models.functions import RowNumber
     from startScan.models import ScanHistory
-    keep = set()
-    for domain_id in domain_ids:
-        keep.update(ScanHistory.objects.filter(domain_id=domain_id).order_by('-id').values_list('id', flat=True)[:KEEP_LATEST])
-    return keep
+    # One ranked query for the batch instead of a query for every domain.
+    return set(ScanHistory.objects.filter(domain_id__in=domain_ids)
+               .annotate(position=Window(expression=RowNumber(), partition_by=[F('domain_id')], order_by=F('id').desc()))
+               .filter(position__lte=KEEP_LATEST).values_list('id', flat=True))
 
 
 def run(now=None, days=None, dry_run=False, budget_seconds=DEFAULT_BUDGET_SECONDS, clock=time.monotonic):
