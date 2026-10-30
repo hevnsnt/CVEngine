@@ -1,8 +1,12 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from threading import Barrier
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.db import IntegrityError, close_old_connections, transaction
+from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 from django.utils import timezone
 
 from agentapi.auth import create_token
@@ -138,6 +142,95 @@ class QueueTests(RetestFixture, TestCase):
 		self.assertEqual(retest.queue_retests(second)['queued'], 1)
 		self.assertEqual(DeferredRetest.objects.filter(host='a.ct.test').count(), 2)
 
+	def test_identical_evidence_can_recur_after_done_or_exhausted_failure(self):
+		for status in ('done', 'failed'):
+			with self.subTest(status=status):
+				host = f'{status}.ct.test'
+				first = self.scan({host: HOST})
+				self.change(first, host, 'port_opened', None, {'port': 443})
+				self.assertEqual(retest.queue_retests(first)['queued'], 1)
+				original = DeferredRetest.objects.get(host=host)
+				DeferredRetest.objects.filter(pk=original.pk).update(status=status, attempts=3)
+				later = timezone.now() + timedelta(hours=25)
+				with mock.patch('cveFeed.retest.timezone.now', return_value=later):
+					second = self.scan({host: HOST})
+					self.change(second, host, 'port_opened', None, {'port': 443})
+					self.assertEqual(retest.queue_retests(second)['queued'], 1)
+				latest = DeferredRetest.objects.filter(host=host).latest('id')
+				self.assertNotEqual(latest.pk, original.pk)
+				self.assertEqual((latest.scan_id, latest.status, latest.attempts), (second.pk, 'queued', 1))
+				original.refresh_from_db()
+				self.assertEqual((original.status, original.attempts), (status, 3))
+
+	def test_identical_terminal_evidence_coalesces_inside_configured_window(self):
+		for status in ('done', 'failed'):
+			with self.subTest(status=status):
+				host = f'{status}.ct.test'
+				first = self.scan({host: HOST})
+				self.change(first, host, 'host_returned')
+				retest.queue_retests(first)
+				DeferredRetest.objects.filter(host=host).update(status=status)
+				later = timezone.now() + timedelta(hours=25)
+				with mock.patch.dict(os.environ, {'CVENGINE_TTL_RETEST': '48'}), \
+						mock.patch('cveFeed.retest.timezone.now', return_value=later):
+					second = self.scan({host: HOST})
+					self.change(second, host, 'host_returned')
+					self.assertEqual(retest.queue_retests(second)['queued'], 0)
+				self.assertEqual(DeferredRetest.objects.filter(host=host).count(), 1)
+
+	def test_source_scan_and_delayed_overlapping_scan_do_not_replay_after_ttl(self):
+		first = self.scan({'a.ct.test': HOST})
+		copy = self.scan({'a.ct.test': HOST})
+		for scan in (first, copy):
+			self.change(scan, 'a.ct.test', 'host_returned')
+		retest.queue_retests(first)
+		DeferredRetest.objects.update(status='done')
+		later = timezone.now() + timedelta(hours=25)
+		with mock.patch('cveFeed.retest.timezone.now', return_value=later):
+			self.assertEqual(retest.queue_retests(first)['queued'], 0)
+			self.assertEqual(retest.queue_retests(copy)['queued'], 0)
+		self.assertEqual(DeferredRetest.objects.count(), 1)
+
+	def test_active_evidence_still_coalesces_after_ttl(self):
+		first = self.scan({'a.ct.test': HOST})
+		self.change(first, 'a.ct.test', 'host_returned')
+		with mock.patch('cveFeed.retest.dispatch_deferred_retests', return_value={'queued': 0}):
+			retest.queue_retests(first)
+			later = timezone.now() + timedelta(hours=25)
+			with mock.patch('cveFeed.retest.timezone.now', return_value=later):
+				second = self.scan({'a.ct.test': HOST})
+				self.change(second, 'a.ct.test', 'host_returned')
+				self.assertEqual(retest.queue_retests(second)['queued'], 0)
+		self.assertEqual(DeferredRetest.objects.count(), 1)
+
+	def test_database_keeps_one_active_episode_and_rejects_source_scan_replay(self):
+		first = self.scan({'a.ct.test': HOST})
+		second = self.scan({'a.ct.test': HOST})
+		original = self.deferred(self.project, self.domain, first, 'a.ct.test')
+		with self.assertRaises(IntegrityError), transaction.atomic():
+			self.deferred(self.project, self.domain, second, 'a.ct.test')
+		DeferredRetest.objects.filter(pk=original.pk).update(status='done')
+		with self.assertRaises(IntegrityError), transaction.atomic():
+			self.deferred(self.project, self.domain, first, 'a.ct.test')
+		self.deferred(self.project, self.domain, second, 'a.ct.test')
+		self.assertEqual(DeferredRetest.objects.count(), 2)
+
+	def test_stale_worker_for_terminal_episode_cannot_claim_its_recurrence(self):
+		from cveFeed.tasks import retest_hosts
+		first = self.scan({'a.ct.test': HOST})
+		second = self.scan({'a.ct.test': HOST})
+		original = self.deferred(self.project, self.domain, first, 'a.ct.test')
+		DeferredRetest.objects.filter(pk=original.pk).update(status='done')
+		recurrence = self.deferred(self.project, self.domain, second, 'a.ct.test')
+		DeferredRetest.objects.filter(pk=recurrence.pk).update(status='queued')
+		with mock.patch('cveFeed.bounty_gate.Gate.project_blocked', return_value=False), \
+				mock.patch('cveFeed.discovery.run_host_pipeline') as run:
+			out = retest_hosts(self.domain.pk, ['a.ct.test'], first.pk, [original.pk])
+		self.assertEqual(out['status'], 'skipped')
+		run.assert_not_called()
+		recurrence.refresh_from_db()
+		self.assertEqual(recurrence.status, 'queued')
+
 	def test_broker_failure_leaves_pending_row_for_retry(self):
 		scan = self.scan({'a.ct.test': HOST})
 		self.change(scan, 'a.ct.test', 'host_new')
@@ -194,6 +287,34 @@ class QueueTests(RetestFixture, TestCase):
 		self.delay.side_effect = RuntimeError('broker down')
 		out = changes.record_scan_changes(second.id, resolver=lambda names: {(n, 'x') for n in names})
 		self.assertEqual(out['changes'], 1)
+
+
+class ConcurrentQueueTests(RetestFixture, TransactionTestCase):
+	@skipUnlessDBFeature('has_select_for_update')
+	def test_concurrent_copies_create_one_episode(self):
+		scans = [self.scan({'a.ct.test': HOST}) for _ in range(2)]
+		for scan in scans:
+			self.change(scan, 'a.ct.test', 'host_returned')
+		ready = Barrier(2)
+		evidence = retest._changed_evidence
+
+		def read_together(scan):
+			result = evidence(scan)
+			ready.wait(timeout=10)
+			return result
+
+		def queue(scan):
+			close_old_connections()
+			try:
+				return retest.queue_retests(scan)
+			finally:
+				close_old_connections()
+
+		with mock.patch('cveFeed.retest._changed_evidence', side_effect=read_together), \
+				mock.patch('cveFeed.retest.dispatch_deferred_retests', return_value={'queued': 0}):
+			with ThreadPoolExecutor(max_workers=2) as workers:
+				list(workers.map(queue, scans))
+		self.assertEqual(DeferredRetest.objects.count(), 1)
 
 
 class EndToEndTests(RetestFixture, TestCase):
