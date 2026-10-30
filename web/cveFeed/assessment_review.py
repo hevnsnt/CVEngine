@@ -136,7 +136,10 @@ def project_facts(project_id, start, end):
     recent = AgentActivity.objects.filter(project_id=project_id, created_at__gte=start, created_at__lt=end).aggregate(
         total=Count('id'), errors=Count('id', filter=Q(status='failed')))
     from django.db.models import OuterRef, Subquery
-    latest_success = ScanHistory.objects.filter(domain_id=OuterRef('pk'), scan_status=2).order_by('-stop_scan_date', '-id')
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    latest_success = (ScanHistory.objects.filter(domain_id=OuterRef('pk'), scan_status=2)
+                      .exclude(tasks__contains=[HOST_PIPELINE_TASK])
+                      .order_by('-stop_scan_date', '-id'))
     due = (Domain.objects.filter(project_id=project_id)
            .annotate(last_success=Subquery(latest_success.values('stop_scan_date')[:1]))
            .filter(Q(last_success__isnull=True) | Q(last_success__lt=end - timedelta(days=7)))
