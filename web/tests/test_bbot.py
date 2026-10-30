@@ -161,12 +161,27 @@ class StreamEventsProcessTests(unittest.TestCase):
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', 'pass']):
 			self.assertEqual(list(stream_events(['example.com'])), [])
 
-	def test_a_crash_after_at_least_one_event_is_not_treated_as_a_total_failure(self):
+	def test_a_crash_after_at_least_one_event_keeps_partial_events_but_fails(self):
 		script = ('print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\'); '
 		          'import sys; sys.exit(1)')
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
-			events = list(stream_events(['example.com']))  # partial results are kept, not discarded as an error
+			events = []
+			with self.assertRaises(BbotProcessError) as cm:
+				for event in stream_events(['example.com']):
+					events.append(event)
 		self.assertEqual(len(events), 1)
+		self.assertIn('after producing partial results', str(cm.exception))
+
+	def test_a_timeout_after_an_event_is_failed(self):
+		script = ('import time; print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\', flush=True); '
+		          'time.sleep(2)')
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
+			events = []
+			with self.assertRaises(BbotProcessError) as cm:
+				for event in stream_events(['example.com'], timeout=0.1):
+					events.append(event)
+		self.assertEqual(len(events), 1)
+		self.assertIn('timed out', str(cm.exception))
 
 
 class BbotCliFlagsAreRealTests(unittest.TestCase):
