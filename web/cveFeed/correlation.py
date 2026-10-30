@@ -862,10 +862,10 @@ def _carry_remediation(fresh):
     domains = {d for d, _n in hosts.values()}
     names = {n for _d, n in hosts.values()}
     earlier = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
-                                       subdomain__name__in=names).exclude(remediation_status="open")
+                                       subdomain__name__in=names)
                .exclude(subdomain_id__in=list(hosts)).select_related("subdomain").order_by("id"))
     latest, by_host = {}, {}
-    for m in earlier:  # oldest first, so the newest decision wins
+    for m in earlier:  # oldest first, including open: a newer reopening supersedes an older closure
         latest[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product)] = m
         by_host[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name)] = m
     if not latest:
@@ -965,19 +965,10 @@ def close_rejected():
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch
-    from cveFeed import scoring
     open_matches = CVEMatch.objects.filter(cve_entry__status__icontains="reject").exclude(
         ai_verdict="not_affected", ai_reason__startswith="Closed automatically:")
-    closed = 0
-    while rows := list(open_matches.order_by('pk').values_list('pk', 'subdomain_id')[:scoring.CHUNK]):
-        ids = [pk for pk, _ in rows]
-        updated = open_matches.filter(pk__in=ids).update(
-            ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-            ai_reason="Closed automatically: the CVE was rejected by its CNA.")
-        closed += updated
-        if updated:
-            scoring.rescore_subdomain_ids({subdomain_id for _, subdomain_id in rows})
-    return closed
+    return open_matches.update(ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
+                               ai_reason="Closed automatically: the CVE was rejected by its CNA.")
 
 
 def close_stale(current, covered):
