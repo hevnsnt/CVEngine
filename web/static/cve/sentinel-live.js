@@ -53,7 +53,8 @@ function task(t) {
   const row = el("div", "sl-task");
   const what = el("div", "sl-what");
   what.append(el("b", "mono", kindName(t.kind)), document.createTextNode(` on ${t.label || t.host || "a target"}`));
-  const meta = el("span", "sl-meta", `${t.project}${t.status === "claimed" ? " · starting" : ""}`);
+  // a task of a project this viewer may not read arrives with no host, project or error: it reads "nuclei (light) on a target"
+  const meta = el("span", "sl-meta", `${t.project || ""}${t.status === "claimed" ? `${t.project ? " · " : ""}starting` : ""}`);
   row.append(what, meta);
   if (t.since) row.append(el("span", "sl-since", "", { "data-since": t.since }));
   return row;
@@ -61,7 +62,7 @@ function task(t) {
 
 function recent(t) {
   const li = el("li", `sl-r ${t.status}`);
-  li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || ""));
+  li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || (t.hidden ? "a target" : "")));
   const tail = t.status === "failed" ? t.error || "failed" : t.seconds != null ? span(t.seconds) : "";
   li.append(el("span", "sl-tail", tail));
   if (t.finished) li.append(el("span", "sl-when", "", { "data-ago": t.finished }));
