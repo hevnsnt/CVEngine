@@ -42,3 +42,22 @@ class DiscoverNewTests(SimpleTestCase):
     def test_with_the_conductor_off_nothing_would_pick_the_rest_up_so_everything_is_queued(self):
         scans, deferred, *_ = self.run_it(200, depth=0)
         self.assertEqual((len(scans), deferred), (200, 0))
+
+
+class AlreadyQueuedTests(SimpleTestCase):
+    def test_scans_the_project_already_has_waiting_count_against_the_batch(self):
+        domains = [mock.Mock(id=i) for i in range(60)]
+        with mock.patch.object(services, '_start_discoveries', side_effect=lambda d, *a, **k: list(d)), mock.patch('cveFeed.conductor.wanted_depth', return_value=3), \
+                mock.patch('cveFeed.activity.log'), mock.patch('startScan.models.ScanHistory.objects') as scans:
+            scans.filter.return_value.count.return_value = 40
+            queued, deferred = services._discover_new(domains, 'standard', 7)
+        self.assertEqual((len(queued), deferred), (services.BULK_DISCOVER_NOW - 40, 60 - (services.BULK_DISCOVER_NOW - 40)))
+
+    def test_a_project_already_at_the_batch_size_queues_none_now(self):
+        domains = [mock.Mock(id=i) for i in range(5)]
+        with mock.patch.object(services, '_start_discoveries') as start, mock.patch('cveFeed.conductor.wanted_depth', return_value=3), \
+                mock.patch('cveFeed.activity.log'), mock.patch('startScan.models.ScanHistory.objects') as scans:
+            scans.filter.return_value.count.return_value = services.BULK_DISCOVER_NOW + 10
+            queued, deferred = services._discover_new(domains, 'standard', 7)
+        self.assertEqual((queued, deferred), ([], 5))
+        start.assert_not_called()

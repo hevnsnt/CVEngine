@@ -815,6 +815,10 @@ def _discover_new(domains, mode, project_id, initiated_by=None):
         cap = BULK_DISCOVER_NOW
     if not conductor.wanted_depth():
         cap = len(domains) or 1
+    else:  # what the project already has waiting counts against the batch: two pastes in a row are not two batches
+        from cveFeed.discovery import QUEUED
+        from startScan.models import ScanHistory
+        cap = max(0, cap - ScanHistory.objects.filter(domain__project_id=project_id, scan_status=QUEUED).count())
     now, rest = domains[:cap], domains[cap:]
     scans = _start_discoveries(now, mode, project_id, initiated_by=initiated_by) if now else []
     if rest:
