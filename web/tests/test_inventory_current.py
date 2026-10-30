@@ -34,7 +34,7 @@ class CurrentInventoryTests(TestCase):
 
 	def current(self):
 		rows = Subdomain.objects.filter(latest_scan_q(), target_domain=self.domain)
-		return sorted((row.name, row.scan_history_id) for row in rows)
+		return sorted(((row.name, row.scan_history_id) for row in rows), key=lambda row: (row[0], row[1] or 0))
 
 	def test_rescanning_one_host_keeps_the_rest_of_the_inventory(self):
 		full = self.scan(names=['www.acme.example', 'api.acme.example', 'mail.acme.example'])
@@ -84,6 +84,23 @@ class CurrentInventoryTests(TestCase):
 		names = [name for name, _ in self.current()]
 		self.assertEqual(names, ['api.acme.example', 'www.acme.example'])
 		self.assertIn(('www.acme.example', second.id), self.current())
+
+	def test_before_first_successful_full_scan_only_newest_failed_copy_is_current(self):
+		old = self.scan(status=0, names=['www.acme.example', 'old.acme.example'])
+		newer = self.scan(status=0, names=['www.acme.example'])
+		self.assertEqual(self.current(), [('old.acme.example', old.id), ('www.acme.example', newer.id)])
+
+	def test_a_scanned_host_supersedes_its_scanless_discovery_row(self):
+		Subdomain.objects.create(name='www.acme.example', target_domain=self.domain)
+		partial = self.scan(tasks=HP, names=['www.acme.example'])
+		self.assertEqual(self.current(), [('www.acme.example', partial.id)])
+
+	def test_scanless_rediscovery_survives_when_latest_full_scan_omitted_host(self):
+		self.scan(names=['www.acme.example'])
+		self.scan(names=['other.acme.example'])
+		rediscovered = Subdomain.objects.create(name='www.acme.example', target_domain=self.domain)
+		self.assertIn(('www.acme.example', None), self.current())
+		self.assertEqual([row for row in self.current() if row[0] == rediscovered.name], [(rediscovered.name, None)])
 
 	def test_rows_without_a_scan_stay_current(self):
 		self.scan(names=['www.acme.example'])

@@ -1194,12 +1194,22 @@ def latest_scan_q(prefix=""):
     newest_full_of = full.filter(domain_id=OuterRef("domain_id")).order_by("-id").values("id")[:1]
     after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).annotate(
         full_id=Coalesce(Subquery(newest_full_of), 0)).filter(id__gt=F("full_id")).values("id")
-    newer_row = Subdomain.objects.filter(scan_history_id__in=after_full, target_domain_id=OuterRef(prefix + "target_domain_id"),
-                                         name=OuterRef(prefix + "name"), scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
+    same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
+                                         name=OuterRef(prefix + "name"))
+    newer_row = same_host.filter(scan_history_id__in=after_full,
+                                 scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
+    # Before the first successful full scan, keep the newest scanned copy of each host. A scanless CT row is useful
+    # until that host has a current scanned copy, but must not duplicate it once a scan has observed the host.
+    newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
+    current_scanned = same_host.filter(scan_history__isnull=False).filter(
+        Q(scan_history_id__in=latest_full) | Q(scan_history_id__in=after_full)
+        | ~Q(target_domain_id__in=full.values("domain_id")))
     return ((Q(**{prefix + "scan_history_id__in": latest_full}) | Q(**{prefix + "scan_history_id__in": after_full})
              | Q(**{prefix + "scan_history__isnull": True})
              | ~Q(**{prefix + "target_domain_id__in": full.values("domain_id")}))
-            & ~Q(Exists(newer_row)))
+            & ~Q(Exists(newer_row))
+            & (Q(**{prefix + "scan_history__isnull": False}) | ~Q(Exists(current_scanned)))
+            & (Q(**{prefix + "target_domain_id__in": full.values("domain_id")}) | ~Q(Exists(newer_fallback))))
 
 
 def candidate_subdomains(product_index, base=None):
