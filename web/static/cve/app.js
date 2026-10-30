@@ -2682,7 +2682,7 @@ const pages = {
           return;
         }
         const label = pick.selectedOptions[0].parentElement.label ? `${pick.selectedOptions[0].parentElement.label} / ${pick.selectedOptions[0].textContent}` : pick.selectedOptions[0].textContent;
-        const sure = await ask(`Move ${h.host} to ${label}? It is scanned there from scratch. Its findings and history in this project are deleted.`, { title: "Move host?", ok: "Move host", danger: false });
+        const sure = await ask(`Move ${h.host} to ${label}? A host that is not a target is scanned there from scratch and its findings and history in this project are deleted. A target moves with its history.`, { title: "Move host?", ok: "Move host", danger: false });
         if (!sure) return;
         move.disabled = true;
         const done = (r) => {
@@ -2703,7 +2703,7 @@ const pages = {
           const shown = whole.hosts.slice(0, 6).join(", ");
           const more = whole.count > 6 ? ` and ${whole.count - 6} more` : "";
           const all = await ask(
-            `${whole.host} is a target in this project with ${whole.count} other host${whole.count === 1 ? "" : "s"} under it (${shown}${more}). Move the target and all of them to ${label}? They are discovered and scanned there from scratch, and their findings and history in this project are deleted.`,
+            `${whole.host} is a target in this project with ${whole.count} other host${whole.count === 1 ? "" : "s"} under it (${shown}${more}). Move the target and all of them to ${label}? ${whole.keeps_history ? "Their findings, notes and history move with them, and the next scan there updates them." : "They are discovered and scanned there from scratch, and their findings and history in this project are deleted."}`,
             { title: "Move the whole target?", ok: `Move ${whole.count + 1} hosts`, danger: false },
           );
           if (!all) {
