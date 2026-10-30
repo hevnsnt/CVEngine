@@ -1428,6 +1428,14 @@ def _for_viewer(queryset, user):
     return queryset if allowed is None else queryset.filter(project_id__in=allowed)
 
 
+def _viewer_project_ids(user):
+    """The ids of the projects ``user`` may read (every project for an App Admin), for what the live page lists from outside the viewer-scoped
+    task queryset: the OpenVAS queue names projects and hosts, and another tenant's never show."""
+    from dashboard.models import Project
+    allowed = roles.allowed_project_ids(user)
+    return list(Project.objects.values_list('id', flat=True)) if allowed is None else list(allowed)
+
+
 def live_overview(ctx):
     """What every Sentinel the caller may manage is doing right now, for the Sentinels page: liveness, the task each one holds,
     its last few finished tasks and how much it has done lately. Hosts and projects come only from tasks the caller's tenancy
@@ -1483,12 +1491,11 @@ def live_overview(ctx):
                       'failed_24h': st.get('failed_24h', 0),
                       'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None}})
     from cveFeed import internal_view, openvas_scan
-    from dashboard.models import Project
     networks = internal_view.declared_networks()
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out,
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
-            'openvas': openvas_scan.overview(list(Project.objects.values_list('id', flat=True)))}
+            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user))}
 
 
 def _visible_orgs(user):
