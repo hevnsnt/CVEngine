@@ -58,6 +58,30 @@ class Base(World):
 
 
 class RunTests(Base):
+    def test_internal_tls_and_udp_use_only_the_project_organizations_ip_row(self):
+        ip = self.domain.name
+        foreign = IpAddress.objects.create(address=ip, org=self.org2)
+        own = IpAddress.objects.create(address=ip, org=self.org1)
+        foreign.ports.add(Port.objects.create(number=8443, protocol='tcp', state='open', service_name='https'))
+        own.ports.add(Port.objects.create(number=9443, protocol='tcp', state='open', service_name='https'))
+        scan = self.queued_scan()
+        tls_ports = []
+
+        def tls_dispatch(project, kind, target, **kwargs):
+            tls_ports.append(target['port'])
+            return None
+
+        internal_scan._testssl(scan, self.pa, self.domain, ip, self.org1.id, tls_dispatch)
+        self.assertEqual(tls_ports, [9443])
+
+        xml = ('<nmaprun><host><address addr="10.20.0.7" addrtype="ipv4"/><ports>'
+               '<port protocol="udp" portid="123"><state state="open"/>'
+               '<service name="ntp" product="NTP" version="4"/></port></ports></host></nmaprun>')
+        result = internal_scan._udp(scan, self.pa, ip, self.org1.id, lambda *a, **k: {'xml': xml})
+        self.assertEqual(result['open'], 1)
+        self.assertTrue(own.ports.filter(number=123, protocol='udp').exists())
+        self.assertFalse(foreign.ports.filter(protocol='udp').exists())
+
     def test_a_sentinel_answer_becomes_the_host_its_services_and_a_correlation_run(self):
         scan = self.queued_scan()
         calls = []
