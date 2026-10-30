@@ -1064,10 +1064,17 @@ def _clean_naabu_result(body):
     ports = body.get('ports')
     if not isinstance(ports, dict) or len(ports) > MAX_ADDRESSES:
         raise ApiError(400, f'ports must be an object of at most {MAX_ADDRESSES} addresses')
+    from cveFeed.naabu_scan import MAX_OPEN_PER_IP
     out = {}
     for ip, values in ports.items():
         ip = _address(ip) if isinstance(ip, str) else None
-        if ip is None or not isinstance(values, list):
+        if ip is None or not (isinstance(values, list) or values is None):
+            continue
+        if values is None or len(values) > MAX_OPEN_PER_IP:
+            # an address with more open ports than that is a tarpit or a firewall that accepts everything: its list is no port list. It is kept
+            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and naabu_scan.discover then
+            # leaves the address to nmap's default ports.
+            out[ip] = None
             continue
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
         if clean:
