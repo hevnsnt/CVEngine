@@ -44,19 +44,23 @@ def retention_days(environ=None):
 
 
 def _worked(model, kind, scan_field):
-    """The scans that hold a ``model`` row a person worked on, or commented on."""
-    from cveFeed.models import FindingComment
-    worked = model.objects.filter(**{f'{scan_field}__isnull': False}).filter(~Q(remediation_status='open') | ~Q(remediation_note='') | Q(assignee__isnull=False))
-    commented = model.objects.filter(**{f'{scan_field}__isnull': False},
-                                     pk__in=FindingComment.objects.filter(finding_kind=kind).values('finding_id'))
-    return list(worked.values_list(scan_field, flat=True)) + list(commented.values_list(scan_field, flat=True))
+    """Lazy scan-id subquery for findings with any human work, including audit history later reverted to open."""
+    from django.db.models import Exists, OuterRef
+    from cveFeed.models import FindingAuditEvent, FindingComment
+    comments = FindingComment.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
+    audit = FindingAuditEvent.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
+    return (model.objects.filter(**{f'{scan_field}__isnull': False})
+            .filter(~Q(remediation_status='open') | ~Q(remediation_note='') | Q(assignee__isnull=False)
+                    | Q(Exists(comments)) | Q(Exists(audit)))
+            .values(scan_field))
 
 
 def worked_scans():
-    """The ids of the scans that hold work a person did (read once per run: it does not change while the run deletes)."""
+    """Two database subqueries, so retention never loads every worked scan id into worker memory."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    return set(_worked(Vulnerability, 'vulnerability', 'scan_history_id')) | set(_worked(CVEMatch, 'match', 'scan_history_id'))
+    return (_worked(Vulnerability, 'vulnerability', 'scan_history_id'),
+            _worked(CVEMatch, 'match', 'scan_history_id'))
 
 
 def candidates(now=None, days=None, kept=None):
@@ -70,7 +74,7 @@ def candidates(now=None, days=None, kept=None):
     current = Subdomain.objects.filter(latest_scan_q(), scan_history__isnull=False).values('scan_history_id')
     kept = worked_scans() if kept is None else kept
     return (ScanHistory.objects.filter(start_scan_date__lt=now - timedelta(days=days), scan_status__in=TERMINAL)
-            .exclude(pk__in=current).exclude(pk__in=kept))
+            .exclude(pk__in=current).exclude(pk__in=kept[0]).exclude(pk__in=kept[1]))
 
 
 def _newest(domain_ids):

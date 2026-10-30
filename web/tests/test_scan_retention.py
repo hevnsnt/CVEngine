@@ -9,7 +9,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import discovery, scan_retention
-from cveFeed.models import CVEEntry, CVEMatch, FindingComment
+from cveFeed.models import CVEEntry, CVEMatch, FindingAuditEvent, FindingComment
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
@@ -92,6 +92,21 @@ class ScanRetentionTests(TestCase):
         self.assertNotIn(old[5].id, self.ids())
         for finding in (worked, noted, assigned, commented):
             self.assertTrue(Vulnerability.objects.filter(pk=finding.pk).exists())
+        self.assertTrue(CVEMatch.objects.filter(pk=match.pk).exists())
+
+    def test_an_audit_trail_stays_when_the_current_remediation_fields_are_open_again(self):
+        old, _ = self.history(6)
+        finding = Vulnerability.objects.create(name='Reviewed then reopened', severity=2, scan_history=old[0],
+                                                target_domain=self.domain)
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='vulnerability', finding_id=finding.pk,
+                                         event='status', before={'status': 'in_progress'}, after={'status': 'open'})
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-8', cvss=7.5, title='t', published_at=self.now)
+        match = CVEMatch.objects.create(cve_entry=cve, subdomain=old[1].subdomain_set.first(), scan_history=old[1])
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='match', finding_id=match.pk,
+                                         event='assignee', before={'assignee': 1}, after={'assignee': None})
+        scan_retention.run(self.now, days=180)
+        self.assertTrue({old[0].pk, old[1].pk} <= self.ids())
+        self.assertTrue(Vulnerability.objects.filter(pk=finding.pk).exists())
         self.assertTrue(CVEMatch.objects.filter(pk=match.pk).exists())
 
     def test_one_domain_does_not_protect_or_expose_another(self):
