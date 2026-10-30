@@ -47,7 +47,7 @@ class DecisionTests(SimpleTestCase):
         # An unattributed failure cannot justify reducing the busiest, unrelated tool.
         self.assertEqual(safe_candidate(sample, scanner_failures=4, **args)['direction'], 'none')
         self.assertEqual(safe_candidate(sample, scanner_failures=4,
-                        stage_outcomes={'nmap': {'runs': 20, 'failures': 4}}, **args)['kind'], 'nmap')
+                        stage_outcomes={'nmap': {'runs': 20, 'failures': 4, 'capacity_failures': 4}}, **args)['kind'], 'nmap')
         caps['nmap'] = 3
         self.assertEqual(safe_candidate(sample, **args)['direction'], 'none')
 
@@ -56,7 +56,7 @@ class DecisionTests(SimpleTestCase):
                   'waiting': {'nmap': 60}, 'running': {'nmap': 100, 'nuclei': 5}}
         caps = {'nmap': 3, 'nuclei': 2}
         bounds = {'nmap': (1, 4), 'nuclei': (1, 3)}
-        outcomes = {'nmap': {'runs': 30, 'failures': 0}, 'nuclei': {'runs': 20, 'failures': 5}}
+        outcomes = {'nmap': {'runs': 30, 'failures': 0, 'capacity_failures': 0}, 'nuclei': {'runs': 20, 'failures': 5, 'capacity_failures': 5}}
         previous = {'kind': 'nuclei', 'direction': 'up', 'previous': 1, 'at': 99999}
         result = safe_candidate(sample, caps=caps, bounds=bounds, scanner_runs=50, scanner_failures=5,
                                 stage_outcomes=outcomes, previous=previous, now=100000)
@@ -120,7 +120,8 @@ class ScheduledReviewTests(TestCase):
             ScanActivity(scan_of=scan, name='nmap_scan', title='nmap', status=2, time=now)
             for _ in range(20)
         ] + [
-            ScanActivity(scan_of=scan, name='nuclei_light_scan', title='nuclei', status=0 if i < 5 else 2, time=now)
+            ScanActivity(scan_of=scan, name='nuclei_light_scan', title='nuclei', status=0 if i < 5 else 2, time=now,
+                         error_message='Nuclei timed out' if i < 5 else None)
             for i in range(20)
         ])
         samples = [{'t': now.timestamp() - 7200 + i * 60,
@@ -136,8 +137,64 @@ class ScheduledReviewTests(TestCase):
              mock.patch.object(performance_review, '_model_agrees', return_value=(True, 'agreed')):
             result = performance_review.review(now)
         self.assertEqual((result['status'], result['kind'], result['before'], result['after']), ('changed', 'nuclei', 2, 1))
-        self.assertEqual(result['stage_outcomes'], {'nmap': {'runs': 20, 'failures': 0}, 'nuclei': {'runs': 20, 'failures': 5}})
+        self.assertEqual(result['stage_outcomes'], {
+            'nmap': {'runs': 20, 'failures': 0, 'capacity_failures': 0, 'configuration_failures': 0},
+            'nuclei': {'runs': 20, 'failures': 5, 'capacity_failures': 5, 'configuration_failures': 0}})
         self.assertEqual(client.set.call_count, 2)
+
+    def test_failure_cause_separates_capacity_from_configuration(self):
+        for message in ('nmap on web1 waited too long for memory (210 MB free, needs 600 MB)', 'Nuclei timed out',
+                        'probe exceeded its total time budget', 'Nuclei exited with status -9', 'nmap exited with status 137'):
+            self.assertEqual(performance_review.failure_cause(message), 'capacity', message)
+        for message in ('Nuclei template library is unavailable', 'No installed Nuclei templates passed the read-only policy',
+                        'invalid probe URL', 'www.example.com is not scanned: the program has not confirmed automated testing'):
+            self.assertEqual(performance_review.failure_cause(message), 'configuration', message)
+        for message in ('nmap exited with status 1', 'nmap returned no XML report', '', None):
+            self.assertEqual(performance_review.failure_cause(message), 'other', message)
+
+    def test_configuration_and_unexplained_failures_never_lower_a_cap(self):
+        sample = {'samples': 150, 'span_minutes': 170, 'free_p10': .65, 'waiting': {'nmap': 60}, 'running': {'nmap': 100, 'nuclei': 5}}
+        args = {'caps': {'nmap': 3, 'nuclei': 2}, 'bounds': {'nmap': (1, 4), 'nuclei': (1, 3)}, 'scanner_runs': 50,
+                'scanner_failures': 8, 'now': 100000}
+        configuration = {'nuclei': {'runs': 20, 'failures': 8, 'capacity_failures': 0, 'configuration_failures': 8}}
+        result = safe_candidate(sample, stage_outcomes=configuration, **args)
+        self.assertEqual((result['kind'], result['direction']), ('none', 'none'))
+        self.assertIn('configuration, not capacity', result['reason'])
+        unexplained = {'nuclei': {'runs': 20, 'failures': 8, 'capacity_failures': 0, 'configuration_failures': 0}}
+        self.assertEqual(safe_candidate(sample, stage_outcomes=unexplained, **args)['direction'], 'none')
+        capacity = {'nuclei': {'runs': 20, 'failures': 8, 'capacity_failures': 5, 'configuration_failures': 3}}
+        self.assertEqual((safe_candidate(sample, stage_outcomes=capacity, **args)['kind'],
+                          safe_candidate(sample, stage_outcomes=capacity, **args)['direction']), ('nuclei', 'down'))
+
+    def test_performance_review_reports_configuration_failures_without_lowering_the_cap(self):
+        now = timezone.now()
+        project = self.projects[0]
+        domain = Domain.objects.create(name='config.example', project=project, insert_date=now)
+        scan = ScanHistory.objects.create(domain=domain, scan_type=EngineType.objects.create(
+            engine_name='config', yaml_configuration='x'), start_scan_date=now, scan_status=2)
+        ScanActivity.objects.bulk_create([
+            ScanActivity(scan_of=scan, name='nuclei_light_scan', title='nuclei', status=0 if i < 8 else 2, time=now,
+                         error_message='Nuclei template library is unavailable' if i < 8 else None) for i in range(20)]
+            + [ScanActivity(scan_of=scan, name='nmap_scan', title='nmap', status=0, time=now, error_message='nmap exited with status 137')
+               for _ in range(3)])
+        samples = [{'t': now.timestamp() - 7200 + i * 60, 'memory': {'total_mb': 1000, 'available_mb': 700},
+                    'waiting_by_kind': {}, 'running_by_kind': {'nuclei': 1}} for i in range(121)]
+        client = mock.Mock()
+        client.get.return_value = None
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch.object(resources, 'get_store', return_value=mock.Mock(r=client)), \
+             mock.patch.object(resources, 'adaptive_history', return_value=samples), \
+             mock.patch.object(resources, 'max_concurrent', side_effect=lambda kind: 2), \
+             mock.patch.object(resources, 'adaptive_bounds', side_effect=lambda kind: (1, 3)), \
+             mock.patch.object(performance_review, '_model_agrees') as model:
+            result = performance_review.review(now)
+        model.assert_not_called()
+        self.assertEqual(result['status'], 'no_change')
+        self.assertIn('configuration, not capacity', result['reason'])
+        self.assertEqual(result['stage_outcomes']['nuclei'], {'runs': 20, 'failures': 8, 'capacity_failures': 0, 'configuration_failures': 8})
+        # the same pattern read by the database: an exit status of 137 (the kernel's kill) is capacity, not configuration
+        self.assertEqual(result['stage_outcomes']['nmap'], {'runs': 3, 'failures': 3, 'capacity_failures': 3, 'configuration_failures': 0})
+        client.set.assert_not_called()
 
     def test_rescan_history_does_not_inflate_review_or_requeue_old_cve_rows(self):
         from cveFeed import triage, validation
