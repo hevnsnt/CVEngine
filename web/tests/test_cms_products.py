@@ -92,3 +92,47 @@ class VersionFileTests(SimpleTestCase):
         self.assertIsNone(plan)  # plan_for_host needs a host row: the lead pattern is what selects the probe
         self.assertTrue(probes._lead_matches(probes.BY_ID['magento-version'], 'magento', sub_leads[0]))
         self.assertFalse(probes._lead_matches(probes.BY_ID['magento-version'], 'drupal', {'name': 'Drupal', 'source': 'tech'}))
+
+
+FORUMS = {
+    'MyBB': ('<div id="footer"><a href="https://mybb.com">Powered By</a> <a href="https://mybb.com" target="_blank">MyBB 1.8.38</a></div>', '1.8.38'),
+    'Simple Machines Forum': ('<script>var smf_version = "SMF 2.1.4", smf_scripturl = "/index.php?";</script>', '2.1.4'),
+    'PunBB': ('<p id="brd-about">Powered by <a href="http://punbb.informer.com/">PunBB</a> 1.4.6</p>', '1.4.6'),
+    'XMB': ('<!-- Powered by XMB 1.9.12 -->', '1.9.12'),
+    'YetAnotherForum.NET': ('<span>Powered by YAF.NET 2.2.5</span>', '2.2.5'),
+    'NodeBB': ('<script>var config = {"relative_path":"","version":"3.6.7","siteTitle":"x"};</script><script src="/assets/nodebb.min.js"></script>', '3.6.7'),
+}
+
+
+class ForumTests(SimpleTestCase):
+    def test_each_board_names_itself_and_states_its_release_from_its_footer_or_script(self):
+        for product, (body, version) in FORUMS.items():
+            with self.subTest(product):
+                found = probes.observations_from_page(page(200, body=f'<html><body>{body}</body></html>'))
+                self.assertIn((product, version), [(o['product'], o['version']) for o in found if o['kind'] == 'version'])
+
+    def test_vanilla_states_its_release_in_a_header(self):
+        found = probes.observations_from_page(page(200, headers={'X-Garden-Version': 'Vanilla 3.0'}, body='<html></html>'))
+        self.assertIn(('Vanilla', '3.0'), [(o['product'], o['version']) for o in found if o['kind'] == 'version'])
+
+    def test_a_board_that_hides_its_release_is_named_without_one(self):
+        found = probes.observations_from_page(page(200, body='<a href="https://mybb.com">MyBB</a>'))
+        self.assertEqual([(o['product'], o['version'], o['outcome']) for o in found if o['product'] == 'MyBB'], [('MyBB', '', 'hidden')])
+
+    def test_a_post_that_names_a_release_is_not_the_boards_footer(self):
+        body = '<div class="post">Upgrade to MyBB 1.8.38 and SMF 2.1.4 as soon as you can, and use phpBB 3.3.11 in production.</div>'
+        self.assertEqual([o for o in probes.observations_from_page(page(200, body=body)) if o['product'] in ('MyBB', 'Simple Machines Forum', 'phpBB')], [])
+
+    def test_a_footer_without_a_full_release_states_no_version(self):
+        found = probes.observations_from_page(page(200, body='<a href="https://mybb.com">MyBB 1</a>'))
+        self.assertEqual({o['version'] for o in found if o['product'] == 'MyBB'}, {''})  # named, no release stated
+
+    def test_boards_that_state_no_release_are_still_named(self):
+        for product, body in (('phpBB', '<a href="https://www.phpbb.com/">phpBB</a>&reg; Forum Software'),
+                              ('XenForo', '<div data-xf-init="x"></div>'), ('Discourse', '<div data-discourse-setup="x"></div>'),
+                              ('Flarum', '<div id="flarum-loading"></div>')):
+            with self.subTest(product):
+                self.assertIn(product, names(f'<html>{body}</html>'))
+
+    def test_generator_tags_already_carry_discourse_and_vbulletin_releases(self):
+        self.assertIn('vBulletin:5.7.5', names('<meta name="generator" content="vBulletin 5.7.5">'))

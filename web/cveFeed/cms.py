@@ -43,6 +43,18 @@ MARKERS = (
     (re.compile(r'\bMage\.Cookies\b|mage/cookies'), 'Magento', 'page:magento'),
     (_attr(r'/(?:typo3temp/|typo3conf/)'), 'TYPO3', 'page:typo3'),
     (_attr(r'/umbraco/'), 'Umbraco', 'page:umbraco'),
+    # forums: the footer link text is how a board says what it runs (a post that names MyBB is not the footer's closing tag)
+    (re.compile(r'>MyBB(?: \d[\d.]*)?</a>'), 'MyBB', 'page:mybb'),
+    (re.compile(r'\bsmf_(?:version|scripturl)\b|>SMF(?: \d[\d.]*)?</a>|/Themes/default/scripts/script\.js'), 'Simple Machines Forum', 'page:smf'),
+    (re.compile(r'https?://(?:www\.)?phpbb\.com/|/styles/prosilver/'), 'phpBB', 'page:phpbb'),
+    (re.compile(r'PunBB</a>'), 'PunBB', 'page:punbb'),
+    (re.compile(r'Powered by XMB\b'), 'XMB', 'page:xmb'),
+    (re.compile(r'Powered by YAF\.NET\b'), 'YetAnotherForum.NET', 'page:yaf'),
+    (re.compile(r'/assets/nodebb\.min\.js'), 'NodeBB', 'page:nodebb'),
+    (re.compile(r'data-xf-init|/js/xf/|Forum software by XenForo'), 'XenForo', 'page:xenforo'),
+    (_attr(r'/clientscript/vbulletin'), 'vBulletin', 'page:vbulletin'),
+    (re.compile(r'data-discourse-setup|/assets/discourse[-.]'), 'Discourse', 'page:discourse'),
+    (re.compile(r'flarum-loading|/assets/forum(?:-[a-f0-9]{6,})?\.js'), 'Flarum', 'page:flarum'),
 )
 
 
@@ -66,6 +78,17 @@ SOURCES = {
         Source('feed:generator', r'<generator>\s*https?://wordpress\.org/\?v=' + VERSION + r'\s*</generator>', 0.9, path='/feed/'),
         Source('readme', r'Version\s+' + VERSION, 0.6, path='/readme.html'),
     ),
+    # forums: the version is in the footer link or a script variable; a board that hides it states none, and a post that names a release is not read
+    'MyBB': (Source('footer', r'>MyBB (' + VERSION[1:-1] + r')</a>', 0.85),),
+    'Simple Machines Forum': (
+        Source('footer', r'>SMF (' + VERSION[1:-1] + r')</a>', 0.85),
+        Source('script:smf_version', r'smf_version\s*=\s*["\']SMF (' + VERSION[1:-1] + r')', 0.85),
+    ),
+    'PunBB': (Source('footer', r'PunBB</a> (' + VERSION[1:-1] + r')', 0.85),),
+    'XMB': (Source('footer', r'Powered by XMB (' + VERSION[1:-1] + r')', 0.85),),
+    'YetAnotherForum.NET': (Source('footer', r'Powered by YAF\.NET (' + VERSION[1:-1] + r')', 0.85),),
+    'NodeBB': (Source('script:config', r'var config\s*=\s*\{[^}]{0,2000}?"version"\s*:\s*"(' + VERSION[1:-1] + r')"', 0.85),),
+    'Vanilla': (Source('header:x-garden-version', r'Vanilla (' + VERSION[1:-1] + r')', 0.9, header='x-garden-version'),),
     'Drupal': (
         # Drupal 8 and later version their own core scripts with the core release; the vendored libraries beside them carry the library's version
         Source('asset:drupal.js', r'/core/misc/(?:drupal|drupalSettingsLoader|drupal\.init)(?:\.min)?\.js\?v=' + VERSION + r'(?![\w.-])', 0.85),
