@@ -626,14 +626,31 @@ class ApplyValidationTests(ValidationBase):
 		Triage.objects.filter(pk=row.pk).update(next_attempt_at=None)
 		self.assertIn(row.pk, validation.due_ids(self.project.pk))
 
-	def test_a_reaffirmed_version_raises_a_triaged_finding_to_likely(self):
+	def test_a_reaffirmed_version_alone_keeps_a_version_only_match_at_the_ceiling(self):
+		"""Reading the same version a second time is not more evidence than reading it once: v1.3.1 lifted such a match to likely, and the next
+		triage pass put it back about twelve minutes later (camstork, issue 210)."""
 		m, row = self.prepared()
+		self.assertTrue(validation._version_only(row))
 		row.classification = 'needs_validation'
 		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'reaffirmed', 'summary': 'nmap reports nginx 1.18.2'})
-		self.assertEqual(row.classification, 'likely')
+		self.assertEqual(row.classification, 'needs_validation')
 		row.classification = ''
 		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'reaffirmed', 'summary': 'again'})
 		self.assertEqual(row.classification, '')  # not triaged: a version reading does not invent a classification
+
+	def test_a_reaffirmed_version_still_raises_a_match_that_has_more_than_the_version(self):
+		m, row = self.prepared()
+		CVEMatch.objects.filter(pk=m.pk).update(distro_status='vulnerable')  # the distribution's own tracker lists the release as affected
+		row.refresh_from_db()
+		row.match.refresh_from_db()
+		self.assertFalse(validation._version_only(row))
+		row.classification = 'needs_validation'
+		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'reaffirmed', 'summary': 'nmap reports nginx 1.18.2'})
+		self.assertEqual(row.classification, 'likely')
+
+	def test_a_reaffirmed_route_is_not_a_version_match_and_still_raises(self):
+		from types import SimpleNamespace
+		self.assertFalse(validation._version_only(SimpleNamespace(match_id=None)))  # a route (or any finding that is not a CVE match) has no version to read twice
 
 
 class RunValidationTests(ValidationBase):

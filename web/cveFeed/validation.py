@@ -536,10 +536,21 @@ def raise_class(row, level, why):
         row.reason = (f'{why}. ' + (row.reason or ''))[:700]
 
 
+def _version_only(row):
+    """Whether the row's CVE match stands on a version string alone (``match_policy.version_only``): no template hit, no distribution tracker
+    listing, no runZero report. Re-reading that same version with another tool is not further evidence."""
+    if not row.match_id:
+        return False
+    from cveFeed import match_policy
+    match = row.match
+    return match_policy.version_only(getattr(match, 'source', ''), getattr(match, 'evidence', None) or {}, match.version_in_range,
+                                     getattr(match, 'template_result', '') or '', getattr(match, 'distro_status', '') or '')
+
+
 def apply_validation(row, check, result, now=None, save=True):
     """Record one check's result on its Triage row and apply the rules. Never lowers a classification: a hit confirms (for a CVE match
     it also records the template hit as a nuclei-cve finding and sets the match's template_result), a re-affirmed live version raises a
-    triaged finding to likely, a check that did not reproduce the finding changes nothing but the confidence (so a template that missed
+    triaged finding to likely (or to the ceiling, when the match rests on its version string alone), a check that did not reproduce the finding changes nothing but the confidence (so a template that missed
     can never clear a finding with hard evidence), and a failure schedules a retry and is never treated as clean."""
     now = now or timezone.now()
     status = result['status']
@@ -562,7 +573,14 @@ def apply_validation(row, check, result, now=None, save=True):
             row.attempts = 0
     else:
         if status == 'reaffirmed' and row.classification:
-            raise_class(row, 'likely', f'Validated: {step["summary"]}')
+            # a live version still inside the range raises a triaged finding to likely, but never above what the evidence supports: a match that
+            # stands on its version string alone stays at the ceiling, because reading the same version a second time is not more evidence
+            # (v1.3.1 lifted it to likely and the next triage pass put it back, about twelve minutes later)
+            level = 'likely'
+            if _version_only(row):
+                cap, _why = triage.ceiling('cve_match', {'version_only': True})
+                level = cap if cap and triage.rank(cap) < triage.rank(level) else level
+            raise_class(row, level, f'Validated: {step["summary"]}')
         if status in ('no_match', 'version_changed', 'reaffirmed'):
             row.confidence_adjust = CLEAN_CONFIDENCE_ADJUST if status != 'reaffirmed' else 0.0
         if status in ('no_match', 'version_changed') and row.hard_evidence:

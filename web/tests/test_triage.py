@@ -327,6 +327,25 @@ class RescanTwinTests(TriageDbBase):
 		for match in (other_host, other_cve):
 			self.assertEqual((self.rows_of(match).status, self.rows_of(match).validation_status), ('pending', 'none'))
 
+	def test_a_cve_matched_twice_on_one_host_inherits_both_from_its_own_predecessor(self, _log):
+		"""Apache 2.4.58 is matched once from the port scan and once from the web fingerprint, with different evidence: a rescan must carry
+		both records over (11 of 24 started over when only the newest row of the pair was looked at)."""
+		port = self.match('a.tr.test')
+		tech = CVEMatch.objects.create(cve_entry=self.cve, subdomain=port.subdomain, matched_product='Apache HTTP Server', matched_version='1.18.0',
+									   version_in_range=True, source='tech')
+		self.run_all(provider=self.provider())
+		Triage.objects.update(validation_status='clean', validation_steps=[{'kind': 'nuclei_template', 'result': 'clean'}],
+							  validated_at=timezone.now() - datetime.timedelta(days=1))
+		self.assertEqual(Triage.objects.filter(status='triaged').count(), 2)
+		again_port = self.match('a.tr.test')
+		again_tech = CVEMatch.objects.create(cve_entry=self.cve, subdomain=again_port.subdomain, matched_product='Apache HTTP Server',
+											 matched_version='1.18.0', version_in_range=True, source='tech')
+		self.track_all()
+		for match in (again_port, again_tech):
+			row = self.rows_of(match)
+			self.assertEqual((row.status, row.validation_status), ('triaged', 'clean'), match.source)
+		self.assertEqual(self.provider().complete.call_count, 0)
+
 	def test_a_twin_that_was_never_judged_gives_nothing(self, _log):
 		self.match('a.tr.test')
 		self.track_all()

@@ -542,6 +542,12 @@ def _ranges(entry):
     return out[:30]
 
 
+def uses_default_status(entries):
+    """Whether any ``affected`` block of a CVE List record states its releases as the unaffected intervals of a ``defaultStatus: affected``
+    product (Jenkins), the shape ``_default_affected_ranges`` reads: what a run counts, so the shape can be sized (camstork, issue 210)."""
+    return any(isinstance(e, dict) and _default_affected_ranges(e, "SEMVER") for e in entries or [])
+
+
 def convert_affected(entries):
     """CVE 5 ``affected`` -> the cve.now shape correlation reads: [{vendor, product, package?, ranges}]."""
     from cveFeed.correlation import parse_cpe
@@ -628,11 +634,15 @@ def entry_from_cve5(doc, intel):
             "status": "PUBLISHED", "published_at": published, "first_seen_at": published}
 
 
+LAST_IMPORT = {"default_status": 0}  # what the last import_missing saw: records whose affected releases come from default-status ranges
+
+
 def import_missing(data, limit, now=None, get=None, workers=8):
     """Create up to ``limit`` CVEEntry rows for CVEs the sources name that are not stored. Returns the new rows."""
     from django.core.cache import cache
 
     from cveFeed.models import CVEEntry
+    LAST_IMPORT["default_status"] = 0
     candidates, missing = import_candidates(data), []
     for start in range(0, len(candidates), 2000):
         chunk = candidates[start:start + 2000]
@@ -662,6 +672,8 @@ def import_missing(data, limit, now=None, get=None, workers=8):
         if fields is None:  # no record, rejected or reserved: do not ask again for a week
             cache.set(f"cvengine:intel-skip:{cve}", 1, 7 * 86400)
             continue
+        if uses_default_status(((doc.get("containers") or {}).get("cna") or {}).get("affected")):
+            LAST_IMPORT["default_status"] += 1
         kev, epss_reached, exploit_db = merged_flags({}, intel)
         sources = ["CVE List V5"] + [labels[n] for group in ("kev", "exploits") for n in intel.get(group, {})] + (["FIRST EPSS"] if intel.get("epss") else [])
         obj, made = CVEEntry.objects.get_or_create(cve_id=cve, defaults={**fields, "intel": intel, "kev": kev, "epss_reached": epss_reached,
@@ -695,5 +707,8 @@ def run(now=None, get=None):
     marker.last_checked = now
     marker.save(update_fields=["last_checked"])
     created = import_missing(data, _int_env("CVENGINE_INTEL_IMPORT_PER_RUN", 2000, 0, 20000), now=now, get=get)
+    if LAST_IMPORT["default_status"]:
+        logger.info("threat intel: %s of the %s imported CVE records state their affected releases as unaffected ranges of a default-affected "
+                    "product (defaultStatus), which are now read as the releases between those ranges", LAST_IMPORT["default_status"], len(created))
     return {"sources": {n: len(data.get(n) or {}) for n in names}, "errors": errors, "reconciled": updated,
-            "signals_changed": changed_ids, "imported": created}
+            "signals_changed": changed_ids, "imported": created, "default_status_records": LAST_IMPORT["default_status"]}
