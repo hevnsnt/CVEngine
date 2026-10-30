@@ -76,12 +76,15 @@ def enqueue(project, sub, *, source='manual', user=None):
     from cveFeed.exclusions import is_excluded
     from cveFeed.models import HostState
     from startScan.models import ScanHistory
+    from targetApp.target_types import sentinel_only_target
 
     domain = sub.target_domain
     host = sub.name.lower().rstrip('.')
     if not domain or domain.project_id != project.pk or not (host == domain.name.lower() or
             (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
         raise ValueError('host is outside its stored target scope')
+    if sentinel_only_target(host, project.pk):
+        raise ValueError('internal hosts are assessed by an internal Sentinel scan')
     if is_excluded(project.pk, host):
         raise ValueError('host is excluded')
     from cveFeed.bounty_gate import Gate
@@ -128,6 +131,7 @@ def execute(job_id, celery_id=None):
     from cveFeed.models import HostState
     from cveFeed.scan_control import pause_requested
     from startScan.models import Subdomain
+    from targetApp.target_types import sentinel_only_target
 
     now = timezone.now()
     if not HostAssessment.objects.filter(pk=job_id, status='queued').update(status='running', started_at=now):
@@ -137,7 +141,7 @@ def execute(job_id, celery_id=None):
     activity.log('discovery', f'Host assessment #{job.pk} started for {job.host}', project=job.project_id, status='running')
     try:
         current = Subdomain.objects.filter(target_domain=job.domain, name=job.host).exists()
-        if not current or is_excluded(job.project_id, job.host) or \
+        if not current or sentinel_only_target(job.host, job.project_id) or is_excluded(job.project_id, job.host) or \
                 HostState.objects.filter(project_id=job.project_id, host=job.host, archived_at__isnull=False).exists() or \
                 (job.domain.is_host_scoped() and job.host != job.domain.name.lower()) or pause_requested() or \
                 Gate().refusal(job.project_id, job.host, unattended=job.requested_by_id is None):  # re-read: the program's scope or the confirmation may have changed while it queued

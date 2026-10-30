@@ -53,6 +53,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     from django.db.models import Exists, OuterRef
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment, HostExclusion, HostState
+    from cveFeed.internal_scan import TASK_TAG as INTERNAL_PIPELINE_TASK
     from cveFeed.unresolved_archive import COUNTS_FOR
     from startScan.models import ScanActivity, Subdomain
 
@@ -75,7 +76,10 @@ def host_coverage_due(project, at, limit=1, need_count=True):
                                           unresolved_last_at__gte=at - COUNTS_FOR)
     # the current inventory only (one row per host, from the latest scan), not every scan's copy of every name: with a long history the
     # six correlated checks below ran once per host per scan, every minute for every project
+    # Internal inventory has its own Sentinel-only scan cadence. A host assessment
+    # here would try the external pipeline and cannot repair missing internal stages.
     rows = (Subdomain.objects.filter(latest_scan_q()).filter(target_domain__project=project)
+            .exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
             .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
                       excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
             .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))
