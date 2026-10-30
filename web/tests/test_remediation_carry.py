@@ -78,6 +78,16 @@ class CarryRemediationTests(TestCase):
 		match = CVEMatch.objects.get(subdomain=self.new)
 		self.assertEqual((match.remediation_status, match.remediation_note), ('open', 'reopened by ops'))
 
+	def test_latest_host_decision_beats_older_exact_product_decision(self):
+		self.worked(status='fixed', product='nginx')
+		latest = self.worked(status='open', product='NGINX Plus')
+		latest.remediation_note = 'reopened after verification'
+		latest.save(update_fields=['remediation_note'])
+		correlation.save_matches([self.row(product='nginx')])
+		match = CVEMatch.objects.get(subdomain=self.new)
+		self.assertEqual((match.remediation_status, match.remediation_note),
+			('open', 'reopened after verification'))
+
 	def test_a_decision_about_another_cve_or_host_is_not_inherited(self):
 		other = CVEEntry.objects.create(cve_id='CVE-2099-1', title='other', published_at=timezone.now())
 		CVEMatch.objects.create(cve_entry=other, subdomain=self.old, source='tech', matched_product='nginx', remediation_status='fixed')

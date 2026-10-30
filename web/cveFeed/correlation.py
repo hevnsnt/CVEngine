@@ -892,23 +892,18 @@ def _carry_remediation(fresh):
     base = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
                                     subdomain__name__in=names)
             .exclude(subdomain_id__in=list(hosts)).select_related("subdomain"))
-    # Only the newest earlier row of each finding matters, an open one included (a newer reopening supersedes an older closure). Every
-    # scan keeps its own copy of every match, so asking for all of them would load the whole history; ask for the newest per key.
+    # A remediation decision applies to this CVE on this host, even when a feed
+    # changes the product label or evidence source. Use the newest host-level
+    # row: preferring an older exact-product row would undo a later reopening.
+    # Each scan keeps a copy, so let PostgreSQL return just one row per key.
     by_host_fields = ("cve_entry_id", "subdomain__target_domain_id", "subdomain__name")
-    by_product_fields = by_host_fields + ("source", "matched_product")
-    latest = {(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product): m
-              for m in base.order_by(*by_product_fields, "-id").distinct(*by_product_fields)}
     by_host = {(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name): m
                for m in base.order_by(*by_host_fields, "-id").distinct(*by_host_fields)}
-    if not latest:
+    if not by_host:
         return
     for match in fresh:
         domain_id, name = hosts.get(match.subdomain_id, (None, None))
-        # The same product by the same name first. When the match is now made under another product string or source (the advisory's
-        # name changed in a feed update, the product is now seen on another port, a CPE where a banner was) it is still the same CVE on
-        # the same host, and a person's decision about that must not be lost to a different label.
-        before = (latest.get((match.cve_entry_id, domain_id, name, match.source, match.matched_product))
-                  or by_host.get((match.cve_entry_id, domain_id, name)))
+        before = by_host.get((match.cve_entry_id, domain_id, name))
         if before is not None:
             match.remediation_status, match.remediation_note = before.remediation_status, before.remediation_note
             match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
