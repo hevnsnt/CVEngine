@@ -481,13 +481,17 @@ def interpret(subject, check, result):
     Returns the result, with its status refined. Pure."""
     if result.get('status') != 'observed':
         return result
-    from cveFeed.correlation import parse_version, version_in_range
+    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, parse_version, version_in_range
     out = dict(result)
     if subject['kind'] == 'cve_match':
         observed = (result.get('observed') or {})
-        product = (subject.get('product') or '').lower()
-        if observed.get('version') and (not observed.get('product') or observed['product'].lower() in product
-                                        or product in observed['product'].lower()):
+        product = _norm(subject.get('product') or '', catalogue=True)
+        observed_product = _norm(observed.get('product') or '')
+        # A version belongs to the identified product, never to a sibling or an unidentified banner.
+        same_product = (name_matches_token(observed_product, product)
+                        or product in PRODUCT_ALIASES.get(observed_product, ())
+                        or observed_product in PRODUCT_ALIASES.get(product, ()))
+        if observed.get('version') and same_product:
             inside = version_in_range(parse_version(observed['version']), subject.get('range') or {})
             if inside is True:
                 out.update(status='reaffirmed', summary=result['summary'] + '; that version is inside the affected range')
@@ -549,6 +553,7 @@ def apply_validation(row, check, result, now=None, save=True):
     if status == 'hit':
         raise_class(row, 'confirmed', f'Validated: {step["summary"]}')
         row.validation_evidence = {**(row.validation_evidence or {}), check['kind']: result.get('evidence') or {}}
+        row.attempts, row.next_attempt_at = 0, None
         if check['kind'] == 'nuclei_template' and row.match_id:
             _record_template_hit(row, check, result)
     elif status == 'failed':
@@ -557,6 +562,7 @@ def apply_validation(row, check, result, now=None, save=True):
         if row.attempts >= 3:
             row.attempts = 0
     else:
+        row.attempts, row.next_attempt_at = 0, None
         if status == 'reaffirmed' and row.classification:
             raise_class(row, 'likely', f'Validated: {step["summary"]}')
         if status in ('no_match', 'version_changed', 'reaffirmed'):
@@ -565,10 +571,6 @@ def apply_validation(row, check, result, now=None, save=True):
             row.reason = (f'{row.reason or ""} The {check["label"]} did not reproduce it ({step["summary"]}); the hard evidence '
                           f'({"; ".join(row.hard_evidence)}) stands.').strip()[:700]
     row.validation_status = rollup(row.validation_steps)
-    # A successful step cannot clear another step's failure. Keep the retry
-    # date while the row is failed, and clear it once the failed step resolves.
-    if row.validation_status != 'failed':
-        row.attempts, row.next_attempt_at = 0, None
     row.validated_at = now
     if save:
         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at', 'attempts',
@@ -852,7 +854,6 @@ def due_ids(project_id, limit=None):
     stale = now - timedelta(seconds=ledger_ttl())
     due = (Q(validation_status__in=('none', 'pending'))
            | Q(validation_status='failed', next_attempt_at__lte=now)
-           | Q(validation_status='failed', next_attempt_at__isnull=True)
            | Q(validation_status__in=('hit', 'clean', 'observed'), validated_at__lt=stale)
            | Q(validation_status__in=('no_check', 'skipped_blocked'), updated_at__lt=stale))
     qs = Triage.objects.filter(project_id=project_id, kind__in=PLANNED_KINDS).filter(due).filter(
