@@ -162,7 +162,7 @@ async function run() {
       ? `Update to ${s.latest} approved by ${s.approved_by}. The host will apply it shortly.`
       : s.status === "diverged"
         ? `CVEngine has ${s.behind_by} new commit${s.behind_by === 1 ? "" : "s"}, but this server has ${s.local_commits} of its own, so it cannot be updated for you: ${s.latest_message}`
-        : `A new version of CVEngine is available${s.behind_by ? ` (${s.behind_by} commit${s.behind_by === 1 ? "" : "s"})` : ""}: ${s.latest_message}`;
+        : `A new version of CVEngine is available${s.behind_by ? ` (${s.behind_by} commit${s.behind_by === 1 ? "" : "s"})` : ""}${s.branch_warning ? ` on the ${s.branch} branch, which is not a release` : ""}: ${s.latest_message}`;
   bar.append(el("span", "", msg));
   const review = el("a", "btn sm", s.status === "approved" || s.status === "diverged" ? "Details" : "Review and update");
   review.href = "/cve/settings/#updates";
