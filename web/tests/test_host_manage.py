@@ -11,7 +11,7 @@ from agentapi.auth import create_token
 from agentapi.services import ApiError, Ctx
 from cveFeed import ctmonitor, discovery, fullscan, route_auth as ra, tasks
 from cveFeed.exclusions import drop_excluded, excluded_names, is_excluded, normalize
-from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth,
+from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth,
 	ServiceRun)
 from cveFeed.nuclei_scan import scan_targets
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
@@ -539,7 +539,7 @@ class MoveHostTests(Base):
 		now = timezone.now()
 		Domain.objects.create(name=HOST, project=self.a1, insert_date=now)
 		out = hm.move_host(self.ctx(self.admin), 'a1', HOST, 'a2')
-		self.assertTrue(out['target_created'])
+		self.assertFalse(out['target_created'])  # the same record, pointed at the new project
 		self.assertEqual(list(Domain.objects.filter(name=HOST).values_list('project__slug', flat=True)), ['a2'])
 
 	def test_a_target_of_that_name_elsewhere_in_the_org_or_with_other_hosts_is_refused_before_anything_is_deleted(self):
@@ -616,39 +616,64 @@ class MoveHostTests(Base):
 		with self.assertRaises(ApiError) as e:
 			hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2')
 		self.assertEqual(e.exception.status, 409)
-		self.assertEqual(e.exception.extra['whole_target'], {'host': 'root.example', 'hosts': ['api.root.example', 'mail.root.example'], 'count': 2})
+		self.assertEqual(e.exception.extra['whole_target'], {'host': 'root.example', 'hosts': ['api.root.example', 'mail.root.example'], 'count': 2, 'keeps_history': True})
 		self.assertEqual(Domain.objects.filter(project=self.a1, name__endswith='root.example').count(), 2)
 		token = create_token(self.admin, 'mover')[1]
 		status, out = call(token, 'POST', '/api/v1/projects/a1/hosts/root.example/move', {'to_project': 'a2'})
 		self.assertEqual((status, out['whole_target']['count']), (409, 2), out)
 
-	def test_the_whole_target_moves_with_every_host_under_it(self):
+	def test_the_whole_target_is_pointed_at_the_new_project_with_its_history(self):
 		from cveFeed.models import HostMove
-		self.whole_target_setup()
+		root = self.whole_target_setup()
+		scan_id = ScanHistory.objects.get(domain=root).id
+		HostState.objects.create(project=self.a1, domain=root, host='mail.root.example', state={'ports': [22]}, fingerprint='x')
+		HostProfile.objects.create(project=self.a1, host='mail.root.example', owner='ops')
 		out = hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
-		self.assertEqual((out['hosts_moved'], out['target_created']), (3, True))
+		self.assertEqual((out['hosts_moved'], out['target_created']), (3, False))
 		self.assertFalse(Domain.objects.filter(project=self.a1, name__endswith='root.example').exists())
-		self.assertFalse(Subdomain.objects.filter(target_domain__project=self.a1, name__endswith='root.example').exists())
-		self.assertFalse(HostLabel.objects.filter(project=self.a1, host='mail.root.example').exists())
 		self.assertEqual(sorted(Domain.objects.filter(project=self.a2, name__endswith='root.example').values_list('name', flat=True)),
-			['root.example', 'staging.root.example'])  # what was moved there before stays
-		self.assertEqual(sorted(HostMove.objects.filter(project=self.a1).values_list('host', flat=True)),
-			['api.root.example', 'mail.root.example', 'root.example'])
-		self.assertTrue(is_excluded(self.a1.pk, 'mail.root.example'))
-		self.assertFalse(is_excluded(self.a2.pk, 'mail.root.example'))
+			['api.root.example', 'root.example', 'staging.root.example'])  # what the destination held stays
+		self.assertTrue(ScanHistory.objects.filter(pk=scan_id, domain=root).exists())  # nothing was deleted: the scan, its hosts and the notes came along
+		self.assertTrue(Subdomain.objects.filter(target_domain__project=self.a2, name='mail.root.example').exists())
+		self.assertEqual(HostLabel.objects.get(host='mail.root.example').project, self.a2)
+		self.assertEqual(HostState.objects.get(host='mail.root.example').project, self.a2)
+		self.assertEqual(HostProfile.objects.get(host='mail.root.example').project, self.a2)
+		self.assertEqual(sorted(HostMove.objects.filter(project=self.a1).values_list('host', flat=True)), ['api.root.example', 'root.example'])
 		hm.move_host(self.ctx(self.admin), 'a2', 'root.example', 'a1', whole_target=True)  # and back: the blocks lift
 		self.assertFalse(HostMove.objects.filter(project=self.a1).exists())
-		self.assertTrue(Domain.objects.filter(project=self.a1, name='root.example').exists())
+		self.assertEqual(Domain.objects.get(name='root.example').project, self.a1)
 
-	def test_a_whole_target_is_refused_when_a_third_project_holds_a_target_under_it(self):
+	def test_findings_matches_and_their_notes_come_along(self):
+		root = self.whole_target_setup()
+		scan = ScanHistory.objects.get(domain=root)
+		mail = Subdomain.objects.get(target_domain=root, name='mail.root.example')
+		vuln = Vulnerability.objects.create(name='Open admin', severity=3, subdomain=mail, target_domain=root, scan_history=scan, http_url='https://mail.root.example/admin')
+		cve, _ = CVEEntry.objects.get_or_create(cve_id='CVE-2099-0002')
+		match = CVEMatch.objects.create(cve_entry=cve, subdomain=mail)
+		FindingComment.objects.create(project=self.a1, finding_kind='vulnerability', finding_id=vuln.pk, author=self.admin, text='looking')
+		FindingComment.objects.create(project=self.a1, finding_kind='match', finding_id=match.pk, author=self.admin, text='patched next week')
+		keep = FindingComment.objects.create(project=self.a1, finding_kind='vulnerability', finding_id=vuln.pk + 1000, author=self.admin, text='another host')
+		hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
+		self.assertTrue(Vulnerability.objects.filter(pk=vuln.pk, target_domain__project=self.a2).exists())
+		self.assertEqual(sorted(FindingComment.objects.filter(project=self.a2).values_list('text', flat=True)), ['looking', 'patched next week'])
+		self.assertEqual(FindingComment.objects.get(pk=keep.pk).project, self.a1)
+
+	def test_a_row_the_destination_already_holds_wins_over_the_moved_one(self):
+		root = self.whole_target_setup()
+		other = Domain.objects.create(name='other.example', project=self.a2, insert_date=timezone.now())
+		HostLabel.objects.create(project=self.a1, domain=root, host='shared.example', label='WAF')
+		HostLabel.objects.create(project=self.a2, domain=other, host='shared.example', label='WAF')
+		hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
+		self.assertEqual(HostLabel.objects.filter(host='shared.example').count(), 1)
+		self.assertEqual(HostLabel.objects.get(host='shared.example').domain, other)
+		self.assertEqual(HostLabel.objects.get(host='mail.root.example').project, self.a2)
+
+	def test_a_target_a_third_project_holds_under_the_name_stays_where_it_is(self):
 		self.whole_target_setup()
 		a3 = Project.objects.create(name='A3', slug='a3', insert_date=timezone.now(), org=self.org_a)
 		Domain.objects.create(name='dev.root.example', project=a3, insert_date=timezone.now())
-		with self.assertRaises(ApiError) as e:
-			hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
-		self.assertEqual(e.exception.status, 409)
-		self.assertIn('dev.root.example', e.exception.message)
-		self.assertTrue(Domain.objects.filter(project=self.a1, name='root.example').exists())
+		hm.move_host(self.ctx(self.admin), 'a1', 'root.example', 'a2', whole_target=True)
+		self.assertEqual(Domain.objects.get(name='dev.root.example').project, a3)
 
 	def test_a_removal_a_running_scan_got_in_the_way_of_is_run_again(self):
 		"""A scan already under way can write a row for a target being deleted; the commit then fails whole and is retried."""

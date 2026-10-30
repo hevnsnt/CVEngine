@@ -331,6 +331,9 @@ def move_host(ctx, slug, host, to_project, discover=True, whole_target=False):
     scanned there. Moving it back later lifts that block. Needs write access to both projects. Everything that could refuse the move
     is checked before anything is deleted.
 
+    A target moved within its organization is not deleted and discovered again: it is pointed at the new project with everything it holds
+    (``target_move``). The rest of this function is the other case, a host under a larger target or a move to another organization.
+
     A host that is also a target of this project with other hosts under it moves only with ``whole_target``: the target, every host
     under it and every target of this project under it go together (one HostMove per name), and the destination discovers them
     again. Without it the 409 says how many hosts the target holds, so the caller can ask before moving them all."""
@@ -351,6 +354,9 @@ def move_host(ctx, slug, host, to_project, discover=True, whole_target=False):
         raise ApiError(404, 'host not found in this project')
     _expand_target(name, dest.id)  # refused here (a blocked address, say) before anything is deleted
     is_target = Domain.objects.filter(project=source, name__iexact=name).exists()
+    if is_target and source.org_id == dest.org_id:  # the same organization: the target is pointed at the new project, with its history (target_move)
+        from agentapi.target_move import move_target
+        return move_target(ctx, source, dest, name, discover=discover, whole_target=whole_target)
     others = _target_hosts(source, name) if is_target else []
     if others and not whole_target:
         raise ApiError(409, f'{name} is a target of this project with {len(others)} other host{"s" if len(others) != 1 else ""} under it: '
