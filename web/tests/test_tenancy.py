@@ -342,7 +342,7 @@ class MfaFlowTests(TestCase):
 		self.assertContains(r, 'reNgine')
 		self.assertContains(r, 'https://github.com/ACK-J/MailFail')
 		self.assertContains(r, 'Black Hills Information Security')
-		self.assertContains(r, f'<dt>Version</dt><dd>{settings.RENGINE_CURRENT_VERSION}</dd>')
+		self.assertContains(r, f'<dt>Version</dt><dd>{settings.RENGINE_CURRENT_VERSION}')  # an edition name may follow the version
 		self.assertNotEqual(settings.RENGINE_CURRENT_VERSION, 'unknown')
 
 
