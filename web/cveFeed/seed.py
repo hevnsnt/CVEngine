@@ -68,14 +68,18 @@ def record_for(cve, detection_row=None):
 
 def export_seed(path, progress=None):
     """Write the whole catalog to ``path`` (and ``path`` + ``.manifest.json`` beside it). Returns the manifest."""
+    from django.db.models import Max
     detections = {d.cve_entry_id: d for d in CVEDetection.objects.exclude(strategy={}).iterator(chunk_size=2000)}
     tiers, count = {'fire': 0, 'smoke': 0, 'ice': 0}, 0
+    # the newest publication time the snapshot holds: what a consumer may assume the feed is complete through (the export time says when
+    # it was written, not what the catalog had read by then)
+    covers_through = _iso(CVEEntry.objects.aggregate(newest=Max('published_at'))['newest'])
     directory = os.path.dirname(os.path.abspath(path))
     handle, tmp = tempfile.mkstemp(prefix='.cve-seed-', dir=directory)
     os.close(handle)
     try:
         with gzip.open(tmp, 'wt', encoding='utf-8', compresslevel=9) as out:
-            out.write(json.dumps({'format': FORMAT, 'generated_at': timezone.now().isoformat(),
+            out.write(json.dumps({'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'covers_through': covers_through,
                                   'detection_schema': detection.SCHEMA_VERSION}) + '\n')
             for cve in CVEEntry.objects.order_by('id').iterator(chunk_size=2000):
                 record = record_for(cve, detections.get(cve.id))
@@ -93,7 +97,7 @@ def export_seed(path, progress=None):
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-    manifest = {'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'count': count, 'tiers': tiers,
+    manifest = {'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'covers_through': covers_through, 'count': count, 'tiers': tiers,
                 'with_detection': sum(1 for d in detections.values()), 'bytes': os.path.getsize(path), 'sha256': digest.hexdigest()}
     with open(path + '.manifest.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=1)
@@ -224,6 +228,10 @@ def import_seed(path, batch=1000, progress=None):
             if progress:
                 progress(counts)
     flush()
+    # the feed is complete through what the snapshot holds (older seeds only say when they were written, which is later than that:
+    # the walk's margin and the coverage window absorb the difference)
+    from cveFeed import feed_watermark
+    feed_watermark.note_snapshot(_time(manifest.get('covers_through')) or _time(manifest.get('generated_at')))
     return counts
 
 

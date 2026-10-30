@@ -215,8 +215,19 @@ def _feeds():
         guidance = detection_author.progress()
     except Exception:  # noqa: BLE001 - status must not fail on a counting problem
         guidance = None
+    try:
+        from cveFeed import feed_watermark
+        watermark = feed_watermark.status()  # the feed is complete through this time; `behind` when it has not been read to its head in a day
+    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
+        watermark = None
     return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
-            'cve_guidance': guidance}
+            'cve_feed_watermark': watermark, 'cve_guidance': guidance}
+
+
+def _os_detection():
+    """Whether the operating system guesses nmap makes from this server can be believed, why not, and what to do about it (cveFeed.os_detection)."""
+    from cveFeed import os_detection
+    return os_detection.status()
 
 
 def _ai():
@@ -422,6 +433,7 @@ def _system(user, problems, notes):
         age = (timezone.now() - datetime.fromisoformat(last)).total_seconds() / 3600
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
+    out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
     out['ai'] = _probe(problems, 'ai', _ai)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))

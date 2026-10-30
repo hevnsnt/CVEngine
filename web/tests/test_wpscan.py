@@ -216,7 +216,7 @@ class StageTests(RouteFixture, TestCase):
         runner = lambda url, token: stages.append(url) or REPORT  # noqa: E731
         with mock.patch('cveFeed.discovery.stopped', return_value=False):
             discovery._run_stages(self.scan_obj.id, {'scan_id': self.scan_obj.id, 'status': discovery.SUCCESS}, hygiene=False,
-                                  nmap_runner=lambda targets, flags, timeout: '', db_exposure_checks={}, provider=None,
+                                  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
                                   light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
                                   route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, wpscan_runner=runner,
                                   probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '', 'final_url': url, 'url': url})

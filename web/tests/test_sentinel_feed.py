@@ -25,6 +25,8 @@ class NmapIpv6Tests(SimpleTestCase):
         commands, replies = [], list(answers)
 
         class Proc:
+            returncode = 0
+
             def __init__(self, cmd, **kw):
                 commands.append(cmd)
 
@@ -210,3 +212,77 @@ class FeedTests(Base):
         task = PeriodicTask.objects.get(name='cvengine-feed-sentinels')
         self.assertEqual((task.task, task.enabled, task.interval.every, task.interval.period), ('feed_sentinels', True, 1, 'minutes'))
         self.assertIn('feed_sentinels', scan_control.PAUSE_EXEMPT_TASKS)
+
+
+class RefreshTests(Base):
+    """With every host covered nothing is due, so nothing would reach a Sentinel: the refresh gives it the stalest hosts again."""
+
+    def setUp(self):
+        super().setUp()
+        mock.patch('cveFeed.assessment_review.host_coverage_due', return_value=(0, [])).start()  # every host has its first pass
+        sender = mock.patch('cveFeed.tasks.assess_host.apply_async').start()
+        sender.return_value.id = 'task'
+
+    def assessed(self, sub, hours_ago):
+        job = HostAssessment.objects.create(project=self.project, domain=self.domain, host=sub.name.lower(), status='completed')
+        HostAssessment.objects.filter(pk=job.pk).update(created_at=self.now - timedelta(hours=hours_ago))
+
+    def queued_hosts(self):
+        return list(HostAssessment.objects.filter(status='queued').order_by('id').values_list('host', flat=True))
+
+    def test_the_stalest_hosts_are_queued_first_and_one_assessed_inside_the_gap_is_left_alone(self):
+        never, old, older, fresh = self.host('never'), self.host('old'), self.host('older'), self.host('fresh')
+        self.assessed(old, 20)
+        self.assessed(older, 70)
+        self.assessed(fresh, 1)
+        self.sentinel(slots=3)
+        out = coverage_topup.refresh_for_sentinels(self.now)
+        self.assertEqual(out['refreshed'], 3)
+        self.assertEqual(self.queued_hosts(), [never.name, older.name, old.name])  # never assessed, then longest ago; 'fresh' rests
+        self.assertEqual(set(HostAssessment.objects.filter(status='queued').values_list('source', flat=True)), {'refresh'})
+
+    def test_it_fills_the_sentinel_scaled_cap_and_no_more(self):
+        for i in range(20):
+            self.host(f'h{i}')
+        self.sentinel(slots=3)  # project cap 9
+        self.assertEqual(coverage_topup.refresh_for_sentinels(self.now)['refreshed'], 9)
+        self.assertEqual(coverage_topup.refresh_for_sentinels(self.now)['refreshed'], 0)  # the pool is full
+
+    def test_a_project_no_sentinel_covers_is_not_refreshed(self):
+        self.host('a')
+        self.sentinel(slots=3, scope={'orgs': [], 'projects': ['elsewhere'], 'hosts': []})
+        self.assertEqual(coverage_topup.refresh_for_sentinels(self.now)['refreshed'], 0)
+        self.assertEqual(self.queued_hosts(), [])
+
+    def test_the_gap_is_configurable_and_zero_turns_the_refresh_off(self):
+        self.host('a')
+        self.sentinel(slots=3)
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_REFRESH_GAP_HOURS': '0'}):
+            self.assertEqual(coverage_topup.refresh_for_sentinels(self.now), {'refreshed': 0, 'skipped': 'refresh is off'})
+        self.assertEqual(coverage_topup.refresh_gap(), timedelta(hours=6))
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_REFRESH_GAP_HOURS': '24'}):
+            self.assertEqual(coverage_topup.refresh_gap(), timedelta(hours=24))
+
+    def test_a_pause_stops_it_and_an_excluded_or_archived_host_is_skipped_not_fatal(self):
+        archived, ok = self.host('archived'), self.host('ok')
+        HostState.objects.create(project=self.project, domain=self.domain, host=archived.name, archived_at=self.now)
+        self.sentinel(slots=3)
+        self.assertEqual(coverage_topup.refresh_for_sentinels(self.now)['refreshed'], 1)
+        self.assertEqual(self.queued_hosts(), [ok.name])
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=True):
+            self.assertEqual(coverage_topup.refresh_for_sentinels(self.now)['skipped'], 'paused')
+
+    def test_the_feed_gives_an_idle_sentinel_work_once_nothing_is_due(self):
+        for name in ('a', 'b'):
+            self.host(name)
+        self.sentinel(slots=3)
+        out = coverage_topup.feed_sentinels(self.now)
+        self.assertEqual((out['hosts_queued'], out['refresh']['refreshed']), (0, 2))
+        self.assertEqual(len(self.queued_hosts()), 2)
+
+    def test_the_refresh_only_ever_queues_a_host_once_at_a_time(self):
+        self.host('a')
+        self.sentinel(slots=3)
+        coverage_topup.refresh_for_sentinels(self.now)
+        coverage_topup.refresh_for_sentinels(self.now)
+        self.assertEqual(HostAssessment.objects.filter(status='queued').count(), 1)

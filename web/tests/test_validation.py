@@ -358,6 +358,29 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(validation.interpret(route, {}, {'status': 'observed', 'summary': 'x', 'http': {'status': 200}})['status'], 'reaffirmed')
 		self.assertEqual(validation.interpret(route, {}, {'status': 'observed', 'summary': 'x', 'http': {'status': 404}})['status'], 'no_match')
 
+	def test_interpret_requires_the_same_identified_product(self):
+		for product, observed in (('ingress-nginx', 'nginx'), ('nginx', 'ingress-nginx'),
+				('phpMyAdmin', 'php'), ('php', 'phpMyAdmin'), ('nginx', ''), ('', 'nginx'),
+				('Apache HTTP Server', 'Oracle HTTP Server'), ('WAF', 'WAF')):
+			for version in ('1.5.0', '3.0.0'):
+				with self.subTest(product=product, observed=observed, version=version):
+					subject = {'kind': 'cve_match', 'product': product, 'range': {'introduced': '1.0', 'fixed': '2.0'}}
+					seen = {'status': 'observed', 'summary': 'x', 'observed': {'product': observed, 'version': version}}
+					self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'observed')
+
+	def test_interpret_accepts_product_aliases_and_vendor_names(self):
+		# the second part: product strings nmap really prints, with words the advisory's product name does not have
+		for product, observed in (('nginx', 'NGINX'), ('Apache HTTP Server', 'Apache httpd'),
+				('HTTP Server', 'Apache'), ('OpenSSH', 'OpenSSH server'),
+				('tomcat', 'Apache Tomcat/Coyote JSP engine'), ('express', 'Node.js Express framework'), ('esxi', 'VMware ESXi SOAP API'),
+				('internet_information_services', 'Microsoft IIS httpd'), ('sql_server', 'Microsoft SQL Server 2019'), ('weblogic_server', 'Oracle WebLogic Server')):
+			with self.subTest(product=product, observed=observed):
+				subject = {'kind': 'cve_match', 'product': product, 'range': {'introduced': '1.0', 'fixed': '2.0'}}
+				seen = {'status': 'observed', 'summary': 'x', 'observed': {'product': observed, 'version': '1.5.0'}}
+				self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'reaffirmed')
+				seen['observed']['version'] = '3.0.0'
+				self.assertEqual(validation.interpret(subject, {}, seen)['status'], 'version_changed')
+
 	def test_rollup_never_calls_a_failure_clean(self):
 		r = validation.rollup
 		self.assertEqual(r([]), 'none')
@@ -584,6 +607,25 @@ class ApplyValidationTests(ValidationBase):
 		self.assertEqual(len(row.validation_steps), 1)  # the step for the same check is replaced, not piled up
 		self.assertNotEqual(row.validation_status, 'clean')
 
+	def test_a_later_clean_check_keeps_an_earlier_failure_due_for_retry(self):
+		_, row = self.prepared()
+		now = timezone.now() - datetime.timedelta(hours=7)
+		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'failed', 'error': 'timeout', 'summary': 'timed out'}, now=now)
+		retry_at = row.next_attempt_at
+		validation.apply_validation(row, self.check(), {'status': 'no_match', 'summary': 'the template did not match'},
+														 now=now + datetime.timedelta(minutes=1))
+		row.refresh_from_db()
+		self.assertEqual((row.validation_status, row.attempts, row.next_attempt_at), ('failed', 1, retry_at))
+		self.assertIn(row.pk, validation.due_ids(self.project.pk))
+		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'no_match', 'summary': 'the service did not match'})
+		self.assertEqual((row.validation_status, row.attempts, row.next_attempt_at), ('clean', 0, None))
+
+	def test_a_failed_row_without_a_retry_date_is_recovered_by_the_sweep(self):
+		_, row = self.prepared()
+		validation.apply_validation(row, self.check(), {'status': 'failed', 'error': 'timeout', 'summary': 'timed out'})
+		Triage.objects.filter(pk=row.pk).update(next_attempt_at=None)
+		self.assertIn(row.pk, validation.due_ids(self.project.pk))
+
 	def test_a_reaffirmed_version_raises_a_triaged_finding_to_likely(self):
 		m, row = self.prepared()
 		row.classification = 'needs_validation'
@@ -728,6 +770,19 @@ class RunValidationTests(ValidationBase):
 		Triage.objects.update(next_attempt_at=timezone.now() - datetime.timedelta(minutes=1))
 		self.run_validation(runners=(runners, calls))
 		self.assertEqual(len(calls), 4)
+
+	def test_a_failed_step_of_a_check_the_plan_no_longer_holds_does_not_keep_the_row_failed(self):
+		self.match()
+		(row,) = self.rows()
+		row.validation_steps = [{'kind': 'nmap_sv', 'label': 'gone', 'display': '', 'target': 'a-host-no-longer-planned.v.test', 'ran_at': timezone.now().isoformat(),
+			'result': 'failed', 'summary': 'timed out', 'output_excerpt': '', 'error': 'timeout'}]
+		row.validation_status, row.attempts, row.next_attempt_at = 'failed', 1, timezone.now() - datetime.timedelta(minutes=1)
+		row.save(update_fields=['validation_steps', 'validation_status', 'attempts', 'next_attempt_at'])
+		self.run_validation()
+		row.refresh_from_db()
+		self.assertNotEqual(row.validation_status, 'failed')
+		self.assertIsNone(row.next_attempt_at)
+		self.assertFalse(any(s['target'] == 'a-host-no-longer-planned.v.test' for s in row.validation_steps))
 
 	def test_a_crashing_runner_is_failed_never_clean(self):
 		self.match()

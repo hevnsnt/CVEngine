@@ -73,8 +73,11 @@ def next_targets(limit, now=None):
     gate = Gate()
     blocked_projects = gate.blocked
     cutoff = now - min_gap()
-    # the newest scan date per domain by an index lookup (startScan ScanHistory (domain, start_scan_date)), not a join and group over every scan ever run
-    newest = ScanHistory.objects.filter(domain_id=OuterRef('pk')).order_by('-start_scan_date').values('start_scan_date')[:1]
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    # A host-only retest does not refresh discovery of the entire domain.
+    newest = (ScanHistory.objects.filter(domain_id=OuterRef('pk'))
+              .exclude(tasks__contains=[HOST_PIPELINE_TASK])
+              .order_by('-start_scan_date').values('start_scan_date')[:1])
     rows = (Domain.objects.exclude(project=None).annotate(last_scan=Subquery(newest))
             .order_by(F('last_scan').asc(nulls_first=True), 'id').values_list('id', 'project_id', 'name', 'last_scan'))
     from targetApp.target_types import internal_networks, sentinel_only_target

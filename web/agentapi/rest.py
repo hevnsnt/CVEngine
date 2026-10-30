@@ -20,6 +20,7 @@ from agentapi import authcheck
 from agentapi import reports
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
+from tenancy import roles
 from reNgine import schema_guard
 from agentapi.auth import create_token
 from tenancy import audit
@@ -221,8 +222,9 @@ ROUTES = [
                                                              criticality=_body(r).get('criticality'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/delete', 'Delete a host\'s data from this project only (it can be rediscovered); exact name, irreversible',
      lambda r, c, slug, host, **k: hosts.delete_host(c, slug, host, with_aliases=bool(_body(r).get('with_aliases')))),
-    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/move', 'Move a host to another project you can write to; body {to_project}. It is added there as a target and scanned; its data is deleted here and this project never brings it back',
-     lambda r, c, slug, host, **k: hosts.move_host(c, slug, host, _body(r).get('to_project'), discover=_body(r).get('discover', True) is not False)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/move', 'Move a host to another project you can write to; body {to_project, whole_target}. It is added there as a target and scanned; its data is deleted here and this project never brings it back. A host that is a target here with other hosts under it moves only with whole_target (the 409 says how many)',
+     lambda r, c, slug, host, **k: hosts.move_host(c, slug, host, _body(r).get('to_project'), discover=_body(r).get('discover', True) is not False,
+                                                     whole_target=_body(r).get('whole_target') is True)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/exclude', 'Remove a host from every project of the organization and never scan it again; body {reason, with_aliases, include_subdomains}. Needs an organization-level role',
      lambda r, c, slug, host, **k: hosts.exclude_host(c, slug, host, _body(r).get('reason', ''), include_subdomains=bool(_body(r).get('include_subdomains')),
                                                       with_aliases=bool(_body(r).get('with_aliases')))),
@@ -396,7 +398,7 @@ ROUTES = [
      lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents); a Sentinel row carries slots {max, in_use, free, by_kind}', lambda r, c, **k: broker.list_agents(c, r.GET)),
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
-    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null hands one back to the Sentinel) and update: "now" (refused while self_update is off)',
+    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
     ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, changed_by, changed_at}; self_update applies to every Sentinel with no value of its own (null follows the instance\'s Automatic or Manual update choice)',
      lambda r, c, **k: sentinel_settings.get_defaults()),
@@ -483,7 +485,7 @@ def dispatch(request, path):
     path = path.strip('/')
     if path == 'openapi.json':
         return JsonResponse(openapi_spec())
-    ctx = Ctx(user=request.user, token=getattr(request, 'api_token', None))
+    ctx = Ctx(user=request.user, token=getattr(request, 'api_token', None), org=roles.scope_org(request))
     allowed = []
     for method, regex, _, fn in COMPILED:
         match = regex.match(path)
@@ -499,7 +501,7 @@ def dispatch(request, path):
                 raise ApiError(403, 'this token is read only')
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
-            return JsonResponse({'error': e.message}, status=e.status)
+            return JsonResponse({**getattr(e, 'extra', {}), 'error': e.message}, status=e.status)
         except Exception as exc:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
             if schema_guard.behind(exc):  # an update is between its new files and its migration: ask again shortly
                 return schema_guard.unavailable(request)

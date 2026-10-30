@@ -63,6 +63,62 @@ class SeedRoundTripTests(TestCase):
 		self.assertEqual((counts['created'], counts['detections']), (0, 2))
 
 
+class SeedWatermarkTests(TestCase):
+	"""A seed is a snapshot: the feed is complete through what it holds, and the walk reads on from there (issue 207)."""
+
+	def _import(self, manifest):
+		with tempfile.TemporaryDirectory() as directory:
+			path = os.path.join(directory, 'seed.jsonl.gz')
+			with gzip.open(path, 'wt') as out:
+				out.write(json.dumps({'format': 1, **manifest}) + '\n')
+				out.write(json.dumps({'cve_id': 'CVE-2099-300', 'title': 't'}) + '\n')
+			return seed.import_seed(path)
+
+	def _through(self):
+		from cveFeed import feed_watermark
+		row = feed_watermark.current()
+		return row.covered_through.isoformat() if row.covered_through else None
+
+	def test_an_import_takes_the_newest_publication_time_the_snapshot_holds(self):
+		self._import({'generated_at': '2026-10-20T06:00:00+00:00', 'covers_through': '2026-10-18T22:30:00+00:00'})
+		self.assertEqual(self._through(), '2026-10-18T22:30:00+00:00')
+
+	def test_an_older_seed_without_it_falls_back_to_when_it_was_written(self):
+		self._import({'generated_at': '2026-10-20T06:00:00+00:00'})
+		self.assertEqual(self._through(), '2026-10-20T06:00:00+00:00')
+
+	def test_it_is_set_even_when_the_seed_added_nothing_new(self):
+		CVEEntry.objects.create(cve_id='CVE-2099-300', affected=[])
+		self._import({'covers_through': '2026-10-18T22:30:00+00:00'})
+		self.assertEqual(self._through(), '2026-10-18T22:30:00+00:00')
+
+	def test_a_manifest_with_no_usable_time_records_nothing(self):
+		self._import({'generated_at': 'not a time'})
+		self.assertIsNone(self._through())
+
+	def test_the_earlier_time_stands_and_a_walk_in_progress_is_dropped(self):
+		from cveFeed import feed_watermark
+		self._import({'covers_through': '2026-10-18T22:30:00+00:00'})
+		row = feed_watermark.current()
+		row.resume_cursor, row.resume_head = 'c9', timezone.now()
+		row.save()
+		self._import({'covers_through': '2026-10-25T00:00:00+00:00'})  # a newer seed does not claim more than is known
+		self.assertEqual(self._through(), '2026-10-18T22:30:00+00:00')
+		self.assertEqual(feed_watermark.current().resume_cursor, '')
+		self._import({'covers_through': '2026-10-01T00:00:00+00:00'})
+		self.assertEqual(self._through(), '2026-10-01T00:00:00+00:00')
+
+	def test_an_export_says_what_it_covers(self):
+		make_catalog()
+		with tempfile.TemporaryDirectory() as directory:
+			path = os.path.join(directory, 'seed.jsonl.gz')
+			manifest = seed.export_seed(path)
+			header = next(seed.iter_lines(path))
+		newest = CVEEntry.objects.order_by('-published_at').values_list('published_at', flat=True).first()
+		self.assertEqual(manifest['covers_through'], newest.isoformat())
+		self.assertEqual(header['covers_through'], manifest['covers_through'])
+
+
 def write_seed(path, records):
 	with gzip.open(path, 'wt') as out:
 		out.write(json.dumps({'format': 1}) + '\n')

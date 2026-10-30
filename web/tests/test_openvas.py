@@ -102,10 +102,14 @@ class ParseTests(SimpleTestCase):
     def test_severity_levels_follow_cvss(self):
         self.assertEqual([ov.severity_level(s) for s in (0, 0.1, 3.9, 4.0, 6.9, 7.0, 8.9, 9.0, 10)], [0, 1, 1, 2, 2, 3, 3, 4, 4])
 
-    def test_the_confirmation_line_is_80(self):
-        self.assertEqual(ov.CONFIRMED_QOD, 80)
-        self.assertTrue(ov.confirmed({'qod': 80}))
-        self.assertFalse(ov.confirmed({'qod': 79}))
+    def test_the_type_decides_and_qod_80_is_a_banner_read_not_a_confirmation(self):
+        self.assertEqual(ov.CONFIRMED_QOD, 95)
+        for qod_type in ('remote_active', 'remote_vul', 'remote_app', 'package', 'registry', 'exploit'):
+            self.assertTrue(ov.confirmed({'qod': 80, 'qod_type': qod_type}), qod_type)
+        for qod_type in ('remote_banner', 'executable_version', 'remote_analysis', 'remote_probe', 'remote_banner_unreliable'):
+            self.assertFalse(ov.confirmed({'qod': 99, 'qod_type': qod_type}), qod_type)  # the number never overrides a banner type
+        self.assertTrue(ov.confirmed({'qod': 95, 'qod_type': ''}))  # no type from gvmd: the number alone
+        self.assertFalse(ov.confirmed({'qod': 94, 'qod_type': ''}))
 
     def test_nothing_marks_third_party_text_safe_for_html(self):
         for name in ('openvas_scan.py', 'openvas_admin.py'):
@@ -377,7 +381,7 @@ class Fixture(GvmdFixture, RouteFixture):
 
 
 APACHE = dict(host='93.184.216.5', port='443/tcp', oid=OID_APACHE, name='Apache HTTP Server < 2.4.51 Path Traversal', severity=9.8, qod=99,
-              cves=['CVE-2021-41773'], hostname='www.rt.test')
+              cves=['CVE-2021-41773'], hostname='www.rt.test', qod_type='remote_active')
 BANNER = dict(host='93.184.216.5', port='80/tcp', oid=OID_BANNER, name='Old thing version check', severity=5.0, qod=30, cves=['CVE-2019-0001'],
               hostname='www.rt.test', qod_type='remote_banner_unreliable')
 PLAIN = dict(host='93.184.216.5', port='22/tcp', oid=OID_PLAIN, name='SSH weak algorithms', severity=5.3, qod=80, cves=[], hostname='www.rt.test')
@@ -715,13 +719,14 @@ class ImportTests(Fixture, TestCase):
         self.assertIn('Not confirmed', vuln.description)
         self.assertEqual(vuln.severity, 2)  # the severity still follows the CVSS
 
-    def test_the_boundary_is_exactly_80(self):
-        for qod, expected in ((79, ''), (80, 'vulnerable')):
+    def test_a_banner_version_check_at_qod_80_is_not_hard_evidence(self):
+        for qod, qod_type, expected in ((80, 'remote_banner', ''), (80, 'executable_version', ''), (80, 'remote_active', 'vulnerable'),
+                                        (97, 'package', 'vulnerable')):
             CVEMatch.objects.all().delete()
             ProbeObservation.objects.all().delete()
             Vulnerability.objects.all().delete()
-            self.run_scan([{**APACHE, 'qod': qod}])
-            self.assertEqual(CVEMatch.objects.get(cve_entry=self.cve).template_result, expected, qod)
+            self.run_scan([{**APACHE, 'qod': qod, 'qod_type': qod_type}])
+            self.assertEqual(CVEMatch.objects.get(cve_entry=self.cve).template_result, expected, (qod, qod_type))
 
     def test_a_cve_the_catalogue_does_not_know_is_a_finding_without_a_match(self):
         self.run_scan([{**APACHE, 'cves': ['CVE-2099-0001']}])
@@ -1145,7 +1150,7 @@ class SettingsApiTests(Fixture, TestCase):
         status, data = send(self.c, 'GET', 'openvas')
         self.assertEqual(status, 200)
         self.assertEqual((data['enabled'], data['sentinel_only'], data['password_set'], data['links'], data['running']), (False, False, False, [], False))
-        self.assertEqual(data['floor']['confirmed_qod'], 80)
+        self.assertEqual(data['floor']['confirmed_qod'], 95)
         self.assertEqual(data['floor']['excluded_families'], ['Denial of Service', 'Brute force attacks'])
         self.assertEqual(data['transport'], 'socket:/run/gvmd/gvmd.sock')
         self.assertIn(self.pid, [p['id'] for p in data['projects']])

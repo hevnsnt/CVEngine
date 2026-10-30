@@ -139,6 +139,7 @@ async function api(method, path, body) {
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
+    err.data = data;
     throw err;
   }
   return data;
@@ -551,7 +552,7 @@ const CHANGE_LABEL = {
   screenshot_changed: "Screenshot changed",
 };
 const AUTH_RANK = { open: 0, login: 1, session_required: 2, sso: 3 };
-const AUTH_LABEL = { open: "open", login: "login page", session_required: "session required", sso: "SSO", redirect: "redirect", not_found: "not found" };
+const AUTH_LABEL = { open: "open", login: "login page", session_required: "session required", sso: "SSO", redirect: "redirect", not_found: "not found", catch_all: "same as a missing page" };
 const authLabel = (s) => AUTH_LABEL[s] || s || "unknown";
 const pathOf = (url) => {
   try {
@@ -627,7 +628,7 @@ const SENSITIVE_GROUP = {
   pii: ["email", "phone", "card"],
   internal: ["internal_ip", "internal_host"],
 };
-const AUTH_BADGE = { open: "smoke", login: "", session_required: "ice", sso: "success", redirect: "queued", not_found: "queued", error: "queued" };
+const AUTH_BADGE = { open: "smoke", login: "", session_required: "ice", sso: "success", redirect: "queued", not_found: "queued", catch_all: "queued", error: "queued" };
 const NOTABLE_ROUTES = ["open", "login", "session_required", "sso"];
 function routeLine(r) {
   const line = el("div", "find");
@@ -2681,16 +2682,40 @@ const pages = {
           return;
         }
         const label = pick.selectedOptions[0].parentElement.label ? `${pick.selectedOptions[0].parentElement.label} / ${pick.selectedOptions[0].textContent}` : pick.selectedOptions[0].textContent;
-        const sure = await ask(`Move ${h.host} to ${label}? It is scanned there from scratch. Its findings and history in this project are deleted.`, { title: "Move host?", ok: "Move host", danger: false });
+        const sure = await ask(`Move ${h.host} to ${label}? A host that is not a target is scanned there from scratch and its findings and history in this project are deleted. A target moves with its history.`, { title: "Move host?", ok: "Move host", danger: false });
         if (!sure) return;
         move.disabled = true;
-        try {
-          const r = await api("POST", hostPath(h, "move"), { to_project: to });
-          toast(`Moved ${r.host} to ${[r.to_org_name, r.to_project_name].filter(Boolean).join(" / ")}${r.scan_ids && r.scan_ids.length ? ": a scan has started there" : ""}`);
+        const done = (r) => {
+          const n = r.hosts_moved > 1 ? ` and ${r.hosts_moved - 1} host${r.hosts_moved === 2 ? "" : "s"} under it` : "";
+          toast(`Moved ${r.host}${n} to ${[r.to_org_name, r.to_project_name].filter(Boolean).join(" / ")}${r.scan_ids && r.scan_ids.length ? ": a scan has started there" : ""}`);
           afterRemoval();
+        };
+        try {
+          done(await api("POST", hostPath(h, "move"), { to_project: to }));
         } catch (err) {
-          toast(err.message, true);
-          move.disabled = false;
+          // the host is also a target here with other hosts under it: they can only go together, so say which and ask again
+          const whole = err.status === 409 && err.data && err.data.whole_target;
+          if (!whole) {
+            toast(err.message, true);
+            move.disabled = false;
+            return;
+          }
+          const shown = whole.hosts.slice(0, 6).join(", ");
+          const more = whole.count > 6 ? ` and ${whole.count - 6} more` : "";
+          const all = await ask(
+            `${whole.host} is a target in this project with ${whole.count} other host${whole.count === 1 ? "" : "s"} under it (${shown}${more}). Move the target and all of them to ${label}? ${whole.keeps_history ? "Their findings, notes and history move with them, and the next scan there updates them." : "They are discovered and scanned there from scratch, and their findings and history in this project are deleted."}`,
+            { title: "Move the whole target?", ok: `Move ${whole.count + 1} hosts`, danger: false },
+          );
+          if (!all) {
+            move.disabled = false;
+            return;
+          }
+          try {
+            done(await api("POST", hostPath(h, "move"), { to_project: to, whole_target: true }));
+          } catch (err2) {
+            toast(err2.message, true);
+            move.disabled = false;
+          }
         }
       };
       return box;

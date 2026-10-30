@@ -20,10 +20,11 @@ def get_or_create_ip(address, org_id=None):
     organization's scans found are never visible through another's hosts), so the lookup is ``(org, address)``. Safe when another
     worker creates the same row at the same moment: the unique constraint makes the loser's insert fail, and it reads the winner's
     row instead of failing the scan."""
+    from targetApp.target_types import is_public_address
     lookup = {'address': address, 'org_id': org_id}
     try:
         with transaction.atomic():
-            return IpAddress.objects.get_or_create(**lookup)
+            return IpAddress.objects.get_or_create(**lookup, defaults={'is_private': not is_public_address(address)})
     except IntegrityError:
         return IpAddress.objects.get(**lookup), False
     except IpAddress.MultipleObjectsReturned:  # rows from before the constraint existed

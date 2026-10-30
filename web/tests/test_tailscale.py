@@ -648,8 +648,24 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         sub = mock.Mock()
         sub.ip_addresses.all.return_value = [mock.Mock(address='100.64.0.5', is_private=False)]
         self.assertFalse(_has_public_ip(sub))  # a tailnet address is never "public"
-        sub.ip_addresses.all.return_value = [mock.Mock(address='198.51.100.7', is_private=False)]
+        sub.ip_addresses.all.return_value = [mock.Mock(address='93.184.216.34', is_private=False)]
         self.assertTrue(_has_public_ip(sub))
+
+    def test_a_private_address_is_never_public_even_when_the_install_scans_its_own_network(self):
+        # issue 212: nothing set the stored flag for an address a scan found, and with private targets allowed the scanner gate said yes
+        import os
+        from cveFeed.scoring import _has_public_ip
+        sub = mock.Mock()
+        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
+            for private in ('192.168.1.5', '10.0.0.7', '172.20.1.1', 'fd12::5'):
+                sub.ip_addresses.all.return_value = [mock.Mock(address=private, is_private=False)]
+                self.assertFalse(_has_public_ip(sub), private)
+            sub.ip_addresses.all.return_value = [mock.Mock(address='192.168.1.5', is_private=False), mock.Mock(address='93.184.216.34', is_private=False)]
+            self.assertTrue(_has_public_ip(sub))  # one public address among them still counts
+        # a scanning policy never changes an exposure score: a blocked range does not make a public address private
+        with mock.patch.dict(os.environ, {'CVENGINE_BLOCKED_CIDRS': '93.184.216.0/24'}):
+            sub.ip_addresses.all.return_value = [mock.Mock(address='93.184.216.34', is_private=False)]
+            self.assertTrue(_has_public_ip(sub))
 
     def test_nuclei_db_exposure_and_the_change_log_pass_the_owning_project(self):
         from cveFeed import changes, db_exposure, nuclei_scan
@@ -705,7 +721,7 @@ class PipelineReachTests(ScopeFixture, TestCase):
 
         def runner(targets, flags, timeout):
             nmap.append(list(targets))
-            return ''
+            return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
         kwargs = dict(stream=mock.Mock(side_effect=AssertionError('no bbot for an IP')), light_stream=lambda path, **k: iter([]),
                       targeted_stream=lambda path, **k: iter([]), nmap_runner=runner, db_exposure_checks={}, provider=None,
                       route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},

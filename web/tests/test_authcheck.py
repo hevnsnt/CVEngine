@@ -853,6 +853,14 @@ class NucleiTests(Fixture):
 		self.runs = []
 		self.leftovers = []
 
+	def make(self, *args, allow_untrusted_certificate=True, **kwargs):
+		# Most Nuclei tests exercise the owner's explicit opt-in. Tests for the
+		# default, withheld path pass False and verify no secret file is used.
+		cred = super().make(*args, **kwargs)
+		cred.allow_untrusted_certificate = allow_untrusted_certificate
+		cred.save(update_fields=['allow_untrusted_certificate'])
+		return cred
+
 	def scan(self, names=('app.example.test',), ports=((443, 'https'),), domain=None):
 		scan = ScanHistory.objects.create(domain=domain or self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=1)
 		for number, name in enumerate(names):
@@ -958,26 +966,20 @@ class NucleiTests(Fixture):
 		self.assertIn('app.example.test:8443', plain)  # the plain pass still covers every port and the address
 		self.assertTrue([t for t in plain if t.startswith('203.0.113.')])
 
-	def test_a_certificate_that_verifies_gets_the_sign_in_and_one_that_does_not_gets_nothing_and_says_why(self):
-		self.make(host='app.example.test')
-		nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
-		self.assertEqual(len(self.signed_runs()), 1)
-		self.verify.assert_called_once_with('app.example.test', 443, self.project.pk)
-		self.runs.clear()
-		ServiceRun.objects.all().delete()
-		self.verify.return_value = (False, 'self-signed certificate')
+	def test_a_successful_preflight_cannot_authorize_a_later_unverified_nuclei_connection(self):
+		self.make(host='app.example.test', allow_untrusted_certificate=False)
 		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
-		self.assertEqual(self.signed_runs(), [])  # nothing signed in was started, so no value was written anywhere
-		self.assertEqual(out['authenticated']['skipped'], 'certificate not trusted')
+		self.assertEqual(self.signed_runs(), [])  # even a valid preflight cannot authenticate Nuclei's later TLS connection
+		self.assertEqual(out['authenticated']['skipped'], 'Nuclei TLS is not verified')
+		self.verify.assert_not_called()
 		line = AgentActivity.objects.filter(message__contains='Trust this certificate anyway').get().message
 		self.assertIn('https://app.example.test', line)
-		self.assertIn('self-signed certificate', line)
+		self.assertIn('Nuclei does not verify TLS', line)
 		self.assertEqual(self.runs[0]['secret_file'], None)  # the plain pass still ran
 
 	def test_a_withheld_sign_in_is_recorded_and_the_check_coverage_says_it_is_not_sent(self):
 		from cveFeed import check_coverage as cc
-		cred = self.make(host='app.example.test')
-		self.verify.return_value = (False, 'self-signed certificate')
+		cred = self.make(host='app.example.test', allow_untrusted_certificate=False)
 		nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
 		row = ServiceRun.objects.get(service=auth_nuclei.REFUSED_SERVICE)
 		self.assertEqual((row.status, row.asset, row.project_id), ('refused', f'https://app.example.test@{auth_checks.revision(cred)}', self.project.pk))
@@ -991,13 +993,23 @@ class NucleiTests(Fixture):
 		out = coverage_of_nuclei_signed_in()
 		self.assertEqual(out['state'], 'not_applicable')
 		self.assertIn('is not sent', out['detail'])
-		AuthCredential.objects.filter(pk=cred.pk).update(allow_untrusted_certificate=True)  # the owner chose to trust it: planned again
+		AuthCredential.objects.filter(pk=cred.pk).update(allow_untrusted_certificate=True)  # explicit unverified-TLS opt-in
 		self.assertEqual(coverage_of_nuclei_signed_in()['state'], 'due')
 
+	def test_https_nuclei_coverage_is_withheld_before_any_run(self):
+		from cveFeed import check_coverage as cc
+		cred = self.make(host='app.example.test', allow_untrusted_certificate=False)
+		ev = cc.Evidence()
+		ev.credentials = {self.project.pk: [cred]}
+		host = cc.HostFacts('app.example.test', self.project.pk, target_name=self.domain.name,
+		                    target_is_domain=True, addresses=[cc.Addr('203.0.113.9')])
+		checks = {item['id']: item for item in cc.coverage(host, ev)['checks']}
+		self.assertEqual(checks['nuclei-signed-in']['state'], 'not_applicable')
+		self.assertIn('cannot verify TLS', checks['nuclei-signed-in']['detail'])
+
 	def test_the_switch_sends_the_sign_in_to_a_certificate_that_does_not_verify(self):
-		self.make(host="app.example.test")
+		self.make(host="app.example.test", allow_untrusted_certificate=False)
 		AuthCredential.objects.update(allow_untrusted_certificate=True)
-		self.verify.return_value = (False, 'self-signed certificate')
 		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
 		run, = self.signed_runs()
 		self.assertEqual(run['targets'], ['https://app.example.test'])
@@ -1172,6 +1184,7 @@ class CommandTests(TestCase):
 			'request': f'GET /x HTTP/1.1\r\nAuthorization: {SECRET}', 'response': f'echo {TOKEN}', 'curl-command': f'curl -H "Authorization: {SECRET}"'}]
 		values = auth_checks.secret_values([SimpleNamespace(secret={'headers': [['Authorization', SECRET]], 'cookie': ''})])
 		with mock.patch('cveFeed.validation.approved_template', return_value=('id: fixture', '')), \
+				mock.patch('targetApp.target_types.blocked_names', return_value=set()), \
 				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
 			out = templategen.run_template('/t.yaml', ['https://app.example.test'], secret_file='/tmp/x/secrets.json', redact=values)[0]
 			plain = templategen.run_template('/t.yaml', ['app.example.test'])[0]
@@ -1207,6 +1220,12 @@ class TemplateCheckTests(Fixture):
 		self.verify = mock.patch('cveFeed.auth_checks.certificate_verifies', return_value=(True, '')).start()
 		self.addCleanup(mock.patch.stopall)
 
+	def make(self, *args, allow_untrusted_certificate=True, **kwargs):
+		cred = super().make(*args, **kwargs)
+		cred.allow_untrusted_certificate = allow_untrusted_certificate
+		cred.save(update_fields=['allow_untrusted_certificate'])
+		return cred
+
 	def runs(self, plain_hit, signed_hit):
 		calls = []
 
@@ -1239,11 +1258,11 @@ class TemplateCheckTests(Fixture):
 		calls, merged = self.merge(True, True)
 		self.assertNotIn('authenticated', merged[0])
 
-	def test_an_untrusted_certificate_stops_the_signed_in_template_run_unless_the_switch_is_on(self):
-		cred = self.make()
-		self.verify.return_value = (False, 'self-signed certificate')
+	def test_signed_in_template_requires_explicit_unverified_tls_opt_in(self):
+		cred = self.make(allow_untrusted_certificate=False)
 		calls, merged = self.merge(False, True)
 		self.assertEqual((calls, merged[0]['vulnerable']), ([], False))
+		self.verify.assert_not_called()
 		AuthCredential.objects.filter(pk=cred.pk).update(allow_untrusted_certificate=True)
 		calls, merged = self.merge(False, True)
 		self.assertEqual(len(calls), 1)

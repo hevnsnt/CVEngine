@@ -39,15 +39,16 @@ FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')
 
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, **extra):
         super().__init__(message)
-        self.status, self.message = status, message
+        self.status, self.message, self.extra = status, message, extra  # extra: fields the caller can act on, sent beside the error
 
 
 @dataclass
 class Ctx:
     user: object
     token: Optional[object] = None
+    org: str = ''  # the organization the All projects view is narrowed to ('' = every organization; see roles.scope_org)
 
 
 # --- access ------------------------------------------------------------------
@@ -98,7 +99,7 @@ def get_project(ctx, slug, write=False):
         role = roles.user_best_role(ctx.user)
         if not role:
             raise ApiError(404, 'project not found')
-        return AllProjects(_allowed_ids(ctx.user)), role
+        return AllProjects(roles.org_project_ids(list(_allowed_ids(ctx.user)), getattr(ctx, 'org', ''))), role
     project = Project.objects.filter(slug=slug or '').first()
     role = roles.effective_role(ctx.user, project) if project else None
     if not role:
@@ -570,7 +571,10 @@ def _internal_scan(ctx, project, domain):
     if not sentinel_only_target(domain.name, project.id):
         return None
     from cveFeed import internal_scan
-    scan = internal_scan.start(domain, initiated_by=ctx.user)
+    try:
+        scan = internal_scan.start(domain, initiated_by=ctx.user)
+    except ValueError as exc:  # the range, exclusion, or bounty policy changed after the request's first check
+        raise ApiError(409, str(exc)) from exc
     return {'scan_id': scan.id, 'status': 'queued', 'internal': True}
 
 
@@ -2324,7 +2328,7 @@ def _route(r):
 
 
 def list_routes(ctx, slug, params):
-    """Web routes and how they answer an anonymous GET: open, login, session_required, sso, redirect, not_found, error."""
+    """Web routes and how they answer an anonymous GET: open, login, session_required, sso, redirect, not_found, catch_all (the server answers every path alike), error."""
     from cveFeed.models import RouteAuth
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)

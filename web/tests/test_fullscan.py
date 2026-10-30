@@ -18,7 +18,7 @@ def xml(ip, ports, closed=True):
 	body = ''.join(f'<port protocol="tcp" portid="{n}"><state state="open"/><service name="{s}"/></port>' for n, s in ports)
 	extra = '<extraports state="closed" count="65000"/>' if closed else ''
 	return (f'<?xml version="1.0"?><nmaprun><scaninfo type="syn" protocol="tcp" services="1-65535"/><host><status state="up"/>'
-		f'<address addr="{ip}" addrtype="ipv4"/><ports>{extra}{body}</ports></host></nmaprun>')
+		f'<address addr="{ip}" addrtype="ipv4"/><ports>{extra}{body}</ports></host><runstats><finished exit="success"/></runstats></nmaprun>')
 
 
 class FullScanBase(TestCase):
@@ -183,6 +183,16 @@ class SweepTests(FullScanBase):
 		other = self.ip('192.0.2.2')
 		self.assertEqual(fullscan.pick().pk, other.pk)  # the stuck host does not come back first
 
+	def test_invalid_output_does_not_advance_full_scan_coverage(self):
+		for report in ('', '<nmaprun><host>', '<error/>'):
+			with self.subTest(report=report):
+				ip = self.ip(f'192.0.2.{10 + len(report)}')
+				out = fullscan.sweep_ip(ip, runner=self.runner(report))
+				ip.refresh_from_db()
+				self.assertFalse(out['ok'])
+				self.assertIsNone(ip.full_scanned_at)
+				self.assertEqual(ip.full_scan_failures, 1)
+
 	def test_a_paused_scan_picks_and_claims_nothing(self):
 		ip = self.ip('192.0.2.1')
 		with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
@@ -290,7 +300,7 @@ class SweepTests(FullScanBase):
 
 		def runner(targets, flags, host_timeout):
 			seen.append(flags)
-			return ''
+			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch.dict(os.environ, {'CVENGINE_NMAP_FULL': '1'}):
 			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		self.assertTrue(seen)
@@ -316,7 +326,7 @@ class InvestigationTests(FullScanBase):
 		def run(domain_id, names):
 			self.pipelines.append(list(names))
 			return discovery.run_host_pipeline(domain_id, names, retest=True, resolver=lambda n: {(x, '192.0.2.1') for x in n},
-				light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda t, f, h: '',
+				light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda t, f, h: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>',
 				db_exposure_checks=checks if checks is not None else {}, provider=None,
 				route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		return run

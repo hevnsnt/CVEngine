@@ -154,18 +154,20 @@ async function run() {
   if (s.status === "approved") return watchUpdate(s);
   // a page opened before the update was approved (here, in Settings or on another device) must still notice it and follow it
   setTimeout(recheck, RECHECK_MS);
-  if (s.status !== "available") return;
+  if (s.status !== "available" && s.status !== "diverged") return;
   const bar = el("div", "updatebar");
   bar.setAttribute("role", "status");
   const msg =
     s.status === "approved"
       ? `Update to ${s.latest} approved by ${s.approved_by}. The host will apply it shortly.`
-      : `A new version of CVEngine is available${s.behind_by ? ` (${s.behind_by} commit${s.behind_by === 1 ? "" : "s"})` : ""}: ${s.latest_message}`;
+      : s.status === "diverged"
+        ? `CVEngine has ${s.behind_by} new commit${s.behind_by === 1 ? "" : "s"}, but this server has ${s.local_commits} of its own, so it cannot be updated for you: ${s.latest_message}`
+        : `A new version of CVEngine is available${s.behind_by ? ` (${s.behind_by} commit${s.behind_by === 1 ? "" : "s"})` : ""}${s.branch_warning ? ` on the ${s.branch} branch, which is not a release` : ""}: ${s.latest_message}`;
   bar.append(el("span", "", msg));
-  const review = el("a", "btn sm", s.status === "approved" ? "Details" : "Review and update");
+  const review = el("a", "btn sm", s.status === "approved" || s.status === "diverged" ? "Details" : "Review and update");
   review.href = "/cve/settings/#updates";
   bar.append(review);
-  if (s.status === "available" && csrf) {
+  if ((s.status === "available" || s.status === "diverged") && csrf) {
     const dismiss = el("button", "btn ghost sm", "Dismiss");
     dismiss.type = "button";
     dismiss.onclick = async () => {

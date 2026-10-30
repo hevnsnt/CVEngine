@@ -59,6 +59,43 @@ docker compose exec -T web python3 manage.py create_admin
 
 Give Docker Desktop at least the memory recommended above.
 
+Docker Desktop is fine for trying cvENGINE and for scanning the public internet, with one limit: nmap's operating system detection cannot work from it. See [Operating system detection and the scan path](#operating-system-detection-and-the-scan-path) below.
+
+## Operating system detection and the scan path
+
+nmap finds a host's operating system from how it answers sixteen crafted probes, some malformed on purpose (a segment with FIN, PSH and URG set, a segment to a closed port with an odd option layout). That only works if the probes arrive as sent and the answers return as sent. nmap's own guide says so: "NAT gateways, firewalls, and especially port forwarding can confuse OS detection", and the cure it gives is to scan "from the same network segment" as the target. The scanners run in the `celery` container, so what matters is the network path that container has. Two paths damage it.
+
+**Docker's default bridge network (Linux).** Every connection is translated with iptables and conntrack. A probe with an impossible flag combination is marked `INVALID` by conntrack, is not translated, leaves with the container's private address, and its answer has nowhere to go. Measured here with real Docker (Engine 29.9.2, nmap 7.94, one Linux target, the same scan from each path):
+
+| Path of the scanning container | Top guess | `T7` probe (FIN+PSH+URG) | Distance |
+| --- | --- | --- | --- |
+| Default bridge network | Linux 5.3 - 5.4 (94%), then HP P2000 G3 NAS device (93%) | lost | 2 hops |
+| `network_mode: host` | Linux 5.3 - 5.4 (97%) | answered | 1 hop |
+| macvlan (its own address on the LAN) | Linux 5.3 - 5.4 (97%) | answered | 1 hop |
+
+The guess is only a little worse on a good day, and wrong on a bad one (the NAS ranked first in other runs). The same loss breaks nmap's `-sN`, `-sF` and `-sX` scans.
+
+**Docker Desktop (macOS, Windows).** The container's traffic never reaches the target: Docker's user-space stack (`vpnkit`, now `com.docker.backend`) creates a virtual TCP/IP stack for each remote address, sees the SYN, makes the real connection from the host, and answers the container itself ("How Docker Desktop Networking Works Under the Hood"). Open ports, services and banners are right, because the real connection is made. Every operating system guess describes that stack: one install saw "Google Fuchsia" on an Ubuntu server and a NAS, and an Apple OS X release on a Dell iDRAC. No Docker network setting changes this. Docker's documentation says macvlan "is not supported on Docker Desktop for Mac or Windows", and that Desktop's host networking "works on layer 4": protocols below TCP and UDP are not supported.
+
+### What cvENGINE does about it
+
+- It **measures the path**. Once a day, from the scanning container, `check_os_path` sends a plain SYN and the FIN+PSH+URG probe to a closed port of up to eight hosts the scans already reach (each on a different /16, using the closed port nmap itself found), and notes whether each drew a reset. A path that answers the plain probe and loses the odd one on most hosts is a translating path. Run in the three containers above it said `interfering` on the default bridge and `direct` on host networking and on macvlan. It sends two packets to a host nmap already sends the same probe to.
+- It **recognises Docker Desktop** from the VM kernel (`linuxkit` on macOS, `microsoft-standard-WSL2` on Windows, OrbStack), which no probe can tell apart.
+- When either is true, a packet-based guess is **not stored and not given to the AI**, and guesses stored earlier are removed. The host still gets an operating system from what survives any path, because a full TCP connection does cross it: the distribution in an SSH or HTTP banner, the operating system CPE and `ostype` from service detection, and the Windows build from SMB and RDP. It is marked as service detection and not as a packet measurement. A host whose services say nothing about the system has none.
+- `get_system_status` (and the status page) report it under `os_detection`: whether guesses are believed, why not, the measurement, and what to do.
+- `CVENGINE_OS_DETECTION` overrides everything: `trust` believes the guesses anyway, `distrust` never does.
+
+### Getting packet-based detection back
+
+Take the translation out of the scanner's path.
+
+- **Linux host or VPS (the usual install):** use one of the two overlays. Both were run for real, with the results above.
+  - `docker-compose.hostnet.yml` puts the `celery` container on the host's network (`docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d`). Redis is published on the host's loopback for it (`CVENGINE_REDIS_HOST_PORT`, default 6379) and PostgreSQL already is. Do not combine it with the `tailscale` profile, which joins the celery container's network namespace: run Tailscale on the host instead. Needs Docker Compose 2.24 or later.
+  - `docker-compose.macvlan.yml` gives `celery` its own address on your LAN, with the bridge network kept for Redis and PostgreSQL (set `CVENGINE_SCANNER_IP`, `CVENGINE_SCANNER_SUBNET`, `CVENGINE_SCANNER_GATEWAY` and `CVENGINE_SCANNER_PARENT` in `.env`). Needs Docker Engine 28 or later (`gw_priority`). The switch port must accept more than one MAC address; Wi-Fi access points usually do not, so use `ipvlan` in layer 2 mode there. A macvlan container cannot reach the Docker host itself (a kernel restriction).
+  - Rootless Docker and Podman use a user-space network stack and behave like Docker Desktop.
+- **macOS and Windows:** Docker Desktop cannot send these probes at any setting. The options that hold up are a [Sentinel](SENTINELS.md) on a Linux machine or VM on the network to be measured (it runs with host networking, and a Sentinel on Docker Desktop reports `os_reliable: false`), or running the whole stack on a Linux machine. A Linux VM with a bridged network adapter running Docker Engine should work (Lima's `socket_vmnet` bridged mode gives the VM an address from the LAN's own DHCP server; Colima has a bridged mode too), but that was not run here, and a Wi-Fi interface is a poor bridge target because access points refuse extra MAC addresses: use Ethernet.
+- Commercial scanners say the same: Tenable "does not recommend deploying Tenable Nessus behind a NAT device unless it is scanning the internal network", and runZero asks for host networking and a native explorer.
+
 ## HTTPS
 
 `make certs` creates a private certificate authority and a certificate in `secrets/certs/` for `DOMAIN_NAME` (a hostname or an IP address), `localhost`, `127.0.0.1`, and anything in `CERT_EXTRA_SANS`. `install.sh` runs it only when the certificate is missing or does not match the address. Run it before `make up`, and again after changing `DOMAIN_NAME` or `CERT_EXTRA_SANS`. It is safe to run again at any time: it issues a certificate only when one is needed (none yet, the names changed, fewer than 30 days left, or an older 10-year one), and `CERT_FORCE=1 make certs` issues one regardless. The built-in proxy serves HTTPS (TLS 1.2 and 1.3, HTTP/2) on 443 and redirects plain HTTP on 8082 to it. It accepts request bodies up to 4 MB. Browsers warn until you trust `secrets/certs/ca.crt`, which you copy from the server.

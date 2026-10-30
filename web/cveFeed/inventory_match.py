@@ -149,7 +149,8 @@ def _evidence(inv, component, ver, details, local):
 
 def collect(inv, sub, fix_lookup=None):
     """``(rows, external, notes)``: the CVEMatch rows the host's report supports on ``sub`` (a current row of its host), the
-    external matches it only adds evidence to (``{cve id: (CVEMatch, row)}``), and notes on what was not assessed and why."""
+    current-scan external matches of the same product it only adds evidence to
+    (``{cve id: [(CVEMatch, row), ...]}``), and notes on what was not assessed and why."""
     from cveFeed.models import CVEMatch
     fix_lookup = fix_lookup or correlation.DbFixLookup()
     os_block, packages = inv.os_info or {}, inv.packages or []
@@ -158,9 +159,11 @@ def collect(inv, sub, fix_lookup=None):
     if os_block.get('family') == 'linux' and backports(os_block):
         notes.append('The kernel was not assessed: this distribution backports fixes, so the kernel version number cannot decide a CVE.')
     pools = ((correlation.local_pool(), True), (correlation.cve_pool(), False))
-    external = {m.cve_entry_id: m for m in CVEMatch.objects.filter(
-        subdomain__target_domain__project_id=inv.project_id, subdomain__name__iexact=sub.name,
-        source__in=correlation._CORRELATED_SOURCES).exclude(ai_verdict='not_affected')}
+    # Match only this scan's host row. A prior scan's match is still history, but annotating it would leave the
+    # current host without the evidence its own report supplied.
+    external = {}
+    for match in CVEMatch.objects.filter(subdomain_id=sub.id, source__in=correlation._CORRELATED_SOURCES).exclude(ai_verdict='not_affected'):
+        external.setdefault(match.cve_entry_id, []).append(match)
     tokens = {correlation._norm(name) for component in components for name in component['names']}
     rows, annotated, distinct = [], {}, set()
     for (cve_by_id, index), local in pools:
@@ -178,15 +181,33 @@ def collect(inv, sub, fix_lookup=None):
                     if in_range is not True:
                         continue
                     row = _row(inv, sub, component, ver, cve, product, details.get(cve.id, {}), local, fix_lookup)
-                    if cve.id in external and not local:
-                        annotated[cve.id] = row
+                    # the same CVE product by name: both sides name it as the advisory does, so equal names are the same product whatever the
+                    # token rules say of its length or wording
+                    matching = ([match for match in external.get(cve.id, ())
+                                 if correlation._norm(match.matched_product) == correlation._norm(row['matched_product'])
+                                 or correlation.name_matches_token(correlation._norm(match.matched_product),
+                                                                   correlation._norm(row['matched_product']))]
+                                if not local else [])
+                    if matching:
+                        for match in matching:
+                            key = match.pk
+                            previous = annotated.get(key)
+                            if previous is None or row['confidence'] > previous[1]['confidence']:
+                                annotated[key] = (match, row)
                     else:
                         rows.append(row)
                         distinct.add((row['cve_entry_id'], row['matched_product']))
                 if len(distinct) >= MAX_MATCHES_PER_HOST:
                     notes.append(f'Stopped at {MAX_MATCHES_PER_HOST} matches.')
-                    return rows, {cid: (external[cid], r) for cid, r in annotated.items()}, notes
-    return rows, {cid: (external[cid], r) for cid, r in annotated.items()}, notes
+                    break
+            if len(distinct) >= MAX_MATCHES_PER_HOST:
+                break
+        if len(distinct) >= MAX_MATCHES_PER_HOST:
+            break
+    confirmed = {}
+    for match, row in annotated.values():
+        confirmed.setdefault(match.cve_entry_id, []).append((match, row))
+    return rows, confirmed, notes
 
 
 def parse_reported_version(component):
@@ -218,14 +239,15 @@ def _row(inv, sub, component, ver, cve, product, details, local, fix_lookup):
 
 
 def _add_evidence(external, now):
-    """Put the host's own evidence on the external match of the same CVE: the version is confirmed from the machine, so its
+    """Put the host's own evidence on current external matches of the same CVE and product: the version is confirmed from the machine, so its
     confidence is at least that of a host-reported version."""
     from cveFeed.models import CVEMatch
-    for match, row in external.values():
-        evidence = {**(match.evidence or {}), 'host_reported': {k: row['evidence'][k] for k in ('inventory_id', 'reported_at', 'component', 'raw_version')
-                                                              if k in row['evidence']}}
-        if evidence != (match.evidence or {}) or match.confidence < row['confidence']:
-            CVEMatch.objects.filter(pk=match.pk).update(evidence=evidence, confidence=max(match.confidence, row['confidence']), updated_at=now)
+    for matches in external.values():
+        for match, row in matches:
+            evidence = {**(match.evidence or {}), 'host_reported': {k: row['evidence'][k] for k in ('inventory_id', 'reported_at', 'component', 'raw_version')
+                                                                  if k in row['evidence']}}
+            if evidence != (match.evidence or {}) or match.confidence < row['confidence']:
+                CVEMatch.objects.filter(pk=match.pk).update(evidence=evidence, confidence=max(match.confidence, row['confidence']), updated_at=now)
 
 
 def _close_unreported(inv, sub_id, current, now):

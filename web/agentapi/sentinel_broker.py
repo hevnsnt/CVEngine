@@ -25,7 +25,8 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Avg, Count, DurationField, F, Q, Value
+from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
@@ -308,7 +309,45 @@ def _hash_enrollment(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def effective_capabilities(agent):
+FAIL_STREAK_DEFAULT = 3            # consecutive failures of one kind that withhold it from a Sentinel
+FAIL_COOLDOWN_DEFAULT_MINUTES = 15  # how long it is withheld before one more try
+
+
+def _env_int(name, default):
+    import os
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def failing_kinds(agent, now=None):
+    """``{kind: {'failures': n, 'since': when, 'retry_at': when}}`` for the kinds this Sentinel has failed ``FAIL_STREAK`` times running, the
+    latest inside the cool-off. Such a kind is not offered to it (``effective_capabilities``): a Sentinel whose nuclei is killed, whose OpenVAS
+    socket is gone or whose tool is missing would otherwise be handed the same work again and again, each failing and then running on this server
+    after the round trip. Work of that kind goes straight to this server (``capacity_state`` finds no Sentinel) until the cool-off ends; then the
+    next task of the kind is the one more try, and a success clears the streak while a failure withholds it for another cool-off. Needs no state of
+    its own: it reads the last tasks the Sentinel finished. ``CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES=0`` turns it off."""
+    streak = max(2, _env_int('CVENGINE_SENTINEL_KIND_FAIL_STREAK', FAIL_STREAK_DEFAULT))
+    cooldown = _env_int('CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES', FAIL_COOLDOWN_DEFAULT_MINUTES)
+    if cooldown <= 0 or not agent.pk:
+        return {}
+    now = now or timezone.now()
+    window = timedelta(minutes=cooldown)
+    recent = list(SentinelTask.objects.filter(agent=agent, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
+                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at')[:200])
+    by_kind = {}
+    for kind, status, finished in recent:
+        by_kind.setdefault(kind, []).append((status, finished))
+    out = {}
+    for kind, rows in by_kind.items():
+        last = rows[:streak]
+        if len(last) == streak and all(status == 'failed' for status, _ in last) and now - last[0][1] < window:
+            out[kind] = {'failures': streak, 'since': last[-1][1], 'retry_at': last[0][1] + window}
+    return out
+
+
+def effective_capabilities(agent, withheld=None):
     """The capabilities this server credits a Sentinel with: what it declared, except ``network:internal``, which only the server grants (the
     Sentinel's ``network`` is ``internal``: set from its enrollment, or by an administrator). A Sentinel outside the network that declares
     it anyway would be offered work it cannot reach and report an empty result as clean."""
@@ -317,6 +356,7 @@ def effective_capabilities(agent):
         if sentinel_settings.effective_network(agent) == 'internal':
             caps.add(INTERNAL_CAPABILITY)
         caps -= sentinel_settings.disabled_kinds(agent)  # a kind the machine or an administrator switched off is never offered (it would only be refused)
+        caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
     return caps
 
 
@@ -561,7 +601,8 @@ class SentinelEff:
         if agent.kind != 'scanner':
             self.problem = self.problem or "this agent is not a Sentinel (kind='scanner')"
         limits = agent.limits or {}
-        caps = effective_capabilities(agent)
+        self.withheld = failing_kinds(agent, now) if agent.kind == 'scanner' else {}
+        caps = effective_capabilities(agent, self.withheld)
         if limits.get('capabilities') is not None:
             caps &= set(limits['capabilities'])
         self.caps = caps
@@ -1054,17 +1095,26 @@ def _clean_nmap_result(body):
         if ip is None:  # an address row is only ever made from an IP literal, never from free text
             continue
         out.append({'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])})
-    return {'hosts': out}
+    # Docker Desktop can make an OS guess describe its gateway instead of the target.
+    # Preserve only the explicit boolean opt-out through result sanitization.
+    return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False}
 
 
 def _clean_naabu_result(body):
     ports = body.get('ports')
     if not isinstance(ports, dict) or len(ports) > MAX_ADDRESSES:
         raise ApiError(400, f'ports must be an object of at most {MAX_ADDRESSES} addresses')
+    from cveFeed.naabu_scan import MAX_OPEN_PER_IP
     out = {}
     for ip, values in ports.items():
         ip = _address(ip) if isinstance(ip, str) else None
-        if ip is None or not isinstance(values, list):
+        if ip is None or not (isinstance(values, list) or values is None):
+            continue
+        if values is None or len(values) > MAX_OPEN_PER_IP:
+            # an address with more open ports than that is a tarpit or a firewall that accepts everything: its list is no port list. It is kept
+            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and naabu_scan.discover then
+            # leaves the address to nmap's default ports.
+            out[ip] = None
             continue
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
         if clean:
@@ -1427,6 +1477,14 @@ def _for_viewer(queryset, user):
     return queryset if allowed is None else queryset.filter(project_id__in=allowed)
 
 
+def _viewer_project_ids(user):
+    """The ids of the projects ``user`` may read (every project for an App Admin), for what the live page lists from outside the viewer-scoped
+    task queryset: the OpenVAS queue names projects and hosts, and another tenant's never show."""
+    from dashboard.models import Project
+    allowed = roles.allowed_project_ids(user)
+    return list(Project.objects.values_list('id', flat=True)) if allowed is None else list(allowed)
+
+
 def live_overview(ctx):
     """What every Sentinel the caller may manage is doing right now, for the Sentinels page: liveness, the task each one holds,
     its last few finished tasks and how much it has done lately. Hosts and projects come only from tasks the caller's tenancy
@@ -1441,17 +1499,16 @@ def live_overview(ctx):
         held.setdefault(t.agent_id, []).append(t)
     day = now - timedelta(hours=24)
     hour = now - timedelta(hours=1)
-    stats = {}
-    for t in tasks.filter(finished_at__gte=day, status__in=('done', 'failed')).defer('result', 'target').order_by('-finished_at')[:2000]:  # the counts need no result bodies (an OpenVAS one is thousands of rows)
-        row = stats.setdefault(t.agent_id, {'done_1h': 0, 'failed_1h': 0, 'done_24h': 0, 'failed_24h': 0, 'seconds': 0, 'timed': 0})
-        key = 'done' if t.status == 'done' else 'failed'
-        row[f'{key}_24h'] += 1
-        if t.finished_at >= hour:
-            row[f'{key}_1h'] += 1
-        started = t.accepted_at or t.claimed_at
-        if t.status == 'done' and started:
-            row['seconds'] += max(0, (t.finished_at - started).total_seconds())
-            row['timed'] += 1
+    duration = Greatest(F('finished_at') - Coalesce('accepted_at', 'claimed_at'),
+                        Value(timedelta(0), output_field=DurationField()))
+    stats = {row['agent_id']: row for row in
+             tasks.filter(finished_at__gte=day, status__in=('done', 'failed')).order_by().values('agent_id').annotate(
+                 done_1h=Count('id', filter=Q(status='done', finished_at__gte=hour)),
+                 failed_1h=Count('id', filter=Q(status='failed', finished_at__gte=hour)),
+                 done_24h=Count('id', filter=Q(status='done')),
+                 failed_24h=Count('id', filter=Q(status='failed')),
+                 average_duration=Avg(duration, filter=Q(status='done') &
+                                      (Q(accepted_at__isnull=False) | Q(claimed_at__isnull=False))))}
     for agent_id in ids:
         finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
@@ -1469,6 +1526,7 @@ def live_overview(ctx):
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
             'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
+            'withheld_kinds': {k: {'failures': v['failures'], 'retry_at': svc._iso(v['retry_at'])} for k, v in eff.withheld.items()},
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
@@ -1480,14 +1538,14 @@ def live_overview(ctx):
                         'seconds': int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None,
                         'error': t.error} for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
-                      'failed_24h': st.get('failed_24h', 0), 'average_seconds': int(st['seconds'] / st['timed']) if st.get('timed') else None}})
+                      'failed_24h': st.get('failed_24h', 0),
+                      'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None}})
     from cveFeed import internal_view, openvas_scan
-    from dashboard.models import Project
     networks = internal_view.declared_networks()
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out,
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
-            'openvas': openvas_scan.overview(list(Project.objects.values_list('id', flat=True)))}
+            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user))}
 
 
 def _visible_orgs(user):

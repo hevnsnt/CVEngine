@@ -27,7 +27,7 @@ FAST_XML = '''<?xml version="1.0"?>
 <ports><port protocol="tcp" portid="22">
 <state state="open"/><service name="ssh" product="OpenSSH" version="8.9" extrainfo="Ubuntu"/>
 </port></ports>
-</host></nmaprun>'''
+</host><runstats><finished exit="success"/></runstats></nmaprun>'''
 
 
 def _answer_queued_task(result, status='done'):
@@ -86,9 +86,10 @@ class ZeroSentinelRegressionTests(DispatchBase):
         self.assertIsNone(dispatch.wrap_naabu_runner(self.project, self.scan))
 
     def test_try_nmap_is_a_no_op(self):
-        remaining, totals = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'])
+        remaining, totals, local_ports = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'])
         self.assertEqual(remaining, ['192.0.2.10', '192.0.2.11'])
         self.assertEqual(totals, {'ports': 0, 'hosts_with_os': 0})
+        self.assertIsNone(local_ports)
         self.assertFalse(SentinelTask.objects.exists())  # not even a row was created
 
     def test_wrap_nuclei_stream_returns_the_literal_unwrapped_function(self):
@@ -106,17 +107,71 @@ class NmapDispatchTests(DispatchBase):
         result = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'os_guess': 'Linux 6.X',
                    'ports': [{'number': 443, 'protocol': 'tcp', 'state': 'open', 'service_name': 'https', 'product': 'nginx', 'version': '1.25'}]}]}
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
-            remaining, totals = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=5)
+            remaining, totals, local_ports = dispatch.try_nmap(
+                self.project, self.scan, ['192.0.2.10'], timeout=5, ports_by_ip={'192.0.2.10': [443]})
         self.assertEqual(remaining, [])
         self.assertEqual(totals, {'ports': 1, 'hosts_with_os': 1})
+        self.assertEqual(local_ports, {'192.0.2.10': [443]})
         port = IpAddress.objects.get(address='192.0.2.10').ports.get(number=443)
         self.assertEqual((port.product, port.version, port.source), ('nginx', '1.25', 'nmap'))
 
-    def test_timeout_falls_back_to_local_and_the_task_is_marked_expired(self):
+    def test_an_omitted_sentinel_host_keeps_the_local_fallback(self):
         self.make_sentinel(['nmap'])
-        remaining, totals = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=0.2)
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                        side_effect=_answer_queued_task({'outcome': 'done', 'hosts': []})):
+            remaining, totals, local_ports = dispatch.try_nmap(
+                self.project, self.scan, ['192.0.2.10'], timeout=5, ports_by_ip={'192.0.2.10': [8443]})
         self.assertEqual(remaining, ['192.0.2.10'])
         self.assertEqual(totals, {'ports': 0, 'hosts_with_os': 0})
+        self.assertEqual(local_ports, {'192.0.2.10': [8443]})
+
+    def test_naabu_ports_missing_from_sentinel_report_are_fingerprinted_locally(self):
+        self.make_sentinel(['nmap'])
+        answer = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'os_guess': '',
+                  'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'product': 'OpenSSH', 'version': '8.9'}]}]}
+        calls = []
+
+        def local_runner(targets, flags, host_timeout):
+            calls.append((targets, flags))
+            return ('<nmaprun><host><address addr="192.0.2.10" addrtype="ipv4"/><ports>'
+                    '<port protocol="tcp" portid="8443"><state state="open"/>'
+                    '<service name="https" product="nginx" version="1.25"/></port></ports></host>'
+                    '<runstats><finished exit="success"/></runstats></nmaprun>')
+
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
+            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=local_runner,
+                naabu_runner=lambda ips: {'192.0.2.10': [22, 8443]})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], ['192.0.2.10'])
+        self.assertEqual(calls[0][1][calls[0][1].index('-p') + 1], '8443')
+        self.assertEqual(result['fast']['ports'], 2)
+        ports = IpAddress.objects.get(address='192.0.2.10', org_id=self.org.id).ports
+        self.assertEqual((ports.get(number=22).product, ports.get(number=8443).product), ('OpenSSH', 'nginx'))
+
+    def test_the_closed_probe_port_goes_only_to_addresses_no_sentinel_fingerprinted(self):
+        # nmap's OS detection needs a closed port, and the Sentinel's own guess must not be replaced by a weaker local one
+        self.make_sentinel(['nmap'])
+        Subdomain.objects.get(scan_history=self.scan).ip_addresses.add(IpAddress.objects.create(address='192.0.2.11'))
+        answer = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'os_guess': 'Linux 6.X',
+                  'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'product': 'OpenSSH', 'version': '8.9'}]}]}
+        calls = []
+
+        def local_runner(targets, flags, host_timeout):
+            calls.append((sorted(targets), flags[flags.index('-p') + 1]))
+            return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
+
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
+            nmap_scan.run_nmap_for_scan(self.scan.id, runner=local_runner,
+                naabu_runner=lambda ips: {'192.0.2.10': [22, 8443], '192.0.2.11': [80]})
+        self.assertIn((['192.0.2.11'], '1,3,80'), calls)  # nobody else fingerprinted it: a closed port lets nmap identify the system
+        self.assertIn((['192.0.2.10'], '8443'), calls)  # the Sentinel did: only the port it missed, and no OS detection to replace its guess
+
+    def test_timeout_falls_back_to_local_and_the_task_is_marked_expired(self):
+        self.make_sentinel(['nmap'])
+        remaining, totals, local_ports = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=0.2)
+        self.assertEqual(remaining, ['192.0.2.10'])
+        self.assertEqual(totals, {'ports': 0, 'hosts_with_os': 0})
+        self.assertIsNone(local_ports)
         task = SentinelTask.objects.get(kind='nmap')
         self.assertEqual(task.status, 'expired')
         self.assertIsNone(task.agent_id)

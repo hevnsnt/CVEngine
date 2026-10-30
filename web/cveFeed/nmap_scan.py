@@ -184,12 +184,13 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
             try:
-                out, _err = proc.communicate(timeout=timeout)
+                out, err = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 resources.terminate_group(proc, grace=5)
                 proc.communicate()
                 raise
             job.raise_if_killed()
+            _check_exit(proc.returncode, err)
             return out
     finally:
         os.unlink(path)
@@ -204,16 +205,24 @@ def run_nmap_args(args, label, timeout):
         proc = subprocess.Popen([NMAP_BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         job.attach(proc)
         try:
-            out, _err = proc.communicate(timeout=timeout)
+            out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             resources.terminate_group(proc, grace=5)
             proc.communicate()
             raise
         job.raise_if_killed()
+        _check_exit(proc.returncode, err)
         return out
 
 
-def parse_xml(xml_text):
+def _check_exit(returncode, stderr):
+    """A failed process is not evidence that the target has no services."""
+    if returncode:
+        logger.error('nmap exited with status %s: %s', returncode, (stderr or '').strip()[-500:])
+        raise RuntimeError(f'nmap exited with status {returncode}')
+
+
+def parse_xml(xml_text, strict=False):
     """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable.
 
     This function also reads XML a Sentinel reported (``agentapi.sentinel_dispatch.try_nmap_udp``), not only this
@@ -222,49 +231,81 @@ def parse_xml(xml_text):
     ENTITY, so one is refused outright before parsing (it is the one thing ``xmltodict.parse``'s own default entity
     handling does not stop: that default only blocks an *external* DTD/entity fetch, not an all-internal expansion
     bomb). No extra dependency: a hardened ``expat`` module here would need ``defusedexpat`` (an old, unmaintained C
-    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all."""
+    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all.
+
+    ``strict`` is for a scan that will record coverage: missing, invalid or explicitly failed output must raise so
+    its caller records failure and leaves the target due. Display and import callers retain the tolerant default."""
     import xmltodict
 
     from reNgine.nmap_service import extract_nmap_inventory
     if not (xml_text or '').strip():
+        if strict:
+            raise RuntimeError('nmap returned no XML report')
         return []
     if '<!ENTITY' in xml_text:
         logger.warning('refused to parse nmap XML output: it declares a custom ENTITY')
+        if strict:
+            raise RuntimeError('nmap returned an unsafe XML report')
         return []
     try:
         data = xmltodict.parse(xml_text)
+        if not isinstance(data, dict) or 'nmaprun' not in data:
+            raise ValueError('missing nmaprun root')
+        run = data['nmaprun'] or {}
+        if not isinstance(run, dict):
+            raise ValueError('invalid nmaprun root')
+        data['nmaprun'] = run
+        if strict:
+            finished = (run.get('runstats') or {}).get('finished') or {}
+            # Nmap writes this terminal marker even when no hosts or ports are
+            # reported. A bare root can be a truncated process output, not a
+            # completed empty scan, so it must never establish coverage.
+            if not isinstance(finished, dict) or finished.get('@exit') != 'success':
+                raise ValueError('nmap report has no successful completion marker')
     except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
         logger.warning('could not parse nmap XML output', exc_info=True)
+        if strict:
+            raise RuntimeError('nmap returned an invalid or failed XML report') from None
         return []
     return extract_nmap_inventory(data)
 
 
-def persist_inventory(inventory, source='nmap', org_id=None):
+def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
     """Write parsed nmap records onto Port/IpAddress, creating a Port row if nothing found it first
     (unlike reNgine.tasks.persist_nmap_service_inventory, which only enriches rows naabu already made:
     here nmap itself is the thing finding these ports, so there may be nothing to enrich yet).
     Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
-    seen on one IP's 443 onto every IP's 443."""
+    seen on one IP's 443 onto every IP's 443. ``os_reliable`` says whether the operating system guesses in ``inventory`` were measured
+    from a network that can be believed: None for a scan this server ran itself (see cveFeed.os_detection: behind Docker Desktop's
+    network the guess describes the network, so it is not stored), True for a Sentinel's result."""
+    from cveFeed import os_detection
     from cveFeed.host_inventory import keeps_reported_os
     from startScan.ip_rows import get_or_create_ip
     from startScan.models import TCP_PROTOCOLS, IpAddress, Port
     ports_written = hosts_with_os = 0
     now = timezone.now()
+    if os_reliable is None:
+        os_reliable = not os_detection.unreliable()
     for host in inventory:
         ip_addr = host.get('ip')
         if not ip_addr:
             continue
         ip_obj, _ = get_or_create_ip(ip_addr, org_id)
-        if host.get('os_guess') and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
+        if host.get('os_guess') and os_reliable and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_source': 'nmap'}
             ip_obj.last_seen = now
             fit_columns(ip_obj)
-            ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen'])
+            ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen', 'fingerprint'])
             if host.get('os_matches'):  # the runners-up: a guess a few points ahead of another family is not settled
                 ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_matches': host['os_matches']}
                 ip_obj.save(update_fields=['fingerprint'])
             hosts_with_os += 1
+        if host.get('closed_tcp'):
+            # a port this host answered with a reset, and when: the path check (cveFeed.path_probe) probes it, from this server, later
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'closed_tcp': host['closed_tcp'], 'closed_tcp_at': now.isoformat()}
+            ip_obj.save(update_fields=['fingerprint'])
         host_scripts = _reviewed_scripts(host.get('hostscripts'))
         if host_scripts:
             # smb-os-discovery and nbstat describe the host, not one port
@@ -403,7 +444,7 @@ def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_
             logger.warning('nmap was stopped for memory on %s hosts; retrying as %s + %s', len(chunk), half, len(chunk) - half)
             pending[0:0] = [chunk[:half], chunk[half:]]
             continue
-        result = persist_inventory(parse_xml(xml), org_id=org_id)
+        result = persist_inventory(parse_xml(xml, strict=True), org_id=org_id)
         for key in totals:
             totals[key] += result.get(key, 0)
     return totals
@@ -420,8 +461,8 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
     xml text`` is injectable so tests need no nmap binary. When naabu is installed (see cveFeed.naabu_scan) it finds the open TCP
     ports first and nmap fingerprints only those; without it, or if it fails, the ``--top-ports 1000`` pass above is unchanged.
 
-    ``dispatch`` (on by default) is the one seam a registered Sentinel (agentapi.sentinel_dispatch) uses: before any
-    address reaches the runner or naabu above, it is offered to a live, eligible Sentinel for this project; what a
+    ``dispatch`` (on by default) is the one seam a registered Sentinel (agentapi.sentinel_dispatch) uses: after naabu
+    discovers ports, each address is offered to a live, eligible Sentinel for this project; what a
     Sentinel actually fingerprints is persisted through the exact same ``persist_inventory`` this module already calls,
     and whatever is left (everything, when no Sentinel is registered or none answers in time) runs locally exactly as
     before. Callers that pass their own ``naabu_runner`` (tests) are never second-guessed: dispatch only ever supplies
@@ -472,12 +513,24 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                     from agentapi import sentinel_dispatch
                     if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
                         effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
-                    sentinel_targets, sentinel_totals = sentinel_dispatch.try_nmap(domain.project, scan, targets, org_id=org_id)
                 ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
+                local_ports = ports_by_ip
+                if dispatch:
+                    sentinel_targets, sentinel_totals, local_ports = sentinel_dispatch.try_nmap(
+                        domain.project, scan, targets, org_id=org_id, ports_by_ip=ports_by_ip)
                 flags = fast_flags()
-                fast = scan_in_chunks(runner, sentinel_targets, flags, HOST_TIMEOUT_FAST,
-                                      flags_for=naabu_scan.flags_for(ports_by_ip, flags) if ports_by_ip is not None else None,
-                                      org_id=org_id)
+                # An address a Sentinel already fingerprinted has its operating system from the Sentinel: its top-up pass over the ports the
+                # Sentinel missed gets no closed probe port, so nmap's OS detection does not run and cannot replace that guess with a weaker one.
+                topped_up = {ip for ip in sentinel_targets if local_ports is not None and ports_by_ip is not None and ip in local_ports
+                             and local_ports[ip] != ports_by_ip.get(ip)}
+                fast = {'ports': 0, 'hosts_with_os': 0}
+                for group, os_probe in (([i for i in sentinel_targets if i not in topped_up], True), ([i for i in sentinel_targets if i in topped_up], False)):
+                    if not group:
+                        continue
+                    done = scan_in_chunks(runner, group, flags, HOST_TIMEOUT_FAST,
+                                          flags_for=naabu_scan.flags_for(local_ports, flags, os_probe) if local_ports is not None else None,
+                                          org_id=org_id)
+                    fast = {key: fast.get(key, 0) + done.get(key, 0) for key in set(fast) | set(done)}
                 fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)

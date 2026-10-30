@@ -52,7 +52,7 @@ function orbFor(s, group) {
 function task(t) {
   const row = el("div", "sl-task");
   const what = el("div", "sl-what");
-  what.append(el("b", "mono", kindName(t.kind)), document.createTextNode(` on ${t.host || "a target"}`));
+  what.append(el("b", "mono", kindName(t.kind)), document.createTextNode(` on ${t.label || t.host || "a target"}`));
   const meta = el("span", "sl-meta", `${t.project}${t.status === "claimed" ? " · starting" : ""}`);
   row.append(what, meta);
   if (t.since) row.append(el("span", "sl-since", "", { "data-since": t.since }));
@@ -61,7 +61,7 @@ function task(t) {
 
 function recent(t) {
   const li = el("li", `sl-r ${t.status}`);
-  li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.host || ""));
+  li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || ""));
   const tail = t.status === "failed" ? t.error || "failed" : t.seconds != null ? span(t.seconds) : "";
   li.append(el("span", "sl-tail", tail));
   if (t.finished) li.append(el("span", "sl-when", "", { "data-ago": t.finished }));
@@ -131,6 +131,10 @@ function card(s, reload, detail, group) {
   const kinds = s.capabilities.filter((k) => k !== INTERNAL);
   const tools = kinds.length ? kinds.map(kindName).join(", ") : "no capabilities";
   c.append(el("p", "sl-foot", `${tools}${s.os ? ` · ${s.os}` : ""} · up to ${s.max_concurrent} at once`));
+  Object.entries(s.withheld_kinds || {}).forEach(([k, w]) => {
+    const retry = new Date(w.retry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    c.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
+  });
   return c;
 }
 
@@ -146,6 +150,52 @@ function summary(data) {
   };
   bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel"));
   return bar;
+}
+
+function openvasQueue(queue) {
+  const box = el("section", "sl-openvas", null, { "aria-label": "OpenVAS queue", "aria-live": "off" });
+  const head = el("div", "sl-openvas-head");
+  head.append(el("h3", "", "OpenVAS queue"), el("span", "sl-openvas-count", `${queue.counts.next} due · ${queue.counts.not_due} not due`));
+  box.append(head);
+  if (queue.running) {
+    const run = queue.running;
+    const active = el("div", "sl-openvas-running");
+    active.append(el("b", "", `Scanning ${run.project}`),
+      el("span", "", `${run.hosts.join(", ")} · ${run.via === "sentinel" ? "Sentinel" : "local scanner"}`));
+    const progress = typeof run.progress === "number" ? `${run.progress}%` : "in progress";
+    active.append(el("span", "sl-openvas-progress", `${run.status || "Running"} · ${progress} · ${run.budget_hours}h budget`));
+    box.append(active);
+  } else box.append(el("p", "sl-quiet", "No OpenVAS scan is running."));
+
+  const due = el("div", "sl-openvas-list");
+  due.append(el("h4", "", `Next due (${queue.counts.next})`));
+  if (queue.next.length) {
+    const list = el("ul");
+    queue.next.forEach((row) => {
+      const item = el("li");
+      item.append(el("b", "mono", row.host), el("span", "", row.project));
+      if (row.heat) item.append(badge(row.heat, row.heat));
+      list.append(item);
+    });
+    due.append(list);
+  } else due.append(el("p", "sl-quiet", "No hosts are due."));
+  if (queue.counts.next > queue.next.length) due.append(el("p", "note", `Showing ${queue.next.length} of ${queue.counts.next} due hosts.`));
+  box.append(due);
+
+  if (queue.counts.not_due) {
+    const deferred = el("details", "sl-openvas-deferred");
+    deferred.append(el("summary", "", `Not due (${queue.counts.not_due})`));
+    const list = el("ul");
+    queue.not_due.forEach((row) => {
+      const item = el("li");
+      item.append(el("b", "mono", row.host), el("span", "", row.project), el("span", "sl-openvas-reason", row.reason || "Not due"));
+      list.append(item);
+    });
+    deferred.append(list);
+    if (queue.counts.not_due > queue.not_due.length) deferred.append(el("p", "note", `Showing ${queue.not_due.length} of ${queue.counts.not_due} not due hosts.`));
+    box.append(deferred);
+  }
+  return box;
 }
 
 // The groups to draw: instance-wide Sentinels first, then each organization that has a Sentinel or an internal network, then any
@@ -258,8 +308,9 @@ export function sentinelLive(mount) {
     if (!data) return;
     if (!data.results.length) {
       mount.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
-      if (!(data.orgs || []).some((o) => o.networks.length)) return;
+      if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return;
     } else mount.append(summary(data));
+    if (data.openvas) mount.append(openvasQueue(data.openvas));
     const drawn = groups(data);
     drawn.forEach((g) => mount.append(section(g, reload, details)));
     const kept = new Set(drawn.flatMap((g) => g.sentinels.map((s) => `${g.key}:${s.id}`)));

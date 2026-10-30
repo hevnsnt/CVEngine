@@ -96,7 +96,7 @@ class MemoisedConfirmTests(TestCase):
 		matches = list(CVEMatch.objects.filter(cve_entry=self.cve).select_related('subdomain'))
 		self.assertEqual(confirm_matches(matches, self.cve, provider=provider), 2)
 		self.assertEqual(provider.complete.call_count, 2)
-		self.assertEqual(set(CVEMatch.objects.values_list('ai_verdict', flat=True)), {'affected'})
+		self.assertEqual(set(CVEMatch.objects.values_list('ai_verdict', flat=True)), {'uncertain'})  # a banner version alone is a lead, whatever the model says
 		self.assertEqual(MatchVerdict.objects.count(), 2)
 
 	def test_a_later_correlation_reuses_the_stored_verdict_without_asking(self):
@@ -108,7 +108,7 @@ class MemoisedConfirmTests(TestCase):
 		self._correlate()
 		matches = list(CVEMatch.objects.filter(cve_entry=self.cve).select_related('subdomain'))
 		self.assertEqual(len(matches), 2)
-		self.assertEqual({m.ai_verdict for m in matches}, {'affected'})
+		self.assertEqual({m.ai_verdict for m in matches}, {'uncertain'})
 		self.assertEqual(confirm_matches(matches, self.cve, provider=provider), 0)
 		self.assertEqual(provider.complete.call_count, 1)
 

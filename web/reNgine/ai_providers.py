@@ -31,6 +31,57 @@ def usage_stage(stage):
 		_usage_stage.reset(token)
 
 
+_request_options = ContextVar('cvengine_ai_request_options', default={})
+
+
+@contextmanager
+def request_options(**options):
+	"""Per-request options a stage asks for, read by the providers that take them: ``temperature`` and ``seed`` (a self-hosted server
+	answers differently on every call unless both are pinned, so a verdict is not reproducible; the hosted providers are left alone),
+	``schema`` (a JSON Schema the reply must follow, see ``structured_levels``) and ``token_factor`` (a retry after a reply was cut off
+	asks for a longer one)."""
+	token = _request_options.set({**_request_options.get(), **options})
+	try:
+		yield
+	finally:
+		_request_options.reset(token)
+
+
+def _env_number(name, low, high):
+	"""An integer setting between ``low`` and ``high``, or None when it is unset or not one."""
+	try:
+		value = int(os.environ.get(name, '').strip())
+	except ValueError:
+		return None
+	return value if low <= value <= high else None
+
+
+def request_timeout(default):
+	"""Seconds a completion may take: ``CVENGINE_AI_TIMEOUT`` (10 to 3600) when set, else the provider's own. A local model on a laptop
+	can take longer than the 120 seconds that suits a hosted one."""
+	return _env_number('CVENGINE_AI_TIMEOUT', 10, 3600) or default
+
+
+CONNECT_TIMEOUT = 10  # seconds to reach the server, apart from the (long) wait for a model to answer: a server that is down fails in 10
+
+
+def output_token_cap():
+	"""The reply length limit to send to an OpenAI-compatible server or Ollama: ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768) when set, else
+	None, which leaves the server's own limit (a reasoning model spends thousands of tokens thinking before it answers, so no cap is
+	sent unless the operator chose one)."""
+	cap = _env_number('CVENGINE_AI_MAX_TOKENS', 64, 32768)
+	if cap and _request_options.get().get('token_factor'):
+		cap = min(32768, cap * int(_request_options.get()['token_factor']))
+	return cap
+
+
+def ollama_context():
+	"""``CVENGINE_OLLAMA_NUM_CTX`` (512 to 1048576), the context window to ask Ollama for, or None. Ollama sizes it by the machine's memory
+	(4k tokens under 24 GiB, 32k from 24 to 48, 256k above) and a prompt longer than it is cut, so a host-context prompt can lose its
+	start without an error; set it when the server's default is small."""
+	return _env_number('CVENGINE_OLLAMA_NUM_CTX', 512, 1048576)
+
+
 def _token_number(value):
 	try:
 		n = int(value)
@@ -156,8 +207,9 @@ CONFIRM_SYSTEM_PROMPT = (
 
 class AIProviderError(Exception):
 	def __init__(self, message, *, category='provider_error', http_status=None, stop_reason=None,
-				 output_length=None, digest=None, reason=None, attempts=None):
+				 output_length=None, digest=None, reason=None, attempts=None, hint=''):
 		super().__init__(message)
+		self.hint = hint  # the start of a refused request's body, lower-cased: read by the caller to tell what was refused, never stored or shown
 		self.reason = reason  # why a reply failed validation: fixed wording and sanitized key names, never reply text
 		self.attempts = attempts
 		self.category = category
@@ -247,7 +299,7 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+			resp = requests.post(url, headers=headers, json=payload, timeout=(CONNECT_TIMEOUT, request_timeout(self.timeout)))
 			resp.raise_for_status()
 			try:
 				data = resp.json()
@@ -261,8 +313,9 @@ class AIProvider:
 		except requests.HTTPError as e:
 			status = getattr(getattr(e, 'response', None), 'status_code', None)
 			category = 'provider_auth' if status in (401, 403) else 'provider_rate_limit' if status == 429 else 'provider_http'
+			body = getattr(getattr(e, 'response', None), 'text', '')
 			raise AIProviderError(f'{self.name} HTTP request failed (status {status or "unknown"})',
-				category=category, http_status=status) from e
+				category=category, http_status=status, hint=str(body or '')[:400].lower()) from e
 		except requests.Timeout as e:
 			raise AIProviderError(f'{self.name} request timed out', category='provider_timeout') from e
 		except requests.RequestException as e:
@@ -294,6 +347,91 @@ def _anthropic_text(data):
 		raise AIProviderError('anthropic response contained no text', category='empty_response',
 			stop_reason=data.get('stop_reason'))
 	return answer
+
+
+# ----------------------------------------------------------------------------- structured output (a JSON Schema the reply must follow)
+#
+# A self-hosted server can be made to answer in a given shape (grammar-constrained decoding): vLLM and LM Studio take OpenAI's
+# ``response_format`` (json_schema), Ollama takes ``format``. It makes small local models far more reliable at the format, not at the
+# judgement, and the reply is still validated (``validate_triage``) whatever the server did. Servers differ in what they accept, so the
+# first request tells: a refusal that names the field steps down to JSON mode and then to nothing, and the answer is remembered per
+# (provider, address, model) for an hour. Hosted providers are not sent it unless ``CVENGINE_AI_STRUCTURED=all``: a refusal there costs a
+# paid request, and their models follow the prompt.
+STRUCTURED_LEVELS = {'ollama': ('json_schema', 'json', 'none')}
+_DEFAULT_LEVELS = ('json_schema', 'json_object', 'none')
+_STRUCTURED = {}  # (provider, base_url, model) -> (expires, level)
+_NAMES_STRUCTURE = re.compile(r'response_format|json_schema|json_object|schema|grammar|format|guided|structured')
+
+
+def structured_mode():
+	"""``CVENGINE_AI_STRUCTURED``: ``auto`` (default: the self-hosted servers), ``all`` (OpenRouter and OpenAI too) or ``off``."""
+	value = os.environ.get('CVENGINE_AI_STRUCTURED', 'auto').strip().lower()
+	return value if value in ('auto', 'all', 'off') else 'auto'
+
+
+def triage_schema():
+	"""The JSON Schema of a triage answer, built from the constants ``validate_triage`` checks against so the two cannot drift. Strict
+	mode needs every key present and no others, so the keys the prompt calls optional are required here and may be empty."""
+	text = lambda limit: {'type': 'string', 'maxLength': limit}  # noqa: E731
+	return {
+		'type': 'object', 'additionalProperties': False, 'required': list(TRIAGE_ORDER),
+		'properties': {
+			'classification': {'type': 'string', 'enum': list(TRIAGE_CLASSIFICATIONS)},
+			'reason': text(TRIAGE_CAPS['reason']), 'impact': text(TRIAGE_CAPS['impact']),
+			'severity_adjust': {'type': 'integer', 'enum': [-1, 0, 1]}, 'severity_reason': text(TRIAGE_CAPS['severity_reason']),
+			'remediation': text(TRIAGE_CAPS['remediation']),
+			'validation_steps': {'type': 'array', 'maxItems': 5, 'items': {
+				'type': 'object', 'additionalProperties': False, 'required': ['kind', 'note'],
+				'properties': {'kind': {'type': 'string', 'enum': list(TRIAGE_STEP_KINDS)}, 'note': text(200)}}}}}
+
+
+def _structure_key(provider):
+	return (provider.name, provider.base_url or '', provider._model or '')
+
+
+def structured_levels(provider):
+	"""The levels to try for this request, best first, or () when it carries no schema or this provider is not sent one."""
+	if not _request_options.get().get('schema'):
+		return ()
+	mode = structured_mode()
+	if mode == 'off' or (provider.name not in SERVER_URL_PROVIDERS and mode != 'all') or provider.name == 'anthropic':
+		return ()
+	levels = STRUCTURED_LEVELS.get(provider.name, _DEFAULT_LEVELS)
+	cached = _STRUCTURED.get(_structure_key(provider))
+	if cached and cached[0] > time.time() and cached[1] in levels:
+		return levels[levels.index(cached[1]):]
+	return levels
+
+
+def _step_down(provider, levels):
+	"""Remember that the server did not take ``levels[0]``: the next one is where this model starts for an hour."""
+	_STRUCTURED[_structure_key(provider)] = (time.time() + 3600, levels[1])
+	logger.info('%s at %s does not take structured output (%s); using %s', provider.name, provider.base_url, levels[0], levels[1])
+
+
+def _refused_structure(error):
+	"""Whether a failed request was refused because of the structured-output field (an unsupported or malformed one), as against a bad
+	key, a rate limit or a server error, which no change of the request fixes."""
+	return error.http_status in (400, 422) and bool(_NAMES_STRUCTURE.search(error.hint or ''))
+
+
+def _structured_post(provider, build):
+	"""``provider._post`` with the structure of the request chosen by ``build(level)`` (a ``(url, headers, payload)``), stepping down
+	when the server refuses it or answers with nothing under it. Returns ``(data, level)``."""
+	levels = structured_levels(provider) or ('none',)
+	while True:
+		url, headers, payload = build(levels[0])
+		try:
+			data = provider._post(url, headers, payload)
+			if levels[0] != 'none' and len(levels) > 1:
+				provider._check_text(data)  # an empty answer under a constraint is a reason to ask without it
+			return data, levels[0]
+		except AIProviderError as error:
+			if len(levels) > 1 and levels[0] != 'none' and (_refused_structure(error) or error.category == 'empty_response'):
+				_step_down(provider, levels)
+				levels = levels[1:]
+				continue
+			raise
 
 
 class AnthropicProvider(AIProvider):
@@ -332,9 +470,17 @@ class AnthropicProvider(AIProvider):
 def _openai_text(data, name):
 	"""The text of an OpenAI-compatible chat completion, shared by complete() and complete_vision()."""
 	try:
-		return data['choices'][0]['message']['content']
+		choice = data['choices'][0]
+		text = choice['message']['content']
 	except (KeyError, IndexError, TypeError) as e:
 		raise AIProviderError(f'unexpected {name} response shape', category='provider_shape') from e
+	if isinstance(choice, dict) and choice.get('finish_reason') == 'length':  # cut off at the limit: say so, not "schema invalid" later
+		raise AIProviderError(f'{name} response exceeded the output token limit', category='output_truncated', stop_reason='length')
+	if not isinstance(text, str) or not text.strip():
+		# a reasoning model that spent its reply thinking, or a server that refused: not a reply that "has no classification"
+		raise AIProviderError(f'{name} response contained no text', category='empty_response',
+			stop_reason=choice.get('finish_reason') if isinstance(choice, dict) else None)
+	return text
 
 
 class OpenAIProvider(AIProvider):
@@ -362,12 +508,48 @@ class OpenAIProvider(AIProvider):
 				models.append({'id': m['id'], 'created': _epoch(m.get('created')), 'price': price})
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
+	def _limit_name(self):
+		"""OpenAI's own API names the reply limit max_completion_tokens (every current model takes it, and a reasoning model rejects
+		max_tokens); every compatible server, a proxy in front of OpenAI included, says max_tokens. Chosen by the address, not the
+		provider's name: a LiteLLM proxy is set up as "openai" with its own base URL."""
+		from urllib.parse import urlparse
+		host = (urlparse(self._base()).hostname or '').lower()
+		return 'max_completion_tokens' if host == 'api.openai.com' else 'max_tokens'
+
+	def _options(self):
+		"""The limit, temperature and seed this request carries. The limit only when the operator set one (``output_token_cap``); the
+		temperature and seed only to a self-hosted server and only when the stage pinned them (``request_options``): pinning both is what
+		makes a verdict reproducible (llama.cpp's seed is random by default)."""
+		out = {}
+		cap = output_token_cap()
+		if cap:
+			out[self._limit_name()] = cap
+		pinned = _request_options.get()
+		if self.name in SERVER_URL_PROVIDERS:
+			if pinned.get('temperature') is not None:
+				out['temperature'] = pinned['temperature']
+			if pinned.get('seed') is not None:
+				out['seed'] = pinned['seed']
+		return out
+
+	def _check_text(self, data):
+		_openai_text(data, self.name)
+
 	@tracked_completion
 	def complete(self, system, user):
-		data = self._post(
-			f'{self._base()}/chat/completions', self._headers(),
-			{'model': self.model, 'messages': [
-				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]})
+		messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
+		schema = _request_options.get().get('schema')
+
+		def build(level):
+			payload = {'model': self.model, 'messages': messages, **self._options()}
+			if level == 'json_schema':
+				payload['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'triage', 'strict': True, 'schema': schema}}
+			elif level == 'json_object':
+				payload['response_format'] = {'type': 'json_object'}
+			if self.name == 'openrouter' and level != 'none':
+				payload['provider'] = {'require_parameters': True}  # only an endpoint that takes the field, not one that ignores it
+			return f'{self._base()}/chat/completions', self._headers(), payload
+		data, _level = _structured_post(self, build)
 		return _openai_text(data, self.name)
 
 	@tracked_completion
@@ -378,7 +560,7 @@ class OpenAIProvider(AIProvider):
 			f'{self._base()}/chat/completions', self._headers(),
 			{'model': self.model, 'messages': [
 				{'role': 'system', 'content': system},
-				{'role': 'user', 'content': [{'type': 'text', 'text': user}, {'type': 'image_url', 'image_url': {'url': url}}]}]})
+				{'role': 'user', 'content': [{'type': 'text', 'text': user}, {'type': 'image_url', 'image_url': {'url': url}}]}], **self._options()})
 		return _openai_text(data, self.name)
 
 
@@ -412,9 +594,14 @@ class LMStudioProvider(OpenAIProvider):
 def _ollama_text(data):
 	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
 	try:
-		return data['message']['content']
+		text = data['message']['content']
 	except (KeyError, TypeError) as e:
 		raise AIProviderError('unexpected ollama response shape', category='provider_shape') from e
+	if data.get('done_reason') == 'length':
+		raise AIProviderError('ollama response exceeded the output token limit', category='output_truncated', stop_reason='length')
+	if not isinstance(text, str) or not text.strip():
+		raise AIProviderError('ollama response contained no text', category='empty_response', stop_reason=data.get('done_reason'))
+	return text
 
 
 class OllamaProvider(AIProvider):
@@ -428,13 +615,49 @@ class OllamaProvider(AIProvider):
 		models = [{'id': m['name'], 'created': _epoch(m.get('modified_at')), 'price': None} for m in data.get('models', []) if m.get('name')]
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
+	def _options(self):
+		"""Ollama's ``options``: the reply limit and the context window when the operator set them, the temperature and the seed when the
+		stage pinned them."""
+		options = {}
+		cap = output_token_cap()
+		if cap:
+			options['num_predict'] = cap
+		context = ollama_context()
+		if context:
+			options['num_ctx'] = context
+		pinned = _request_options.get()
+		for key in ('temperature', 'seed'):
+			if pinned.get(key) is not None:
+				options[key] = pinned[key]
+		return {'options': options} if options else {}
+
+	def _check_text(self, data):
+		_ollama_text(data)
+
 	@tracked_completion
 	def complete(self, system, user):
-		data = self._post(
-			f'{self._base()}/api/chat', {},
-			{'model': self.model, 'stream': False, 'messages': [
-				{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]})
+		messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
+		schema = _request_options.get().get('schema')
+
+		def build(level):
+			payload = {'model': self.model, 'stream': False, 'messages': messages, **self._options()}
+			if level == 'json_schema':
+				payload['format'] = schema
+			elif level == 'json':
+				payload['format'] = 'json'
+			return f'{self._base()}/api/chat', {}, payload
+		data, _level = _structured_post(self, build)
+		self._warn_if_cut_off(data)
 		return _ollama_text(data)
+
+	def _warn_if_cut_off(self, data):
+		"""A prompt longer than the context window is cut at its start without an error. Where the window was set, say when a prompt came
+		close to it (``prompt_eval_count`` is what the server counted)."""
+		context = ollama_context()
+		used = data.get('prompt_eval_count') if isinstance(data, dict) else None
+		if context and isinstance(used, int) and used >= 0.95 * context:
+			logger.warning('ollama read %d prompt tokens of a %d token context window: the start of the prompt may have been cut; raise '
+						   'CVENGINE_OLLAMA_NUM_CTX', used, context)
 
 	@tracked_completion
 	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
@@ -443,7 +666,7 @@ class OllamaProvider(AIProvider):
 			f'{self._base()}/api/chat', {},
 			{'model': self.model, 'stream': False, 'messages': [
 				{'role': 'system', 'content': system},
-				{'role': 'user', 'content': user, 'images': [base64.b64encode(image_bytes).decode()]}]})
+				{'role': 'user', 'content': user, 'images': [base64.b64encode(image_bytes).decode()]}], **self._options()})
 		return _ollama_text(data)
 
 
@@ -524,7 +747,8 @@ def confirm_match(provider, asset, cve):
 
 TRIAGE_CLASSIFICATIONS = ('confirmed', 'likely', 'needs_validation', 'likely_false_positive', 'not_applicable')
 TRIAGE_STEP_KINDS = ('nuclei', 'nmap', 'curl', 'manual')
-TRIAGE_KEYS = {'classification', 'reason', 'impact', 'severity_adjust', 'severity_reason', 'remediation', 'validation_steps'}
+TRIAGE_ORDER = ('classification', 'reason', 'impact', 'severity_adjust', 'severity_reason', 'remediation', 'validation_steps')  # the order the prompt names them
+TRIAGE_KEYS = set(TRIAGE_ORDER)
 TRIAGE_CAPS = {'reason': 300, 'impact': 600, 'severity_reason': 200, 'remediation': 600}
 # What a triage prompt may never carry, whatever a caller put in the payload: a name that identifies a target, a raw request or
 # response, a body, a secret (an API key, a masked sample), a command line.
@@ -554,7 +778,11 @@ TRIAGE_SYSTEM_PROMPT = (
 	'4) Does the advisory need local state (kernel, driver, hardware, a local account)? Then no network evidence settles it: answer '
 	'needs_validation and say the host inventory reporter is what decides. Use likely_false_positive or not_applicable only when you can '
 	'name concrete metadata that points away: a different product, a version out of range or patched, or edge-only evidence. A banner or '
-	'tag that says nothing about a version is no reason to close a finding and none to confirm it. ' + UNTRUSTED_NOTICE)
+	'tag that says nothing about a version is no reason to close a finding and none to confirm it. When the only evidence is a version '
+	'inside the advisory range, with no template result, no distribution status and no probe that stated the version, answer '
+	'needs_validation: a version string alone does not show that the host is affected (back-ported fixes, repackaged builds and edge '
+	'devices that report another product\'s version are common). Answer likely only when something beyond the version supports it. '
+	+ UNTRUSTED_NOTICE)
 
 
 def _triage_text(value, limit):
@@ -656,19 +884,36 @@ def build_repair_prompt(kind, payload, reply, reason, host_context=None):
 			+ untrusted_block('REJECTED_REPLY', clean_text(str(reply), 2500)))
 
 
+TRIAGE_SEED = 20260101  # any fixed number: with the temperature at 0 it is what makes a local model's verdict the same on every run
+
+
+def _ask_triage(provider, stage, system, user):
+	"""One triage completion: reproducible (temperature and seed pinned, which only a self-hosted server receives), shaped by the triage
+	schema where the server takes one, and, when the reply was cut off at a limit the operator set, asked once more with a longer one
+	(a reasoning model spends part of the limit thinking). Without a limit set there is nothing to lengthen and the error stands."""
+	options = {'temperature': 0, 'seed': TRIAGE_SEED, 'schema': triage_schema()}
+	with usage_stage(stage), request_options(**options):
+		try:
+			return provider.complete(system, user)
+		except AIProviderError as error:
+			if error.category != 'output_truncated' or not output_token_cap():
+				raise
+	with usage_stage(stage), request_options(**options, token_factor=2):
+		return provider.complete(system, user)
+
+
 def triage_finding(provider, kind, payload, host_context=None):
 	"""Ask ``provider`` to triage one finding. Returns {'parsed': dict, 'model': 'provider:model'} (plus 'repaired': True when the first
 	reply was rejected and the second was fine); the raw reply is dropped. A reply that fails validation is sent back to the model once,
 	with why it failed, and the second answer is the one that counts. Raises AIProviderError when the provider cannot be reached or the
 	second reply is also unusable (category schema_invalid, with the reason)."""
 	import hashlib
-	with usage_stage('finding_triage'):
-		reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload, host_context))
+	reply = _ask_triage(provider, 'finding_triage', TRIAGE_SYSTEM_PROMPT, build_triage_prompt(kind, payload, host_context))
 	parsed, reason = validate_triage(reply)
 	repaired = False
 	if parsed is None:
-		with usage_stage('finding_triage_repair'):
-			reply = provider.complete(TRIAGE_SYSTEM_PROMPT, build_repair_prompt(kind, payload, reply, reason, host_context))
+		reply = _ask_triage(provider, 'finding_triage_repair', TRIAGE_SYSTEM_PROMPT,
+							build_repair_prompt(kind, payload, reply, reason, host_context))
 		parsed, second = validate_triage(reply)
 		if parsed is None:
 			digest = hashlib.sha256(str(reply).encode()).hexdigest()[:12]

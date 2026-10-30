@@ -166,7 +166,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 			return NOT_VULNERABLE
 		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True), mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '', db_exposure_checks={}, provider=None,
+								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 								  node2shell_checker=checker)
@@ -181,7 +181,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		from startScan.models import ScanActivity
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '', db_exposure_checks={}, provider=None,
+								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='node2shell').exists())

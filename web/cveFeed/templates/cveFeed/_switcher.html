@@ -3,14 +3,14 @@
   {% if orgs %}
   <label class="proj-label{% if place == 'top' %} sr{% endif %}" for="org{{ sfx }}">Organization</label>
   <div class="select"><select id="org{{ sfx }}" class="org-switch" data-section="{{ active }}">
-    {% if all_projects %}<option value="" selected>All organizations</option>{% endif %}
-    {% for o in orgs %}<option value="{{ o.slug }}" data-projects="{% for p in projects %}{% if p.org_slug == o.slug %}{{ p.slug }} {% endif %}{% endfor %}" {% if not all_projects and o.slug == current_org %}selected{% endif %}>{{ o.name }}</option>{% endfor %}
+    {% if show_all_option %}<option value="" {% if all_projects and not scope_org %}selected{% endif %}>All organizations</option>{% endif %}
+    {% for o in orgs %}<option value="{{ o.slug }}" data-projects="{% for p in projects %}{% if p.org_slug == o.slug %}{{ p.slug }} {% endif %}{% endfor %}" {% if not all_projects and o.slug == current_org or scope_org and o.slug == scope_org %}selected{% endif %}>{{ o.name }}</option>{% endfor %}
   </select><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></div>
   {% endif %}
   <label class="proj-label{% if orgs or place == 'top' %} sr{% endif %}" for="project{{ sfx }}">Project</label>
   <div class="select"><select id="project{{ sfx }}" class="proj" data-section="{{ active }}">
     {% if show_all_option %}<option value="_all" {% if all_projects %}selected{% endif %}>All projects</option>{% endif %}
-    {% for p in projects %}{% if not orgs or all_projects or p.org_slug == current_org %}<option value="{{ p.slug }}" {% if p.slug == slug %}selected{% endif %}>{{ p.name }}</option>{% endif %}{% endfor %}
+    {% for p in projects %}{% if not orgs or all_projects and not scope_org or not all_projects and p.org_slug == current_org or scope_org and p.org_slug == scope_org %}<option value="{{ p.slug }}" {% if p.slug == slug %}selected{% endif %}>{{ p.name }}</option>{% endif %}{% endfor %}
   </select><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></div>
 </div>
 {% endif %}

@@ -1,0 +1,35 @@
+name: 🧹 Delete merged branch
+
+# Keeps the repository free of dangling branches: when a pull request from a branch of this repository is merged, its branch is deleted.
+# A cloud session's push credential can create and update branches but is refused (403) when it deletes a ref (see branch-cleanup.yml and
+# release.yml), so the deletion is done here with the Actions token. Pull requests from forks are ignored, the long-lived branches are never
+# touched, and `claude/*` session branches are left alone because a session keeps pushing to the same name. A branch that was closed without
+# merging is not deleted (it may still be wanted); `branch-cleanup.yml` removes those by hand.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧹 Delete the merged branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          # the branch name comes from the pull request: validate it as a plain name before using it anywhere
+          if ! [[ $BRANCH =~ ^[A-Za-z0-9._/-]+$ ]] || [[ $BRANCH == -* || $BRANCH == *..* ]]; then
+            echo "::error::Refusing '$BRANCH': not a plain branch name"; exit 1
+          fi
+          case "$BRANCH" in
+            master|main|develop) echo "Keeping the long-lived branch $BRANCH"; exit 0 ;;
+            claude/*) echo "Keeping the session branch $BRANCH"; exit 0 ;;
+          esac
+          echo "Deleting $BRANCH"
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH"

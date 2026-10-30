@@ -481,13 +481,17 @@ def interpret(subject, check, result):
     Returns the result, with its status refined. Pure."""
     if result.get('status') != 'observed':
         return result
-    from cveFeed.correlation import parse_version, version_in_range
+    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, parse_version, version_in_range
     out = dict(result)
     if subject['kind'] == 'cve_match':
         observed = (result.get('observed') or {})
-        product = (subject.get('product') or '').lower()
-        if observed.get('version') and (not observed.get('product') or observed['product'].lower() in product
-                                        or product in observed['product'].lower()):
+        product = _norm(subject.get('product') or '', catalogue=True)
+        observed_product = _norm(observed.get('product') or '')
+        # A version belongs to the identified product, never to a sibling or an unidentified banner.
+        same_product = (name_matches_token(observed_product, product)
+                        or product in PRODUCT_ALIASES.get(observed_product, ())
+                        or observed_product in PRODUCT_ALIASES.get(product, ()))
+        if observed.get('version') and same_product:
             inside = version_in_range(parse_version(observed['version']), subject.get('range') or {})
             if inside is True:
                 out.update(status='reaffirmed', summary=result['summary'] + '; that version is inside the affected range')
@@ -549,7 +553,6 @@ def apply_validation(row, check, result, now=None, save=True):
     if status == 'hit':
         raise_class(row, 'confirmed', f'Validated: {step["summary"]}')
         row.validation_evidence = {**(row.validation_evidence or {}), check['kind']: result.get('evidence') or {}}
-        row.attempts, row.next_attempt_at = 0, None
         if check['kind'] == 'nuclei_template' and row.match_id:
             _record_template_hit(row, check, result)
     elif status == 'failed':
@@ -558,7 +561,6 @@ def apply_validation(row, check, result, now=None, save=True):
         if row.attempts >= 3:
             row.attempts = 0
     else:
-        row.attempts, row.next_attempt_at = 0, None
         if status == 'reaffirmed' and row.classification:
             raise_class(row, 'likely', f'Validated: {step["summary"]}')
         if status in ('no_match', 'version_changed', 'reaffirmed'):
@@ -567,6 +569,10 @@ def apply_validation(row, check, result, now=None, save=True):
             row.reason = (f'{row.reason or ""} The {check["label"]} did not reproduce it ({step["summary"]}); the hard evidence '
                           f'({"; ".join(row.hard_evidence)}) stands.').strip()[:700]
     row.validation_status = rollup(row.validation_steps)
+    # A successful step cannot clear another step's failure. Keep the retry
+    # date while the row is failed, and clear it once the failed step resolves.
+    if row.validation_status != 'failed':
+        row.attempts, row.next_attempt_at = 0, None
     row.validated_at = now
     if save:
         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at', 'attempts',
@@ -782,6 +788,11 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                 except Exception:  # noqa: BLE001 - a suggestion is advisory; it must never break the validation sweep
                     logger.exception('local-check suggestion failed for %s', row.pk)
                 continue
+            # A failed step of a check the plan no longer holds (a template removed, a port gone) is never run again to replace it, so it would
+            # keep the row failed, and due for a retry every day, for ever.
+            planned = {(c['kind'], c['target']) for c in checks}
+            row.validation_steps = [s for s in (row.validation_steps or [])
+                                    if s.get('result') != 'failed' or (s.get('kind'), s.get('target')) in planned]
             for check in checks:
                 # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
                 # stopped by its watchdog)
@@ -846,13 +857,16 @@ def due_ids(project_id, limit=None):
     from django.db.models import Q
 
     from cveFeed.models import Triage
+    from cveFeed.correlation import latest_scan_q
     now = timezone.now()
     stale = now - timedelta(seconds=ledger_ttl())
     due = (Q(validation_status__in=('none', 'pending'))
            | Q(validation_status='failed', next_attempt_at__lte=now)
+           | Q(validation_status='failed', next_attempt_at__isnull=True)
            | Q(validation_status__in=('hit', 'clean', 'observed'), validated_at__lt=stale)
            | Q(validation_status__in=('no_check', 'skipped_blocked'), updated_at__lt=stale))
-    qs = Triage.objects.filter(project_id=project_id, kind__in=PLANNED_KINDS).filter(due).filter(
+    qs = Triage.objects.filter(project_id=project_id, kind__in=PLANNED_KINDS).filter(
+        ~Q(kind='cve_match') | (Q(match__isnull=False) & latest_scan_q('match__subdomain__'))).filter(due).filter(
         Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
     return list(qs.order_by('validated_at', 'id').values_list('id', flat=True)[:limit or cap('VALIDATE_MAX_PER_RUN') * 4])
 

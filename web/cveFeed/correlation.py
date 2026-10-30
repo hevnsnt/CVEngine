@@ -253,6 +253,15 @@ PRODUCT_ALIASES = {
     "iscbind": {"bind"},
     "bind9": {"bind"},
     "nextjs": {"next"},  # the npm package of Next.js is named "next"
+    # product strings nmap's service detection really prints, which name the product with extra words the advisory's name lacks: a version seen
+    # for one of these is the product's (validation.interpret needs the pair to agree before it reaffirms a CVE from a version)
+    "apachetomcatcoyotejspengine": {"tomcat"},
+    "apachecoyote": {"tomcat"},
+    "nodejsexpressframework": {"express"},
+    "vmwareesxisoapapi": {"esxi"},
+    "ciscoioshttpconfig": {"ios"},
+    "golangnethttpserver": {"go"},
+    "pythonbasehttpserver": {"python"},
     # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently
     "apache2": {"httpserver", "apachehttpserver"},
     "opensshserver": {"openssh"},
@@ -498,6 +507,33 @@ def _bounded(rng):
     return version_in_range((0,), rng) is not None  # a range with at least one usable bound
 
 
+def pair_split_ranges(ranges):
+    """The ranges with each ``introduced``-only range joined to the ``fixed``-only range right after it.
+
+    The CVE List writes a branch as two ``versions`` entries when its lower bound is "7.13.0" and its upper bound is "lessThan 7.13.7", and the
+    conversion keeps them as two ranges: ``[{"introduced": "7.13.0"}, {"fixed": "7.13.7"}]``. Read alone, the first says "7.13.0 and every later
+    version", the second "every version before 7.13.7", so the fixed 7.13.7, 7.18.1 and everything in between read as vulnerable (issue 205,
+    CVE-2022-26134). Joined, they are the branch the advisory means. Only a pair that alternates in order and whose fix is newer than its
+    introduction is joined; an ``introduced`` range with no fixed range after it stays open (a branch with no fix), and any other shape is
+    returned as it was."""
+    out, i = [], 0
+    ranges = list(ranges)
+    while i < len(ranges):
+        rng = ranges[i]
+        nxt = ranges[i + 1] if i + 1 < len(ranges) else None
+        if (nxt is not None and rng.get("introduced") and not rng.get("fixed") and not rng.get("lastAffected")
+                and nxt.get("fixed") and not nxt.get("introduced") and not nxt.get("lastAffected")
+                and str(rng.get("type") or "SEMVER").upper() == str(nxt.get("type") or "SEMVER").upper()):
+            intro, fixed = parse_version(rng["introduced"], strict=True), parse_version(nxt["fixed"], strict=True)
+            if intro is not None and fixed is not None and _vcmp(fixed, intro) > 0:
+                out.append({**rng, "fixed": nxt["fixed"]})
+                i += 2
+                continue
+        out.append(rng)
+        i += 1
+    return out
+
+
 def _is_branch_range(rng):
     """One maintained branch of a branch-by-branch fix list: introduced "8.2" or "8.2.*", fixed "8.2.35"."""
     intro = parse_version(rng.get("introduced"), strict=True)
@@ -520,6 +556,45 @@ def branch_unlisted(ver, ranges):
     exposed), so the answer for it is "unknown", not "not in range"."""
     lowest = lowest_listed_branch(ranges)
     return bool(lowest and ver and _vcmp(ver[:len(lowest)], lowest) < 0)
+
+
+def fix_only_branch_list(ranges):
+    """True for a list of two or more ranges that each carry only a ``fixed`` bound: the shape some feeds give a branch-by-branch advisory
+    (PHP2Shell: fixed 8.2.35, 8.3.36, 8.4.27, 8.5.12). The lower bound was dropped, so a range read alone says "every version before
+    the fix", which for one branch's fix includes the other, older branches' already patched releases."""
+    if len(ranges) < 2:
+        return False
+    for rng in ranges:
+        if (rng.get("introduced") or rng.get("lastAffected") or not rng.get("fixed")
+                or str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM") or parse_version(rng.get("fixed"), strict=True) is None):
+            return False
+    return True
+
+
+def fix_only_branch_verdict(ver, ranges):
+    """``(verdict, fixed)`` for ``ver`` against a fix-only branch list, without inventing a lower bound: a fix only speaks for the
+    versions that are on its own line of releases. True/False/None as for ``version_in_range``; ``fixed`` is the fix the answer was
+    read against (None when none applies).
+
+    1. A fix on the host's own major.minor branch decides: vulnerable when the host is before it.
+    2. Otherwise the fixes on the host's major: exactly one decides (an advisory of release trains named by their major, such as
+       18.19.1, 20.11.1 and 21.6.2, or one fix at x.y.0), several that the host sits between or before are a branch the advisory does
+       not list: unknown, never cleared (an end-of-life branch gets no fix).
+    3. Newer than every fix: not vulnerable. Another major, older than every fix: unknown. Between majors: unknown."""
+    parsed = sorted(((parse_version(r["fixed"], strict=True), r["fixed"]) for r in ranges), key=lambda pair: pair[0])
+    if not ver or len(ver) < 1:
+        return None, None
+    own = [pair for pair in parsed if pair[0][:2] == tuple(ver[:2])]
+    if own:
+        fix = own[0]
+        return (_vcmp(ver, fix[0]) < 0), fix[1]
+    if _vcmp(ver, parsed[-1][0]) >= 0:
+        return False, None
+    same_major = [pair for pair in parsed if pair[0][:1] == tuple(ver[:1])]
+    if len(same_major) == 1:
+        fix = same_major[0]
+        return (_vcmp(ver, fix[0]) < 0), fix[1]
+    return None, None
 
 
 def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None):
@@ -560,9 +635,21 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if ver is not None:
             in_range, unknown = False, False
             for index, item in hit:
-                ranges = [r for r in (item.get("ranges") or []) if _bounded(r)]
+                ranges = pair_split_ranges([r for r in (item.get("ranges") or []) if _bounded(r)])
                 if not ranges:
                     unknown = True  # the advisory names the product but no version bound: nothing to test against
+                    continue
+                if fix_only_branch_list(ranges):
+                    # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
+                    result, fixed = fix_only_branch_verdict(ver, ranges)
+                    if result is True:
+                        in_range = True
+                        matched_product = item.get("product") or item.get("package") or name
+                        if details is not None:
+                            details[cve.id] = {"affected_index": index, "range": {"fixed": str(fixed)[:60]}, "no_lower_bound": True}
+                        break
+                    if result is None:
+                        unknown = True
                     continue
                 for rng in ranges:
                     result = version_in_range(ver, rng)
@@ -838,22 +925,21 @@ def _carry_remediation(fresh):
              Subdomain.objects.filter(pk__in={m.subdomain_id for m in fresh}).values_list("id", "target_domain_id", "name")}
     domains = {d for d, _n in hosts.values()}
     names = {n for _d, n in hosts.values()}
-    earlier = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
-                                       subdomain__name__in=names).exclude(remediation_status="open")
-               .exclude(subdomain_id__in=list(hosts)).select_related("subdomain").order_by("id"))
-    latest, by_host = {}, {}
-    for m in earlier:  # oldest first, so the newest decision wins
-        latest[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product)] = m
-        by_host[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name)] = m
-    if not latest:
+    base = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
+                                    subdomain__name__in=names)
+            .exclude(subdomain_id__in=list(hosts)).select_related("subdomain"))
+    # A remediation decision applies to this CVE on this host, even when a feed
+    # changes the product label or evidence source. Use the newest host-level
+    # row: preferring an older exact-product row would undo a later reopening.
+    # Each scan keeps a copy, so let PostgreSQL return just one row per key.
+    by_host_fields = ("cve_entry_id", "subdomain__target_domain_id", "subdomain__name")
+    by_host = {(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name): m
+               for m in base.order_by(*by_host_fields, "-id").distinct(*by_host_fields)}
+    if not by_host:
         return
     for match in fresh:
         domain_id, name = hosts.get(match.subdomain_id, (None, None))
-        # The same product by the same name first. When the match is now made under another product string or source (the advisory's
-        # name changed in a feed update, the product is now seen on another port, a CPE where a banner was) it is still the same CVE on
-        # the same host, and a person's decision about that must not be lost to a different label.
-        before = (latest.get((match.cve_entry_id, domain_id, name, match.source, match.matched_product))
-                  or by_host.get((match.cve_entry_id, domain_id, name)))
+        before = by_host.get((match.cve_entry_id, domain_id, name))
         if before is not None:
             match.remediation_status, match.remediation_note = before.remediation_status, before.remediation_note
             match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
@@ -942,10 +1028,19 @@ def close_rejected():
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch
+    from cveFeed import scoring
     open_matches = CVEMatch.objects.filter(cve_entry__status__icontains="reject").exclude(
         ai_verdict="not_affected", ai_reason__startswith="Closed automatically:")
-    return open_matches.update(ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-                               ai_reason="Closed automatically: the CVE was rejected by its CNA.")
+    closed = 0
+    while rows := list(open_matches.order_by('pk').values_list('pk', 'subdomain_id')[:scoring.CHUNK]):
+        ids = [pk for pk, _ in rows]
+        updated = open_matches.filter(pk__in=ids).update(
+            ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
+            ai_reason="Closed automatically: the CVE was rejected by its CNA.")
+        closed += updated
+        if updated:
+            scoring.rescore_subdomain_ids({subdomain_id for _, subdomain_id in rows})
+    return closed
 
 
 def close_stale(current, covered):
@@ -1126,12 +1221,19 @@ def latest_scan_q(prefix=""):
     newest_full_of = full.filter(domain_id=OuterRef("domain_id")).order_by("-id").values("id")[:1]
     after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).annotate(
         full_id=Coalesce(Subquery(newest_full_of), 0)).filter(id__gt=F("full_id")).values("id")
-    newer_row = Subdomain.objects.filter(scan_history_id__in=after_full, target_domain_id=OuterRef(prefix + "target_domain_id"),
-                                         name=OuterRef(prefix + "name"), scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
+    same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
+                                         name=OuterRef(prefix + "name"))
+    newer_row = same_host.filter(scan_history_id__in=after_full,
+                                 scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
+    # Before the first successful full scan, keep the newest scanned copy of each host. A scanless row (certificate transparency,
+    # an import) is not a copy of a scan: its own addresses and findings fold into the host, so it stays current beside the scanned copy.
+    newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
     return ((Q(**{prefix + "scan_history_id__in": latest_full}) | Q(**{prefix + "scan_history_id__in": after_full})
              | Q(**{prefix + "scan_history__isnull": True})
              | ~Q(**{prefix + "target_domain_id__in": full.values("domain_id")}))
-            & ~Q(Exists(newer_row)))
+            & ~Q(Exists(newer_row))
+            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in": full.values("domain_id")})
+               | ~Q(Exists(newer_fallback))))
 
 
 def candidate_subdomains(product_index, base=None):

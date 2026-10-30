@@ -9,15 +9,17 @@ helper (``probe_url``) is injectable.
 """
 import concurrent.futures
 import functools
+import hashlib
 import http.client
 import logging
 import re
+import secrets
 import socket
 import threading
 import time
 from urllib.parse import urljoin, urlparse
 
-from cveFeed import fingerprint, versions
+from cveFeed import fingerprint, soft404, versions
 
 logger = logging.getLogger(__name__)
 
@@ -274,9 +276,74 @@ def analyse(result):
     from cveFeed import sensitive
     state, evidence = classify(result)
     content_type = (result.get('content_type') or '')[:100]
-    found = sensitive.scan_text(result.get('body') or '') if sensitive.is_text(content_type) else {}
+    body = result.get('body') or ''
+    found = sensitive.scan_text(body) if sensitive.is_text(content_type) else {}
     return {'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
-            'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found)}
+            'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
+            # what the page was, for comparing it with the answer to a path that cannot exist (cveFeed.soft404); held in memory, never stored
+            'fp': soft404.fingerprint(result, urlparse(result.get('url') or '').path), 'bytes': result.get('bytes', len(body))}
+
+
+CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
+MAX_BASELINES_PER_HOST = 8  # extra requests a host may be asked for what its missing pages look like, on top of its routes
+
+
+def _split_route(path):
+    """``(directory, shape, extension)`` of a route path: the directory it is in (``/api/v1/``), and how a name for it that cannot exist
+    should look, because servers answer a missing ``.php`` file, a missing directory and a missing bare name differently."""
+    directory = path.rsplit('/', 1)[0] + '/'
+    name = path.rsplit('/', 1)[1]
+    if path.endswith('/') and path != '/':
+        return path.rsplit('/', 2)[0] + '/', 'slash', ''
+    ext = name.rsplit('.', 1)[1].lower() if '.' in name else ''
+    return directory, ('ext' if re.fullmatch(r'[a-z0-9]{1,5}', ext) else 'bare'), ext
+
+
+def _baseline_path(directory, shape, ext):
+    name = f'cvengine-{secrets.token_hex(6)}'
+    return directory + (name + '/' if shape == 'slash' else f'{name}.{ext}' if shape == 'ext' else name)
+
+
+def _baseline(base, directory, shape, ext, probe, known):
+    """The fingerprint of the server's answer for a path that cannot exist in ``directory``, of the kind ``shape`` names, read once per
+    web base, directory and shape. None when it could not be read or this host has used up its requests for it."""
+    key = (base, directory, shape, ext if shape == 'ext' else '')
+    if key not in known:
+        if sum(1 for k in known if k[0] == base) >= MAX_BASELINES_PER_HOST:
+            return None
+        time.sleep(PER_REQUEST_GAP)
+        path = _baseline_path(directory, shape, ext)
+        try:
+            known[key] = soft404.fingerprint(probe(base + path), path)
+        except Exception:  # noqa: BLE001 - no answer to compare with: the route stands as it was read
+            known[key] = None
+    return known[key]
+
+
+def _against_missing_page(answer, url, probe, known):
+    """``answer`` for ``url`` as it stands, or as ``catch_all`` when the server gives the same answer for a path that cannot exist in the
+    same directory and of the same kind (soft404). Every answer that could be a route's own is compared, not only an open one: a server
+    that sends every path to its login page, or answers 403 to all of them, says as little about a route as one that serves a shell.
+    The root is never compared."""
+    parts = urlparse(url)
+    path = parts.path or '/'
+    status = answer.get('status') or 0
+    if path == '/' or status in (404, 410) or not (200 <= status < 400 or status in (401, 403, 405)) or answer.get('state') == 'error':
+        return answer
+    fp = answer.get('fp')
+    if fp is None:
+        return answer
+    base = f'{parts.scheme}://{parts.netloc}'
+    directory, shape, ext = _split_route(path)
+    # where a path that cannot exist is asked for: beside the route, in its own kind and as a plain name (what ffuf, feroxbuster and
+    # dirsearch calibrate per directory). Below the route is not asked: a server that answers every path under /api alike has an /api
+    for kind in dict.fromkeys((shape, 'bare')):
+        missing = _baseline(base, directory, kind, ext if kind == 'ext' else '', probe, known)
+        if missing is not None and soft404.same(fp, missing):
+            evidence = {**answer['evidence'], 'catch_all': {**soft404.public(missing), 'kind': kind,
+                                                            'note': 'the same answer as for a path that cannot exist'}}
+            return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0}
+    return answer
 
 
 # ----------------------------------------------------------------------------- network
@@ -545,13 +612,14 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
             if not host_allowed(host, project):
                 return host, None
             out = []
+            missing_pages = {}  # web base -> the answer to a path that cannot exist, read once if a route came out open
             for i, url in enumerate(urls):
                 if resources.abort_requested(scan_id):
                     break
                 if i:
                     time.sleep(PER_REQUEST_GAP)
                 try:
-                    result = analyse(probe(url))
+                    result = _against_missing_page(analyse(probe(url)), url, probe, missing_pages)
                     _read_scripts(result, probe, scan_id)
                     out.append((url, result))
                 except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
@@ -586,6 +654,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
         activity.settle(running, 'done', message=(
             f'Checked {len(probed)} web routes on {len(by_host)} hosts of {domain.name}: {counts.get("open", 0)} open, '
             f'{counts.get("login", 0)} login pages, {counts.get("sso", 0)} SSO, {counts.get("session_required", 0)} require a session'
+            + (f'; {counts[CATCH_ALL]} answer like a page that does not exist' if counts.get(CATCH_ALL) else '')
             + (f'; {stored["sensitive"]} routes serve sensitive data' if stored['sensitive'] else '')
             + (f'; {len(errors)} could not be reached' if errors else '')), routes=len(probed))
         return {'routes': len(probed), 'hosts': len(by_host), 'by_state': counts, 'reused': len(fresh), 'errors': len(errors),
@@ -642,7 +711,7 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
         elif row.zombie_since is not None and not answers:
             row.zombie_since = None
         old_rows.append(row)
-        if was != state and not explained:
+        if was != state and not explained and state != CATCH_ALL:  # a reading corrected (the server answers every path alike), nothing changed on the server
             changes.record_auth_change(project, scan.domain_id, scan.id, host.lower(), url, was, state,
                                        {'http_status': result.get('status'), 'provider': evidence.get('provider', '')})
     for part in _chunks(new_rows):

@@ -126,6 +126,12 @@ def _active_count(project_id):
 def _recently_handled(job, signature, now):
     if not job or getattr(job, 'evidence_signature', getattr(job, 'signature', '')) != signature:
         return False
+    return _job_current(job, now)
+
+
+def _job_current(job, now):
+    """Whether ``job``, taken to be about the same evidence, still stands for the finding: running, backing off after a failure,
+    exhausted, skipped for a lasting reason, or finished inside the window (a day when the AI could not answer, else seven)."""
     if job.status in ('queued', 'running'):
         return True
     when = job.finished_at or job.created_at
@@ -138,14 +144,42 @@ def _recently_handled(job, signature, now):
         # Evidence changes get a new signature. Closure can be reversed without a
         # signature change, so a reopened eligible finding is allowed a new job.
         reason = (job.result or {}).get('reason')
-        if reason == 'no_longer_eligible':
-            return False
+        if reason in ('no_longer_eligible', 'historical'):
+            return False  # a replaced match's job says nothing about the match that replaced it
         if reason == 'out_of_scope':
             return when > now - timedelta(minutes=30)
         return True
     result = job.result or {}
     interval = timedelta(days=1) if result.get('ai_state') in ('unavailable', 'deferred', 'failed') else timedelta(days=7)
     return when > now - interval
+
+
+CARRY_HOPS = 6  # a finding rescanned over and over: how many earlier matches of it are followed for a job
+
+
+def _carried_job(row):
+    """The newest validation job of an earlier match of this finding: a rescan makes a new match row, and with it a finding with no job of
+    its own, so its history (a validation that failed for good, one that is backing off, one that finished a day ago) was lost and the
+    work was queued again at attempt 1, every rescan (issue 206). The link is ``Triage.carried_from``, set when the row took its record
+    from the one before it, and is followed back while the older matches have no job themselves."""
+    seen, match_id = set(), row.carried_from
+    for _ in range(CARRY_HOPS):
+        if not match_id or match_id in seen:
+            return None
+        seen.add(match_id)
+        job = OnDemandValidation.objects.filter(match_id=match_id).order_by('-id').first()
+        if job:
+            return job
+        match_id = Triage.objects.filter(match_id=match_id).values_list('carried_from', flat=True).first()
+    return None
+
+
+def _inherited_fresh(row, now):
+    """A rescan's new match row carries the validation its predecessor finished (cveFeed.triage._twins) but has no job of its own: a
+    result younger than the usual window is as good as a job of its own. Without this every rescan queued every match again."""
+    if row.validation_status not in ('hit', 'clean', 'observed', 'no_check') or not row.validated_at:
+        return False
+    return row.validated_at > now - timedelta(days=7)
 
 
 def enqueue(row, lane):
@@ -162,6 +196,7 @@ def enqueue(row, lane):
             return 'stale'
         if row.match_id:
             previous = OnDemandValidation.objects.filter(match_id=row.match_id).order_by('-id').first()
+            carried = _carried_job(row) if previous is None else None
             if previous and previous.status in ('queued', 'running'):
                 if previous.status == 'queued' and previous.priority > priority:
                     previous.priority = priority
@@ -171,12 +206,20 @@ def enqueue(row, lane):
                     return 'inflight'
             elif _recently_handled(previous, row.signature, now):
                 return 'fresh'
+            elif carried is not None and carried.status not in ('queued', 'running') and _job_current(carried, now):
+                return 'fresh'  # the finding's earlier match was handled, and that stands for this one (its evidence is the same)
+            elif previous is None and carried is None and _inherited_fresh(row, now):
+                return 'fresh'
             else:
                 if _active_count(row.project_id) >= cap:
                     return 'project_cap'
+                if carried is not None:
+                    # the attempt count and the backoff carry on from the earlier match's job: its evidence is this one's by construction
+                    attempts = next_attempt_number(carried, row.signature, lambda j: row.signature)
+                else:
+                    attempts = next_attempt_number(previous, row.signature, lambda j: j.evidence_signature)
                 job = OnDemandValidation.objects.create(match_id=row.match_id, project_id=row.project_id,
-                    evidence_signature=row.signature, priority=priority,
-                    attempts=next_attempt_number(previous, row.signature, lambda j: j.evidence_signature))
+                    evidence_signature=row.signature, priority=priority, attempts=attempts)
                 task, promoted = validate_match_on_demand, False
         else:
             previous = AutomaticValidation.objects.filter(triage=row).order_by('-id').first()

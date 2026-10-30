@@ -683,11 +683,16 @@ def _signed_units(h, ev, kind, withheld=None, why_withheld=''):
 
 
 def _withheld(cred, h, ev):
-    """Whether the stored sign-in's last recorded outcome for this host is a refusal: its origin's certificate does not verify and the sign-in
-    is not set to trust it anyway, so nuclei is never given it (``auth_nuclei.trusted_plan``), and a later run that did send it is newer."""
+    """Whether Nuclei will withhold this sign-in: HTTPS requires an explicit unverified-TLS opt-in.
+
+    For a credential with mixed HTTP and HTTPS origins, use the last recorded refusal, since an explicitly selected HTTP origin
+    may still be runnable. A later successful signed-in run overrides an older refusal.
+    """
     from cveFeed import auth_checks
     if cred.allow_untrusted_certificate:
         return False
+    if cred.origins and all(str(origin).startswith('https:') for origin in cred.origins):
+        return True
     key = (h.project_id, h.name, auth_checks.revision(cred))
     refused = [when for _service, _status, when in ev.signed.get(('nuclei-auth-refused', *key), ()) if when]
     if not refused:
@@ -698,7 +703,7 @@ def _withheld(cred, h, ev):
 
 def plan_auth_nuclei(h, ev):
     return _signed_units(h, ev, 'nuclei-auth', withheld=_withheld,
-                         why_withheld='the stored sign-in is not sent: the server certificate does not verify and "Trust this certificate anyway" is off for it')
+                         why_withheld='the stored sign-in is not sent: Nuclei cannot verify TLS on its request and "Trust this certificate anyway" is off')
 
 
 def plan_auth_routes(h, ev):

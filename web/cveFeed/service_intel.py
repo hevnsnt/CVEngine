@@ -1,7 +1,8 @@
 """What nmap's scripts say beyond product and version, kept as host facts and findings.
 
 * ``rdp-ntlm-info`` and ``smb-os-discovery`` name the Windows build, computer name and domain without logging in. They become
-  ``IpAddress.fingerprint['facts']`` and, when nmap's own OS guess is empty, the OS shown for the address.
+  ``IpAddress.fingerprint['facts']`` and, when nmap's own OS guess is empty, the OS shown for the address. Where no script names the
+  system, the distribution or OS CPE the services report does (cveFeed.os_detection.from_services).
 * ``ftp-anon`` says whether the FTP server lets anyone sign in. That is a finding, with the top-level listing nmap read as the
   evidence.
 
@@ -73,6 +74,12 @@ def host_facts(ip_obj):
                 facts.setdefault(key, value)  # SMB's answer wins where both say the same thing
             if facts:
                 facts.setdefault('source', 'rdp-ntlm-info')
+    if not facts.get('os'):
+        # no script named the system: what the services say about it (a distribution in a banner, the OS CPE). This is what still
+        # identifies a host when the network the scans run on makes nmap's packet guess meaningless (cveFeed.os_detection)
+        from cveFeed import os_detection
+        for key, value in os_detection.from_services(ip_obj.ports.all()).items():
+            facts.setdefault(key, value)
     return facts
 
 
@@ -83,11 +90,13 @@ def apply_host_facts(ip_obj):
         return False
     changed = []
     fingerprint = dict(ip_obj.fingerprint or {})
+    previous = (fingerprint.get('facts') or {}).get('os')
     if fingerprint.get('facts') != facts:
         fingerprint['facts'] = facts
         ip_obj.fingerprint = fingerprint
         changed.append('fingerprint')
-    if facts.get('os') and not ip_obj.os_guess:
+    # an empty OS, or the one these facts gave last time (a host that was upgraded or reinstalled); never a guess another source made
+    if facts.get('os') and (not ip_obj.os_guess or (previous and ip_obj.os_guess == previous and previous != facts['os'])):
         ip_obj.os_guess = facts['os']
         changed.append('os_guess')
     if changed:

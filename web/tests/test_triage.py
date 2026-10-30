@@ -261,6 +261,159 @@ class TriageDbBase(TestCase):
 
 
 @mock.patch('cveFeed.activity.log', return_value=None)
+class RescanTwinTests(TriageDbBase):
+	"""A rescan makes new host rows and so new match rows. The new row of an unchanged finding keeps what its predecessor earned (issue
+	206); a changed one starts over."""
+
+	def track_all(self):
+		return triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))
+
+	def judged_and_validated(self, nonce=''):
+		first = self.match('a.tr.test')
+		self.run_all(provider=self.provider())
+		if nonce:  # a validation job sets one first: the row starts over, with the nonce in its signature and evidence key
+			Triage.objects.update(review_nonce=nonce)
+			self.track_all()
+			self.run_all(provider=self.provider())
+		# and the job then writes its result on the row
+		Triage.objects.update(validation_status='clean', validation_steps=[{'kind': 'nuclei_template', 'result': 'clean'}],
+							  validation_evidence={'request': 'GET /'}, validated_at=timezone.now() - datetime.timedelta(days=1))
+		return first, Triage.objects.get(match=first)
+
+	def rows_of(self, match):
+		return Triage.objects.get(match=match)
+
+	def test_the_new_match_of_an_unchanged_finding_keeps_the_record(self, _log):
+		first, old = self.judged_and_validated()
+		second = self.match('a.tr.test')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual((new.classification, new.verdict_id, new.status), (old.classification, old.verdict_id, 'triaged'))
+		self.assertEqual((new.validation_status, new.validation_evidence, new.validated_at), ('clean', {'request': 'GET /'}, old.validated_at))
+		self.assertEqual(new.validation_steps, old.validation_steps)
+		self.assertEqual(self.provider().complete.call_count, 0)
+
+	def test_a_validation_that_set_a_review_nonce_does_not_hide_the_twin(self, _log):
+		first, old = self.judged_and_validated(nonce='41')
+		self.assertEqual(old.review_nonce, '41')
+		second = self.match('a.tr.test')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual((new.review_nonce, new.validation_status, new.classification), ('', 'clean', old.classification))
+		self.assertEqual(new.status, 'triaged')  # only the nonce differed: nothing to review again
+
+	def test_changed_asset_evidence_starts_over(self, _log):
+		self.judged_and_validated()
+		second = self.match('a.tr.test', version='1.19.0')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual((new.status, new.classification, new.verdict_id, new.validation_status), ('pending', '', None, 'none'))
+
+	def test_a_moved_feed_rereviews_and_keeps_the_record_meanwhile(self, _log):
+		first, old = self.judged_and_validated()
+		CVEEntry.objects.filter(pk=self.cve.pk).update(epss_reached=True, summary='Updated advisory text')
+		second = self.match('a.tr.test')
+		self.track_all()
+		new = self.rows_of(second)
+		self.assertEqual(new.status, 'pending')  # asked again about the new advisory
+		self.assertEqual((new.classification, new.verdict_id, new.validation_status), (old.classification, old.verdict_id, 'clean'))
+
+	def test_another_host_or_another_cve_is_not_a_twin(self, _log):
+		self.judged_and_validated()
+		other_host = self.match('b.tr.test')
+		other_cve = self.match('a.tr.test', cve=CVEEntry.objects.create(cve_id='CVE-2099-2', cvss=7.5, published_at=timezone.now(),
+			affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]))
+		self.track_all()
+		for match in (other_host, other_cve):
+			self.assertEqual((self.rows_of(match).status, self.rows_of(match).validation_status), ('pending', 'none'))
+
+	def test_a_twin_that_was_never_judged_gives_nothing(self, _log):
+		self.match('a.tr.test')
+		self.track_all()
+		second = self.match('a.tr.test')
+		self.track_all()
+		self.assertEqual((self.rows_of(second).status, self.rows_of(second).classification), ('pending', ''))
+
+	def test_the_newest_twin_is_the_one_inherited(self, _log):
+		first, old = self.judged_and_validated()
+		second = self.match('a.tr.test')
+		self.track_all()
+		Triage.objects.filter(match=second).update(classification='needs_validation', reason='newer')
+		third = self.match('a.tr.test')
+		self.track_all()
+		self.assertEqual((self.rows_of(third).classification, self.rows_of(third).reason), ('needs_validation', 'newer'))
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
+class VersionOnlyCeilingTests(TriageDbBase):
+	"""A match that stands on a version string alone is needs_validation at most, whatever the model says (issue 210)."""
+
+	def classes(self):
+		return set(Triage.objects.values_list('classification', flat=True))
+
+	def test_a_version_only_match_the_model_calls_likely_is_kept_as_needs_validation(self, _log):
+		m = self.match('a.tr.test')
+		self.run_all(provider=self.provider(reply('likely')))
+		row = Triage.objects.get(match=m)
+		m.refresh_from_db()
+		self.assertEqual((row.classification, m.ai_verdict), ('needs_validation', 'uncertain'))
+		self.assertIn('version string', row.reason)
+		self.assertIn('AI said likely', row.reason)
+
+	def test_confirmed_from_the_model_is_capped_too(self, _log):
+		self.match('a.tr.test')
+		self.run_all(provider=self.provider(reply('confirmed')))
+		self.assertEqual(self.classes(), {'needs_validation'})
+
+	def test_corroborating_evidence_lets_likely_stand(self, _log):
+		for name, kw in (('r.tr.test', {'evidence': {'runzero': True}}), ('h.tr.test', {'source': 'host'}), ('d.tr.test', {'distro_status': 'vulnerable'})):
+			m = self.match(name)
+			CVEMatch.objects.filter(pk=m.pk).update(**kw)
+		self.run_all(provider=self.provider(reply('likely')))
+		self.assertEqual(set(Triage.objects.filter(host__in=['r.tr.test', 'h.tr.test']).values_list('classification', flat=True)), {'likely'})
+
+	def test_a_validation_hit_still_confirms(self, _log):
+		m = self.match('a.tr.test')
+		self.run_all(provider=self.provider(reply('likely')))
+		Triage.objects.filter(match=m).update(validation_status='hit', classification='confirmed', reason='the check matched')
+		self.assertEqual(triage.recap_version_only(), 0)
+		self.assertEqual(Triage.objects.get(match=m).classification, 'confirmed')
+
+	def test_an_answer_stored_before_the_ceiling_is_recapped_without_a_model_call(self, _log):
+		provider = self.provider(reply('likely'))
+		m = self.match('a.tr.test')
+		other = self.match('b.tr.test')
+		CVEMatch.objects.filter(pk=other.pk).update(source='host')
+		self.run_all(provider=provider)
+		Triage.objects.filter(match=m).update(classification='likely', reason='old answer')
+		CVEMatch.objects.filter(pk=m.pk).update(ai_verdict='affected')
+		Triage.objects.filter(match=other).update(classification='likely')
+		calls = provider.complete.call_count
+		self.assertEqual(triage.recap_version_only(), 1)
+		self.assertEqual(provider.complete.call_count, calls)
+		self.assertEqual(Triage.objects.get(match=m).classification, 'needs_validation')
+		self.assertEqual(CVEMatch.objects.get(pk=m.pk).ai_verdict, 'uncertain')
+		self.assertEqual(Triage.objects.get(match=other).classification, 'likely')  # a host's own report is not a banner
+		self.assertEqual(triage.recap_version_only(), 0)  # idempotent
+
+	def test_the_stored_verdict_a_new_match_starts_from_stops_saying_affected(self, _log):
+		from cveFeed.models import MatchVerdict
+		MatchVerdict.objects.create(cve_entry_id=self.cve.pk, matched_product='nginx', matched_version='1.18.0', version_in_range=True,
+									source='port', ai_verdict='affected')
+		MatchVerdict.objects.create(cve_entry_id=self.cve.pk, matched_product='nginx', matched_version='1.18.0', version_in_range=True,
+									source='host', ai_verdict='affected')
+		triage.recap_version_only()
+		self.assertEqual(sorted(MatchVerdict.objects.values_list('source', 'ai_verdict')), [('host', 'affected'), ('port', 'uncertain')])
+
+	def test_the_rule_itself_is_pure(self, _log):
+		self.assertEqual(triage.ceiling('cve_match', {'version_only': True})[0], 'needs_validation')
+		self.assertEqual(triage.ceiling('cve_match', {'version_only': False}), ('', ''))
+		self.assertEqual(triage.ceiling('nuclei', {'version_only': True}), ('', ''))
+		out = triage.apply_rules('cve_match', {'version_in_range': True, 'version_only': True}, parsed('likely'))
+		self.assertEqual((out['classification'], out['overridden']), ('needs_validation', True))
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
 class SignatureCacheTests(TriageDbBase):
 	def test_generic_vendor_fingerprint_closes_candidate_without_provider_call(self, _log):
 		m = self.match('a.tr.test')
@@ -316,8 +469,9 @@ class SignatureCacheTests(TriageDbBase):
 		self.assertEqual(Triage.objects.count(), 10)
 		self.assertEqual(TriageVerdict.objects.count(), 1)
 		self.assertEqual(set(Triage.objects.values_list('verdict_id', flat=True)), {TriageVerdict.objects.get().pk})
-		self.assertEqual(set(Triage.objects.values_list('classification', flat=True)), {'likely'})
-		self.assertEqual(set(CVEMatch.objects.values_list('ai_verdict', flat=True)), {'affected'})
+		# the model said likely, and the only evidence is a version string: kept as needs validation (triage.ceiling)
+		self.assertEqual(set(Triage.objects.values_list('classification', flat=True)), {'needs_validation'})
+		self.assertEqual(set(CVEMatch.objects.values_list('ai_verdict', flat=True)), {'uncertain'})
 		self.assertEqual(Triage.objects.first().status, 'triaged')
 		again = self.run_all(provider=provider)
 		self.assertEqual((again['asked'], provider.complete.call_count), (0, 1))

@@ -135,10 +135,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          # a release may carry a name: a line "<!-- edition: camstork edition -->" in its own CHANGELOG section puts it in the title
+          edition=$(awk -v tag="$TAG" 'index($0, "## " tag " (") == 1 { f = 1; next } f && /^## / { exit } f' CHANGELOG.md \
+            | sed -n 's/^<!-- edition: \([A-Za-z0-9][A-Za-z0-9 .-]\{0,39\}\) -->$/\1/p' | head -n 1)
+          title="CVEngine $TAG${edition:+, $edition}"
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release edit "$TAG" --title "CVEngine $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release edit "$TAG" --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "$TAG" --verify-tag --latest --title "CVEngine $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" --verify-tag --latest --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
           fi
 
       - name: 📦 Attach source archives and checksums

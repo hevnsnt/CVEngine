@@ -205,7 +205,7 @@ class NotifyTests(TestCase):
 			scan = discovery.start_discovery(self.domain)
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			discovery.run_pipeline(scan.id, stream=lambda *a, **k: iter(EVENTS), light_stream=lambda path, **k: iter([]),
-			                       targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda *a, **k: '',
+			                       targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>',
 			                       db_exposure_checks={}, provider=None)
 		slack = [t for n, t in self.sent if n == 'send_slack_message']
 		self.assertEqual(len(slack), 1)

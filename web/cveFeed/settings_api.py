@@ -650,7 +650,8 @@ def updates_check(request):
     updater.check(row)
     if updater.auto_approve(row):
         from cveFeed.admin_api import audit
-        audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by, mode='automatic')
+        audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by, mode='automatic',
+              branch=row.branch, release_branch=not updater.branch_warning(row.branch))
     return updater.state(row)
 
 
@@ -662,7 +663,8 @@ def updates_approve(request):
         updater.approve(row, request.user)
     except updater.UpdateError as exc:
         raise SettingsError(400, str(exc))
-    audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by)
+    audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by,
+          branch=row.branch, release_branch=not updater.branch_warning(row.branch))
     return updater.state(row)
 
 

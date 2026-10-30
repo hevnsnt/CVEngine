@@ -4,6 +4,7 @@ env = environ.FileAwareEnv()
 
 import mimetypes
 import os
+import re
 
 from reNgine.init import first_run
 from reNgine.utilities import RengineTaskFormatter
@@ -81,6 +82,16 @@ if _version.startswith('v'):
     _version = _version[1:]
 
 RENGINE_CURRENT_VERSION = _version
+
+# An optional name for a release ("camstork edition"), read from a file called .edition next to .version; empty when there is none. A
+# release's notes carry it too: see the edition comment of its CHANGELOG section, which the release workflow puts in the release title.
+EDITION_FILE = os.path.join(BASE_DIR, '.edition')
+RENGINE_EDITION = ''
+if os.path.exists(EDITION_FILE):
+    with open(EDITION_FILE, 'r') as f:
+        _edition = f.read().strip()
+    if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 .-]{0,39}', _edition):
+        RENGINE_EDITION = _edition
 
 # Databases
 DATABASES = {
@@ -260,7 +271,11 @@ LOGGING settings
 '''
 LOGGING = {
     'version': 1,
-    'disable_existing_loggers': True,
+    # False: this configuration is applied more than once in a process (django.setup() runs again when reNgine.celery is imported and when a
+    # Celery worker starts, and the setup_logging handler runs it a third time). True switched off every module logger that already existed at
+    # that moment, so a worker lost the log lines of reNgine.ai_providers, cveFeed.templategen and others, and a test run that started the
+    # Celery loader silenced cveFeed.correlation and cveFeed.nuclei_scan for the rest of its process.
+    'disable_existing_loggers': False,
     'handlers': {
         'file': {
             'level': 'ERROR',

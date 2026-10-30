@@ -205,6 +205,48 @@ class LocalFindingTests(MatchBase):
 		self.assertEqual((result['local'], result['external']), (0, 1))
 		self.assertEqual(self.host_matches().get().evidence['scope'], 'external')
 
+	def test_an_old_scan_match_does_not_consume_the_current_hosts_report(self):
+		nginx = cve('CVE-2099-1062', 'nginx', '1.0.0', '1.20.0', vector=NETWORK, local=False)
+		old = self.scanned('web01.example.test', ['192.0.2.10'])
+		prior = CVEMatch.objects.create(cve_entry=nginx, subdomain=old, source='port', matched_product='nginx',
+			matched_version='1.18.0', version_in_range=True, confidence=0.85, evidence={'source': 'port'})
+		inv = self.inventory(report(packages=[{'n': 'nginx', 'v': '1.18.0-6ubuntu14.4', 'e': 'dpkg'}]), sub=False)
+		scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, scan_status=2,
+			start_scan_date=timezone.now(), tasks=['x'])
+		current = Subdomain.objects.create(name=old.name, target_domain=self.domain, scan_history=scan)
+		self.assertEqual(inventory_match.current_row(self.project.id, old.name).pk, current.pk)
+		result = self.refresh(inv)
+		self.assertEqual((result['external'], result['confirmed']), (1, 0))
+		self.assertEqual(self.host_matches(subdomain=current).count(), 1)
+		prior.refresh_from_db()
+		self.assertNotIn('host_reported', prior.evidence)
+
+	def test_a_different_product_under_one_cve_keeps_its_own_host_match(self):
+		shared = cve('CVE-2099-1063', 'nginx', '1.0.0', '1.20.0', vector=NETWORK, local=False)
+		shared.affected.append({'vendor': 'Vendor', 'product': 'ingress-nginx',
+			'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]})
+		shared.save(update_fields=['affected'])
+		inv = self.inventory(report(packages=[{'n': 'nginx', 'v': '1.18.0-6ubuntu14.4', 'e': 'dpkg'}]))
+		other = CVEMatch.objects.create(cve_entry=shared, subdomain=self.sub, source='tech', matched_product='ingress-nginx',
+			matched_version='1.18.0', version_in_range=True, confidence=0.85, evidence={'source': 'tech'})
+		result = self.refresh(inv)
+		self.assertEqual((result['external'], result['confirmed']), (1, 0))
+		self.assertEqual(self.host_matches().get().matched_product, 'nginx')
+		other.refresh_from_db()
+		self.assertNotIn('host_reported', other.evidence)
+
+	def test_one_host_report_annotates_every_current_matching_external_sighting(self):
+		nginx = cve('CVE-2099-1064', 'nginx', '1.0.0', '1.20.0', vector=NETWORK, local=False)
+		inv = self.inventory(report(packages=[{'n': 'nginx', 'v': '1.18.0-6ubuntu14.4', 'e': 'dpkg'}]))
+		matches = [CVEMatch.objects.create(cve_entry=nginx, subdomain=self.sub, source=source, matched_product='nginx',
+			matched_version='1.18.0', version_in_range=True, confidence=0.85, evidence={'source': source})
+			for source in ('port', 'tech')]
+		self.assertEqual(self.refresh(inv)['confirmed'], 1)
+		self.assertFalse(self.host_matches().exists())
+		for match in matches:
+			match.refresh_from_db()
+			self.assertEqual(match.evidence['host_reported']['inventory_id'], inv.id)
+
 
 class StalenessAndClosureTests(MatchBase):
 	def setUp(self):

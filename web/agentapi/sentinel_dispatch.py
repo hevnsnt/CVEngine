@@ -199,24 +199,38 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
 
 # --- nmap: dispatch a chunk of addresses, persist a hit through the exact same function local nmap uses ---------------
 
-def try_nmap(project, scan, targets, org_id=None, timeout=None):
-    """``(remaining_targets, totals)``: the addresses a Sentinel fingerprinted (already persisted) are dropped from
-    ``remaining_targets``, which the caller then runs through the unchanged local ``scan_in_chunks``/``run_nmap_xml``
-    exactly as before. ``totals`` (``{'ports', 'hosts_with_os'}``) is the Sentinel's own contribution, to add to the
-    local pass's totals."""
+def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None):
+    """Return local targets, Sentinel totals, and the local port plan.
+
+    An address is covered only when the Sentinel reports a host row. When naabu found ports that the Sentinel did not
+    report scanning, the local pass fingerprints just those ports. An absent host row keeps the whole local fallback.
+    """
     targets = list(targets)
     zero = {'ports': 0, 'hosts_with_os': 0}
+    local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
     if not any_scanner_for(project, 'nmap'):
-        return targets, zero
-    chunk, rest = targets[:MAX_ADDRESSES], targets[MAX_ADDRESSES:]
+        return targets, zero, local_ports
+    chunk = targets[:MAX_ADDRESSES]
     result = dispatch_or_none(project, 'nmap', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
     if result is None:
-        return targets, zero
+        return targets, zero, local_ports
     from cveFeed.nmap_scan import persist_inventory
     inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                 for host in result.get('hosts', []) if host.get('ip')]
-    totals = persist_inventory(inventory, org_id=org_id)
-    return rest, totals
+                 for host in result.get('hosts', []) if host.get('ip') in chunk]
+    totals = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
+    reported = {}
+    for host in inventory:
+        reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    remaining = []
+    for ip in targets:
+        if ip not in reported:
+            remaining.append(ip)
+        elif local_ports is not None and ip in local_ports:
+            missing = sorted(set(local_ports[ip]) - reported[ip])
+            if missing:
+                local_ports[ip] = missing
+                remaining.append(ip)
+    return remaining, totals, local_ports
 
 
 # --- testssl: one host:port at a time, the Sentinel's raw report items run through the same local evaluate() -----------

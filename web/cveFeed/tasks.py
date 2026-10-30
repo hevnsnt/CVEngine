@@ -250,6 +250,7 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
 
 
 COVERAGE_DAYS_DEFAULT = 14
+GAP_MAX_NEW = 1500
 BACKFILL_ID_RE = re.compile(r'^(CVE-\d{4}-\d{4,9}|GHSA(-[a-z0-9]{4}){3}|OSV-[A-Za-z0-9-]{4,40})$', re.IGNORECASE)
 
 
@@ -263,12 +264,6 @@ def _coverage_days():
 def _watch_techs():
     raw = os.environ.get('CVENGINE_CVE_WATCH_TECHS', 'php')
     return [t.strip().lower() for t in raw.split(',') if t.strip()]
-
-
-def _oldest_first_seen():
-    """When the oldest stored entry was first seen by the feed (None when nothing is stored or none carries the time)."""
-    from django.db.models import Min
-    return CVEEntry.objects.aggregate(oldest=Min('first_seen_at'))['oldest']
 
 
 def _parse_time(value):
@@ -303,17 +298,27 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     from cveFeed.threat import FIRE, SMOKE
     pause_for = sleep or time.sleep
     explicit = bool(ids or techs)
+    row = cutoff = now = None
     if not explicit:
+        from cveFeed import feed_watermark
         window = _coverage_days() if days is None else int(days)
         if window <= 0:
             return {'status': 'disabled'}
-        cutoff = timezone.now() - timedelta(days=window)
-        oldest = _oldest_first_seen()
-        if not force and oldest is not None and oldest <= cutoff:
-            return {'status': 'covered', 'oldest': oldest.isoformat()}
+        now = timezone.now()
+        row = feed_watermark.current()
+        # a walk that read back to its floor is not repeated for a few hours, so the hourly schedule costs no request in between
+        if (not force and row.covered_through is not None and not row.resume_cursor and row.checked_at
+                and now - row.checked_at < feed_watermark.RECHECK):
+            return {'status': 'covered', 'covered_through': row.covered_through.isoformat()}
+        cutoff = feed_watermark.floor_for(row, now, window)
+        max_scan = feed_watermark.scan_budget(cutoff, now, max_scan)
+        if now - cutoff > timedelta(days=2):
+            max_new = max(max_new, GAP_MAX_NEW)
     client = CVENowClient()
     result = {'status': 'ok', 'listed': 0, 'wanted': 0, 'created': 0, 'failed': 0, 'blocked': False, 'invalid': []}
     wanted, first_seen = [], {}
+    # how the walk ended: it read back to the floor or to the end of the listing ("reached"), or stopped at a cap with entries left
+    reached, head, page_cursor = False, None, None
 
     def want(entry_id):
         if entry_id not in first_seen and entry_id not in wanted:
@@ -337,24 +342,38 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                 if force or entry_id not in known:
                     want(entry_id)
         if not explicit:
-            walked = 0
-            for summary, known in _known_in_batches(client.iter_entries(max_entries=max_scan, page_pause=0.3)):
-                walked += 1
-                seen_at = _parse_time(summary.get('firstSeenAt') or summary.get('publishedAt'))
-                if seen_at and seen_at < cutoff:
+            from cveFeed import feed_watermark
+            resumed = row.resume_cursor or None  # a walk cut short by a cap or a failure continues where it was
+            head = row.resume_head if resumed else None
+            walked, stopped = 0, False
+            for page_cursor, page in client.iter_pages(max_entries=max_scan, page_pause=0.3, cursor=resumed):
+                known = set(CVEEntry.objects.filter(cve_id__in=[e.get('id') for e in page if e.get('id')]).values_list('cve_id', flat=True))
+                for summary in page:
+                    walked += 1
+                    published = feed_watermark.published(summary)
+                    if head is None and not resumed and published:
+                        head = published  # the first entry of a walk from the head: what a complete walk will have covered
+                    if published and published < cutoff:
+                        reached = True
+                        break
+                    entry_id = summary.get('id')
+                    if entry_id and (force or entry_id not in known):
+                        want(entry_id)
+                        first_seen[entry_id] = summary.get('firstSeenAt')
+                    if len(wanted) >= max_new:
+                        stopped = True
+                        break
+                if reached or stopped:
                     break
-                entry_id = summary.get('id')
-                if entry_id and (force or entry_id not in known):
-                    want(entry_id)
-                    first_seen[entry_id] = summary.get('firstSeenAt')
-                if len(wanted) >= max_new:
-                    break
+            else:
+                reached = walked < max_scan  # the listing ended before the budget did: everything it lists was read
             result['listed'] = walked
     except requests.RequestException as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         result['blocked'] = status in (401, 403, 429)
         result['status'] = 'blocked' if result['blocked'] else 'failed'
         logger.warning('cve.now backfill could not read the listing: %s', exc)
+        reached = False
         if not wanted:
             return result
     result['wanted'] = len(wanted)
@@ -378,6 +397,18 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             result['failed'] += 1
             logger.warning('cve.now backfill: failed to save %s: %s', entry_id, exc)
         pause_for(pause)
+    if row is not None:
+        clean = result['status'] == 'ok' and not result['failed'] and result['created'] == result['wanted'] and len(wanted) <= max_new
+        if reached and clean:
+            # everything the feed lists back to the floor is stored: the watermark moves to the head this walk started from
+            row.covered_through, row.resume_cursor, row.resume_head, row.checked_at = head or now, '', None, now
+            row.save()
+            result['covered_through'] = row.covered_through.isoformat()
+        elif clean:
+            # stopped at a cap with more to read: continue from this page next time (a failure keeps the earlier state, so nothing is skipped)
+            row.resume_cursor, row.resume_head = page_cursor or '', head
+            row.save()
+            result['continues'] = True
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
@@ -440,7 +471,11 @@ def sync_threat_intel():
     created, changed = result['imported'], result['signals_changed']
     if changed:
         from cveFeed import scoring
-        scoring.rescore_for_matches(list(CVEMatch.objects.filter(cve_entry_id__in=changed[:5000]).select_related('subdomain__target_domain')[:2000]))
+        rescored = set()  # a host matched by CVEs in several chunks is scored once
+        for cve_ids in scoring._chunks(changed, scoring.CHUNK):
+            scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=cve_ids)
+                                        .select_related('subdomain__target_domain')
+                                        .order_by('subdomain__target_domain__project_id', 'subdomain__name'), rescored)
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
     tiers = [c.threat_tier for c in created]
@@ -633,6 +668,23 @@ def validate_findings(project_id, triage_ids, scan_id=None):
         return {"error": str(exc)[:200]}
 
 
+def _skip_on_demand_validation(job, progress, cve_id, reason):
+    """A queued request whose match is no longer the host's current finding is superseded work: it spends no attempt, schedules no retry
+    and is not logged as a failure (the automatic path does the same, ``_skip_automatic_validation``)."""
+    from django.utils import timezone
+    from cveFeed import activity
+    from cveFeed.models import OnDemandValidation
+
+    text = {'historical': 'the match was replaced by a newer scan before the request ran',
+            'out_of_scope': 'the host is outside the scannable project scope'}[reason]
+    result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason, 'next_action': text}
+    OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
+        status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
+    activity.settle(progress, 'done', f'Validation request #{job.pk} skipped for {cve_id}: {text}',
+                    check_state='not_run', ai_state='not_run', reason=reason)
+    return result
+
+
 @app.task(name="validate_match_on_demand", bind=False, queue="validation_priority_queue")
 def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
@@ -653,10 +705,14 @@ def validate_match_on_demand(request_id):
                             project=job.project_id, cve_id=cve_id, status='running', **detail)
     try:
         require_authority(job)
-        match = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id).filter(
-            latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
-        if not match or not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
-            raise ValueError('match is no longer current or the host is outside scannable project scope')
+        owned = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id)
+        match = owned.filter(latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
+        if not match:
+            # a rescan replaced the match while the job waited (or the host left the inventory): superseded work, not a worker failure.
+            # The rescan's own match is queued by the next sweep, which does not count this job against it.
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
+        if not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
+            return _skip_on_demand_validation(job, progress, cve_id, 'out_of_scope')
         invalid_reason = correlation.invalid_identity_reason(match)
         if invalid_reason:
             correlation.close_invalid_correlation(match, invalid_reason)
@@ -1701,6 +1757,40 @@ def weekly_maintenance():
                  + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else ''),
                  archived=result['archived'], deleted=result['deleted'])
     return result
+
+
+@app.task(name="prune_scan_history", bind=False, queue="cve_feed_queue")
+def prune_scan_history():
+    """Daily: delete the finished scans older than CVENGINE_SCAN_HISTORY_RETENTION_DAYS (180 by default, 0 keeps everything) that no longer
+    back the current inventory (cveFeed.scan_retention). One run at a time, bounded in time; a large backlog is cleared over several days."""
+    from django.core.cache import cache
+
+    from cveFeed import activity, scan_retention
+    if scan_retention.retention_days() is None:
+        return {"skipped": "scan history retention is off"}
+    if not cache.add("cvengine:scan-retention", 1, timeout=3 * 3600):
+        return {"skipped": "another retention run is in progress"}
+    try:
+        result = scan_retention.run()
+    except Exception as exc:  # noqa: BLE001 - reported, and retried tomorrow; each scan is deleted in its own transaction
+        logger.exception("scan history retention failed")
+        activity.log("feed", activity.diagnostic("Scan history retention", f"{type(exc).__name__}: {exc}", type(exc).__name__), status="failed")
+        return {"error": type(exc).__name__}
+    finally:
+        cache.delete("cvengine:scan-retention")
+    if result["scans"]:
+        activity.log("feed", f'Scan history retention deleted {result["scans"]:,} scan(s) older than {result["days"]} days'
+                     + ("" if result["complete"] else "; more are left for the next run"), deleted=result["scans"])
+    return result
+
+
+@app.task(name='check_os_path', bind=False, queue='cve_feed_queue', time_limit=300, soft_time_limit=240)
+def check_os_path():
+    """Daily: measure whether the network path this worker scans from loses nmap's malformed OS-detection probes (cveFeed.path_probe), and
+    keep the verdict where operating system detection reads it (cveFeed.os_detection). Runs in the scanning container, so it measures the
+    path the scans take. Two packets to each of at most eight hosts the scans already reach; waits while scanning is paused."""
+    from cveFeed import os_detection, path_probe
+    return os_detection.record_path(path_probe.check())
 
 
 @app.task(name='generate_report', bind=True, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)

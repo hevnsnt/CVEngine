@@ -65,7 +65,7 @@ class RecordedRunsTests(Base):
 
     def run_scan(self, answers):
         scan = self.queued_scan()
-        with mock.patch('cveFeed.tasks.correlate_cves'):
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}):
             internal_scan.run(scan.id, dispatch=lambda p, k, t, **kw: answers.get(k), nuclei_stream=lambda kind: iter_none, provider=None)
         return scan
 

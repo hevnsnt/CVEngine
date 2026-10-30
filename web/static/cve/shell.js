@@ -5,14 +5,26 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "suppliers"];
 
-// Where the switcher sends you when the project changes. On the dashboard it stays on the dashboard
-// (bare /cve/ for the combined view, ?project= for one project); on a section page it keeps the section.
-function projectHref(value, here) {
+// Where the switcher sends you when the project changes. On the dashboard and the asset graph it stays there (?project= names
+// the project or "_all"); on a section page it keeps the section. The server remembers the choice for pages with no project.
+// "All projects" carries ``org``: the organization chosen beside it narrows the view to that organization's projects ("" is every
+// organization). The server remembers it, like the project, for the pages and polls that do not name it.
+function projectHref(value, here, org = "") {
   if (here === "bounty") return `/cve/bounty/?project=${encodeURIComponent(value && value !== "_all" ? value : "")}`;
-  if (here === "dashboard") return value && value !== "_all" ? `/cve/?project=${encodeURIComponent(value)}` : "/cve/";
+  const all = !value || value === "_all";
+  const orgQs = all ? `org=${encodeURIComponent(org)}` : "";
+  // "_all" is named in the address: a bare /cve/ opens the project this session last chose
+  if (here === "dashboard") return `/cve/?project=${encodeURIComponent(value || "_all")}${orgQs ? "&" + orgQs : ""}`;
+  if (here === "graph") return `/cve/graph/?project=${encodeURIComponent(value || "_all")}${orgQs ? "&" + orgQs : ""}`;
   // The section comes from the list above, never from the page text, and the slug is encoded like the other branches.
-  return `/cve/${encodeURIComponent(value)}/${SECTIONS.find((s) => s === here) || "hosts"}/`;
+  return `/cve/${encodeURIComponent(value || "_all")}/${SECTIONS.find((s) => s === here) || "hosts"}/${orgQs ? "?" + orgQs : ""}`;
 }
+// The organization chosen beside a project switcher (the sidebar and the phone sheet each have a pair)
+const orgBeside = (sel) => {
+  const pick = sel.closest(".proj-wrap") && sel.closest(".proj-wrap").querySelector("select.org-switch");
+  const org = pick ? pick.value : "";
+  return /^[-\w]*$/.test(org) ? org : "";
+};
 
 // --- organization switcher: shown when the caller's projects span two or more organizations -----------------------
 const readJson = (id) => {
@@ -52,6 +64,10 @@ if (SWITCH_ORGS.length && currentProject && currentProject.value && currentProje
 }
 $$("select.org-switch").forEach((sel) => {
   sel.addEventListener("change", () => {
+    if (!sel.value) {
+      window.location.href = projectHref("_all", sel.dataset.section, ""); // All organizations: every project
+      return;
+    }
     const slug = projectForOrg(sel.value);
     // Only a project slug may become part of the address (the same rule as the project switcher below): the list comes from page data.
     if (slug && /^[-\w]+$/.test(slug)) window.location.href = projectHref(slug, sel.dataset.section);
@@ -63,7 +79,7 @@ $$("select.proj").forEach((sel) => {
   sel.addEventListener("change", () => {
     // Only a project slug (or the reserved "_all") may become part of the address.
     if (sel.value && !/^[-\w]+$/.test(sel.value)) return;
-    window.location.href = projectHref(sel.value, sel.dataset.section);
+    window.location.href = projectHref(sel.value, sel.dataset.section, orgBeside(sel));
   });
 });
 

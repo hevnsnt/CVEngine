@@ -25,6 +25,7 @@ from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, Disc
                             TlsCertificate)
 from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_temperature
 from startScan.models import OPEN_PORT_STATES, open_services
+from targetApp.target_types import is_public_address
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
 
 logger = logging.getLogger(__name__)
@@ -316,12 +317,36 @@ SECTIONS = {
 }
 
 
-def ui_context(request, active, slug=None):
+SCOPE_KEY = 'cve_scope'  # the session's last chosen project (or ALL_PROJECTS): pages with no project in their address keep it
+
+
+def remembered_scope(request, visible):
+    """The project (or ALL_PROJECTS) this session last chose, when the caller can still see it; otherwise None. ``visible`` is
+    the slugs the caller can see."""
+    want = request.session.get(SCOPE_KEY) if hasattr(request, 'session') else None
+    if want == ALL_PROJECTS:
+        return want if len(visible) >= 2 else None
+    return want if want in visible else None
+
+
+def remember_scope(request, slug):
+    if slug and hasattr(request, 'session') and request.session.get(SCOPE_KEY) != slug:
+        request.session[SCOPE_KEY] = slug
+
+
+def ui_context(request, active, slug=None, remember=True):
     """Shell context shared by every UI page: active nav item and the project switcher. ``slug`` may be the reserved ``_all``
     (the read-only combined view): the switcher then marks "All projects" selected. That option is offered only to a caller who
-    can see two or more projects; with one there is nothing to combine."""
+    can see two or more projects; with one there is nothing to combine. A page that names a project remembers it for the
+    session (unless ``remember`` is false: a page that fell back to a project nobody chose); a page that names none (Sentinels,
+    Settings, About ...) shows the remembered one, so the switcher and the section links carry the choice everywhere."""
     from dashboard.models import Project
     projects = list(Project.objects.order_by('name').values('slug', 'name', org_slug=F('org__slug'), org_name=F('org__name')))  # scoped to the caller
+    if slug:
+        if remember:
+            remember_scope(request, slug)
+    else:
+        slug = remembered_scope(request, [p['slug'] for p in projects]) or (ALL_PROJECTS if len(projects) >= 2 else None)
     current = slug or (projects[0]['slug'] if projects else None)
     # the organizations the caller's projects belong to; the switcher shows an organization choice only when there are two or more
     orgs = []
@@ -331,6 +356,15 @@ def ui_context(request, active, slug=None):
             orgs.append({'slug': p['org_slug'], 'name': p['org_name'] or 'No organization'})
     orgs.sort(key=lambda o: o['name'].lower())
     current_org = next((p['org_slug'] for p in projects if p['slug'] == current), '') if slug != ALL_PROJECTS else None
+    # All projects narrowed to one organization (chosen in the switcher; ?org= names it and the session keeps it)
+    scope_org = ''
+    if slug == ALL_PROJECTS and len(orgs) >= 2:
+        from tenancy.roles import SCOPE_ORG_KEY, scope_org as requested_org
+        want = requested_org(request)
+        scope_org = want if any(o['slug'] == want and want for o in orgs) else ''
+        if remember and 'org' in request.GET and hasattr(request, 'session') and request.session.get(SCOPE_ORG_KEY, '') != scope_org:
+            request.session[SCOPE_ORG_KEY] = scope_org
+    in_scope = [p for p in projects if p['org_slug'] == scope_org] if scope_org else projects
     from tenancy.roles import is_admin_anywhere
     from dashboard.models import AIProviderSettings
     ai_cfg = AIProviderSettings.objects.first()
@@ -344,7 +378,9 @@ def ui_context(request, active, slug=None):
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
-            'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2}
+            'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2,
+            'scope_org': scope_org, 'scope_org_name': next((o['name'] for o in orgs if o['slug'] == scope_org), '') if scope_org else '',
+            'scope_projects': len(in_scope)}
 
 
 def _bounty_allowed(user):
@@ -362,8 +398,11 @@ def bounty_page(request):
         raise PermissionDenied
     projects = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
     want = request.GET.get('project') or ''
-    slug = want if want in projects and want != ALL_PROJECTS else (projects[0] if projects else None)
-    return render(request, 'cveFeed/bounty.html', ui_context(request, 'bounty', slug))
+    if not (want in projects and want != ALL_PROJECTS):
+        want = remembered_scope(request, projects) or ''
+    chosen = want in projects and want != ALL_PROJECTS
+    slug = want if chosen else (projects[0] if projects else None)
+    return render(request, 'cveFeed/bounty.html', ui_context(request, 'bounty', slug, remember=chosen))
 
 
 def dashboard(request):
@@ -375,7 +414,7 @@ def dashboard(request):
     # The dashboard spans every project the viewer can see by default (the combined "All projects" view); a
     # ?project=<slug> they may see narrows every panel to that one. The switcher stays here when it changes.
     projects = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
-    want = request.GET.get('project') or ''
+    want = request.GET.get('project') or remembered_scope(request, projects) or ''  # no ?project: the session's last choice
     if want and want != ALL_PROJECTS and want in projects:
         slug = want
     elif len(projects) >= 2:
@@ -390,14 +429,16 @@ def dashboard(request):
 def graph(request):
     from targetApp.models import Domain
     from dashboard.models import Project
-    project = request.GET.get('project', '')
     allowed = set(Project.objects.values_list('slug', flat=True))
+    project = request.GET.get('project') or remembered_scope(request, allowed) or ''  # no ?project: the session's last choice
     selected = project if project in allowed else ALL_PROJECTS if len(allowed) > 1 else next(iter(allowed), None)
-    return render(request, 'cveFeed/graph.html', {
-        'domains': Domain.objects.filter(project__slug=selected).select_related('project').order_by('name')
-                   if selected != ALL_PROJECTS else Domain.objects.select_related('project').order_by('name'),
-        **ui_context(request, 'graph', selected),
-    })
+    shell = ui_context(request, 'graph', selected)
+    domains = Domain.objects.select_related('project').order_by('name')
+    if selected != ALL_PROJECTS:
+        domains = domains.filter(project__slug=selected)
+    elif shell['scope_org']:
+        domains = domains.filter(project__org__slug=shell['scope_org'])
+    return render(request, 'cveFeed/graph.html', {'domains': domains, **shell})
 
 
 def scan_page(request, slug, scan_id):
@@ -530,7 +571,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.3.0'
+HOW_REVIEWED_VERSION = '1.3.1'
 
 
 def how_page(request):
@@ -583,11 +624,21 @@ def project_scoped(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
         slug = request.GET.get('project', '')
-        if not slug or slug == ALL_PROJECTS:  # "_all": everything the caller may see, which is the default
-            return view(request, *args, **kwargs)
         from dashboard.models import Project
-        from tenancy import scope
+        from tenancy import roles, scope
         allowed = scope.current_allowed()
+        if not slug or slug == ALL_PROJECTS:  # "_all": everything the caller may see, which is the default
+            org = roles.scope_org(request)  # unless the switcher narrowed All projects to one organization
+            ids = set(Project.objects.filter(org__slug=org).values_list('id', flat=True)) if org else set()
+            if allowed is not None:
+                ids &= set(allowed)
+            if not ids:
+                return view(request, *args, **kwargs)
+            tokens = scope.set_scope(ids, scope.current_user())
+            try:
+                return view(request, *args, **kwargs)
+            finally:
+                scope.reset_scope(tokens)
         project = Project.objects.filter(slug=slug).only('id').first()
         if not project or (allowed is not None and project.id not in allowed):
             return JsonResponse({'error': 'project not found'}, status=404)
@@ -662,7 +713,8 @@ def api_alive(request):
 @require_GET
 @project_scoped
 def api_stats(request):
-    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''))), **live_scan_counts()})
+    from tenancy.roles import scope_org
+    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''), scope_org(request))), **live_scan_counts()})
 
 
 GRAPH_CACHE_SECONDS = 30
@@ -705,7 +757,8 @@ def api_graph(request):
     version = graph_version(domain_id, scan_id)
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    key = f'cve-graph:{request.user.pk}:{request.GET.get("project", "")}:{domain_id}:{scan_id}:{version}'
+    from tenancy.roles import scope_org
+    key = f'cve-graph:{request.user.pk}:{request.GET.get("project", "")}:{scope_org(request)}:{domain_id}:{scan_id}:{version}'
     payload = cache.get(key)
     if payload is None:
         payload = {**graph_payload(domain_id, scan_id), 'version': version}
@@ -814,7 +867,7 @@ def node_detail(node_id):
             ('OS guess', ip.os_guess), ('Reverse pointer', ip.reverse_pointer),
             ('Full port scan', f'{timezone.localtime(ip.full_scanned_at):%Y-%m-%d %H:%M} ({ip.full_scan_ports} open)'
              if ip.full_scanned_at else 'never'),
-            ('CDN', 'yes' if ip.is_cdn else ''), ('Private range', 'yes' if ip.is_private else ''))}
+            ('CDN', 'yes' if ip.is_cdn else ''), ('Private range', 'yes' if ip.is_private or not is_public_address(ip.address) else ''))}
     if kind == 'port':
         parts = rest.split(':')
         if len(parts) == 2 and all(p.isdigit() for p in parts):

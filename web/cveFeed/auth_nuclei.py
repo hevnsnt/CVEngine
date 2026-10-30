@@ -7,9 +7,9 @@ secret against the request's host (and port, unless it is 80 or 443) and sends i
 host sends nothing. The run is also given ``-dr`` (no redirects): nuclei would otherwise carry the custom headers to wherever a redirect
 leads. The targets are explicit ``scheme://host[:port]`` URLs for exactly the origins the credential was stored for.
 
-TLS: nuclei's own HTTP client does not verify server certificates, so before a stored sign-in is handed to it the server of each HTTPS origin is
-checked here (``trusted_plan``: a pinned handshake that verifies the chain and the name). An origin whose certificate does not verify gets no
-sign-in, unless the sign-in has "trust this certificate anyway" switched on, as for the web route check (``route_auth.probe_url``).
+TLS: nuclei's own HTTP client does not verify server certificates. A separate preflight handshake cannot secure the later connection that
+carries a sign-in. Therefore an HTTPS origin receives no stored sign-in unless its owner explicitly enabled the unverified-certificate
+switch. The in-process web route check verifies its own TLS connection and does not need this exception.
 
 Every result line is redacted (``auth_checks.redact_obj``) before anything reads it, so no request, response, curl command or extracted
 value that echoes a secret reaches the database, the activity feed or an AI prompt, and a finding it produced is tagged
@@ -37,27 +37,22 @@ def scope_for_scan(scan_id):
     return scope if scope else None
 
 
-def trusted_plan(plan, project, check=None):
-    """``(kept, refused)`` for the ``plan`` of ``auth_checks.plan_nuclei``: ``kept`` are the items whose sign-in may be sent (plain HTTP
-    origins, which have no certificate; HTTPS ones whose certificate verifies; HTTPS ones whose credential has ``allow_untrusted_certificate``),
-    ``refused`` is ``[(url, reason)]`` for the rest. One handshake per host and port. ``check`` is ``auth_checks.certificate_verifies``."""
+def trusted_plan(plan, project):
+    """Keep explicit HTTP origins and HTTPS origins whose owner accepted Nuclei's unverified TLS.
+
+    A successful certificate preflight cannot authenticate Nuclei's later, separate connection. In particular, an active network
+    attacker could allow the preflight through and intercept the request carrying the stored sign-in. ``project`` is retained in the
+    interface for callers; this policy does not need a network request.
+    """
     from urllib.parse import urlsplit
-    check = check or auth_checks.certificate_verifies
-    seen, kept, refused = {}, [], []
+    kept, refused = [], []
     for item in plan:
         url = item.url
         parts = urlsplit(url)
         if parts.scheme != 'https' or item.credential.allow_untrusted_certificate:
             kept.append(item)
             continue
-        where = (parts.hostname, parts.port or 443)
-        if where not in seen:
-            seen[where] = check(where[0], where[1], project)
-        ok, reason = seen[where]
-        if ok:
-            kept.append(item)
-        else:
-            refused.append((url, reason))
+        refused.append((url, 'Nuclei does not verify TLS on the request carrying the sign-in'))
     return kept, refused
 
 
@@ -65,8 +60,8 @@ def refusal_line(refused):
     """The activity sentence for the origins ``trusted_plan`` refused: what was not sent, why, and the switch that changes it. No value in it."""
     urls = sorted({url for url, _reason in refused})
     more = f' and {len(urls) - 5} more' if len(urls) > 5 else ''
-    return (f'the stored sign-in was not sent to {", ".join(urls[:5])}{more}: the server certificate does not verify ({refused[0][1]}). '
-            f'Turn on "Trust this certificate anyway" for the sign-in to send it regardless')
+    return (f'the stored sign-in was not sent to {", ".join(urls[:5])}{more}: {refused[0][1]}. '
+            f'Turn on "Trust this certificate anyway" for the sign-in only if you accept Nuclei\'s unverified TLS risk')
 
 
 def ledger_service(base, stream_is_real):
@@ -115,7 +110,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
             # a durable record of what was withheld, for the check coverage view (which says the sign-in is not sent, not that it is planned)
             ledger.record(REFUSED_SERVICE, [_asset(item.url, item.credential) for item in planned if id(item) not in kept], project, scan, 'refused')
         if not plan:
-            return {**summary, 'skipped': 'certificate not trusted'}
+            return {**summary, 'skipped': 'Nuclei TLS is not verified'}
         stream_is_real = stream is nuclei_scan.stream_nuclei
         ledger_name = ledger_service(service, stream_is_real)
         assets = {_asset(item.url, item.credential): item for item in plan}
@@ -218,7 +213,7 @@ def merge_template_outcomes(path, hosts, outcomes, project):
         plan = auth_checks.plan_nuclei(scope, scannable_hosts(list(hosts), project=project))
         plan, refused = trusted_plan(plan, project)
         if refused:
-            logger.info('signed-in template check: the stored sign-in was withheld from %d origin(s) whose certificate does not verify', len(refused))
+            logger.info('signed-in template check: the stored sign-in was withheld from %d HTTPS origin(s) because Nuclei cannot verify TLS', len(refused))
         if not plan:
             return outcomes
         with auth_checks.secrets_file(auth_checks.entries_for(plan)) as secret_path:

@@ -9,7 +9,7 @@ from cveFeed import activity, discovery
 from cveFeed.models import AgentActivity, CVEEntry, DiscoveryEvent
 from dashboard.models import Org, Project, UserProfile
 from scanEngine.models import EngineType
-from startScan.models import IpAddress, Port, ScanHistory, Subdomain
+from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
 
@@ -124,6 +124,39 @@ class DiscoveryTests(TestCase):
 		self.assertEqual((scan.scan_status, scan.error_message), (0, 'bbot exploded'))
 		correlate.assert_not_called()
 		self.assertEqual(AgentActivity.objects.filter(kind='discovery').order_by('-id').first().status, 'failed')
+
+	def test_a_bbot_crash_after_partial_results_keeps_them_and_the_scan_goes_on_without_counting_as_a_finished_discovery(self):
+		from cveFeed.models import ServiceRun
+		from reNgine.bbot import BbotProcessError
+		scan = self._scan()
+
+		def partial(*args, **kwargs):
+			yield EVENTS[0]
+			raise BbotProcessError('bbot exited with status 1 after producing partial results')
+
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=partial)
+		# the hosts it found are the scan's (a failed scan's hosts are not the domain's current inventory), the discovery stage says it was cut short,
+		# and it is not coverage another target may reuse
+		self.assertEqual(out['status'], discovery.SUCCESS)
+		self.assertIn('partial results', out['partial'])
+		self.assertTrue(Subdomain.objects.filter(scan_history=scan, name='example.test').exists())
+		self.assertTrue(DiscoveryEvent.objects.filter(scan=scan, label='example.test').exists())
+		stage = ScanActivity.objects.get(scan_of=scan, name='bbot_discovery')
+		self.assertEqual(stage.status, discovery.FAILED)
+		self.assertIn('partial results', stage.error_message)
+		self.assertFalse(ServiceRun.objects.filter(service='bbot', scan=scan, status='done').exists())
+
+	def test_a_bbot_failure_with_nothing_found_still_fails_the_scan(self):
+		from reNgine.bbot import BbotProcessError
+		scan = self._scan()
+
+		def nothing(*args, **kwargs):
+			raise BbotProcessError('bbot exited with status 1 before producing any results')
+			yield
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=nothing)
+		self.assertEqual(out['status'], discovery.FAILED)
 
 	def test_deep_run_stopped_for_memory_is_retried_as_standard_and_keeps_what_it_found(self):
 		from reNgine.resources import MemoryKill
@@ -460,11 +493,30 @@ class NucleiStageTests(TestCase):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		kwargs = dict(stream=lambda *a, **k: iter(events), light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-			nmap_runner=lambda *a, **k: '', db_exposure_checks={}, provider=None,
+			nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
 			route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		kwargs.update(overrides)
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			return scan, discovery.run_pipeline(scan.id, **kwargs)
+
+	def test_a_bbot_crash_part_way_still_runs_the_later_stages_on_what_it_found(self):
+		from reNgine.bbot import BbotProcessError
+		ran = []
+
+		def crash_after_one(*a, **k):
+			yield EVENTS[0]
+			raise BbotProcessError('bbot exited with status 1 after producing partial results')
+
+		def nmap(targets, flags, timeout):
+			ran.append(list(targets))
+			return ''
+		scan, out = self._pipeline(stream=crash_after_one, nmap_runner=nmap)
+		scan.refresh_from_db()
+		self.assertEqual(scan.scan_status, 2)  # the hosts it found are the domain's current inventory
+		self.assertIn('bbot_discovery', out['failed_stages'])  # and the cut-short discovery is on record
+		self.assertIn('bbot_discovery', scan.error_message)
+		self.assertTrue(Subdomain.objects.filter(scan_history=scan, name='example.test').exists())
+		self.assertTrue(ran, 'nmap did not run on what bbot found')
 
 	def test_nuclei_results_persist_including_info(self):
 		from startScan.models import Vulnerability
@@ -511,7 +563,8 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(set(ScanActivity.objects.filter(scan_of=scan).values_list('status', flat=True)), {2})
 
 	MYSQL_XML = """<?xml version="1.0"?><nmaprun><host><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="3306">
-		<state state="open"/><service name="mysql" product="MySQL" version="8.0"/></port></ports></host></nmaprun>"""
+		<state state="open"/><service name="mysql" product="MySQL" version="8.0"/></port></ports></host>
+		<runstats><finished exit="success"/></runstats></nmaprun>"""
 	WORDPRESS = {'template-id': 'tech-detect', 'matcher-name': 'WordPress', 'host': 'https://www.example.test',
 	             'info': {'name': 'Wappalyzer Technology Detection', 'severity': 'info'}}
 
@@ -739,7 +792,7 @@ class BbotCoverageTests(TestCase):
 
 		def nmap_runner(targets, flags, timeout):
 			nmap.append(list(targets))
-			return ''
+			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_pipeline(scan.id, stream=bbot, light_stream=lambda path, **k: nuclei.append(open(path).read().split()) or iter([]),
 				targeted_stream=lambda path, **k: iter([]), nmap_runner=nmap_runner, db_exposure_checks={}, provider=None,
@@ -798,7 +851,7 @@ class QueuedScanTests(TestCase):
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			discovery.run_pipeline(scan.id, stream=stream, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-				nmap_runner=lambda *a, **k: '', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertEqual(seen, [(discovery.RUNNING, discovery.RUNNING)])
 
 	def test_a_queued_scan_blocks_a_duplicate_whatever_its_age_but_a_stale_running_one_does_not(self):
@@ -829,7 +882,7 @@ class IpTargetTests(TestCase):
 
 		def runner(targets, flags, timeout):
 			nmap.append(list(targets))
-			return ''
+			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		kwargs = dict(stream=bbot, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=runner,
 			db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 			ip_lookups={'ptr': lambda ip: ['host-5.example.net'], 'certificate': lambda ip: ['shop.example.org', 'www.example.org']})

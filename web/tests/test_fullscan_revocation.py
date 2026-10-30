@@ -35,6 +35,7 @@ class FullScanRevocationTests(FullScanBase):
             yield mock.Mock()
 
         process = mock.Mock()
+        process.returncode = 0
         process.communicate.return_value = ('<nmaprun/>', '')
         with mock.patch('reNgine.resources.heavy_job', admission), \
                 mock.patch('cveFeed.nmap_scan.subprocess.Popen', return_value=process) as popen:

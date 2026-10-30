@@ -29,6 +29,8 @@ class NmapSpeedTests(unittest.TestCase):
 		seen = []
 
 		class Proc:
+			returncode = 0
+
 			def __init__(self, cmd, **kw):
 				seen.append(cmd)
 
