@@ -138,3 +138,78 @@ def best(product, pages):
     """``(version, label)`` of the best candidate, or ``('', '')``."""
     found = read(product, pages)
     return (found[0][0], found[0][1]) if found else ('', '')
+
+
+# ----------------------------------------------------------------------------- one core per host
+
+def key(name):
+    """A product name as the correlation compares it: letters and digits, lowercase."""
+    return re.sub(r'[^a-z0-9]', '', str(name or '').lower())
+
+
+# a host serves one WordPress core, one Drupal core, one board: two versions of these are two claims about one thing, never two installs
+SINGLE_INSTANCE = frozenset({key(product) for _p, product, _s in MARKERS} | {key(product) for product in SOURCES})
+# libraries a core ships or its themes load: their version numbers are the usual wrong answer for a core's (jQuery 3.7.1 is not WordPress 3.7.1)
+LIBRARIES = frozenset({'jquery', 'jquerymigrate', 'jqueryui', 'bootstrap', 'angularjs', 'react', 'vuejs', 'lodash', 'momentjs', 'underscorejs',
+                       'swiper', 'datatables'})
+TRUSTED = 0.6  # the least confidence at which a probe's reading of a product's version settles a dispute
+
+
+def disproven(pairs, attested=None):
+    """``{(product key, version)}`` a host's technologies state that the evidence shows are wrong, for ``pairs`` of ``(name, version)``.
+
+    Only a version that is disproved is returned, never a guess at the right one. When a product that runs once per host has two versions:
+    one a probe states (``attested``: ``{product key: {versions}}``, from what WPScan or a version probe read on this host) settles it, and
+    the others are dropped; with none attested, a version that is also a library's version on the same host is the library's number read as
+    the core's and is dropped, unless it is the only version left. A dispute neither rule settles keeps every version: a host's risk is never
+    hidden by choosing between two claims at random."""
+    attested = attested or {}
+    cores, libraries = {}, set()
+    for name, version in pairs:
+        k = key(name)
+        if not version:
+            continue
+        if k in SINGLE_INSTANCE:
+            cores.setdefault(k, set()).add(version)
+        elif k in LIBRARIES:
+            libraries.add(version)
+    out = set()
+    for k, found in cores.items():
+        if len(found) < 2:
+            continue
+        stated = found & set(attested.get(k, ()))
+        if stated:
+            out |= {(k, v) for v in found - stated}
+            continue
+        borrowed = found & libraries
+        if borrowed and found - borrowed:
+            out |= {(k, v) for v in borrowed}
+    return out
+
+
+def attested(project_id, host, keys):
+    """``{product key: {versions}}`` a probe read on this host for the products in ``keys``: WPScan's core, the WordPress probe, a version probe."""
+    from cveFeed.models import ProbeObservation
+    found = {}
+    rows = ProbeObservation.objects.filter(project_id=project_id, host=str(host).lower(), outcome='found', confidence__gte=TRUSTED) \
+        .exclude(version='').values_list('product', 'version')
+    for product, version in rows:
+        if key(product) in keys:
+            found.setdefault(key(product), set()).add(version)
+    return found
+
+
+def superseded(subdomain, technologies):
+    """``{(product key, version)}`` of ``subdomain``'s technologies that ``disproven`` rules out. Reads the probe evidence only when a one-core
+    product has more than one version, so a host with no dispute costs no query. ``technologies`` is the host's Technology rows (or names)."""
+    from cveFeed.correlation import split_name_version
+    pairs = [split_name_version(getattr(t, 'name', t) or '') for t in technologies]
+    seen = {}
+    for name, version in pairs:
+        if version and key(name) in SINGLE_INSTANCE:
+            seen.setdefault(key(name), set()).add(version)
+    disputed = {k for k, versions in seen.items() if len(versions) > 1}
+    if not disputed:
+        return set()
+    project = subdomain.target_domain.project_id
+    return disproven(pairs, attested(project, subdomain.name, disputed))

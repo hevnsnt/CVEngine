@@ -12,6 +12,7 @@ testable on their own.
 import logging
 import re
 
+from cveFeed import cms
 from cveFeed import distro as distro_lib
 from cveFeed import match_policy
 from cveFeed import runzero
@@ -1094,9 +1095,14 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     rows = [] if rows is None else rows
     fix_lookup = fix_lookup or DbFixLookup()
 
-    # Technology fingerprints (httpx tech-detect).
-    for tech in subdomain.technologies.all():
+    # Technology fingerprints (httpx tech-detect). A version of a one-core product the evidence disproves (jQuery's number read as
+    # WordPress's) is kept on the host as evidence and not matched.
+    technologies = list(subdomain.technologies.all())
+    wrong = cms.superseded(subdomain, technologies)
+    for tech in technologies:
         name, version = split_name_version(tech.name)
+        if wrong and (cms.key(name), version) in wrong:
+            continue
         token = _norm(name)
         if len(token) < _MIN_TOKEN:
             continue
