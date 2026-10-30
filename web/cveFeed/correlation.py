@@ -889,13 +889,17 @@ def _carry_remediation(fresh):
              Subdomain.objects.filter(pk__in={m.subdomain_id for m in fresh}).values_list("id", "target_domain_id", "name")}
     domains = {d for d, _n in hosts.values()}
     names = {n for _d, n in hosts.values()}
-    earlier = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
-                                       subdomain__name__in=names)
-               .exclude(subdomain_id__in=list(hosts)).select_related("subdomain").order_by("id"))
-    latest, by_host = {}, {}
-    for m in earlier:  # oldest first, including open: a newer reopening supersedes an older closure
-        latest[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product)] = m
-        by_host[(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name)] = m
+    base = (CVEMatch.objects.filter(cve_entry_id__in={m.cve_entry_id for m in fresh}, subdomain__target_domain_id__in=domains,
+                                    subdomain__name__in=names)
+            .exclude(subdomain_id__in=list(hosts)).select_related("subdomain"))
+    # Only the newest earlier row of each finding matters, an open one included (a newer reopening supersedes an older closure). Every
+    # scan keeps its own copy of every match, so asking for all of them would load the whole history; ask for the newest per key.
+    by_host_fields = ("cve_entry_id", "subdomain__target_domain_id", "subdomain__name")
+    by_product_fields = by_host_fields + ("source", "matched_product")
+    latest = {(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name, m.source, m.matched_product): m
+              for m in base.order_by(*by_product_fields, "-id").distinct(*by_product_fields)}
+    by_host = {(m.cve_entry_id, m.subdomain.target_domain_id, m.subdomain.name): m
+               for m in base.order_by(*by_host_fields, "-id").distinct(*by_host_fields)}
     if not latest:
         return
     for match in fresh:
