@@ -224,3 +224,80 @@ class SentinelFlagTests(TestCase):
 
 	def test_a_sentinel_that_says_its_guesses_are_unreliable_is_not_believed(self):
 		self.assertEqual(self.run_nmap({'hosts': self.hosts(), 'os_reliable': False}), '')
+
+
+class MeasuredPathTests(TestCase):
+	"""A path measured to lose nmap's malformed probes (cveFeed.path_probe) makes guesses unreliable, like a recognised Docker Desktop."""
+
+	def setUp(self):
+		from django.core.cache import cache
+		cache.delete(os_detection.PATH_CACHE_KEY)
+		self.addCleanup(cache.delete, os_detection.PATH_CACHE_KEY)
+		patcher = mock.patch.object(os_detection, '_kernel', return_value='6.8.0-45-generic')
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		env = mock.patch.dict(os.environ, {}, clear=False)
+		env.start()
+		os.environ.pop('CVENGINE_OS_DETECTION', None)
+		self.addCleanup(env.stop)
+
+	def test_nothing_measured_is_trusted(self):
+		self.assertEqual(os_detection.path_state(), {'state': 'unknown'})
+		self.assertIsNone(os_detection.cause())
+		self.assertFalse(os_detection.unreliable())
+
+	def test_an_interfering_path_is_a_translated_one(self):
+		os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 6})
+		self.assertEqual(os_detection.cause(), 'translated')
+		self.assertTrue(os_detection.unreliable())
+		self.assertIn('translates addresses', os_detection.reason())
+
+	def test_a_direct_path_is_trusted(self):
+		os_detection.record_path({'state': 'direct', 'answered': 5, 'lost': 0, 'hosts': 6})
+		self.assertFalse(os_detection.unreliable())
+
+	def test_the_kernel_hint_wins_over_a_clean_measurement(self):
+		# Docker Desktop's stack may answer a malformed probe with a reset and still fake the whole remote host
+		os_detection.record_path({'state': 'direct', 'answered': 5, 'lost': 0, 'hosts': 6})
+		with mock.patch.object(os_detection, '_kernel', return_value='6.10.14-linuxkit'):
+			self.assertEqual(os_detection.cause(), 'docker-desktop')
+
+	def test_the_override_wins_over_everything(self):
+		os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 6})
+		with mock.patch.dict(os.environ, {'CVENGINE_OS_DETECTION': 'trust'}):
+			self.assertIsNone(os_detection.cause())
+		os_detection.record_path({'state': 'direct', 'answered': 5, 'lost': 0, 'hosts': 6})
+		with mock.patch.dict(os.environ, {'CVENGINE_OS_DETECTION': 'distrust'}):
+			self.assertEqual(os_detection.cause(), 'override')
+
+	def test_a_check_that_could_not_say_keeps_the_earlier_verdict(self):
+		os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 6})
+		os_detection.record_path({'state': 'unknown', 'why': 'too few fingerprinted hosts to measure with', 'hosts': 1})
+		self.assertEqual(os_detection.path_state()['state'], 'interfering')
+
+	def test_a_new_interfering_verdict_removes_the_packet_guesses_stored_before_it_was_known(self):
+		ip = IpAddress.objects.create(address='203.0.113.70', os_guess='HP P2000 G3 NAS device', os_accuracy=93)
+		with mock.patch.object(os_detection, 'clear_stored_guesses') as clear:
+			os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 6})
+			os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 6})
+		clear.assert_called_once()  # on the change, not at every daily check
+		self.assertEqual(IpAddress.objects.get(pk=ip.pk).os_guess, 'HP P2000 G3 NAS device')
+
+	def test_the_status_says_what_to_do(self):
+		self.assertEqual(os_detection.status()['trusted'], True)
+		os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 6})
+		out = os_detection.status()
+		self.assertEqual((out['trusted'], out['cause']), (False, 'translated'))
+		self.assertEqual((out['path']['state'], out['path']['lost']), ('interfering', 5))
+		self.assertIn('docker-compose.hostnet.yml', out['remedy'])
+
+	def test_the_daily_task_runs_the_check_and_keeps_its_answer(self):
+		from cveFeed import path_probe, tasks
+		with mock.patch.object(path_probe, 'check', return_value={'state': 'direct', 'answered': 4, 'lost': 0, 'hosts': 4}):
+			out = tasks.check_os_path()
+		self.assertEqual(out['state'], 'direct')
+		self.assertEqual(os_detection.path_state()['state'], 'direct')
+
+	def test_the_system_status_reports_it(self):
+		from agentapi import system_status
+		self.assertTrue(system_status._os_detection()['trusted'])

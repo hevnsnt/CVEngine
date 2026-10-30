@@ -31,7 +31,12 @@ class ReportedTests(Base):
     def test_a_sentinel_reports_its_own_settings_and_is_told_the_effective_ones(self):
         agent, out = self.sentinel({'network': 'internal', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4})
         self.assertEqual(out['settings']['values'], {'network': 'external', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4, 'self_update': 'manual'})  # it says internal, but only the server decides that
-        self.assertEqual({k: v['source'] for k, v in out['settings']['detail'].items()}, {k: 'sentinel' for k in out['settings']['detail']})  # the instance default is no setting of the Sentinel's
+        self.assertEqual(out['settings']['detail']['network']['value'], 'external')
+        self.assertEqual(out['settings']['detail']['network']['server_grant'], 'external')
+        self.assertEqual(out['settings']['detail']['network']['machine_value'], 'internal')
+        self.assertTrue(out['settings']['detail']['network']['limited_by_server'])
+        self.assertEqual({k: v['source'] for k, v in out['settings']['detail'].items() if k != 'network'},
+                         {k: 'sentinel' for k in out['settings']['detail'] if k != 'network'})
         agent.refresh_from_db()
         self.assertEqual(agent.reported_settings['network']['value'], 'internal')
 
@@ -61,23 +66,30 @@ class ReportedTests(Base):
 
 
 class MostRecentWinsTests(Base):
-    def test_a_later_edit_in_cvengine_beats_the_sentinels_own_value_and_reaches_it_on_the_heartbeat(self):
+    def test_an_admin_internal_grant_is_capped_by_the_machine_until_it_changes(self):
         agent, _ = self.sentinel({'network': 'external', 'max_concurrent': 2})
         status, out = self.manage(agent, {'network': 'internal'})
         self.assertEqual(status, 200, out)
-        self.assertEqual(out['settings']['network']['source'], 'server')
-        self.assertEqual(out['settings']['network']['by'], 's_root')
+        self.assertEqual(out['settings']['network']['source'], 'sentinel')
+        self.assertEqual(out['settings']['network']['server_grant'], 'internal')
+        self.assertEqual(out['settings']['network']['value'], 'external')
+        self.assertEqual(out['settings']['network']['grant_by'], 's_root')
+        self.assertTrue(out['settings']['network']['managed'])
         self.assertEqual(out['settings']['max_concurrent']['source'], 'sentinel')  # untouched settings stay the Sentinel's
         status, beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat')
         self.assertEqual(status, 200, beat)
-        self.assertEqual(beat['settings']['values'], {'network': 'internal', 'max_concurrent': 2, 'self_update': 'manual'})
-        self.assertEqual(beat['settings']['rev'], ss.revision({'network': 'internal', 'max_concurrent': 2, 'self_update': 'manual'}))
+        self.assertEqual(beat['settings']['values'], {'network': 'external', 'max_concurrent': 2, 'self_update': 'manual'})
+        self.assertEqual(beat['settings']['rev'], ss.revision({'network': 'external', 'max_concurrent': 2, 'self_update': 'manual'}))
+        ss.record_reported(agent, {'network': 'internal'})
+        agent.refresh_from_db()
+        self.assertEqual(ss.effective(agent)['network'], 'internal')
 
     def test_a_restart_with_an_unchanged_configuration_does_not_override_the_dashboard(self):
         agent, _ = self.sentinel({'network': 'external'})
         self.manage(agent, {'network': 'internal'})
         _, out = self.sentinel({'network': 'external'})  # the machine still says external, as it always did
-        self.assertEqual(out['settings']['values']['network'], 'internal')
+        self.assertEqual(out['settings']['values']['network'], 'external')
+        self.assertEqual(out['settings']['detail']['network']['server_grant'], 'internal')
 
     def test_a_change_made_on_the_machine_after_the_dashboard_edit_wins(self):
         agent, _ = self.sentinel({'network': 'external', 'max_concurrent': 2})
@@ -86,8 +98,8 @@ class MostRecentWinsTests(Base):
         agent.refresh_from_db()
         ss.record_reported(agent, {'network': 'external', 'max_concurrent': 3}, now=later)  # the operator changed the machine's concurrency after
         agent.refresh_from_db()
-        self.assertEqual({k: v['source'] for k, v in ss.detail(agent).items()}, {'network': 'server', 'max_concurrent': 'sentinel'})
-        self.assertEqual(ss.effective(agent), {'network': 'internal', 'max_concurrent': 3, 'self_update': 'manual'})
+        self.assertEqual({k: v['source'] for k, v in ss.detail(agent).items()}, {'network': 'sentinel', 'max_concurrent': 'sentinel'})
+        self.assertEqual(ss.effective(agent), {'network': 'external', 'max_concurrent': 3, 'self_update': 'manual'})
 
     def test_clearing_a_server_value_hands_the_setting_back_to_the_sentinel(self):
         agent, _ = self.sentinel({'max_concurrent': 3})
@@ -100,7 +112,7 @@ class MostRecentWinsTests(Base):
         agent, _ = self.sentinel()
         self.manage(agent, {'disabled_kinds': ['openvas', 'wpscan', 'openvas']})
         agent.refresh_from_db()
-        self.assertEqual(ss.effective(agent), {'disabled_kinds': ['openvas', 'wpscan'], 'self_update': 'manual'})
+        self.assertEqual(ss.effective(agent), {'disabled_kinds': ['openvas', 'wpscan'], 'self_update': 'manual', 'network': 'external'})
 
 
 class AdminTests(Base):
@@ -111,7 +123,8 @@ class AdminTests(Base):
         self.assertIn(status, (403, 404))  # the Sentinel's own token cannot edit itself through the administrator call
         self.assertEqual(self.manage(agent, {'network': 'internal'})[0], 200)
         entry = AuditLog.objects.filter(action='agent.settings').latest('id')
-        self.assertEqual((entry.detail['before'], entry.detail['after']), ({'network': 'external'}, {'network': 'internal'}))
+        self.assertEqual((entry.detail['before'], entry.detail['after']), ({'network': 'external'}, {'network': 'external'}))
+        self.assertEqual((entry.detail['network_grant_before'], entry.detail['network_grant_after']), ('external', 'internal'))
 
     def test_bad_values_and_non_sentinel_agents_are_refused(self):
         agent, _ = self.sentinel({'network': 'external'})
@@ -126,7 +139,8 @@ class AdminTests(Base):
         status, out = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
         self.assertEqual(status, 200)
         self.assertEqual(out['settings']['profile']['source'], 'server')
-        self.assertEqual(out['settings']['network']['source'], 'sentinel')
+        self.assertEqual(out['settings']['network']['source'], 'server')
+        self.assertEqual(out['settings']['network']['machine_value'], 'external')
 
 
 class UpdateTests(Base):

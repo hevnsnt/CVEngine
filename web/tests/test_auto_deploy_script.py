@@ -126,6 +126,35 @@ class AutoDeployTests(unittest.TestCase):
         self.assertEqual(self.run_deploy().returncode, 0)
         self.assertIn('update --stop-scans drain=1800', self.calls())
 
+    def commit_of_its_own(self):
+        (self.work / 'web' / 'local-change').write_text('only this checkout has it\n')
+        self.git('add', 'web/local-change', cwd=self.work)
+        self.git('commit', '-m', 'local', cwd=self.work)
+
+    def test_a_checkout_with_commits_of_its_own_that_has_merged_master_is_level_with_it(self):
+        # HEAD never equals master's commit once the checkout has commits of its own: that used to deploy (and back up) at every run
+        self.push_new_commit()
+        self.commit_of_its_own()
+        self.git('fetch', 'origin', 'master', cwd=self.work)
+        self.git('merge', '-m', 'merge master', 'origin/master', cwd=self.work)
+        result = self.run_deploy()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_checkout_with_commits_of_its_own_and_a_master_that_moved_waits_for_a_merge_and_says_so_once(self):
+        self.commit_of_its_own()
+        self.push_new_commit()
+        first, second = self.run_deploy(), self.run_deploy()
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        self.assertEqual(self.calls(), [])  # no backup, no update that cannot move forward
+        self.assertIn('commit(s) of its own', first.stdout)
+        self.assertIn('Merge it by hand', first.stdout)
+        self.assertEqual(second.stdout.strip(), '')
+        # once the merge is done by hand nothing is left to deploy, and the note is forgotten
+        self.git('merge', '-m', 'merge master', 'origin/master', cwd=self.work)
+        self.assertEqual(self.run_deploy().returncode, 0)
+        self.assertFalse((self.state() / 'diverged-note').exists())
+
     def test_a_checkout_on_another_branch_does_nothing_and_says_so_once(self):
         # update.sh only ever deploys master: without this the timer backed up the database and failed inside update.sh at every retry
         self.push_new_commit()

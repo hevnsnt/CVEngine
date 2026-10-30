@@ -74,7 +74,21 @@ if [[ ! $latest =~ ^[0-9a-f]{40}$ ]]; then
     exit 0
 fi
 current=$(git rev-parse HEAD)
-[[ $latest != "$current" ]] || exit 0
+# Level with master means master is in this checkout, not that HEAD is master's commit: a checkout with commits of its own never equals it
+if git cat-file -e "$latest^{commit}" 2>/dev/null && git merge-base --is-ancestor "$latest" HEAD; then
+    rm -f "$state/diverged-note"
+    exit 0
+fi
+# Master has commits this checkout lacks. If the checkout also has commits of its own it cannot be fast-forwarded (update.sh only moves forward), and
+# trying would back up the database and stop at every retry: say so once for this master commit and wait for the merge to be done by hand.
+if timeout 120 git fetch --quiet origin master 2>/dev/null && ! git merge-base --is-ancestor HEAD "$latest" 2>/dev/null; then
+    if [[ $(cat "$state/diverged-note" 2>/dev/null) != "$latest" ]]; then
+        log "Master moved to ${latest:0:8}, but this checkout has $(git rev-list --count "$latest..HEAD" 2>/dev/null || echo some) commit(s) of its own, so it cannot be fast-forwarded and nothing is deployed. Merge it by hand (git fetch origin && git merge origin/master), then run scripts/update.sh."
+        printf '%s' "$latest" > "$state/diverged-note"
+    fi
+    exit 0
+fi
+rm -f "$state/diverged-note"
 
 # Leave a manual or approved update alone while it holds the updater lock.
 if [[ -x scripts/update-state.py || -f scripts/update-state.py ]]; then

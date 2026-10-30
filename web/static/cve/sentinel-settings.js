@@ -1,7 +1,7 @@
-// A Sentinel's settings, version and updates on the Sentinels page. GET /api/v1/agents/{id} reports, for a Sentinel, `settings` (each one
-// {value, source: "server"|"sentinel", at, by}: the effective value, and whether it was last set from this dashboard or in the Sentinel's
-// own .env, the most recent change winning), `version` and `update` ({status, phase, detail, from, to, at, requested_at}). PATCH the same
-// address with {settings: {...}} (null hands a setting back to the Sentinel's .env) or {update: "now"}. A server or Sentinel too old to
+// A Sentinel's settings, version and updates on the Sentinels page. GET /api/v1/agents/{id} reports `settings` with value, source,
+// at and by. Network also reports its server grant and machine setting, with value showing the usable location. PATCH the same
+// address with {settings: {...}} (network null restores its provisioned grant; other null values clear the dashboard setting)
+// or {update: "now"}. A server or Sentinel too old to
 // report them simply leaves the keys out, and then nothing here is drawn. Everything the machine reports is set with textContent.
 import {
   api,
@@ -76,6 +76,13 @@ function ago(iso) {
 // "Set from this dashboard by alice, 2h ago" or "Set on the Sentinel's machine, 1d ago"
 export function sourceLine(setting) {
   if (!setting) return "Not set";
+  if (setting.server_grant) {
+    const machine = setting.machine_value || "not reported";
+    const grant = setting.managed
+      ? `Set by an administrator${setting.grant_by ? ` (${setting.grant_by})` : ""}${setting.grant_at ? `, ${ago(setting.grant_at)}` : ""}`
+      : "No dashboard override";
+    return `Server grant: ${setting.server_grant}. Machine setting: ${machine}. Effective: ${setting.value}. ${grant}.`;
+  }
   const when = setting.at ? `, ${ago(setting.at)}` : "";
   const limit = setting.limited_by_machine
     ? ` (limited by this machine's setting${setting.machine_value ? `: ${setting.machine_value}` : ""}, so this does not take effect)`
@@ -221,13 +228,15 @@ function readControl(key, node) {
 }
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const controlValue = (key, setting) =>
+  key === "network" ? setting?.server_grant ?? setting?.value : setting?.value;
 
 const ROWS = [
   ["name", "Name", "How it appears in cvENGINE."],
   [
     "network",
     "Where it runs",
-    "Internal Sentinels scan the private networks declared for a project.",
+    "Choose the server grant. Internal Sentinels scan declared private networks only when their machine setting allows it.",
   ],
   ["profile", "Size", "Light never runs OpenVAS."],
   [
@@ -249,7 +258,7 @@ export function openSettings(first, onChange) {
       el(
         "p",
         "note",
-        "The most recent change wins, wherever it was made: a later edit of the Sentinel's own .env takes over again. Changes reach the Sentinel within a heartbeat or so; this panel refreshes by itself.",
+        "For most settings, the most recent change wins. Private network access comes from provisioning or an administrator, and the Sentinel's own setting can limit it. Changes reach the Sentinel within a heartbeat or so; this panel refreshes by itself.",
       ),
     );
     let d = first;
@@ -261,13 +270,15 @@ export function openSettings(first, onChange) {
       const now = el("b", "ss-now");
       const src = el("span", "note ss-src");
       head.append(el("span", "ss-label", label), now);
-      const input = control(key, d.settings[key] && d.settings[key].value);
+      const input = control(key, controlValue(key, d.settings[key]));
       const reset = button(
-        "Reset to the Sentinel's value",
+        key === "network" ? "Restore provisioned location" : "Reset to the Sentinel's value",
         async () => {
           if (
             !(await ask(
-              `Hand ${label.toLowerCase()} back to the Sentinel's own .env?`,
+              key === "network"
+                ? "Restore the network access granted when this Sentinel was provisioned? A Sentinel without an enrollment returns to external."
+                : `Hand ${label.toLowerCase()} back to the Sentinel's own .env?`,
               { title: "Reset setting", ok: "Reset", danger: false },
             ))
           )
@@ -275,7 +286,7 @@ export function openSettings(first, onChange) {
           d = await api("PATCH", detailUrl(d.id), {
             settings: { [key]: null },
           });
-          toast(`${label} handed back to the Sentinel`);
+          toast(key === "network" ? "Provisioned network access restored" : `${label} handed back to the Sentinel`);
           paint(true);
           onChange();
         },
@@ -296,7 +307,7 @@ export function openSettings(first, onChange) {
         const change = {};
         rows.forEach((r, key) => {
           const next = readControl(key, r.input);
-          const cur = d.settings[key] ? d.settings[key].value : undefined;
+          const cur = controlValue(key, d.settings[key]);
           if (next !== undefined && !same(next, cur)) change[key] = next;
           if (key === "disabled_kinds" && same(next, []) && cur && cur.length)
             change[key] = [];
@@ -330,9 +341,9 @@ export function openSettings(first, onChange) {
         const s = d.settings[key];
         r.now.textContent = shown(key, s && s.value);
         r.src.textContent = sourceLine(s);
-        r.reset.hidden = !(s && s.source === "server");
+        r.reset.hidden = !(s && (key === "network" ? (s.managed ?? (s.source === "server")) : s.source === "server"));
         if (refill) {
-          const fresh = control(key, s && s.value);
+          const fresh = control(key, controlValue(key, s));
           r.input.replaceWith(fresh);
           fresh.id = r.input.id;
           r.input = fresh;

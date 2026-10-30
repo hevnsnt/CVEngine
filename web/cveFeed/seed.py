@@ -68,14 +68,18 @@ def record_for(cve, detection_row=None):
 
 def export_seed(path, progress=None):
     """Write the whole catalog to ``path`` (and ``path`` + ``.manifest.json`` beside it). Returns the manifest."""
+    from django.db.models import Max
     detections = {d.cve_entry_id: d for d in CVEDetection.objects.exclude(strategy={}).iterator(chunk_size=2000)}
     tiers, count = {'fire': 0, 'smoke': 0, 'ice': 0}, 0
+    # the newest publication time the snapshot holds: what a consumer may assume the feed is complete through (the export time says when
+    # it was written, not what the catalog had read by then)
+    covers_through = _iso(CVEEntry.objects.aggregate(newest=Max('published_at'))['newest'])
     directory = os.path.dirname(os.path.abspath(path))
     handle, tmp = tempfile.mkstemp(prefix='.cve-seed-', dir=directory)
     os.close(handle)
     try:
         with gzip.open(tmp, 'wt', encoding='utf-8', compresslevel=9) as out:
-            out.write(json.dumps({'format': FORMAT, 'generated_at': timezone.now().isoformat(),
+            out.write(json.dumps({'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'covers_through': covers_through,
                                   'detection_schema': detection.SCHEMA_VERSION}) + '\n')
             for cve in CVEEntry.objects.order_by('id').iterator(chunk_size=2000):
                 record = record_for(cve, detections.get(cve.id))
@@ -93,7 +97,7 @@ def export_seed(path, progress=None):
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-    manifest = {'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'count': count, 'tiers': tiers,
+    manifest = {'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'covers_through': covers_through, 'count': count, 'tiers': tiers,
                 'with_detection': sum(1 for d in detections.values()), 'bytes': os.path.getsize(path), 'sha256': digest.hexdigest()}
     with open(path + '.manifest.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=1)
@@ -224,50 +228,11 @@ def import_seed(path, batch=1000, progress=None):
             if progress:
                 progress(counts)
     flush()
-    if counts['created']:
-        note_feed_gap(_time(manifest.get('generated_at')))
+    # the feed is complete through what the snapshot holds (older seeds only say when they were written, which is later than that:
+    # the walk's margin and the coverage window absorb the difference)
+    from cveFeed import feed_watermark
+    feed_watermark.note_snapshot(_time(manifest.get('covers_through')) or _time(manifest.get('generated_at')))
     return counts
-
-
-# --- the gap behind a seed ---------------------------------------------------------------------------------------------------
-# A seed is a snapshot: the CVEs first seen between its generated_at and the first feed sync are in neither. The incremental sync
-# stops after a few hundred new entries, so it never reaches back that far, and the coverage backfill used to call the window
-# covered as soon as any entry was older than it (a seed holds entries from 1999). So the import records where the gap starts and the
-# backfill walks back to it, then closes it. The position is kept in BackgroundCursor (a lane name and a number, here epoch seconds).
-
-GAP_LANE = 'cve_feed_gap_from'          # the feed may be missing entries first seen after this time
-GAP_CHECKED_LANE = 'cve_feed_gap_checked'  # the gap behind the seed was looked at once (set when a walk reached its floor)
-
-
-def note_feed_gap(since):
-    """Record that entries first seen after ``since`` (a datetime) may be missing. The earliest recorded time stands."""
-    from cveFeed.models import BackgroundCursor
-    if since is None:
-        return
-    seconds = max(0, int(since.timestamp()))
-    row, created = BackgroundCursor.objects.get_or_create(lane=GAP_LANE, defaults={'last_pk': seconds})
-    if not created and (not row.last_pk or seconds < row.last_pk):
-        BackgroundCursor.objects.filter(lane=GAP_LANE).update(last_pk=seconds)
-    BackgroundCursor.objects.filter(lane=GAP_CHECKED_LANE).delete()  # a new seed makes the earlier check out of date
-
-
-def feed_gap_from():
-    """When the recorded gap starts (an aware datetime), or None when none is recorded."""
-    from cveFeed.models import BackgroundCursor
-    row = BackgroundCursor.objects.filter(lane=GAP_LANE).first()
-    return datetime.fromtimestamp(row.last_pk, tz=dt_timezone.utc) if row and row.last_pk else None
-
-
-def feed_gap_checked():
-    from cveFeed.models import BackgroundCursor
-    return BackgroundCursor.objects.filter(lane=GAP_CHECKED_LANE).exists()
-
-
-def close_feed_gap():
-    """The backfill read the feed back past the gap: clear it, and remember that it was looked at."""
-    from cveFeed.models import BackgroundCursor
-    BackgroundCursor.objects.filter(lane=GAP_LANE).delete()
-    BackgroundCursor.objects.get_or_create(lane=GAP_CHECKED_LANE)
 
 
 # --- download ---------------------------------------------------------------------------------------------------------------

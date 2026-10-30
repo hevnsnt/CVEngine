@@ -587,7 +587,7 @@ class IpAddress(models.Model):
 	geo_iso = models.ForeignKey(
 		CountryISO, on_delete=models.CASCADE, null=True, blank=True)
 	version = models.IntegerField(blank=True, null=True)
-	is_private = models.BooleanField(default=False)
+	is_private = models.BooleanField(default=False)  # not an address of the public internet (targetApp.target_types.is_public_address)
 	reverse_pointer = models.CharField(max_length=100, blank=True, null=True)
 	# Host-level OS fingerprint (nmap -O).
 	os_guess = models.CharField(max_length=255, blank=True, default='')
