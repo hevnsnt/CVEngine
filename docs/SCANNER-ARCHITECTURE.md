@@ -198,6 +198,10 @@ signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is
 for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
 (`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes still run here by design until the secure read exists.
 
+A name in the list that is not a kind (`nmpa` for `nmap`) is ignored, which reads as `none` for that kind and so strands it. It is never silent: the server logs one warning per
+process for each distinct value, the status's `scanner` block carries `unknown_kinds`, and for an App Admin `problems` says "CVENGINE_LOCAL_FALLBACK names kinds
+that do not exist: ...; check the spelling". The semantics do not change; the name is still ignored.
+
 
 ### The "scanner offline" reading
 

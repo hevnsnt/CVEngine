@@ -4,7 +4,16 @@
 read: the Sentinel repo takes a copy at the version it targets and validates its own results against it, and this repo's tests tie it
 to the limits the broker enforces (``sentinel_broker``) and to one fixture per kind. A change a client must follow bumps
 ``contract_version``. The server stays strict whatever a client sends (``sentinel_broker.clean_result``); the contract is what a
-correct client keeps to, so the server never has to clip or drop anything of a good Sentinel's."""
+correct client keeps to, so the server never has to clip or drop anything of a good Sentinel's.
+
+The kinds are listed once, in ``kind_since``: ``KINDS`` is that list, and ``SentinelTask.KINDS`` is ``KINDS``. Every other per-kind table (the
+cleaners, the dispatch budgets, ``$defs.results`` and ``$defs.targets``) is held to it by ``tests.test_sentinel_contract``.
+
+Frozen fixtures. ``tests/fixtures/sentinel_results/`` holds one good result per kind at the current ``contract_version``. Bumping
+``contract_version`` copies the then-current fixtures, unchanged, into ``v<N>/`` (``v1/`` is the first set, and ``waf.json``, which arrived in 2,
+joins ``v2/``). A frozen set is never edited again, and the server keeps accepting every one of them down to ``min_supported_contract_version``:
+a Sentinel one release behind sends exactly what it sent before, and ``tests.test_sentinel_contract`` runs each frozen set through
+``sentinel_broker.clean_result`` and this schema."""
 import json
 from pathlib import Path
 
@@ -13,6 +22,9 @@ PATH = Path(__file__).with_name('sentinel_contract.json')
 
 def load():
     return json.loads(PATH.read_text())
+
+
+KINDS = tuple(load()['kind_since'])  # every task kind, in the order the file lists them
 
 
 def version():

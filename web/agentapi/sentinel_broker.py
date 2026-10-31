@@ -42,6 +42,7 @@ from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError, AssetFilter
+from dashboard.models import AuditLog
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -814,7 +815,9 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
 
 
 def project_slots(project, now=None):
-    """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over."""
+    """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over. Counted over the two
+    kinds every scan stage starts with (``nmap``, ``nuclei_light``), not over every kind: a Sentinel that only runs OpenVAS or ``discover`` does not
+    widen the per-scan stage pool, so this is a deliberate pair and does not follow ``KINDS``."""
     now = now or timezone.now()
     memo = getattr(_memo, 'cache', None)
     key = ('slots', project.pk)
@@ -1573,6 +1576,25 @@ def explain_error(text):
     return message[:300]
 
 
+def _held_before(task, agent):
+    """Whether ``agent`` held ``task`` before it ended. ``expire`` clears the task's agent, so the claim's audit row is the only record of who it was."""
+    return AuditLog.objects.filter(action='sentinel.task.claim', detail__task_id=task.pk, detail__agent_id=agent.pk).exists()
+
+
+def _record_late(ctx, agent, task):
+    """A Sentinel reported a task whose stage had already stopped waiting: the result is discarded (the stage ran it here or left the targets due),
+    but it is said, once per task however often the Sentinel retries: an audit row, and an activity line next to the stage's own."""
+    if AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists():
+        return
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity
+    reason = task.error or 'no reason given'
+    audit.record(ctx.user, 'sentinel.task.late', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk, agent=agent.name,
+                 reason=reason)
+    activity.log('run_check', f'Sentinel {agent.name} reported {task.kind} work for {sentinel_dispatch._label(task.host, task.ips)} after the stage '
+                 f'stopped waiting ({reason[:150]})', project=task.project, status='expired', scan_id=task.scan_id, sentinel_task_id=task.pk)
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -1585,9 +1607,13 @@ def report_result(ctx, task_id, body):
     rejected = None
     with transaction.atomic():
         task = SentinelTask.objects.select_for_update(of=('self',)).select_related('project').filter(pk=_int(task_id)).first()
-        if task is None or task.agent_id != agent.pk:
+        late = task is not None and task.status == 'expired' and (task.agent_id == agent.pk or (task.agent_id is None and _held_before(task, agent)))
+        if task is None or (task.agent_id != agent.pk and not late):
             raise ApiError(404, 'task not found')
         if task.status in ('done', 'failed', 'expired'):  # a retry of a report that already went through (the answer was lost): the same answer again, whatever the body
+            if late:  # the stage stopped waiting first: this result is discarded, as before, but no longer without a trace
+                _record_late(ctx, agent, task)
+                return {'task': task_brief(task), 'duplicate': True, 'late': True}
             return {'task': task_brief(task), 'duplicate': True}
         if task.status not in ('claimed', 'running') or not task.lease_expires_at or task.lease_expires_at < now:
             raise ApiError(409, 'the task is no longer assigned to this Sentinel (its lease expired or it was cancelled)')

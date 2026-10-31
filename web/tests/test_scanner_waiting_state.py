@@ -78,6 +78,31 @@ class HelperTests(SentinelWorld, TestCase):
                 self.assertEqual(scanner_state.waiting_kinds(), [])
                 self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
+    def test_a_misspelt_kind_is_still_ignored_but_warned_about_once_per_distinct_value(self):
+        warned = mock.patch.object(sentinel_dispatch, '_WARNED_FALLBACK', set())
+        warned.start()
+        self.addCleanup(warned.stop)
+        self.policy('nmpa, Naabu,wpscn,nmpa')
+        with self.assertLogs('agentapi.sentinel_dispatch', 'WARNING') as seen:
+            self.assertEqual(sentinel_dispatch.local_fallback_kinds(), {'naabu'})  # the semantics are unchanged: the unknown names are dropped
+            self.assertEqual(sentinel_dispatch.unknown_fallback_kinds(), ['nmpa', 'wpscn'])  # in order, each once
+            self.assertFalse(sentinel_dispatch.fallback_allowed('nmap'))
+        self.assertEqual(len(seen.records), 1)  # three reads, one warning
+        self.assertIn('nmpa, wpscn', seen.output[0])
+        self.policy('nmap,tesssl')  # another value is another warning
+        with self.assertLogs('agentapi.sentinel_dispatch', 'WARNING') as seen:
+            sentinel_dispatch.local_fallback_kinds()
+            sentinel_dispatch.local_fallback_kinds()
+        self.assertEqual(len(seen.records), 1)
+        self.assertIn('tesssl', seen.output[0])
+
+    def test_nothing_is_warned_about_when_every_name_is_a_kind(self):
+        for value in (None, '', 'all', '*', 'none', 'nmap,naabu', ' NMAP , wpscan '):
+            self.policy(value)
+            self.assertEqual(sentinel_dispatch.unknown_fallback_kinds(), [], value)
+        with self.assertNoLogs('agentapi.sentinel_dispatch', 'WARNING'):
+            sentinel_dispatch.local_fallback_kinds()
+
     def test_every_kind_allowed_by_name_is_never_waiting(self):
         self.policy(','.join(ALL_KINDS))
         self.assertEqual(scanner_state.waiting_kinds(), [])
@@ -252,6 +277,21 @@ class WordingTests(SimpleTestCase):
         self.assertEqual((member['kinds'], member['never_seen'], member['never_seen_message']), (['nmap'], [], None))
         self.assertNotIn('CVENGINE_LOCAL_FALLBACK', json.dumps(member))
 
+    def test_the_status_lists_unknown_kinds_for_an_admin_only(self):
+        with mock.patch.dict(os.environ, {ENV: 'nmap,nmpa,wpscn'}):
+            admin = scanner_state.status(admin=True, snapshot={'offline': False, 'kinds': [], 'never_seen': []})
+            member = scanner_state.status(admin=False, snapshot={'offline': False, 'kinds': [], 'never_seen': []})
+        self.assertEqual(admin['unknown_kinds'], ['nmpa', 'wpscn'])
+        self.assertEqual(admin['unknown_kinds_message'], 'CVENGINE_LOCAL_FALLBACK names kinds that do not exist: nmpa, wpscn; check the spelling.')
+        self.assertEqual((member['unknown_kinds'], member['unknown_kinds_message']), ([], None))
+        self.assertNotIn('CVENGINE_LOCAL_FALLBACK', json.dumps(member))
+
+    def test_unset_the_status_has_no_unknown_kinds(self):
+        with mock.patch.dict(os.environ, {}):
+            os.environ.pop(ENV, None)
+            out = scanner_state.status()
+        self.assertEqual((out['unknown_kinds'], out['unknown_kinds_message']), ([], None))
+
     def test_a_member_with_only_never_seen_kinds_sees_nothing(self):
         member = scanner_state.status(admin=False, snapshot={'offline': True, 'kinds': ['wpscan'], 'never_seen': ['wpscan']})
         self.assertFalse(member['offline'])
@@ -313,6 +353,26 @@ class SystemStatusTests(SentinelWorld, TestCase):
         self.assertIn(scanner['never_seen_message'], data['problems'])
         self.assertEqual(data['overall'], 'degraded')
         self.assertEqual(scanner['message'], 'Scanner offline: nmap work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.')
+
+    def test_a_misspelt_kind_is_a_problem_for_an_admin_and_nothing_for_a_member(self):
+        self.policy('nmap,nmpa')
+        self.sentinel(ALL_KINDS)
+        sentence = 'CVENGINE_LOCAL_FALLBACK names kinds that do not exist: nmpa; check the spelling.'
+        admin = self.status(self.t_root)
+        self.assertEqual(admin['scanning']['scanner']['unknown_kinds'], ['nmpa'])
+        self.assertIn(sentence, admin['problems'])
+        self.assertEqual(admin['overall'], 'degraded')
+        member = self.status(self.t_member)
+        self.assertEqual(member['scanning']['scanner']['unknown_kinds'], [])
+        self.assertNotIn('nmpa', json.dumps(member))
+        self.assertFalse([p for p in member['problems'] if 'CVENGINE_LOCAL_FALLBACK' in p])
+
+    def test_unset_or_spelt_right_there_is_no_spelling_problem(self):
+        for value in (None, 'none', 'nmap,naabu'):
+            self.policy(value)
+            data = self.status(self.t_root)
+            self.assertEqual(data['scanning']['scanner']['unknown_kinds'], [], value)
+            self.assertFalse([p for p in data['problems'] if 'do not exist' in p], value)
 
     def test_a_live_scanner_for_everything_is_quiet(self):
         self.policy('none')
