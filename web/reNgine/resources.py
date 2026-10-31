@@ -69,6 +69,16 @@ class MemoryBusy(RuntimeError):
     """The job waited for memory for longer than allowed."""
 
 
+class ScannerUnavailable(MemoryBusy):
+    """The scan work needs a Sentinel and none could take it, and this kind may not run on this server (``CVENGINE_LOCAL_FALLBACK``). It is
+    a ``MemoryBusy`` on purpose: every stage already treats that as "not the target's failure, it stays due", which is what waiting for
+    a scanner to come back must look like (nothing marked failed, nothing scanned locally)."""
+
+    def __init__(self, kind, why=''):
+        self.kind, self.why = kind, why
+        super().__init__(f'no scanner could run {kind} work{": " + why if why else ""}; it stays due until one can')
+
+
 class ScanAborted(RuntimeError):
     """The scan this work belongs to was stopped by a person; the work stops and the pipeline exits cleanly."""
 
