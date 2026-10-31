@@ -48,6 +48,8 @@ const CELL_H = 14;
 const HUB_LINKS = 3; // an IP with this many hosts is a hub: its label always shows
 const MIN_LABEL_SCALE = 0.45; // below this zoom only hubs and hovered nodes are labelled
 const DRAG_PX = 4; // a pointer that moves less than this is a click
+// Shows or hides an SVG node. An empty display attribute is an invalid CSS value Firefox logs once per node, so showing removes it.
+const showSvg = (node, on) => on ? node.removeAttribute("display") : node.setAttribute("display", "none");
 
 const colorOf = (d) =>
   d.kind === "cve" ? CVE_COLORS[d.tier] || css("--ice") : COLORS[d.kind] || css("--muted");
@@ -404,7 +406,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
   };
   const markGroup = (id, on) => {
     const ring = ringOf(id);
-    if (ring) ring.setAttribute("display", on ? "" : "none");
+    if (ring) showSvg(ring, on);
   };
   function clearGroup() {
     group.forEach((id) => markGroup(id, false));
@@ -924,7 +926,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
           text.setAttribute('y', -(radius + 12 / Math.max(scale, 0.05)));
         }
       }
-      text.setAttribute('display', '');
+      showSvg(text, true);
       const label = text.getBoundingClientRect();
       const left = Math.floor((label.left - box.left) / CELL_W);
       const right = Math.floor((label.right - box.left) / CELL_W);
@@ -941,7 +943,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         ((!zoomedOut || picked) && rank >= 3 && free) :
         rank === 0 || rank === 3 || ((!zoomedOut || picked) && free));
       if (show) cells.forEach(cell => taken.add(cell));
-      text.setAttribute("display", show ? "" : "none");
+      showSvg(text, show);
     });
   }
   // Labels are laid out from the bubbles' on-screen boxes, which forces a layout of every node: skip it in a hidden tab, and while the
