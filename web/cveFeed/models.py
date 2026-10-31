@@ -123,8 +123,16 @@ class CVEEntry(models.Model):
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
         }
+        # the CVE List's own forms the feed passes on ("unspecified" bounds, a branch in two ranges, Junos' "21.1*" and comma lists of fixes) are
+        # made ranges correlation can read, and a block the feed states no range for keeps the ranges the CVE List record gave (issues 205, 210)
+        from cveFeed.intel import keep_published_ranges, normalize_feed_ranges, overlay_branch_ranges
+        defaults["affected"] = normalize_feed_ranges(defaults["affected"])
+        stored = cls.objects.filter(cve_id=str(entry["id"])[:64]).values_list("affected", "sources").first()
+        if stored and "CVE List V5" in (stored[1] or []):
+            defaults["affected"] = keep_published_ranges(defaults["affected"], stored[0])
+            if "CVE List V5" not in defaults["sources"]:  # the label is what lets the next refresh keep them too
+                defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
-        from cveFeed.intel import overlay_branch_ranges
         defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
         if overlaid and "CVE List V5" not in defaults["sources"]:
             defaults["sources"] = [*defaults["sources"], "CVE List V5"]
@@ -273,6 +281,11 @@ class FeedWatermark(models.Model):
     resume_cursor = models.TextField(blank=True, default="")
     resume_head = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)  # when a walk last reached its floor
+    # entries a walk listed but could not read, as {id: attempts}; one that failed ``MAX_ATTEMPTS`` runs in a row is set aside (reported, no longer
+    # allowed to keep the window from being declared covered)
+    failures = models.JSONField(default=dict, db_default={}, blank=True)
+    # set when the first walk had no seed time and no earlier walk to start from: the feed was only read back this many days
+    assumed_days = models.PositiveSmallIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
 

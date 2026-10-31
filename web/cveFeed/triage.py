@@ -281,8 +281,8 @@ def affected_brief(affected, names=()):
         if not isinstance(item, dict):
             continue
         row = {k: _s(item[k], 80, names) for k in ('vendor', 'product', 'package') if item.get(k)}
-        from cveFeed.correlation import pair_split_ranges  # a branch the CVE List split in two reads as one range, as matching reads it
-        row['ranges'] = [_range(r, names) for r in pair_split_ranges([r for r in (item.get('ranges') or []) if isinstance(r, dict)])[:10]]
+        from cveFeed.correlation import prepared_ranges  # the ranges as matching reads them: a branch the CVE List split in two is one range
+        row['ranges'] = [_range(r, names) for r in prepared_ranges(item.get('ranges'), keep_unusable=True)[:10]]
         out.append(row)
     return out
 
@@ -562,6 +562,17 @@ def describe(finding):
     return d
 
 
+def request_fresh_review(row, d, nonce):
+    """Ask for a fresh AI review of ``row`` (``d`` is its current description, from ``track``) under ``nonce``, as a validation request
+    does, without erasing what the row already holds. The nonce is part of the evidence key, so setting it alone made the next ``track`` take
+    the row for changed evidence and reset it: with no AI to answer, the earlier classification, verdict and legacy match verdict were
+    simply lost. The key is moved with the nonce, so ``track`` only re-queues the review (``_rereview_fields``) and the record stays until
+    the new answer replaces it."""
+    row.review_nonce = nonce
+    row.evidence_key = evidence_key_for(d['kind'], d['signature_fields'], nonce)
+    row.save(update_fields=['review_nonce', 'evidence_key', 'updated_at'])
+
+
 def _rereview_fields(d, now):
     """The asset evidence is unchanged but the signature is not (new feed intelligence, or a new decision scheme): queue a fresh
     AI review and keep the verdict, classification, validation record and legacy CVE verdict until that review replaces them."""
@@ -573,6 +584,7 @@ def _reset_fields(d, now):
     return {'signature': d['signature'], 'evidence_key': d['evidence_key'], 'verdict': None, 'status': 'pending', 'classification': '', 'reason': '',
             'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'validation_status': 'none', 'validation_steps': [],
             'validation_evidence': {}, 'validated_at': None, 'attempts': 0, 'next_attempt_at': None, 'confidence_adjust': 0.0,
+            'carried_from': None,  # the earlier match's job history is about the evidence this row no longer has (hot_validation._carried_job)
             'updated_at': now}
 
 
@@ -613,8 +625,11 @@ def _twins(pending):
     if not pending:
         return {}
     from django.db.models import Q
-    # one row per finding (host, CVE, source, matched product): the newest that holds a record, within the window. DISTINCT ON keeps the read to
-    # the number of findings in the chunk however many scans have run since (every rescan adds a row per finding and nothing prunes the old ones)
+    # one row per finding (host, CVE, source, matched product): the newest that holds a record, within the window. DISTINCT ON bounds what comes
+    # back (one row per finding), not what is read: PostgreSQL sorts every row of these hosts and CVEs inside TWIN_WINDOW to pick the newest, and
+    # every rescan adds a row per finding that nothing prunes. Measured with 500 findings and 60 scans kept: 30,000 rows sorted, an external
+    # merge of 8 MB, about 250 ms per chunk, linear in the scans kept (sorting only the key columns and fetching the rows after it is about 85 ms,
+    # in memory, and just as linear). Bounding it needs the finding's key on the Triage row (an index to seek the newest row by) or pruning.
     rows = (Triage.objects.filter(Q(status='triaged') | ~Q(validation_status='none'), kind='cve_match', match__isnull=False,
                                   updated_at__gte=timezone.now() - TWIN_WINDOW,
                                   project_id__in={d['project_id'] for _, d in pending},
@@ -708,7 +723,7 @@ def _track(findings):
         if changed:
             Triage.objects.bulk_update(changed, ['last_seen', 'host', 'kind', 'signature', 'evidence_key', 'verdict', 'status', 'classification', 'reason',
                                                  'hard_evidence', 'validation_status', 'validation_steps', 'validation_evidence',
-                                                 'validated_at', 'attempts', 'next_attempt_at', 'confidence_adjust', 'updated_at'],
+                                                 'validated_at', 'attempts', 'next_attempt_at', 'confidence_adjust', 'carried_from', 'updated_at'],
                                        batch_size=CHUNK)
         for f, d in described:
             row = existing[KIND_FK[d['kind']]].get(f.pk)
@@ -1026,12 +1041,17 @@ def _apply(verdict, group):
 
 def recap_version_only():
     """Bring the answers stored before the ceiling in line with it (no model call): a triaged CVE match that stands on a version string
-    alone and was classed likely or confirmed becomes needs_validation, with its legacy verdict, and the shared verdict a new match of
-    the same version would start from stops saying affected. A validation hit, a template hit, a distribution listing, a host report and a
-    runZero report are all left as they are. Idempotent. Returns how many rows changed."""
-    from cveFeed.models import CVEMatch, MatchVerdict, Triage
+    alone (inside the range, or on a branch no advisory lists) and was classed likely or confirmed becomes needs_validation, with its
+    legacy verdict. A validation hit, a template hit, a distribution listing, a host report and a
+    runZero report are all left as they are. Idempotent. Returns how many rows changed. (The shared MatchVerdict is not touched: it has
+    no evidence class, so it may be the answer a host with a template hit or a distribution listing earned; ``correlation._seedable``
+    keeps it from seeding a version-only match as affected.)"""
+    from django.db.models import Q
+
+    from cveFeed.models import CVEMatch, Triage
     limit, text = ceiling('cve_match', {'version_only': True})
-    rows = (Triage.objects.filter(kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'), match__version_in_range=True)
+    version = Q(match__version_in_range=True) | Q(match__version_in_range__isnull=True, match__evidence__has_key='branch_unlisted')
+    rows = (Triage.objects.filter(version, kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'))
             .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
             .exclude(match__source='host').exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
     ids = list(rows.values_list('pk', flat=True))
@@ -1045,7 +1065,6 @@ def recap_version_only():
             CVEMatch.objects.filter(pk=match_id).update(ai_verdict=verdict_for(limit), updated_at=now,
                                                         ai_reason=(f'{text.capitalize()}; kept as {limit.replace("_", " ")}. ' + reason)[:2000])
         changed += len(batch)
-    MatchVerdict.objects.filter(version_in_range=True, ai_verdict='affected').exclude(source='host').update(ai_verdict=verdict_for(limit))
     return changed
 
 

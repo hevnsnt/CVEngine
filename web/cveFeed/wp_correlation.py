@@ -34,7 +34,7 @@ def sightings(project_id, host):
 
 def match_rows(sub, found, cve_by_id, product_index, scan_history=None):
     """The CVEMatch rows for ``found`` sightings on ``sub``: exact slug or title identity and a version inside a bounded range."""
-    from cveFeed.correlation import (affected_product_tokens, clean_affected, confidence_for, pair_split_ranges, parse_version, version_in_range)
+    from cveFeed.correlation import (affected_product_tokens, clean_affected, confidence_for, parse_version, range_verdict)
     rows = []
     for sighting in found:
         version = parse_version(sighting['version'])
@@ -51,8 +51,8 @@ def match_rows(sub, found, cve_by_id, product_index, scan_history=None):
             for index, item in enumerate(clean_affected(cve.affected)):
                 if not names & affected_product_tokens(item):
                     continue
-                hit = next((rng for rng in pair_split_ranges(item.get('ranges') or []) if version_in_range(version, rng) is True), None)
-                if hit is None:
+                result, hit, _no_lower_bound = range_verdict(version, item.get('ranges') or [])  # the same reading of the ranges as main correlation
+                if result is not True:
                     continue
                 rows.append({
                     'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE,
