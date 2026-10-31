@@ -38,8 +38,9 @@ _request_options = ContextVar('cvengine_ai_request_options', default={})
 def request_options(**options):
 	"""Per-request options a stage asks for, read by the providers that take them: ``temperature`` and ``seed`` (a self-hosted server
 	answers differently on every call unless both are pinned, so a verdict is not reproducible; the hosted providers are left alone),
-	``schema`` (a JSON Schema the reply must follow, see ``structured_levels``) and ``token_factor`` (a retry after a reply was cut off
-	asks for a longer one)."""
+	``schema`` (a JSON Schema the reply must follow, see ``structured_levels``), ``max_tokens`` (the stage's own reply limit, used when
+	the operator set none and the server is self-hosted, see ``reply_limit``) and ``token_factor`` (a retry after a reply was cut off asks
+	for a longer one)."""
 	token = _request_options.set({**_request_options.get(), **options})
 	try:
 		yield
@@ -65,13 +66,30 @@ def request_timeout(default):
 CONNECT_TIMEOUT = 10  # seconds to reach the server, apart from the (long) wait for a model to answer: a server that is down fails in 10
 
 
-def output_token_cap():
-	"""The reply length limit to send to an OpenAI-compatible server or Ollama: ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768) when set, else
-	None, which leaves the server's own limit (a reasoning model spends thousands of tokens thinking before it answers, so no cap is
-	sent unless the operator chose one)."""
+def connect_timeout():
+	"""Seconds to reach the server: ``CVENGINE_AI_CONNECT_TIMEOUT`` (1 to 300) when set, else CONNECT_TIMEOUT. The wait for the answer is
+	``request_timeout``; a slow proxy or a distant network can need more than 10 seconds just to connect."""
+	return _env_number('CVENGINE_AI_CONNECT_TIMEOUT', 1, 300) or CONNECT_TIMEOUT
+
+
+TRIAGE_TOKEN_CAP = 400  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
+
+
+def reply_limit(provider):
+	"""The reply length limit to send, or None to send none. ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768) when set, for every provider. Unset:
+	Anthropic is sent MAX_TOKENS (2048, what it always was); a self-hosted server and Ollama are sent the stage's own limit when it has one
+	(``request_options(max_tokens=...)``: triage's TRIAGE_TOKEN_CAP) and MAX_TOKENS otherwise, so a model that never stops cannot hold a
+	worker; OpenAI and OpenRouter get none (a hosted reasoning model spends part of its limit thinking, and OpenAI names the field
+	differently). A retry after a cut-off reply asks for ``token_factor`` times as much."""
+	options = _request_options.get()
 	cap = _env_number('CVENGINE_AI_MAX_TOKENS', 64, 32768)
-	if cap and _request_options.get().get('token_factor'):
-		cap = min(32768, cap * int(_request_options.get()['token_factor']))
+	if cap is None:
+		if provider.name == 'anthropic':
+			cap = MAX_TOKENS
+		elif provider.name in SERVER_URL_PROVIDERS:
+			cap = options.get('max_tokens') or MAX_TOKENS
+	if cap and options.get('token_factor'):
+		cap = min(32768, cap * int(options['token_factor']))
 	return cap
 
 
@@ -299,7 +317,7 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=(CONNECT_TIMEOUT, request_timeout(self.timeout)))
+			resp = requests.post(url, headers=headers, json=payload, timeout=(connect_timeout(), request_timeout(self.timeout)))
 			resp.raise_for_status()
 			try:
 				data = resp.json()
@@ -450,7 +468,7 @@ class AnthropicProvider(AIProvider):
 	def complete(self, system, user):
 		data = self._post(
 			self.base_url or ANTHROPIC_URL, self._headers(),
-			{'model': self.model, 'max_tokens': MAX_TOKENS, 'system': system,
+			{'model': self.model, 'max_tokens': reply_limit(self), 'system': system,
 			 'messages': [{'role': 'user', 'content': user}]})
 		return _anthropic_text(data)
 
@@ -459,7 +477,7 @@ class AnthropicProvider(AIProvider):
 		import base64
 		data = self._post(
 			self.base_url or ANTHROPIC_URL, self._headers(),
-			{'model': self.model, 'max_tokens': MAX_TOKENS, 'system': system,
+			{'model': self.model, 'max_tokens': reply_limit(self), 'system': system,
 			 'messages': [{'role': 'user', 'content': [
 				 {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type,
 											   'data': base64.b64encode(image_bytes).decode()}},
@@ -517,11 +535,11 @@ class OpenAIProvider(AIProvider):
 		return 'max_completion_tokens' if host == 'api.openai.com' else 'max_tokens'
 
 	def _options(self):
-		"""The limit, temperature and seed this request carries. The limit only when the operator set one (``output_token_cap``); the
-		temperature and seed only to a self-hosted server and only when the stage pinned them (``request_options``): pinning both is what
-		makes a verdict reproducible (llama.cpp's seed is random by default)."""
+		"""The limit, temperature and seed this request carries. The limit as ``reply_limit`` says (the operator's, else the default of a
+		self-hosted server; none for OpenAI and OpenRouter); the temperature and seed only to a self-hosted server and only when the stage
+		pinned them (``request_options``): pinning both is what makes a verdict reproducible (llama.cpp's seed is random by default)."""
 		out = {}
-		cap = output_token_cap()
+		cap = reply_limit(self)
 		if cap:
 			out[self._limit_name()] = cap
 		pinned = _request_options.get()
@@ -616,10 +634,10 @@ class OllamaProvider(AIProvider):
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
 	def _options(self):
-		"""Ollama's ``options``: the reply limit and the context window when the operator set them, the temperature and the seed when the
-		stage pinned them."""
+		"""Ollama's ``options``: the reply limit (``reply_limit``), the context window when the operator set it, the temperature and the
+		seed when the stage pinned them."""
 		options = {}
-		cap = output_token_cap()
+		cap = reply_limit(self)
 		if cap:
 			options['num_predict'] = cap
 		context = ollama_context()
@@ -889,14 +907,15 @@ TRIAGE_SEED = 20260101  # any fixed number: with the temperature at 0 it is what
 
 def _ask_triage(provider, stage, system, user):
 	"""One triage completion: reproducible (temperature and seed pinned, which only a self-hosted server receives), shaped by the triage
-	schema where the server takes one, and, when the reply was cut off at a limit the operator set, asked once more with a longer one
-	(a reasoning model spends part of the limit thinking). Without a limit set there is nothing to lengthen and the error stands."""
-	options = {'temperature': 0, 'seed': TRIAGE_SEED, 'schema': triage_schema()}
+	schema where the server takes one, and, when the reply was cut off at a limit that was sent, asked once more with twice the limit (a
+	reasoning model spends part of it thinking). A provider that was sent no limit (OpenAI, OpenRouter) has nothing to lengthen and the
+	error stands."""
+	options = {'temperature': 0, 'seed': TRIAGE_SEED, 'schema': triage_schema(), 'max_tokens': TRIAGE_TOKEN_CAP}
 	with usage_stage(stage), request_options(**options):
 		try:
 			return provider.complete(system, user)
 		except AIProviderError as error:
-			if error.category != 'output_truncated' or not output_token_cap():
+			if error.category != 'output_truncated' or not reply_limit(provider):
 				raise
 	with usage_stage(stage), request_options(**options, token_factor=2):
 		return provider.complete(system, user)

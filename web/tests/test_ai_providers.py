@@ -218,12 +218,11 @@ class LocalModelLimitsTests(unittest.TestCase):
 		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': 'soon'})['timeout'], (ai.CONNECT_TIMEOUT, ai.REQUEST_TIMEOUT))
 		self.assertEqual(self.post('vllm', env={'CVENGINE_AI_TIMEOUT': '2'})['timeout'], (ai.CONNECT_TIMEOUT, ai.REQUEST_TIMEOUT))  # out of range: ignored
 
-	def test_no_reply_limit_is_sent_unless_the_operator_set_one(self):
-		for name in ('openai', 'openrouter', 'vllm', 'lmstudio'):
+	def test_a_hosted_provider_is_sent_no_reply_limit_unless_the_operator_set_one(self):
+		for name in ('openai', 'openrouter'):
 			body = self.post(name)['json']
 			self.assertNotIn('max_tokens', body, name)
 			self.assertNotIn('max_completion_tokens', body, name)
-		self.assertNotIn('options', self.post('ollama', {'message': {'content': 'ok'}})['json'])
 
 	def test_the_limit_is_sent_under_the_name_each_server_uses(self):
 		env = {'CVENGINE_AI_MAX_TOKENS': '1500'}
@@ -247,7 +246,7 @@ class LocalModelLimitsTests(unittest.TestCase):
 		with ai.request_options(temperature=0):
 			self.assertEqual(self.post('vllm')['json']['temperature'], 0)
 			self.assertEqual(self.post('lmstudio')['json']['temperature'], 0)
-			self.assertEqual(self.post('ollama', {'message': {'content': 'ok'}})['json']['options'], {'temperature': 0})
+			self.assertEqual(self.post('ollama', {'message': {'content': 'ok'}})['json']['options'], {'num_predict': 2048, 'temperature': 0})
 			self.assertNotIn('temperature', self.post('openai')['json'])
 			self.assertNotIn('temperature', self.post('openrouter')['json'])
 		self.assertNotIn('temperature', self.post('vllm')['json'])  # and only inside the stage
@@ -264,6 +263,123 @@ class LocalModelLimitsTests(unittest.TestCase):
 		ai.triage_finding(Spy(), 'cve_match', {'product': 'nginx'})
 		self.assertEqual(captured, [0])
 		self.assertIsNone(ai._request_options.get().get('temperature'))
+
+
+class ReplyLimitTests(unittest.TestCase):
+	"""The reply limit: CVENGINE_AI_MAX_TOKENS applies to every provider (Anthropic included), a self-hosted server and Ollama are always sent
+	one (2048, 400 for a triage), a hosted OpenAI model is left as it was."""
+
+	OK = {'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}
+	ANTHROPIC_OK = {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn'}
+	BASES = {'ollama': 'http://h:11434', 'vllm': 'http://h:8000/v1', 'lmstudio': 'http://h:1234/v1'}
+
+	def send(self, name, env=None, base='-', triage=False, vision=False):
+		if base == '-':
+			base = self.BASES.get(name)
+		text = TRIAGE_OK if triage else 'ok'
+		reply = self.ANTHROPIC_OK if name == 'anthropic' else {'message': {'content': text}} if name == 'ollama' else {'choices': [{'message': {'content': text}, 'finish_reason': 'stop'}]}
+		if name == 'anthropic' and triage:
+			reply = {'content': [{'type': 'text', 'text': TRIAGE_OK}], 'stop_reason': 'end_turn'}
+		env = {'CVENGINE_AI_MAX_TOKENS': '', **(env or {})}
+		with mock.patch.dict('os.environ', env), mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			provider = ai.get_provider(name, model='m', api_key='k' if name in ('openai', 'openrouter', 'anthropic') else None, base_url=base)
+			if vision:
+				provider.complete_vision('s', 'u', b'\x89PNG')
+			elif triage:
+				ai._ask_triage(provider, 'finding_triage', 's', 'u')
+			else:
+				provider.complete('s', 'u')
+		return post.call_args[1]['json']
+
+	def limit(self, body):
+		return body.get('max_tokens') or body.get('max_completion_tokens') or (body.get('options') or {}).get('num_predict')
+
+	def test_the_default_anthropic_request_is_byte_identical_to_what_it_was(self):
+		import json
+		body = self.send('anthropic', base=None)
+		legacy = {'model': 'm', 'max_tokens': 2048, 'system': 's', 'messages': [{'role': 'user', 'content': 'u'}]}
+		self.assertEqual(json.dumps(body), json.dumps(legacy))
+		vision = self.send('anthropic', base=None, vision=True)
+		self.assertEqual(list(vision), ['model', 'max_tokens', 'system', 'messages'])
+		self.assertEqual(vision['max_tokens'], 2048)
+
+	def test_the_setting_applies_to_anthropic_too(self):
+		self.assertEqual(self.send('anthropic', {'CVENGINE_AI_MAX_TOKENS': '900'}, base=None)['max_tokens'], 900)
+		self.assertEqual(self.send('anthropic', {'CVENGINE_AI_MAX_TOKENS': '900'}, base=None, vision=True)['max_tokens'], 900)
+		for bad in ('soon', '10', '99999'):  # unset, out of range: the default stays
+			self.assertEqual(self.send('anthropic', {'CVENGINE_AI_MAX_TOKENS': bad}, base=None)['max_tokens'], 2048, bad)
+
+	def test_a_self_hosted_server_and_ollama_are_sent_the_default_limit(self):
+		for name in ('vllm', 'lmstudio'):
+			self.assertEqual(self.send(name)['max_tokens'], 2048, name)
+			self.assertEqual(self.send(name, vision=True)['max_tokens'], 2048, name)
+		self.assertEqual(self.send('ollama')['options'], {'num_predict': 2048})
+		self.assertEqual(self.send('ollama', vision=True)['options'], {'num_predict': 2048})
+
+	def test_the_setting_wins_over_every_default(self):
+		env = {'CVENGINE_AI_MAX_TOKENS': '1500'}
+		self.assertEqual(self.send('vllm', env)['max_tokens'], 1500)
+		self.assertEqual(self.send('vllm', env, triage=True)['max_tokens'], 1500)
+		self.assertEqual(self.send('ollama', env, triage=True)['options']['num_predict'], 1500)
+
+	def test_a_hosted_openai_model_is_not_sent_max_tokens_and_keeps_its_behaviour(self):
+		self.assertIsNone(self.limit(self.send('openai', base=None)))
+		self.assertIsNone(self.limit(self.send('openai', base=None, triage=True)))
+		self.assertIsNone(self.limit(self.send('openrouter', base=None, triage=True)))
+		self.assertEqual(self.send('openai', {'CVENGINE_AI_MAX_TOKENS': '900'}, base=None)['max_completion_tokens'], 900)  # as before
+		self.assertNotIn('max_tokens', self.send('openai', {'CVENGINE_AI_MAX_TOKENS': '900'}, base=None))
+
+	def test_the_openai_provider_with_another_address_is_not_treated_as_self_hosted(self):
+		# a proxy set up as "openai" may front a hosted reasoning model that refuses a temperature; the vLLM provider is the way to name a local server
+		proxy = 'https://llm-proxy.example.test/v1'
+		body = self.send('openai', base=proxy, triage=True)
+		self.assertIsNone(self.limit(body))
+		self.assertNotIn('temperature', body)
+		self.assertNotIn('seed', body)
+		self.assertNotIn('response_format', body)
+		self.assertEqual(self.send('openai', {'CVENGINE_AI_MAX_TOKENS': '900'}, base=proxy)['max_tokens'], 900)  # what the operator sets still goes, as max_tokens
+
+	def test_a_triage_on_a_self_hosted_server_is_capped_at_400_and_anthropic_keeps_2048(self):
+		self.assertEqual(ai.TRIAGE_TOKEN_CAP, 400)
+		for name in ('vllm', 'lmstudio'):
+			self.assertEqual(self.send(name, triage=True)['max_tokens'], 400, name)
+		self.assertEqual(self.send('ollama', triage=True)['options']['num_predict'], 400)
+		self.assertEqual(self.send('anthropic', base=None, triage=True)['max_tokens'], 2048)
+		self.assertEqual(self.send('vllm')['max_tokens'], 2048)  # outside the stage
+
+	def test_the_stage_cap_is_carried_by_the_same_context_variable_as_the_other_triage_options(self):
+		seen = []
+
+		class Spy:
+			name, model = 'vllm', 'm'
+
+			def complete(self, system, user):
+				seen.append(dict(ai._request_options.get()))
+				return TRIAGE_OK
+		ai.triage_finding(Spy(), 'cve_match', {'product': 'nginx'})
+		self.assertEqual((seen[0]['temperature'], seen[0]['max_tokens']), (0, 400))
+		self.assertEqual(ai._request_options.get(), {})
+
+	def test_a_triage_cut_off_at_the_default_cap_is_asked_again_with_twice_the_cap(self):
+		cut = FakeResp({'choices': [{'message': {'content': '{"classif'}, 'finish_reason': 'length'}]})
+		good = FakeResp({'choices': [{'message': {'content': TRIAGE_OK}, 'finish_reason': 'stop'}]})
+		with mock.patch.dict('os.environ', {'CVENGINE_AI_MAX_TOKENS': ''}), mock.patch('requests.post', side_effect=[cut, good]) as post:
+			out = ai.triage_finding(ai.get_provider('vllm', model='m', base_url='http://h:8000/v1'), 'cve_match', {'product': 'nginx'})
+		self.assertEqual(out['parsed']['classification'], 'needs_validation')
+		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [400, 800])
+
+	def test_the_connect_limit_is_a_setting_and_the_read_limit_is_not_touched_by_it(self):
+		def timeout(env, name='anthropic'):
+			reply = self.ANTHROPIC_OK if name == 'anthropic' else self.OK
+			with mock.patch.dict('os.environ', env), mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+				ai.get_provider(name, model='m', api_key='k', base_url=None if name == 'anthropic' else 'http://h:8000/v1').complete('s', 'u')
+			return post.call_args[1]['timeout']
+		base = {'CVENGINE_AI_TIMEOUT': ''}
+		self.assertEqual(timeout({**base, 'CVENGINE_AI_CONNECT_TIMEOUT': ''}), (10, 120))  # Anthropic's read limit is the 120 it always was
+		self.assertEqual(timeout({**base, 'CVENGINE_AI_CONNECT_TIMEOUT': '45'}), (45, 120))
+		self.assertEqual(timeout({'CVENGINE_AI_TIMEOUT': '300', 'CVENGINE_AI_CONNECT_TIMEOUT': '45'}), (45, 300))
+		self.assertEqual(timeout({**base, 'CVENGINE_AI_CONNECT_TIMEOUT': '0'}), (10, 120))  # out of range: ignored
+		self.assertEqual(timeout({**base, 'CVENGINE_AI_CONNECT_TIMEOUT': 'x'}, 'vllm'), (10, 120))
 
 
 class RefusingResp(FakeResp):
@@ -313,13 +429,11 @@ class LocalModelGapsTests(unittest.TestCase):
 		self.assertEqual(out['parsed']['classification'], 'needs_validation')
 		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [600, 1200])
 
-	def test_without_a_limit_set_a_cut_off_reply_is_not_asked_again(self):
+	def test_without_a_limit_set_a_cut_off_reply_from_a_hosted_provider_is_not_asked_again(self):
 		cut = FakeResp({'choices': [{'message': {'content': '{"classif'}, 'finish_reason': 'length'}]})
-		with mock.patch.dict('os.environ', {}, clear=False), mock.patch('requests.post', return_value=cut) as post:
-			import os
-			os.environ.pop('CVENGINE_AI_MAX_TOKENS', None)
+		with mock.patch.dict('os.environ', {'CVENGINE_AI_MAX_TOKENS': ''}), mock.patch('requests.post', return_value=cut) as post:
 			with self.assertRaises(ai.AIProviderError) as error:
-				ai.triage_finding(self.provider('vllm', 'http://h:8000/v1'), 'cve_match', {'product': 'nginx'})
+				ai.triage_finding(self.provider('openai', None), 'cve_match', {'product': 'nginx'})
 		self.assertEqual((error.exception.category, post.call_count), ('output_truncated', 1))
 
 	def test_a_pinned_seed_reaches_a_self_hosted_server_only(self):
@@ -330,18 +444,18 @@ class LocalModelGapsTests(unittest.TestCase):
 			self.assertNotIn('seed', post.call_args[1]['json'])
 		with ai.request_options(temperature=0, seed=7), mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
 			self.provider('ollama', 'http://h:11434').complete('s', 'u')
-			self.assertEqual(post.call_args[1]['json']['options'], {'temperature': 0, 'seed': 7})
+			self.assertEqual(post.call_args[1]['json']['options'], {'num_predict': 2048, 'temperature': 0, 'seed': 7})
 
 	def test_ollamas_context_window_is_a_setting_and_a_full_one_is_reported(self):
 		with mock.patch.dict('os.environ', {'CVENGINE_OLLAMA_NUM_CTX': '8192'}), \
 				mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}, 'prompt_eval_count': 8000})) as post, \
 				mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('reNgine.ai_providers', level='WARNING') as logs:
 			self.provider('ollama', 'http://h:11434').complete('s', 'u')
-		self.assertEqual(post.call_args[1]['json']['options'], {'num_ctx': 8192})
+		self.assertEqual(post.call_args[1]['json']['options'], {'num_predict': 2048, 'num_ctx': 8192})
 		self.assertIn('CVENGINE_OLLAMA_NUM_CTX', logs.output[0])
 		with mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
 			self.provider('ollama', 'http://h:11434').complete('s', 'u')
-		self.assertNotIn('options', post.call_args[1]['json'])
+		self.assertEqual(post.call_args[1]['json']['options'], {'num_predict': 2048})
 
 
 TRIAGE_OK = ('{"classification": "needs_validation", "reason": "r", "impact": "i", "severity_adjust": 0, "severity_reason": "", '
