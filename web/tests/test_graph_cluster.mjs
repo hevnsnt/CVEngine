@@ -5,7 +5,7 @@ import {test} from 'node:test';
 // Load the browser module without a DOM; clusterGraph is deliberately a pure
 // transform so shared asset relationships and project boundaries can be tested.
 const source = readFileSync(new URL('../static/cve/graph.js', import.meta.url), 'utf8');
-const {clusterGraph, cloudProjects, cloudRadius, focusProject, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+const {clusterGraph, cloudProjects, cloudRadius, cloudShape, focusProject, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
 
 test('groups original bubbles by project and root, with scoped copies of shared IPs', () => {
   const data = {
@@ -139,6 +139,29 @@ test('clouds are sized by their hosts and packed with the biggest in the middle,
   // a cloud's aura is its worst heat
   const calm = cloudProjects(bigProject(30, 0)).nodes;
   assert.deepEqual(['__cloud:big', '__cloud:small'].map(id => calm.find(n => n.id === id).hot), ['calm', 'fire']);
+});
+
+test('a cloud is made of its targets, and its shape follows them: no two projects alike, the same one alike every time', () => {
+  const data = manyProjects([0, 0]);
+  const add = (slug, target, hosts, hot) => {
+    for (let i = 0; i < hosts; i++) data.nodes.push({id: `sub:${slug}:${target}:${i}`, kind: 'subdomain', label: `h${i}.${target}`, project: slug, target, heat: i < hot ? 'fire' : 'clean'});
+  };
+  add('p0', 'one.example', 30, 2);
+  ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].forEach((t, i) => add('p1', `${t}.example`, 12 - i, i === 3 ? 4 : 0));
+  const clouds = Object.fromEntries(cloudProjects(data).nodes.filter(n => n.kind === 'cloud').map(c => [c.project, c]));
+  assert.deepEqual(clouds.p0.parts, [{name: 'one.example', hosts: 30, findings: 2}]);
+  assert.equal(clouds.p1.parts.length, 8); // the smallest targets fold into one
+  assert.deepEqual(clouds.p1.parts.at(-1), {name: '3 more targets', hosts: 12, findings: 0});
+  assert.deepEqual(clouds.p1.parts[3], {name: 'd.example', hosts: 9, findings: 4});
+  const shape = (c) => cloudShape(c, 100);
+  const one = shape(clouds.p0), many = shape(clouds.p1);
+  assert.ok(new Set(many.map(p => p.part)).size === 8 && one.every(p => p.part === 0)); // a puff for each target
+  assert.ok(many.length > one.length);
+  const width = (s) => Math.max(...s.map(p => p.x + p.r)) - Math.min(...s.map(p => p.x - p.r));
+  const height = (s) => Math.max(...s.map(p => p.y + p.r)) - Math.min(...s.map(p => p.y - p.r));
+  for (const s of [one, many]) assert.ok(width(s) <= 231 && height(s) <= 176 && (width(s) > 229 || height(s) > 174)); // fits the cloud's room
+  assert.notDeepEqual(one, many);
+  assert.deepEqual(shape(clouds.p1), many);
 });
 
 test('every cloud takes a slot in the clustered project grid, anchored, with its bubbles around it', () => {
