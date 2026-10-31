@@ -102,6 +102,10 @@ DATABASES = {
         'PASSWORD': env('POSTGRES_PASSWORD'),
         'HOST': env('POSTGRES_HOST'),
         'PORT': env('POSTGRES_PORT'),
+        # No JIT. CVEngine's host queries are large (one row per host: window functions, a dozen correlated subqueries) and Postgres
+        # overestimates their cost, so it compiled each one with LLVM before running it: a 0.1 s query took 2 s here and up to a minute
+        # on a busy 3-core server, which is what made a 2,000-host project's dashboard slow to open. The queries themselves are cheap.
+        'OPTIONS': {'options': '-c jit=off'},
         # 'OPTIONS':{
         #     'sslmode':'verify-full',
         #     'sslrootcert': os.path.join(BASE_DIR, 'ca-certificate.crt')
