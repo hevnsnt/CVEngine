@@ -2,14 +2,14 @@
 
 Every host has its own ``HostAssessment`` row (status, history, the Live page, the API), but the feed does not run one pipeline per host: hosts of one
 target that are due together are carried through one pipeline run (``enqueue_batch`` / ``execute_batch``), so each Sentinel stage is handed many
-targets at once instead of one tiny task per host that the pipeline then waits for. ``CVENGINE_ASSESS_BATCH`` sets how many (default 32, 1 to 64;
+targets at once instead of one tiny task per host that the pipeline then waits for. ``CVENGINE_ASSESS_BATCH`` sets how many (default 8, 1 to 64;
 1 is one pipeline per host, as before)."""
 import logging
 import os
 import uuid
 
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Q
 from django.utils import timezone
 from datetime import timedelta
 
@@ -61,11 +61,11 @@ def active_count(project=None):
 
 
 BATCH_ENV = 'CVENGINE_ASSESS_BATCH'
-DEFAULT_BATCH, MAX_BATCH = 32, 64  # 64 is what one dispatched nmap/naabu task takes (agentapi.sentinel_broker.MAX_ADDRESSES)
+DEFAULT_BATCH, MAX_BATCH = 8, 64  # 64 is what one dispatched nmap/naabu task takes (agentapi.sentinel_broker.MAX_ADDRESSES)
 
 
 def batch_size():
-    """Most hosts of one target carried through one assessment pipeline run (``CVENGINE_ASSESS_BATCH``, default 32, held to 1..64; 1 runs
+    """Most hosts of one target carried through one assessment pipeline run (``CVENGINE_ASSESS_BATCH``, default 8, held to 1..64; 1 runs
     every host on its own, exactly as before batching). An unreadable value is the default."""
     try:
         wanted = int(str(os.environ.get(BATCH_ENV, '')).strip())
@@ -75,32 +75,50 @@ def batch_size():
 
 
 def batch_size_for(project):
-    """``batch_size()``, except 1 for a project a host-narrowed Sentinel covers (``agentapi.sentinel_broker.host_narrowed``): a task naming many hosts
-    can be claimed by a Sentinel that only some of them are in the scope of, so those hosts keep one pipeline run, and one task, each."""
+    """``batch_size()``, except 1 where batching would do harm:
+
+    * a project a host-narrowed Sentinel covers (``agentapi.sentinel_broker.host_narrowed``): a task naming many hosts can be claimed by a Sentinel
+      that only some of them are in the scope of, so those hosts keep one pipeline run, and one task, each;
+    * a project no live Sentinel covers (``project_slots`` is 0): the work runs on this server, where nmap and nuclei are held to a few at once
+      (``heavy_job``), so a big batch only multiplies the wall time of one run and what a kill at the time limit takes with it."""
     size = batch_size()
     if size > 1:
         try:
             from agentapi import sentinel_broker
-            if sentinel_broker.host_narrowed(project):
+            if not sentinel_broker.project_slots(project) or sentinel_broker.host_narrowed(project):
                 return 1
         except Exception:  # noqa: BLE001 - when it cannot be told, the safe answer is no batching
-            logger.exception('could not tell whether a Sentinel of project %s is narrowed to hosts', project.pk)
+            logger.exception('could not tell how project %s is covered by Sentinels', project.pk)
             return 1
     return size
 
 
-def active_slots(project=None):
-    """Pipeline runs occupying a worker slot: ``active_count`` (one per host) with the rows of a batch counted once, since a batch is one Celery
-    task, one worker slot and one stream of Sentinel tasks however many hosts it carries (its rows share a Celery task id). The caps below are in
-    these slots; the hosts in flight are bounded by them times the batch size, and ``active_count`` still counts every host."""
-    total = active_count(project)
-    if batch_size() <= 1:  # no batches are made: one row, one run, exactly as before (a batch still queued from before is counted by host: the safe side)
-        return total
-    rows = HostAssessment._base_manager.filter(status__in=ACTIVE).exclude(celery_id='')
+def _live_rows(project=None):
+    """``[(celery_id, ...)]`` of the active rows that count: ``active_count``'s rule, row by row (a queued row older than ``ORPHAN_AFTER_MINUTES``
+    that the reaper's last broker snapshot says has no task is left out)."""
+    rows = HostAssessment._base_manager.filter(status__in=ACTIVE)
     if project is not None:
         rows = rows.filter(project=project)
-    shared = rows.values('celery_id').annotate(n=Count('pk')).filter(n__gt=1)
-    return max(0, total - sum(group['n'] - 1 for group in shared))
+    rows = list(rows.values_list('celery_id', 'status', 'created_at'))
+    cutoff = timezone.now() - timedelta(minutes=ORPHAN_AFTER_MINUTES)
+    if any(status == 'queued' and created < cutoff for _, status, created in rows):
+        from cveFeed import broker_recovery
+        snapshot = broker_recovery.live_snapshot()
+        if snapshot is not None:
+            live, taken_at = snapshot
+            rows = [r for r in rows if not (r[1] == 'queued' and r[2] < cutoff and r[2] < taken_at and (not r[0] or r[0] not in live))]
+    return rows
+
+
+def active_slots(project=None):
+    """Pipeline runs occupying a worker slot: the rows of a batch count once, since a batch is one Celery task, one worker slot and one stream of
+    Sentinel tasks however many hosts it carries (its rows share a Celery task id); a row with no task id yet is a run of its own. Counted from the
+    rows that count (``_live_rows``, so an orphaned batch holds no slot), never as ``active_count`` less something. The caps below are in these
+    slots; the hosts in flight are bounded by them times the batch size, and ``active_count`` still counts every host."""
+    if batch_size() <= 1:  # no batches are made: one row, one run, exactly as before (a batch still queued from before is counted by host: the safe side)
+        return active_count(project)
+    rows = _live_rows(project)
+    return len({celery_id for celery_id, _, _ in rows if celery_id}) + sum(1 for celery_id, _, _ in rows if not celery_id)
 
 
 def batches(subs, size=None):

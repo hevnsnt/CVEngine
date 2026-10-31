@@ -826,10 +826,13 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     wanted = sorted({n.strip().lower().rstrip('.') for n in names if n and n.strip()})
     requested = list(wanted)
     from cveFeed.exclusions import drop_excluded
-    wanted = drop_excluded(domain.project_id, [n for n in wanted if n == suffix or n.endswith('.' + suffix)])[:MAX_PIPELINE_HOSTS]
+    in_target = [n for n in wanted if n == suffix or n.endswith('.' + suffix)]
+    wanted = drop_excluded(domain.project_id, in_target)[:MAX_PIPELINE_HOSTS]
+    not_excluded = set(wanted)
     from cveFeed.archive_rediscovery import archived_names
     archived = archived_names(domain.project_id)
     wanted = [n for n in wanted if n not in archived]
+    not_archived = set(wanted)
     from cveFeed.bounty_gate import Gate
     gate = Gate()
     if not by_person and gate.project_blocked(domain.project_id):
@@ -838,7 +841,15 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     assessment_ids = list(assessment_ids or ([assessment_id] if assessment_id else []))
     per_host = {}  # a batch only: the hosts that do not go on to the stages, each with its own outcome
     if len(assessment_ids) > 1:
-        per_host = {n: {'status': 'empty', 'hosts': 0} for n in requested if n not in wanted}
+        def why(name):  # the reason a host of a batch was not scanned, so its row never shows a blank outcome
+            if name not in in_target:
+                return 'host is outside the target'
+            if name not in not_excluded:
+                return 'host is excluded'
+            if name not in not_archived:
+                return 'host is archived'
+            return 'host is outside the program scope'
+        per_host = {n: {'status': 'empty', 'hosts': 0, 'error': why(n)} for n in requested if n not in wanted}
     if not wanted:
         return {'status': 'empty', 'hosts': 0, **({'per_host': per_host} if per_host else {})}
     engine = pick_engine()

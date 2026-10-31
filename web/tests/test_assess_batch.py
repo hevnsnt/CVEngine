@@ -1,5 +1,6 @@
 """Host assessments in batches: the feed carries the due hosts of one target through ONE pipeline run (``CVENGINE_ASSESS_BATCH``), each host
 keeping its own row, outcome, bookkeeping and gates, with the caps counted in pipeline runs and the reaper and time limits sized for a batch."""
+import contextlib
 import os
 import socket
 import uuid
@@ -39,16 +40,20 @@ class Base(TestCase):
         self.a2 = Domain.objects.create(name='a2.example', project=self.project, insert_date=self.now)
         self.b1 = Domain.objects.create(name='b1.example', project=self.other, insert_date=self.now)
         EngineType.objects.create(engine_name='batch-engine', yaml_configuration='x', default_engine=True)
-        patcher = mock.patch.dict(os.environ, {'CVENGINE_ASSESS_BATCH': '32'})  # the default, whatever the environment of the run says
+        patcher = mock.patch.dict(os.environ, {'CVENGINE_ASSESS_BATCH': '32'})  # a size well above the tests' host counts, whatever the environment says
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def hosts(self, domain, n, prefix='h'):
         return [Subdomain.objects.create(target_domain=domain, name=f'{prefix}{i}.{domain.name}') for i in range(n)]
 
-    def sweep(self, size, fn=None):
-        """One top-up sweep with the given batch size; returns (result, batch task mock, single task mock)."""
-        with mock.patch.dict(os.environ, {'CVENGINE_ASSESS_BATCH': str(size)}), \
+    def sweep(self, size, fn=None, real=False):
+        """One top-up sweep with the given batch size; returns (result, batch task mock, single task mock). A Sentinel covering the project is
+        assumed (``real=False``: the batch size is what the environment says); ``real=True`` asks the real ``batch_size_for``."""
+        stack = contextlib.ExitStack()
+        if not real:
+            stack.enter_context(mock.patch('cveFeed.host_assessment.batch_size_for', side_effect=lambda project: batch_size()))
+        with stack, mock.patch.dict(os.environ, {'CVENGINE_ASSESS_BATCH': str(size)}), \
                 mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
                 mock.patch('cveFeed.tasks.assess_hosts.apply_async', side_effect=unique_ids) as many, \
                 mock.patch('cveFeed.tasks.assess_host.apply_async', side_effect=unique_ids) as one:
@@ -58,7 +63,7 @@ class Base(TestCase):
 
 class BatchSizeTests(SimpleTestCase):
     def test_default_range_and_unreadable_values(self):
-        cases = {None: 32, '': 32, '1': 1, '16': 16, '64': 64, '65': 64, '1000': 64, '0': 1, '-3': 1, 'many': 32, ' 8 ': 8}
+        cases = {None: 8, '': 8, '1': 1, '16': 16, '64': 64, '65': 64, '1000': 64, '0': 1, '-3': 1, 'many': 8, ' 12 ': 12}
         for raw, expected in cases.items():
             env = {} if raw is None else {'CVENGINE_ASSESS_BATCH': raw}
             with mock.patch.dict(os.environ, env, clear=False):
@@ -186,6 +191,54 @@ class TopUpBatchTests(Base):
             jobs, skipped = enqueue_batch(self.project, subs)
         self.assertEqual(len(jobs), 3)
 
+    def test_a_project_no_live_sentinel_covers_is_not_batched(self):
+        # the work runs on this server, where nmap and nuclei are held to a few at once: a big run only multiplies its wall time
+        self.hosts(self.a1, 6)
+        self.assertEqual(host_assessment.batch_size_for(self.project), 1)
+        result, many, one = self.sweep(32, real=True)
+        self.assertEqual((result['hosts_queued'], result['batches_queued']), (5, 5))  # the base cap of 5, a run each
+        many.assert_not_called()
+        self.assertEqual(one.call_count, 5)
+
+    def test_a_covered_project_is_batched_by_the_real_rule(self):
+        self.sentinel({'orgs': [], 'projects': [self.project.slug], 'hosts': []})
+        with mock.patch.dict(os.environ):
+            os.environ.pop('CVENGINE_ASSESS_BATCH', None)
+            self.assertEqual(host_assessment.batch_size_for(self.project), 8)  # the default
+        self.assertEqual(host_assessment.batch_size_for(self.other), 1)  # nothing covers that one
+
+    def test_an_orphaned_batch_holds_no_slot_and_does_not_hide_the_live_runs(self):
+        from django.core.cache import cache
+        from cveFeed import broker_recovery
+        old = timezone.now() - timedelta(hours=1)
+        for i in range(32):  # a 32-host batch whose task a restart took
+            HostAssessment.objects.create(project=self.project, domain=self.a1, host=f'dead{i}.a1.example', status='queued', celery_id='dead-batch')
+        HostAssessment.objects.filter(celery_id='dead-batch').update(created_at=old)
+        for i in range(5):
+            HostAssessment.objects.create(project=self.project, domain=self.a1, host=f'live{i}.a1.example', status='running', celery_id=f'live-{i}')
+        cache.delete(broker_recovery.SNAPSHOT_KEY)
+        self.addCleanup(cache.delete, broker_recovery.SNAPSHOT_KEY)
+        self.assertEqual(host_assessment.active_slots(self.project), 6)  # no snapshot: the batch counts, once
+        broker_recovery._remember({f'live-{i}' for i in range(5)})  # the broker says the batch's task exists nowhere
+        self.assertEqual(host_assessment.active_count(self.project), 5)
+        self.assertEqual(host_assessment.active_slots(self.project), 5)
+        self.assertEqual(host_assessment.active_slots(), 5)
+        self.hosts(self.a2, 40)
+        result, many, one = self.sweep(32)  # the project's cap of 5 is full of live runs: nothing is admitted
+        self.assertEqual(result['hosts_queued'], 0)
+        many.assert_not_called()
+        from tenancy import scope
+        user = User.objects.create_user('batch-scoped', password='x')
+        tokens = scope.set_scope({self.project.pk}, user)  # a request's scope does not narrow the global count
+        try:
+            self.assertEqual(host_assessment.active_slots(), 5)
+            self.assertEqual(host_assessment.active_slots(self.project), 5)
+        finally:
+            scope.reset_scope(tokens)
+        other_subs = list(Subdomain.objects.filter(pk__in=[s.pk for s in self.hosts(self.a2, 1, prefix='z')]).select_related('target_domain'))
+        with self.assertRaisesRegex(RuntimeError, 'capacity'):
+            enqueue(self.project, other_subs[0])  # the project's 5 slots are held by live runs
+
     def sentinel(self, scope):
         user = User.objects.get_or_create(username='batch-owner')[0]
         token, _raw = create_token(user, f'batch-{Agent.objects.count()}')
@@ -196,7 +249,7 @@ class TopUpBatchTests(Base):
         # a task that names many hosts is claimable by a Sentinel any one of them is in the scope of, so these hosts keep a task each
         self.hosts(self.a1, 6)
         self.sentinel({'orgs': [], 'projects': [self.project.slug], 'hosts': ['h0.a1.example']})
-        result, many, one = self.sweep(32)
+        result, many, one = self.sweep(32, real=True)
         self.assertEqual((result['hosts_queued'], result['batches_queued']), (6, 6))  # a run each (the live Sentinel's 3 slots make the cap 9)
         many.assert_not_called()
         self.assertEqual(one.call_count, 6)
@@ -205,7 +258,7 @@ class TopUpBatchTests(Base):
         self.hosts(self.a1, 6)
         self.sentinel({'orgs': [], 'projects': [self.other.slug], 'hosts': ['h0.b1.example']})
         self.sentinel({'orgs': [], 'projects': [self.project.slug], 'hosts': []})  # covers the project, no narrowing
-        result, many, one = self.sweep(32)
+        result, many, one = self.sweep(32, real=True)
         self.assertEqual((result['hosts_queued'], result['batches_queued']), (6, 1))
         one.assert_not_called()
 
@@ -505,6 +558,41 @@ class ReaperAndLimitsTests(Base):
         reaper.reap(now)
         self.assertEqual({HostAssessment.objects.get(pk=r.pk).status for r in late}, {'failed'})
         self.assertEqual({HostAssessment.objects.get(pk=r.pk).status for r in fresh}, {'running'})
+
+    def test_with_task_limits_off_a_dead_batch_still_goes_within_twelve_hours(self):
+        now = timezone.now()
+        late = self.rows(8, now - timedelta(hours=13), 'nolimit-late')
+        fresh = self.rows(8, now - timedelta(hours=11), 'nolimit-fresh')
+        with mock.patch.dict(os.environ, {'CVENGINE_TIME_LIMITS': '0'}):
+            reaper.reap(now)
+        self.assertEqual({HostAssessment.objects.get(pk=r.pk).status for r in late}, {'failed'})
+        self.assertEqual({HostAssessment.objects.get(pk=r.pk).status for r in fresh}, {'running'})
+
+    def test_a_redispatched_batch_row_is_never_processed_twice(self):
+        subs = list(Subdomain.objects.filter(pk__in=[s.pk for s in self.hosts(self.a1, 3)]).select_related('target_domain').order_by('pk'))
+        with mock.patch('cveFeed.tasks.assess_hosts.apply_async', side_effect=unique_ids):
+            jobs, _ = enqueue_batch(self.project, subs)
+        HostAssessment.objects.filter(pk__in=[j.pk for j in jobs]).update(created_at=timezone.now() - timedelta(hours=1))
+        store = mock.Mock()
+        store.r.set.return_value = True
+        sent = []
+        with mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=set()), mock.patch('reNgine.resources.get_store', return_value=store), \
+                mock.patch('cveFeed.tasks.assess_host.apply_async', side_effect=lambda *a, **k: sent.append(k['args'][0]) or unique_ids()):
+            self.assertEqual(reaper.redispatch_queued_assessments(), 3)  # the batch's task is gone: each row gets a single-host task
+        self.assertEqual(sorted(sent), sorted(j.pk for j in jobs))
+        seen = []
+
+        def pipeline(domain_id, names, **kw):
+            seen.extend(names)
+            return {'status': discovery.SUCCESS, 'failed_stages': [], 'scan_id': None, 'resolved': len(names)}
+        with mock.patch('cveFeed.discovery.run_host_pipeline', side_effect=pipeline):
+            host_assessment.execute(jobs[0].pk)  # the redispatched single task of the first row runs...
+            outcome = execute_batch([j.pk for j in jobs])  # ...then the original batch message arrives late
+            for job in jobs:  # and the single tasks of the other rows arrive after it
+                host_assessment.execute(job.pk)
+        self.assertEqual(sorted(seen), sorted(j.host for j in jobs))  # every host once
+        self.assertEqual(outcome['hosts'], 2)  # the batch only took what was still queued
+        self.assertEqual(set(HostAssessment.objects.filter(pk__in=[j.pk for j in jobs]).values_list('status', flat=True)), {'completed'})
 
     def test_an_explicit_running_limit_scales_the_same_way(self):
         now = timezone.now()

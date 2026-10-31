@@ -49,6 +49,7 @@ def _hours(name, default):
         return default
 
 
+NO_LIMIT_CEILING_HOURS = 12  # the longest a batch is given when the discovery queue has no time limit (``CVENGINE_TIME_LIMITS=0``)
 BATCH_HOSTS_PER_FACTOR = 4  # a batch of this many hosts (or fewer) is given the limit of one host; each further few hosts add another
 
 
@@ -70,12 +71,10 @@ def batch_shield(hours, now):
     sizes = dict(HostAssessment._base_manager.filter(celery_id__in={r[1] for r in rows}).values('celery_id').annotate(n=Count('pk'))
                  .values_list('celery_id', 'n'))
     found = time_limits.limits_for('discovery_queue')
-    ceiling = max(hours, math.ceil(found[1] / 3600)) if found else None
+    ceiling = max(hours, math.ceil(found[1] / 3600)) if found else max(hours, NO_LIMIT_CEILING_HOURS)  # no task limit: a dead batch still goes within a day
     shielded = set()
     for pk, celery_id, started, created in rows:
-        allowed = hours * math.ceil(sizes.get(celery_id, 1) / BATCH_HOSTS_PER_FACTOR)
-        if ceiling is not None:
-            allowed = min(allowed, ceiling)
+        allowed = min(hours * math.ceil(sizes.get(celery_id, 1) / BATCH_HOSTS_PER_FACTOR), ceiling)
         if (started or created) >= now - timedelta(hours=allowed):
             shielded.add(pk)
     return shielded
