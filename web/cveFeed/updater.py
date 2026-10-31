@@ -266,9 +266,10 @@ def _first_line(text):
 
 def fetch_latest(repo, branch, token='', installed='', get=None):
     """Ask GitHub for the branch head and how far ahead of ``installed`` it is.
-    Returns {sha, message, url, date, behind_by (None if unknown), commits, reference_known}: ``reference_known`` is False when GitHub answered "not
-    found" for ``installed`` (it has never seen that commit: a fork's own, or a server's unpushed one), which is not the same as not being able to
-    ask. Raises UpdateError with a readable reason."""
+    Returns {sha, message, url, date, behind_by (None if unknown), commits, reference_known, compare_error}: ``reference_known`` is False when GitHub
+    answered "not found" for ``installed`` (it has never seen that commit: a fork's own, or a server's unpushed one), which is not the same as not
+    being able to ask; when the comparison itself could not be made (a refusal, a rate limit, an error, no answer) ``compare_error`` says so and
+    ``behind_by`` stays None: the caller must not read that as "behind". Raises UpdateError with a readable reason."""
     if not valid_repo(repo) or not valid_branch(branch):
         raise UpdateError('the repository or branch name is not valid')
     get = get or requests.get  # looked up now, so a test that replaces requests.get is heard
@@ -289,7 +290,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
     commit = data.get('commit') or {}
     date = ((commit.get('committer') or {}).get('date')) or ''
     out = {'sha': sha, 'message': _first_line(commit.get('message')), 'url': str(data.get('html_url', ''))[:300],
-           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True}
+           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': ''}
     if not installed:
         return out
     if installed == sha:
@@ -297,10 +298,13 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
         return out
     try:
         cmp = get(f'{API}/repos/{repo}/compare/{installed}...{sha}', headers=_headers(token), timeout=20)
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        out['compare_error'] = f'could not compare this build with {branch} on GitHub: {exc}'[:300]
         return out
     if cmp.status_code == 404:
         out['reference_known'] = False
+    elif cmp.status_code != 200:
+        out['compare_error'] = f'GitHub answered {cmp.status_code} when this build was compared with {branch}, so whether it is behind cannot be told'
     if cmp.status_code == 200:
         body = cmp.json()
         if body.get('status') in ('behind', 'identical'):
@@ -337,7 +341,11 @@ def check(row=None, get=None):
         row.latest_date = datetime.fromisoformat(found['date'].replace('Z', '+00:00')) if found['date'] else None
     except ValueError:
         row.latest_date = None
-    row.behind_by, row.commits, row.reference_unknown = found['behind_by'], found['commits'], not found['reference_known']
+    if found['compare_error'] and row.approved_sha == found['sha']:
+        row.last_error = found['compare_error']  # the host is applying this update: the banner keeps what it showed
+    else:
+        row.behind_by, row.commits, row.reference_unknown = found['behind_by'], found['commits'], not found['reference_known'] or bool(found['compare_error'])
+        row.last_error = found['compare_error']
     row.save()
     sync_applied(row)
     return row

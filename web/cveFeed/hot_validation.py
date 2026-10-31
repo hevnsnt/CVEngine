@@ -176,10 +176,11 @@ def _carried_job(row):
 
 def _inherited_fresh(row, now):
     """A rescan's new match row carries the validation its predecessor finished (cveFeed.triage._twins) but has no job of its own: a
-    result younger than the usual window is as good as a job of its own. Without this every rescan queued every match again."""
+    result younger than the usual window is as good as a job of its own. Without this every rescan queued every match again. The window is
+    the one ``_job_current`` gives a job: a day when the AI could not answer (no provider, or its answer failed), else seven."""
     if row.validation_status not in ('hit', 'clean', 'observed', 'no_check') or not row.validated_at:
         return False
-    return row.validated_at > now - timedelta(days=7)
+    return row.validated_at > now - timedelta(days=1 if row.status in ('not_triaged', 'error') else 7)
 
 
 def enqueue(row, lane):

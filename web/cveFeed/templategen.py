@@ -654,9 +654,14 @@ def approve_reviewed_template(template_pk):
 
 
 def cve_info_for(cve):
+    from cveFeed.correlation import prepared_ranges  # the ranges as matching reads them: a branch the CVE List split in two is one range
+    affected = cve.affected
+    if isinstance(affected, list):
+        affected = [{**item, "ranges": prepared_ranges(item["ranges"], keep_unusable=True)} if isinstance(item, dict) and isinstance(item.get("ranges"), list)
+                    else item for item in affected]
     return {"id": cve.cve_id, "title": cve.title,
             "description": cve.original_description or cve.summary,
-            "cvss": cve.cvss, "affected": cve.affected, "references": cve.references}
+            "cvss": cve.cvss, "affected": affected, "references": cve.references}
 
 
 class TemplateBudgetExceeded(Exception):
