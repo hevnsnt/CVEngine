@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hevnsnt/CVEngine/agentapi/sentinel_contract.json",
   "title": "cvENGINE Sentinel result contract",
-  "description": "What a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result for each task kind. The server clips and validates every field anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds here are asserted equal to the server's own limits by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
+  "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 1,
   "$defs": {
     "envelope": {
@@ -676,6 +676,373 @@
             }
           }
         ]
+      }
+    },
+    "targets": {
+      "nmap": {
+        "type": "object",
+        "required": [
+          "addresses"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 60
+            }
+          }
+        }
+      },
+      "naabu": {
+        "type": "object",
+        "required": [
+          "addresses"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 60
+            }
+          }
+        }
+      },
+      "nuclei_light": {
+        "type": "object",
+        "required": [
+          "targets",
+          "tags",
+          "severities",
+          "etags",
+          "template_policy"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "severities": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "info",
+                "low",
+                "medium",
+                "high",
+                "critical",
+                "unknown"
+              ]
+            }
+          },
+          "etags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "description": "tags the run must always exclude (dos)"
+          },
+          "template_policy": {
+            "type": "object",
+            "required": [
+              "rev",
+              "read_only",
+              "bundle_sha256"
+            ],
+            "properties": {
+              "rev": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "read_only": {
+                "type": "boolean"
+              },
+              "bundle_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      },
+      "nuclei_targeted": {
+        "type": "object",
+        "required": [
+          "targets",
+          "tags",
+          "severities",
+          "etags",
+          "template_policy"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "severities": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "info",
+                "low",
+                "medium",
+                "high",
+                "critical",
+                "unknown"
+              ]
+            }
+          },
+          "etags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "description": "tags the run must always exclude (dos)"
+          },
+          "template_policy": {
+            "type": "object",
+            "required": [
+              "rev",
+              "read_only",
+              "bundle_sha256"
+            ],
+            "properties": {
+              "rev": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "read_only": {
+                "type": "boolean"
+              },
+              "bundle_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      },
+      "nuclei_deep": {
+        "type": "object",
+        "required": [
+          "targets",
+          "tags",
+          "severities",
+          "etags",
+          "template_policy"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "severities": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "info",
+                "low",
+                "medium",
+                "high",
+                "critical",
+                "unknown"
+              ]
+            }
+          },
+          "etags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "description": "tags the run must always exclude (dos)"
+          },
+          "template_policy": {
+            "type": "object",
+            "required": [
+              "rev",
+              "read_only",
+              "bundle_sha256"
+            ],
+            "properties": {
+              "rev": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "read_only": {
+                "type": "boolean"
+              },
+              "bundle_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      },
+      "testssl": {
+        "type": "object",
+        "required": [
+          "host",
+          "ip",
+          "port"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string",
+            "maxLength": 260
+          },
+          "ip": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "starttls": {
+            "type": "string",
+            "maxLength": 20
+          }
+        }
+      },
+      "nmap_udp": {
+        "type": "object",
+        "required": [
+          "address"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "type": "string",
+            "maxLength": 60
+          }
+        }
+      },
+      "wpscan": {
+        "type": "object",
+        "required": [
+          "url",
+          "token"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "token": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "the project's WPScan API token, for this one run; the server replaces it with *** once the task ends"
+          }
+        }
+      },
+      "discover": {
+        "type": "object",
+        "required": [
+          "cidr"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "cidr": {
+            "type": "string",
+            "maxLength": 64
+          }
+        }
+      },
+      "openvas": {
+        "type": "object",
+        "required": [
+          "hosts",
+          "excluded_families",
+          "max_hours",
+          "preferences"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "hosts": {
+            "type": "object",
+            "description": "address to host name",
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 260
+            }
+          },
+          "excluded_families": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          "max_hours": {
+            "type": "number",
+            "minimum": 0
+          },
+          "preferences": {
+            "type": "object"
+          }
+        }
       }
     }
   }

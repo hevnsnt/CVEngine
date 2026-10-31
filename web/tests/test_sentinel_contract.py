@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
+from unittest import mock
 
 from django.test import SimpleTestCase
 from jsonschema import Draft202012Validator
 
 from agentapi import sentinel_broker as broker
+from agentapi import sentinel_dispatch as broker_dispatch
 from agentapi import sentinel_contract as contract
 from agentapi.models import SentinelTask
 
@@ -122,3 +124,86 @@ class ContractMatchesTheServerTests(SimpleTestCase):
         self.assertEqual(tuple(contract.load()['$defs']['port']['properties']['protocol']['enum']), broker._PROTOCOLS)
         severities = self.body('testssl')['items']['items']['properties']['severity']['enum']
         self.assertEqual(tuple(s for s in severities if s), broker._TESTSSL_SEVERITIES)
+
+
+TARGETS = Path(__file__).with_name('fixtures') / 'sentinel_targets'
+
+
+def target_validator(kind):
+    return Draft202012Validator(contract.target_schema(kind))
+
+
+class TargetContractTests(SimpleTestCase):
+    """The other direction: what the server hands a Sentinel."""
+
+    def test_every_task_kind_has_a_target_schema_and_a_fixture(self):
+        for kind in SentinelTask.KINDS:
+            Draft202012Validator.check_schema(contract.target_schema(kind))
+        have = {p.stem for p in TARGETS.glob('*.json')}
+        self.assertEqual(have, {k for k in SentinelTask.KINDS if k not in ('nuclei_targeted', 'nuclei_deep')})
+
+    def test_each_fixture_is_a_valid_target_for_its_kind(self):
+        for path in TARGETS.glob('*.json'):
+            self.assertEqual(list(target_validator(path.stem).iter_errors(json.loads(path.read_text()))), [], path.stem)
+
+    def test_the_three_nuclei_kinds_share_one_target_shape(self):
+        sent = json.loads((TARGETS / 'nuclei_light.json').read_text())
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            self.assertEqual(list(target_validator(kind).iter_errors(sent)), [], kind)
+
+    def test_a_target_outside_the_contract_is_rejected(self):
+        bad = json.loads((TARGETS / 'nmap.json').read_text())
+        bad['addresses'] = [f'192.0.2.{i % 250 + 1}' for i in range(broker_dispatch.MAX_ADDRESSES + 1)]
+        self.assertTrue(list(target_validator('nmap').iter_errors(bad)))
+        self.assertTrue(list(target_validator('nmap').iter_errors({'addresses': ['192.0.2.1'], 'surprise': 1})))
+        self.assertTrue(list(target_validator('testssl').iter_errors({'host': 'example.com', 'ip': '192.0.2.1', 'port': 70000})))
+
+    def test_the_address_cap_equals_the_dispatchers(self):
+        defs = contract.load()['$defs']['targets']
+        self.assertEqual(defs['nmap']['properties']['addresses']['maxItems'], broker_dispatch.MAX_ADDRESSES)
+        self.assertEqual(defs['naabu']['properties']['addresses']['maxItems'], broker_dispatch.MAX_ADDRESSES)
+        self.assertEqual(defs['nuclei_light']['properties']['targets']['maxItems'], broker_dispatch.MAX_ADDRESSES)
+
+
+class RealTargetBuilderTests(SimpleTestCase):
+    """Run the server's own code that builds each target and check what it produced against the schema, so a builder that changes shape
+    fails here and not on a Sentinel in the field."""
+
+    def captured(self, call):
+        seen = []
+
+        def fake_dispatch(project, kind, target, **kwargs):
+            seen.append((kind, target))
+            return None
+        with mock.patch.object(broker_dispatch, 'any_scanner_for', return_value=True), \
+                mock.patch.object(broker_dispatch, 'dispatch_or_none', side_effect=fake_dispatch):
+            call()
+        return seen
+
+    def check(self, seen, expect_kinds):
+        self.assertEqual({k for k, _ in seen}, set(expect_kinds))
+        for kind, target in seen:
+            self.assertEqual(list(target_validator(kind).iter_errors(target)), [], (kind, target))
+
+    def test_nmap_naabu_udp_and_testssl_targets(self):
+        scan = mock.Mock()
+        with mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}):  # no Sentinel answers here, so the wrapper would run naabu itself
+            seen = self.run_builders(scan)
+        self.check(seen, ['nmap', 'naabu', 'nmap_udp', 'testssl'])
+
+    def run_builders(self, scan):
+        return self.captured(lambda: (
+            broker_dispatch.try_nmap(mock.Mock(), scan, ['192.0.2.10', '192.0.2.11']),
+            broker_dispatch.wrap_naabu_runner(mock.Mock(), scan)(['192.0.2.10']),
+            broker_dispatch.try_nmap_udp(mock.Mock(), '192.0.2.10', scan),
+            broker_dispatch.try_testssl(mock.Mock(), 'example.com', '192.0.2.10', 443, 'smtp', scan)))
+
+    def test_the_nuclei_targets_for_every_kind(self):
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            target = broker_dispatch._nuclei_target(kind, ['https://example.com'], {'tags': {'wordpress', 'tech'}, 'severities': ['high']})
+            self.assertEqual(list(target_validator(kind).iter_errors(target)), [], (kind, target))
+
+    def test_the_wpscan_target(self):
+        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', return_value={}):
+            seen = self.captured(lambda: broker_dispatch.wrap_wpscan_runner(mock.Mock(), mock.Mock())('https://example.com/', 'example-token'))
+        self.check(seen, ['wpscan'])

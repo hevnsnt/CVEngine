@@ -25,3 +25,11 @@ def result_schema(kind):
     if kind not in doc['$defs']['results']:
         raise KeyError(kind)
     return {'$schema': doc['$schema'], '$ref': f'#/$defs/results/{kind}', '$defs': doc['$defs']}
+
+
+def target_schema(kind):
+    """A self-contained schema for the ``target`` the server hands a Sentinel for a ``kind`` task."""
+    doc = load()
+    if kind not in doc['$defs']['targets']:
+        raise KeyError(kind)
+    return {'$schema': doc['$schema'], '$ref': f'#/$defs/targets/{kind}', '$defs': doc['$defs']}
