@@ -307,6 +307,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     pause_for = sleep or time.sleep
     explicit = bool(ids or techs)
     row = cutoff = now = None
+    assumed_days, failures, set_aside = None, {}, set()
     if not explicit:
         from cveFeed import feed_watermark
         window = _coverage_days() if days is None else int(days)
@@ -319,6 +320,10 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                 and now - row.checked_at < feed_watermark.RECHECK):
             return {'status': 'covered', 'covered_through': row.covered_through.isoformat()}
         cutoff = feed_watermark.floor_for(row, now, window)
+        if row.covered_through is None or row.covered_through > now + feed_watermark.SKEW:
+            assumed_days = max(feed_watermark.LEGACY_DAYS, window)  # nothing says how far back the feed is complete: this window is a guess
+        failures = dict(row.failures or {})
+        set_aside = {i for i, tries in failures.items() if tries >= feed_watermark.MAX_ATTEMPTS}
         max_scan = feed_watermark.scan_budget(cutoff, now, max_scan)
         if now - cutoff > timedelta(days=2):
             max_new = max(max_new, GAP_MAX_NEW)
@@ -329,6 +334,8 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     reached, head, page_cursor = False, None, None
 
     def want(entry_id):
+        if entry_id in set_aside and not force:
+            return  # refused on every attempt of earlier runs: reported (feed_watermark.status), retried by a forced run, not read again here
         if entry_id not in first_seen and entry_id not in wanted:
             wanted.append(entry_id)
 
@@ -385,7 +392,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         if not wanted:
             return result
     result['wanted'] = len(wanted)
-    created_rows = []
+    created_rows, refused = [], []
     for entry_id in wanted[:max_new]:
         try:
             entry = client.get_entry(entry_id)
@@ -394,9 +401,11 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             obj, _ = CVEEntry.from_api(entry)
             created_rows.append(obj)
             result['created'] += 1
+            failures.pop(entry_id, None)
         except requests.RequestException as exc:
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
             result['failed'] += 1
+            refused.append(entry_id)
             logger.warning('cve.now backfill: failed to fetch %s: %s', entry_id, exc)
             if status in (401, 403, 429):
                 result['blocked'], result['status'] = True, 'blocked'
@@ -404,12 +413,37 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
             result['failed'] += 1
             logger.warning('cve.now backfill: failed to save %s: %s', entry_id, exc)
+            refused.append(entry_id)
         pause_for(pause)
     if row is not None:
+        if result['status'] == 'ok':
+            # an entry that fails run after run is set aside once (up to a few), so one bad entry cannot hold the window back for good; a feed
+            # that refuses everything is not a bad entry and never gets that far (the cap), and a refusal (401/403/429) says nothing about an entry
+            for entry_id in refused:
+                tries = failures.get(entry_id, 0) + 1
+                if tries >= feed_watermark.MAX_ATTEMPTS and entry_id not in set_aside:
+                    if len(set_aside) >= feed_watermark.MAX_UNREADABLE:
+                        tries = feed_watermark.MAX_ATTEMPTS - 1
+                    else:
+                        set_aside.add(entry_id)
+                        activity.log('feed', f'cve.now backfill: {entry_id} could not be read in {tries} runs and is set aside; it is listed in the feed status', status='failed')
+                failures[entry_id] = min(tries, feed_watermark.MAX_ATTEMPTS)
+        if failures:
+            stored = set(CVEEntry.objects.filter(cve_id__in=list(failures)).values_list('cve_id', flat=True))
+            failures = {i: t for i, t in failures.items() if i not in stored}
+        failures_changed = failures != (row.failures or {})
+        row.failures = failures
+        if feed_watermark.unreadable(row):
+            result['unreadable'] = feed_watermark.unreadable(row)
         clean = result['status'] == 'ok' and not result['failed'] and result['created'] == result['wanted'] and len(wanted) <= max_new
         if reached and clean:
             # everything the feed lists back to the floor is stored: the watermark moves to the head this walk started from
-            row.covered_through, row.resume_cursor, row.resume_head, row.checked_at = head or now, '', None, now
+            row.covered_through, row.resume_cursor, row.resume_head, row.checked_at = min(head or now, now), '', None, now
+            if assumed_days:
+                row.assumed_days = assumed_days
+                result['window_assumed_days'] = assumed_days
+                activity.log('feed', f'cve.now backfill: no seed time or earlier walk says how far back the feed was complete, so it was read back '
+                             f'{assumed_days} days; anything older that is missing stays missing', status='done')
             row.save()
             result['covered_through'] = row.covered_through.isoformat()
         elif clean:
@@ -417,6 +451,8 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             row.resume_cursor, row.resume_head = page_cursor or '', head
             row.save()
             result['continues'] = True
+        elif failures_changed:
+            row.save(update_fields=['failures', 'updated_at'])
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
