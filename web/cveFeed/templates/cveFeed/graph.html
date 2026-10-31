@@ -53,15 +53,13 @@
     <span><i style="border:2px solid var(--graph-node-border);background:var(--graph-node-bg)"></i>project / registered domain (all domains)</span>
   </div>
 </div>
-<div class="card node-card" id="detail" aria-live="polite"></div>
 {% endblock %} {% block scripts %}
 <script src="{% asset 'cve/vivagraph.min.js' %}"></script>
 <script type="module">
-  import { mountGraph, showNodeDetails } from '/staticfiles/cve/graph.js';
-  const box = document.getElementById('detail');
-  const graph = mountGraph(document.getElementById('graph'), { onSelect: d => showNodeDetails(box, d) });
+  import { detailDrawer, mountGraph } from '/staticfiles/cve/graph.js';
+  const drawer = detailDrawer({ onClose: () => graph.deselect() });
+  const graph = mountGraph(document.getElementById('graph'), { onSelect: d => drawer.show(d) });
   document.getElementById('pods-toggle').addEventListener('click', (e) => { const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', String(on)); graph.setPods(on); });
-  showNodeDetails(box, null);
   const live = document.getElementById('live'), count = document.getElementById('count'),
     select = document.getElementById('domain');
   let last = null;
