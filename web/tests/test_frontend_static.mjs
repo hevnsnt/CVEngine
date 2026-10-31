@@ -29,6 +29,22 @@ test('a module that calls a prefs.js formatter imports or defines it', () => {
   }
 });
 
+test('the AI settings show a Base URL for every provider, and an address is not carried to another provider', () => {
+  const src = read('settings.js');
+  assert.doesNotMatch(src, /baseField\.style\.display\s*=\s*\[/, 'the Base URL field is hidden for some provider');
+  for (const p of ['openai', 'anthropic', 'openrouter', 'ollama', 'vllm', 'lmstudio']) {
+    assert.match(src, new RegExp(`BASE_HINT = \\{[\\s\\S]*\\b${p}:`), `no Base URL hint for ${p}`);
+  }
+  assert.match(src, /base\.value = provider\.value === s\.provider \?/, 'changing provider keeps the previous provider\'s address');
+});
+
+test('the first-run AI step asks for the provider of a key that names no vendor instead of guessing', () => {
+  const src = read('welcome.js');
+  assert.match(src, /ambiguous/);
+  assert.match(src, /provider: pick\.value \|\| undefined/, 'the chosen provider is sent with the key');
+  assert.match(src, /Choose which provider this key belongs to/);
+});
+
 // charts.js takes the display-zone preference from prefs.js, which reads the DOM; hand it a stand-in.
 let zone = 'local';
 globalThis.__tzMode = () => zone;
@@ -154,4 +170,22 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
   assert.match(content, /No OpenVAS scan is running/);
   assert.match(content, /No hosts are due/);
   assert.equal(panel.children.some((child) => child.cls === 'sl-openvas-deferred'), false);
+});
+
+// The alias and note a person types on a host or target are shown in many places: they must only ever become text nodes, and the inputs must
+// carry the same bounds the server enforces (targetApp/alias_note.py).
+test('the alias and note are never written as markup', () => {
+  for (const name of modules) {
+    for (const line of read(name).split('\n')) {
+      if (/innerHTML|insertAdjacentHTML|outerHTML/.test(line)) assert.doesNotMatch(line, /\b(alias|note)\b/i, `${name}: ${line.trim()}`);
+    }
+  }
+});
+
+test('the alias and note inputs are bounded like the server bounds them', () => {
+  const py = readFileSync(new URL('../targetApp/alias_note.py', import.meta.url), 'utf8');
+  const [, alias, note] = /ALIAS_MAX, NOTE_MAX = (\d+), (\d+)/.exec(py);
+  const app = read('app.js');
+  assert.match(app, new RegExp(`const aliasInput = .*maxlength: "${alias}"`));
+  assert.match(app, new RegExp(`const noteInput = .*maxlength: "${note}"`));
 });

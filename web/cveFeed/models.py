@@ -9,6 +9,7 @@ from django.db.models.functions import Lower
 
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
+from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 from django.utils.dateparse import parse_datetime
 
 
@@ -633,8 +634,10 @@ class ProbeObservation(models.Model):
 
 
 class HostProfile(models.Model):
-    """Editable asset information for one host of a project: who owns it, what it is for and how much it matters.
-    One row per (project, host); the host name is stored lowercase. Never read by a scanner."""
+    """Editable asset information for one host of a project: who owns it, what it is for and how much it matters, and the alias (a short
+    display name) and note a person gave it. One row per (project, host); the host name is stored lowercase. Never read by a scanner.
+    It is keyed by the host's name, not by a scan row or an address set, so it survives rescans, and when other names resolve to the same
+    addresses the Hosts page shows one host and takes the alias and note from whichever of its names has them (agentapi.services._host)."""
 
     CRITICALITY = ("unknown", "low", "medium", "high", "critical")
     CRITICALITY_CHOICES = [(c, c) for c in CRITICALITY]
@@ -644,6 +647,8 @@ class HostProfile(models.Model):
     owner = models.CharField(max_length=200, blank=True, default="")
     purpose = models.CharField(max_length=500, blank=True, default="")
     criticality = models.CharField(max_length=16, choices=CRITICALITY_CHOICES, default="unknown")
+    alias = models.CharField(max_length=ALIAS_MAX, blank=True, default="", db_default="")  # display only: the address and discovered names stay
+    note = models.CharField(max_length=NOTE_MAX, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

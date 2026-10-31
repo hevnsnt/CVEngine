@@ -21,7 +21,7 @@
     <div class="field">
       <label for="provider">Provider</label>
       <select id="provider">
-        <option value="">Detect from key</option>
+        <option value="">Detect from key (sk-ant-, sk-or-, sk-proj-)</option>
         <option value="anthropic" {% if ai_usage_provider == 'anthropic' %}selected{% endif %}>Anthropic</option><option value="openai" {% if ai_usage_provider == 'openai' %}selected{% endif %}>OpenAI</option><option value="openrouter" {% if ai_usage_provider == 'openrouter' %}selected{% endif %}>OpenRouter</option><option value="ollama" {% if ai_usage_provider == 'ollama' %}selected{% endif %}>Ollama (local, no key)</option><option value="vllm" {% if ai_usage_provider == 'vllm' %}selected{% endif %}>vLLM</option><option value="lmstudio" {% if ai_usage_provider == 'lmstudio' %}selected{% endif %}>LM Studio (local)</option>
       </select>
     </div>
@@ -46,7 +46,7 @@
   var key = document.getElementById('key'), prov = document.getElementById('provider'), model = document.getElementById('model'),
       out = document.getElementById('out'), go = document.getElementById('go'), det = document.getElementById('detected'),
       csrf = document.querySelector('[name=csrfmiddlewaretoken]').value, t;
-  var NAMES = {anthropic: 'Anthropic', openai: 'OpenAI'};
+  var NAMES = {anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter'};
   function post(url, body) {
     return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: JSON.stringify(body)});
   }
@@ -55,7 +55,7 @@
     t = setTimeout(function () {
       if (!key.value.trim()) return;
       post('/cve/api/setup/detect', {key: key.value}).then(function (r) { return r.json(); }).then(function (d) {
-        det.textContent = d.provider ? 'Looks like an ' + NAMES[d.provider] + ' key.' : 'Not a recognised key format. Choose a provider below.';
+        det.textContent = d.provider ? 'Looks like an ' + NAMES[d.provider] + ' key.' : d.ambiguous ? 'More than one vendor issues keys like this one: choose the provider below, the key is sent only there.' : 'Not a recognised key format. Choose a provider below.';
         if (d.provider && !prov.value) prov.dataset.auto = d.provider;
       });
     }, 250);

@@ -17,6 +17,8 @@ from functools import wraps
 
 import requests
 
+from reNgine.ai_profiles import DEFAULT_REPLY_CAP, PROFILES, REASONING_LEVELS, STAGE_REPLY_CAPS, reasoning_plan
+
 logger = logging.getLogger(__name__)
 _usage_stage = ContextVar('cvengine_ai_usage_stage', default='unspecified')
 
@@ -72,7 +74,7 @@ def connect_timeout():
 	return _env_number('CVENGINE_AI_CONNECT_TIMEOUT', 1, 300) or CONNECT_TIMEOUT
 
 
-TRIAGE_TOKEN_CAP = 400  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
+TRIAGE_TOKEN_CAP = STAGE_REPLY_CAPS['triage']  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
 
 
 def reply_limit(provider):
@@ -84,13 +86,46 @@ def reply_limit(provider):
 	options = _request_options.get()
 	cap = _env_number('CVENGINE_AI_MAX_TOKENS', 64, 32768)
 	if cap is None:
-		if provider.name == 'anthropic':
-			cap = MAX_TOKENS
-		elif provider.name in SERVER_URL_PROVIDERS:
-			cap = options.get('max_tokens') or MAX_TOKENS
+		profile = PROFILES.get(provider.name)
+		if profile and profile.reply_cap:  # Anthropic and the self-hosted servers; the latter take the stage's own limit first
+			cap = (options.get('max_tokens') if profile.reply_cap_by_stage else None) or profile.reply_cap
 	if cap and options.get('token_factor'):
 		cap = min(32768, cap * int(options['token_factor']))
 	return cap
+
+
+_REASONING_NOTED = set()
+
+
+def _note_once(*key):
+	"""True the first time ``key`` is seen: a setting that is ignored is said so once, not on every request."""
+	if key in _REASONING_NOTED:
+		return False
+	_REASONING_NOTED.add(key)
+	return True
+
+
+def reasoning_level():
+	"""``CVENGINE_AI_REASONING`` (off, low, medium, high or max), or None when it is unset or not one of those, which sends nothing (what
+	every version before it did). A value that is not a level is logged once."""
+	value = os.environ.get('CVENGINE_AI_REASONING', '').strip().lower()
+	if not value:
+		return None
+	if value not in REASONING_LEVELS and _note_once('bad-level', value):
+		logger.warning('CVENGINE_AI_REASONING=%r is not one of %s: no reasoning setting is sent', value, ', '.join(REASONING_LEVELS))
+	return value if value in REASONING_LEVELS else None
+
+
+def reasoning_fields(provider, max_tokens=None):
+	"""The top-level request fields ``CVENGINE_AI_REASONING`` adds for this provider's model (see ``ai_profiles.reasoning_plan``), {} when it is
+	unset or does not apply here; when it is set and nothing can be sent, that is logged once per provider and model."""
+	level = reasoning_level()
+	if level is None:
+		return {}
+	fields, why = reasoning_plan(provider.name, provider.model, level, max_tokens)
+	if why and _note_once(provider.name, provider.model, why):
+		logger.warning('CVENGINE_AI_REASONING=%s is ignored for %s %s: %s', level, provider.name, provider.model or '(default model)', why)
+	return fields
 
 
 def ollama_context():
@@ -154,22 +189,15 @@ def tracked_completion(fn):
 			_record_completion(self, status, category, started, max(0, int((time.monotonic() - tick) * 1000)))
 	return wrapped
 
-ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
+ANTHROPIC_URL = PROFILES['anthropic'].default_base
 ANTHROPIC_VERSION = '2023-06-01'
-OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
+OPENAI_URL = PROFILES['openai'].default_base + '/chat/completions'
 # Models used when none is chosen. Anthropic and OpenAI get the newest cheapest model: resolved from the
 # provider's own model list (see pick_cheapest_newest), with these as the fallback when the list cannot be read.
 # OpenRouter, Ollama, vLLM and LM Studio serve whatever the operator picked or hosts, so there is no default for them.
-DEFAULT_MODELS = {
-	'anthropic': 'claude-haiku-5-5',
-	'openai': 'gpt-5.4-nano',
-	'openrouter': '',
-	'ollama': '',
-	'vllm': '',
-	'lmstudio': '',
-}
-SELECTABLE = ('openrouter', 'ollama', 'vllm', 'lmstudio')  # the user must choose the model
-OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
+DEFAULT_MODELS = {name: profile.default_model for name, profile in PROFILES.items()}
+SELECTABLE = tuple(name for name, profile in PROFILES.items() if not profile.default_model)  # the user must choose the model
+OPENROUTER_BASE = PROFILES['openrouter'].default_base
 LOCAL_NAMES = ('localhost', '127.0.0.1', '::1', '[::1]')
 HOST_FROM_CONTAINER = 'host.docker.internal'  # compose maps this to the Docker host for the web and celery containers
 URL_HELP = ('the server address, for example http://100.64.0.5:{port} (a Tailscale or other remote machine) '
@@ -187,7 +215,7 @@ def reachable_url(url):
 		return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 	return url
 REQUEST_TIMEOUT = 120
-MAX_TOKENS = 2048
+MAX_TOKENS = DEFAULT_REPLY_CAP
 VERDICTS = ('affected', 'not_affected', 'uncertain')
 
 UNTRUSTED_NOTICE = (
@@ -375,8 +403,6 @@ def _anthropic_text(data):
 # first request tells: a refusal that names the field steps down to JSON mode and then to nothing, and the answer is remembered per
 # (provider, address, model) for an hour. Hosted providers are not sent it unless ``CVENGINE_AI_STRUCTURED=all``: a refusal there costs a
 # paid request, and their models follow the prompt.
-STRUCTURED_LEVELS = {'ollama': ('json_schema', 'json', 'none')}
-_DEFAULT_LEVELS = ('json_schema', 'json_object', 'none')
 _STRUCTURED = {}  # (provider, base_url, model) -> (expires, level)
 _NAMES_STRUCTURE = re.compile(r'response_format|json_schema|json_object|schema|grammar|format|guided|structured')
 
@@ -412,9 +438,10 @@ def structured_levels(provider):
 	if not _request_options.get().get('schema'):
 		return ()
 	mode = structured_mode()
-	if mode == 'off' or (provider.name not in SERVER_URL_PROVIDERS and mode != 'all') or provider.name == 'anthropic':
+	profile = PROFILES.get(provider.name)
+	if mode == 'off' or not profile or not profile.structured or (not profile.structured_default and mode != 'all'):
 		return ()
-	levels = STRUCTURED_LEVELS.get(provider.name, _DEFAULT_LEVELS)
+	levels = profile.structured
 	cached = _STRUCTURED.get(_structure_key(provider))
 	if cached and cached[0] > time.time() and cached[1] in levels:
 		return levels[levels.index(cached[1]):]
@@ -458,30 +485,41 @@ class AnthropicProvider(AIProvider):
 	def _headers(self):
 		return {'x-api-key': self.api_key or '', 'anthropic-version': ANTHROPIC_VERSION}
 
+	def _messages_url(self):
+		"""The messages endpoint: Anthropic's own unless a Base URL is set. A bare address (``https://gateway.example``, or one ending in
+		``/v1``) is the server and the endpoint is under it; an address with any other path is used as written, as it always was."""
+		if not (self.base_url or '').strip():
+			return ANTHROPIC_URL
+		from urllib.parse import urlsplit
+		url = reachable_url(self.base_url)
+		path = urlsplit(url).path.rstrip('/')
+		if not path:
+			return url.rstrip('/') + '/v1/messages'
+		if path == '/v1':
+			return url.rstrip('/') + '/messages'
+		return url
+
+	def _body(self, system, messages):
+		cap = reply_limit(self)
+		return {'model': self.model, 'max_tokens': cap, 'system': system, 'messages': messages, **reasoning_fields(self, cap)}
+
 	def list_models(self):
-		base = (self.base_url or ANTHROPIC_URL).split('/v1/')[0]
+		base = self._messages_url().split('/v1/')[0]
 		data = self._get(f'{base}/v1/models?limit=1000', self._headers())
 		models = [{'id': m['id'], 'created': _epoch(m.get('created_at')), 'price': None} for m in data.get('data', []) if m.get('id')]
 		return sorted(models, key=lambda m: -m['created'])
 
 	@tracked_completion
 	def complete(self, system, user):
-		data = self._post(
-			self.base_url or ANTHROPIC_URL, self._headers(),
-			{'model': self.model, 'max_tokens': reply_limit(self), 'system': system,
-			 'messages': [{'role': 'user', 'content': user}]})
+		data = self._post(self._messages_url(), self._headers(), self._body(system, [{'role': 'user', 'content': user}]))
 		return _anthropic_text(data)
 
 	@tracked_completion
 	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
 		import base64
-		data = self._post(
-			self.base_url or ANTHROPIC_URL, self._headers(),
-			{'model': self.model, 'max_tokens': reply_limit(self), 'system': system,
-			 'messages': [{'role': 'user', 'content': [
-				 {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type,
-											   'data': base64.b64encode(image_bytes).decode()}},
-				 {'type': 'text', 'text': user}]}]})
+		data = self._post(self._messages_url(), self._headers(), self._body(system, [{'role': 'user', 'content': [
+			{'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': base64.b64encode(image_bytes).decode()}},
+			{'type': 'text', 'text': user}]}]))
 		return _anthropic_text(data)
 
 
@@ -537,18 +575,19 @@ class OpenAIProvider(AIProvider):
 	def _options(self):
 		"""The limit, temperature and seed this request carries. The limit as ``reply_limit`` says (the operator's, else the default of a
 		self-hosted server; none for OpenAI and OpenRouter); the temperature and seed only to a self-hosted server and only when the stage
-		pinned them (``request_options``): pinning both is what makes a verdict reproducible (llama.cpp's seed is random by default)."""
+		pinned them (``request_options``): pinning both is what makes a verdict reproducible (llama.cpp's seed is random by default). The
+		opt-in reasoning field (``CVENGINE_AI_REASONING``) last: nothing unless it is set."""
 		out = {}
 		cap = reply_limit(self)
 		if cap:
 			out[self._limit_name()] = cap
 		pinned = _request_options.get()
-		if self.name in SERVER_URL_PROVIDERS:
-			if pinned.get('temperature') is not None:
-				out['temperature'] = pinned['temperature']
-			if pinned.get('seed') is not None:
-				out['seed'] = pinned['seed']
-		return out
+		profile = PROFILES[self.name]
+		if profile.temperature_ok and pinned.get('temperature') is not None:
+			out['temperature'] = pinned['temperature']
+		if profile.seed_ok and pinned.get('seed') is not None:
+			out['seed'] = pinned['seed']
+		return {**out, **reasoning_fields(self, cap)}
 
 	def _check_text(self, data):
 		_openai_text(data, self.name)
@@ -635,7 +674,7 @@ class OllamaProvider(AIProvider):
 
 	def _options(self):
 		"""Ollama's ``options``: the reply limit (``reply_limit``), the context window when the operator set it, the temperature and the
-		seed when the stage pinned them."""
+		seed when the stage pinned them; beside them ``think`` when ``CVENGINE_AI_REASONING`` is set and the model has the switch."""
 		options = {}
 		cap = reply_limit(self)
 		if cap:
@@ -644,10 +683,11 @@ class OllamaProvider(AIProvider):
 		if context:
 			options['num_ctx'] = context
 		pinned = _request_options.get()
-		for key in ('temperature', 'seed'):
-			if pinned.get(key) is not None:
+		profile = PROFILES['ollama']
+		for key, allowed in (('temperature', profile.temperature_ok), ('seed', profile.seed_ok)):
+			if allowed and pinned.get(key) is not None:
 				options[key] = pinned[key]
-		return {'options': options} if options else {}
+		return {**({'options': options} if options else {}), **reasoning_fields(self, cap)}
 
 	def _check_text(self, data):
 		_ollama_text(data)
@@ -688,10 +728,11 @@ class OllamaProvider(AIProvider):
 		return _ollama_text(data)
 
 
-PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider, LMStudioProvider)}
-KEYLESS = ('ollama', 'vllm', 'lmstudio')  # a key is optional (vLLM, LM Studio) or unused (Ollama)
-SERVER_URL_PROVIDERS = ('ollama', 'vllm', 'lmstudio')  # you run the server, so there is no default address
-LOCAL_PORT = {'ollama': 11434, 'vllm': 8000, 'lmstudio': 1234}  # each server's usual port, for the address hints
+_CLASSES = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider, LMStudioProvider)}
+PROVIDERS = {name: _CLASSES[name] for name in PROFILES}  # the ids come from the profile table (reNgine.ai_profiles); a profile without a class fails here
+KEYLESS = tuple(name for name, profile in PROFILES.items() if not profile.needs_key)  # a key is optional (vLLM, LM Studio) or unused (Ollama)
+SERVER_URL_PROVIDERS = tuple(name for name, profile in PROFILES.items() if profile.needs_url)  # you run the server, so there is no default address
+LOCAL_PORT = {name: profile.port for name, profile in PROFILES.items() if profile.needs_url}  # each server's usual port, for the address hints
 
 
 def get_provider(name, model=None, api_key=None, base_url=None):
@@ -1022,17 +1063,23 @@ def suggest_local_checks(provider, context):
 	return {'parsed': parse_local_checks(reply), 'model': f'{provider.name}:{provider.model}'}
 
 
-def detect_provider(api_key):
-	"""Guess the provider from an API key's prefix; None when it is not recognisable.
+# Prefixes that name one vendor and no other. A key is only ever sent where the user chose, and a prefix is only taken for a choice when it
+# cannot belong to anyone else; the bare ``sk-`` that OpenAI used to issue is also used by DeepSeek and by many
+# OpenAI-compatible vendors and proxies, so it names nobody. ``AIza`` is Google's (no provider for it yet).
+KEY_PREFIXES = (('sk-ant-', 'anthropic'), ('sk-or-', 'openrouter'), ('sk-proj-', 'openai'))
 
-	Anthropic keys start ``sk-ant-``; OpenRouter ``sk-or-``; OpenAI keys start ``sk-`` (``sk-proj-``,
-	``sk-svcacct-`` ...). Anthropic is checked first since both begin ``sk-``.
-	"""
+
+def detect_provider(api_key):
+	"""The provider an API key's prefix names, or None when it does not name exactly one: ``sk-ant-`` is Anthropic, ``sk-or-`` OpenRouter,
+	``sk-proj-`` OpenAI. A bare ``sk-...`` key is ambiguous (see ``ambiguous_key``) and is never guessed onto a vendor: the caller asks."""
 	key = (api_key or '').strip()
-	if key.startswith('sk-ant-'):
-		return 'anthropic'
-	if key.startswith('sk-or-'):  # OpenRouter, before the generic sk- check
-		return 'openrouter'
-	if key.startswith('sk-') and len(key) >= 20:
-		return 'openai'
+	for prefix, provider in KEY_PREFIXES:
+		if key.startswith(prefix):
+			return provider
 	return None
+
+
+def ambiguous_key(api_key):
+	"""Whether a key looks like an OpenAI-style secret (``sk-``) that more than one vendor issues, so the user has to say whose it is."""
+	key = (api_key or '').strip()
+	return key.startswith('sk-') and detect_provider(key) is None
