@@ -438,6 +438,7 @@ def self_signed(directory):
 class LiveProxyTests(ProxyOn, TestCase):
     """A real probe, real sockets, a real proxy process-in-a-thread: the traffic must arrive at the proxy, addressed to the vetted IP."""
     DNS = {'app.example.test': '203.0.113.10'}
+    allow_network = True  # the point of these cases: real sockets and the real resolver (a stand-in for it answers only the names in DNS)
 
     @classmethod
     def setUpClass(cls):

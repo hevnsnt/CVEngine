@@ -1,6 +1,7 @@
 """The onboarding email: outgoing mail settings, the message a new person gets, and the link that lets them choose a password."""
 import json
 import smtplib
+import socket
 import ssl
 from datetime import timedelta
 from unittest import mock
@@ -56,6 +57,13 @@ class Base(TestCase):
 
 
 class SettingsTests(Base):
+    def setUp(self):
+        super().setUp()
+        # saving a mail server looks its name up (a name that resolves to a metadata address is refused); an unknown name is not refused
+        lookup = mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)
+        lookup.start()
+        self.addCleanup(lookup.stop)
+
     def test_saved_settings_never_return_the_password(self):
         status, data = call(self.client, 'PUT', 'settings/email', GOOD)
         self.assertEqual(status, 200)

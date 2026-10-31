@@ -741,7 +741,8 @@ class AiServerAddressPolicyTests(unittest.TestCase):
 				'http://metadata.google.internal/computeMetadata/v1', 'http://[::ffff:169.254.169.254]/'):
 			self.assertTrue(ai_url_blocked(url), url)
 
-	def test_localhost_the_lan_a_tailnet_and_names_are_allowed(self):
+	@mock.patch('socket.getaddrinfo', side_effect=OSError('no such name'))  # a name that does not resolve is not blocked
+	def test_localhost_the_lan_a_tailnet_and_names_are_allowed(self, _lookup):
 		from cveFeed.settings_api import ai_url_blocked
 		for url in ('http://localhost:1234/v1', 'http://127.0.0.1:11434', 'http://192.168.1.20:8000/v1', 'http://100.64.0.5:11434',
 				'http://lmstudio.tailnet.example.test:1234/v1', 'https://api.openai.com/v1'):
