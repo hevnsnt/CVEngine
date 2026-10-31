@@ -60,7 +60,7 @@ class MaintenancePageTests(SimpleTestCase):
 		self.assertIn('new URL("maintenance.html", import.meta.url)', watch)
 		self.assertIn('veil.srcdoc = scene', watch)  # shown from memory: during the outage nothing can serve the file
 		self.assertIn('manageVeil()', bar)
-		self.assertIn('location.replace("/cve/")', bar)
+		self.assertIn('hardReload("/cve/")', bar)
 		self.assertNotIn('location.reload()', bar)
 		self.assertIn('.update-veil', read('web', 'static', 'cve', 'cve.css'))
 		# framed, the page only shows what it is told; alone, it polls for the site itself
@@ -74,6 +74,17 @@ class SiteWatchTests(SimpleTestCase):
 		base = read('web', 'cveFeed', 'templates', 'cveFeed', 'base.html')
 		self.assertIn("cve/sitewatch.js", base)
 		self.assertLess(base.index("cve/sitewatch.js"), base.index("{% if request.user.is_superuser %}<script type=\"module\" src=\"{% asset 'cve/updatebar.js' %}"))
+
+	def test_the_page_comes_back_with_a_hard_reload(self):
+		# a plain reload can keep last release's fonts, images and scene: their URLs carry no content hash
+		watch = read('web', 'static', 'cve', 'sitewatch.js')
+		hard = watch[watch.index('export async function hardReload'):]
+		hard = hard[:hard.index('\n}\n')]
+		self.assertIn('cache: "reload"', hard)
+		self.assertIn('caches.delete', hard)
+		self.assertIn('FRESHEN_MS', hard)  # bounded: a slow file never keeps the scene up
+		self.assertIn('return hardReload();', watch)
+		self.assertNotIn('location.reload();\n      }', watch)
 
 	def test_a_page_opened_before_the_approval_still_follows_the_update(self):
 		bar = read('web', 'static', 'cve', 'updatebar.js')

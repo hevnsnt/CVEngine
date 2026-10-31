@@ -9,6 +9,7 @@ const DOWN_MS = 3000; // once a check failed, look again soon
 const BACK_MS = 4000; // while veiled
 const DOWN_AFTER = 2; // misses in a row before the page is covered: one dropped request is not an outage
 const UP_AFTER = 2; // answers in a row before the page reloads
+const FRESHEN_MS = 6000; // the longest a hard reload waits for files before reloading anyway
 
 let scene = null;
 let veil = null;
@@ -59,6 +60,33 @@ export function hideVeil() {
   document.querySelectorAll(".layout, #main").forEach((n) => n.removeAttribute("inert"));
 }
 
+// A hard reload, as Ctrl+Shift+R would do it: a script cannot ask for one, so the page refetches itself and every file it or the new
+// page use past the browser cache (cache: "reload" overwrites the cached copy), empties Cache Storage, then navigates. After an update
+// that means no stale font, image, scene or module a hashed URL does not cover. Bounded, so a slow file never keeps the veil up.
+export async function hardReload(to = location.href) {
+  const files = new Set();
+  const keep = (u) => {
+    try {
+      const url = new URL(u, location.href);
+      if (url.origin === location.origin && url.pathname.startsWith("/staticfiles/")) files.add(url.href);
+    } catch (_) {}
+  };
+  performance.getEntriesByType("resource").forEach((e) => keep(e.name));
+  const freshen = async () => {
+    try {
+      if (window.caches) await Promise.all((await caches.keys()).map((k) => caches.delete(k)));
+    } catch (_) {}
+    try {
+      const html = await (await fetch(to, { cache: "reload", credentials: "same-origin" })).text();
+      for (const m of html.matchAll(/(?:src|href)="([^"]+)"|"(\/staticfiles\/[^"]+)"/g)) keep(m[1] || m[2]);
+    } catch (_) {}
+    await Promise.all([...files].map((u) => fetch(u, { cache: "reload", credentials: "same-origin" }).catch(() => null)));
+  };
+  await Promise.race([freshen(), new Promise((done) => setTimeout(done, FRESHEN_MS))]);
+  if (to === location.href) location.reload();
+  else location.replace(to);
+}
+
 // the update watcher owns the veil from here on: it knows the phases and where to go when the update is done
 export function manageVeil() {
   managed = true;
@@ -86,7 +114,7 @@ async function check() {
       hits += 1;
       if (hits >= UP_AFTER) {
         showVeil("Back. Reloading.");
-        return location.reload();
+        return hardReload();
       }
       return setTimeout(check, BACK_MS);
     }
