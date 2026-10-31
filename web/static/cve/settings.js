@@ -384,6 +384,7 @@ const sections = {
         dismissed: "A newer version is available (dismissed).",
         approved: "Update approved. Waiting for the host updater to apply it.",
         error: "The last check failed.",
+        unknown: "Whether a newer version is available cannot be told.",
         disabled: "Update checks are turned off.",
       }[s.status];
       const kids = [el("p", "", head, { style: "font-weight:500;margin:0 0 6px" })];
@@ -444,7 +445,7 @@ const sections = {
         kids.push(el("p", "msg err", `The branch has ${s.behind_by} new commit${s.behind_by === 1 ? "" : "s"}, but this server has ${s.local_commits} of its own on top of ${s.common || "it"}, so an update cannot be applied for you (it moves the checkout forward and never merges). On the server run git fetch origin, then git merge origin/${s.branch}, then scripts/update.sh or make up.`));
       else if (s.local_commits > 0 && s.status === "up_to_date")
         kids.push(el("p", "note", `This server has ${s.local_commits} commit${s.local_commits === 1 ? "" : "s"} of its own on top of ${s.branch}; everything on the branch is included.`));
-      if (s.status === "unknown")
+      if (s.status === "unknown" && !s.last_error)
         kids.push(el("p", "msg err", "Whether this server is behind cannot be told: GitHub has never seen the commit it was built from (commits of its own that were not pushed), and the host has not said which commit it shares with the branch. The host updater reports that within half an hour of running; if it is not installed, run scripts/install-updater.sh."));
       if (s.host_comparison) kids.push(el("p", "note", s.host_comparison));
       if (["available", "dismissed", "approved", "diverged"].includes(s.status)) {
