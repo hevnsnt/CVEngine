@@ -630,7 +630,7 @@ class StoredHostTests(TestCase):
 		self.assertLessEqual(big, 12)
 
 	def test_all_projects_view_costs_the_same_however_many_hosts(self):
-		small = self.coverage_cost('_all')
+		small = self.coverage_cost('_all', token=self.superuser_token)  # the same caller for both measures: the query count of a request depends on who asks
 		for i in range(8):
 			self.host(self.da, self.scan_a, f'm{i}.alpha.example.test', f'203.0.113.{150 + i}', [(443, 'https')])
 			self.host(self.db, self.scan_b, f'n{i}.beta.example.test', f'203.0.113.{170 + i}', [(443, 'https')])
