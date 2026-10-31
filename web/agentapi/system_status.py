@@ -55,6 +55,34 @@ def _scanner(admin):
     return scanner_state.status(admin=admin)
 
 
+BUILTIN_ENROLL_GRACE = timedelta(minutes=10)  # a freshly switched-on scanner needs a beat run, the blob and its own start; longer than this is a problem
+
+
+def _builtin_scanner(admin, problems):
+    """The built-in scanner's own block (``agentapi.builtin_scanner.status``: enabled, enrolled, live, last_seen, agent_id, name), ``{'enabled': False}``
+    while the switch is off (no query). With it on and nothing enrolled, the age is that of the one enrollment the server is holding for it (the
+    unredeemed ``SentinelEnrollment``: ``ensure_builtin_scanner`` keeps at most one), the only timestamp there is; with none written yet nothing is
+    claimed. An App Admin gets the problem lines; anyone else gets only whether it is enabled, enrolled and live."""
+    from agentapi import builtin_scanner
+    out = builtin_scanner.status()
+    if not out.get('enabled'):
+        return out
+    now = timezone.now()
+    if admin and not out.get('enrolled'):
+        from agentapi.models import SentinelEnrollment
+        since = SentinelEnrollment.objects.filter(builtin=True, used_at__isnull=True).order_by('created_at').values_list('created_at', flat=True).first()
+        if since and now - since > BUILTIN_ENROLL_GRACE:
+            problems.append(f'built-in scanner: switched on but not enrolled after {int((now - since).total_seconds() // 60)} minutes; check that '
+                            'COMPOSE_PROFILES includes builtin-scanner and read the scanner container log (docker compose logs scanner)')
+    elif admin and not out.get('live'):
+        seen = datetime.fromisoformat(out['last_seen']) if out.get('last_seen') else None
+        heard = f'last heard from {int((now - seen).total_seconds() // 60)} minutes ago' if seen else 'never heard from'
+        problems.append(f'built-in scanner: enrolled but not checking in ({heard}); check the scanner container (docker compose ps scanner)')
+    if not admin:  # the agent's id and name describe the server, not the caller's projects
+        out = {k: out[k] for k in ('enabled', 'enrolled', 'live') if k in out}
+    return out
+
+
 def _update():
     from cveFeed import updater
     phase = updater.read_phase()
@@ -467,11 +495,12 @@ def system_status(ctx):
     if admin and scanner.get('never_seen'):
         problems.append(scanner['never_seen_message'])
     scanning['scanner'] = scanner
+    scanning['builtin_scanner'] = _probe(problems, 'built-in scanner', lambda: _builtin_scanner(admin, problems))
     update = _probe(problems, 'update', _update)
     if update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
     if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
-        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner') if k in scanning}
+        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner', 'builtin_scanner') if k in scanning}
         update = {k: update.get(k) for k in ('phase', 'error') if k in update}
     projects = _probe(problems, 'inventory', lambda: _projects(ctx))
     totals = _totals(projects) if isinstance(projects, list) else None

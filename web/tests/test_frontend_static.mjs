@@ -155,3 +155,25 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
   assert.match(content, /No hosts are due/);
   assert.equal(panel.children.some((child) => child.cls === 'sl-openvas-deferred'), false);
 });
+
+const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
+globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
+const {versionBlock} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge, button} = globalThis.__sentinelUi;\n${settingsSource}`,
+)}`);
+const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
+
+test('a Sentinel card has Update now, the built-in scanner does not and says why', () => {
+  const detail = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  const external = versionBlock(detail, {onChange() {}});
+  assert.deepEqual(buttonLabels(external), ['Update now', 'Settings']);
+  const builtin = versionBlock(detail, {onChange() {}, builtin: true});
+  assert.deepEqual(buttonLabels(builtin), ['Settings']);
+  assert.match(sentinelText(builtin), /never updates itself/);
+  assert.doesNotMatch(sentinelText(external), /never updates itself/);
+});
+
+test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
+  assert.match(sentinelSource, /if \(s\.builtin\) state\.append\(" ", el\("span", "chip sl-builtin", "Built-in"/);
+  assert.match(sentinelSource, /versionBlock\(detail, \{ onChange: reload, builtin: s\.builtin \}\)/);
+});

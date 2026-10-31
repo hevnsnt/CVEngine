@@ -1763,6 +1763,7 @@ def live_overview(ctx):
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
     orgs, org_of = _visible_orgs(ctx.user)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
+    builtin_id = builtin_pk()  # likewise: one read, then each card compares ids
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)
@@ -1770,7 +1771,7 @@ def live_overview(ctx):
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'status': agent.status, 'status_note': agent.status_note,
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
