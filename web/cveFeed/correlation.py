@@ -893,7 +893,13 @@ def close_invalid_correlation(match, reason=None):
 
 def _seedable(verdict, row):
     """The stored verdict a new or moved match may start from: never a clearing one (not_affected) for a version in the affected range
-    that no distribution has patched, whose evidence the verdict was not reached on (the signature does not carry the distro result)."""
+    that no distribution has patched, whose evidence the verdict was not reached on (the signature does not carry the distro result),
+    and never an "affected" one for a match that stands on its version string alone (``match_policy.version_only``): the verdict may
+    have been earned on a host with a template hit or a distribution listing, which this match does not have, and the ceiling
+    (``triage.ceiling``) holds such a match at needs_validation. It starts unjudged instead and is triaged under the ceiling."""
+    if verdict and verdict.ai_verdict == "affected" and match_policy.version_only(
+            row.get("source"), row.get("evidence"), row.get("version_in_range"), row.get("template_result", ""), row.get("distro_status", "")):
+        return None
     if verdict and verdict.ai_verdict == "not_affected":
         if row["evidence"].get("unbounded") and (verdict.ai_reason or '').startswith(match_policy.NO_EVIDENCE):
             return None  # closed for lack of a version bound before the KEV exception: the candidate is wanted now

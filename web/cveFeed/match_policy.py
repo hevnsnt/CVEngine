@@ -80,11 +80,13 @@ def is_version_unknown(evidence, version_in_range, template_result='', distro_st
 
 
 def version_only(source, evidence, version_in_range, template_result='', distro_status=''):
-    """Whether a match stands on nothing but a version string inside an advisory's range: no template hit, no distribution tracker
-    listing, no host-reported inventory (source ``host``), no runZero report. A banner version is the weakest evidence there is (a
-    distribution backports fixes without changing it, a proxy answers for another server), so such a match is a lead to check, never a
-    finding the AI can call affected (``triage.ceiling``)."""
-    return (version_in_range is True and template_result != 'vulnerable' and distro_status != 'vulnerable'
+    """Whether a match stands on nothing but a version string inside an advisory's range (or older than every branch it fixes, which
+    correlation records as ``branch_unlisted`` with no range result: the same string, read against the advisory's branches): no template
+    hit, no distribution tracker listing, no host-reported inventory (source ``host``), no runZero report. A banner version is the
+    weakest evidence there is (a distribution backports fixes without changing it, a proxy answers for another server), so such a match
+    is a lead to check, never a finding the AI can call affected (``triage.ceiling``)."""
+    on_version = version_in_range is True or (version_in_range is None and bool((evidence or {}).get('branch_unlisted')))
+    return (on_version and template_result != 'vulnerable' and distro_status != 'vulnerable'
             and source != 'host' and not (evidence or {}).get('runzero'))
 
 
