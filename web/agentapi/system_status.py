@@ -504,6 +504,8 @@ def system_status(ctx):
         problems.append(scanner['never_seen_message'])
     if admin and scanner.get('unknown_kinds'):
         problems.append(scanner['unknown_kinds_message'])
+    if admin:
+        problems.extend(scanner.get('vantage') or [])  # kinds moved to a scanner that lacks this server's proxy, Tailscale or private-target setting
     scanning['scanner'] = scanner
     scanning['builtin_scanner'] = _probe(problems, 'built-in scanner', lambda: _builtin_scanner(admin, problems))
     update = _probe(problems, 'update', _update)
