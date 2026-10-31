@@ -5,7 +5,7 @@ import {test} from 'node:test';
 // Load the browser module without a DOM; clusterGraph is deliberately a pure
 // transform so shared asset relationships and project boundaries can be tested.
 const source = readFileSync(new URL('../static/cve/graph.js', import.meta.url), 'utf8');
-const {clusterGraph, cloudProjects, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+const {clusterGraph, cloudProjects, focusProject, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
 
 test('groups original bubbles by project and root, with scoped copies of shared IPs', () => {
   const data = {
@@ -95,4 +95,16 @@ test('a cloud takes a slot in the clustered project grid, anchored', () => {
   assert.ok(!view.nodes.some(n => n.id === '__project:big'));
   assert.ok(view.nodes.some(n => n.id === '__project:small'));
   assert.ok(Number.isFinite(view.nodes.find(n => n.id === 'sub:0').seed_x));
+});
+
+test('opening a cloud draws only that project, host by host, with shared addresses kept', () => {
+  const data = bigProject(CLOUD_HOSTS + 1, 3);
+  const view = focusProject(data, 'big');
+  const ids = new Set(view.nodes.map(n => n.id));
+  assert.equal(view.nodes.filter(n => n.kind === 'subdomain').length, CLOUD_HOSTS + 1);
+  assert.ok(ids.has('dom:1') && ids.has('cve:1'));
+  assert.ok(ids.has('ip:big')); // shared by many hosts: kept
+  assert.ok(!ids.has('ip:shared')); // only one of this project's hosts uses it
+  assert.ok(!ids.has('dom:2') && !ids.has('sub:small')); // another project is not drawn
+  assert.ok(view.edges.every(e => ids.has(e.from) && ids.has(e.to)));
 });
