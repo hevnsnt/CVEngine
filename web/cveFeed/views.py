@@ -237,7 +237,24 @@ def graph_payload(domain_id=None, scan_id=None):
         per_project = {slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}
         total_hosts = max(sum(per_project.values()), drawn_hosts)
     return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
-            'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project}}
+            'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project},
+            'projects': _graph_projects(domain_id, scan_id)}
+
+
+def _graph_projects(domain_id=None, scan_id=None):
+    """``{slug: {'name', 'hygiene'}}`` for every project the caller sees: its open, actionable hygiene findings (the dashboard's Hygiene
+    tile), which the graph hangs off the project's cloud beside its fire, smoke and ice hosts. Hygiene findings belong to a target, not
+    a host row, so they are counted here rather than from the drawn hosts. One query."""
+    from django.db.models import Count
+    from cveFeed import counts
+    from dashboard.models import Project
+    hygiene = counts.actionable_hygiene(HygieneFinding.objects.all())
+    if domain_id:
+        hygiene = hygiene.filter(domain_id=domain_id)
+    if scan_id:
+        hygiene = hygiene.none()  # one scan's graph: its hosts only
+    found = dict(hygiene.order_by().values_list('domain__project__slug').annotate(n=Count('id')))
+    return {slug: {'name': name, 'hygiene': found.get(slug, 0)} for slug, name in Project.objects.values_list('slug', 'name')}
 
 
 def _running_scans(ScanHistory):

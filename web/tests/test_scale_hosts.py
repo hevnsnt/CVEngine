@@ -177,3 +177,33 @@ class HostsPageOnceTests(TestCase):
         self.assertEqual(status, 200)
         runs = [q for q in ctx.captured_queries if 'ROW_NUMBER()' in q['sql']]
         self.assertEqual(len(runs), 1)  # it was two: a COUNT and the page
+
+
+class GraphProjectsTests(TestCase):
+    def setUp(self):
+        from cveFeed.models import HygieneFinding
+        now = timezone.now()
+        org = Org.objects.create(name='H', slug='hyg-org')
+        self.p1 = Project.objects.create(name='Hyg One', slug='hyg1', insert_date=now, org=org)
+        self.p2 = Project.objects.create(name='Hyg Two', slug='hyg2', insert_date=now, org=org)
+        d1 = Domain.objects.create(name='one.hyg.test', project=self.p1, insert_date=now)
+        d2 = Domain.objects.create(name='two.hyg.test', project=self.p2, insert_date=now)
+        checks = iter(['spf_missing', 'dmarc_none', 'tls_expired', 'hsts_missing', 'dkim_missing', 'spf_missing'])
+        finding = lambda domain, **kw: HygieneFinding.objects.create(domain=domain, host=domain.name, check_name=next(checks), title='t', **kw)  # noqa: E731
+        finding(d1, severity=2)
+        finding(d1, severity=3)
+        finding(d1, severity=0)  # informational: not actionable
+        finding(d1, severity=3, status='resolved')
+        finding(d1, severity=3, remediation_status='accepted_risk')
+        finding(d2, severity=1)
+
+    def test_each_project_carries_its_open_actionable_hygiene_for_its_cloud(self):
+        self.assertEqual(views.graph_payload()['projects'], {'hyg1': {'name': 'Hyg One', 'hygiene': 2}, 'hyg2': {'name': 'Hyg Two', 'hygiene': 1}})
+
+    def test_a_project_outside_the_callers_scope_is_neither_counted_nor_named(self):
+        from tenancy import scope
+        tokens = scope.set_scope({self.p1.id})
+        try:
+            self.assertEqual(views.graph_payload()['projects'], {'hyg1': {'name': 'Hyg One', 'hygiene': 2}})
+        finally:
+            scope.reset_scope(tokens)
