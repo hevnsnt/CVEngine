@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_SECONDS = 15
 CACHE_KEY = 'cvengine:scanner-state:'  # followed by the raw value of CVENGINE_LOCAL_FALLBACK, so a changed setting is never answered from the old one
+NO_STAGE = ('waf',)  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (drop when one does)
 
 
 def _empty():
@@ -31,7 +32,7 @@ def _compute(now):
     from agentapi import sentinel_broker, sentinel_dispatch
     from agentapi.models import Agent, SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed]
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE]
     if not off:
         return _empty()
     offered = set()

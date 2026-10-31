@@ -28,7 +28,7 @@ from tests.test_wpscan_quick import WP
 from tests.test_wordpress import WordPressFixture
 
 ENV = sentinel_dispatch.LOCAL_FALLBACK_ENV
-ALL_KINDS = list(SentinelTask.KINDS)
+ALL_KINDS = [k for k in SentinelTask.KINDS if k not in scanner_state.NO_STAGE]
 
 
 class FallbackEnv:
@@ -99,6 +99,12 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertEqual(out['never_seen'], out['kinds'])
         self.assertFalse(scanner_state.is_waiting('nmap'))
         self.assertTrue(scanner_state.is_waiting('testssl'))
+
+    def test_a_kind_no_stage_dispatches_never_waits(self):
+        self.policy('none')
+        self.sentinel(['nmap'])
+        self.assertNotIn('waf', scanner_state.state()['kinds'])
+        self.assertFalse(scanner_state.is_waiting('waf'))
 
     def test_a_live_sentinel_for_every_kind_is_not_offline(self):
         self.policy('none')
