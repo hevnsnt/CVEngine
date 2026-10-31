@@ -98,11 +98,47 @@ const CLOUD_EMBERS = 9; // at most this many red sparks inside a cloud, in propo
 const HEATS = ["fire", "smoke", "ice"];
 export const TIERS = [...HEATS, "hygiene"];
 const TIER_NAMES = { fire: "Fire", smoke: "Smoke", ice: "Ice", hygiene: "Hygiene" };
-const CLOUD_CELL = [400, 320]; // a cloud's slot: its halo, its name above, its counts below and its bubbles on an arc to the right
-const TIER_ARC = [-38, -8, 22, 52]; // degrees from the cloud's right, top to bottom, in TIERS order
-// The clouds sit still in a grid (``aspect``: the drawing's width over its height shapes it), in name order so a project is in the same
-// place on every refresh, each with its bubbles on a fixed arc beside it: nothing links one project to another, so a force layout only
-// let clouds overlap and bubbles drift off toward the wrong cloud.
+// A cloud's size says how big the project is: from a few hosts to thousands, on a log scale so a small project is still a cloud.
+export const cloudRadius = (d) => Math.round(Math.min(128, Math.max(58, 58 + 22 * Math.log10((d.hosts || 0) + 1))));
+// Where a cloud's bubbles hang: slots around it that keep clear of its name above and its counts below (degrees, 0 is right).
+const TIER_SLOTS = [-48, 205, 18, 160, 58, 122, -12, 232];
+const TIER_REACH = 34; // from the cloud's rim to a bubble's rim
+const CLOUD_GAP = 6;
+const CLOUD_SNUG = 0.86; // neighbours' outer rings may overlap a little: a cloud's bubbles only take some of its ring
+// The clouds are packed like soap bubbles, biggest in the middle and the rest spiralling out, pushed apart until none touch and
+// pulled toward an ellipse the shape of the drawing (``aspect``: its width over its height). Nothing random goes in, so the same
+// projects come out in the same places on every refresh. A force layout let clouds overlap and bubbles drift to the wrong cloud;
+// a grid read as a spreadsheet.
+function packClouds(clouds, feet, aspect) {
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const squash = Math.max(1, Math.min(aspect, 5));
+  const items = clouds.map((c, i) => {
+    const step = Math.sqrt(i) * (feet.get(c) + CLOUD_GAP) * 1.1;
+    return { c, x: Math.cos(i * golden) * step * Math.sqrt(squash), y: Math.sin(i * golden) * step / Math.sqrt(squash) };
+  });
+  for (let round = 0; round < 260; round++) {
+    const pull = 0.04 * (1 - round / 320);
+    for (const p of items) {
+      p.x -= p.x * pull / squash;
+      p.y -= p.y * pull * squash;
+    }
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const a = items[i], b = items[j];
+        let dx = b.x - a.x, dy = b.y - a.y, dist = Math.hypot(dx, dy);
+        const need = (feet.get(a.c) + feet.get(b.c)) * CLOUD_SNUG + CLOUD_GAP;
+        if (dist >= need) continue;
+        if (dist < 0.01) [dx, dy, dist] = [Math.cos(i + j), Math.sin(i + j), 1];
+        const push = (need - dist) / 2, ux = dx / dist, uy = dy / dist;
+        a.x -= ux * push;
+        a.y -= uy * push;
+        b.x += ux * push;
+        b.y += uy * push;
+      }
+    }
+  }
+  return items;
+}
 export function cloudProjects(data, { aspect = 1.6 } = {}) {
   const counts = new Map();
   for (const n of data.nodes) {
@@ -134,7 +170,8 @@ export function cloudProjects(data, { aspect = 1.6 } = {}) {
   for (const slug of big) {
     const t = { fire: 0, smoke: 0, ice: 0, ...heat.get(slug), hygiene: (about[slug] && about[slug].hygiene) || 0 };
     const cloud = { id: `__cloud:${slug}`, kind: "cloud", label: names.get(slug) || (about[slug] && about[slug].name) || slug, project: slug,
-      hosts: counts.get(slug), findings: t.fire + t.smoke + t.ice, hygiene: t.hygiene };
+      hosts: counts.get(slug), findings: t.fire + t.smoke + t.ice, hygiene: t.hygiene,
+      hot: t.fire ? "fire" : t.smoke ? "smoke" : t.ice ? "ice" : "calm" }; // its aura: the worst heat among its hosts
     clouds.push(cloud);
     for (const tier of TIERS) {
       if (!t[tier]) continue;
@@ -142,14 +179,19 @@ export function cloudProjects(data, { aspect = 1.6 } = {}) {
       edges.push({ from: cloud.id, to: `__tier:${slug}:${tier}` });
     }
   }
-  clouds.sort((a, b) => a.label.localeCompare(b.label));
-  const columns = Math.max(1, Math.min(clouds.length, Math.round(Math.sqrt(clouds.length * aspect * CLOUD_CELL[1] / CLOUD_CELL[0]))));
-  clouds.forEach((cloud, i) => {
-    const x = (i % columns) * CLOUD_CELL[0], y = Math.floor(i / columns) * CLOUD_CELL[1];
-    Object.assign(cloud, { seed_x: x, seed_y: y, anchored: true });
+  clouds.sort((a, b) => b.hosts - a.hosts || a.label.localeCompare(b.label));
+  const feet = new Map(clouds.map((cloud) => { // a cloud and the ring its bubbles hang in
+    const own = tiers.filter((t) => t.project === cloud.project);
+    return [cloud, cloudRadius(cloud) + (own.length ? TIER_REACH + 10 + 2 * Math.max(...own.map(tierRadius)) + 14 : 34)];
+  }));
+  packClouds(clouds, feet, aspect).forEach(({ c: cloud, x, y }, i) => {
+    Object.assign(cloud, { seed_x: x, seed_y: y, anchored: true, order: i });
+    const r = cloudRadius(cloud);
+    const start = Math.floor(unit(cloud.project) * TIER_SLOTS.length); // each cloud wears its bubbles its own way round
     tiers.filter((t) => t.project === cloud.project).forEach((t, j) => {
-      const a = TIER_ARC[j] * Math.PI / 180, reach = CLOUD_R + 26 + tierRadius(t);
-      Object.assign(t, { seed_x: x + Math.cos(a) * reach, seed_y: y + Math.sin(a) * reach, anchored: true });
+      const a = TIER_SLOTS[(start + j * 3) % TIER_SLOTS.length] * Math.PI / 180;
+      const reach = r + TIER_REACH + tierRadius(t) + (j % 2) * 10;
+      Object.assign(t, { seed_x: x + Math.cos(a) * reach, seed_y: y + Math.sin(a) * reach, anchored: true, order: i, slot: j });
     });
   });
   // an IP or CVE that only clouded hosts pointed at goes with them
@@ -208,8 +250,9 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
       positions.set(project.cloud.id, [x, y]);
       anchored.add(project.cloud.id);
       data.edges.filter(edge => edge.from === project.cloud.id).forEach(edge => {
-        const angle = stableAngle(edge.to);
-        positions.set(edge.to, [x + Math.cos(angle) * (CLOUD_R + 60), y + Math.sin(angle) * (CLOUD_R + 60)]);
+        const tier = originals.get(edge.to), angle = stableAngle(edge.to);
+        positions.set(edge.to, Number.isFinite(tier?.seed_x) ? [x + tier.seed_x - project.cloud.seed_x, y + tier.seed_y - project.cloud.seed_y]
+          : [x + Math.cos(angle) * (CLOUD_R + 60), y + Math.sin(angle) * (CLOUD_R + 60)]);
       });
       return;
     }
@@ -348,6 +391,7 @@ const svgEl = (tag, attrs = {}, cls = "") => {
 const unit = (seed) => stableAngle(seed) / (2 * Math.PI); // a stable 0..1 from a string
 function cloudArt(d) {
   const id = `cloud${++cloudSeq}`;
+  const R = cloudRadius(d);
   const under = svgEl("g", {}, "cloud-under");
   const defs = svgEl("defs");
   const glow = svgEl("radialGradient", { id: `${id}-glow` });
@@ -355,15 +399,15 @@ function cloudArt(d) {
   const body = svgEl("radialGradient", { id: `${id}-body`, cx: "38%", cy: "32%", r: "75%" });
   body.append(svgEl("stop", { offset: "0%" }, "cg-body-in"), svgEl("stop", { offset: "70%" }, "cg-body-mid"), svgEl("stop", { offset: "100%" }, "cg-body-out"));
   defs.append(glow, body);
-  under.append(defs, svgEl("circle", { r: CLOUD_R + 34, fill: `url(#${id}-glow)` }, "cloud-halo"));
+  under.append(defs, svgEl("circle", { r: R + 34, fill: `url(#${id}-glow)` }, "cloud-halo"));
 
   const over = svgEl("g", {}, "cloud-over");
-  over.append(svgEl("circle", { r: CLOUD_R - 12 }, "cloud-orbit"), svgEl("circle", { r: CLOUD_R + 12 }, "cloud-orbit cloud-orbit-2"));
+  over.append(svgEl("circle", { r: R - 12 }, "cloud-orbit"), svgEl("circle", { r: R + 12 }, "cloud-orbit cloud-orbit-2"));
   const bubbles = svgEl("g", {}, "cloud-bubbles");
   const embers = Math.min(CLOUD_EMBERS, d.findings ? Math.max(1, Math.round((d.findings / Math.max(d.hosts, 1)) * 60)) : 0);
   for (let i = 0; i < CLOUD_BUBBLES; i++) {
     const a = unit(`${d.id}:${i}`) * 2 * Math.PI;
-    const reach = (CLOUD_R - 14) * Math.sqrt(0.08 + 0.92 * unit(`${d.id}:${i}:r`));
+    const reach = (R - 14) * Math.sqrt(0.08 + 0.92 * unit(`${d.id}:${i}:r`));
     const ember = i < embers;
     const size = ember ? 2.6 + unit(`${d.id}:${i}:s`) * 1.8 : 2 + unit(`${d.id}:${i}:s`) ** 2 * 7;
     const c = svgEl("circle", { cx: (Math.cos(a) * reach).toFixed(1), cy: (Math.sin(a) * reach).toFixed(1), r: size.toFixed(1) }, ember ? "cb cb-ember" : "cb");
@@ -373,18 +417,28 @@ function cloudArt(d) {
   }
   for (let i = 0; i < 6; i++) { // twinkles on the rim
     const a = unit(`${d.id}:tw${i}`) * 2 * Math.PI;
-    const c = svgEl("circle", { cx: (Math.cos(a) * (CLOUD_R + 4)).toFixed(1), cy: (Math.sin(a) * (CLOUD_R + 4)).toFixed(1), r: 1.6 }, "cloud-twinkle");
+    const c = svgEl("circle", { cx: (Math.cos(a) * (R + 4)).toFixed(1), cy: (Math.sin(a) * (R + 4)).toFixed(1), r: 1.6 }, "cloud-twinkle");
     c.style.animationDelay = `-${(unit(`${d.id}:tw${i}:d`) * 4).toFixed(1)}s`;
     bubbles.append(c);
   }
-  const count = svgEl("text", { y: 6, "text-anchor": "middle" }, "cloud-n");
+  if (d.hot === "fire") { // a cloud with hosts on fire throws sparks off its top
+    for (let i = 0; i < 9; i++) {
+      const a = (-150 + unit(`${d.id}:fl${i}`) * 120) * Math.PI / 180;
+      const c = svgEl("circle", { cx: (Math.cos(a) * (R - 2)).toFixed(1), cy: (Math.sin(a) * (R - 2)).toFixed(1), r: (1.4 + unit(`${d.id}:fl${i}:s`) * 1.8).toFixed(1) }, "cloud-spark");
+      c.style.animationDuration = `${(1.8 + unit(`${d.id}:fl${i}:t`) * 1.6).toFixed(1)}s`;
+      c.style.animationDelay = `-${(unit(`${d.id}:fl${i}:d`) * 3).toFixed(1)}s`;
+      bubbles.append(c);
+    }
+  }
+  const count = svgEl("text", { y: Math.round(R * 0.1), "text-anchor": "middle" }, "cloud-n");
+  count.style.fontSize = `${Math.round(R * 0.38)}px`;
   count.textContent = Number(d.hosts || 0).toLocaleString();
-  const unitText = svgEl("text", { y: 24, "text-anchor": "middle" }, "cloud-u");
+  const unitText = svgEl("text", { y: Math.round(R * 0.1) + 18, "text-anchor": "middle" }, "cloud-u");
   unitText.textContent = "hosts";
-  const found = svgEl("text", { y: CLOUD_R + 26, "text-anchor": "middle" }, "cloud-f");
+  const found = svgEl("text", { y: R + 26, "text-anchor": "middle" }, "cloud-f");
   found.textContent = d.findings ? `${d.findings} with findings` : "no findings";
   found.classList.toggle("cloud-calm", !d.findings);
-  const hint = svgEl("text", { y: CLOUD_R + 42, "text-anchor": "middle" }, "cloud-hint");
+  const hint = svgEl("text", { y: R + 42, "text-anchor": "middle" }, "cloud-hint");
   hint.textContent = "double-click to open";
   over.append(bubbles, count, unitText, found, hint);
   return { under, over, fill: `url(#${id}-body)` };
@@ -401,13 +455,47 @@ function refreshCloud(ui, d) {
   if (t) t.textContent = `${d.label}: ${d.hosts} hosts, ${d.findings} with findings. Double-click to open it.`;
 }
 const TIER_TIPS = { fire: "hosts on fire", smoke: "hosts in smoke", ice: "hosts on ice", hygiene: "open hygiene findings" };
+// What a bubble does: fire flickers and throws sparks, smoke puffs, ice wears a turning ring of frost, hygiene a sweeping scan.
+// Placed and timed from its id like a cloud's, and all of it CSS, so reduced motion stops it.
+function tierWeather(d, r) {
+  const fx = svgEl("g", {}, "tier-fx");
+  const timed = (el, key, base, spread) => {
+    el.style.animationDuration = `${(base + unit(`${d.id}:${key}:t`) * spread).toFixed(2)}s`;
+    el.style.animationDelay = `-${(unit(`${d.id}:${key}:d`) * (base + spread)).toFixed(2)}s`;
+    return el;
+  };
+  if (d.tier === "fire") {
+    fx.append(svgEl("circle", { r: r + 7 }, "tier-flare"));
+    for (let i = 0; i < 7; i++) {
+      const x = (unit(`${d.id}:s${i}`) - 0.5) * r * 1.3;
+      fx.append(timed(svgEl("circle", { cx: x.toFixed(1), cy: (-r * 0.55).toFixed(1), r: (1.3 + unit(`${d.id}:s${i}:r`) * 1.6).toFixed(1) }, "tier-spark"), `s${i}`, 1.2, 1.3));
+    }
+  } else if (d.tier === "smoke") {
+    for (let i = 0; i < 3; i++) {
+      const x = (unit(`${d.id}:w${i}`) - 0.5) * r;
+      fx.append(timed(svgEl("circle", { cx: x.toFixed(1), cy: (-r * 0.6).toFixed(1), r: (r * 0.42).toFixed(1) }, "tier-wisp"), `w${i}`, 3.2, 2));
+    }
+  } else if (d.tier === "ice") {
+    fx.append(svgEl("circle", { r: r + 6 }, "tier-frost"), svgEl("circle", { r: r + 11 }, "tier-frost tier-frost-2"));
+  } else if (d.tier === "hygiene") {
+    const sweep = svgEl("circle", { r: r + 6 }, "tier-sweep");
+    sweep.setAttribute("stroke-dasharray", `${(2 * Math.PI * (r + 6) * 0.22).toFixed(1)} ${(2 * Math.PI * (r + 6)).toFixed(1)}`);
+    fx.append(sweep);
+  }
+  return fx;
+}
 function refreshTier(ui, d) {
   const n = ui.querySelector(".tier-n");
   if (n) n.textContent = Number(d.count || 0).toLocaleString();
   const r = tierRadius(d);
   ui.querySelector("circle:not(.ring)")?.setAttribute("r", r);
   ui.querySelector(".ring")?.setAttribute("r", r + 5);
-  ui.querySelector("text")?.setAttribute("x", r + 5);
+  const label = ui.querySelector("text");
+  label?.setAttribute("x", 0);
+  label?.setAttribute("y", r + 16);
+  label?.setAttribute("text-anchor", "middle");
+  ui.querySelector(".tier-fx")?.remove();
+  ui.querySelector(".tier-body")?.before(tierWeather(d, r));
   const t = ui.querySelector("title");
   if (t) t.textContent = `${d.project_name}: ${d.count} ${TIER_TIPS[d.tier]}. Click for the list, double-click to open the project.`;
 }
@@ -670,6 +758,11 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       g.setAttribute("role", "button");
       g.setAttribute("tabindex", "0");
       g.dataset.heat = d.heat || d.tier || "";
+      if (d.kind === "cloud") g.dataset.hot = d.hot || "calm";
+      if (d.kind === "cloud" || d.kind === "tier") { // they arrive one cloud at a time, biggest first, each followed by its bubbles
+        g.style.setProperty("--i", d.order || 0);
+        g.style.setProperty("--j", d.slot || 0);
+      }
       g.dataset.k = d.kind;
       g.style.touchAction = "none";
       g.setAttribute(
@@ -678,7 +771,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
           ? `${d.label}, ${d.status || "unscanned"}`
           : `${d.kind} ${d.label}`,
       );
-      const r = d.kind === "cloud" ? CLOUD_R : d.kind === "tier" ? tierRadius(d) : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
+      const r = d.kind === "cloud" ? cloudRadius(d) : d.kind === "tier" ? tierRadius(d) : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
       const ring = document.createElementNS(NS, "circle");
       ring.setAttribute("class", "ring");
       ring.setAttribute("r", r + 5);
@@ -776,6 +869,13 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     l.setAttribute("stroke", link.fromId.startsWith('__project:') || link.fromId.startsWith('__root:') ? css('--graph-link-hi') : css('--line-2'));
     l.setAttribute("stroke-width", link.fromId.startsWith('__project:') ? '1.8' : '1');
     if (link.data?.crossCluster) l.setAttribute('stroke-dasharray', '4 4');
+    if (link.toId.startsWith('__tier:')) { // a bubble hangs off its cloud on a tether that flows with its colour
+      const tier = graph.getNode(link.toId)?.data || {};
+      l.setAttribute('class', 'gl-tether');
+      l.dataset.heat = tier.tier || '';
+      l.style.setProperty('--i', tier.order || 0);
+      l.style.setProperty('--j', tier.slot || 0);
+    }
     l.__from = link.fromId;
     l.__to = link.toId;
     linkUis.set(link.id, l);
