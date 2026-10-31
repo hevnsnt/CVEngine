@@ -17,6 +17,7 @@ import secrets
 import socket
 import threading
 import time
+import zlib
 from urllib.parse import urljoin, urlparse
 
 from cveFeed import fingerprint, soft404, versions
@@ -464,23 +465,30 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         if content_encoding in ('', 'identity'):
             raw = response.read(max_bytes) or b''
         elif content_encoding in ('gzip', 'deflate'):
-            import zlib
-            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if content_encoding == 'gzip' else zlib.MAX_WBITS)
+            decoder = None
             parts = []
             remaining = max_bytes
             compressed_budget = min(MAX_PROBE_BYTES + 4096, max_bytes + 4096)
-            while remaining and compressed_budget and not decoder.eof:
+            while remaining and compressed_budget and not (decoder and decoder.eof):
                 chunk = response.read(min(4096, compressed_budget))
                 if not chunk:
                     break
                 compressed_budget -= len(chunk)
+                if decoder is None:  # 'deflate' is a zlib stream per the RFC, but some devices send a raw deflate stream with no header
+                    if content_encoding == 'gzip':
+                        wbits = 16 + zlib.MAX_WBITS
+                    elif len(chunk) >= 2 and chunk[0] & 0x0F == 8 and ((chunk[0] << 8) | chunk[1]) % 31 == 0:
+                        wbits = zlib.MAX_WBITS
+                    else:
+                        wbits = -zlib.MAX_WBITS
+                    decoder = zlib.decompressobj(wbits)
                 try:
                     decoded = decoder.decompress(chunk, remaining)
                 except zlib.error as exc:
                     raise ValueError('invalid compressed probe response') from exc
                 parts.append(decoded)
                 remaining -= len(decoded)
-            if remaining and not decoder.eof:
+            if remaining and decoder is not None and not decoder.eof:
                 raise ValueError('incomplete compressed probe response')
             raw = b''.join(parts)
         else:
