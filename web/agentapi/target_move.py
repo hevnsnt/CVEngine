@@ -77,7 +77,7 @@ def move_target(ctx, source, dest, name, discover=True, whole_target=False):
     writing under the old project); with ``discover`` the moved target is scanned in its new project, and the scan updates the same records."""
     from agentapi.host_manage import MOVE_LIST_MAX, _stop_scans_under
     from agentapi.services import ApiError, _not_internal
-    from cveFeed.discovery import start_discoveries
+    from cveFeed.discovery import start_in_stored_modes
     from cveFeed.exclusions import is_excluded
     from cveFeed.models import HostMove
     domains, hosts = moving(source, name)
@@ -98,7 +98,7 @@ def move_target(ctx, source, dest, name, discover=True, whole_target=False):
     scan_ids = []
     if discover:
         root = [d for d in _not_internal(dest, domains) if d.name.lower() == name]
-        scan_ids = [scan.id for scan in start_discoveries(root, initiated_by=ctx.user)]
+        scan_ids = [scan.id for scan in start_in_stored_modes(root, initiated_by=ctx.user)]
     from cveFeed.admin_api import audit
     audit(ctx.user, 'host.move', f'{name} from {source.slug} to {dest.slug}', source.org, project=source.slug, host=name, to_project=dest.slug,
           hosts_moved=len(hosts), repointed=True, targets=counts['targets'])

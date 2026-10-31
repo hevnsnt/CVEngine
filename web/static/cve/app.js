@@ -1891,6 +1891,7 @@ function allTargets(mount) {
       withProject([
         { label: "Target", render: (t) => hostLink(t.name, projectOf(t)) },
         { label: "Scope", render: (t) => (t.host_scoped ? "this host only" : t.scope_mode === "parent" ? "includes parent domain" : "auto") },
+        { label: "Discovery", render: (t) => (t.discovery_mode === "manual" ? "manual only" : t.discovery_mode || "standard") },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2028,6 +2029,36 @@ const pages = {
       box.append(pick, note);
       return box;
     };
+    // The mode discovery runs in whenever it starts on its own (the work conductor's rescans, the weekly sweeps). "Manual only" is
+    // "just add it, do not scan yet": nothing automatic scans it until a person picks a mode here and presses Discover or Scan.
+    const discoveryCell = (t) => {
+      const pick = el("select", "", null, { "aria-label": `Discovery mode of ${t.name}` });
+      for (const [value, label] of [
+        ["standard", "Standard"],
+        ["deep", "Deep"],
+        ["passive", "Passive (public sources only)"],
+        ["manual", "Manual only (never scanned automatically)"],
+      ]) {
+        const o = el("option", "", label, { value });
+        o.selected = t.discovery_mode === value;
+        pick.append(o);
+      }
+      pick.onchange = async () => {
+        pick.disabled = true;
+        try {
+          const r = await post(`targets/${t.id}/discovery-mode`, { discovery_mode: pick.value });
+          t.discovery_mode = r.discovery_mode;
+          toast(`${t.name}: discovery ${r.discovery_mode}`);
+        } catch (err) {
+          pick.value = t.discovery_mode;
+          toast(err.message, true);
+        }
+        pick.disabled = false;
+      };
+      const box = el("div", "scope-cell");
+      box.append(pick);
+      return box;
+    };
     const rowBox = (t) => {
       const b = el("input", "", null, { type: "checkbox", "aria-label": `Select ${t.name}` });
       b.checked = allMatching || selected.has(t.id);
@@ -2061,6 +2092,7 @@ const pages = {
         { label: "", cls: "sel", head: () => headBox, render: rowBox },
         { label: "Target", render: (t) => hostLink(t.name) },
         { label: "Scope", render: (t) => scopeCell(t) },
+        { label: "Discovery", render: (t) => discoveryCell(t) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -3570,7 +3602,7 @@ pages.hygiene = function hygiene(mount) {
   }).start();
 
   const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS and email authentication"));
+  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
   const tools = el("div", "tools");
   const sev = picker(
     "Severity",
@@ -3590,6 +3622,7 @@ pages.hygiene = function hygiene(mount) {
     [
       ["", "All areas"],
       ["tls", "TLS and certificates"],
+      ["cleartext", "Cleartext services"],
       ["spf", "SPF"],
       ["dkim", "DKIM"],
       ["dmarc", "DMARC"],
@@ -3615,7 +3648,7 @@ pages.hygiene = function hygiene(mount) {
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
     empty:
-      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC all look healthy.",
+      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
     onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },

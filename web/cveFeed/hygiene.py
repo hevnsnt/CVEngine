@@ -1,4 +1,4 @@
-"""Domain and TLS hygiene: certificate validity and expiry, TLS configuration, and SPF / DKIM / DMARC.
+"""Domain and TLS hygiene: certificate validity and expiry, TLS configuration, SPF / DKIM / DMARC, and cleartext services (cveFeed.cleartext).
 
 Evaluators are pure functions over plain data (records, cert info) so every rule is unit tested; the
 network helpers (DNS via dnspython, TLS via ssl) are thin and injectable. Each run upserts findings and
@@ -589,7 +589,17 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             f'MailFail checks (Black Hills Information Security) on {shown}: {issues} issue{"s" if issues != 1 else ""}'),
             credit=CREDIT, mail_domains=len(mail_hosts), issues=issues)
 
-    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_')))  # the tailnet, testssl.sh, cloud storage and UDP checks keep their own
+    cleartext_found, cleartext_ok = [], True  # Telnet, FTP, rlogin and a plain-HTTP login, from the ports and routes already stored: no probe
+    try:
+        from cveFeed import cleartext
+        cleartext_found = cleartext.findings_for(domain, hosts=hosts)
+    except Exception:  # noqa: BLE001 - the rest of the review stands on its own, and an open finding is not resolved for want of an answer
+        cleartext_ok = False
+        logger.exception('cleartext service check failed for %s', domain.name)
+    found += cleartext_found
+
+    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_'))  # the tailnet, testssl.sh, cloud storage and UDP checks keep their own
+                           and (cleartext_ok or not check.startswith('cleartext_')))
     try:  # the medium and worse findings are triaged (impact and a fix); never fatal to the check
         from cveFeed import triage
         triage.triage_hygiene(domain_id)
@@ -597,7 +607,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
         logger.exception('could not triage the hygiene findings of %s', domain.name)
     worst = max((f.severity for f in found if f.severity >= LOW), default=-1)
     counts = {'tls_hosts': probed, 'mail_domains': len(mail_hosts), 'findings': len([f for f in found if f.severity >= LOW]),
-              'resolved': len(stale), 'cert_changes': cert_changes}
+              'resolved': len(stale), 'cert_changes': cert_changes, 'cleartext': len(cleartext_found)}
     activity.settle(running, 'done', message=(
         f'Hygiene check of {domain.name}: {probed} certificate{"s" if probed != 1 else ""}, '
         f'{counts["findings"]} issue{"s" if counts["findings"] != 1 else ""}'

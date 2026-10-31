@@ -68,6 +68,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_NAABU` | `1` | Anything other than `1`, `true`, `yes`, or `on` (an empty value too) turns off the naabu full-port discovery that runs ahead of nmap by default (see [Pipeline](PIPELINE.md)). |
 | `CVENGINE_NAABU_BIN`, `CVENGINE_NAABU_RATE` | `naabu`, `1000` | The binary and packets per second (100 to 5000). |
 | `CVENGINE_HYGIENE_RDAP` | `1` | `0` skips the registry lookups that check whether SPF includes and DMARC report domains are registered. |
+| `CVENGINE_HYGIENE_CLEARTEXT` | `1` | `0`, `false`, `no` or `off` turns off the cleartext service findings (open Telnet, FTP without TLS, rlogin and rsh, a login page over plain HTTP; see [Pipeline](PIPELINE.md#stages)). None is made and the open ones resolve at the next hygiene run. |
 | `CVENGINE_SHOT_THRESHOLD` | `12` | Bits (of 64) by which screenshot hashes must differ to count as a changed front page. |
 | `CVENGINE_RETEST_MAX_HOSTS` | `25` | Hosts re-tested per source scan. The rest wait for the five-minute sweep. |
 | `CVENGINE_WPSCAN_MAX_SITES`, `CVENGINE_WPSCAN_TIMEOUT`, `CVENGINE_WPSCAN_STAGE_SECONDS` | `20`, `900`, `3600` | The quick pass: WordPress sites WPScan checks per scan, seconds allowed per site, and seconds the whole stage may use (candidates beyond either limit are recorded as waiting and go first next time, longest-waiting first). |

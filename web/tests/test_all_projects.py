@@ -293,7 +293,7 @@ class AllProjectsReadOnlyTests(AllProjectsBase):
 		self.assertGreater(len(writes), 15)
 		for method, pattern in writes:
 			path = re.sub(r'\(\?P<(\w+)>[^)]*\)', lambda m: {'slug': '_all', 'host': 'x.example.com', 'service': 'shodan', 'kind': 'match'}.get(m.group(1), '1'), pattern)
-			status, body = bearer(token, method, f'/api/v1/{path}', {'value': 'x.example.com', 'status': 'open', 'scope_mode': 'host', 'target_id': 1})
+			status, body = bearer(token, method, f'/api/v1/{path}', {'value': 'x.example.com', 'status': 'open', 'scope_mode': 'host', 'discovery_mode': 'standard', 'target_id': 1})
 			self.assertEqual(status, 400, (method, path, body))
 			self.assertEqual(body['error'], 'pick a project to make changes', (method, path))
 

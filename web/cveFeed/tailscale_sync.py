@@ -326,12 +326,12 @@ def queue_scans(link, pending, now):
     if pause_requested():
         return 0, 'scanning is paused'
     from cveFeed import activity
-    from cveFeed.discovery import start_discoveries
+    from cveFeed.discovery import start_in_stored_modes
     from cveFeed.models import TailscaleDevice
     batch = pending[:link.max_devices]
     domains = [r.domain for r in batch if r.domain is not None]
     try:
-        start_discoveries(domains, quiet=True)
+        start_in_stored_modes(domains, quiet=True)
     except RuntimeError as exc:  # no scan engine configured
         return 0, str(exc)[:200]
     TailscaleDevice.objects.filter(pk__in=[r.pk for r in batch]).update(scan_queued_at=now)

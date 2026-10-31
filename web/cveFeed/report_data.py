@@ -228,11 +228,13 @@ def _hygiene_group(check):
         return 'TLS and certificates'
     if check.startswith(('spf_', 'dmarc_', 'dkim_', 'mx_', 'mta_', 'bimi_', 'smtp_')):
         return 'Email'
+    if check.startswith('cleartext_'):  # Telnet, FTP, rlogin and a plain-HTTP login (cveFeed.cleartext)
+        return 'Cleartext services'
     return 'Other configuration'
 
 
 def _hygiene(qs, cap):
-    """Hygiene findings (TLS, certificates, email) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
+    """Hygiene findings (TLS, certificates, email, cleartext services) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
     from agentapi import services as svc
     groups = {}
     for f in qs[:cap]:
@@ -244,7 +246,7 @@ def _hygiene(qs, cap):
             'evidence': [{'label': clean(k, 40), 'value': clean(v, 160)} for k, v in list((f.evidence or {}).items())[:6]],
             'remediation': clean(verdict.remediation if verdict else '', 800), 'tracking': _tracking(f),
             'first_seen': _date(f.first_seen)})
-    return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Other configuration') if name in groups]
+    return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Cleartext services', 'Other configuration') if name in groups]
 
 
 # --- hosts ---------------------------------------------------------------------------------------------------------------------
