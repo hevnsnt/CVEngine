@@ -110,6 +110,13 @@ which send nothing to the target and need no vantage point.
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
+  - *Built (server side, dormant):* `POST /api/v1/sentinel/tasks/<id>/secret` (`agentapi.sentinel_broker.read_secret`). The task
+    carries `secret_ref` (an `AuthCredential` reference) and `secret_read_at`. Only the built-in agent, for its own claimed or
+    running task, may call it. An atomic update of `secret_read_at` is won before anything is decrypted, so it answers once
+    (409 after). Every call is audited as `sentinel.secret.read`. The broker leaves a `secret_ref` task out of next-task, queue and
+    capacity for every other Sentinel. Rate limited.
+  - *Not built:* the scanner client that calls it, and any dispatch of signed-in work (nothing sets `secret_ref`; the dispatch
+    wrappers still keep `secret_file` passes on the server).
 - **Updates**: the release manifest pins `(server tag, scanner digest)` and the updater swaps the pair with rollback. The
   built-in never updates itself. The version check compares against the digest the server expects, not GitHub's head.
 - **Contract**: the file gains a `targets` half (server to scanner) next to `results`, a `contract_version` declared at
