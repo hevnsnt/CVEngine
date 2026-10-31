@@ -366,6 +366,9 @@ a.cve-link{font-family:var(--mono)}
 /* update bar */
 .updatebar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px var(--gutter);background:var(--brand);color:var(--on-brand);font-size:14px;font-weight:600}
 .updatebar .btn.ghost{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
+.scannerbar{padding:8px var(--gutter);background:var(--ice-bg);color:var(--ice-ink);border-bottom:1px solid var(--ring-ice);font-size:14px;line-height:1.4}
+.scannerbar p{margin:0;overflow-wrap:anywhere}.scannerbar p+p{margin-top:4px}
+.scannerbar .sb-never{padding:6px 10px;margin:6px 0 0;background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:600}
 .updatebar span{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
 
 /* ================= live dashboard ================= */

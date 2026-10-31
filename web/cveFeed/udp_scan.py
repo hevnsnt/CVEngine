@@ -563,6 +563,10 @@ def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
     from reNgine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_UDPSCAN is off'}
+    from agentapi import scanner_state
+    waiting = scanner_state.skip_note('nmap_udp')  # no scanner can run it and this server may not: nothing is dispatched, raised or logged
+    if waiting:
+        return {'skipped': waiting}
     if coverage_topup.backlog_exists():
         coverage_topup.log_deferral('UDP scan')
         return {'skipped': 'coverage backlog: first-pass hosts are still outstanding'}

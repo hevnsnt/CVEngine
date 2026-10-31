@@ -58,6 +58,18 @@ def bounty_blocked_projects():
     return set(BountyEngagement.objects.exclude(confirmed).values_list('project_id', flat=True))
 
 
+# The kinds of work this conductor itself starts: one discovery scan (bbot, which runs on this server) per target. It has no per-kind work to hold back
+# while a scanner is offline, so ``scanner_state`` only annotates its rounds; the sweeps that dispatch one kind on their own schedule are the ones that
+# stop (testssl, UDP, WPScan), and they do it themselves.
+def scanner_waiting():
+    """The kinds waiting for a scanner (``agentapi.scanner_state``), for the round's record; never raises, and never changes what the round does."""
+    try:
+        from agentapi import scanner_state
+        return scanner_state.waiting_kinds()
+    except Exception:  # noqa: BLE001 - a note about the scanners must not stop the conductor
+        return []
+
+
 def next_targets(limit, now=None):
     """The targets to scan next, most overdue first: never scanned, then longest since the last scan. At most one per project, none
     with a scan going, none scanned inside the minimum gap, none excluded."""
@@ -107,6 +119,9 @@ def keep_work_queued():
     from cveFeed.scan_control import pause_requested
     depth = wanted_depth()
     result = {'at': timezone.now().isoformat(), 'depth': depth, 'started': 0}
+    waiting = scanner_waiting()
+    if waiting:
+        result['scanner_waiting'] = waiting  # shown with the round: scans still start (discovery runs here), their dispatched stages wait for a scanner
     if not depth:
         result['skipped'] = 'off'
     elif pause_requested():

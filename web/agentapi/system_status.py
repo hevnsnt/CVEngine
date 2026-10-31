@@ -48,6 +48,13 @@ def _scanning():
             'by': row.actor or None, 'changed_at': _iso(row.changed_at), 'last_error': row.last_error or None}
 
 
+def _scanner(admin):
+    """The derived "scanner offline" state (``agentapi.scanner_state``): the kinds that may not run on this server and have no live scanner, the ones no
+    scanner ever registered for, and the wording the interface shows. Read only; nothing is paused or failed by it."""
+    from agentapi import scanner_state
+    return scanner_state.status(admin=admin)
+
+
 def _update():
     from cveFeed import updater
     phase = updater.read_phase()
@@ -454,11 +461,17 @@ def system_status(ctx):
     scanning = _probe(problems, 'scan control', _scanning)
     if scanning.get('paused'):
         notes.append('scanning is paused' + (f": {scanning['reason']}" if admin and scanning.get('reason') else ''))
+    scanner = _probe(problems, 'scanner', lambda: _scanner(admin))
+    if scanner.get('message'):
+        notes.append(scanner['message'])
+    if admin and scanner.get('never_seen'):
+        problems.append(scanner['never_seen_message'])
+    scanning['scanner'] = scanner
     update = _probe(problems, 'update', _update)
     if update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
     if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
-        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error') if k in scanning}
+        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner') if k in scanning}
         update = {k: update.get(k) for k in ('phase', 'error') if k in update}
     projects = _probe(problems, 'inventory', lambda: _projects(ctx))
     totals = _totals(projects) if isinstance(projects, list) else None
