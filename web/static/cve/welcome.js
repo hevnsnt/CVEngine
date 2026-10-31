@@ -134,26 +134,37 @@ const steps = {
 
   ai(node) {
     const key = el('input', '', null, { type: 'password', autocomplete: 'new-password', spellcheck: 'false', placeholder: 'sk-ant-...  or  sk-...' });
-    const hint = el('p', 'note', 'Paste an Anthropic, OpenAI or OpenRouter key and we will detect which one it is (Ollama, vLLM and LM Studio are set up in Settings). It is stored in your database and never shown again.', { style: 'margin:6px 0 0' });
+    const hint = el('p', 'note', 'Paste an Anthropic (sk-ant-...), OpenRouter (sk-or-...) or OpenAI (sk-proj-...) key and we will detect which one it is; for any other key you choose the provider. Ollama, vLLM, LM Studio and other OpenAI-compatible services are set up in Settings. The key is stored in your database and never shown again.', { style: 'margin:6px 0 0' });
+    // A bare sk- key is issued by more than one vendor: it is never guessed onto one, the person says whose it is.
+    const pick = el('select');
+    pick.append(Object.assign(el('option'), { value: '', textContent: 'Choose the provider' }),
+      ...Object.entries(NAMES).map(([id, label]) => Object.assign(el('option'), { value: id, textContent: label })));
+    const pickField = field('Provider', pick, 'Many vendors issue keys that start with sk- (OpenAI, DeepSeek and others), so choose the one this key belongs to: the key is sent only there. For another vendor with an OpenAI-compatible API, finish in Settings > AI model with its Base URL.');
+    pickField.style.display = 'none';
+    const detect = () => api('POST', '/cve/api/setup/detect', { key: key.value }).catch(() => ({}));
     let timer;
     key.addEventListener('input', () => {
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        if (!key.value.trim()) { hint.textContent = 'Paste an Anthropic or OpenAI key and we will detect which one it is.'; return; }
-        const r = await api('POST', '/cve/api/setup/detect', { key: key.value }).catch(() => ({}));
-        hint.textContent = r.provider ? `That looks like an ${NAMES[r.provider]} key.` : 'We do not recognize that key. You can keep going and pick a provider in Settings.';
+        if (!key.value.trim()) { hint.textContent = 'Paste an Anthropic, OpenRouter or OpenAI key and we will detect which one it is.'; pickField.style.display = 'none'; return; }
+        const r = await detect();
+        pickField.style.display = r.provider ? 'none' : '';
+        if (r.provider) pick.value = '';
+        hint.textContent = r.provider ? `That looks like an ${NAMES[r.provider]} key.`
+          : r.ambiguous ? 'More than one vendor issues keys like this one. Choose the provider below.' : 'We do not recognize that key. Choose the provider below, or pick one in Settings.';
       }, 250);
     });
     if (state.ai_ready) { key.placeholder = 'Connected. Paste a new key only to replace it.'; hint.textContent = 'An AI model is already connected. Continue, or paste a new key to replace it.'; }
     const wrap = el('div', 'field'); wrap.append(el('label', '', 'API key', { for: 'ai-key' }), key, hint); key.id = 'ai-key';
     form(node, {
       title: 'Connect your AI model', lead: 'This is what confirms which hosts are really exposed and writes checks for new CVEs.',
-      body: [wrap], primary: state.ai_ready ? 'Continue' : 'Verify and continue',
+      body: [wrap, pickField], primary: state.ai_ready ? 'Continue' : 'Verify and continue',
       skip: { label: 'Skip for now', onClick: next },
       onSubmit: async () => {
         if (!key.value.trim() && state.ai_ready) { next(); return; } // a model is already connected
         if (!key.value.trim()) throw new Error('Paste a key, or choose "Skip for now".');
-        const r = await api('POST', '/cve/api/setup/save', { key: key.value });
+        if (!pick.value && !(await detect()).provider) { pickField.style.display = ''; throw new Error('Choose which provider this key belongs to. Nothing was sent anywhere.'); }
+        const r = await api('POST', '/cve/api/setup/save', { key: key.value, provider: pick.value || undefined });
         key.value = '';
         if (r.needs_model) { hint.textContent = `Connected to ${NAMES[r.provider] || r.provider}. Choose its model in Settings > AI model, then turn it on.`; next(); return; }
         state.ai_ready = true;

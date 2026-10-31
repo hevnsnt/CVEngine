@@ -12,6 +12,7 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
 from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
+from reNgine.ai_profiles import same_service
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
@@ -139,8 +140,8 @@ def ai_put(request):
     if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
-    if cfg.api_key == old_connection[3] and (cfg.provider, (cfg.base_url or '').strip()) != (old_connection[0], (old_connection[2] or '').strip()):
-        cfg.api_key = ''  # a stored key is never sent to a different service or address: type it again for the new one
+    if cfg.api_key == old_connection[3] and not same_service(old_connection[0], old_connection[2], cfg.provider, cfg.base_url):
+        cfg.api_key = ''  # a stored key is never sent to a different service or host (for any provider, the vendor's own address included): type it again
     if (cfg.provider, cfg.model, cfg.base_url, cfg.api_key) != old_connection:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
     if 'enabled' in data:
@@ -243,8 +244,7 @@ def ai_models(request):
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
     if base_url and ai_url_blocked(base_url):
         raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
-    same_service = provider == cfg.provider and base_url.strip() == (cfg.base_url or '').strip()
-    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service else '')  # the stored key goes only where it was saved for
+    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
     try:
         listed = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
     except AIProviderError as exc:
