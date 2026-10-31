@@ -171,3 +171,21 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
   assert.match(content, /No hosts are due/);
   assert.equal(panel.children.some((child) => child.cls === 'sl-openvas-deferred'), false);
 });
+
+// The alias and note a person types on a host or target are shown in many places: they must only ever become text nodes, and the inputs must
+// carry the same bounds the server enforces (targetApp/alias_note.py).
+test('the alias and note are never written as markup', () => {
+  for (const name of modules) {
+    for (const line of read(name).split('\n')) {
+      if (/innerHTML|insertAdjacentHTML|outerHTML/.test(line)) assert.doesNotMatch(line, /\b(alias|note)\b/i, `${name}: ${line.trim()}`);
+    }
+  }
+});
+
+test('the alias and note inputs are bounded like the server bounds them', () => {
+  const py = readFileSync(new URL('../targetApp/alias_note.py', import.meta.url), 'utf8');
+  const [, alias, note] = /ALIAS_MAX, NOTE_MAX = (\d+), (\d+)/.exec(py);
+  const app = read('app.js');
+  assert.match(app, new RegExp(`const aliasInput = .*maxlength: "${alias}"`));
+  assert.match(app, new RegExp(`const noteInput = .*maxlength: "${note}"`));
+});

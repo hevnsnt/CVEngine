@@ -141,9 +141,13 @@ def create_report(request, id):
         total_by_host[row['subdomain__name']] += row['n']
         if row['severity'] != 0:
             names_by_host[row['subdomain__name']].add(row['name'])
+    from cveFeed.models import HostProfile
+    aliases = dict(HostProfile.objects.filter(project_id=scan.domain.project_id, host__in={h.name.lower() for h in host_rows}).exclude(alias='')
+                   .values_list('host', 'alias'))  # what a person calls a host, shown beside its name (display only)
     for host in host_rows:
         host.report_vulnerability_names = sorted(names_by_host.get(host.name, ()))
         host.report_vulnerability_count = total_by_host.get(host.name, 0)
+        host.report_alias = aliases.get(host.name.lower(), '')
     ip_total = ip_addresses.count()
     ip_rows = list(ip_addresses.order_by('address').select_related('geo_iso').prefetch_related('ports')[:REPORT_MAX_HOSTS])
     vuln_total = vulns.count()

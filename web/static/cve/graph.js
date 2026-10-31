@@ -641,6 +641,8 @@ function refreshCloud(ui, d) {
   if (t) t.textContent = [`${d.label}: ${d.hosts} hosts, ${d.findings} with findings. Double-click to open it.`,
     ...(d.parts || []).map((p) => `${p.name}: ${p.hosts} hosts${p.findings ? `, ${p.findings} with findings` : ""}`)].join("\n");
 }
+// the full name for a tooltip: the address (or name) with the alias a person gave it beside it; the drawn label stays the name
+const tipName = (d) => (d.alias && (d.kind === "subdomain" || d.kind === "domain") ? `${d.label} (${d.alias})` : d.label);
 const TIER_TIPS = { fire: "hosts on fire", smoke: "hosts in smoke", ice: "hosts on ice", hygiene: "open hygiene findings" };
 // What a bubble does: fire flickers and throws sparks, smoke puffs, ice wears a turning ring of frost, hygiene a sweeping scan.
 // Placed and timed from its id like a cloud's, and all of it CSS, so reduced motion stops it.
@@ -955,8 +957,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       g.setAttribute(
         "aria-label",
         d.kind === "subdomain"
-          ? `${d.label}, ${d.status || "unscanned"}`
-          : `${d.kind} ${d.label}`,
+          ? `${tipName(d)}, ${d.status || "unscanned"}`
+          : `${d.kind} ${tipName(d)}`,
       );
       const r = d.kind === "cloud" ? cloudRadius(d) : d.kind === "tier" ? tierRadius(d) : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
       const ring = document.createElementNS(NS, "circle");
@@ -991,7 +993,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       if (above) t.setAttribute('text-anchor', 'middle');
       t.textContent = shorten(shortLabel(d));
       const title = document.createElementNS(NS, "title");
-      title.textContent = d.label;
+      title.textContent = tipName(d);
       g.append(ring, c, t, title);
       if (d.kind === "cloud") { // the name label stays the group's first text: relabel() finds it there
         const art = cloudArt(d);
@@ -1012,7 +1014,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         boundary.setAttribute("fill", "none");
         g.insertBefore(boundary, ring);
         g.classList.add("gn-internal");
-        title.textContent = `${d.label} (internal${d.network ? `, ${d.network}` : ""})`;
+        title.textContent = `${tipName(d)} (internal${d.network ? `, ${d.network}` : ""})`;
         g.setAttribute("aria-label", `${g.getAttribute("aria-label")}, internal${d.network ? ` network ${d.network}` : ""}`);
       }
       if (d.kind === "subdomain") refreshHost(g, d);

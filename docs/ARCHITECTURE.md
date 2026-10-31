@@ -36,7 +36,7 @@ Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.993, and Go 1.2
 | `Triage`, `TriageVerdict` | One triage per finding, and the AI answer shared by findings with the same evidence |
 | `GeneratedTemplate`, `AutoFireRun` | AI-drafted nuclei templates and auto-fire runs |
 | `HostState`, `AssetChange` | Each host's snapshot, and the change log built from comparing snapshots |
-| `HostProfile`, `HostLabel`, `HostExclusion`, `HostAssessment` | Owner and criticality, detection chips, exclusions, and rescans |
+| `HostProfile`, `HostLabel`, `HostExclusion`, `HostAssessment` | Owner, criticality, alias and note (one row per project and host name, so they outlast rescans), detection chips, exclusions, and rescans |
 | `HostInventory`, `HostInventoryReport` | What a host reported about itself with the reporter script, one row per machine, and its summarised report history ([HOST-INVENTORY.md](HOST-INVENTORY.md)) |
 | `ServiceRun` | The last finished run of each scanner on each asset |
 | `ReportExport` | One requested PDF report: who asked, for what, its state and the random file name, until it expires ([FRONTEND.md](FRONTEND.md#pdf-reports)) |
