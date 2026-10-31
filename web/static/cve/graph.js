@@ -84,6 +84,40 @@ const stableAngle = (value) => {
   return ((hash >>> 0) % 3600) * Math.PI / 1800;
 };
 
+// Clouds. A project with more than CLOUD_HOSTS hosts is too many bubbles to lay out (the force layout and the SVG both crawl), so it is
+// drawn as one cloud of drifting bubbles instead. Only its hosts with findings stay on the picture, as red dots tied to the cloud; its
+// other hosts, targets, IPs and CVEs are left off. The Hosts page still lists every one of them.
+export const CLOUD_HOSTS = 500;
+const CLOUD_R = 70;
+const CLOUD_BUBBLES = 36;
+export function cloudProjects(data) {
+  const counts = new Map();
+  for (const n of data.nodes) if (n.kind === "subdomain" && n.project) counts.set(n.project, (counts.get(n.project) || 0) + 1);
+  const big = new Set([...counts].filter(([, n]) => n > CLOUD_HOSTS).map(([slug]) => slug));
+  if (!big.size) return data;
+  const names = new Map();
+  const clouded = new Set(); // every host and target of a clouded project, red dots included: their own links are dropped
+  const dots = new Map();
+  for (const n of data.nodes) {
+    if (!big.has(n.project) || !["subdomain", "domain"].includes(n.kind)) continue;
+    clouded.add(n.id);
+    if (n.kind === "domain") names.set(n.project, n.project_name || n.project);
+    else if (hostState(n) === "vulnerable") dots.set(n.id, { ...n, cloud: n.project });
+  }
+  const edges = data.edges.filter((e) => !clouded.has(e.from) && !clouded.has(e.to));
+  const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
+  const findings = new Map();
+  for (const dot of dots.values()) {
+    findings.set(dot.cloud, (findings.get(dot.cloud) || 0) + 1);
+    edges.push({ from: `__cloud:${dot.cloud}`, to: dot.id });
+  }
+  const clouds = [...big].map((slug) => ({ id: `__cloud:${slug}`, kind: "cloud", label: names.get(slug) || slug, project: slug,
+    hosts: counts.get(slug), findings: findings.get(slug) || 0 }));
+  // an IP or CVE that only clouded hosts pointed at goes with them
+  const nodes = data.nodes.filter((n) => !clouded.has(n.id) && (!["ip", "cve"].includes(n.kind) || linked.has(n.id)));
+  return { ...data, nodes: [...nodes, ...dots.values(), ...clouds], edges };
+}
+
 // Retain the original bubbles and discovery links. Invisible force anchors are
 // replaced by visible project/root-domain bubbles when showing all domains.
 // A shared IP/CVE gets one visual copy per root so a CDN does not pull two
@@ -91,8 +125,9 @@ const stableAngle = (value) => {
 export function clusterGraph(data, {columns: requestedColumns} = {}) {
   const originals = new Map(data.nodes.map(node => [node.id, node]));
   const domains = data.nodes.filter(node => node.kind === 'domain' && node.project && node.root);
-  if (!domains.length) return {nodes: data.nodes, edges: data.edges};
-  const projects = new Map();
+  const clouds = data.nodes.filter(node => node.kind === 'cloud');
+  if (!domains.length && !clouds.length) return {nodes: data.nodes, edges: data.edges};
+  const projects = new Map(clouds.map(cloud => [cloud.project, {slug: cloud.project, name: cloud.label, cloud, roots: new Map()}]));
   for (const domain of domains) {
     const project = projects.get(domain.project) ||
       {slug: domain.project, name: domain.project_name || domain.project, roots: new Map()};
@@ -102,6 +137,7 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
     roots.push(domain);
   }
   const ordered = [...projects.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const anchored = new Set();
   const columns = Math.max(1, requestedColumns || Math.ceil(Math.sqrt(ordered.length * 1.5)));
   const added = [], links = [];
   const positions = new Map();
@@ -117,6 +153,15 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
   ordered.forEach((project, index) => {
     const x = (index % columns) * 1100;
     const y = Math.floor(index / columns) * 1050;
+    if (project.cloud) { // the cloud is the project: it holds the slot, and its red dots ring it
+      positions.set(project.cloud.id, [x, y]);
+      anchored.add(project.cloud.id);
+      data.edges.filter(edge => edge.from === project.cloud.id).forEach(edge => {
+        const angle = stableAngle(edge.to);
+        positions.set(edge.to, [x + Math.cos(angle) * (CLOUD_R + 60), y + Math.sin(angle) * (CLOUD_R + 60)]);
+      });
+      return;
+    }
     const projectId = `__project:${project.slug}`;
     added.push({id: projectId, kind: 'project', label: project.name, seed_x: x, seed_y: y, anchored: true});
     const roots = [...project.roots.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -164,7 +209,7 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
   const originalNodes = data.nodes.filter(node => !['ip', 'cve'].includes(node.kind) ||
     links.some(edge => edge.to === node.id || edge.from === node.id));
   return {nodes: [...originalNodes.map(node => positions.has(node.id) ?
-    {...node, seed_x: positions.get(node.id)[0], seed_y: positions.get(node.id)[1]} : node),
+    {...node, seed_x: positions.get(node.id)[0], seed_y: positions.get(node.id)[1], anchored: anchored.has(node.id) || node.anchored} : node),
     ...clones.values(), ...added], edges: links};
 }
 
@@ -237,7 +282,25 @@ function decorateMoons(g, d, r) {
   });
   g.append(moons);
 }
-const hostRadius = (d) => (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
+const hostRadius = (d) => d.cloud ? 5 : (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
+// the bubbles floating in a cloud: placed and timed from the cloud's id, so a redraw looks the same; CSS drifts them
+function cloudBubbles(d) {
+  const bubbles = document.createElementNS(NS, "g");
+  bubbles.setAttribute("class", "cloud-bubbles");
+  for (let i = 0; i < CLOUD_BUBBLES; i++) {
+    const a = stableAngle(`${d.id}:${i}`), b = stableAngle(`${d.id}:${i}:r`);
+    const reach = (CLOUD_R - 10) * Math.sqrt(b / (2 * Math.PI));
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("class", "cb");
+    c.setAttribute("cx", (Math.cos(a) * reach).toFixed(1));
+    c.setAttribute("cy", (Math.sin(a) * reach).toFixed(1));
+    c.setAttribute("r", (2.5 + (b % 1) * 4.5).toFixed(1));
+    c.style.animationDuration = `${(6 + (a % 1) * 8).toFixed(1)}s`;
+    c.style.animationDelay = `-${(b * 2).toFixed(1)}s`;
+    bubbles.append(c);
+  }
+  return bubbles;
+}
 const arc = (r, len, offset, color) => {
   const c = document.createElementNS(NS, "circle");
   const circumference = 2 * Math.PI * r;
@@ -310,6 +373,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     // leaves that share an IP get extra room, and a hub's links are long, so clusters fan out instead of stacking
     springTransform(link, spring) {
       if (link.fromId.startsWith('__project:')) { spring.length = 190; return; }
+      if (link.fromId.startsWith('__cloud:')) { spring.length = CLOUD_R + 40; return; }
       if (link.fromId.startsWith('__root:')) { spring.length = 105; return; }
       if (link.data?.crossCluster) { spring.length = 550; return; }
       const ip = graph.getNode(link.toId);
@@ -492,7 +556,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         uis.set(node.id, g);
         return g;
       }
-      g.setAttribute("class", `gn gn-${d.kind}${isActive(node) ? " gn-live" : ""}`);
+      g.setAttribute("class", `gn gn-${d.kind}${d.cloud ? " gn-dot" : ""}${isActive(node) ? " gn-live" : ""}`);
       g.setAttribute("role", "button");
       g.setAttribute("tabindex", "0");
       g.dataset.heat = d.heat || d.tier || "";
@@ -504,7 +568,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
           ? `${d.label}, ${d.status || "unscanned"}`
           : `${d.kind} ${d.label}`,
       );
-      const r = d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
+      const r = d.kind === "cloud" ? CLOUD_R : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
       const ring = document.createElementNS(NS, "circle");
       ring.setAttribute("class", "ring");
       ring.setAttribute("r", r + 5);
@@ -514,6 +578,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       c.setAttribute("r", r);
       if (d.kind === "subdomain") {
         styleHost(c, d);
+      } else if (d.kind === "cloud") {
+        c.setAttribute("class", "cloud-body");
       } else if (d.kind === "project" || d.kind === "root") {
         c.setAttribute("fill", d.kind === "project" ? css("--graph-project-bg") : css("--graph-node-bg"));
         c.setAttribute("stroke", css("--graph-node-border"));
@@ -527,13 +593,16 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         c.setAttribute("fill", colorOf(d));
       }
       const t = document.createElementNS(NS, "text");
-      t.setAttribute("x", ['project', 'root'].includes(d.kind) ? 0 : r + 4);
-      t.setAttribute("y", ['project', 'root'].includes(d.kind) ? -(r + 8) : 3.5);
-      if (['project', 'root'].includes(d.kind)) t.setAttribute('text-anchor', 'middle');
-      t.textContent = shorten(shortLabel(d));
+      const above = ['project', 'root', 'cloud'].includes(d.kind);
+      t.setAttribute("x", above ? 0 : r + 4);
+      t.setAttribute("y", above ? -(r + 8) : 3.5);
+      if (above) t.setAttribute('text-anchor', 'middle');
+      // a red dot in a cloud carries no label (there can be hundreds); its name is in the tooltip and the card
+      t.textContent = d.cloud ? "" : d.kind === "cloud" ? `${shorten(d.label)} · ${d.hosts} hosts` : shorten(shortLabel(d));
       const title = document.createElementNS(NS, "title");
-      title.textContent = d.label;
+      title.textContent = d.kind === "cloud" ? `${d.label}: ${d.hosts} hosts, ${d.findings} with findings` : d.label;
       g.append(ring, c, t, title);
+      if (d.kind === "cloud") g.insertBefore(cloudBubbles(d), t);
       if (d.kind === "subdomain" && d.internal) {
         // a host inside a network its project declared internal (only a Sentinel there scans it): a dashed outer boundary marks it
         const boundary = document.createElementNS(NS, "circle");
@@ -813,7 +882,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
   };
   const isHub = (n) => {
     const d = n.data || {};
-    return ['project', 'root', 'domain'].includes(d.kind) ||
+    return ['project', 'root', 'domain', 'cloud'].includes(d.kind) ||
       (d.kind === "ip" && (n.links || []).filter((l) => l.fromId !== "__hub").length >= HUB_LINKS);
   };
   function relabel() {
@@ -827,7 +896,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       const p = ui.getBoundingClientRect();
       const kind = n.data?.kind;
       const rank = n.id === hovered || n.id === selected ? 0 :
-        clustered && kind === 'project' ? 1 : clustered && kind === 'root' ? 2 :
+        clustered && ['project', 'cloud'].includes(kind) ? 1 : clustered && kind === 'root' ? 2 :
         isHub(n) ? 3 : 4;
       items.push({ n, ui, rank, picked: group.has(n.id), x: p.left - box.left, y: p.top - box.top });
     });
@@ -864,7 +933,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       const kind = n.data?.kind;
       const live = ui.classList.contains("gn-live");
       const show = live || (clustered ?
-        rank === 0 || (kind === 'project' && free) ||
+        rank === 0 || (['project', 'cloud'].includes(kind) && free) ||
         (kind === 'root' && scale >= 0.16 && free) ||
         ((!zoomedOut || picked) && rank >= 3 && free) :
         rank === 0 || rank === 3 || ((!zoomedOut || picked) && free));
@@ -1028,7 +1097,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       const width = container.clientWidth;
       const columns = width < 600 ? 1 : width < 1000 ? 2 : undefined;
       lastData = data;
-      const base = clustered ? clusterGraph(data, {columns}) : data;
+      const clouded = cloudProjects(data);
+      const base = clustered ? clusterGraph(clouded, {columns}) : clouded;
       const view = pods ? collapsePods(base, expanded) : base;
       const ids = new Set();
       view.nodes.forEach((n) => {
@@ -1066,8 +1136,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       // domain links to keeps them in one compact cluster so the whole graph fits the window.
       if (!clustered) {
         if (!graph.getNode("__hub")) graph.addNode("__hub", { id: "__hub", kind: "hub" });
-        data.nodes.forEach((n) => {
-          if (n.kind === "domain" && !graph.hasLink("__hub", n.id)) graph.addLink("__hub", n.id);
+        clouded.nodes.forEach((n) => {
+          if ((n.kind === "domain" || n.kind === "cloud") && !graph.hasLink("__hub", n.id)) graph.addLink("__hub", n.id);
         });
         ids.add("__hub");
       }
@@ -1092,6 +1162,14 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
 export async function showNodeDetails(box, data) {
   box.textContent = "";
   if (!data) return;
+  if (data.kind === 'cloud') {
+    const heading = Object.assign(document.createElement('strong'), { className: 'cve-id', textContent: data.label });
+    const note = Object.assign(document.createElement('p'), { className: 'note',
+      textContent: `${data.hosts} hosts, ${data.findings} with findings. A project this large is drawn as a cloud: only the hosts with findings show, as red dots.` });
+    const link = Object.assign(document.createElement('a'), { className: 'btn sm', href: `/cve/${encodeURIComponent(data.project)}/hosts/`, textContent: 'Every host' });
+    box.append(heading, note, link);
+    return;
+  }
   if (data.kind === 'project' || data.kind === 'root') {
     const heading = document.createElement('strong');
     heading.className = 'cve-id';

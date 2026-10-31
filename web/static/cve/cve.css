@@ -516,6 +516,13 @@ circle.pop{animation:popin .5s ease}
 .gn.sel circle{stroke:var(--ink);stroke-width:3px}
 .gn.sel text{fill:var(--ink);font-weight:700}
 .gn .ring{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:3 3;pointer-events:none}
+/* a project too large to draw host by host: one cloud of drifting bubbles (graph.js cloudProjects) */
+.gn-cloud .cloud-body{fill:color-mix(in srgb,var(--graph-ip) 7%,transparent);stroke:var(--graph-ip);stroke-width:1.5;stroke-dasharray:5 4}
+.gn-cloud .cb{fill:var(--surface);stroke:var(--graph-ip);stroke-width:1;opacity:.85;pointer-events:none;animation:cloud-drift 9s ease-in-out infinite alternate}
+.gn-cloud:hover .cb{stroke:var(--graph-ip);stroke-width:1}
+.gn-cloud text{font-size:13px;font-weight:750;fill:var(--graph-title-2)}
+@keyframes cloud-drift{0%{transform:translate(-4px,3px)}50%{transform:translate(3px,-4px)}100%{transform:translate(5px,4px)}}
+@media (prefers-reduced-motion:reduce){.gn-cloud .cb{animation:none}}
 /* live scan highlighting: a domain or host a scan is working on right now pulses */
 .gn-live .ring{display:inline!important;stroke:var(--brand);stroke-width:3.5;stroke-dasharray:none;animation:gn-pulse 1.2s ease-in-out infinite}
 .gn-live circle:not(.ring){stroke:var(--brand);stroke-width:3px}
@@ -1393,6 +1400,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gn[data-heat="fire"]{--planet:var(--fire)}.gn[data-heat="smoke"]{--planet:var(--smoke)}.gn[data-heat="clean"]{--planet:var(--ok)}
 .gn[data-k="subdomain"] circle:not(.ring):not(.pod circle):not(.moons circle){fill:color-mix(in srgb,var(--planet) 24%,var(--surface))!important;stroke:var(--planet)!important;stroke-width:2.5!important;filter:drop-shadow(0 2px 7px color-mix(in srgb,var(--planet) 45%,transparent))}
 .gn[data-k="ip"] circle:not(.ring){opacity:.8}
+.gn.gn-dot[data-k="subdomain"] circle:not(.ring):not(.pod circle):not(.moons circle){fill:var(--fire)!important;stroke:var(--fire)!important;stroke-width:1!important;filter:none} /* a host with findings in a cloud: a plain red dot */
 .gn.has-pod .pod-n{fill:var(--ink)}
 @media (prefers-reduced-motion:reduce){.moon{animation:none}}
 
