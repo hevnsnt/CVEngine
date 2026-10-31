@@ -1,0 +1,19 @@
+{
+  "targets": [
+    "https://example.com"
+  ],
+  "tags": [
+    "tech"
+  ],
+  "severities": [
+    "info"
+  ],
+  "etags": [
+    "dos"
+  ],
+  "template_policy": {
+    "rev": "read-only-1",
+    "read_only": true,
+    "bundle_sha256": null
+  }
+}

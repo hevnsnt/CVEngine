@@ -72,7 +72,7 @@ jobs:
       - name: Install application dependencies
         run: |
           sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
-          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2  # tblib lets a failure in a parallel test worker show its real traceback
+          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2 jsonschema==4.26.0  # jsonschema checks the Sentinel result contract (web/agentapi/sentinel_contract.json) in the tests; tblib lets a failure in a parallel test worker show its real traceback
       - name: Nuclei positive and negative loopback fixture smoke
         working-directory: web
         env:
