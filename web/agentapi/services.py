@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone as dt_timezone
 from typing import Optional
 
+from django.contrib.postgres.expressions import ArraySubquery
+from django.db.models import AutoField, Lookup
 from django.utils import timezone
 
 from cveFeed import match_policy
@@ -1534,6 +1536,18 @@ def _name_siblings(project, subs):
     return {s.id: [rows[i] for i, _ in ids.get(s.id, []) if i in rows] for s in subs}
 
 
+@AutoField.register_lookup
+class _InArray(Lookup):
+    """``id__in_array=ArraySubquery(...)``: ``id = ANY(ARRAY(subquery))``. The subquery runs once and its ids are looked up in the array, where
+    ``id IN (subquery)`` lets Postgres rescan the subquery for every row when it misjudges how many rows it returns."""
+    lookup_name = 'in_array'
+
+    def as_sql(self, compiler, connection):
+        lhs, lhs_params = self.process_lhs(compiler, connection)
+        rhs, rhs_params = self.process_rhs(compiler, connection)
+        return f'{lhs} = ANY({rhs})', (*lhs_params, *rhs_params)
+
+
 def _one_per_host(qs, per_project=False):
     """Collapse a Subdomain queryset to one row per host. First one row per hostname: the one with the most open ports, then the most
     IPs, then the newest scan (a scan-less row last). Then names that resolve to exactly the same addresses (``example.com`` and
@@ -1560,7 +1574,9 @@ def _one_per_host(qs, per_project=False):
         RowNumber(), partition_by=[F('host_key')],
         order_by=[own_target.asc(), Length('name').asc(), F('name').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
     ).filter(_rank=1).values('id')
-    return Subdomain.objects.filter(id__in=rep)
+    # the ids are gathered into an array once and looked up in it (``id = ANY(ARRAY(...))``). ``id IN (subquery)`` let Postgres guess one row for the
+    # window query and rescan its 8,000 rows for each of 10,000 hosts: 4.8 s at that size, 0.1 s with the array
+    return Subdomain.objects.filter(id__in_array=ArraySubquery(rep))
 
 
 def _hosts_page(project, qs, params, extra=None, coverage=True):
