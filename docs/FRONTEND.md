@@ -110,7 +110,7 @@ Under **Settings** (App Admins) there is one tab for each of these:
 
 The tabs that hold settings are described in [CONFIGURATION.md](CONFIGURATION.md#settings-in-the-app).
 
-The **Add targets** dialog takes an organization and project, `#Project` and `##Organization` grouped pastes, a file (`.txt`, `.csv`, `.list`), a live count, a discovery mode (Standard, Deep, Passive, or Just add), and an authorization tick (sent as `authorized: true` with the request; the server does not record it yet), then links to **Watch it live**.
+The **Add targets** dialog takes an organization and project, `#Project` and `##Organization` grouped pastes, a file (`.txt`, `.csv`, `.list`), a live count, a discovery mode (Standard, Deep, Passive, or Just add), which is kept on each target and used for its later automatic scans (Just add means manual only: nothing scans it until a person picks a mode), and an authorization tick (sent as `authorized: true` with the request; the server does not record it yet), then links to **Watch it live**.
 
 `/cve/settings/` is backed by `cveFeed/settings_api.py` (`/cve/api/settings/...`), needs an App Admin session and CSRF, and is not part of the agent API. Secrets are write-only: responses say whether one is set, and a blank value keeps the stored one.
 
