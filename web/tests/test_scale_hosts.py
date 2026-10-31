@@ -36,9 +36,21 @@ class GraphCapTests(TestCase):
         with mock.patch.object(views, 'GRAPH_NODE_CAP', 20):
             self.assertEqual(self.hosts(views.graph_payload()), drawn)  # the same hosts on every poll
 
+    def test_past_the_cap_each_project_reports_its_own_host_total(self):
+        now = timezone.now()
+        other = Project.objects.create(name='D', slug='cap2', insert_date=now, org=Org.objects.create(name='D', slug='cap2-org'))
+        domain = Domain.objects.create(name='cap2.test', project=other, insert_date=now)
+        for i in range(5):
+            sub = Subdomain.objects.create(target_domain=domain, name=f'o{i}.cap2.test', score=0)
+            sub.ip_addresses.add(IpAddress.objects.create(address=f'198.51.100.{i + 1}'))
+        with mock.patch.object(views, 'GRAPH_NODE_CAP', 20):
+            payload = views.graph_payload()
+        self.assertEqual(payload['hosts']['projects'], {'cap': 30, 'cap2': 5})
+        self.assertEqual(payload['hosts']['total'], 35)
+
     def test_under_the_cap_every_host_is_drawn_and_there_is_nothing_to_report(self):
         payload = views.graph_payload()
-        self.assertEqual(payload['hosts'], {'drawn': 30, 'total': 30})
+        self.assertEqual(payload['hosts'], {'drawn': 30, 'total': 30, 'projects': {}})
 
 
 class ExposedHostCountTests(TestCase):
