@@ -500,37 +500,41 @@ function cloudArt(d) {
   const under = svgEl("g", {}, "cloud-under");
   const net = svgEl("g", {}, "cloud-bubbles cloud-net");
   const { nodes, links } = cloudNetwork(d, R, puffs);
-  for (const [i, j] of links) {
+  const wires = links.map(([i, j], w) => {
     const a = nodes[i], b = nodes[j];
     const at = { x1: a.x.toFixed(1), y1: a.y.toFixed(1), x2: b.x.toFixed(1), y2: b.y.toFixed(1) };
     const hot = a.heat || b.heat;
-    net.append(svgEl("line", at, hot ? "cloud-link cloud-link-hot" : "cloud-link"));
+    const els = [svgEl("line", at, hot ? "cloud-link cloud-link-hot" : "cloud-link")];
     if (unit(`${d.id}:l${i}-${j}`) < 0.35) { // a packet on its way
       const packet = svgEl("line", { ...at, pathLength: 100 }, hot ? "cloud-packet cloud-packet-hot" : "cloud-packet");
       packet.style.animationDuration = `${(1.6 + unit(`${d.id}:l${i}-${j}:t`) * 2.6).toFixed(1)}s`;
       packet.style.animationDelay = `-${(unit(`${d.id}:l${i}-${j}:d`) * 4).toFixed(1)}s`;
       if (unit(`${d.id}:l${i}-${j}:w`) < 0.5) packet.style.animationDirection = "reverse";
-      net.append(packet);
+      els.push(packet);
     }
-  }
-  nodes.forEach((n) => {
-    const at = { cx: n.x.toFixed(1), cy: n.y.toFixed(1) };
+    net.append(...els);
+    return { i, j, els, bridge: a.part !== b.part, key: w };
+  });
+  const dots = nodes.map((n) => {
     const delay = `-${(unit(`${d.id}:n${n.k}:d`) * 5).toFixed(1)}s`;
     if (!n.heat) {
-      const c = svgEl("circle", { ...at, r: (1.8 + unit(`${d.id}:n${n.k}:s`) * 1.5).toFixed(1) }, "cloud-node");
+      const c = svgEl("circle", { cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: (1.8 + unit(`${d.id}:n${n.k}:s`) * 1.5).toFixed(1) }, "cloud-node");
       c.style.animationDelay = delay;
       net.append(c);
-      return;
+      return c;
     }
-    // a host in trouble flares: a glow, a four-point glint and a bright core, in its heat's colour
-    const star = svgEl("g", {}, `cloud-star cloud-star-${n.heat}`);
-    const x = n.x, y = n.y, arm = 6.5;
-    star.append(svgEl("circle", { ...at, r: 9 }, "cloud-star-glow"),
-      svgEl("path", { d: `M${(x - arm).toFixed(1)},${y.toFixed(1)}H${(x + arm).toFixed(1)}M${x.toFixed(1)},${(y - arm).toFixed(1)}V${(y + arm).toFixed(1)}` }, "cloud-star-glint"),
-      svgEl("circle", { ...at, r: 2.8 }, "cloud-star-core"));
-    star.style.animationDelay = delay;
+    // a host in trouble flares: a glow, a four-point glint and a bright core in its heat's colour, and pings like a sonar contact
+    const star = svgEl("g", { transform: `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})` }, `cloud-star cloud-star-${n.heat}`);
+    const body = svgEl("g", {}, "cloud-star-body");
+    body.append(svgEl("circle", { r: 9 }, "cloud-star-glow"), svgEl("path", { d: "M-6.5,0H6.5M0,-6.5V6.5" }, "cloud-star-glint"), svgEl("circle", { r: 2.8 }, "cloud-star-core"));
+    body.style.animationDelay = delay;
+    const ping = svgEl("circle", { r: 4 }, "cloud-star-ping");
+    ping.style.animationDelay = `-${(unit(`${d.id}:n${n.k}:p`) * 3).toFixed(1)}s`;
+    star.append(ping, body);
     net.append(star);
+    return star;
   });
+  liven(d, R, net, nodes, wires, dots);
   under.append(net);
   const over = svgEl("g", {}, "cloud-over");
   const count = svgEl("text", { y: Math.round(R * 0.1), "text-anchor": "middle" }, "cloud-n");
@@ -546,6 +550,84 @@ function cloudArt(d) {
   hint.textContent = "double-click to open";
   over.append(count, unitText, found, hint);
   return { under, over, fill: "transparent" };
+}
+// The constellations are alive: every star drifts on its own slow loop and its wires follow it, the whole figure sways, and every few
+// seconds a wire lets go and reaches for another near neighbour, so the network keeps rewiring itself. Each star's loop comes from the
+// project's id; which wire moves when is chance. One loop runs them all at about 30 frames a second; the browser pauses it with the tab,
+// it stops itself once no constellation is on the page, and reduced motion never starts it.
+const LIVE = new Set();
+let liveFrame = 0, liveLast = 0;
+const STILL = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+function liven(d, R, net, nodes, wires, dots) {
+  if (STILL || typeof requestAnimationFrame !== "function") return;
+  const near = nodes.map((n, i) => nodes.map((m, j) => [Math.hypot(m.x - n.x, m.y - n.y), j])
+    .filter(([, j]) => j !== i && nodes[j].part === n.part).sort((a, b) => a[0] - b[0]).slice(0, 4).map(([, j]) => j));
+  const drift = nodes.map((n) => ({
+    a: R * (0.03 + 0.04 * unit(`${d.id}:n${n.k}:a`)) * (n.heat ? 1.3 : 1),
+    w: 0.35 + 0.5 * unit(`${d.id}:n${n.k}:w`), w2: 0.3 + 0.5 * unit(`${d.id}:n${n.k}:w2`),
+    p: 6.283 * unit(`${d.id}:n${n.k}:p`), p2: 6.283 * unit(`${d.id}:n${n.k}:p2`),
+  }));
+  LIVE.add({ net, nodes, wires, dots, near, drift, sway: 6.283 * unit(`${d.id}:sway`), next: 0 });
+  if (!liveFrame) liveFrame = requestAnimationFrame(liveLoop);
+}
+function liveLoop(now) {
+  liveFrame = 0;
+  if (now - liveLast >= 32) {
+    liveLast = now;
+    for (const c of LIVE) {
+      if (!c.net.isConnected) LIVE.delete(c);
+      else liveStep(c, now / 1000);
+    }
+  }
+  if (LIVE.size) liveFrame = requestAnimationFrame(liveLoop);
+}
+function liveStep(c, t) {
+  const at = c.nodes.map((n, i) => {
+    const m = c.drift[i];
+    return [n.x + Math.sin(t * m.w + m.p) * m.a, n.y + Math.cos(t * m.w2 + m.p2) * m.a * 0.8];
+  });
+  c.dots.forEach((el, i) => {
+    const [x, y] = at[i];
+    if (el.tagName === "g") el.setAttribute("transform", `translate(${x.toFixed(1)},${y.toFixed(1)})`);
+    else {
+      el.setAttribute("cx", x.toFixed(1));
+      el.setAttribute("cy", y.toFixed(1));
+    }
+  });
+  for (const w of c.wires) {
+    const [x1, y1] = at[w.i], [x2, y2] = at[w.j];
+    for (const el of w.els) {
+      el.setAttribute("x1", x1.toFixed(1));
+      el.setAttribute("y1", y1.toFixed(1));
+      el.setAttribute("x2", x2.toFixed(1));
+      el.setAttribute("y2", y2.toFixed(1));
+    }
+  }
+  c.net.setAttribute("transform", `rotate(${(Math.sin(t / 9 + c.sway) * 4).toFixed(2)})`);
+  if (!c.next) c.next = t + Math.random() * 2;
+  if (t >= c.next) rewire(c, t);
+}
+// one wire lets go of one end and reaches for another near neighbour (never leaving a star alone, never a target's bridge)
+function rewire(c, t) {
+  c.next = t + 1.4 + Math.random() * 2.2;
+  const w = c.wires[Math.floor(Math.random() * c.wires.length)];
+  if (!w || w.moving || w.bridge) return;
+  const pair = (i, j) => `${Math.min(i, j)}-${Math.max(i, j)}`;
+  const linked = new Set(c.wires.map((x) => pair(x.i, x.j)));
+  if (c.wires.filter((x) => x.i === w.j || x.j === w.j).length < 2) return;
+  const options = c.near[w.i].filter((k) => k !== w.j && !linked.has(pair(w.i, k)));
+  if (!options.length) return;
+  const k = options[Math.floor(Math.random() * options.length)];
+  w.moving = true;
+  w.els.forEach((el) => el.classList.add("cloud-wire-off"));
+  setTimeout(() => {
+    w.j = k;
+    const hot = Boolean(c.nodes[w.i].heat || c.nodes[k].heat);
+    w.els[0].classList.toggle("cloud-link-hot", hot);
+    if (w.els[1]) w.els[1].classList.toggle("cloud-packet-hot", hot);
+    w.els.forEach((el) => el.classList.remove("cloud-wire-off"));
+    w.moving = false;
+  }, 650);
 }
 function refreshCloud(ui, d) {
   const n = ui.querySelector(".cloud-n");
