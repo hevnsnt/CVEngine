@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_SECONDS = 15
 CACHE_KEY = 'cvengine:scanner-state:'  # followed by the raw value of CVENGINE_LOCAL_FALLBACK, so a changed setting is never answered from the old one
+INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design: never part of a vantage-point warning
 NO_STAGE = ('waf',)  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (drop when one does)
 
 
@@ -54,6 +55,60 @@ def _compute(now):
     out = {'offline': True, 'kinds': kinds, 'never_seen': [k for k in kinds if k not in ever]}
     if heard:
         out['since'] = max(heard).isoformat()
+    return out
+
+
+def _uses_proxy(kind, tools):
+    """Whether a run of ``kind`` takes the egress proxy: its tool (the kind's name, or the part before the first underscore) is one of
+    ``egress_proxy.TOOLS``. A kind that runs on raw sockets never did, so the proxy is no part of its vantage point."""
+    return kind in tools or kind.split('_')[0] in tools
+
+
+def _tailscale_enabled():
+    """Whether this install runs the ``tailscale`` compose profile: it is in ``COMPOSE_PROFILES`` (``.env`` reaches every container) or the sidecar has
+    published a node status file (``cveFeed.tailscale_local``, fresh or not: the install is set up for it)."""
+    import os
+    profiles = os.environ.get('COMPOSE_PROFILES', '').replace(' ', ',').lower().split(',')
+    if 'tailscale' in profiles:
+        return True
+    from cveFeed import tailscale_local
+    return tailscale_local.available()
+
+
+def vantage_warnings():
+    """Sentences (one per cause, empty for none) warning that ``CVENGINE_LOCAL_FALLBACK`` moves kinds to the built-in scanner container, which has
+    none of this server's vantage point: its egress proxy (Settings > Proxy, only for the kinds whose tools take one), the Tailscale network namespace
+    that the ``tailscale`` sidecar shares with celery, or ``CVENGINE_ALLOW_PRIVATE_TARGETS``. Those scans would start from the scanner's network
+    without anything failing, so an administrator is told. It is a warning, never a refusal, derived and never stored (``ScanControl`` is untouched).
+    Internal ranges are Sentinel-only already and are not a cause. With the variable unset no kind moves and nothing is read."""
+    from agentapi import sentinel_dispatch
+    from agentapi.models import SentinelTask
+    allowed = sentinel_dispatch.local_fallback_kinds()
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY]
+    if not off:
+        return []
+
+    def probe(check):
+        try:
+            return bool(check())
+        except Exception:  # noqa: BLE001 - a reading that fails is no reason to warn, nor to break the status
+            logger.debug('vantage check could not be read', exc_info=True)
+            return False
+
+    def sentence(kinds, what):
+        return (f"CVENGINE_LOCAL_FALLBACK moves {_join(kinds)} to the built-in scanner, which does not use {what}; "
+                "those scans will start from the scanner's network instead.")
+
+    from cveFeed import egress_proxy
+    from targetApp import target_types
+    out = []
+    proxied = [k for k in off if _uses_proxy(k, egress_proxy.TOOLS)]
+    if proxied and probe(egress_proxy.configured):
+        out.append(sentence(proxied, "this server's egress proxy"))
+    if probe(_tailscale_enabled):
+        out.append(sentence(off, 'the Tailscale network'))
+    if probe(target_types.private_targets_allowed):
+        out.append(sentence(off, 'the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)'))
     return out
 
 
@@ -134,8 +189,8 @@ def unknown_message(unknown):
 
 def status(admin=True, snapshot=None):
     """The ``scanner`` block of the system status and the stats poll: the state plus the wording. The ``never_seen`` part and ``unknown_kinds`` (names in
-    ``CVENGINE_LOCAL_FALLBACK`` that are no kind) describe a server setting, so they are for an App Admin (``admin``); anyone else sees the waiting kinds
-    and the first sentence only."""
+    ``CVENGINE_LOCAL_FALLBACK`` that are no kind) and ``vantage`` (``vantage_warnings``) describe a server setting, so they are for an App Admin (``admin``);
+    anyone else sees the waiting kinds and the first sentence only."""
     from agentapi import sentinel_dispatch
     snapshot = dict(state() if snapshot is None else snapshot)
     text = messages(snapshot)
@@ -147,6 +202,7 @@ def status(admin=True, snapshot=None):
         text['never_seen'] = None
         unknown = []
     snapshot['unknown_kinds'] = unknown
+    snapshot['vantage'] = vantage_warnings() if admin else []  # a server setting, so for an App Admin; not in ``messages`` (the page strip)
     snapshot['messages'] = [t for t in (text['offline'], text['never_seen']) if t]
     snapshot['message'] = text['offline']
     snapshot['never_seen_message'] = text['never_seen']

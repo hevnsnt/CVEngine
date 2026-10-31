@@ -255,6 +255,12 @@ class HelperTests(SentinelWorld, TestCase):
 
 
 class WordingTests(SimpleTestCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(scanner_state, 'vantage_warnings', lambda: [])  # no database here; tests.test_scanner_vantage covers it
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_the_two_sentences(self):
         text = scanner_state.messages({'offline': True, 'kinds': ['nmap', 'testssl', 'wpscan'], 'never_seen': ['wpscan']})
         self.assertEqual(text['offline'], 'Scanner offline: nmap, testssl work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.')
