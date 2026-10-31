@@ -249,8 +249,15 @@ services:
   # (celery) writes a one-time provisioning blob into the scanner_bootstrap volume (agentapi/builtin_scanner.py); this container reads it once, and
   # the token it gets lives in its own state volume afterwards. CVENGINE_SCANNER_IMAGE names the Sentinel image (a registry reference pinned by digest
   # once the image is published, or the locally built cvengine-sentinel-local:latest). It never updates itself: the server updater swaps the image.
+  # Until the image is published, `build:` makes it from a pinned COMMIT of the Sentinel repository (make scanner-build; the first up builds it when the image
+  # is missing); CVENGINE_SCANNER_SOURCE points at another checkout or commit. BUILDKIT_CONTEXT_KEEP_GIT_DIR keeps the .git directory of that context, so the
+  # Sentinel's VERSION stamp is the commit. The published image, by digest, replaces `build:` later.
   scanner:
     profiles: ["builtin-scanner"]
+    build:
+      context: "${CVENGINE_SCANNER_SOURCE:-https://github.com/hevnsnt/cvENGINE-sentinel.git#1a2827a1be66618983e7bc245e3dae0d0f95e4f3}"
+      args:
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
     image: "${CVENGINE_SCANNER_IMAGE:-cvengine-sentinel-local:latest}"
     pull_policy: missing
     container_name: cvengine-scanner
@@ -266,7 +273,7 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 90s
+      start_period: 10m  # covers the wait for the server's enrollment (entrypoint below)
     environment:
       CVENGINE_SENTINEL_NAME: "CVEngine Scanner"
       CVENGINE_SENTINEL_UPDATE: "off"  # the server's updater swaps the image
@@ -278,6 +285,16 @@ services:
       - /bin/sh
       - -c
       - |
+        # No token from an earlier start: the server writes the enrollment when celery starts and then every five minutes, and only with
+        # CVENGINE_BUILTIN_SCANNER=1 and an App Admin. Wait for it (up to ~10 minutes, one log line) instead of exiting and restarting in a loop.
+        if [ ! -s /var/lib/cvengine-sentinel/token.json ] && [ ! -s /bootstrap/blob ]; then
+          echo "waiting for the server to write the enrollment; needs CVENGINE_BUILTIN_SCANNER=1 and an App Admin"
+          n=0
+          while [ ! -s /bootstrap/blob ] && [ "$$n" -lt 300 ]; do
+            sleep 2
+            n=$$((n + 1))
+          done
+        fi
         if [ -s /bootstrap/blob ]; then
           CVENGINE_SENTINEL_BLOB="$$(cat /bootstrap/blob)"
           export CVENGINE_SENTINEL_BLOB

@@ -164,7 +164,9 @@ instance-wide enrollment ready, owned by the oldest App Admin, valid 24 hours an
 provisioning blob to `/var/lib/cvengine-scanner/blob` (mode 0600, handed to uid 10001) on the `scanner_bootstrap` volume that only celery (writes) and
 the scanner (reads, read-only) mount. The scanner redeems it through the ordinary bootstrap call; the server forces the name "CVEngine Scanner", removes the
 file at its next run, and writes a new blob if the scanner is later lost (token revoked or expired). `web` is added to `ALLOWED_HOSTS` only while the
-setting is on, because the scanner reaches the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides). What is not built: the published
+setting is on, because the scanner reaches the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides). Until the image is published, compose
+builds it (`make scanner-build`) from a pinned Sentinel commit (`CVENGINE_SCANNER_SOURCE` overrides). Celery writes the first blob at start-up instead of waiting for beat, and a
+scanner with no saved token waits up to ten minutes for the blob before it starts. What is not built: the published
 Sentinel image (`CVENGINE_SCANNER_IMAGE`), the client re-reading the blob after its token expires, and the status line in System status.
 
 ## `CVENGINE_LOCAL_FALLBACK`

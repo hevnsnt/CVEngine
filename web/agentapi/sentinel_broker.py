@@ -887,10 +887,13 @@ def _scrubbed(task):
     return {'target': {**target, 'token': '***'}} if task.kind == 'wpscan' and target.get('token') not in (None, '', '***') else {}
 
 
-def expire(task, reason='the dispatch wait timed out; the stage fell back to local execution', actor=None):
+def expire(task, reason=None, actor=None):
     """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
-    caller already fell back to running the tool locally, so this task's work is simply over), its lease cleared. Also
-    the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
+    caller already fell back to running the tool locally, or, for a kind taken off ``CVENGINE_LOCAL_FALLBACK``, left the targets due, so this
+    task's work is simply over), its lease cleared. Also the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
+    if reason is None:
+        from agentapi import sentinel_dispatch
+        reason = f'the dispatch wait timed out; {sentinel_dispatch.outcome_text(task.kind)}'
     now = timezone.now()
     won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
         status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, **_scrubbed(task))
