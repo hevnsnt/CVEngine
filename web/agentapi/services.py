@@ -2277,7 +2277,7 @@ def _hygiene(f):
 
 
 def list_hygiene(ctx, slug, params):
-    """TLS, certificate and email-authentication (SPF, DKIM, DMARC, CAA) findings."""
+    """TLS, certificate, email-authentication (SPF, DKIM, DMARC, CAA) and cleartext-service findings."""
     from cveFeed.models import HygieneFinding
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
@@ -2289,7 +2289,7 @@ def list_hygiene(ctx, slug, params):
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
     if params.get('check'):
-        qs = qs.filter(check_name__startswith=params['check'])  # e.g. spf, dmarc, dkim, tls
+        qs = qs.filter(check_name__startswith=params['check'])  # e.g. spf, dmarc, dkim, tls, cleartext
     if params.get('q'):
         qs = qs.filter(host__icontains=params['q'])
     return paginate(qs, params, _tagged(_hygiene, lambda f: f.domain.project) if everywhere else _hygiene)
