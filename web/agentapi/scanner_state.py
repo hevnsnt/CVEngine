@@ -125,17 +125,30 @@ def messages(snapshot=None):
     }
 
 
+def unknown_message(unknown):
+    """The sentence for names in ``CVENGINE_LOCAL_FALLBACK`` that are no kind, or None when there are none."""
+    if not unknown:
+        return None
+    return f'CVENGINE_LOCAL_FALLBACK names kinds that do not exist: {_join(unknown)}; check the spelling.'
+
+
 def status(admin=True, snapshot=None):
-    """The ``scanner`` block of the system status and the stats poll: the state plus the wording. The ``never_seen`` part names a server setting, so
-    it is for an App Admin (``admin``); anyone else sees the waiting kinds and the first sentence only."""
+    """The ``scanner`` block of the system status and the stats poll: the state plus the wording. The ``never_seen`` part and ``unknown_kinds`` (names in
+    ``CVENGINE_LOCAL_FALLBACK`` that are no kind) describe a server setting, so they are for an App Admin (``admin``); anyone else sees the waiting kinds
+    and the first sentence only."""
+    from agentapi import sentinel_dispatch
     snapshot = dict(state() if snapshot is None else snapshot)
     text = messages(snapshot)
+    unknown = sentinel_dispatch.unknown_fallback_kinds()
     if not admin:
         snapshot['kinds'] = [k for k in snapshot['kinds'] if k not in snapshot['never_seen']]
         snapshot['never_seen'] = []
         snapshot['offline'] = bool(snapshot['kinds'])
         text['never_seen'] = None
+        unknown = []
+    snapshot['unknown_kinds'] = unknown
     snapshot['messages'] = [t for t in (text['offline'], text['never_seen']) if t]
     snapshot['message'] = text['offline']
     snapshot['never_seen_message'] = text['never_seen']
+    snapshot['unknown_kinds_message'] = unknown_message(unknown)
     return snapshot

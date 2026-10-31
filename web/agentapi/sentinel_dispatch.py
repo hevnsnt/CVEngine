@@ -25,6 +25,7 @@ follow-up once there is real-world experience with how many Sentinels a project 
 """
 import contextlib
 import ipaddress
+import logging
 import os
 import tempfile
 import time
@@ -38,34 +39,66 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # The longest a stage waits for a Sentinel that has claimed its task, by kind: a Sentinel that keeps heartbeating a running task is
 # doing the work, and a slow tool (nuclei over ten hosts, a full TLS audit) must not be run a second time locally because a short fixed
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
-# the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes.
+# the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
+# ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
+# Only the kinds that take a chunk of targets are listed; any other adds nothing.
 PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60}
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
 
+logger = logging.getLogger(__name__)
+
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
+_WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
+
+
+def _parse_local_fallback():
+    """``(allowed, unknown)``: the kinds ``CVENGINE_LOCAL_FALLBACK`` lets run here, and the names in it that are no kind. An unknown name is ignored (a
+    typo reads as ``none`` for that kind), but never silently: it is warned about once per process and shown in the scanner status."""
+    from agentapi.models import SentinelTask
+    raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
+    if raw in ('', 'all', '*'):
+        return set(SentinelTask.KINDS), []
+    if raw == 'none':
+        return set(), []
+    names = [k.strip() for k in raw.split(',') if k.strip()]
+    unknown = [k for k in dict.fromkeys(names) if k not in SentinelTask.KINDS]
+    if unknown and raw not in _WARNED_FALLBACK:
+        _WARNED_FALLBACK.add(raw)
+        logger.warning('%s names kinds that do not exist and are ignored: %s (valid: %s)', LOCAL_FALLBACK_ENV, ', '.join(unknown),
+                       ', '.join(SentinelTask.KINDS))
+    return {k for k in names if k in SentinelTask.KINDS}, unknown
 
 
 def local_fallback_kinds():
     """The task kinds that may still run on this server when no Sentinel can take them: ``CVENGINE_LOCAL_FALLBACK`` is unset or ``all`` (every kind,
     how it has always worked), ``none``, or a comma list of kinds. This is the switch of the move to one scanner (docs/SCANNER-ARCHITECTURE.md): a kind
-    taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead."""
-    from agentapi.models import SentinelTask
-    raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
-    if raw in ('', 'all', '*'):
-        return set(SentinelTask.KINDS)
-    if raw == 'none':
-        return set()
-    return {k.strip() for k in raw.split(',') if k.strip() in SentinelTask.KINDS}
+    taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead. A name in
+    the list that is no kind is ignored (see ``unknown_fallback_kinds``)."""
+    return _parse_local_fallback()[0]
+
+
+def unknown_fallback_kinds():
+    """The names in ``CVENGINE_LOCAL_FALLBACK`` that are not task kinds (in the order written, each once): empty when it is unset, ``all`` or ``none``."""
+    return _parse_local_fallback()[1]
 
 
 def fallback_allowed(kind):
     return kind in local_fallback_kinds()
+
+
+STAY_DUE = 'the targets stay due until a scanner can take the work'
+
+
+def outcome_text(kind):
+    """How a task that nobody finished ends, in words that are true for the kind's policy: the stage ran it here when ``kind`` may fall back,
+    or (it never ran here) the targets stay due until a scanner can take the work."""
+    return 'the stage fell back to local execution' if fallback_allowed(kind) else STAY_DUE
 
 
 def _no_local(kind, why):
@@ -190,7 +223,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             last_reap = now
             if task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none':
                 never_claimed = True  # the last live Sentinel went away while the task waited: nothing will take it
-                sentinel_broker.expire(task, 'no live Sentinel is left to take the task; the stage fell back to local execution')
+                sentinel_broker.expire(task, f'no live Sentinel is left to take the task; {outcome_text(kind)}')
                 break
         if task.status in ('claimed', 'running') and run_deadline is None:
             run_deadline = now + timeout
@@ -200,11 +233,11 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
                 busy, claim_deadline = True, started + queue_budget  # another stage took the free slot first: wait for the next one
                 continue
             never_claimed = True
-            sentinel_broker.expire(task, ('no Sentinel slot freed up in time; the stage fell back to local execution' if busy
-                                          else 'no Sentinel claimed the task in time; the stage fell back to local execution'))
+            sentinel_broker.expire(task, (f'no Sentinel slot freed up in time; {outcome_text(kind)}' if busy
+                                          else f'no Sentinel claimed the task in time; {outcome_text(kind)}'))
             break
         if run_deadline is not None and now >= run_deadline:
-            sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
+            sentinel_broker.expire(task, f'the dispatch wait timed out; {outcome_text(kind)}')
             break
         horizon = run_deadline if run_deadline is not None else claim_deadline
         time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, horizon - now)))
@@ -216,11 +249,13 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         reason = (task.error or (task.result or {}).get('error') or 'no reason given')[:180]
         activity.settle(entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
                         else f'A Sentinel reported {kind} failed for {label}: {reason}'))
-    elif never_claimed:
-        activity.settle(entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; it ran locally instead' if busy
-                                                   else f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead'))
-    else:  # claimed, but not reported back before the completion timeout
-        activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
+    else:  # no Sentinel took it, or one did and never reported back: the ending is true for the kind's policy (it ran here, or the targets stay due)
+        ending = 'it ran locally instead' if fallback_allowed(kind) else STAY_DUE
+        if never_claimed:
+            activity.settle(entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; {ending}' if busy
+                                                       else f'No Sentinel picked up {kind} work for {label} in time; {ending}'))
+        else:  # claimed, but not reported back before the completion timeout
+            activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; {ending}')
     if redact_target is not None:
         SentinelTask.objects.filter(pk=task.pk).update(target=redact_target(target))
     if task.status != 'done' and not internal:

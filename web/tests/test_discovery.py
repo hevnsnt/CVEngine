@@ -316,6 +316,9 @@ class DiscoveryApiCredentialWiringTests(TestCase):
 		self.project = Project.objects.create(name='K', slug='pk2', insert_date=timezone.now(), org=self.org)
 		self.domain = Domain.objects.create(name='keyed.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests: a resolver answer must not decide whether the stream runs
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def test_configured_keys_are_passed_as_extra_args_to_the_stream(self):
 		from dashboard.models import ApiCredential

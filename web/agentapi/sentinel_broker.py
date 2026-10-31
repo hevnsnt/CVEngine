@@ -42,6 +42,7 @@ from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError, AssetFilter
+from dashboard.models import AuditLog
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -814,7 +815,9 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
 
 
 def project_slots(project, now=None):
-    """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over."""
+    """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over. Counted over the two
+    kinds every scan stage starts with (``nmap``, ``nuclei_light``), not over every kind: a Sentinel that only runs OpenVAS or ``discover`` does not
+    widen the per-scan stage pool, so this is a deliberate pair and does not follow ``KINDS``."""
     now = now or timezone.now()
     memo = getattr(_memo, 'cache', None)
     key = ('slots', project.pk)
@@ -887,10 +890,13 @@ def _scrubbed(task):
     return {'target': {**target, 'token': '***'}} if task.kind == 'wpscan' and target.get('token') not in (None, '', '***') else {}
 
 
-def expire(task, reason='the dispatch wait timed out; the stage fell back to local execution', actor=None):
+def expire(task, reason=None, actor=None):
     """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
-    caller already fell back to running the tool locally, so this task's work is simply over), its lease cleared. Also
-    the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
+    caller already fell back to running the tool locally, or, for a kind taken off ``CVENGINE_LOCAL_FALLBACK``, left the targets due, so this
+    task's work is simply over), its lease cleared. Also the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
+    if reason is None:
+        from agentapi import sentinel_dispatch
+        reason = f'the dispatch wait timed out; {sentinel_dispatch.outcome_text(task.kind)}'
     now = timezone.now()
     won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
         status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, **_scrubbed(task))
@@ -1570,6 +1576,25 @@ def explain_error(text):
     return message[:300]
 
 
+def _held_before(task, agent):
+    """Whether ``agent`` held ``task`` before it ended. ``expire`` clears the task's agent, so the claim's audit row is the only record of who it was."""
+    return AuditLog.objects.filter(action='sentinel.task.claim', detail__task_id=task.pk, detail__agent_id=agent.pk).exists()
+
+
+def _record_late(ctx, agent, task):
+    """A Sentinel reported a task whose stage had already stopped waiting: the result is discarded (the stage ran it here or left the targets due),
+    but it is said, once per task however often the Sentinel retries: an audit row, and an activity line next to the stage's own."""
+    if AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists():
+        return
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity
+    reason = task.error or 'no reason given'
+    audit.record(ctx.user, 'sentinel.task.late', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk, agent=agent.name,
+                 reason=reason)
+    activity.log('run_check', f'Sentinel {agent.name} reported {task.kind} work for {sentinel_dispatch._label(task.host, task.ips)} after the stage '
+                 f'stopped waiting ({reason[:150]})', project=task.project, status='expired', scan_id=task.scan_id, sentinel_task_id=task.pk)
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -1582,9 +1607,13 @@ def report_result(ctx, task_id, body):
     rejected = None
     with transaction.atomic():
         task = SentinelTask.objects.select_for_update(of=('self',)).select_related('project').filter(pk=_int(task_id)).first()
-        if task is None or task.agent_id != agent.pk:
+        late = task is not None and task.status == 'expired' and (task.agent_id == agent.pk or (task.agent_id is None and _held_before(task, agent)))
+        if task is None or (task.agent_id != agent.pk and not late):
             raise ApiError(404, 'task not found')
         if task.status in ('done', 'failed', 'expired'):  # a retry of a report that already went through (the answer was lost): the same answer again, whatever the body
+            if late:  # the stage stopped waiting first: this result is discarded, as before, but no longer without a trace
+                _record_late(ctx, agent, task)
+                return {'task': task_brief(task), 'duplicate': True, 'late': True}
             return {'task': task_brief(task), 'duplicate': True}
         if task.status not in ('claimed', 'running') or not task.lease_expires_at or task.lease_expires_at < now:
             raise ApiError(409, 'the task is no longer assigned to this Sentinel (its lease expired or it was cancelled)')
@@ -1763,6 +1792,7 @@ def live_overview(ctx):
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
     orgs, org_of = _visible_orgs(ctx.user)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
+    builtin_id = builtin_pk()  # likewise: one read, then each card compares ids
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)
@@ -1770,7 +1800,7 @@ def live_overview(ctx):
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'status': agent.status, 'status_note': agent.status_note,
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
