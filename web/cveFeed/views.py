@@ -170,6 +170,13 @@ def graph_payload(domain_id=None, scan_id=None):
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
                                                   name__in=NUCLEI_SCAN_ACTIVITY_NAMES, status=2).values_list('scan_of_id', flat=True))
+    # the alias and note a person gave each host (one query): the node's label stays the name, the tooltip and card add them
+    from types import SimpleNamespace
+    from agentapi.services import alias_and_note
+    from cveFeed.models import HostProfile
+    wanted = {s.name.lower() for s in sub_list} | {n.lower() for rows in siblings.values() for _, n in rows}
+    tags = {(row.project_id, row.host): {'alias': row.alias, 'note': row.note}
+            for row in HostProfile.objects.filter(host__in=wanted).exclude(alias='', note='')}
     cut = False  # the node cap stopped the drawing before every host was in
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
@@ -192,7 +199,9 @@ def graph_payload(domain_id=None, scan_id=None):
             status = 'vulnerable'
         tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)) for m in live]
         heat = host_heat(status, tiers, sev)
+        given = alias_and_note(sub, [SimpleNamespace(name=n, target_domain=sub.target_domain) for _, n in sibs], tags)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
+                    **{k: given[k] for k in ('alias', 'note') if given[k]},
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
                     status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
                     internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
@@ -201,6 +210,7 @@ def graph_payload(domain_id=None, scan_id=None):
             break
         by_name[sub.name.lower()] = sid
         if sub.target_domain_id and node(f'dom:{sub.target_domain_id}', 'domain', sub.target_domain.name,
+                **{k: getattr(sub.target_domain, k) for k in ('alias', 'note') if getattr(sub.target_domain, k)},
                 project=sub.target_domain.project.slug if sub.target_domain.project_id else '',
                 project_name=sub.target_domain.project.name if sub.target_domain.project_id else '',
                 root=root_for(sub.target_domain)):
@@ -735,6 +745,18 @@ GRAPH_CACHE_SECONDS = 30
 GRAPH_VERSION_WINDOW = 300  # a graph that "has not changed" is still re-sent this often: edits to existing rows move no id
 
 
+def _label_version():
+    """What the graph shows of the aliases and notes people gave hosts and targets, as a token: an edit moves no id, so the newest change of the
+    host rows and the labelled targets' own text stand for them. The graph would otherwise show an old tooltip until the time window passes."""
+    from django.contrib.postgres.aggregates import StringAgg
+    from django.db.models import Count, Max
+    from cveFeed.models import HostProfile
+    from targetApp.models import Domain
+    hosts = HostProfile.objects.aggregate(m=Max('updated_at'), n=Count('id'))
+    targets = Domain.objects.exclude(alias='', note='').aggregate(a=StringAgg('alias', '\x1f', ordering='id'), n=StringAgg('note', '\x1f', ordering='id'))
+    return hosts, targets
+
+
 def graph_version(domain_id=None, scan_id=None):
     """A cheap token that changes when the graph's inputs do: the newest hosts, IPs, findings, scan steps, discovery events
     and CVE matches, plus when a match was last touched (an AI verdict rewrites a row without adding one). Queried
@@ -754,6 +776,7 @@ def graph_version(domain_id=None, scan_id=None):
         ScanActivity.objects.aggregate(m=Max('id'), t=Max('time')),
         DiscoveryEvent.objects.aggregate(m=Max('id'))['m'],
         CVEMatch.objects.aggregate(m=Max('id'), u=Max('updated_at')),
+        _label_version(),
         int(timezone.now().timestamp() // GRAPH_VERSION_WINDOW),
     ]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:16]
@@ -838,6 +861,7 @@ def node_detail(node_id):
         if not d:
             return None
         return {'kind': 'domain', 'title': d.name, 'rows': _kv(
+            ('Alias', d.alias), ('Note', d.note),
             ('Hosts', Subdomain.objects.filter(target_domain=d).count()),
             ('Scans', ScanHistory.objects.filter(domain=d).count()),
             ('Findings', Vulnerability.objects.filter(target_domain=d).count()),
@@ -850,10 +874,14 @@ def node_detail(node_id):
         ports = [f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_services(ip)]
         matches = list(CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage'))
         vulns = Vulnerability.objects.filter(subdomain=s).order_by('-severity')[:8]
-        from agentapi.services import _host_heat
+        from agentapi.services import _host_heat, alias_and_note
+        from cveFeed.models import HostProfile
         project = s.target_domain.project if s.target_domain else None
+        mine = HostProfile.objects.filter(project=project, host=s.name.lower()).first() if project else None
+        given = alias_and_note(s, [], {(project.id, s.name.lower()): {'alias': mine.alias, 'note': mine.note}} if mine else {})  # what a person calls it
         return {'kind': 'host', 'title': s.name, 'heat': _host_heat(s),
                 'link': f'/cve/{project.slug}/hosts/?host={quote(s.name)}' if project else '', 'rows': _kv(
+            ('Alias', given['alias']), ('Note', given['note']),
             ('Target', [(s.target_domain.name, _host_href(project.slug, s.target_domain.name))] if project else (s.target_domain.name if s.target_domain else '')),
             ('IP addresses', [(ip.address, _ip_href(project.slug, ip.address)) for ip in s.ip_addresses.all()] if project
              else ', '.join(ip.address for ip in s.ip_addresses.all())),

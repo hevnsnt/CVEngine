@@ -81,7 +81,8 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <h1>{{ r.title }}</h1>
   <div class="subject">{{ r.subject }}</div>
   <table>
-    {% if r.host %}<tr><td>Host</td><td>{{ r.host }}</td></tr>{% endif %}
+    {% if r.host %}<tr><td>Host</td><td>{{ r.host }}{% if r.host_alias %} ({{ r.host_alias }}){% endif %}</td></tr>{% endif %}
+    {% if r.host_note %}<tr><td>Note</td><td class="pre">{{ r.host_note }}</td></tr>{% endif %}
     <tr><td>Project</td><td>{{ r.project }}</td></tr>
     {% if r.organization %}<tr><td>Organization</td><td>{{ r.organization }}</td></tr>{% endif %}
     <tr><td>Generated</td><td>{{ r.generated }}</td></tr>
@@ -121,7 +122,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <table class="grid">
     <thead><tr><th>Heat</th><th>Finding</th><th>Host</th><th>Status</th></tr></thead>
     <tbody>{% for f in r.summary.top %}
-      <tr><td><span class="chip c-{{ f.heat }}">{{ f.heat }}</span></td><td>{{ f.title }}{% if f.cves and f.kind != 'CVE match' %} <span class="mute">({{ f.cves|join:", " }})</span>{% endif %}</td><td>{{ f.host }}</td><td>{{ f.tracking.status }}</td></tr>{% endfor %}
+      <tr><td><span class="chip c-{{ f.heat }}">{{ f.heat }}</span></td><td>{{ f.title }}{% if f.cves and f.kind != 'CVE match' %} <span class="mute">({{ f.cves|join:", " }})</span>{% endif %}</td><td>{{ f.host }}{% if f.host_alias %}<br><span class="mute small">{{ f.host_alias }}</span>{% endif %}</td><td>{{ f.tracking.status }}</td></tr>{% endfor %}
     </tbody>
   </table>
   {% else %}<p class="mute">Nothing to list.</p>{% endif %}
@@ -135,7 +136,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <table class="grid">
     <thead><tr><th>Host</th><th>Heat</th><th class="num">Score</th><th class="num">Findings</th><th>Exposure (open ports)</th><th>Owner</th></tr></thead>
     <tbody>{% for h in r.hosts %}
-      <tr><td>{{ h.host }}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
+      <tr><td>{{ h.host }}{% if h.alias %}<br><span class="mute small">{{ h.alias }}</span>{% endif %}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
         <td><span class="chip c-{{ h.heat }}">{{ h.heat }}</span></td><td class="num">{{ h.score }}</td><td class="num">{{ h.findings }}</td>
         <td>{% if h.port_count %}{{ h.ports|join:", " }}{% if h.ports_more %} +{{ h.ports_more }} more{% endif %}{% else %}<span class="mute">none open</span>{% endif %}<br><span class="mute small">{{ h.addresses }} address{{ h.addresses|pluralize:"es" }}</span></td>
         <td>{{ h.owner|default:"-" }}{% if h.criticality and h.criticality != 'unknown' %}<br><span class="mute small">{{ h.criticality }} criticality</span>{% endif %}</td></tr>{% endfor %}
@@ -161,7 +162,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <div class="finding f-{{ f.heat }}">
     <h3>{{ f.title }}</h3>
     <div class="meta"><span class="chip c-{{ f.heat }}">{{ f.heat }}</span> <span class="chip c-{{ f.severity }}">{{ f.severity }}</span>
-      <span class="mute small">{{ f.kind }}{% if f.host %} on {{ f.host }}{% endif %}{% if f.subtitle %} &middot; {{ f.subtitle }}{% endif %}</span></div>
+      <span class="mute small">{{ f.kind }}{% if f.host %} on {{ f.host }}{% if f.host_alias %} ({{ f.host_alias }}){% endif %}{% endif %}{% if f.subtitle %} &middot; {{ f.subtitle }}{% endif %}</span></div>
     <dl class="kv">
       {% if f.cves %}<dt>CVE</dt><dd>{{ f.cves|join:", " }}{% if f.cvss %} &middot; CVSS {{ f.cvss }}{% endif %}{% if f.signals %} &middot; {{ f.signals|join:", " }}{% endif %}</dd>{% endif %}
       <dt>Basis</dt><dd><span class="{% if f.confirmed %}basis-confirmed{% else %}basis-version{% endif %}">{{ f.basis }}</span></dd>
@@ -192,7 +193,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <tbody>{% for f in g.items %}
       <tr><td><span class="chip c-{{ f.severity }}">{{ f.severity }}</span></td>
         <td>{{ f.title }}{% if f.detail %}<br><span class="mute small pre">{{ f.detail }}</span>{% endif %}{% if f.remediation %}<br><span class="small pre"><b>Fix:</b> {{ f.remediation }}</span>{% endif %}</td>
-        <td>{{ f.host }}</td>
+        <td>{{ f.host }}{% if f.host_alias %}<br><span class="mute small">{{ f.host_alias }}</span>{% endif %}</td>
         <td>{{ f.tracking.status }}{% if f.tracking.assignee %}<br><span class="mute small">{{ f.tracking.assignee }}</span>{% endif %}{% if f.tracking.note %}<br><span class="mute small pre">{{ f.tracking.note }}</span>{% endif %}</td></tr>{% endfor %}
     </tbody>
   </table>

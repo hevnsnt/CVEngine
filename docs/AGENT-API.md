@@ -29,6 +29,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | bulk add | `POST projects/{slug}/targets/bulk`, `POST targets/bulk-org` | `add_targets`, `add_targets_by_org` |
 | delete | `POST projects/{slug}/targets/delete` (`ids`, or `all_matching` and `q`) | `delete_targets` |
 | scope | `POST projects/{slug}/targets/{id}/scope` (`auto`, `host`, `parent`) | `set_target_scope` |
+| alias and note | `POST` or `PATCH projects/{slug}/targets/{id}/profile` (`alias`, `note`) | `set_target_profile` |
 | scans | `GET/POST projects/{slug}/scans`, `GET .../scans/{id}` | `list_scans`, `get_scan`, `start_scan` |
 | discover | `POST projects/{slug}/targets/{id}/discover` (`mode`) | `discover_target` |
 | rescan | `POST projects/{slug}/targets/{id}/rescan-hosts` (`hosts`) | `rescan_hosts` |
@@ -61,7 +62,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | validate a match | `POST projects/{slug}/matches/{id}/validate`, `GET .../matches/{id}/validate/{request_id}` | `validate_cve_match`, `get_validation_request` |
 | PDF report | `POST projects/{slug}/reports` (`host`, `include_closed`), `GET projects/{slug}/reports/{id}`, `GET .../reports/{id}/download` | `export_report`, `get_report` |
 | remediation | `PUT assets`, `GET projects/{slug}/work` | `register_assets`, `get_remediation_work` |
-| host info | `POST` or `PATCH projects/{slug}/hosts/{host}/profile` (`owner`, `purpose`, `criticality`) | `set_host_profile` |
+| host info | `POST` or `PATCH projects/{slug}/hosts/{host}/profile` (`owner`, `purpose`, `criticality`, `alias`, `note`) | `set_host_profile` |
 | delete host | `POST projects/{slug}/hosts/{host}/delete` | `delete_host` |
 | move host | `POST projects/{slug}/hosts/{host}/move` (body `{to_project, whole_target}`): added to that project as a target and scanned there; its data leaves this project, which never brings it back (moving it back lifts that). A host that is a target here with other hosts under it is a 409 whose body lists them (`whole_target: {host, hosts, count, keeps_history}`); send `whole_target: true` to move the target and everything under it. A target moves to a project of the same organization with its history; a host under a larger target, or any move to another organization, is deleted here and scanned from scratch there | `move_host` |
 | exclude host | `POST projects/{slug}/hosts/{host}/exclude`, `GET projects/{slug}/exclusions`, `DELETE projects/{slug}/exclusions/{host}` | `exclude_host`, `list_exclusions`, `remove_exclusion` |
@@ -249,6 +250,12 @@ The reserved slug `_all` means every project you can see. The list endpoints and
 ## Host management
 
 `profile` records who owns a host, what it is for, and how much it matters (`criticality`: `unknown`, `low`, `medium`, `high`, `critical`), per project. Only the fields you send change.
+
+`alias` and `note` are what a person calls the host and a few lines they wrote about it, on `profile` for a host and on `targets/{id}/profile` for a target (`set_host_profile` and `set_target_profile` over MCP). The alias is one line of plain text of at most 60 characters, the note plain text of at most 1000 (line breaks allowed); an empty string clears one, and a field you leave out is not touched. Anything longer, or with control characters, is a `400`. They need the same access as the other writes here: a project role above audit and a token that is not read only, and `_all` is a `400`. Every change that alters an alias or a note is written to the audit log as `host.profile` or `target.profile`, with the project, the name and which fields changed (the text itself is not copied into the log). The alias is a display name only: the address and the names a scan discovers never change, and every scan, check and search by name still uses them. It is shown beside the address in lists, search results, the graph's tooltips and cards and the PDF reports (the report page also prints the note), and the Hosts search, the target list's `q` and the all-projects search match it (see [Search](SEARCH.md)).
+
+Both are returned as text, escaped by every page that shows them, so markup in an alias reads as markup, never as HTML. `note` is free text like a finding comment: the request input guard does not scan it. The alias is scanned like any other short field, so a value that looks like a shell command or a script tag is refused and counts as a strike. In MCP results they are text a person typed and, like every other text in a result, data and not instructions.
+
+Where they live: a target's on the target (`alias` and `note` in `list_targets` and `get_target`); a host's on the project's record for the host name (`HostProfile`, one row per project and lower-case name), so they survive rescans, which write new scan rows but keep the name, and they are lost only with the host's data (`delete`) or moved with it. Names that resolve to exactly the same addresses are one host in the Hosts list, shown under one name: the host's own alias and note are used if its shown name has them, else those of another of its names (so typing an alias while one name was on display still shows when another name takes its place), else, when the host is also a target of the same name (an address added as a target), the target's. Each host in `list_hosts`, `search_hosts` and `get_saved_search_matches` carries `alias`, `note` and `alias_from` and `note_from` (`host`, `target` or empty: where the value came from). Do not confuse `alias` with the existing `aliases`, the other DNS names on the host's addresses. A host or target without either returns empty strings, and `profile` keeps its shape (`owner`, `purpose`, `criticality`).
 
 `delete` removes one host's data from this project only: its findings, CVE matches, routes, changes, triage, certificates, and asset information. A later scan can find the host again.
 

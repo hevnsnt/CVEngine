@@ -362,6 +362,8 @@ function refreshCloud(ui, d) {
   const t = ui.querySelector("title");
   if (t) t.textContent = `${d.label}: ${d.hosts} hosts, ${d.findings} with findings. Double-click to open it.`;
 }
+// the full name for a tooltip: the address (or name) with the alias a person gave it beside it; the drawn label stays the name
+const tipName = (d) => (d.alias && (d.kind === "subdomain" || d.kind === "domain") ? `${d.label} (${d.alias})` : d.label);
 const arc = (r, len, offset, color) => {
   const c = document.createElementNS(NS, "circle");
   const circumference = 2 * Math.PI * r;
@@ -626,8 +628,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       g.setAttribute(
         "aria-label",
         d.kind === "subdomain"
-          ? `${d.label}, ${d.status || "unscanned"}`
-          : `${d.kind} ${d.label}`,
+          ? `${tipName(d)}, ${d.status || "unscanned"}`
+          : `${d.kind} ${tipName(d)}`,
       );
       const r = d.kind === "cloud" ? CLOUD_R : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
       const ring = document.createElementNS(NS, "circle");
@@ -661,7 +663,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       // a red dot in a cloud carries no label (there can be hundreds); its name is in the tooltip and the card
       t.textContent = d.cloud ? "" : shorten(shortLabel(d));
       const title = document.createElementNS(NS, "title");
-      title.textContent = d.label;
+      title.textContent = tipName(d);
       g.append(ring, c, t, title);
       if (d.kind === "cloud") { // the name label stays the group's first text: relabel() finds it there
         const art = cloudArt(d);
@@ -678,7 +680,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         boundary.setAttribute("fill", "none");
         g.insertBefore(boundary, ring);
         g.classList.add("gn-internal");
-        title.textContent = `${d.label} (internal${d.network ? `, ${d.network}` : ""})`;
+        title.textContent = `${tipName(d)} (internal${d.network ? `, ${d.network}` : ""})`;
         g.setAttribute("aria-label", `${g.getAttribute("aria-label")}, internal${d.network ? ` network ${d.network}` : ""}`);
       }
       if (d.kind === "subdomain") refreshHost(g, d);
