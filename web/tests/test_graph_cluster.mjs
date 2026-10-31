@@ -149,10 +149,10 @@ test('a cloud is made of its targets, and its shape follows them: no two project
   add('p0', 'one.example', 30, 2);
   ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].forEach((t, i) => add('p1', `${t}.example`, 12 - i, i === 3 ? 4 : 0));
   const clouds = Object.fromEntries(cloudProjects(data).nodes.filter(n => n.kind === 'cloud').map(c => [c.project, c]));
-  assert.deepEqual(clouds.p0.parts, [{name: 'one.example', hosts: 30, findings: 2}]);
+  assert.deepEqual(clouds.p0.parts, [{name: 'one.example', hosts: 30, findings: 2, fire: 2, smoke: 0, ice: 0}]);
   assert.equal(clouds.p1.parts.length, 8); // the smallest targets fold into one
-  assert.deepEqual(clouds.p1.parts.at(-1), {name: '3 more targets', hosts: 12, findings: 0});
-  assert.deepEqual(clouds.p1.parts[3], {name: 'd.example', hosts: 9, findings: 4});
+  assert.deepEqual(clouds.p1.parts.at(-1), {name: '3 more targets', hosts: 12, findings: 0, fire: 0, smoke: 0, ice: 0});
+  assert.deepEqual(clouds.p1.parts[3], {name: 'd.example', hosts: 9, findings: 4, fire: 4, smoke: 0, ice: 0});
   const shape = (c) => cloudShape(c, 100);
   const one = shape(clouds.p0), many = shape(clouds.p1);
   assert.ok(new Set(many.map(p => p.part)).size === 8 && one.every(p => p.part === 0)); // a puff for each target
