@@ -102,7 +102,8 @@ function cloudParts(parts) {
   parts.sort((a, b) => b.hosts - a.hosts || a.name.localeCompare(b.name));
   if (parts.length <= CLOUD_PARTS) return parts;
   const rest = parts.slice(CLOUD_PARTS - 1);
-  return [...parts.slice(0, CLOUD_PARTS - 1), { name: `${rest.length} more targets`, hosts: rest.reduce((s, p) => s + p.hosts, 0), findings: rest.reduce((s, p) => s + p.findings, 0) }];
+  const sum = (key) => rest.reduce((s, p) => s + (p[key] || 0), 0);
+  return [...parts.slice(0, CLOUD_PARTS - 1), { name: `${rest.length} more targets`, hosts: sum("hosts"), findings: sum("findings"), fire: sum("fire"), smoke: sum("smoke"), ice: sum("ice") }];
 }
 // A cloud's size says how big the project is: from a few hosts to thousands, on a log scale so a small project is still a cloud.
 export const cloudRadius = (d) => Math.round(Math.min(128, Math.max(58, 58 + 22 * Math.log10((d.hosts || 0) + 1))));
@@ -159,7 +160,7 @@ export function cloudProjects(data, { aspect = 1.6 } = {}) {
   const about = data.projects || {};
   const names = new Map();
   const heat = new Map(); // project -> {fire, smoke, ice}: hosts by their worst temperature
-  const made = new Map(); // project -> target -> {name, hosts, findings}: what the cloud is made of
+  const made = new Map(); // project -> target -> {name, hosts, findings, fire, smoke, ice}: what the cloud is made of
   const clouded = new Set(); // every host and target of a clouded project: they are inside it
   for (const n of data.nodes) {
     if (!big.has(n.project) || !["subdomain", "domain"].includes(n.kind)) continue;
@@ -168,9 +169,12 @@ export function cloudProjects(data, { aspect = 1.6 } = {}) {
     else {
       const parts = made.get(n.project) || new Map();
       const name = n.target || n.project;
-      const part = parts.get(name) || { name, hosts: 0, findings: 0 };
+      const part = parts.get(name) || { name, hosts: 0, findings: 0, fire: 0, smoke: 0, ice: 0 };
       part.hosts += 1;
-      part.findings += HEATS.includes(n.heat) ? 1 : 0;
+      if (HEATS.includes(n.heat)) {
+        part.findings += 1;
+        part[n.heat] += 1;
+      }
       parts.set(name, part);
       made.set(n.project, parts);
     }
@@ -395,12 +399,10 @@ function decorateMoons(g, d, r) {
 }
 const tierRadius = (d) => Math.min(30, 12 + 3 * Math.sqrt(d.count || 0));
 const hostRadius = (d) => (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
-// A cloud's look: a real cloud, puffs heaped into one billowing outline, glowing in its aura, and inside it the project as a living
-// network: hosts as nodes, each tied to its nearest neighbours, packets running along the links, and a red node for each share of its
-// hosts with findings. Placed and timed from the cloud's id, so a redraw looks the same; CSS does every motion (and stops it for reduced
+// A project's look: a constellation. No body, only its hosts as stars scattered through the shape of its targets, each wired to its
+// nearest neighbours with packets running along the wires, and a flaring star (red, amber or blue) for each share of its hosts on fire,
+// in smoke or on ice. Placed and timed from the project's id, so a redraw looks the same; CSS does every motion (and stops it for reduced
 // motion). ``under`` goes beneath the body (the hit area), ``over`` above it.
-const CLOUD_SPARKS = 9;
-let cloudSeq = 0;
 const svgEl = (tag, attrs = {}, cls = "") => {
   const el = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
@@ -446,25 +448,33 @@ export function cloudShape(d, R) {
   const cx = (left + right) / 2, cy = (top + bottom) / 2;
   return puffs.map((p) => ({ x: (p.x - cx) * k, y: (p.y - cy) * k, r: p.r * k, part: p.part }));
 }
-// the network inside: each target's hosts as nodes in its own puffs (red for its share with findings), each tied to its two nearest,
-// and each target bridged to the nearest one heaped before it
+// the stars: each target's hosts scattered through its own puffs, the share with findings flaring in their heat (fire first), each tied
+// to its two nearest, and each target bridged to the nearest one heaped before it
 function cloudNetwork(d, R, puffs) {
   const parts = d.parts && d.parts.length ? d.parts : [{ name: d.project || d.id, hosts: d.hosts || 0, findings: 0 }];
   const total = parts.reduce((s, p) => s + Math.max(1, p.hosts), 0);
-  const want = Math.round(Math.min(30, 12 + 5 * Math.log10((d.hosts || 0) + 1)));
+  const want = Math.round(Math.min(44, 8 + 11 * Math.log10((d.hosts || 0) + 1)));
   const nodes = [], links = new Map();
   const link = (i, j) => links.set(i < j ? `${i}-${j}` : `${j}-${i}`, [Math.min(i, j), Math.max(i, j)]);
   parts.forEach((part, pi) => {
     const own = puffs.filter((p) => p.part === pi);
     const n = Math.max(2, Math.round(want * Math.max(1, part.hosts) / total));
-    const hot = part.findings ? Math.min(Math.ceil(n * 0.5), Math.max(1, Math.round(part.findings / Math.max(part.hosts, 1) * n * 3))) : 0;
+    // never more flaring stars than hosts with findings, about twice their share so a few stand out, and never most of the stars
+    const kinds = HEATS.filter((h) => part[h]).length || 1; // every heat it has shows at least once
+    const hot = part.findings ? Math.min(part.findings, Math.max(kinds, Math.ceil(n * 0.35)), Math.max(kinds, Math.round((part.findings / Math.max(part.hosts, 1)) * n * 2))) : 0;
     const first = nodes.length;
+    const heats = []; // the flaring stars' heats, fire first, each heat at least one star when the target has any
+    for (const h of HEATS) {
+      const m = part[h] ? Math.max(1, Math.round((part[h] / part.findings) * hot)) : 0;
+      for (let i = 0; i < m && heats.length < hot; i++) heats.push(h);
+    }
+    while (heats.length < hot) heats.push(HEATS.find((h) => part[h]) || "fire");
     for (let k = 0; k < 300 && nodes.length - first < n; k++) {
       const p = own[Math.floor(unit(`${d.id}:${pi}:n${k}:p`) * own.length)];
       const a = unit(`${d.id}:${pi}:n${k}:a`) * 2 * Math.PI, reach = p.r * 0.7 * Math.sqrt(unit(`${d.id}:${pi}:n${k}:r`));
       const x = p.x + Math.cos(a) * reach, y = p.y + Math.sin(a) * reach;
       if (Math.abs(x) < R * 0.36 && Math.abs(y - R * 0.04) < R * 0.24) continue; // the count sits here
-      if (nodes.every((m) => Math.hypot(m.x - x, m.y - y) > R * 0.13)) nodes.push({ x, y, k: `${pi}:${k}`, part: pi, hot: nodes.length - first < hot });
+      if (nodes.every((m) => Math.hypot(m.x - x, m.y - y) > R * 0.13)) nodes.push({ x, y, k: `${pi}:${k}`, part: pi, heat: heats[nodes.length - first] || "" });
     }
     const mine = nodes.map((m, i) => [m, i]).filter(([m]) => m.part === pi);
     for (const [m, i] of mine) {
@@ -485,75 +495,56 @@ function cloudNetwork(d, R, puffs) {
   return { nodes, links: [...links.values()] };
 }
 function cloudArt(d) {
-  const id = `cloud${++cloudSeq}`;
   const R = cloudRadius(d);
-  const puffs = cloudShape(d, R);
+  const puffs = cloudShape(d, R); // never drawn: the scaffold the stars are scattered through, so the shape still follows the targets
   const under = svgEl("g", {}, "cloud-under");
-  const defs = svgEl("defs");
-  // one shading across every puff, lit from the top left, so the heap reads as one cloud
-  const body = svgEl("radialGradient", { id: `${id}-body`, gradientUnits: "userSpaceOnUse", cx: -R * 0.3, cy: -R * 0.55, r: R * 1.6 });
-  body.append(svgEl("stop", { offset: "0%" }, "cg-body-in"), svgEl("stop", { offset: "55%" }, "cg-body-mid"), svgEl("stop", { offset: "100%" }, "cg-body-out"));
-  defs.append(body);
-  const halo = svgEl("g", {}, "cloud-halo"); // the aura: the cloud's own shape, blurred, breathing
-  const edge = svgEl("g", {}, "cloud-edge"); // every puff with an outline, then every puff without on top: only the outer edge shows
-  const fill = svgEl("g", {}, "cloud-fill");
-  puffs.forEach((p, i) => {
-    const at = { cx: p.x.toFixed(1), cy: p.y.toFixed(1) };
-    const delay = `-${(unit(`${d.id}:p${i}:d`) * 7).toFixed(1)}s`, duration = `${(5 + unit(`${d.id}:p${i}:t`) * 4).toFixed(1)}s`;
-    halo.append(svgEl("circle", { ...at, r: (p.r * 1.08).toFixed(1) }));
-    for (const [layer, cls] of [[edge, "cloud-puff"], [fill, "cloud-puff"]]) {
-      const c = svgEl("circle", { ...at, r: p.r.toFixed(1), fill: `url(#${id}-body)` }, cls);
-      c.style.animationDelay = delay; // both layers billow together, so the outline never shows through
-      c.style.animationDuration = duration;
-      layer.append(c);
-    }
-  });
-  under.append(defs, halo, edge, fill);
-
-  const over = svgEl("g", {}, "cloud-over");
   const net = svgEl("g", {}, "cloud-bubbles cloud-net");
   const { nodes, links } = cloudNetwork(d, R, puffs);
   for (const [i, j] of links) {
     const a = nodes[i], b = nodes[j];
     const at = { x1: a.x.toFixed(1), y1: a.y.toFixed(1), x2: b.x.toFixed(1), y2: b.y.toFixed(1) };
-    const hot = a.hot || b.hot;
+    const hot = a.heat || b.heat;
     net.append(svgEl("line", at, hot ? "cloud-link cloud-link-hot" : "cloud-link"));
-    if (unit(`${d.id}:l${i}-${j}`) < 0.55) { // a packet on its way
+    if (unit(`${d.id}:l${i}-${j}`) < 0.35) { // a packet on its way
       const packet = svgEl("line", { ...at, pathLength: 100 }, hot ? "cloud-packet cloud-packet-hot" : "cloud-packet");
-      packet.style.animationDuration = `${(1.4 + unit(`${d.id}:l${i}-${j}:t`) * 2.4).toFixed(1)}s`;
+      packet.style.animationDuration = `${(1.6 + unit(`${d.id}:l${i}-${j}:t`) * 2.6).toFixed(1)}s`;
       packet.style.animationDelay = `-${(unit(`${d.id}:l${i}-${j}:d`) * 4).toFixed(1)}s`;
       if (unit(`${d.id}:l${i}-${j}:w`) < 0.5) packet.style.animationDirection = "reverse";
       net.append(packet);
     }
   }
   nodes.forEach((n) => {
-    const c = svgEl("circle", { cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: (n.hot ? 3.4 : 2.2 + unit(`${d.id}:n${n.k}:s`) * 1.6).toFixed(1) },
-      n.hot ? "cloud-node cloud-node-hot" : "cloud-node");
-    c.style.animationDelay = `-${(unit(`${d.id}:n${n.k}:d`) * 5).toFixed(1)}s`;
-    net.append(c);
-  });
-  if (d.hot === "fire") { // a cloud with hosts on fire throws sparks off its top
-    const tops = puffs.filter((p) => p.y < 0);
-    for (let i = 0; i < CLOUD_SPARKS; i++) {
-      const p = tops[i % tops.length], a = (-150 + unit(`${d.id}:fl${i}`) * 120) * Math.PI / 180;
-      const c = svgEl("circle", { cx: (p.x + Math.cos(a) * p.r).toFixed(1), cy: (p.y + Math.sin(a) * p.r).toFixed(1), r: (1.4 + unit(`${d.id}:fl${i}:s`) * 1.8).toFixed(1) }, "cloud-spark");
-      c.style.animationDuration = `${(1.8 + unit(`${d.id}:fl${i}:t`) * 1.6).toFixed(1)}s`;
-      c.style.animationDelay = `-${(unit(`${d.id}:fl${i}:d`) * 3).toFixed(1)}s`;
+    const at = { cx: n.x.toFixed(1), cy: n.y.toFixed(1) };
+    const delay = `-${(unit(`${d.id}:n${n.k}:d`) * 5).toFixed(1)}s`;
+    if (!n.heat) {
+      const c = svgEl("circle", { ...at, r: (1.8 + unit(`${d.id}:n${n.k}:s`) * 1.5).toFixed(1) }, "cloud-node");
+      c.style.animationDelay = delay;
       net.append(c);
+      return;
     }
-  }
+    // a host in trouble flares: a glow, a four-point glint and a bright core, in its heat's colour
+    const star = svgEl("g", {}, `cloud-star cloud-star-${n.heat}`);
+    const x = n.x, y = n.y, arm = 6.5;
+    star.append(svgEl("circle", { ...at, r: 9 }, "cloud-star-glow"),
+      svgEl("path", { d: `M${(x - arm).toFixed(1)},${y.toFixed(1)}H${(x + arm).toFixed(1)}M${x.toFixed(1)},${(y - arm).toFixed(1)}V${(y + arm).toFixed(1)}` }, "cloud-star-glint"),
+      svgEl("circle", { ...at, r: 2.8 }, "cloud-star-core"));
+    star.style.animationDelay = delay;
+    net.append(star);
+  });
+  under.append(net);
+  const over = svgEl("g", {}, "cloud-over");
   const count = svgEl("text", { y: Math.round(R * 0.1), "text-anchor": "middle" }, "cloud-n");
   count.style.fontSize = `${Math.round(R * 0.38)}px`;
   count.textContent = Number(d.hosts || 0).toLocaleString();
   const unitText = svgEl("text", { y: Math.round(R * 0.1) + 18, "text-anchor": "middle" }, "cloud-u");
   unitText.textContent = "hosts";
-  const base = Math.max(...puffs.map((p) => p.y + p.r)); // the bottom of the heap
-  const found = svgEl("text", { y: Math.round(base + 18), "text-anchor": "middle" }, "cloud-f");
+  const base = Math.max(...nodes.map((n) => n.y), R * 0.5) + 10; // under the lowest star
+  const found = svgEl("text", { y: Math.round(base + 14), "text-anchor": "middle" }, "cloud-f");
   found.textContent = d.findings ? `${d.findings} with findings` : "no findings";
   found.classList.toggle("cloud-calm", !d.findings);
-  const hint = svgEl("text", { y: Math.round(base + 33), "text-anchor": "middle" }, "cloud-hint");
+  const hint = svgEl("text", { y: Math.round(base + 29), "text-anchor": "middle" }, "cloud-hint");
   hint.textContent = "double-click to open";
-  over.append(net, count, unitText, found, hint);
+  over.append(count, unitText, found, hint);
   return { under, over, fill: "transparent" };
 }
 function refreshCloud(ui, d) {
