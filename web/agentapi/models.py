@@ -6,6 +6,8 @@ A ``SentinelTask`` is one unit of scan-stage work (nmap, naabu, a nuclei pass) f
 Agent (a "Sentinel") the same way, but shaped around what a scanner needs rather than a CVE match. A ``SentinelEnrollment``
 is the one-time secret an administrator hands a new Sentinel so its first ``register`` call can create its own ``Agent`` row.
 """
+import uuid
+
 from django.db import models
 
 ACTIVE_TASK_STATUSES = ('queued', 'assigned', 'running')
@@ -92,6 +94,11 @@ class AgentTask(models.Model):
                                                name='one_active_agent_task_per_match_kind')]
 
 
+def new_trace_id():
+    """The id one SentinelTask carries from the stage that queues it, through the Sentinel that runs it, to the audit rows and activity lines about it."""
+    return uuid.uuid4().hex
+
+
 class SentinelTask(models.Model):
     """One unit of scan-stage work: run this tool against this server-constructed target, leased to a ``kind='scanner'`` Agent (a
     Sentinel) until it reports back. ``target`` and ``result`` are each a small typed, clipped record (see
@@ -122,6 +129,7 @@ class SentinelTask(models.Model):
     # ``sentinel_broker.read_secret``. ``secret_read_at`` is the compare-and-set that makes that read single use. Nothing sets ``secret_ref`` yet.
     secret_ref = models.CharField(max_length=40, null=True, blank=True)
     secret_read_at = models.DateTimeField(null=True, blank=True)
+    trace_id = models.CharField(max_length=32, default=new_trace_id, db_default='', db_index=False)  # rows from before it existed read ''
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

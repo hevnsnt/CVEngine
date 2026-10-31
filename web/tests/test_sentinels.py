@@ -360,6 +360,28 @@ class ScopeAndClaimTests(SentinelBase):
         self.assertEqual(len(host['ports'][0]['product']), 120)
         self.assertEqual(len(host['ports'][0]['version']), 80)
 
+    def test_every_task_has_its_own_trace_id_and_the_payload_and_audit_rows_carry_it(self):
+        from dashboard.models import AuditLog
+        first, second = self._queue('sen-a'), self._queue('sen-a')
+        self.assertNotEqual(first.trace_id, second.trace_id)
+        for task in (first, second):
+            self.assertRegex(task.trace_id, r'^[0-9a-f]{32}$')
+        status, out = call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        self.assertEqual(status, 200)
+        task = SentinelTask.objects.get(pk=out['task']['id'])
+        self.assertEqual(out['task']['trace_id'], task.trace_id)  # what the Sentinel receives
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        status, _ = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', {'outcome': 'done', 'hosts': []})
+        self.assertEqual(status, 200)
+        rows = {r.action: r.detail for r in AuditLog.objects.filter(action__startswith='sentinel.task.', detail__task_id=task.pk)}
+        self.assertEqual(set(rows), {'sentinel.task.claim', 'sentinel.task.accept', 'sentinel.task.complete'})
+        for action, detail in rows.items():
+            self.assertEqual(detail['trace_id'], task.trace_id, action)
+        other = second if task.pk == first.pk else first
+        self.assertFalse(AuditLog.objects.filter(detail__trace_id=other.trace_id).exists())  # the other task's id is on nothing yet
+        sentinels.expire(other, 'the dispatch wait timed out')
+        self.assertEqual(AuditLog.objects.get(action='sentinel.task.expire', detail__task_id=other.pk).detail['trace_id'], other.trace_id)
+
     def test_release_puts_it_back_for_another_sentinel(self):
         task = self._queue('sen-a')
         call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})

@@ -98,7 +98,7 @@ which send nothing to the target and need no vantage point.
   expires. External Sentinels enrol the way they do today.
 - **Transport**: HTTP pull for the built-in as well, with the same token, validation and trust model. A second channel would
   be a second code path. Latency is cut inside the one path: a Redis notify wakes the long poll and the dispatcher in place of
-  polling every half second, and the long-poll waiter cap is lifted for the built-in token.
+  polling every half second, and the long-poll waiter cap is lifted for the built-in token (built: the instance cap, and a Sentinel's token is never counted against its user's cap).
 - **Parsing**: the scanner turns tool output into normalised facts and the server validates them (`clean_result`), for every
   kind. The raw-XML exception for UDP goes away, and the server stops parsing hostile XML in its own process.
 - **Policy**: the server decides what to scan (conductor, bounty gate, exclusions, internal ranges, SSRF). The scanner keeps its

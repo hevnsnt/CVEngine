@@ -1160,7 +1160,8 @@ def dispatch_to_sentinel(link, batch):
     except IntegrityError:
         task.delete()
         return None
-    activity.log('run_check', f'Handed an OpenVAS scan of {len(batch)} host(s) to a Sentinel', project=link.project_id, sentinel_task_id=task.pk)
+    activity.log('run_check', f'Handed an OpenVAS scan of {len(batch)} host(s) to a Sentinel', project=link.project_id, sentinel_task_id=task.pk,
+                 trace_id=task.trace_id)
     return run
 
 

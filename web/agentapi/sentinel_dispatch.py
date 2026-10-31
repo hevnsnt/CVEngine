@@ -182,7 +182,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     busy = capacity['state'] == 'busy'
     entry = activity.log('run_check', (f'Queued {kind} work for {label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one' if busy
                                        else f'Handed {kind} work for {label} to a Sentinel'),
-                         project=project, status='running', scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk)
+                         project=project, status='running', scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk, trace_id=task.trace_id)
     started = time.monotonic()
     queue_budget = _queue_timeout(kind)
     claim_deadline = started + (queue_budget if busy else min(_claim_timeout(), timeout))
@@ -220,18 +220,19 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     sentinel = task.agent.name if task.agent_id else None
     if task.status == 'done':
         activity.settle(entry, 'done', message=f'Sentinel {sentinel} checked in {kind} work for {label}' if sentinel
-                        else f'A Sentinel checked in {kind} work for {label}')
+                        else f'A Sentinel checked in {kind} work for {label}', trace_id=task.trace_id)
     elif task.status == 'failed':
         reason = (task.error or (task.result or {}).get('error') or 'no reason given')[:180]
         activity.settle(entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
-                        else f'A Sentinel reported {kind} failed for {label}: {reason}'))
+                        else f'A Sentinel reported {kind} failed for {label}: {reason}'), trace_id=task.trace_id)
     else:  # no Sentinel took it, or one did and never reported back: the ending is true for the kind's policy (it ran here, or the targets stay due)
         ending = 'it ran locally instead' if fallback_allowed(kind) else STAY_DUE
         if never_claimed:
             activity.settle(entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; {ending}' if busy
-                                                       else f'No Sentinel picked up {kind} work for {label} in time; {ending}'))
+                                                       else f'No Sentinel picked up {kind} work for {label} in time; {ending}'),
+                            trace_id=task.trace_id)
         else:  # claimed, but not reported back before the completion timeout
-            activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; {ending}')
+            activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; {ending}', trace_id=task.trace_id)
     if redact_target is not None:
         SentinelTask.objects.filter(pk=task.pk).update(target=redact_target(target))
     if task.status != 'done' and not internal:

@@ -309,6 +309,15 @@ class DispatchActivityLoggingTests(DispatchBase):
         self.assertEqual(entries[-1].status, 'expired')
         self.assertIn('No Sentinel picked up nmap work for www.example.test in time; it ran locally instead', entries[-1].message)
 
+    def test_the_activity_line_carries_the_tasks_trace_id_from_hand_off_to_ending(self):
+        self.make_sentinel(['nmap'])
+        dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
+        task = SentinelTask.objects.get()
+        entries = self._entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].detail['trace_id'], task.trace_id)
+        self.assertEqual(entries[0].detail['sentinel_task_id'], task.pk)
+
     def test_no_eligible_sentinel_writes_no_activity_at_all(self):
         # any_scanner_for's own cheap existence check short-circuits before anything (including activity) is written,
         # so a project with no Sentinel pays for nothing beyond that one query - matching ZeroSentinelRegressionTests.
