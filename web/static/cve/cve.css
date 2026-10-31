@@ -462,6 +462,7 @@ a.cell{cursor:pointer;transition:background .12s}@media (hover:hover) and (point
 .counts b{color:var(--ink);font-weight:700}
 .ticker{list-style:none;margin:6px 0 0;padding:0 0 22px;height:130px;overflow-y:auto;overflow-anchor:none;overscroll-behavior:contain;scrollbar-width:none;font:500 12.5px var(--mono);-webkit-mask-image:linear-gradient(#000 80%,transparent);mask-image:linear-gradient(#000 80%,transparent)}
 .ticker::-webkit-scrollbar{display:none}
+.ticker:empty{display:none} /* nothing found yet: no blank box under the graph */
 .see-all{display:inline-block;align-self:flex-start;flex:none;margin-top:8px;font:600 12px var(--font);color:var(--ink-2);text-decoration:underline;text-underline-offset:3px}@media (hover:hover) and (pointer:fine){.see-all:hover{color:var(--ink)}}
 .ticker li{display:flex;gap:8px;align-items:baseline;padding:3px 0;animation:in .3s ease}
 @keyframes in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
@@ -637,7 +638,15 @@ body.soc .soc-hud{display:block;position:absolute;inset:0;z-index:3;pointer-even
 .node-rows{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0;font-size:13.5px}
 .node-rows dt{color:var(--muted);font:600 11.5px var(--mono);padding-top:2px}
 .node-rows dd{margin:0;overflow-wrap:anywhere}
-.discovery .node-card{border:0;border-top:1px solid var(--line);border-radius:0;padding:10px 0 0;margin-top:10px;min-height:0;min-width:0;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
+/* the detail drawer (graph.js detailDrawer): slides out from the right over the page */
+.drawer{position:fixed;top:0;right:0;bottom:0;z-index:120;width:min(440px,100vw);display:flex;flex-direction:column;background:var(--surface);border-left:1px solid var(--line);box-shadow:-24px 0 48px -12px color-mix(in srgb,var(--ink) 22%,transparent);transform:translateX(104%);visibility:hidden;transition:transform .3s cubic-bezier(.2,.8,.2,1),visibility 0s linear .3s}
+.drawer.open{transform:none;visibility:visible;transition:transform .3s cubic-bezier(.2,.8,.2,1)}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.drawer-head h2{margin:0;font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.drawer .drawer-body{flex:1;min-height:0;margin:0;padding:16px;border:0;border-radius:0;overflow:auto;overscroll-behavior:contain}
+.drawer .node-rows dd{overflow-wrap:anywhere;word-break:break-word}
+body.soc .drawer{display:none}
+@media (prefers-reduced-motion:reduce){.drawer,.drawer.open{transition:none}}
 .discovery .node-rows{max-width:100%}
 .discovery .node-rows dd{overflow-wrap:anywhere;word-break:break-word}
 .node-title{text-decoration:none;border-bottom:1px solid transparent}@media (hover:hover) and (pointer:fine){.node-title:hover{border-bottom-color:currentColor}}
