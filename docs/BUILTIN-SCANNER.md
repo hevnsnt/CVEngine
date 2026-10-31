@@ -20,6 +20,10 @@ What does **not** move yet, and so still runs on the server (the celery containe
 
 So "scanner offline" does not mean no traffic leaves the server: those checks keep going while the scanner is down, and only the kinds taken off the list wait. The full inventory is in [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md#what-exists-today).
 
+## What the built-in scanner takes: the capability policy
+
+The built-in scanner is a Sentinel like any other, so an administrator chooses what it may take, per kind, in its card's **Settings** ("What it may take": Allow, Deny, Prefer and a cap each), through `PATCH agents/{id}` (`settings.kinds`) or for the whole class with the instance default `builtin_kinds` (`PUT sentinels/defaults`). A fresh built-in scanner ships with **OpenVAS denied**: the default is `{"openvas": {"mode": "deny"}}`, so it does not take OpenVAS work until you allow it (on its card, or by setting `builtin_kinds` to `{}`), and an external Sentinel that has OpenVAS picks it up instead. A kind the scanner does not declare (its tool is missing) cannot be allowed; see [SENTINELS.md](SENTINELS.md#what-each-sentinel-may-take-capability-policy).
+
 ## The recipe
 
 You need a Linux Docker host with at least 10 GB of RAM (or lower `CELERY_MEM_LIMIT`: the scanner container is limited to 2 GB on top of the usual stack), about 2 GB of free disk, and outbound HTTPS while the image builds: the Ubuntu base image and packages, nmap.org, go.dev and the Go module proxy, GitHub (the Sentinel source and the nuclei templates), testssl.sh, PyPI and rubygems.

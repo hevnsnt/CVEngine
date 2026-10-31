@@ -35,6 +35,7 @@ from django.utils import timezone
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
 from agentapi import builtin_scanner
+from agentapi import sentinel_policy
 from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_version
@@ -81,6 +82,7 @@ RUN_GRACE = timedelta(minutes=10)  # heartbeats extend a running task's lease up
 RUNNING_GRACE = timedelta(seconds=120)  # a task accepted more recently than this is not ended for missing from a heartbeat's ``running`` list (the Sentinel may not have started it yet)
 MAX_RUNNING_IDS = 100
 TEMPLATE_POLICY_PATH = '/api/v1/sentinel/template-policy'
+PREFER_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel that does not prefer its kind while one that does is live and has room (CVENGINE_SENTINEL_PREFER_DEFER_SECONDS)
 ENROLLMENT_KEEP = timedelta(days=7)  # an expired, never redeemed enrollment secret is deleted this long after it expired
 
 
@@ -99,7 +101,7 @@ def register(ctx, body):
     if info is not None:
         sentinel_settings.clean_info(info)
     settings = body.pop('settings', None)
-    reported = sentinel_settings.clean_settings(settings) if settings is not None else None  # refused before anything is stored
+    reported = sentinel_settings.clean_settings(settings, managed=False) if settings is not None else None  # refused before anything is stored
     out = broker.register(ctx, body)
     out = _with_settings(out, reported)
     out['contract'] = sentinel_contract.reply()
@@ -247,7 +249,7 @@ def _with_settings(out, reported):
     if reported:
         sentinel_settings.record_reported(agent, reported)
         agent.refresh_from_db()
-    out['settings'] = {**sentinel_settings.reply(agent), 'detail': sentinel_settings.detail(agent)}
+    out['settings'] = {**sentinel_settings.reply(agent), 'detail': {k: v for k, v in sentinel_settings.detail(agent).items() if k not in sentinel_settings.MANAGED_ONLY}}  # the policy stays on the server
     return out
 
 
@@ -291,7 +293,7 @@ def bootstrap(body):
                 fields[key] = clean(body[key])
             except scope_lib.ScopeError as exc:
                 raise ApiError(400, str(exc))
-    settings = sentinel_settings.clean_settings(body['settings']) if body.get('settings') is not None else None
+    settings = sentinel_settings.clean_settings(body['settings'], managed=False) if body.get('settings') is not None else None
     max_concurrent = body.get('max_concurrent')
     if max_concurrent is not None:
         if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or not 1 <= max_concurrent <= broker.MAX_CONCURRENT_CAP:
@@ -362,15 +364,23 @@ def failing_kinds(agent, now=None):
     return out
 
 
-def effective_capabilities(agent, withheld=None):
+def prefer_defer_seconds():
+    """``CVENGINE_SENTINEL_PREFER_DEFER_SECONDS`` (default 60, ``0`` turns preferring off): how long a queued task is held back from a Sentinel that does not
+    prefer its kind while another live, eligible Sentinel that does has room for it."""
+    return max(0, _env_int('CVENGINE_SENTINEL_PREFER_DEFER_SECONDS', PREFER_DEFER_DEFAULT))
+
+
+def effective_capabilities(agent, withheld=None, policy=None):
     """The capabilities this server credits a Sentinel with: what it declared, except ``network:internal``, which only the server grants (the
     Sentinel's ``network`` is ``internal``: set from its enrollment, or by an administrator). A Sentinel outside the network that declares
-    it anyway would be offered work it cannot reach and report an empty result as clean."""
+    it anyway would be offered work it cannot reach and report an empty result as clean. A kind its capability policy denies (the machine's veto, the
+    administrator's policy for it, else the instance default of its class: ``sentinel_policy``) is never offered, ``policy`` being that resolution when
+    the caller already has it."""
     caps = set(agent.capabilities or []) - {INTERNAL_CAPABILITY}
     if agent.kind == 'scanner':
         if sentinel_settings.effective_network(agent) == 'internal':
             caps.add(INTERNAL_CAPABILITY)
-        caps -= sentinel_settings.disabled_kinds(agent)  # a kind the machine or an administrator switched off is never offered (it would only be refused)
+        caps -= sentinel_policy.denied(agent, policy=policy)  # a kind the machine or an administrator switched off is never offered (it would only be refused)
         caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
         reported = (agent.info or {}).get('contract_version')
         caps = {c for c in caps if c not in SentinelTask.KINDS or sentinel_contract.can_run(reported, c)}  # a kind its contract version predates is never sent
@@ -619,16 +629,20 @@ class SentinelEff:
             self.problem = self.problem or "this agent is not a Sentinel (kind='scanner')"
         limits = agent.limits or {}
         self.withheld = failing_kinds(agent, now) if agent.kind == 'scanner' else {}
-        caps = effective_capabilities(agent, self.withheld)
+        self._builtin = sentinel_policy.is_builtin(agent) if agent.kind == 'scanner' else None
+        self.policy = sentinel_policy.resolve(agent, self._builtin) if agent.kind == 'scanner' else {}
+        caps = effective_capabilities(agent, self.withheld, self.policy)
         if limits.get('capabilities') is not None:
             caps &= set(limits['capabilities'])
         self.caps = caps
+        self.denied = {k for k, p in self.policy.items() if p['mode'] == 'deny'}  # kinds the policy refuses here, whether or not the Sentinel declares them
+        self.kind_caps = {k: p['cap'] for k, p in self.policy.items() if p['cap']}  # per-kind concurrency caps
+        self.preferred = {k for k, p in self.policy.items() if p['mode'] == 'prefer'}
         self.projects = scope_lib.project_slugs_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
         patterns = (agent.scope or {}).get('hosts') or []
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
         self._internal_nets = {}
-        self._builtin = None
 
     @property
     def builtin(self):
@@ -719,8 +733,9 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
     if live_only:
         agents = agents.filter(last_seen__gte=now - LIVE_WINDOW)
     agents = agents.select_related('token__user')[:CANDIDATES]
-    return [e for e in (SentinelEff(a, now) for a in agents)
-            if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+    with sentinel_policy.shared_lookups():
+        return [e for e in (SentinelEff(a, now) for a in agents)
+                if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
 
 
 def has_sentinels(project_slug, org_slug):
@@ -743,7 +758,8 @@ def memoised_rights():
         return
     _memo.cache = {}
     try:
-        yield
+        with sentinel_policy.shared_lookups():
+            yield
     finally:
         _memo.cache = None
 
@@ -755,7 +771,8 @@ def _live_scanners(now):
         return memo['live']
     agents = (Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW)
               .select_related('token__user')[:CANDIDATES])
-    live = [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
+    with sentinel_policy.shared_lookups():
+        live = [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
     if memo is not None:
         memo['live'] = live
     return live
@@ -767,7 +784,8 @@ def _live_for(project, now):
     if memo is None:
         agents = (Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                        token__revoked=False, last_seen__gte=now - LIVE_WINDOW).select_related('token__user')[:CANDIDATES])
-        return [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
+        with sentinel_policy.shared_lookups():
+            return [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
     key = ('project', project.pk)
     if key not in memo:
         org = project.org.slug if project.org_id else None
@@ -785,25 +803,45 @@ def queued_ttl(kind):
     return timedelta(seconds=max(sentinel_dispatch._queue_timeout(kind), sentinel_dispatch._claim_timeout())) + QUEUE_GRACE
 
 
-def capacity_state(project, kind, internal=False, now=None, exclude=None, builtin_only=False):
+def capacity_state(project, kind, internal=False, now=None, exclude=None, builtin_only=False, why=False):
     """``{'state': 'none'|'free'|'busy', 'live': n, 'slots': n, 'free': n}`` for ``kind`` work in ``project``: ``none`` when no live, eligible Sentinel
     exists (the work cannot go to one), ``free`` when at least one has a slot to take it now, ``busy`` when live eligible Sentinels exist and every
     one is at its concurrency limit (the work should wait for a slot, not run somewhere else). A Sentinel's slots are its ``max_concurrent``, and
-    a slot is in use while it holds a task (claimed or running), whatever the kind. A task already queued for ``kind`` in this project is promised
+    a slot is in use while it holds a task (claimed or running), whatever the kind; a per-kind cap of its capability policy narrows the slots ``kind`` work
+    may use there (``slots`` and ``free`` of the kind are the sum over the eligible Sentinels of the smaller of its free slots and its headroom under that
+    cap). A task already queued for ``kind`` in this project is promised
     one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, a dispatcher's own). Work that needs a
     stored credential asks with ``builtin_only``: only the built-in scanner counts, and every queued task of the kind (signed-in or not) is waiting for
-    its slots; for any other work the signed-in tasks in the queue are not counted, as no one else's slot will take them."""
+    its slots; for any other work the signed-in tasks in the queue are not counted, as no one else's slot will take them.
+
+    ``why`` adds, to a ``none``, the reason and a sentence (``explain_none``): ``reason`` is ``disabled`` (a live Sentinel that covers the project has the
+    kind and its policy denies it), ``offline`` (an active one has it and none is live), ``withheld`` (a live one has it and keeps failing it, or is too old
+    to run it), ``inactive`` (one has it but is pending or suspended) or ``never`` (none ever declared it). Left off, the cheap answer a dispatch gate needs."""
     now = now or timezone.now()
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
     if builtin_only:
         own = builtin_pk()
         live = [e for e in live if e.agent.pk == own]
     if not live:
-        return {'state': 'none', 'live': 0, 'slots': 0, 'free': 0}
-    held = dict(SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES)
-                .values_list('agent_id').annotate(n=Count('id')))
-    slots = sum(e.max_concurrent for e in live)
-    free = sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live)
+        out = {'state': 'none', 'live': 0, 'slots': 0, 'free': 0}
+        if why:
+            out.update(explain_none(project, kind, internal, now, builtin_only))
+        return out
+    held, held_kind = {}, {}
+    for agent_id, task_kind, n in (SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES)
+                                   .values_list('agent_id', 'kind').annotate(n=Count('id'))):
+        held[agent_id] = held.get(agent_id, 0) + n
+        held_kind[(agent_id, task_kind)] = n
+    slots = free = 0
+    for e in live:
+        room = max(0, e.max_concurrent - held.get(e.agent.pk, 0))
+        size = e.max_concurrent
+        cap = e.kind_caps.get(kind)
+        if cap is not None:
+            room = min(room, max(0, cap - held_kind.get((e.agent.pk, kind), 0)))
+            size = min(size, cap)
+        slots += size
+        free += room
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
         if not builtin_only:
@@ -812,6 +850,94 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
             waiting = waiting.exclude(pk=exclude)
         free = max(0, free - waiting.count())
     return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
+
+
+# Why a kind has nowhere to go, in the order a reader should act on it (the first that applies is the reason; every Sentinel's own state is in the sentence).
+NONE_REASONS = ('disabled', 'offline', 'withheld', 'inactive', 'outdated', 'never')
+
+
+def _explain(kind, agents, live, internal=False, only=None):
+    """``(reason, clauses)`` for ``kind`` among ``agents`` (the Sentinels that could matter) given ``live`` (``{pk: SentinelEff}`` of those heard from now)."""
+    clauses, reasons = [], set()
+    word = sentinel_policy.label(kind)
+    for a in agents:
+        if only is not None and a.pk != only:
+            continue
+        veto = kind in sentinel_policy.machine_denied(a)
+        if kind not in (a.capabilities or []) and not veto:
+            continue  # it does not have it: nothing to say about it here
+        if internal and sentinel_settings.effective_network(a) != 'internal':
+            continue
+        e = live.get(a.pk)
+        if a.status != 'active':
+            reasons.add('inactive')
+            clauses.append(f'{a.name} has it but is {a.status}')
+        elif e is None:
+            reasons.add('offline')
+            clauses.append(f'{a.name} has it but is offline')
+        elif kind in e.denied:
+            reasons.add('disabled')
+            clauses.append(f"turned off on {a.name}'s machine" if veto else f'off on {a.name}')
+        elif kind in e.withheld:
+            reasons.add('withheld')
+            clauses.append(f'{a.name} has it but is cooling off after repeated failures')
+        elif kind not in e.caps and not sentinel_contract.can_run((a.info or {}).get('contract_version'), kind):
+            reasons.add('outdated')
+            clauses.append(f'{a.name} has it but its client is too old to run {word}')
+    reason = next((r for r in NONE_REASONS if r in reasons), 'never')
+    return reason, clauses
+
+
+def _none_answer(kind, reason, clauses, any_sentinel):
+    word = sentinel_policy.label(kind)
+    if reason == 'never':
+        sentence = (f'no Sentinel that covers this has {word} (install its tool on one, or turn it on there)' if any_sentinel
+                    else 'no Sentinel is live for this project')
+    else:
+        sentence = f'{word} is not enabled on any live Sentinel ({"; ".join(clauses)})'
+    return {'reason': reason, 'message': sentence}
+
+
+def explain_none(project, kind, internal=False, now=None, builtin_only=False):
+    """``{'reason': ..., 'message': ...}`` for why ``kind`` work in ``project`` has no live, eligible Sentinel (``NONE_REASONS``), the sentence naming each
+    Sentinel that has the kind and what keeps it from taking it, e.g. ``OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; Remote-1 has it
+    but is offline)``. A few queries, so asked only once the answer is already ``none``."""
+    now = now or timezone.now()
+    agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', token__revoked=False)
+                  .exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
+    live = {e.agent.pk: e for e in _live_for(project, now)}
+    reason, clauses = _explain(kind, agents, live, internal, builtin_pk() if builtin_only else None)
+    return _none_answer(kind, reason, clauses, bool(agents))
+
+
+def kinds_overview(now=None):
+    """``{kind: {'live_sentinels': n, 'free_slots': n, 'state': 'none'|'free'|'busy', 'reason'?: ...}}`` over the whole instance, for the system status:
+    how many live Sentinels offer each kind, the slots they have free for it (under the per-kind caps) and, for a kind nobody offers, why. Built from the
+    live Sentinels' rights once, and one read of every Sentinel."""
+    now = now or timezone.now()
+    live = _live_scanners(now)
+    by_pk = {e.agent.pk: e for e in live}
+    held, held_kind = {}, {}
+    for agent_id, task_kind, n in (SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES)
+                                   .values_list('agent_id', 'kind').annotate(n=Count('id'))):
+        held[agent_id] = held.get(agent_id, 0) + n
+        held_kind[(agent_id, task_kind)] = n
+    agents = None
+    out = {}
+    for kind in SentinelTask.KINDS:
+        offering = [e for e in live if kind in e.caps]
+        free = 0
+        for e in offering:
+            room = max(0, e.max_concurrent - held.get(e.agent.pk, 0))
+            cap = e.kind_caps.get(kind)
+            free += room if cap is None else min(room, max(0, cap - held_kind.get((e.agent.pk, kind), 0)))
+        row = {'live_sentinels': len(offering), 'free_slots': free, 'state': 'none' if not offering else 'free' if free else 'busy'}
+        if not offering:
+            if agents is None:
+                agents = list(Agent.objects.filter(kind='scanner', token__revoked=False).exclude(status='revoked').select_related('token__user')[:CANDIDATES])
+            row['reason'] = _explain(kind, agents, by_pk)[0]
+        out[kind] = row
+    return out
 
 
 def project_slots(project, now=None):
@@ -874,6 +1000,41 @@ def queued_for(agent, now=None):
     if not eff.builtin:
         queued = queued.filter(secret_ref__isnull=True)  # signed-in work is not this Sentinel's to take
     return {kind: n for kind, n in queued.values_list('kind').annotate(n=Count('id'))}
+
+
+def kind_report(agent, now=None, eff=None):
+    """``{kind: {declared, effective, mode, source, cap, held, state, by, at, note, retry_at?}}`` for every task kind of one Sentinel: what ``GET agents/{id}`` shows as
+    ``kinds``. ``declared``: the Sentinel itself offers the kind (its tool was found and its own machine left it on). ``effective``: cvENGINE offers it work of
+    that kind right now. ``mode`` is the resolved policy (``allow``, ``deny``, ``prefer``) and ``source`` who decided what the kind is now: ``machine`` (turned
+    off on the Sentinel's machine, which no setting here lifts), ``agent`` (this Sentinel's own policy), ``instance default`` (the default of its class),
+    ``contract`` (its client is too old to run it), ``cool-off`` (it kept failing, so it is withheld until ``retry_at``) or ``default`` (nothing set).
+    ``cap`` is the per-kind concurrency cap (``null`` for none) and ``held`` how many tasks of the kind it holds now. ``state`` is one word for an interface:
+    ``on``, ``denied``, ``machine_off``, ``unavailable`` (not declared: its tool is missing or off on the machine), ``cool_off`` or ``outdated``."""
+    now = now or timezone.now()
+    eff = eff or SentinelEff(agent, now)
+    declared = set(agent.capabilities or [])
+    held = slot_usage([agent.pk]).get(agent.pk, {})
+    reported_contract = (agent.info or {}).get('contract_version')
+    out = {}
+    for kind in SentinelTask.KINDS:
+        p = eff.policy.get(kind) or {'mode': 'allow', 'cap': None, 'source': 'default', 'by': None, 'at': None}
+        row = {'declared': kind in declared, 'effective': kind in eff.caps, 'mode': p['mode'], 'source': p['source'], 'cap': p['cap'],
+               'held': held.get(kind, 0), 'by': p['by'], 'at': p['at'], 'retry_at': None}
+        if p['mode'] == 'deny':
+            state, note = ('machine_off', 'turned off on the machine; only a change there lifts it') if p['source'] == 'machine' else ('denied', '')
+        elif kind not in declared:
+            state, note = 'unavailable', 'not available on this Sentinel (tool missing or off on the machine)'
+        elif kind in eff.withheld:
+            row['source'], row['retry_at'] = 'cool-off', svc._iso(eff.withheld[kind]['retry_at'])
+            state, note = 'cool_off', f'failed {eff.withheld[kind]["failures"]} times in a row; withheld until the retry time'
+        elif not sentinel_contract.can_run(reported_contract, kind):
+            row['source'] = 'contract'
+            state, note = 'outdated', 'its client is too old to run this kind; update it'
+        else:
+            state, note = 'on', ''
+        row['state'], row['note'] = state, note
+        out[kind] = row
+    return out
 
 
 # --- leases (mirrors agent_broker's shape, for SentinelTask) ------------------------------------------------
@@ -1011,6 +1172,43 @@ def _updating(agent, now):
     return now - at < UPDATE_HOLD
 
 
+def _holders(agent_ids):
+    """``({agent_id: n}, {(agent_id, kind): n})``: the tasks each Sentinel holds now (claimed or running), in all and by kind."""
+    held, by_kind = {}, {}
+    for agent_id, kind, n in (SentinelTask._base_manager.filter(status__in=('claimed', 'running'), agent_id__in=agent_ids)
+                              .values_list('agent_id', 'kind').annotate(n=Count('id'))):
+        held[agent_id] = held.get(agent_id, 0) + n
+        by_kind[(agent_id, kind)] = n
+    return held, by_kind
+
+
+def _preferred_elsewhere(eff, task, now):
+    """Whether another live Sentinel that could take ``task`` right now prefers its kind (``prefer`` in its capability policy) while this one does not, so
+    the task is held back from this one for a moment: a Sentinel is *eligible* when its scope reaches the task, it is not updating, it is not at its
+    concurrency limit or its per-kind cap for the kind, and nothing but a preference keeps it from the task. Cheap pre-filter first (the policy is stored
+    JSON), so the rights are built only for the few Sentinels that prefer the kind."""
+    kind = task.kind
+    pk = builtin_pk()
+    candidates = (Agent.objects.filter(_covers(task.project.slug, task.project.org.slug if task.project.org_id else None), kind='scanner', status='active',
+                                       token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=eff.agent.pk)
+                  .select_related('token__user')[:CANDIDATES])
+    preferring = [a for a in candidates if kind in (a.capabilities or []) and sentinel_policy.prefers(a, kind, builtin=(a.pk == pk))]
+    if not preferring:
+        return False
+    held, by_kind = _holders([a.pk for a in preferring])
+    for a in preferring:
+        other = SentinelEff(a, now)
+        if other.problem or not other.live or kind not in other.caps or kind not in other.preferred or other.refusal(task) is not None or _updating(a, now):
+            continue
+        if held.get(a.pk, 0) >= other.max_concurrent:
+            continue
+        cap = other.kind_caps.get(kind)
+        if cap is not None and by_kind.get((a.pk, kind), 0) >= cap:
+            continue
+        return True
+    return False
+
+
 def _try_claim(agent, kinds, now):
     eff = effective(agent, now)
     if eff.problem:
@@ -1019,9 +1217,14 @@ def _try_claim(agent, kinds, now):
         return None, 'the Sentinel is updating itself and takes no new work'
     with transaction.atomic():
         Agent.objects.select_for_update().get(pk=agent.pk)
-        held = SentinelTask._base_manager.filter(status__in=('claimed', 'running'), agent=agent).count()
+        held_by_kind = _holders([agent.pk])[1]
+        held = sum(n for (_, _kind), n in held_by_kind.items())
         if held >= eff.max_concurrent:
             return None, f'at capacity ({held} of {eff.max_concurrent} tasks in progress)'
+        held_back = {}  # kind -> why a queued task of it was passed over (a per-kind cap, or a preferring Sentinel)
+        deferred = {}  # (project, kind) -> whether a preferring Sentinel has room, asked once per call
+        defer_for = prefer_defer_seconds()
+        # the order of the policy: deny (``eff.caps`` already leaves a denied kind out of ``_claimable``), then the per-kind cap, then prefer
         for task in list(_claimable(eff, kinds, now)[:CANDIDATES]):
             if not eff._in_hosts(task):
                 continue
@@ -1029,6 +1232,17 @@ def _try_claim(agent, kinds, now):
                 continue  # only a Sentinel inside the private network can reach it
             if task.secret_ref and not eff.builtin:
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
+            cap = eff.kind_caps.get(task.kind)
+            if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
+                held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is at its limit of {cap} at once here')
+                continue  # at its per-kind cap: a later queued task of another kind may still be taken
+            if defer_for and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < defer_for:
+                key = (task.project_id, task.kind)
+                if key not in deferred:
+                    deferred[key] = _preferred_elsewhere(eff, task, now)
+                if deferred[key]:
+                    held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a Sentinel that prefers it for up to {defer_for} seconds')
+                    continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
@@ -1036,6 +1250,8 @@ def _try_claim(agent, kinds, now):
                 audit.record(agent.token.user, 'sentinel.task.claim', _target(task), org=task.project.org_id, task_id=task.pk,
                              trace_id=task.trace_id, agent_id=agent.pk, agent=agent.name)
                 return task, ''
+        if held_back:
+            return None, 'no eligible work is queued right now (' + '; '.join(held_back.values()) + ')'
         return None, 'no eligible work is queued'
 
 
@@ -1705,11 +1921,12 @@ def list_project_sentinels(ctx, slug):
     agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner',
                                        token__revoked=False).exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
     rows = []
-    for agent in agents:
-        eff = SentinelEff(agent, now)
-        if agent.status == 'active' and not eff.problem and project.slug not in eff.projects:
-            continue  # the owner's reach or an administrator's project limit keeps it out of this project
-        rows.append((agent, eff))
+    with sentinel_policy.shared_lookups():
+        for agent in agents:
+            eff = SentinelEff(agent, now)
+            if agent.status == 'active' and not eff.problem and project.slug not in eff.projects:
+                continue  # the owner's reach or an administrator's project limit keeps it out of this project
+            rows.append((agent, eff))
     ids = [a.pk for a, _ in rows]
     counts = {}
     for agent_id, status, n in (SentinelTask.objects.filter(project=project, agent_id__in=ids).values_list('agent_id', 'status').annotate(n=Count('id'))):
@@ -1764,6 +1981,11 @@ def _live_task(task, allowed, **fields):
 
 
 def live_overview(ctx):
+    with sentinel_policy.shared_lookups():  # the defaults and the built-in scanner's id are read once for every card
+        return _live_overview(ctx)
+
+
+def _live_overview(ctx):
     """What every Sentinel the caller may manage is doing right now, for the Sentinels page: liveness, the task each one holds,
     its last few finished tasks and how much it has done lately. Every task counts, but hosts, projects and errors show only for
     projects the caller may read (``_live_task``): another tenant's work shows as its kind on a target and nothing more."""
@@ -1795,7 +2017,7 @@ def live_overview(ctx):
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
     orgs, org_of = _visible_orgs(ctx.user)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
-    builtin_id = builtin_pk()  # likewise: one read, then each card compares ids
+    builtin_id = sentinel_policy.builtin_pk()  # likewise: one read, then each card compares ids
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)

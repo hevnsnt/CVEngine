@@ -368,6 +368,7 @@ a.cve-link{font-family:var(--mono)}
 .updatebar .btn.ghost{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
 .scannerbar{padding:8px var(--gutter);background:var(--ice-bg);color:var(--ice-ink);border-bottom:1px solid var(--ring-ice);font-size:14px;line-height:1.4}
 .scannerbar p{margin:0;overflow-wrap:anywhere}.scannerbar p+p{margin-top:4px}
+.scannerbar .sb-disabled{padding:6px 10px;margin:6px 0 0;background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice);font-weight:600}
 .scannerbar .sb-never{padding:6px 10px;margin:6px 0 0;background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:600}
 .updatebar span{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
 
@@ -1732,11 +1733,22 @@ section.internal[hidden]{display:none}
 .ss-src{grid-column:1;margin:0;font-size:12px}
 .ss-row .field{grid-column:1/-1;margin:6px 0 0}
 .ss-reset{grid-column:2;grid-row:1/3;align-self:start}
-.ss-kinds{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 12px}
-.ss-kind{display:flex;align-items:center;gap:6px;font-weight:400;font-size:13px}
-.ss-kind input{width:auto;min-height:0}
 .ss-msg{margin:0}
 @media (max-width:640px){.ss-row{grid-template-columns:1fr}.ss-reset{grid-column:1;grid-row:auto;justify-self:start}}
+/* the capability policy: one row per kind (name, who decided, mode, cap, reset) in the settings panel, and the chips of a card */
+.ss-pol-title{margin:16px 0 4px}
+.ss-pol{display:flex;flex-direction:column;margin:8px 0}
+.ss-pol-row{display:grid;grid-template-columns:130px minmax(0,1fr) 110px 90px auto;gap:6px 10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.ss-pol-name{font-size:13px;overflow-wrap:anywhere}
+.ss-pol-note{margin:0;font-size:12px;overflow-wrap:anywhere}
+.ss-pol-row select,.ss-pol-row input{min-height:0;width:100%}
+.ss-pol-row[data-state=unavailable] .ss-pol-name,.ss-pol-row[data-state=machine_off] .ss-pol-name{color:var(--muted)}
+.ss-pol-row [hidden]{display:none}
+@media (max-width:640px){.ss-pol-row{grid-template-columns:1fr 1fr}.ss-pol-name,.ss-pol-note{grid-column:1/-1}}
+.sl-kinds{margin:0}
+.chip.kind-on{background:var(--ok-bg);color:var(--ink)}
+.chip.kind-denied{background:var(--sunk);color:var(--muted);text-decoration:line-through;cursor:help}
+.chip.kind-held{background:var(--smoke-bg);color:var(--smoke-ink);cursor:help}
 
 /* settings: the tabs grouped in a column beside the panel; on a narrow screen the groups wrap into rows above it */
 .set-layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:24px;align-items:start}

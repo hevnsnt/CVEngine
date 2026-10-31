@@ -902,7 +902,7 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         out['builtin'] = _sentinel().is_builtin(agent) if builtin_id is _UNKNOWN else agent.pk == builtin_id  # the install's own scanner (its updater is the server's)
         out['version'] =(agent.info or {}).get('version')
         out['version_label'] = out['version'] or 'unknown (built without the updater)'  # a Sentinel installed with plain docker compose reports the build's commit; one with neither says so
-        out['self_update'] = sentinel_settings.effective(agent)['self_update']
+        out['self_update'] = sentinel_settings.effective(agent, kinds=False)['self_update']
         out['updater'] = sentinel_settings.updater_state(agent)
         from agentapi import sentinel_version
         out['version_state'] = sentinel_version.state(agent, out['self_update'])  # current, behind or unknown, from the cached check of the latest client
@@ -914,11 +914,12 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         if agent.kind == 'scanner':
             out['settings'] = sentinel_settings.detail(agent)
             out['update'] = {**((agent.info or {}).get('update') or {}), 'requested_at': svc._iso(agent.update_requested_at)}
-        eff = effective(agent, now)
+        eff = _sentinel().effective(agent, now) if agent.kind == 'scanner' else effective(agent, now)  # a Sentinel's rights include its capability policy
         out['effective'] = {'capabilities': sorted(eff.caps), 'projects': sorted(eff.projects), 'max_concurrent': eff.max_concurrent,
                             'can_receive_work': not eff.problem and bool(eff.projects) and bool(eff.caps), 'problem': eff.problem}
         if agent.kind == 'scanner':
             out['queued_for_it'] = _sentinel().queued_for(agent)  # what waits in the queue that this Sentinel could take, by kind
+            out['kinds'] = _sentinel().kind_report(agent, now, eff)  # per kind: declared, effective, mode (allow, deny, prefer), source, cap, held
     return _redacted(out, viewer, agent)
 
 

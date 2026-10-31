@@ -6,7 +6,7 @@
 // internal networks its projects declared.
 import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
-import { detailCache, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
+import { detailCache, kindChips, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -130,9 +130,12 @@ function card(s, reload, detail, group) {
     s.recent.forEach((t) => list.append(recent(t)));
     c.append(list);
   }
+  // the capability chips (allowed, denied, withheld) come from the Sentinel's detail; the plain list is the fallback while it has not loaded or on an older server
+  const chips = detail && detail.kinds ? kindChips(detail.kinds) : null;
   const kinds = s.capabilities.filter((k) => k !== INTERNAL);
   const tools = kinds.length ? kinds.map(kindName).join(", ") : "no capabilities";
-  c.append(el("p", "sl-foot", `${tools}${s.os ? ` · ${s.os}` : ""} · up to ${s.max_concurrent} at once`));
+  if (chips) c.append(chips);
+  c.append(el("p", "sl-foot", [...(chips ? [] : [tools]), s.os, `up to ${s.max_concurrent} at once`].filter(Boolean).join(" · ")));
   Object.entries(s.withheld_kinds || {}).forEach(([k, w]) => {
     const retry = new Date(w.retry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     c.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));

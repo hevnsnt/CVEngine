@@ -22,24 +22,28 @@ from django.utils import timezone
 
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
+from agentapi import sentinel_policy as policy_lib
 from agentapi.models import Agent, SentinelDefaults, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError
 from tenancy import audit
 
-SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'max_concurrent', 'self_update')
+SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update')
+MANAGED_ONLY = ('kinds',)  # set from cvENGINE only: a Sentinel never reports a policy (it can only turn a kind off, with ``disabled_kinds``)
 SELF_UPDATE = ('off', 'manual', 'automatic')
 # What an administrator is told to run on the Sentinel's machine when its host updater is missing: fixed text, never something a Sentinel reported.
 INSTALL_COMMAND = 'cd <the Sentinel checkout> && sudo ./scripts/install-updater.sh'
 
 
-def clean_settings(raw):
-    """The settings in ``raw`` (any subset of ``SETTINGS``) validated, or ``ApiError``. ``None`` as a value is kept so a caller can clear one."""
+def clean_settings(raw, managed=True):
+    """The settings in ``raw`` (any subset of ``SETTINGS``) validated, or ``ApiError``. ``None`` as a value is kept so a caller can clear one. ``managed`` is
+    False for what a Sentinel reports about itself, which cannot carry ``MANAGED_ONLY`` settings."""
     from agentapi import sentinel_broker as sb
+    allowed = SETTINGS if managed else tuple(k for k in SETTINGS if k not in MANAGED_ONLY)
     if not isinstance(raw, dict) or not raw:
-        raise ApiError(400, f'send settings as an object with any of {", ".join(SETTINGS)}')
-    unknown = sorted(set(raw) - set(SETTINGS))
+        raise ApiError(400, f'send settings as an object with any of {", ".join(allowed)}')
+    unknown = sorted(set(raw) - set(allowed))
     if unknown:
-        raise ApiError(400, f'unknown setting {unknown[0]!r}; settings are {", ".join(SETTINGS)}')
+        raise ApiError(400, f'unknown setting {unknown[0]!r}; settings are {", ".join(allowed)}')
     out = {}
     for key, value in raw.items():
         if value is None:
@@ -65,6 +69,8 @@ def clean_settings(raw):
             if not isinstance(value, list) or len(value) > len(SentinelTask.KINDS) or not all(isinstance(k, str) and k in SentinelTask.KINDS for k in value):
                 raise ApiError(400, f'disabled_kinds must be a list drawn from {", ".join(SentinelTask.KINDS)}')
             out[key] = sorted(set(value))
+        elif key == 'kinds':
+            out[key] = policy_lib.clean_kinds(value)
         elif key == 'max_concurrent':
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= broker.MAX_CONCURRENT_CAP:
                 raise ApiError(400, f'max_concurrent must be a whole number from 1 to {broker.MAX_CONCURRENT_CAP}')
@@ -84,12 +90,15 @@ def detail(agent):
     out = {}
     managed, reported = agent.managed_settings or {}, agent.reported_settings or {}
     for key in SETTINGS:
+        if key in ('disabled_kinds', 'kinds'):
+            continue  # below: the capability policy, with the older disabled_kinds derived from it
         m, r = managed.get(key), reported.get(key)
         if m is None and r is None:
             continue
         pick = 'sentinel' if m is None else 'server' if r is None else ('sentinel' if (_when(r) and _when(m) and _when(r) > _when(m)) else 'server')
         entry = m if pick == 'server' else r
         out[key] = {'value': entry['value'], 'source': pick, 'at': entry.get('at'), 'by': entry.get('by') if pick == 'server' else None}
+    _kinds_detail(agent, out)
     if agent.kind == 'scanner':
         managed_network = managed.get('network')
         reported_network = reported.get('network')
@@ -110,6 +119,25 @@ def detail(agent):
     return out
 
 
+def _kinds_detail(agent, out):
+    """``kinds`` (the administrator's capability policy for this Sentinel) and ``disabled_kinds`` (the kinds it refuses on this Sentinel's own account: the
+    machine's and the administrator's denials; the instance defaults are not in it) into ``out``. ``disabled_kinds`` is the older name of the same
+    thing and is kept so a reader of it keeps working."""
+    reported = (agent.reported_settings or {}).get('disabled_kinds')
+    own, at, by = policy_lib.managed_envelope(agent)
+    if own or at:
+        out['kinds'] = {'value': own, 'source': 'server', 'at': at, 'by': by}
+    if not own and not at and reported is None:
+        return
+    managed_value = sorted(k for k, e in own.items() if e['mode'] == 'deny')
+    machine = sorted(policy_lib.machine_denied(agent))
+    m = {'at': at, 'by': by} if at else None
+    pick = 'sentinel' if m is None else 'server' if reported is None else ('sentinel' if (_when(reported) and _when(m) and _when(reported) > _when(m)) else 'server')
+    entry = m if pick == 'server' else reported
+    out['disabled_kinds'] = {'value': sorted(set(managed_value) | set(machine)), 'source': pick, 'at': (entry or {}).get('at'),
+                             'by': (entry or {}).get('by') if pick == 'server' else None}
+
+
 RANK = {'off': 0, 'manual': 1, 'automatic': 2}
 
 
@@ -121,14 +149,10 @@ def effective_network(agent):
     return 'external' if ((agent.reported_settings or {}).get('network') or {}).get('value') == 'external' else 'internal'
 
 
-def disabled_kinds(agent):
-    """The task kinds this Sentinel must not be offered: those its own machine disabled and those an administrator disabled (both limit it)."""
-    out = set()
-    for source in (agent.reported_settings or {}, agent.managed_settings or {}):
-        value = (source.get('disabled_kinds') or {}).get('value')
-        if isinstance(value, list):
-            out |= {k for k in value if isinstance(k, str)}
-    return out
+def disabled_kinds(agent, builtin=None):
+    """The task kinds this Sentinel must not be offered: those its own machine disabled and every kind an administrator, or the instance default for its
+    class, denies (``sentinel_policy``; all of them limit it)."""
+    return policy_lib.denied(agent, builtin)
 
 
 def _limits(agent, entries):
@@ -156,15 +180,21 @@ def instance_self_update():
 def explicit(agent):
     """``{setting: value}`` for settings either side set, without the instance default. Network uses its authorized effective value."""
     has_network = 'network' in (agent.managed_settings or {}) or 'network' in (agent.reported_settings or {})
-    return {key: entry['value'] for key, entry in detail(agent).items() if key != 'network' or has_network}
+    return {key: entry['value'] for key, entry in detail(agent).items() if (key != 'network' or has_network) and key not in MANAGED_ONLY}
 
 
-def effective(agent):
-    """``{setting: value}``: what this Sentinel should run with now. ``self_update`` always has a value: its own, else the instance default."""
+def effective(agent, kinds=True):
+    """``{setting: value}``: what this Sentinel should run with now. ``self_update`` always has a value: its own, else the instance default. ``kinds``
+    leaves out the lookups of the capability policy (the instance defaults and whether this is the built-in scanner: two queries) for a caller that only
+    wants another setting, such as a page of agents."""
     out = explicit(agent)
     out.setdefault('self_update', instance_self_update())
     if agent.kind == 'scanner':
         out['network'] = effective_network(agent)
+        if kinds:
+            denied = policy_lib.wire_disabled_kinds(agent)  # the wire format of the capability policy is still the one list a client already honours
+            if denied or 'disabled_kinds' in out:
+                out['disabled_kinds'] = denied
     return out
 
 
@@ -177,7 +207,7 @@ def record_reported(agent, raw, now=None):
     """Store the Sentinel's own settings. Only a value that differs from the last one it reported moves its time forward, so a restart with an
     unchanged configuration never overrides an administrator's later edit. Returns the settings that changed."""
     now = now or timezone.now()
-    values = clean_settings({k: v for k, v in (raw or {}).items() if v is not None}) if raw else {}
+    values = clean_settings({k: v for k, v in (raw or {}).items() if v is not None}, managed=False) if raw else {}
     reported, changed = dict(agent.reported_settings or {}), []
     for key, value in values.items():
         if (reported.get(key) or {}).get('value') != value:
@@ -194,7 +224,25 @@ def set_managed(agent, raw, actor, now=None):
     from agentapi import sentinel_broker as sb
     now = now or timezone.now()
     values = clean_settings(raw)
+    if 'kinds' in values and 'disabled_kinds' in values:
+        raise ApiError(400, 'send kinds (the capability policy) or disabled_kinds (the older list of denied kinds), not both')
     managed, before = dict(agent.managed_settings or {}), explicit(agent)
+    kinds_before = policy_lib.managed_kinds(agent)
+    kinds_after = kinds_before
+    if 'kinds' in values or 'disabled_kinds' in values:
+        if 'kinds' in values:
+            change = values.pop('kinds')
+            if change is not None:
+                policy_lib.refuse_unavailable(agent, change)  # only what the Sentinel declares can be enabled; refused before anything is stored
+            kinds_after = policy_lib.apply_change(kinds_before, change)
+        else:
+            kinds_after = policy_lib.apply_disabled_kinds(kinds_before, values.pop('disabled_kinds'))
+        if kinds_after != kinds_before:  # the older disabled_kinds is folded into the policy, which is its one home from now on
+            managed.pop('disabled_kinds', None)
+            if kinds_after:
+                managed['kinds'] = {'value': kinds_after, 'at': now.isoformat(), 'by': actor.username}
+            else:
+                managed.pop('kinds', None)
     network_before = agent.network
     if 'network' in values:  # the Sentinel cannot grant itself access to private networks
         if values['network'] is None:
@@ -213,6 +261,8 @@ def set_managed(agent, raw, actor, now=None):
         updates['network'] = agent.network
     Agent.objects.filter(pk=agent.pk).update(**updates)
     grant_change = {'network_grant_before': network_before, 'network_grant_after': agent.network} if 'network' in values else {}
+    if kinds_after != kinds_before:
+        grant_change.update(kinds_before=kinds_before, kinds_after=kinds_after)  # who changed what in the capability policy: the map before and after
     audit.record_for_user(actor, 'agent.settings', agent.token.user, target=agent.name, agent_id=agent.pk,
                           before=before, after=explicit(agent), **grant_change)
     return effective(agent)
@@ -300,7 +350,7 @@ def update_reply(agent):
     """What a Sentinel's updater is told: ``setting`` (``off``, ``manual`` or ``automatic``, this Sentinel's effective self-update setting) and
     whether an administrator asked it to update now. ``mode`` is the same answer in the older vocabulary (``auto`` or ``manual``) for a client that
     predates ``setting``. Nothing changes a Sentinel's code unless ``setting`` is ``automatic``, or ``manual`` and ``requested``; ``off`` never."""
-    setting = effective(agent)['self_update']
+    setting = effective(agent, kinds=False)['self_update']
     return {'setting': setting, 'mode': 'auto' if setting == 'automatic' else 'manual',
             'requested': bool(agent.update_requested_at) and setting != 'off'}
 
@@ -317,7 +367,7 @@ def updater_state(agent):
         state = 'not_installed'
     else:
         state = 'running' if reported.get('running') else 'stopped'
-    setting = effective(agent)['self_update']
+    setting = effective(agent, kinds=False)['self_update']
     warning = None
     if state in ('not_installed', 'stopped') and setting != 'off':
         warning = (f'self-update is {setting.capitalize()} here but the updater is {"not installed" if state == "not_installed" else "not running"} '
@@ -330,7 +380,7 @@ def updater_state(agent):
 def request_update(agent, actor, now=None):
     """An administrator's "update now" for one Sentinel: its updater proceeds whatever the mode says, still draining running tasks first. Refused
     while self-update is Off for it."""
-    if effective(agent)['self_update'] == 'off':
+    if effective(agent, kinds=False)['self_update'] == 'off':
         raise ApiError(409, 'self-update is Off for this Sentinel: set it to Manual or Automatic first')
     now = now or timezone.now()
     agent.update_requested_at = now
@@ -339,26 +389,54 @@ def request_update(agent, actor, now=None):
                           version=(agent.info or {}).get('version'))
 
 
+DEFAULT_KEYS = ('self_update', 'builtin_kinds', 'external_kinds')
+
+
 def get_defaults():
-    """The instance-wide Sentinel defaults: ``{self_update, effective_self_update, follows_instance, changed_by, changed_at}``."""
+    """The instance-wide Sentinel defaults: ``{self_update, effective_self_update, follows_instance, builtin_kinds, builtin_kinds_is_shipped, external_kinds,
+    changed_by, changed_at}``. ``builtin_kinds`` and ``external_kinds`` are the capability policy a Sentinel gets for a kind it has no policy of its own for
+    (``{kind: {mode, max_concurrent}}``): the first for the install's own scanner (OpenVAS denied until an administrator changes it, which
+    ``builtin_kinds_is_shipped`` says), the second for every other Sentinel (empty: every declared kind is allowed)."""
     row = SentinelDefaults.current()
+    kinds = policy_lib.defaults()
     return {'self_update': row.self_update or None, 'effective_self_update': instance_self_update(), 'follows_instance': not row.self_update,
+            'builtin_kinds': kinds['builtin'], 'builtin_kinds_is_shipped': kinds['builtin_shipped'], 'external_kinds': kinds['external'],
             'changed_by': row.changed_by or None, 'changed_at': row.changed_at.isoformat() if row.changed_at else None}
 
 
 def set_defaults(actor, body):
-    """App Admin only: ``{self_update: off|manual|automatic|null}`` (``null`` goes back to following the instance's own Automatic or Manual
-    update choice). Applies to every Sentinel with no value of its own for that setting."""
+    """App Admin only: any of ``{self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode, max_concurrent}}|null, external_kinds: {...}|null}``.
+    ``self_update`` ``null`` goes back to following the instance's own Automatic or Manual update choice. ``builtin_kinds`` / ``external_kinds`` replace the whole map
+    (``{}``: no defaults); ``null`` for ``builtin_kinds`` restores the shipped default (OpenVAS denied on the built-in scanner), for ``external_kinds`` it is
+    the same as ``{}``. They apply to every Sentinel of the class with no policy of its own for a kind."""
     if not actor.is_superuser:
         raise ApiError(403, 'the Sentinel defaults are changed by an App Admin')
-    if not isinstance(body, dict) or set(body) != {'self_update'}:
-        raise ApiError(400, 'send {"self_update": "off" | "manual" | "automatic" | null}')
-    value = body['self_update']
-    if value is not None and value not in SELF_UPDATE:
+    if not isinstance(body, dict) or not body or set(body) - set(DEFAULT_KEYS):
+        raise ApiError(400, f'send any of {", ".join(DEFAULT_KEYS)}: {{"self_update": "off" | "manual" | "automatic" | null, '
+                            '"builtin_kinds": {kind: {"mode", "max_concurrent"}} | null, "external_kinds": {kind: {"mode", "max_concurrent"}} | null}')
+    value = body.get('self_update')
+    if 'self_update' in body and value is not None and value not in SELF_UPDATE:
         raise ApiError(400, f'self_update must be one of {", ".join(SELF_UPDATE)}, or null')
+    cleaned = {}
+    for key in ('builtin_kinds', 'external_kinds'):
+        if key in body:
+            if body[key] is None:
+                cleaned[key] = None
+            elif body[key] == {}:
+                cleaned[key] = {}
+            else:
+                cleaned[key] = policy_lib.clean_kinds(body[key], what=key, allow_null_entries=False)
     before = get_defaults()
     row = SentinelDefaults.current()
-    row.self_update, row.changed_by, row.changed_at = value or '', actor.username, timezone.now()
+    if 'self_update' in body:
+        row.self_update = value or ''
+    if 'builtin_kinds' in cleaned:
+        row.builtin_kinds = cleaned['builtin_kinds']  # None: the shipped default again
+    if 'external_kinds' in cleaned:
+        row.external_kinds = cleaned['external_kinds'] or {}
+    row.changed_by, row.changed_at = actor.username, timezone.now()
     row.save()
-    audit.record(actor, 'sentinel.defaults', 'sentinel defaults', before=before['self_update'], after=value)
-    return get_defaults()
+    after = get_defaults()
+    extra = {key: {'before': before[key], 'after': after[key]} for key in ('builtin_kinds', 'external_kinds') if key in body}
+    audit.record(actor, 'sentinel.defaults', 'sentinel defaults', before=before['self_update'], after=after['self_update'], **extra)
+    return after

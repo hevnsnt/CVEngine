@@ -412,7 +412,9 @@ def _sentinels(problems):
         problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or expired")
     recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).order_by('-finished_at')
                          .values('id', 'kind', 'error', 'finished_at', 'agent__name')[:SENTINEL_RECENT_ERRORS])
+    from agentapi import sentinel_broker
     return {'registered': by_status, 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+           'by_kind': sentinel_broker.kinds_overview(now),  # per kind: the live Sentinels offering it, the free slots under the per-kind caps, and why none does
            'recent_errors': [{'task_id': r['id'], 'kind': r['kind'], 'sentinel': r['agent__name'], 'error': r['error'],
                               'at': _iso(r['finished_at'])} for r in recent_errors]}
 

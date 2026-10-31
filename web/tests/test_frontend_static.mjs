@@ -105,16 +105,17 @@ test('a count or a badge asks for the count alone, and an export or a palette pr
 });
 
 class SentinelElement {
-  constructor(tag, cls = '', text = '') {
+  constructor(tag, cls = '', text = '', attrs = {}) {
     this.tag = tag;
     this.cls = cls;
     this.text = text == null ? '' : String(text);
+    this.attrs = attrs;
     this.children = [];
   }
   append(...children) { this.children.push(...children); }
 }
 
-const sentinelEl = (tag, cls, text) => new SentinelElement(tag, cls, text);
+const sentinelEl = (tag, cls, text, attrs) => new SentinelElement(tag, cls, text, attrs);
 const sentinelText = (node) => typeof node === 'string' ? node : [node.text, ...node.children.map(sentinelText)].join(' ');
 globalThis.localStorage = {getItem: () => null};
 globalThis.document = {createTextNode: (text) => new SentinelElement('#text', '', text), getElementById: () => null};
@@ -158,7 +159,7 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
-const {versionBlock} = await import(`data:text/javascript,${encodeURIComponent(
+const {versionBlock, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset} = await import(`data:text/javascript,${encodeURIComponent(
   `const {el, badge, button} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
@@ -176,4 +177,74 @@ test('a Sentinel card has Update now, the built-in scanner does not and says why
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
   assert.match(sentinelSource, /if \(s\.builtin\) state\.append\(" ", el\("span", "chip sl-builtin", "Built-in"/);
   assert.match(sentinelSource, /versionBlock\(detail, \{ onChange: reload, builtin: s\.builtin \}\)/);
+});
+
+// --- the capability policy of a Sentinel (GET agents/{id} `kinds`, PATCH settings.kinds) ---------------------------------------------------------
+const kindInfo = (changes = {}) => ({declared: true, effective: true, mode: 'allow', source: 'default', cap: null, held: 0, by: null, at: null, retry_at: null, state: 'on', note: '', ...changes});
+const policyKinds = {
+  nmap: kindInfo(),
+  openvas: kindInfo({mode: 'deny', source: 'agent', by: 'alice', state: 'denied', effective: false}),
+  nuclei_light: kindInfo({state: 'cool_off', source: 'cool-off', effective: false, retry_at: '2026-10-31T12:30:00Z'}),
+  wpscan: kindInfo({declared: false, effective: false, state: 'unavailable'}),
+  testssl: kindInfo({mode: 'deny', source: 'machine', declared: true, effective: false, state: 'machine_off'}),
+  naabu: kindInfo({mode: 'prefer', cap: 2}),
+};
+
+test('a kind says what it is on this Sentinel, in words that name the cause', () => {
+  assert.equal(kindState(policyKinds.nmap), 'on');
+  assert.equal(kindState(policyKinds.openvas), 'denied');
+  assert.match(kindNote(policyKinds.openvas), /Denied by alice/);
+  assert.match(kindNote(policyKinds.wpscan), /Not available on this Sentinel \(tool missing or off on the machine\)/);
+  assert.match(kindNote(policyKinds.testssl), /Turned off on the machine/);
+  assert.match(kindNote(policyKinds.nuclei_light), /Withheld after repeated failures until/);
+  assert.match(kindNote(policyKinds.naabu), /Preferred.*at most 2 at once/);
+  assert.match(kindNote({...policyKinds.openvas, source: 'instance default', by: 'root'}), /Denied by the instance default \(set by root\)/);
+  // an older server without `state` is read from the other fields
+  assert.equal(kindState({declared: true, mode: 'allow', source: 'cool-off'}), 'cool_off');
+  assert.equal(kindState({declared: false, mode: 'allow', source: 'default'}), 'unavailable');
+  assert.equal(kindState({declared: true, mode: 'deny', source: 'machine'}), 'machine_off');
+});
+
+test('the panel offers Allow, Deny and Prefer only for what the Sentinel declares and its machine left on', () => {
+  assert.deepEqual(modesOffered(policyKinds.nmap), ['allow', 'deny', 'prefer']);
+  assert.deepEqual(modesOffered(policyKinds.openvas), ['allow', 'deny', 'prefer']);
+  assert.deepEqual(modesOffered(policyKinds.wpscan), []);
+  assert.deepEqual(modesOffered(policyKinds.testssl), []);
+  assert.equal(canReset(policyKinds.openvas), true);
+  assert.equal(canReset(policyKinds.nmap), false);
+});
+
+test('only a kind that changed is sent, a reset sends null, and a bad cap is refused before anything is sent', () => {
+  assert.deepEqual(kindsChange(policyKinds, {nmap: {mode: 'allow', cap: ''}, openvas: {mode: 'deny', cap: ''}}), {});
+  assert.deepEqual(kindsChange(policyKinds, {openvas: {mode: 'allow', cap: ''}}), {openvas: {mode: 'allow', max_concurrent: null}});
+  assert.deepEqual(kindsChange(policyKinds, {nmap: {mode: 'prefer', cap: '3'}}), {nmap: {mode: 'prefer', max_concurrent: 3}});
+  assert.deepEqual(kindsChange(policyKinds, {naabu: {mode: 'prefer', cap: ''}}), {naabu: {mode: 'prefer', max_concurrent: null}});
+  assert.deepEqual(kindsChange(policyKinds, {openvas: {reset: true}, nmap: {reset: true}}), {openvas: null});
+  assert.deepEqual(kindsChange(policyKinds, {wpscan: {mode: 'allow', cap: ''}, testssl: {mode: 'allow', cap: ''}}), {});
+  for (const cap of ['0', '11', '2.5', 'abc']) assert.throws(() => kindsChange(policyKinds, {nmap: {mode: 'allow', cap}}), /whole number from 1 to 10/);
+});
+
+test('a card shows a chip per kind in three styles, with who or what decided in the tooltip, and none for a kind it does not have', () => {
+  const chips = kindChips(policyKinds);
+  const byText = Object.fromEntries(chips.children.map((c) => [c.text, c]));
+  assert.equal(byText['nmap'].cls, 'chip kind-on');
+  assert.equal(byText['OpenVAS'].cls, 'chip kind-denied');
+  assert.match(byText['OpenVAS'].attrs.title, /Denied by alice/);
+  assert.equal(byText['nuclei (light)'].cls, 'chip kind-held');
+  assert.match(byText['nuclei (light)'].attrs.title, /Withheld after repeated failures until/);
+  assert.equal(byText['testssl'].cls, 'chip kind-denied');
+  assert.match(byText['testssl'].attrs.title, /Turned off on the machine/);
+  assert.ok(byText['naabu (preferred) x2'], 'preferred and capped kinds say so');
+  assert.equal(byText['WPScan'], undefined);
+  assert.equal(kindChips({wpscan: policyKinds.wpscan}), null);
+  assert.equal(kindChips(undefined), null);
+});
+
+test('the capability policy is drawn with textContent only', () => {
+  for (const name of ['sentinel-settings.js', 'sentinel-live.js', 'scannerbar.js']) {
+    assert.doesNotMatch(read(name), /innerHTML|insertAdjacentHTML|outerHTML/, `${name} sets server text with textContent only`);
+  }
+  assert.match(settingsSource, /settings: \{ kinds: \{ \[kind\]: null \} \}/, 'Use default removes the Sentinel\'s own policy of a kind');
+  assert.match(sentinelSource, /kindChips\(detail\.kinds\)/);
+  assert.match(read('scannerbar.js'), /disabled_message/);
 });

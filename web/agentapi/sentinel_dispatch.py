@@ -112,6 +112,18 @@ def _no_local(kind, why, reason='no_scanner', project=None):
     scanner_fallback.record(kind, project, reason)
 
 
+def _no_scanner(kind, project, capacity=None):
+    """``_no_local`` for a stage that found no live, eligible Sentinel for ``kind`` in ``project``, saying why: ``OpenVAS is not enabled on any live Sentinel
+    (off on CVEngine Scanner; Remote-1 has it but is offline)`` rather than a bare "no Sentinel is live". ``capacity`` is the ``capacity_state(..., why=True)``
+    the caller already has. The telemetry reason is ``disabled_everywhere`` when a live Sentinel has the kind and an administrator's (or its machine's)
+    policy keeps it off every one, and ``no_scanner`` for every other reason (nothing live, nothing ever declared it)."""
+    from agentapi import sentinel_broker
+    if capacity is None or 'reason' not in capacity:
+        capacity = sentinel_broker.capacity_state(project, kind, why=True)
+    reason = 'disabled_everywhere' if capacity.get('reason') == 'disabled' else 'no_scanner'
+    _no_local(kind, capacity.get('message') or 'no Sentinel is live for this project', reason, project)
+
+
 def _dispatch_timeout(kind=None, targets=0):
     """Seconds a stage waits for a dispatched Sentinel task to *finish* once a Sentinel has claimed it, before falling back to running
     the tool locally: ``COMPLETION_CEILING`` for the kind, plus ``PER_TARGET_SECONDS`` for each target beyond the first (so a chunk of many
@@ -197,10 +209,10 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from cveFeed import activity
-    capacity = sentinel_broker.capacity_state(project, kind, internal)
+    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
         if not internal:  # an internal task never had a local run to fall back to: its caller already fails it
-            _no_local(kind, 'no Sentinel is live for this project', 'no_scanner', project)
+            _no_scanner(kind, project, capacity=capacity)
         return None
     targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
     timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
@@ -290,7 +302,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
     zero = {'ports': 0, 'hosts_with_os': 0}
     local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
     if not any_scanner_for(project, 'nmap'):
-        _no_local('nmap', 'no Sentinel is live for this project', 'no_scanner', project)
+        _no_scanner('nmap', project)
         return targets, zero, local_ports
     chunk = targets[:MAX_ADDRESSES]
     result = dispatch_or_none(project, 'nmap', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
@@ -323,7 +335,7 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
     the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu/nuclei this is never chunked: a testssl
     run is already one host:port per call, locally or dispatched."""
     if not any_scanner_for(project, 'testssl'):
-        _no_local('testssl', 'no Sentinel is live for this project', 'no_scanner', project)
+        _no_scanner('testssl', project)
         return None
     target = {'host': host, 'ip': ip, 'port': port, 'starttls': starttls or ''}
     result = dispatch_or_none(project, 'testssl', target, host=host, ips=[ip], scan=scan, timeout=timeout)
@@ -342,7 +354,7 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     nmap output), so that is the one function - local or dispatched - that ever turns the XML into a record. Never
     chunked: one address per task, like testssl."""
     if not any_scanner_for(project, 'nmap_udp'):
-        _no_local('nmap_udp', 'no Sentinel is live for this project', 'no_scanner', project)
+        _no_scanner('nmap_udp', project)
         return None
     result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
     if result is None:
@@ -360,7 +372,7 @@ def wrap_naabu_runner(project, scan, timeout=None):
     naabu's own JSON output already means) are never scanned locally too; anything beyond one chunk, or left over on a
     timeout, falls back to the real, unmodified ``naabu_scan.run_naabu``."""
     if not any_scanner_for(project, 'naabu'):
-        _no_local('naabu', 'no Sentinel is live for this project', 'no_scanner', project)
+        _no_scanner('naabu', project)
         return None
 
     def runner(ips):
@@ -510,7 +522,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     yield _finding_to_nuclei_line(finding)
         return internal_stream
     if not any_scanner_for(project, kind):
-        _no_local(kind, 'no Sentinel is live for this project', 'no_scanner', project)
+        _no_scanner(kind, project)
         return stream_nuclei
 
     def stream(targets_file, **kwargs):
@@ -572,7 +584,7 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
             return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
         return internal_runner
     if not any_scanner_for(project, 'wpscan'):
-        _no_local('wpscan', 'no Sentinel is live for this project', 'no_scanner', project)
+        _no_scanner('wpscan', project)
         return run_wpscan_process
 
     def runner(url, token):

@@ -9,7 +9,9 @@ no work from the real pause; it is recomputed from the Sentinels' own heartbeats
 ``waiting_kinds()`` is the kinds that may not run here and for which no live, active Sentinel declares the capability right now (anywhere on the
 instance: a Sentinel scoped to another project still counts, so the signal says "surely nothing can take this", never a guess). ``state()`` adds
 ``never_seen``: of those, the kinds for which no Sentinel that could run them has ever registered (any status), which is the foot-gun of
-``CVENGINE_LOCAL_FALLBACK=none`` on an instance with no scanner at all. The answer is kept in the Django cache for ``CACHE_SECONDS`` so a beat tick or
+``CVENGINE_LOCAL_FALLBACK=none`` on an instance with no scanner at all, and ``disabled`` (present only when not empty): the waiting kinds that a live Sentinel has
+and its capability policy (an administrator's, an instance default, or its own machine) turns off, with no other active Sentinel that has them offline. Those are
+not "offline": the scanner is there and told not to take the work, so the interface says so and the fix is a setting, not a reconnect. The answer is kept in the Django cache for ``CACHE_SECONDS`` so a beat tick or
 a polling page costs one cache read; with the variable unset every kind may run here, the answer is empty and no query is made at all.
 """
 import logging
@@ -36,23 +38,31 @@ def _compute(now):
     off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE]
     if not off:
         return _empty()
-    offered = set()
+    offered, denied, live_pks = set(), set(), set()
     for eff in sentinel_broker._live_scanners(now):
         offered |= eff.caps
+        live_pks.add(eff.agent.pk)
+        # a kind it has (declared, or turned off on its machine) and its policy turns off
+        denied |= {k for k in eff.denied if k in (eff.agent.capabilities or []) or eff.policy[k]['machine']}
     kinds = [k for k in off if k not in offered]
     if not kinds:
         return _empty()
     # Registered at any time, in any status (a revoked or suspended one still proves a scanner was set up): the declared capabilities, and when
-    # the last of them was heard from, which is when the work started waiting.
+    # the last of them was heard from, which is when the work started waiting. ``away`` are the kinds an active Sentinel has while it is not heard from.
     declared = {k: None for k in kinds}
-    ever = set()
-    for capabilities, last_seen in Agent.objects.filter(kind='scanner').values_list('capabilities', 'last_seen'):
+    ever, away = set(), set()
+    for pk, capabilities, last_seen, status in Agent.objects.filter(kind='scanner').values_list('pk', 'capabilities', 'last_seen', 'status'):
         for kind in set(capabilities or []) & set(kinds):
             ever.add(kind)
+            if status == 'active' and pk not in live_pks:
+                away.add(kind)
             if last_seen and (declared[kind] is None or last_seen > declared[kind]):
                 declared[kind] = last_seen
     heard = [t for k, t in declared.items() if t is not None]
     out = {'offline': True, 'kinds': kinds, 'never_seen': [k for k in kinds if k not in ever]}
+    disabled = [k for k in kinds if k in denied and k not in away]
+    if disabled:
+        out['disabled'] = disabled
     if heard:
         out['since'] = max(heard).isoformat()
     return out
@@ -147,18 +157,36 @@ def waiting_kinds(now=None):
     return list(state(now)['kinds'])
 
 
+def disabled_kinds(now=None):
+    """The waiting kinds that are turned off, not offline: a live Sentinel has each and its capability policy denies it (``state()['disabled']``)."""
+    return list(state(now).get('disabled', []))
+
+
+def offline_kinds(now=None):
+    """The waiting kinds that really are waiting for a scanner to come back: not turned off, and not a kind no scanner ever registered for (the second
+    sentence of ``messages``)."""
+    snapshot = state(now)
+    skip = set(snapshot.get('disabled', [])) | set(snapshot.get('never_seen', []))
+    return [k for k in snapshot['kinds'] if k not in skip]
+
+
 def is_waiting(kind, now=None):
     return kind in state(now)['kinds']
 
 
 def skip_note(kind, now=None):
-    """The ``skipped`` text for a sweep of ``kind`` that should not start because it is waiting for a scanner, or None when it may go on."""
+    """The ``skipped`` text for a sweep of ``kind`` that should not start because it is waiting for a scanner, or None when it may go on. A kind that is turned
+    off on every Sentinel that has it says so: that is a setting, not a scanner that is offline."""
     try:
-        if not is_waiting(kind, now):
+        snapshot = state(now)
+        if kind not in snapshot['kinds']:
             return None
+        turned_off = kind in snapshot.get('disabled', [])
     except Exception:  # noqa: BLE001 - a reading that fails must never stop a sweep: it goes on as it did before this existed
         logger.warning('scanner state could not be read', exc_info=True)
         return None
+    if turned_off:
+        return f'{_words([kind])} is turned off on every Sentinel that has it; the targets stay due'
     return f'no scanner is online for {kind}; the targets stay due'
 
 
@@ -166,18 +194,31 @@ def _join(kinds):
     return ', '.join(kinds)
 
 
+def _words(kinds):
+    """``kinds`` as an administrator reads them (``OpenVAS``, ``internal discovery``), for the sentence about a setting."""
+    from agentapi import sentinel_policy
+    return ', '.join(sentinel_policy.label(k) for k in kinds)
+
+
 def messages(snapshot=None):
-    """The two sentences the interface and the status show, ``{'offline': str|None, 'never_seen': str|None}``. The first names the kinds that are
-    waiting for a scanner that was set up before (it reconnects and the work resumes); the second the kinds no scanner was ever registered for."""
+    """The sentences the interface and the status show, ``{'offline': str|None, 'never_seen': str|None}``, and ``'disabled'`` when a kind is turned off. The
+    first names the kinds that are waiting for a scanner that was set up before (it reconnects and the work resumes); the second the kinds no scanner was ever
+    registered for; the third the kinds a live Sentinel has and the capability policy turns off on every Sentinel that has it (a setting to change, not a scanner
+    to bring back)."""
     snapshot = state() if snapshot is None else snapshot
     never = [k for k in snapshot.get('never_seen', [])]
-    waiting = [k for k in snapshot.get('kinds', []) if k not in never]
-    return {
+    disabled = [k for k in snapshot.get('disabled', []) if k not in never]
+    waiting = [k for k in snapshot.get('kinds', []) if k not in never and k not in disabled]
+    out = {
         'offline': (f'Scanner offline: {_join(waiting)} work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.'
                     if waiting else None),
         'never_seen': (f'CVENGINE_LOCAL_FALLBACK stops {_join(never)} from running on this server but no scanner has ever registered for them: '
                        'nothing of that kind will run until one does.' if never else None),
     }
+    if disabled:
+        out['disabled'] = (f'{_words(disabled)} {"is" if len(disabled) == 1 else "are"} turned off on every Sentinel that has '
+                           f'{"it" if len(disabled) == 1 else "them"}. Nothing has failed; the work stays due until one is turned back on (Sentinels page, Settings).')
+    return out
 
 
 def unknown_message(unknown):
@@ -197,14 +238,18 @@ def status(admin=True, snapshot=None):
     unknown = sentinel_dispatch.unknown_fallback_kinds()
     if not admin:
         snapshot['kinds'] = [k for k in snapshot['kinds'] if k not in snapshot['never_seen']]
+        snapshot['disabled'] = [k for k in snapshot.get('disabled', []) if k in snapshot['kinds']]
+        if not snapshot['disabled']:
+            snapshot.pop('disabled', None)
         snapshot['never_seen'] = []
         snapshot['offline'] = bool(snapshot['kinds'])
         text['never_seen'] = None
         unknown = []
     snapshot['unknown_kinds'] = unknown
     snapshot['vantage'] = vantage_warnings() if admin else []  # a server setting, so for an App Admin; not in ``messages`` (the page strip)
-    snapshot['messages'] = [t for t in (text['offline'], text['never_seen']) if t]
+    snapshot['messages'] = [t for t in (text['offline'], text.get('disabled'), text['never_seen']) if t]
     snapshot['message'] = text['offline']
+    snapshot['disabled_message'] = text.get('disabled')
     snapshot['never_seen_message'] = text['never_seen']
     snapshot['unknown_kinds_message'] = unknown_message(unknown)
     return snapshot
