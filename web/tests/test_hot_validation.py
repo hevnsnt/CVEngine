@@ -136,6 +136,37 @@ class HotValidationTests(TestCase):
         row = self._rescan_with_job(status='completed', result={'ai_state': 'ok'}, finished_at=timezone.now() - timedelta(days=2))
         self.assertEqual(self._enqueue(row)[0], 'fresh')
 
+    def test_changed_evidence_on_a_carried_row_is_validated_again(self):
+        # issue 206: only an UNCHANGED finding keeps its predecessor's job. save_matches moves a match's evidence in place (distro or range
+        # data moved), which resets the Triage row; the stale carried_from used to hand it the old job's "fresh" verdict all the same
+        row = self._rescan_with_job(status='completed', result={'ai_state': 'ok'}, finished_at=timezone.now() - timedelta(days=1))
+        self.assertEqual(self._enqueue(row)[0], 'fresh')  # unchanged evidence: the job stands
+        CVEMatch.objects.filter(pk=row.match_id).update(matched_version='1.19.0')
+        row = triage.track(triage.with_cves([CVEMatch.objects.select_related('subdomain__target_domain').get(pk=row.match_id)]))[0][0]
+        self.assertEqual((row.status, row.classification, row.validation_status), ('pending', '', 'none'))
+        outcome, dispatch = self._enqueue(Triage.objects.get(pk=row.pk))
+        self.assertEqual(outcome, 'queued')
+        dispatch.assert_called_once()
+        self.assertIsNone(Triage.objects.get(pk=row.pk).carried_from)  # persisted, not just set on the object
+
+    def _ai_off_rescan(self, validated_ago):
+        """A rescan's new row of a finding the AI never reviewed (no provider), validated by the scan pipeline, with no job of its own."""
+        Triage.objects.filter(match=self.fire_match).update(status='not_triaged', validation_status='clean',
+                                                            validated_at=timezone.now() - validated_ago)
+        later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+        row = triage.track([CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')])[0][0]
+        Triage.objects.filter(pk=row.pk).update(status='not_triaged')  # (the host's other matches differ in this fixture, which re-queues it)
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.validation_status, row.carried_from), ('not_triaged', 'clean', self.fire_match.pk))
+        return row
+
+    def test_an_ai_off_row_validated_three_days_ago_is_validated_again(self):
+        # the shorter window is for a result the AI could not review (_job_current); the same applies to a row with no job of its own
+        self.assertEqual(self._enqueue(self._ai_off_rescan(timedelta(days=3)))[0], 'queued')
+
+    def test_an_ai_off_row_validated_a_few_hours_ago_is_still_fresh(self):
+        self.assertEqual(self._enqueue(self._ai_off_rescan(timedelta(hours=5)))[0], 'fresh')
+
     def test_the_shorter_window_applies_when_the_ai_could_not_answer(self):
         row = self._rescan_with_job(status='completed', result={'ai_state': 'unavailable'}, finished_at=timezone.now() - timedelta(days=2))
         self.assertEqual(self._enqueue(row)[0], 'queued')
@@ -169,7 +200,7 @@ class HotValidationTests(TestCase):
         row = triage.track([CVEMatch.objects.create(cve_entry=self.fire, subdomain=later, matched_product='nginx')])[0][0]
         self.assertEqual((row.status, row.classification, row.carried_from), ('pending', '', None))
 
-    def test_the_twin_lookup_reads_one_row_per_finding_however_many_scans_there_were(self):
+    def test_the_twin_lookup_returns_one_row_per_finding_however_many_scans_there_were(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
         Triage.objects.filter(match=self.fire_match).update(status='triaged', classification='likely')
@@ -191,6 +222,21 @@ class HotValidationTests(TestCase):
             first = hot_validation.sweep(max_jobs=1)
             second = hot_validation.sweep(max_jobs=1)
         self.assertEqual((first['fire'], second['fire']), (1, 1))
+
+    def test_an_automatic_validation_with_the_ai_off_keeps_the_earlier_triage(self):
+        # the job asks for a fresh review under its own nonce; that must not reset the row (the same loss as an on-demand match validation)
+        from cveFeed import tasks
+        row = Triage.objects.get(vulnerability=self.high)
+        Triage.objects.filter(pk=row.pk).update(status='triaged', classification='likely', reason='earlier answer')
+        row.refresh_from_db()
+        job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id, signature=row.signature, priority=6)
+        with mock.patch('cveFeed.validation_authority.require_authority'), \
+                mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
+                mock.patch('cveFeed.triage._resolve_provider', return_value=None):
+            tasks.automatic_validate_finding(job.pk)
+        row.refresh_from_db()
+        self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'completed')
+        self.assertEqual((row.classification, row.reason), ('likely', 'earlier answer'))
 
     def test_backfill_existing_untracked_findings(self):
         Triage.objects.all().delete()

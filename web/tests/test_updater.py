@@ -132,14 +132,47 @@ class StateTests(TestCase):
 			updater.approve(row, self.admin)
 		self.assertFalse(updater.auto_approve(row))
 
-	def test_a_failed_comparison_is_not_unknown_the_installed_commit_is_still_offered_the_latest(self):
-		self.install(OLD)
+	def github_with_compare(self, answer):
+		"""A GitHub whose branch head is NEW and whose compare call answers ``answer`` (a status code, or an exception to raise)."""
 		def get(url, headers=None, timeout=None):
 			if '/compare/' in url:
-				return FakeResp(502)
+				if isinstance(answer, Exception):
+					raise answer
+				return FakeResp(answer)
 			return FakeResp(200, {'sha': NEW, 'html_url': 'u', 'commit': {'message': 'm', 'committer': {'date': ''}}})
-		row = updater.check(UpdateSettings.current(), get=get)
-		self.assertEqual((updater.state(row)['status'], row.reference_unknown), ('available', False))
+		return get
+
+	def test_a_comparison_that_could_not_be_made_is_unknown_and_cannot_be_approved(self):
+		# a fork with commits of its own and no host answer, behind a partial rate limit (the head was readable, the compare call was not):
+		# nothing says whether the branch is ahead of this build, so nothing is offered (review of the fix for 211)
+		import requests
+		self.install(self.MINE)
+		for answer in (403, 429, 500, 502, requests.ConnectionError('reset')):
+			with self.subTest(answer=answer):
+				row = updater.check(UpdateSettings.current(), get=self.github_with_compare(answer))
+				state = updater.state(row)
+				self.assertEqual(state['status'], 'unknown')
+				self.assertIsNone(state['behind_by'])
+				self.assertTrue(state['last_error'])  # said, not silent
+				with self.assertRaises(updater.UpdateError):
+					updater.approve(row, self.admin)
+				self.assertFalse(updater.auto_approve(row))
+				self.assertFalse(os.path.exists(os.path.join(self.dir, '.update-approved')))
+
+	def test_the_next_comparison_that_works_clears_it(self):
+		self.install(OLD)
+		row = updater.check(UpdateSettings.current(), get=self.github_with_compare(429))
+		self.assertEqual(updater.state(row)['status'], 'unknown')
+		row = updater.check(row, get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		state = updater.state(row)
+		self.assertEqual((state['status'], state['last_error']), ('available', ''))
+
+	def test_a_comparison_that_fails_while_an_update_is_approved_does_not_hide_it(self):
+		self.install(OLD)
+		row = updater.check(UpdateSettings.current(), get=fake_github(compare={'status': 'ahead', 'ahead_by': 1, 'commits': []}))
+		updater.approve(row, self.admin)
+		row = updater.check(row, get=self.github_with_compare(403))  # the host is applying it: the banner keeps showing that
+		self.assertEqual(updater.state(row)['status'], 'approved')
 
 	def test_the_check_tells_the_host_what_it_tracks(self):
 		self.install(OLD)

@@ -94,6 +94,62 @@ class DispatchPolicyTests(DispatchBase):
             self.assertEqual(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5), result)
 
 
+class ActivityWordingTests(DispatchBase):
+    """The activity line and the expiry reason of a task nobody took say what really happened to the work: it ran here when the kind may fall
+    back, and the targets stay due when it may not (nothing ran locally then)."""
+    STAYS_DUE = 'the targets stay due until a scanner can take the work'
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict('os.environ', {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import os
+        os.environ.pop(ENV, None)
+
+    def _entries(self):
+        from cveFeed.models import AgentActivity
+        return list(AgentActivity.objects.filter(project=self.project).order_by('id'))
+
+    def unclaimed(self, policy):
+        import os
+        if policy is not None:
+            os.environ[ENV] = policy
+        self.make_sentinel(['nmap'])
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
+            try:
+                dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', ips=['192.0.2.10'], timeout=5)
+            except resources.ScannerUnavailable:
+                pass
+        return self._entries()[-1].message, SentinelTask.objects.get().error
+
+    def test_when_the_kind_may_fall_back_the_wording_says_it_ran_locally(self):
+        message, reason = self.unclaimed(None)
+        self.assertIn('No Sentinel picked up nmap work for www.example.test in time; it ran locally instead', message)
+        self.assertIn('the stage fell back to local execution', reason)
+
+    def test_when_the_kind_may_not_the_wording_says_the_targets_stay_due(self):
+        message, reason = self.unclaimed('none')
+        self.assertIn(f'No Sentinel picked up nmap work for www.example.test in time; {self.STAYS_DUE}', message)
+        self.assertIn(self.STAYS_DUE, reason)
+        for text in (message, reason):
+            self.assertNotIn('locally', text)
+            self.assertNotIn('local execution', text)
+
+    def test_a_list_that_names_the_kind_still_says_it_ran_locally(self):
+        message, reason = self.unclaimed('nmap,naabu')
+        self.assertIn('it ran locally instead', message)
+        self.assertIn('fell back to local execution', reason)
+
+    def test_a_task_nobody_finished_expires_with_a_true_default_reason(self):
+        from agentapi import sentinel_broker
+        self.make_sentinel(['nmap'])
+        for policy, wanted in (('all', 'fell back to local execution'), ('none', self.STAYS_DUE)):
+            with mock.patch.dict('os.environ', {ENV: policy}):
+                task = SentinelTask.objects.create(project=self.project, kind='nmap', target={'addresses': ['192.0.2.10']})
+                self.assertIn(wanted, sentinel_broker.expire(task).error)
+
+
 class WrapperPolicyTests(DispatchBase):
     """With no Sentinel for the project every wrapper used to hand the work back to a local run; under ``none`` each says it must wait."""
 

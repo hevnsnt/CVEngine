@@ -23,6 +23,9 @@ RECHECK = timedelta(hours=6)         # a walk that reached its floor is not repe
 STALE_AFTER = timedelta(hours=24)    # a feed that has not been read to its head for this long is reported as behind
 ENTRIES_PER_DAY = 800                # about what the feed lists in a day at most: how deep a walk back has to read
 MAX_SCAN = 40000
+SKEW = timedelta(hours=1)            # a time this far ahead of the clock is a clock difference; further is not a time to believe
+MAX_ATTEMPTS = 4                     # runs in a row an entry may fail to be read before it is set aside (reported, and no longer holds the window back)
+MAX_UNREADABLE = 20                  # how many entries may be set aside: more than this is an outage, not a few bad entries, and coverage waits
 
 
 def current():
@@ -32,21 +35,31 @@ def current():
 
 def note_snapshot(covers_through):
     """A seed was imported: the feed is complete through ``covers_through`` at most (the newest publication time the snapshot holds).
-    The earlier of this and what is already known stands, and a walk in progress is dropped (its head is out of date)."""
+    The earlier of this and what is already known stands, and a walk in progress is dropped (its head is out of date). A time
+    ahead of the clock is a claim about entries that cannot exist yet: a few minutes is a clock difference and is clamped to now,
+    more is not believed at all (the walk then reads back its usual window instead of skipping what lies before it)."""
+    now = timezone.now()
     if covers_through is None:
+        logger.warning('the CVE seed states no usable time, so the feed is read back %d days to find what it lacks', LEGACY_DAYS)
         return
+    if covers_through > now + SKEW:
+        logger.warning('the CVE seed claims to cover through %s, which is in the future: ignored', covers_through.isoformat())
+        return
+    covers_through = min(covers_through, now)
     row = current()
     if row.covered_through is None or covers_through < row.covered_through:
         row.covered_through = covers_through
+        row.assumed_days = None  # the snapshot states what it holds
     row.resume_cursor, row.resume_head, row.checked_at = '', None, None
     row.save()
 
 
 def floor_for(row, now, window_days=0):
     """The oldest publication time a walk has to read back to: a little before the watermark, or ``LEGACY_DAYS`` (at least the
-    configured coverage window) back when there is none."""
-    if row.covered_through is not None:
-        return row.covered_through - MARGIN
+    configured coverage window) back when there is none, or when it lies in the future (nothing stored can have been read through a time
+    that has not come)."""
+    if row.covered_through is not None and row.covered_through <= now + SKEW:
+        return min(row.covered_through, now) - MARGIN
     return now - timedelta(days=max(LEGACY_DAYS, window_days))
 
 
@@ -64,7 +77,14 @@ def status(now=None):
     return {'covered_through': through.isoformat() if through else None, 'lag_hours': None if lag is None else round(lag, 1),
             'walk_in_progress': bool(row.resume_cursor),
             'last_complete_walk': row.checked_at.isoformat() if row.checked_at else None,
+            'window_assumed_days': row.assumed_days,  # the first walk had no seed time to start from, so only this many days were read back
+            'unreadable': unreadable(row),  # listed by the feed but refused on every attempt: not stored, kept for a retry
             'behind': bool(through is None or now - through > STALE_AFTER)}
+
+
+def unreadable(row):
+    """The ids set aside after ``MAX_ATTEMPTS`` failed runs."""
+    return sorted(i for i, tries in (row.failures or {}).items() if tries >= MAX_ATTEMPTS)
 
 
 def published(summary):
