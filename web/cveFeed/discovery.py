@@ -132,6 +132,22 @@ def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_b
     return start_discoveries([domain], mode, quiet, initiated_by=initiated_by)[0]
 
 
+def start_in_stored_modes(domains, quiet=False, initiated_by=None):
+    """Queue discovery of each domain in the mode stored on it (``Domain.discovery_mode``): the way every start that nobody asked for
+    one by one goes (the work conductor, the assessment review, a Tailscale sweep, a move), so a target added as passive is never
+    rescanned in standard. A manual only target ("just add it, do not scan yet") is left out. Returns the scans of the rest; targets
+    of one mode are queued together, each group in the order given."""
+    from targetApp.models import Domain
+    groups = {}
+    for d in domains:
+        if d.discovery_mode != Domain.DISCOVERY_MANUAL:
+            groups.setdefault(d.discovery_mode, []).append(d)
+    scans = []
+    for mode, group in groups.items():
+        scans += start_discoveries(group, mode=mode, quiet=quiet, initiated_by=initiated_by)
+    return scans
+
+
 def queued_ids():
     """Ids of every queued scan, oldest first. The queue is one first-in, first-out line shared by all projects, so a scan's
     place in it is not limited to what the caller can see."""

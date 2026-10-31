@@ -99,11 +99,11 @@ function build() {
   const pick = el('label', 'btn ghost sm', 'Upload a file', { for: 'dlg-file', style: 'display:inline-flex;align-items:center;margin:0;cursor:pointer' });
   tools.append(count, el('span', 'grow'), pick, file);
   const mode = el('select', '', null, { 'aria-label': 'Discovery' });
-  [['standard', 'Standard discovery (subdomains and web fingerprinting, safe modules only)'], ['deep', 'Deep discovery (everything: brute forcing, spidering, takes hours)'], ['passive', 'Passive discovery (public sources only, fast)'], ['none', 'Just add them, do not scan yet']]
+  [['standard', 'Standard discovery (subdomains and web fingerprinting, safe modules only)'], ['deep', 'Deep discovery (everything: brute forcing, spidering, takes hours)'], ['passive', 'Passive discovery (public sources only, fast)'], ['none', 'Just add them, do not scan yet (never scanned automatically)']]
     .forEach(([v, t]) => mode.append(Object.assign(el('option', '', t), { value: v })));
   const auth = el('input', '', null, { type: 'checkbox', id: 'dlg-auth' });
   const authWrap = el('label', 'check', null, { for: 'dlg-auth' });
-  authWrap.append(auth, document.createTextNode('I am authorized to test these targets. Standard and deep discovery send traffic to them.'));
+  authWrap.append(auth, document.createTextNode('I am authorized to test these targets. Standard and deep discovery send traffic to them. The mode you pick is kept: the work conductor rescans each target in it, and never scans one added with "just add them".'));
   const msg = el('div', 'msg', '', { role: 'status', style: 'display:none' });
   const out = el('div', 'dlg-out');
   const actions = el('div', 'actions');
@@ -149,7 +149,7 @@ function build() {
       const orgMode = isOrgFormat(area.value);
       const res = await fetch(orgMode ? '/api/v1/targets/bulk-org' : `/api/v1/projects/${encodeURIComponent(projSel.value)}/targets/bulk`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? undefined : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined, authorized: auth.checked || undefined }), // the attestation travels with the request; the server does not record it yet
+        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? 'manual' : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined, authorized: auth.checked || undefined }), // the attestation travels with the request; the server does not record it yet
       });
       const data = await res.json();
       clearInterval(ticker);

@@ -140,7 +140,7 @@ def project_facts(project_id, start, end):
     latest_success = (ScanHistory.objects.filter(domain_id=OuterRef('pk'), scan_status=2)
                       .exclude(tasks__contains=[HOST_PIPELINE_TASK])
                       .order_by('-stop_scan_date', '-id'))
-    due = (Domain.objects.filter(project_id=project_id)
+    due = (Domain.objects.filter(project_id=project_id).exclude(discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never started for a person
            .annotate(last_success=Subquery(latest_success.values('stop_scan_date')[:1]))
            .filter(Q(last_success__isnull=True) | Q(last_success__lt=end - timedelta(days=7)))
            .order_by('last_success', 'id').values_list('id', flat=True).first())
@@ -216,9 +216,10 @@ def dispatch(project, facts, action):
         from cveFeed.exclusions import is_excluded
         from targetApp.models import Domain
         target = Domain.objects.filter(pk=facts['due_discovery_target_id'], project=project).first()
-        if not target or is_excluded(project.pk, target.name) or running_discovery(target):
-            return 'stale', None, 'target is excluded, absent or already scanning'
-        scan = start_discovery(target)
+        if (not target or target.discovery_mode == Domain.DISCOVERY_MANUAL or is_excluded(project.pk, target.name)
+                or running_discovery(target)):
+            return 'stale', None, 'target is excluded, absent, manual only or already scanning'
+        scan = start_discovery(target, target.discovery_mode)
         return 'queued', scan.pk, f'discovery scan #{scan.pk}'
     if action == 'assess_host':
         from cveFeed.host_assessment import enqueue

@@ -60,7 +60,8 @@ def bounty_blocked_projects():
 
 def next_targets(limit, now=None):
     """The targets to scan next, most overdue first: never scanned, then longest since the last scan. At most one per project, none
-    with a scan going, none scanned inside the minimum gap, none excluded."""
+    with a scan going, none scanned inside the minimum gap, none excluded, none set to manual only (added with "just add them, do not
+    scan yet": only a person starts those)."""
     from django.db.models import F, OuterRef, Subquery
     from django.utils import timezone
 
@@ -78,7 +79,7 @@ def next_targets(limit, now=None):
     newest = (ScanHistory.objects.filter(domain_id=OuterRef('pk'))
               .exclude(tasks__contains=[HOST_PIPELINE_TASK])
               .order_by('-start_scan_date').values('start_scan_date')[:1])
-    rows = (Domain.objects.exclude(project=None).annotate(last_scan=Subquery(newest))
+    rows = (Domain.objects.exclude(project=None).exclude(discovery_mode=Domain.DISCOVERY_MANUAL).annotate(last_scan=Subquery(newest))
             .order_by(F('last_scan').asc(nulls_first=True), 'id').values_list('id', 'project_id', 'name', 'last_scan'))
     from targetApp.target_types import internal_networks, sentinel_only_target
     chosen, projects, banned, internal = [], set(), {}, {}
@@ -119,14 +120,14 @@ def keep_work_queued():
             current = active_scans().count()
             result['active'] = current
             if current < depth:
-                from cveFeed.discovery import start_discoveries
+                from cveFeed.discovery import start_in_stored_modes
                 from targetApp.models import Domain
                 ids = next_targets(depth - current)
                 if ids:
                     domains = list(Domain.objects.filter(pk__in=ids))
                     domains.sort(key=lambda d: ids.index(d.id))
                     try:
-                        result['started'] = len(start_discoveries(domains, 'standard'))
+                        result['started'] = len(start_in_stored_modes(domains))
                     except Exception:  # noqa: BLE001 - a failed round must not stop the next one
                         logger.exception('work conductor: could not queue discovery')
                         result['error'] = 'could not queue discovery'
