@@ -30,6 +30,7 @@ import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from functools import cmp_to_key
 from datetime import timedelta
 
 from django.conf import settings
@@ -399,13 +400,13 @@ def _bound(value):
     return (found.group(1), False) if found else (None, False)
 
 
-_WILDCARD = re.compile(r"^(?:version|ver\.?|v)?\s*(\d+(?:\.\d+)*)\.(?:x|\*)$", re.I)
+_WILDCARD = re.compile(r"^(?:version|ver\.?|v)?\s*(?:(\d+(?:\.\d+)*)\.(?:x|\*)|(\d+(?:\.\d+)+)\*)$", re.I)
 
 
 def _wildcard_base(value):
-    """"2.3.x" or "2.3.*" -> "2.3" (the branch a wildcard names), else None."""
+    """"2.3.x" or "2.3.*" -> "2.3" (the branch a wildcard names), else None. Juniper writes "21.1*", which is the same branch."""
     found = _WILDCARD.match(str(value or "").strip())
-    return found.group(1) if found else None
+    return (found.group(1) or found.group(2)) if found else None
 
 
 def _next_branch(base):
@@ -492,13 +493,164 @@ def _default_affected_ranges(entry, kind):
     return out
 
 
+# what a feed writes for a bound it does not state
+_PLACEHOLDERS = frozenset({"unspecified", "unknown", "n/a", "none"})
+_ZERO = ("", "*", "0", "0.0", "0.0.0")
+_SERVICE_BASE = re.compile(r"^(\d+\.\d+R\d+)-S\d+")  # Junos: 22.3R3-S1 is a service release of the release 22.3R3
+_COMMA_VERSION = re.compile(r"^(\d+),(\d+)$")  # a typo the record of CVE-2023-36845 has: the branch "23,2"
+_RANGE_BOUNDS = ("introduced", "fixed", "lastAffected")
+
+
+def _placeholder(value):
+    return str(value or "").strip().lower() in _PLACEHOLDERS
+
+
+def _version_text(value):
+    return _COMMA_VERSION.sub(r"\1.\2", str(value or "").strip())
+
+
+def _cmp(a, b):
+    """-1, 0 or 1 for two version texts, None when either is not a version."""
+    from cveFeed.correlation import _vcmp, parse_version
+    left, right = parse_version(a, strict=True), parse_version(b, strict=True)
+    return None if left is None or right is None else _vcmp(left, right)
+
+
+def _in_branch(version, base):
+    """Whether ``version`` is a release of the branch ``base`` ("21.1" and "21.1R3" are in "21.1")."""
+    from cveFeed.correlation import parse_version
+    low, branch = parse_version(version, strict=True), parse_version(base, strict=True)
+    return bool(low and branch and low[:len(branch)] == branch)
+
+
+def _upper_split(start, value, start_readable=True):
+    """The ranges one upper bound text stands for when it is not a plain version, as ``[{introduced?, fixed}]``; None when it is plain.
+
+    * A wildcard that names the branch ``start`` is in ("21.1" below "21.1*", Juniper's way of saying every 21.1 release) is that whole
+      branch: from ``start`` to where the next branch begins. Before this it read as "fixed 21.1", an empty range.
+    * A comma list of fixes ("22.3R2-S2, 22.3R3-S1") is read as Juniper writes it: nothing before the oldest fix is safe, and a fix that is a
+      service release (22.3R3-S1) leaves its own release (22.3R3) exposed up to it. Anything older than the oldest fix is the part that is
+      certain; for a list that cannot be read exactly (or a lower bound that cannot) there is no range at all, never an open one."""
+    text = str(value or "").strip()
+    if "," in text:
+        bounds = [_bound(part.strip()) for part in text.split(",") if part.strip()]
+        if len(bounds) < 2 or not start_readable or not all(bound and exact for bound, exact in bounds) or any(_cmp(b, b) is None for b, _ in bounds):
+            return []
+        fixes = sorted({bound for bound, _exact in bounds}, key=cmp_to_key(lambda x, y: _cmp(x, y)))
+        if start and _cmp(fixes[0], start) != 1:
+            return []
+        out = [{**({"introduced": start} if start else {}), "fixed": fixes[0]}]
+        for later in fixes[1:]:
+            release = _SERVICE_BASE.match(later)
+            if release and _cmp(release.group(1), fixes[0]) == 1 and (not start or _cmp(release.group(1), start) == 1):
+                out.append({"introduced": release.group(1), "fixed": later})
+        return out
+    branch = _wildcard_base(text)
+    if branch and start and _in_branch(start, branch):
+        return [{"introduced": start, "fixed": _next_branch(branch)}]
+    return None
+
+
+def _join_split_branches(versions):
+    """CVE 5 ``versions`` with each branch the record wrote as two entries made one. Atlassian writes a branch as ``{version: 7.13.0,
+    lessThan: unspecified}`` followed by ``{version: unspecified, lessThan: 7.13.7}`` (Confluence, CVE-2022-26134): read alone the first is
+    "7.13.0 and every later release" and the second "everything before 7.13.7", so the fixed releases between them read as exposed. Joined
+    they are the branch 7.13.0 to 7.13.7. Only that exact pair is joined, and only when the fix is newer than the start."""
+    out, i = [], 0
+    versions = list(versions)
+    while i < len(versions):
+        a = versions[i]
+        b = versions[i + 1] if i + 1 < len(versions) else None
+        if (isinstance(a, dict) and isinstance(b, dict) and a.get("status") == "affected" == b.get("status")
+                and _placeholder(a.get("lessThan")) and not a.get("lessThanOrEqual") and not a.get("changes")
+                and a.get("version") and not _placeholder(a["version"]) and _bound(a["version"])[1]
+                and _placeholder(b.get("version")) and b.get("lessThan") and not _placeholder(b["lessThan"])
+                and not b.get("lessThanOrEqual") and not b.get("changes")
+                and _cmp(b["lessThan"], a["version"]) == 1):
+            out.append({**a, "lessThan": b["lessThan"]})
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+def _joined_feed_ranges(ranges):
+    """The ``ranges`` of a cve.now entry with each ``{introduced: X, fixed: unspecified}`` followed by ``{introduced: unspecified, fixed: Y}``
+    made one range {X, Y}: the same branch written as two (see ``_join_split_branches``), which is how cve.now carries the CVE List's."""
+    out, i = [], 0
+    while i < len(ranges):
+        a = ranges[i]
+        b = ranges[i + 1] if i + 1 < len(ranges) else None
+        if (isinstance(a, dict) and isinstance(b, dict) and _placeholder(a.get("fixed")) and not a.get("lastAffected")
+                and a.get("introduced") and not _placeholder(a["introduced"]) and _bound(a["introduced"])[1]
+                and _placeholder(b.get("introduced")) and b.get("fixed") and not _placeholder(b["fixed"]) and not b.get("lastAffected")
+                and a.get("type") == b.get("type") and _cmp(b["fixed"], a["introduced"]) == 1):
+            out.append({**a, "fixed": b["fixed"]})
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+def _normalized_range(rng):
+    """The ranges one cve.now range stands for: a bound the feed marks "unspecified" is no bound, and an upper bound that is a wildcard branch
+    or a comma list of fixes is read as ``_upper_split`` reads it. A range that has nothing readable left is dropped."""
+    if not isinstance(rng, dict):
+        return [rng]
+    clean = {k: v for k, v in rng.items() if not (k in _RANGE_BOUNDS and _placeholder(v))}
+    start, upper = _version_text(clean["introduced"]) if clean.get("introduced") else None, clean.get("fixed")
+    if upper and not clean.get("lastAffected"):
+        start_text = start if start and _bound(start)[1] and _bound(start)[0] not in _ZERO else None
+        split = _upper_split(start_text, upper, bool(start_text) or str(start or "").strip() in _ZERO)
+        if split is not None:
+            rest = {k: v for k, v in clean.items() if k not in ("introduced", "fixed")}
+            return [{**rest, **piece} for piece in split]
+    if clean != rng and not any(_cmp(clean[k], clean[k]) is not None for k in _RANGE_BOUNDS if clean.get(k)):
+        return []
+    return [clean]
+
+
+def normalize_feed_ranges(affected):
+    """cve.now's ``affected`` with the ranges its CVE List source gave in the forms correlation cannot read made readable: the two halves of a
+    branch joined (Confluence CVE-2022-26134: ``{introduced 7.13.0, fixed unspecified}`` and ``{introduced unspecified, fixed 7.13.7}``),
+    "unspecified" taken away, Junos' ``21.1*`` made the 21.1 branch and its comma lists of fixes made one range per release train. Entries
+    with none of these are returned as they were."""
+    out = []
+    for item in affected or []:
+        ranges = item.get("ranges") if isinstance(item, dict) else None
+        if isinstance(ranges, list) and ranges:
+            new = [r for rng in _joined_feed_ranges(ranges) for r in _normalized_range(rng)][:100]
+            if new != ranges:
+                item = {**item, "ranges": new}
+        out.append(item)
+    return out
+
+
+def keep_published_ranges(affected, stored):
+    """``affected`` (what cve.now says now) with every block that states no range given the ranges the stored CVE List record had for the same
+    product. An empty block says nothing, so a refresh must not replace the CVE List's ranges with it (Jenkins, CVE-2024-23897: the feed's
+    Jenkins block has none, next to OSV blocks that do). A block with ranges of its own is never touched."""
+    from cveFeed.correlation import affected_product_tokens
+    out = list(affected or [])
+    for i, item in enumerate(out):
+        if not isinstance(item, dict) or item.get("ranges") or not (item.get("product") or item.get("package")):
+            continue
+        wanted = affected_product_tokens(item)
+        old = next((o for o in stored or [] if isinstance(o, dict) and o.get("ranges") and wanted & affected_product_tokens(o)), None)
+        if wanted and old:
+            out[i] = {**item, "ranges": old["ranges"]}
+    return out
+
+
 def _ranges(entry):
     """CVE 5 ``versions`` entries -> correlation ranges ({introduced, fixed | lastAffected}), split at ``changes``. An upper
     bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts."""
     out = []
     kind0 = "GIT" if any(str(v.get("versionType") or "").lower() == "git" for v in entry.get("versions") or [] if isinstance(v, dict)) else "SEMVER"
     out += _default_affected_ranges(entry, kind0)
-    for v in entry.get("versions") or []:
+    for v in _join_split_branches(entry.get("versions") or []):
         if not isinstance(v, dict) or v.get("status") != "affected":
             continue
         kind = "GIT" if str(v.get("versionType") or "").lower() == "git" else "SEMVER"
@@ -506,9 +658,15 @@ def _ranges(entry):
         if textual:  # the range is written in the version field itself
             out.append({"type": kind, **textual})
             continue
-        branch = _wildcard_base(v.get("version"))  # "2.3.x": every release of 2.3 (a wildcard is not a version bound)
-        start = branch or _bound(v.get("version"))[0]
+        version_text = _version_text(v.get("version"))
+        branch = _wildcard_base(version_text)  # "2.3.x": every release of 2.3 (a wildcard is not a version bound)
+        start = branch or _bound(version_text)[0]
         start = None if start in ("0", "0.0", "0.0.0") else start
+        if v.get("lessThan") and not v.get("changes"):
+            split = _upper_split(start, v["lessThan"], bool(start) or version_text in _ZERO or _placeholder(version_text))
+            if split is not None:  # a wildcard branch or a comma list of fixes: one range per release train, never an open one
+                out += [{"type": kind, **piece} for piece in split]
+                continue
         upper = {}
         if v.get("lessThan"):
             below = _wildcard_base(v.get("lessThan"))
@@ -683,6 +841,98 @@ def import_missing(data, limit, now=None, get=None, workers=8):
     return created
 
 
+# ----------------------------------------------------------------------------- repairing stored ranges
+
+RANGES_MARKER = "_ranges_repair"  # the IntelSource row whose ``cves`` is the id the repair has reached and ``last_changed`` when it began
+# the stored entries whose ranges an older conversion may have got wrong: one imported from the CVE List before the current conversion
+# existed, one with a block that states no range (Jenkins, issue 210), one in a form the feed's ranges were not read in ("unspecified" bounds,
+# a Junos wildcard branch or comma list of fixes: issue 205)
+_REPAIR_SQL = """(
+    (sources->0 = '"CVE List V5"'::jsonb AND created_at < %s)
+    OR jsonb_path_exists(affected, '$[*] ? (@.ranges.size() == 0)')
+    OR jsonb_path_exists(affected, '$[*].ranges[*] ? (@.fixed like_regex "^unspecified$" flag "i" || @.introduced like_regex "^unspecified$" flag "i"
+        || @.fixed like_regex "[*,]" || @.introduced like_regex "[,]")')
+)"""
+
+
+def repair_ranges(limit=200, get=None, workers=8, scan=1000, now=None):
+    """Re-derive the ranges of stored entries an older conversion got wrong. Returns the counts of one bounded run.
+
+    Resumable: it walks the entries in id order from where the last run stopped (the cursor is the ``_ranges_repair`` IntelSource row) and
+    reads the CVE List record of at most ``limit`` of them per run, so it can be called every hour until the table is done, and ``--reset`` of
+    ``manage.py repair_cve_ranges`` starts it again.
+
+      * a range in a form cve.now passes on from the CVE List that correlation cannot read is rewritten from the stored data alone (no request)
+      * an entry the CVE List import created before the current conversion is re-derived from its record
+      * a block with no range of an entry whose record states its releases as the unaffected ranges of a default-affected product (Jenkins)
+        takes the ranges the record gives
+    An entry that changes is marked for re-correlation and its cached match verdicts are dropped, as a cve.now refresh does."""
+    from cveFeed.models import CVEEntry, IntelSource, MatchVerdict
+    from django.core.cache import cache
+    now = now or timezone.now()
+    marker, created = IntelSource.objects.get_or_create(name=RANGES_MARKER)
+    if created or not marker.last_changed:
+        marker.last_changed = now
+        marker.save(update_fields=["last_changed"])
+    out = {"scanned": 0, "examined": 0, "normalized": 0, "repaired": 0, "failed": 0}
+    rows = list(CVEEntry.objects.extra(where=[_REPAIR_SQL], params=[marker.last_changed]).filter(pk__gt=marker.cves).order_by("pk")[:max(1, scan)])
+    plan, last, fetches = [], marker.cves, 0
+    for row in rows:
+        affected = normalize_feed_ranges(row.affected)
+        empty = any(isinstance(i, dict) and not i.get("ranges") and (i.get("product") or i.get("package")) for i in affected)
+        reimport = bool(row.sources) and row.sources[0] == "CVE List V5" and row.created_at < marker.last_changed
+        if empty or reimport:
+            if fetches >= limit:
+                break
+            fetches += 1
+        plan.append((row, affected, empty, reimport))
+        last = row.pk
+
+    def load(row):
+        try:
+            return fetch_cve5(row.cve_id, get=get), None
+        except Exception as exc:  # noqa: BLE001 - asked again by a later run
+            return None, exc
+    wanted = [row for row, _a, empty, reimport in plan if empty or reimport]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        records = dict(zip((r.pk for r in wanted), pool.map(load, wanted)))
+    hold = None
+    for row, affected, empty, reimport in plan:
+        out["scanned"] += 1
+        new, from_record = affected, False
+        if row.pk in records:
+            out["examined"] += 1
+            doc, error = records[row.pk]
+            if error is not None:
+                out["failed"] += 1
+                key = f"cvengine:ranges-repair:{row.cve_id}"
+                tries = (cache.get(key) or 0) + 1
+                cache.set(key, tries, 86400)
+                if tries < 3:  # held at this entry for the next run; a third failure lets the run pass it
+                    hold = row.pk - 1 if hold is None else min(hold, row.pk - 1)
+                logger.warning("ranges repair: could not read the CVE List record of %s: %s", row.cve_id, error)
+            else:
+                fields = entry_from_cve5(doc, {}) if doc else None
+                if fields:
+                    published = fields["affected"]
+                    cna = ((doc.get("containers") or {}).get("cna") or {})
+                    if reimport and any(i.get("ranges") for i in published):
+                        new, from_record = published, True
+                    elif empty and uses_default_status(cna.get("affected")):
+                        new, from_record = keep_published_ranges(affected, published), True
+        if new != row.affected:
+            sources = list(row.sources or [])
+            if from_record and "CVE List V5" not in sources:
+                sources.append("CVE List V5")
+            CVEEntry.objects.filter(pk=row.pk).update(affected=new, sources=sources, needs_recorrelation=True)
+            MatchVerdict.objects.filter(cve_entry_id=row.pk).delete()
+            out["repaired" if from_record else "normalized"] += 1
+    marker.cves = max(marker.cves, min(last, hold) if hold is not None else last)
+    marker.last_checked = now
+    marker.save(update_fields=["cves", "last_checked"])
+    return out
+
+
 # ----------------------------------------------------------------------------- one run
 
 def run(now=None, get=None):
@@ -707,8 +957,16 @@ def run(now=None, get=None):
     marker.last_checked = now
     marker.save(update_fields=["last_checked"])
     created = import_missing(data, _int_env("CVENGINE_INTEL_IMPORT_PER_RUN", 2000, 0, 20000), now=now, get=get)
+    repaired = {}
+    per_run = _int_env("CVENGINE_RANGE_REPAIR_PER_RUN", 200, 0, 5000)
+    if per_run:  # a bounded step of the repair of stored ranges (0 turns it off); it never stops the rest of the run
+        try:
+            repaired = repair_ranges(per_run, get=get, now=now)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("threat intel: ranges repair failed: %s", exc)
     if LAST_IMPORT["default_status"]:
         logger.info("threat intel: %s of the %s imported CVE records state their affected releases as unaffected ranges of a default-affected "
                     "product (defaultStatus), which are now read as the releases between those ranges", LAST_IMPORT["default_status"], len(created))
     return {"sources": {n: len(data.get(n) or {}) for n in names}, "errors": errors, "reconciled": updated,
-            "signals_changed": changed_ids, "imported": created, "default_status_records": LAST_IMPORT["default_status"]}
+            "signals_changed": changed_ids, "imported": created, "default_status_records": LAST_IMPORT["default_status"],
+            "ranges_repaired": repaired.get("repaired", 0) + repaired.get("normalized", 0)}

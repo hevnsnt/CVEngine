@@ -75,6 +75,10 @@ _PRE_RE = re.compile(r"^[-_.~+ ]?(?:(alpha|beta|rc|cr|pre|dev|snapshot)|(a|b|m))
 _PATCH_LETTER_RE = re.compile(r"^([a-z]{1,2})(?![a-z0-9])", re.IGNORECASE)
 _PORTABLE_PATCH_RE = re.compile(r"^[-_. ]?p(\d+)(?![A-Za-z0-9])", re.IGNORECASE)  # 8.9p1, 9.6p1
 _MARIADB_PREFIX_RE = re.compile(r"^5\.5\.5-(?=\d)")
+# Junos: 22.4R2-S2 is the second service release of release 2 of 22.4, so 22.4R2 < 22.4R2-S1 < 22.4R2-S2 < 22.4R3 < 23.2R1. The release and the
+# service release become the third and fourth components. Only a two-part version of 8 or later followed by an upper-case R and a number
+# (the form Juniper alone uses), so no other version string is read differently.
+_JUNOS_RELEASE_RE = re.compile(r"^R(\d+)(?:-S(\d+))?(?![0-9A-Za-z])")
 _DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
@@ -116,6 +120,9 @@ def parse_version(value, strict=False):
     if dated:
         return tuple(parts[:3 if dated.group(3) else 2])
     rest = text[match.end():]
+    junos = _JUNOS_RELEASE_RE.match(rest) if len(parts) == 2 and parts[0] >= 8 else None
+    if junos:
+        return tuple(parts + [int(junos.group(1)), int(junos.group(2) or 0)])
     pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]

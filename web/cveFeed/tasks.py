@@ -522,6 +522,8 @@ def sync_threat_intel():
                                         .order_by('subdomain__target_domain__project_id', 'subdomain__name'), rescored)
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
+    if result.get('ranges_repaired'):  # entries whose ranges were re-derived are correlated again (cveFeed.intel.repair_ranges)
+        correlate_refreshed_cves.delay()
     tiers = [c.threat_tier for c in created]
     if created or changed or result['errors']:
         activity.log('feed', (f"Threat intelligence: {len(created)} CVEs imported from the CVE List ({tiers.count(FIRE)} fire, "
