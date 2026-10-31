@@ -3,9 +3,12 @@
 The rules are tested on plain facts (no database) and on stored hosts through the real host list. A test at the end fails when a ledger kind,
 a sweep or a scan stage exists in the code that is neither in the registry nor listed as deliberately excluded."""
 import ast
+import contextlib
 import os
 import pathlib
 import re
+import sys
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
@@ -480,6 +483,22 @@ class StoredHostTests(TestCase):
 	def check(self, host, check_id):
 		return {c['id']: c for c in host['check_coverage']['checks']}[check_id]
 
+	@contextlib.contextmanager
+	def steady_caches(self):
+		"""Pin the per-process caches that expire on the clock, so no request of a measure pays for one. A request costs two queries more when the
+		IP allowlist and ban caches (reNgine.ip_allowlist, reNgine.input_guard: 10 seconds) have expired, and one or three more when the internal
+		network table (cveFeed.internal_view: 5 minutes) has. Those queries belong to whichever request lands after the expiry, whatever the page
+		holds: on a slow CI worker one landed in the host-less ``without`` request of the first measure only, and the cost read 7 against 9."""
+		from cveFeed import internal_view
+		from reNgine import input_guard, ip_allowlist
+		internal_view.invalidate()
+		with mock.patch.object(internal_view, 'CACHE_SECONDS', float('inf')), \
+				mock.patch.object(ip_allowlist, '_load', return_value=(False, [])), \
+				mock.patch.object(input_guard, 'banned_ips', return_value=frozenset()):
+			internal_view.table()  # built once, here, outside the measure
+			yield
+		internal_view.invalidate()  # the next test builds its own from its own rows
+
 	def coverage_cost(self, project, token=None):
 		"""The queries the check coverage adds to the host list: the list with it, less the list without it (the rest of the host record has
 		its own cost, which is not what is measured here)."""
@@ -488,17 +507,13 @@ class StoredHostTests(TestCase):
 				status, data = call(token or self.token, 'GET', f'/api/v1/projects/{project}/hosts')
 			self.assertEqual(status, 200, data)
 			return ctx, data
-		queries()  # the first request of a user does its own one-off work (preferences, token use)
-		costs = []
-		# A one-off query (a cache entry expiring between two requests in a slow full run) adds to one measure and not the other; a real per-host
-		# or per-check query shows in every repetition. The cheapest of three is the steady-state cost.
-		for _ in range(3):
+		with self.steady_caches():
+			queries()  # the first request of a user does its own one-off work (preferences, token use)
 			with_it, data = queries()
 			self.assertTrue(all('check_coverage' in h for h in data['results']))
 			with mock.patch.object(services, '_coverage_for', return_value=None):
 				without, _ = queries()
-			costs.append(len(with_it) - len(without))
-		return min(costs)
+		return len(with_it) - len(without)
 
 	def test_the_host_record_carries_the_field(self):
 		now = timezone.now()
@@ -640,6 +655,25 @@ class StoredHostTests(TestCase):
 			self.host(self.da, self.scan_a, f'm{i}.alpha.example.test', f'203.0.113.{150 + i}', [(443, 'https')])
 			self.host(self.db, self.scan_b, f'n{i}.beta.example.test', f'203.0.113.{170 + i}', [(443, 'https')])
 		self.assertEqual(self.coverage_cost('_all', token=self.superuser_token), small)
+
+	def test_the_measure_does_not_move_when_the_clock_caches_expire(self):
+		"""Regression for a flake (9 != 7 on slow CI workers): the per-process caches that expire on the clock (allowlist and bans after 10 seconds,
+		internal networks after 5 minutes) each cost a query, to whichever request lands after the expiry. Here the host-less request of the
+		measure always does: the cost must still read the same as with the clock still."""
+		steady = self.coverage_cost('_all', token=self.superuser_token)
+		clock, calls = {'offset': 0.0}, {'n': 0}
+		real_call, real_time, real_monotonic = call, time.time, time.monotonic
+
+		def later(*args, **kwargs):
+			if calls['n'] and calls['n'] % 2 == 0:  # the second request of a pair
+				clock['offset'] += 600
+			calls['n'] += 1
+			return real_call(*args, **kwargs)
+		with mock.patch.object(time, 'time', lambda: real_time() + clock['offset']), \
+				mock.patch.object(time, 'monotonic', lambda: real_monotonic() + clock['offset']), \
+				mock.patch.object(sys.modules[__name__], 'call', later):
+			self.assertEqual(self.coverage_cost('_all', token=self.superuser_token), steady)
+		self.assertGreater(clock['offset'], 0)
 
 
 class SignedInTests(TestCase):
