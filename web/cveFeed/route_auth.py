@@ -460,9 +460,31 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         connection.sock.settimeout(timeout[1])
         connection.request(method, path, headers=request_headers)
         response = connection.getresponse()
-        if response.getheader('Content-Encoding', 'identity').lower() not in ('', 'identity'):
-            raise ValueError('probe server ignored identity encoding')
-        raw = response.read(max_bytes) or b''
+        content_encoding = response.getheader('Content-Encoding', 'identity').strip().lower()
+        if content_encoding in ('', 'identity'):
+            raw = response.read(max_bytes) or b''
+        elif content_encoding in ('gzip', 'deflate'):
+            import zlib
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if content_encoding == 'gzip' else zlib.MAX_WBITS)
+            parts = []
+            remaining = max_bytes
+            compressed_budget = min(MAX_PROBE_BYTES + 4096, max_bytes + 4096)
+            while remaining and compressed_budget and not decoder.eof:
+                chunk = response.read(min(4096, compressed_budget))
+                if not chunk:
+                    break
+                compressed_budget -= len(chunk)
+                try:
+                    decoded = decoder.decompress(chunk, remaining)
+                except zlib.error as exc:
+                    raise ValueError('invalid compressed probe response') from exc
+                parts.append(decoded)
+                remaining -= len(decoded)
+            if remaining and not decoder.eof:
+                raise ValueError('incomplete compressed probe response')
+            raw = b''.join(parts)
+        else:
+            raise ValueError('unsupported probe content encoding')
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget')
         encoding = response.headers.get_content_charset() or 'utf-8'
