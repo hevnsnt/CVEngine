@@ -4,6 +4,8 @@
   "title": "cvENGINE Sentinel result contract",
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 1,
+  "min_supported_contract_version": 1,
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1},
   "$defs": {
     "envelope": {
       "type": "object",
