@@ -9,6 +9,7 @@ is the one-time secret an administrator hands a new Sentinel so its first ``regi
 import uuid
 
 from django.db import models
+from django.utils import timezone
 
 from agentapi import sentinel_contract
 
@@ -144,6 +145,23 @@ class SentinelTask(models.Model):
 
     def __str__(self):
         return f'sentinel task #{self.pk} {self.kind} ({self.status})'
+
+
+class ScannerFallback(models.Model):
+    """One time a stage that could have used a Sentinel ran (or was allowed to run) its tool on this server instead
+    (``agentapi.scanner_fallback``): the telemetry that gates deleting a local scan path (docs/SCANNER-ARCHITECTURE.md). It holds
+    the kind, the project and why, never a target name or address. Pruned after ``scanner_fallback.RETENTION_DAYS``."""
+    kind = models.CharField(max_length=20)
+    project = models.ForeignKey('dashboard.Project', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    reason = models.CharField(max_length=24)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['kind', 'created_at'], name='scannerfallback_kind_idx')]
+
+    def __str__(self):
+        return f'{self.kind} ran locally ({self.reason})'
 
 
 class SentinelEnrollment(models.Model):
