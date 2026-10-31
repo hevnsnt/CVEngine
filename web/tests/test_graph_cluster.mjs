@@ -5,7 +5,7 @@ import {test} from 'node:test';
 // Load the browser module without a DOM; clusterGraph is deliberately a pure
 // transform so shared asset relationships and project boundaries can be tested.
 const source = readFileSync(new URL('../static/cve/graph.js', import.meta.url), 'utf8');
-const {clusterGraph, cloudProjects, focusProject, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+const {clusterGraph, cloudProjects, cloudRadius, focusProject, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
 
 test('groups original bubbles by project and root, with scoped copies of shared IPs', () => {
   const data = {
@@ -95,6 +95,50 @@ test('one project alone is drawn host by host up to the threshold, and clouded p
   const view = cloudProjects(over);
   assert.deepEqual(view.nodes.filter(n => n.kind === 'cloud').map(n => n.hosts), [CLOUD_HOSTS + 1]);
   assert.deepEqual(tiersOf(view, 'big'), {fire: 1, smoke: 1, ice: 1});
+});
+
+// many projects of very different sizes, each with some heat and hygiene
+function manyProjects(sizes) {
+  const nodes = [], edges = [], projects = {};
+  sizes.forEach((hosts, p) => {
+    const slug = `p${p}`;
+    projects[slug] = {name: `Project ${p}`, hygiene: p % 3 ? 5 * p : 0};
+    nodes.push({id: `dom:${slug}`, kind: 'domain', label: `${slug}.example`, project: slug, project_name: `Project ${p}`, root: `${slug}.example`});
+    for (let i = 0; i < hosts; i++) {
+      nodes.push({id: `sub:${slug}:${i}`, kind: 'subdomain', label: `h${i}.${slug}.example`, project: slug, heat: i < 3 ? HEAT[(i + p) % 3] : 'clean'});
+      edges.push({from: `dom:${slug}`, to: `sub:${slug}:${i}`});
+    }
+  });
+  return {nodes, edges, projects};
+}
+
+test('clouds are sized by their hosts and packed with the biggest in the middle, none overlapping, the same on every refresh', () => {
+  const data = manyProjects([2, 810, 46, 32, 26, 22, 20, 9, 6, 5, 4, 3]);
+  const view = cloudProjects(data, {aspect: 3});
+  const clouds = view.nodes.filter(n => n.kind === 'cloud');
+  assert.ok(cloudRadius(clouds.find(c => c.project === 'p1')) > cloudRadius(clouds.find(c => c.project === 'p0')));
+  const centre = [clouds.reduce((s, c) => s + c.seed_x, 0) / clouds.length, clouds.reduce((s, c) => s + c.seed_y, 0) / clouds.length];
+  const away = (c) => Math.hypot(c.seed_x - centre[0], c.seed_y - centre[1]);
+  assert.equal(clouds.find(c => c.order === 0).project, 'p1');
+  assert.ok(away(clouds.find(c => c.project === 'p1')) < Math.min(...clouds.filter(c => c.project !== 'p1').map(away)));
+  for (const a of clouds) for (const b of clouds) {
+    if (a !== b) assert.ok(Math.hypot(a.seed_x - b.seed_x, a.seed_y - b.seed_y) > cloudRadius(a) + cloudRadius(b), `${a.project} overlaps ${b.project}`);
+  }
+  const xs = clouds.map(c => c.seed_x), ys = clouds.map(c => c.seed_y);
+  assert.ok(Math.max(...xs) - Math.min(...xs) > Math.max(...ys) - Math.min(...ys)); // a wide drawing gets a wide picture
+  const again = cloudProjects(manyProjects([2, 810, 46, 32, 26, 22, 20, 9, 6, 5, 4, 3]), {aspect: 3});
+  assert.deepEqual(again.nodes.filter(n => ['cloud', 'tier'].includes(n.kind)).map(n => [n.id, n.seed_x, n.seed_y]),
+    view.nodes.filter(n => ['cloud', 'tier'].includes(n.kind)).map(n => [n.id, n.seed_x, n.seed_y]));
+  // every bubble hangs nearer its own cloud than any other cloud's core
+  for (const t of view.nodes.filter(n => n.kind === 'tier')) {
+    const gap = (c) => Math.hypot(t.seed_x - c.seed_x, t.seed_y - c.seed_y) - cloudRadius(c);
+    const own = clouds.find(c => c.project === t.project);
+    assert.ok(clouds.every(c => c === own || gap(c) > 0), `${t.id} sits inside another cloud`);
+    assert.ok(gap(own) > 0);
+  }
+  // a cloud's aura is its worst heat
+  const calm = cloudProjects(bigProject(30, 0)).nodes;
+  assert.deepEqual(['__cloud:big', '__cloud:small'].map(id => calm.find(n => n.id === id).hot), ['calm', 'fire']);
 });
 
 test('every cloud takes a slot in the clustered project grid, anchored, with its bubbles around it', () => {
