@@ -31,6 +31,7 @@ from django.utils import timezone
 
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
+from agentapi import builtin_scanner
 from agentapi import sentinel_settings
 from agentapi import sentinel_version
 from agentapi import services as svc
@@ -287,6 +288,8 @@ def bootstrap(body):
         fields['max_concurrent'] = max_concurrent
     with transaction.atomic():  # redeeming the secret and creating what it buys stand or fall together
         enrollment = consume_enrollment(raw)
+        if enrollment.builtin:
+            name = builtin_scanner.NAME  # the install's own scanner is always shown under one name, whatever the container calls itself
         scope = {'orgs': [enrollment.org.slug] if enrollment.org_id else [],
                   'projects': [enrollment.project.slug] if enrollment.project_id else [], 'hosts': [],
                   'instance': not enrollment.org_id and not enrollment.project_id}

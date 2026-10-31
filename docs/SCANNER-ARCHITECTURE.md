@@ -148,3 +148,15 @@ which send nothing to the target and need no vantage point.
 Add about 2 GB of memory and 1.5 GB of disk. If the scanner is offline, scans pause with a banner and are never marked failed.
 Air-gapped installs get a release bundle with both image tarballs, the CVE seed and the template bundle, with the version
 check off for the built-in.
+
+## The built-in scanner's enrollment (server half, built)
+
+`CVENGINE_BUILTIN_SCANNER=1` switches it on; with `COMPOSE_PROFILES=builtin-scanner` compose also starts the `scanner` service. The server
+(`agentapi/builtin_scanner.py`, run every five minutes by `ensure_builtin_scanner`, or by hand with `manage.py ensure_builtin_scanner`) keeps one
+instance-wide enrollment ready, owned by the oldest App Admin, valid 24 hours and renewed when under two hours are left, and writes it as a
+provisioning blob to `/var/lib/cvengine-scanner/blob` (mode 0600, handed to uid 10001) on the `scanner_bootstrap` volume that only celery (writes) and
+the scanner (reads, read-only) mount. The scanner redeems it through the ordinary bootstrap call; the server forces the name "CVEngine Scanner", removes the
+file at its next run, and writes a new blob if the scanner is later lost (token revoked or expired). `web` is added to `ALLOWED_HOSTS` only while the
+setting is on, because the scanner reaches the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides). What is not built: the published
+Sentinel image (`CVENGINE_SCANNER_IMAGE`), the client re-reading the blob after its token expires, and the status line in System status.
+

@@ -49,6 +49,7 @@ services:
       - tool_config:/root/.config
       - static_volume:/usr/src/app/staticfiles/
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
+      - scanner_bootstrap:/var/lib/cvengine-scanner  # where the server leaves the built-in scanner's one-time enrollment (agentapi/builtin_scanner.py); empty unless CVENGINE_BUILTIN_SCANNER=1
       - openvas_gvmd_socket_vol:/run/gvmd:ro  # the optional openvas profile's gvmd (GMP) socket (docs/OPENVAS.md); an empty directory without it, and only celery mounts it
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
@@ -242,6 +243,53 @@ services:
     volumes:
       - tailscale_state:/var/lib/tailscale
       - tailscale_status:/status
+
+  # Optional, 1.4 work in progress: the built-in scanner ("CVEngine Scanner"), the cvENGINE Sentinel image running next to the server and enrolled by it with
+  # nobody typing a secret (docs/SCANNER-ARCHITECTURE.md). Off unless COMPOSE_PROFILES=builtin-scanner and CVENGINE_BUILTIN_SCANNER=1 are in .env. The server
+  # (celery) writes a one-time provisioning blob into the scanner_bootstrap volume (agentapi/builtin_scanner.py); this container reads it once, and
+  # the token it gets lives in its own state volume afterwards. CVENGINE_SCANNER_IMAGE names the Sentinel image (a registry reference pinned by digest
+  # once the image is published, or the locally built cvengine-sentinel-local:latest). It never updates itself: the server updater swaps the image.
+  scanner:
+    profiles: ["builtin-scanner"]
+    image: "${CVENGINE_SCANNER_IMAGE:-cvengine-sentinel-local:latest}"
+    pull_policy: missing
+    container_name: cvengine-scanner
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 75s
+    pids_limit: 512
+    mem_limit: "${SCANNER_MEM_LIMIT:-2g}"
+    cap_add:
+      - NET_RAW  # nmap's OS detection, naabu's SYN scan and the UDP sweep need raw sockets
+    healthcheck:
+      test: ["CMD", "python3", "-m", "client.control", "health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    environment:
+      CVENGINE_SENTINEL_NAME: "CVEngine Scanner"
+      CVENGINE_SENTINEL_UPDATE: "off"  # the server's updater swaps the image
+      CVENGINE_SENTINEL_ALLOW_INSECURE: "1"  # it talks to the server over the compose network, in plain http
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -s /bootstrap/blob ]; then
+          CVENGINE_SENTINEL_BLOB="$$(cat /bootstrap/blob)"
+          export CVENGINE_SENTINEL_BLOB
+        fi
+        exec /opt/sentinel/docker-entrypoint.sh python3 -m client
+    volumes:
+      - scanner_bootstrap:/bootstrap:ro
+      - scanner_state:/var/lib/cvengine-sentinel
+    depends_on:
+      - web
+    networks:
+      - rengine_network
 
   # Optional: OpenVAS (Greenbone Community Edition) as a vulnerability scanner. Off unless COMPOSE_PROFILES=openvas is in .env (or
   # `docker compose --profile openvas up -d`, `make openvas-up`); without it none of these services exist, start or use memory. docs/OPENVAS.md has
@@ -507,6 +555,8 @@ volumes:
   static_volume:
   tailscale_state:
   tailscale_status:
+  scanner_bootstrap:
+  scanner_state:
   openvas_gpg_data_vol:
   openvas_scap_data_vol:
   openvas_cert_data_vol:

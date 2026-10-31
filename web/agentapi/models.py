@@ -146,6 +146,7 @@ class SentinelEnrollment(models.Model):
     network = models.CharField(max_length=10, default='external', db_default='external')  # what the administrator chose when provisioning: external or internal
     used_at = models.DateTimeField(null=True, blank=True)
     used_by_agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    builtin = models.BooleanField(default=False, db_default=False)  # the install's own scanner (agentapi.builtin_scanner): minted by the server, never by a person
     # The API token the redeemed secret minted (scope 'sentinel'): what ties a Sentinel to the scope it was enrolled for, so it can narrow it but
     # never widen it, even after its Agent row was removed and registered again.
     token = models.OneToOneField('dashboard.ApiToken', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
