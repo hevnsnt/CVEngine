@@ -165,6 +165,7 @@
 {% if slug %}<script type="module" src="{% asset 'cve/addtargets.js' %}"></script>{% endif %}
 <script type="module" src="{% asset 'cve/sitewatch.js' %}"></script>
 {% if request.user.is_superuser %}<script type="module" src="{% asset 'cve/updatebar.js' %}"></script>{% endif %}
+<script type="module" src="{% asset 'cve/scannerbar.js' %}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

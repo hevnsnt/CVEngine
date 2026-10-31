@@ -829,6 +829,16 @@ def queue_quick(scan, hosts, attempt=0, dispatch=True):
     return hosts
 
 
+def _requeue_quick(scan, hosts, attempt):
+    """Ask again at the same attempt, after the same delay, without using one up and without touching any host's recorded state: the quick pass
+    that found no scanner online (``scanner_state``) has not failed, so it waits for one instead of spending its tries."""
+    try:
+        from cveFeed.tasks import wpscan_quick
+        wpscan_quick.apply_async(args=[scan.id, sorted(hosts), attempt], countdown=QUICK_DELAY * max(1, attempt), queue=THOROUGH_QUEUE)
+    except Exception:  # noqa: BLE001 - the hosts stay recorded as they were: the next scan's quick pass asks again
+        logger.exception('could not queue the WPScan quick pass for %s', scan.domain.name)
+
+
 def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None):
     """The queued quick pass: the stage's WPScan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
     freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
@@ -843,6 +853,11 @@ def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None
     if resources.global_pause_requested(fail_closed=True) or resources.abort_requested(scan_id):
         queue_quick(scan, only, attempt, dispatch=not resources.abort_requested(scan_id))
         return {'skipped': 'scanning is paused: the hosts stay queued'}
+    from agentapi import scanner_state
+    waiting = scanner_state.skip_note('wpscan')
+    if waiting:  # no scanner can run it and this server may not: asked again at the same attempt a little later, with no run and no activity line
+        _requeue_quick(scan, only, attempt)
+        return {'skipped': waiting}
     with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', f'quick-{os.getpid()}', 600) as holder:
         if holder is not True:
             queue_quick(scan, only, attempt)

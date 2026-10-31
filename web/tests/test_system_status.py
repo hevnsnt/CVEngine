@@ -273,7 +273,7 @@ class SystemStatusTests(TestCase):
 		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
 			_, data = self.get(self.t_member)
 		self.assertTrue(data['scanning']['paused'])
-		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update'})
+		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update', 'scanner'})
 		self.assertEqual(data['update'], {'phase': 'draining'})
 		blob = str(data)
 		for secret in ('maintenance window', 'bill', 'boom', 'waiting'):

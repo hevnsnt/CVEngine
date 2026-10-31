@@ -410,6 +410,10 @@ def sweep(project_id, runner=None, resolve=None):
     summary = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     if runner is None and not installed():
         return {**summary, 'skipped': 'testssl.sh is not installed'}
+    from agentapi import scanner_state
+    waiting = scanner_state.skip_note('testssl')  # no scanner can run it and this server may not: no dispatch, no raise, no activity line
+    if waiting:
+        return {**summary, 'skipped': waiting}
     from cveFeed.conductor import bounty_blocked_projects
     if project_id in bounty_blocked_projects():
         return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
@@ -473,6 +477,10 @@ def sweep_all(runner=None):
     """Every project's due targets. One sweep at a time; the work is spread over days by ``max_targets`` per run."""
     from cveFeed import ledger
     from dashboard.models import Project
+    from agentapi import scanner_state
+    waiting = scanner_state.skip_note('testssl')
+    if waiting:
+        return {'skipped': waiting}
     if not ledger.sweep_claim('testssl', 3 * 60 * 60):
         return {'skipped': 'another sweep is running'}
     totals = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}

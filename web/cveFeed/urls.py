@@ -29,6 +29,7 @@ urlpatterns = [
     path('api/feed', views.api_feed, name='cve_api_feed'),
     path('api/alive', views.api_alive, name='cve_api_alive'),
     path('api/stats', views.api_stats, name='cve_api_stats'),
+    path('api/scanner', views.api_scanner, name='cve_api_scanner'),
     path('api/graph', views.api_graph, name='cve_api_graph'),
     path('api/graph-live', views.api_graph_live, name='cve_api_graph_live'),
     path('api/node', views.api_node, name='cve_api_node'),

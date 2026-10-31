@@ -180,3 +180,21 @@ signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is
 for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
 (`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes still run here by design until the secure read exists.
 
+
+### The "scanner offline" reading
+
+Waiting is visible, not a pause. `agentapi/scanner_state.py` derives, from the Sentinels' own heartbeats and with nothing written, which kinds
+are waiting: the kinds `CVENGINE_LOCAL_FALLBACK` takes off this server (`waiting_kinds()`) for which no live, active Sentinel on the instance declares
+the capability right now. It is cached for 15 seconds, and with the variable unset it is empty and costs no query. `state()` adds `never_seen`: the
+waiting kinds for which no Sentinel that could run them has ever registered, in any status (revoked and suspended ones count as seen). That is the
+foot-gun: `CVENGINE_LOCAL_FALLBACK=none` on a server with no scanner strands every kind, and it is a `problems` line in the system status.
+
+It is shown as a `scanning.scanner` block in the system status, a note ("Scanner offline: ... Nothing has failed; it resumes automatically when a scanner
+reconnects.") and, for an App Admin, the never-seen sentence, and as a strip on every page (`static/cve/scannerbar.js`, `/cve/api/scanner`) with a
+colour and wording of its own, never the scanning pause's. The sweeps that run on their own schedules and would dispatch, raise, catch and log an
+activity line every tick (the testssl sweep, the UDP sweep, the WPScan quick pass) return `{'skipped': 'no scanner is online for <kind>; the targets stay
+due'}` before doing any of that. The WPScan quick pass asks again at the same attempt, so a returning scanner finds it and its tries are not spent.
+It never writes `ScanControl`, never stops a running scan and never holds back local work: the CVE feed, bbot discovery (which runs here, so the work
+conductor goes on starting it and only records `scanner_waiting` with its round), the internal-range Sentinel-only path and the thorough WPScan pass (never
+dispatched) are untouched. The OpenVAS tick already waits for a Sentinel only. A kind a Sentinel keeps failing (`failing_kinds`) is withheld from it
+for a cool-off and so also reads as waiting.

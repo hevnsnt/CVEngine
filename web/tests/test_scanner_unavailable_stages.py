@@ -25,6 +25,12 @@ IP = '192.0.2.10'
 class WaitsMixin:
     """The assertions every stage shares."""
 
+    def reach_the_stage_handler(self):
+        """The sweeps stop early when the derived scanner state says nothing can take the work (``scanner_state.skip_note``, its own tests are in
+        ``test_scanner_waiting_state``); these tests are about the handler a sweep reaches when that read is stale or has not caught up."""
+        mock.patch('agentapi.scanner_state.skip_note', return_value=None).start()
+        self.addCleanup(mock.patch.stopall)
+
     def assertNothingRecorded(self, *services):
         self.assertFalse(ServiceRun.objects.filter(status='failed').exists(), list(ServiceRun.objects.values_list('service', 'asset', 'status')))
         for service in services:  # not a success either: the target is still due
@@ -253,6 +259,7 @@ class TestsslTests(WaitsMixin, RouteFixture, TestCase):
     def setUp(self):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
+        self.reach_the_stage_handler()
         for patcher in (mock.patch.dict(os.environ, {ENV: 'none'}, clear=False), mock.patch('reNgine.resources.global_pause_requested', return_value=False)):
             patcher.start()
         self.addCleanup(mock.patch.stopall)
@@ -288,6 +295,7 @@ class TestsslTests(WaitsMixin, RouteFixture, TestCase):
 class UdpTests(WaitsMixin, UdpBase):
     def setUp(self):
         super().setUp()
+        self.reach_the_stage_handler()
         mock.patch.dict(os.environ, {ENV: 'none'}, clear=False).start()
 
     def test_the_sweep_waits_names_the_scanner_and_runs_no_local_nmap(self):
