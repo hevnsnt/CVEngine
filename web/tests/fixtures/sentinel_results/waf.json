@@ -1,0 +1,13 @@
+{
+  "outcome": "done",
+  "products": [
+    {
+      "name": "FortiWeb",
+      "manufacturer": "Fortinet"
+    },
+    {
+      "name": "ExampleShield"
+    }
+  ],
+  "generic": false
+}

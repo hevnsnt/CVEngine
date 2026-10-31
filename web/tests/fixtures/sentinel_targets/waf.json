@@ -1,0 +1,6 @@
+{
+  "host": "www.example.com",
+  "ip": "192.0.2.10",
+  "port": 443,
+  "scheme": "https"
+}

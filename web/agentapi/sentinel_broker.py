@@ -1302,10 +1302,31 @@ def _clean_openvas_result(body):
             'partial': body.get('partial') is True}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
+def _clean_waf_result(body):
+    """A Sentinel's wafw00f run on one web host, reshaped into what ``cveFeed.waf_scan.persist_waf_result`` stores: the products it named (``name``,
+    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else wafw00f prints is kept. The
+    bounds are ``cveFeed.waf_scan``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
+    left for ``persist_waf_result`` to drop, by the one rule a local run's output goes through."""
+    from cveFeed.waf_scan import MAX_PRODUCTS, NAME_LEN
+    products = body.get('products')
+    if not isinstance(products, list) or len(products) > MAX_PRODUCTS:
+        raise ApiError(400, f'products must be a list of at most {MAX_PRODUCTS} entries')
+    out = []
+    for item in products:
+        if not isinstance(item, dict) or not isinstance(item.get('name'), str) or not item['name'].strip():
+            continue
+        row = {'name': _text(item['name'], NAME_LEN)}
+        manufacturer = _text(item.get('manufacturer'), NAME_LEN)
+        if manufacturer:
+            row['manufacturer'] = manufacturer
+        out.append(row)
+    return {'products': out, 'generic': body.get('generic') is True}
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
-             'discover': _clean_discover_result}
+             'discover': _clean_discover_result, 'waf': _clean_waf_result}
 
 
 def _bind_to_task(kind, result, task):

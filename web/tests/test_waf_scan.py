@@ -5,13 +5,16 @@ import json
 import shutil
 import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from django.test import TestCase
+from django.utils import timezone
 
+from agentapi import sentinel_broker as broker
 from cveFeed import waf_scan
 from cveFeed.models import ServiceRun
-from startScan.models import Subdomain
+from startScan.models import Subdomain, Technology
 from tests.test_route_auth import RouteFixture
 
 NAMED = json.dumps([{'detected': True, 'firewall': 'FortiWeb', 'manufacturer': 'Fortinet', 'trigger_url': 'http://x/?a', 'url': 'http://x/'}])
@@ -85,6 +88,62 @@ class StageTests(RouteFixture, TestCase):
 		with mock.patch.dict('os.environ', {'CVENGINE_WAFW00F_MAX_HOSTS': '2'}):
 			out, asked = self.run_it(scan, {})
 		self.assertEqual((out['tested'], len(asked)), (2, 2))
+
+
+class ContractResultTests(RouteFixture, TestCase):
+	"""A Sentinel's ``waf`` result stores exactly what a local run of the same products stores."""
+	def two_hosts(self):
+		scan = self.scan(names=('local.rt.test', 'remote.rt.test'))
+		Subdomain.objects.filter(scan_history=scan).update(http_status=200)
+		for sub in Subdomain.objects.filter(scan_history=scan):
+			Subdomain.objects.filter(pk=sub.pk).update(http_url=f'https://{sub.name}/')
+		return scan, Subdomain.objects.get(scan_history=scan, name='local.rt.test'), Subdomain.objects.get(scan_history=scan, name='remote.rt.test')
+
+	def stored(self, sub):
+		return sorted(sub.technologies.values_list('name', 'version', 'category'))
+
+	def test_the_fixture_stores_what_the_local_path_stores_for_the_same_products(self):
+		fixture = json.loads((Path(__file__).parent / 'fixtures' / 'sentinel_results' / 'waf.json').read_text())
+		result = broker.clean_result('waf', fixture)
+		scan, local, remote = self.two_hosts()
+		ran = {'products': [{'firewall': p['name'], 'manufacturer': p.get('manufacturer', '')} for p in fixture['products']], 'generic': False, 'error': ''}
+		waf_scan.run_for_scan(scan.id, runner=lambda url: ran if 'local' in url else {'products': [], 'generic': False, 'error': ''}, force=True)
+		self.assertEqual([t[0] for t in self.stored(local)], ['ExampleShield', 'FortiWeb'])
+		out = waf_scan.persist_waf_result(self.project, remote, result, scan)
+		self.assertEqual(out, {'named': 2, 'generic': False, 'recorded': True})
+		self.assertEqual(self.stored(remote), self.stored(local))  # name, version and category: the same rows
+		self.assertEqual(Technology.objects.filter(name__in=['FortiWeb', 'ExampleShield']).count(), 2)  # the one technology row each, shared
+
+	def test_the_same_rules_apply_to_a_sentinels_names_as_to_wafw00fs(self):
+		scan, _local, remote = self.two_hosts()
+		result = {'outcome': 'done', 'generic': False, 'products': [{'name': ' Cloudflare ', 'manufacturer': 'Cloudflare, Inc.'}, {'name': 'cloudflare'},
+			{'name': 'Generic'}, {'name': 'None'}, {'name': 'A' * waf_scan.NAME_LEN}]}
+		out = waf_scan.persist_waf_result(self.project, remote, result, scan)
+		self.assertEqual((out['named'], out['generic']), (2, False))
+		self.assertEqual(sorted(t.name for t in remote.technologies.all()), ['A' * waf_scan.NAME_LEN, 'Cloudflare'])
+
+	def test_a_generic_block_names_nothing_but_the_host_is_not_asked_again_inside_the_window(self):
+		scan, _local, remote = self.two_hosts()
+		out = waf_scan.persist_waf_result(self.project, remote, {'outcome': 'done', 'products': [], 'generic': True}, scan)
+		self.assertEqual(out, {'named': 0, 'generic': True, 'recorded': True})
+		self.assertEqual(remote.technologies.count(), 0)
+		self.assertEqual(ServiceRun.objects.filter(service=waf_scan.SERVICE, asset='remote.rt.test').count(), 1)
+
+	def test_a_result_that_is_not_done_stores_and_records_nothing(self):
+		scan, _local, remote = self.two_hosts()
+		for result in ({'outcome': 'error', 'error': 'timed out'}, {}, None, 'done'):
+			self.assertEqual(waf_scan.persist_waf_result(self.project, remote, result, scan), {'named': 0, 'generic': False, 'recorded': False})
+		self.assertFalse(ServiceRun.objects.filter(service=waf_scan.SERVICE).exists())
+		self.assertEqual(remote.technologies.count(), 0)
+
+	def test_a_host_of_another_project_is_refused(self):
+		from dashboard.models import Project
+		scan, _local, remote = self.two_hosts()
+		other = Project.objects.create(name='Q', slug='pq', insert_date=timezone.now(), org=self.project.org)
+		with self.assertRaises(ValueError):
+			waf_scan.persist_waf_result(other, remote, {'outcome': 'done', 'products': [{'name': 'FortiWeb'}], 'generic': False}, scan)
+		self.assertEqual(remote.technologies.count(), 0)
+		self.assertFalse(ServiceRun.objects.filter(service=waf_scan.SERVICE).exists())
 
 
 @unittest.skipUnless(shutil.which('wafw00f'), 'wafw00f is not installed')
