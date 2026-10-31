@@ -120,12 +120,12 @@ which send nothing to the target and need no vantage point.
 
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
-2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract.
+2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done.
 3. The built-in scanner service in compose, enrolled automatically, shown in system status.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing
    pause the conductor honours, re-queue stages with a delay instead of failing them, and show a banner.
-5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>`, delete each local path after the telemetry shows no fallbacks
+5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. Add the missing kinds from section B as they move.
 6. Extract the shared library and delete the server's copies of the parsers and flags.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
@@ -159,4 +159,13 @@ the scanner (reads, read-only) mount. The scanner redeems it through the ordinar
 file at its next run, and writes a new blob if the scanner is later lost (token revoked or expired). `web` is added to `ALLOWED_HOSTS` only while the
 setting is on, because the scanner reaches the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides). What is not built: the published
 Sentinel image (`CVENGINE_SCANNER_IMAGE`), the client re-reading the blob after its token expires, and the status line in System status.
+
+## `CVENGINE_LOCAL_FALLBACK`
+
+Unset (or `all`), every kind may still run on this server when no Sentinel takes it: nothing changes. `none` or a comma list of kinds
+(`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
+`resources.ScannerUnavailable` (a `MemoryBusy`, so stages that already treat that as "not the target's failure, it stays due" wait
+correctly: testssl, UDP and WPScan do today) where it used to run the tool locally. The nmap, naabu and nuclei stages record a
+failure for it as they do for any error until their handlers are written, so a kind is taken off the list only in the same
+change that gives its stage a handler. Signed-in nuclei passes still run here by design until the secure read exists.
 

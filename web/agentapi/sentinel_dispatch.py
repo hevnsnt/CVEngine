@@ -48,6 +48,33 @@ DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot w
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
 
+LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
+
+
+def local_fallback_kinds():
+    """The task kinds that may still run on this server when no Sentinel can take them: ``CVENGINE_LOCAL_FALLBACK`` is unset or ``all`` (every kind,
+    how it has always worked), ``none``, or a comma list of kinds. This is the switch of the move to one scanner (docs/SCANNER-ARCHITECTURE.md): a kind
+    taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead."""
+    from agentapi.models import SentinelTask
+    raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
+    if raw in ('', 'all', '*'):
+        return set(SentinelTask.KINDS)
+    if raw == 'none':
+        return set()
+    return {k.strip() for k in raw.split(',') if k.strip() in SentinelTask.KINDS}
+
+
+def fallback_allowed(kind):
+    return kind in local_fallback_kinds()
+
+
+def _no_local(kind, why):
+    """Where a stage would run ``kind`` here because no Sentinel took it: nothing when it may, ``ScannerUnavailable`` when it may not."""
+    if not fallback_allowed(kind):
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable(kind, why)
+
+
 def _dispatch_timeout(kind=None, targets=0):
     """Seconds a stage waits for a dispatched Sentinel task to *finish* once a Sentinel has claimed it, before falling back to running
     the tool locally: ``COMPLETION_CEILING`` for the kind, plus ``PER_TARGET_SECONDS`` for each target beyond the first (so a chunk of many
@@ -135,6 +162,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from cveFeed import activity
     capacity = sentinel_broker.capacity_state(project, kind, internal)
     if capacity['state'] == 'none':
+        if not internal:  # an internal task never had a local run to fall back to: its caller already fails it
+            _no_local(kind, 'no Sentinel is live for this project')
         return None
     targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
     timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
@@ -194,6 +223,9 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
     if redact_target is not None:
         SentinelTask.objects.filter(pk=task.pk).update(target=redact_target(target))
+    if task.status != 'done' and not internal:
+        _no_local(kind, f'the {"queue" if never_claimed else "Sentinel"} did not return a result in time' if task.status != 'failed'
+                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}')
     return task.result if task.status == 'done' else None
 
 
@@ -209,6 +241,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
     zero = {'ports': 0, 'hosts_with_os': 0}
     local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
     if not any_scanner_for(project, 'nmap'):
+        _no_local('nmap', 'no Sentinel is live for this project')
         return targets, zero, local_ports
     chunk = targets[:MAX_ADDRESSES]
     result = dispatch_or_none(project, 'nmap', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
@@ -241,6 +274,7 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
     the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu/nuclei this is never chunked: a testssl
     run is already one host:port per call, locally or dispatched."""
     if not any_scanner_for(project, 'testssl'):
+        _no_local('testssl', 'no Sentinel is live for this project')
         return None
     target = {'host': host, 'ip': ip, 'port': port, 'starttls': starttls or ''}
     result = dispatch_or_none(project, 'testssl', target, host=host, ips=[ip], scan=scan, timeout=timeout)
@@ -259,6 +293,7 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     nmap output), so that is the one function - local or dispatched - that ever turns the XML into a record. Never
     chunked: one address per task, like testssl."""
     if not any_scanner_for(project, 'nmap_udp'):
+        _no_local('nmap_udp', 'no Sentinel is live for this project')
         return None
     result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
     if result is None:
@@ -276,6 +311,7 @@ def wrap_naabu_runner(project, scan, timeout=None):
     naabu's own JSON output already means) are never scanned locally too; anything beyond one chunk, or left over on a
     timeout, falls back to the real, unmodified ``naabu_scan.run_naabu``."""
     if not any_scanner_for(project, 'naabu'):
+        _no_local('naabu', 'no Sentinel is live for this project')
         return None
 
     def runner(ips):
@@ -285,6 +321,7 @@ def wrap_naabu_runner(project, scan, timeout=None):
         result = dispatch_or_none(project, 'naabu', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
         found = dict((result or {}).get('ports') or {}) if result is not None else run_naabu(chunk)
         if rest:
+            _no_local('naabu', 'more addresses than one task carries and no local run is allowed')
             found.update(run_naabu(rest))
         return found
     return runner
@@ -424,6 +461,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     yield _finding_to_nuclei_line(finding)
         return internal_stream
     if not any_scanner_for(project, kind):
+        _no_local(kind, 'no Sentinel is live for this project')
         return stream_nuclei
 
     def stream(targets_file, **kwargs):
@@ -438,10 +476,13 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         except OSError:
             targets = []
         if not targets:  # nothing readable to send: the local run decides what an empty or missing list means
-            yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
+            if fallback_allowed(kind):
+                yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
             return
         for chunk in _chunks(targets):  # one task per chunk of MAX_ADDRESSES: the caller marks the whole list scanned, so none may be dropped
             live = resolvable_targets(chunk)
+            if not live and not fallback_allowed(kind):
+                continue  # nothing in the chunk resolves: there is nothing for a scanner to run, and nothing may run here
             result = dispatch_or_none(project, kind, _nuclei_target(kind, live, kwargs), ips=[], scan=scan, timeout=timeout) if live else None
             if result is None:
                 # no Sentinel took it, or nothing in the chunk resolves (a Sentinel would be asked to do nothing, and nuclei cannot reach what cannot
@@ -482,6 +523,7 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
             return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
         return internal_runner
     if not any_scanner_for(project, 'wpscan'):
+        _no_local('wpscan', 'no Sentinel is live for this project')
         return run_wpscan_process
 
     def runner(url, token):

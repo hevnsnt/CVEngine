@@ -230,7 +230,7 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, its updater's ``update`` state and whether its own GVM stack can scan (``openvas``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (agentapi/sentinel_contract.json), its updater's ``update`` state and whether its own GVM stack can scan (``openvas``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -239,6 +239,11 @@ def clean_info(raw):
         if not isinstance(version, str) or len(version) > 64 or not all(c.isalnum() or c in '.-_+' for c in version):
             raise ApiError(400, 'version must be at most 64 letters, digits and . - _ +')
         out['version'] = version
+    contract = raw.get('contract_version')
+    if contract is not None:
+        if isinstance(contract, bool) or not isinstance(contract, int) or not 1 <= contract <= 1000:
+            raise ApiError(400, 'contract_version must be a whole number from 1 to 1000')
+        out['contract_version'] = contract
     update = raw.get('update')
     if update is not None:
         if not isinstance(update, dict) or update.get('status') not in UPDATE_STATUSES:

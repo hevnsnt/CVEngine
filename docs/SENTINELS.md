@@ -100,6 +100,8 @@ What a Sentinel sends back for each task kind is written down once, as a JSON Sc
 
 The tests tie the file to the server: every task kind has a schema, one fixture per kind (`web/tests/fixtures/sentinel_results/`) is valid and passes through the server unchanged, and every list bound, string length and enum in the file equals the broker's own limit, so changing one side alone fails CI. A change a client must follow bumps `contract_version` and is named in the CHANGELOG. This covers results (Sentinel to server); the targets the server hands out are the next piece.
 
+A Sentinel says which contract it speaks: `info.contract_version` (a whole number, 1 to 1000) in its registration and heartbeat. A client from before the field is taken to speak version 1. The file lists `kind_since` (the version that introduced each kind) and `min_supported_contract_version` (the server speaks the current contract and the one before it), and a Sentinel is offered only the kinds its version can run; one older than the server still speaks is offered nothing and shows as `unsupported`. Every register and heartbeat answer carries `contract: {version, min_supported}` so the client can see for itself that it is behind, and the Sentinels list shows each one's `contract_version` and `contract_state` (`current`, `previous`, `unsupported`, `newer` or `unreported`).
+
 ## Troubleshooting
 
 - **"No Sentinel picked up work in time; it ran locally."** The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need an internal Sentinel (one the server granted `network:internal`).
