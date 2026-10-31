@@ -145,12 +145,12 @@ def input_hash(cve):
 
 def build_user_prompt(cve, current=None, guidance=''):
     from reNgine.ai_providers import clean_text, untrusted_block
-    from cveFeed.correlation import clean_affected
+    from cveFeed.correlation import clean_affected, prepared_ranges
     affected = []
     for item in clean_affected(cve.affected)[:10]:
         part = {k: clean_text(item.get(k), 100, strict=True) for k in ('vendor', 'product', 'package') if item.get(k)}
         part['ranges'] = [{k: clean_text(v, 64, strict=True) for k, v in r.items() if isinstance(v, (str, int, float))}
-                          for r in (item.get('ranges') or [])[:10]]
+                          for r in prepared_ranges(item.get('ranges'), keep_unusable=True)[:10]]  # as matching reads them, then capped
         affected.append(part)
     refs = [clean_text(r.get('url') if isinstance(r, dict) else r, 200, strict=True) for r in (cve.references or [])[:6]]
     info = {'id': clean_text(cve.cve_id, 30, strict=True), 'title': clean_text(cve.title, 300),
