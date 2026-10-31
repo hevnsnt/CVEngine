@@ -1,6 +1,6 @@
 // Live dashboard: discovery graph + event ticker, the AI activity feed, KPIs and the CVE feed.
 // Every panel reads one endpoint each, so the numbers can never disagree with the lists beside them.
-import { mountGraph, showNodeDetails } from "/staticfiles/cve/graph.js";
+import { detailDrawer, mountGraph } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
@@ -571,12 +571,12 @@ function drawMap(nodes) {
 
 // --- live discovery -----------------------------------------------------------------
 let followScan = dash.dataset.follow || "";
+const drawer = detailDrawer({ onClose: () => graph.deselect() });
 const graph = mountGraph($("d-graph"), {
   pods: true,
-  onSelect: (d) => showNodeDetails($("d-detail"), d),
+  onSelect: (d) => drawer.show(d),
   pinKey: () => `cve.pins.${slug || "all"}`, // where nodes were dropped; the graph spans the project, so the key is the project
 });
-showNodeDetails($("d-detail"), null);
 let lastEvent = 0;
 let shownScan = null;
 const tickerMax = 100; // lines kept in the live discovery ticker; the rest fall off the bottom

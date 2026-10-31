@@ -462,6 +462,7 @@ a.cell{cursor:pointer;transition:background .12s}@media (hover:hover) and (point
 .counts b{color:var(--ink);font-weight:700}
 .ticker{list-style:none;margin:6px 0 0;padding:0 0 22px;height:130px;overflow-y:auto;overflow-anchor:none;overscroll-behavior:contain;scrollbar-width:none;font:500 12.5px var(--mono);-webkit-mask-image:linear-gradient(#000 80%,transparent);mask-image:linear-gradient(#000 80%,transparent)}
 .ticker::-webkit-scrollbar{display:none}
+.ticker:empty{display:none} /* nothing found yet: no blank box under the graph */
 .see-all{display:inline-block;align-self:flex-start;flex:none;margin-top:8px;font:600 12px var(--font);color:var(--ink-2);text-decoration:underline;text-underline-offset:3px}@media (hover:hover) and (pointer:fine){.see-all:hover{color:var(--ink)}}
 .ticker li{display:flex;gap:8px;align-items:baseline;padding:3px 0;animation:in .3s ease}
 @keyframes in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
@@ -517,24 +518,28 @@ circle.pop{animation:popin .5s ease}
 .gn.sel text{fill:var(--ink);font-weight:700}
 .gn .ring{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:3 3;pointer-events:none}
 /* a project drawn as one cloud (graph.js cloudProjects, cloudArt). Rules start .gn.gn-cloud to beat .gn:hover circle */
-.gn.gn-cloud{--cloud:var(--graph-accent);--aura:var(--graph-accent);--aura-a:.22;cursor:zoom-in}
+.gn.gn-cloud{--cloud:var(--graph-accent);--aura:var(--graph-accent);--aura-a:.2;cursor:zoom-in}
 /* its aura is the worst heat among its hosts: a cloud with hosts on fire glows red and breathes faster */
 .gn.gn-cloud[data-hot="fire"]{--aura:var(--fire);--aura-a:.34}.gn.gn-cloud[data-hot="smoke"]{--aura:var(--smoke);--aura-a:.28}.gn.gn-cloud[data-hot="ice"]{--aura:var(--ice)}
-.gn.gn-cloud .cg-glow-in{stop-color:var(--aura);stop-opacity:var(--aura-a)}.gn.gn-cloud .cg-glow-out{stop-color:var(--aura);stop-opacity:0}
-.gn.gn-cloud .cg-body-in{stop-color:var(--surface);stop-opacity:.95}.gn.gn-cloud .cg-body-mid{stop-color:var(--graph-project-bg);stop-opacity:.9}.gn.gn-cloud .cg-body-out{stop-color:color-mix(in srgb,var(--cloud) 65%,var(--aura));stop-opacity:.32}
-.gn.gn-cloud .cloud-halo{stroke:none;transform-box:fill-box;transform-origin:center;animation:cloud-breathe 6s ease-in-out infinite;pointer-events:none}
+.gn.gn-cloud .cg-body-in{stop-color:var(--surface);stop-opacity:.97}.gn.gn-cloud .cg-body-mid{stop-color:var(--graph-project-bg);stop-opacity:.94}.gn.gn-cloud .cg-body-out{stop-color:color-mix(in srgb,var(--cloud) 60%,var(--aura));stop-opacity:.34}
+.gn.gn-cloud .cloud-body{fill:transparent;stroke:none;pointer-events:all}
+.gn.gn-cloud .cloud-halo{fill:var(--aura);opacity:var(--aura-a);filter:blur(14px);transform-box:fill-box;transform-origin:center;animation:cloud-breathe 6s ease-in-out infinite;pointer-events:none}
 .gn.gn-cloud[data-hot="fire"] .cloud-halo{animation-duration:2.8s}
-.gn.gn-cloud .cloud-under{transition:transform .45s cubic-bezier(.2,1.5,.4,1)}.gn.gn-cloud:hover .cloud-under{transform:scale(1.12)}
-.gn.gn-cloud .cloud-body{stroke:color-mix(in srgb,var(--cloud) 55%,transparent);stroke-width:1.2;filter:drop-shadow(0 8px 22px color-mix(in srgb,var(--aura) 34%,transparent));transition:stroke-width .2s}
+.gn.gn-cloud .cloud-edge .cloud-puff{stroke:color-mix(in srgb,var(--cloud) 50%,var(--aura));stroke-width:2.2;stroke-opacity:.7}
+.gn.gn-cloud .cloud-puff{transform-box:fill-box;transform-origin:center;animation:cloud-billow 7s ease-in-out infinite alternate;pointer-events:none}
+.gn.gn-cloud .cloud-under{transition:transform .45s cubic-bezier(.2,1.5,.4,1)}.gn.gn-cloud:hover .cloud-under{transform:scale(1.07)}
+.gn.gn-cloud:hover .cloud-edge .cloud-puff{stroke-opacity:1}
 /* they arrive one by one, biggest first, and each cloud's bubbles pop out after it on their tethers */
 .gn.gn-cloud>:not(.ring):not(title){animation:cloud-in .95s cubic-bezier(.2,1.3,.35,1) calc(var(--i,0)*120ms) backwards}
 .gn.gn-cloud .cloud-spark{fill:var(--fire);stroke:none;pointer-events:none;transform-box:fill-box;transform-origin:center;filter:drop-shadow(0 0 3px var(--fire));animation:cloud-spark 2.4s ease-out infinite}
-.gn.gn-cloud:hover .cloud-body{stroke:var(--cloud);stroke-width:2}
-.gn.gn-cloud .cloud-orbit{fill:none;stroke:color-mix(in srgb,var(--cloud) 45%,transparent);stroke-width:1;stroke-dasharray:2 7;stroke-linecap:round;pointer-events:none;animation:cloud-turn 48s linear infinite}
-.gn.gn-cloud .cloud-orbit-2{stroke-dasharray:1 11;animation-duration:70s;animation-direction:reverse}
-.gn.gn-cloud .cb{fill:color-mix(in srgb,var(--surface) 80%,var(--cloud));stroke:color-mix(in srgb,var(--cloud) 50%,transparent);stroke-width:.8;opacity:.9;pointer-events:none;transform-box:fill-box;transform-origin:center;animation:cloud-drift 11s ease-in-out infinite alternate}
-.gn.gn-cloud .cb-ember{fill:var(--fire);stroke:none;opacity:1;filter:drop-shadow(0 0 3px var(--fire));animation-name:cloud-drift,cloud-ember}
-.gn.gn-cloud .cloud-twinkle{fill:var(--cloud);stroke:none;pointer-events:none;animation:cloud-twinkle 4s ease-in-out infinite}
+/* the network inside: hosts tied to their neighbours, packets running along the links, red where there are findings */
+.gn.gn-cloud .cloud-net *{pointer-events:none}
+.gn.gn-cloud .cloud-link{stroke:color-mix(in srgb,var(--cloud) 45%,transparent);stroke-width:1}
+.gn.gn-cloud .cloud-link-hot{stroke:color-mix(in srgb,var(--fire) 45%,transparent)}
+.gn.gn-cloud .cloud-packet{stroke:var(--cloud);stroke-width:2.4;stroke-linecap:round;stroke-dasharray:7 100;animation:cloud-packet 2.4s linear infinite}
+.gn.gn-cloud .cloud-packet-hot{stroke:var(--fire);filter:drop-shadow(0 0 2px var(--fire))}
+.gn.gn-cloud .cloud-node{fill:var(--surface);stroke:var(--cloud);stroke-width:1.3;transform-box:fill-box;transform-origin:center;animation:cloud-blink 5s ease-in-out infinite}
+.gn.gn-cloud .cloud-node-hot{fill:var(--fire);stroke:none;filter:drop-shadow(0 0 3px var(--fire));animation:cloud-ember 1.6s ease-in-out infinite}
 .gn.gn-cloud .cloud-n{font:800 30px var(--mono);fill:var(--graph-title);letter-spacing:-.02em;paint-order:stroke;stroke:color-mix(in srgb,var(--surface) 70%,transparent);stroke-width:5px;pointer-events:none}
 .gn.gn-cloud .cloud-u{font:650 10px var(--mono);fill:var(--graph-title-2);letter-spacing:.18em;text-transform:uppercase;stroke-width:3px;pointer-events:none}
 .gn.gn-cloud .cloud-f{font:700 11px var(--mono);fill:var(--fire);pointer-events:none}
@@ -567,11 +572,12 @@ circle.pop{animation:popin .5s ease}
 .gn.gn-tier .tier-n{font:800 12px var(--mono);fill:var(--tier);pointer-events:none}
 .gn.gn-tier>text:first-of-type{font-size:11px;font-weight:700;fill:var(--tier);letter-spacing:.04em;text-transform:uppercase}
 @keyframes tier-glow{50%{filter:drop-shadow(0 0 12px color-mix(in srgb,var(--fire) 65%,transparent))}}
-@keyframes cloud-drift{0%{transform:translate(-4px,3px)}50%{transform:translate(3px,-5px)}100%{transform:translate(5px,4px)}}
 @keyframes cloud-breathe{0%,100%{transform:scale(.94);opacity:.75}50%{transform:scale(1.04);opacity:1}}
 @keyframes cloud-turn{to{transform:rotate(360deg)}}
 @keyframes cloud-ember{0%,100%{opacity:1}50%{opacity:.45}}
-@keyframes cloud-twinkle{0%,100%{opacity:0}50%{opacity:.9}}
+@keyframes cloud-billow{0%{transform:scale(.97) translate(0,1px)}100%{transform:scale(1.04) translate(0,-1px)}}
+@keyframes cloud-packet{from{stroke-dashoffset:0}to{stroke-dashoffset:-107}}
+@keyframes cloud-blink{0%,100%{transform:scale(1)}50%{transform:scale(1.35)}}
 @keyframes cloud-burst{to{transform:scale(2.6);opacity:0}}
 @keyframes cloud-flare{to{transform:scale(1.8);opacity:0}}
 @keyframes cloud-in{from{transform:scale(.2);opacity:0}}
@@ -598,7 +604,7 @@ circle.pop{animation:popin .5s ease}
 .graph-focus-name{font:700 12px var(--mono);color:var(--graph-title);background:color-mix(in srgb,var(--surface) 85%,transparent);border:1px solid var(--line);border-radius:999px;padding:4px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .cloud-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .graph-focused{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--graph-accent) 40%,transparent)}
-@media (prefers-reduced-motion:reduce){.gn.gn-cloud .cb,.gn.gn-cloud .cloud-halo,.gn.gn-cloud .cloud-orbit,.gn.gn-cloud .cloud-twinkle,.gn.gn-tier .tier-body,.gn.gn-cloud>*,.gn.gn-tier>*,.gn.gn-tier .tier-fx *,.gl-tether{animation:none}.gn.gn-cloud .cloud-spark,.gn.gn-tier .tier-spark,.gn.gn-tier .tier-wisp{display:none}.gn.gn-cloud:hover .cloud-under{transform:none}}
+@media (prefers-reduced-motion:reduce){.gn.gn-cloud .cloud-halo,.gn.gn-cloud .cloud-puff,.gn.gn-cloud .cloud-packet,.gn.gn-cloud .cloud-node,.gn.gn-tier .tier-body,.gn.gn-cloud>*,.gn.gn-tier>*,.gn.gn-tier .tier-fx *,.gl-tether{animation:none}.gn.gn-cloud .cloud-spark,.gn.gn-cloud .cloud-packet,.gn.gn-tier .tier-spark,.gn.gn-tier .tier-wisp{display:none}.gn.gn-cloud:hover .cloud-under{transform:none}}
 /* live scan highlighting: a domain or host a scan is working on right now pulses */
 .gn-live .ring{display:inline!important;stroke:var(--brand);stroke-width:3.5;stroke-dasharray:none;animation:gn-pulse 1.2s ease-in-out infinite}
 .gn-live circle:not(.ring){stroke:var(--brand);stroke-width:3px}
@@ -637,7 +643,15 @@ body.soc .soc-hud{display:block;position:absolute;inset:0;z-index:3;pointer-even
 .node-rows{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0;font-size:13.5px}
 .node-rows dt{color:var(--muted);font:600 11.5px var(--mono);padding-top:2px}
 .node-rows dd{margin:0;overflow-wrap:anywhere}
-.discovery .node-card{border:0;border-top:1px solid var(--line);border-radius:0;padding:10px 0 0;margin-top:10px;min-height:0;min-width:0;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
+/* the detail drawer (graph.js detailDrawer): slides out from the right over the page */
+.drawer{position:fixed;top:0;right:0;bottom:0;z-index:120;width:min(440px,100vw);display:flex;flex-direction:column;background:var(--surface);border-left:1px solid var(--line);box-shadow:-24px 0 48px -12px color-mix(in srgb,var(--ink) 22%,transparent);transform:translateX(104%);visibility:hidden;transition:transform .3s cubic-bezier(.2,.8,.2,1),visibility 0s linear .3s}
+.drawer.open{transform:none;visibility:visible;transition:transform .3s cubic-bezier(.2,.8,.2,1)}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.drawer-head h2{margin:0;font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.drawer .drawer-body{flex:1;min-height:0;margin:0;padding:16px;border:0;border-radius:0;overflow:auto;overscroll-behavior:contain}
+.drawer .node-rows dd{overflow-wrap:anywhere;word-break:break-word}
+body.soc .drawer{display:none}
+@media (prefers-reduced-motion:reduce){.drawer,.drawer.open{transition:none}}
 .discovery .node-rows{max-width:100%}
 .discovery .node-rows dd{overflow-wrap:anywhere;word-break:break-word}
 .node-title{text-decoration:none;border-bottom:1px solid transparent}@media (hover:hover) and (pointer:fine){.node-title:hover{border-bottom-color:currentColor}}
