@@ -5,10 +5,12 @@ on:
     branches:
       - master
       - develop
+      - 1.4-develop
   pull_request:
     branches:
       - master
       - develop
+      - 1.4-develop
       - release/*
   schedule:
     # weekly rebuild without the layer cache, so the pinned tools and the runtime-fetched templates are re-fetched from scratch
