@@ -84,7 +84,7 @@ A Sentinel *declares* what it can do (the tools it found, whether its OpenVAS st
 
 - **Allow** offers the kind. This is what a declared kind gets when nothing is set.
 - **Deny** never offers it: it is not claimed, not dispatched to it and a task of the kind it holds is released when you deny it.
-- **Prefer** offers it and, for up to a minute (`CVENGINE_SENTINEL_PREFER_DEFER_SECONDS`, default 60, `0` turns it off), holds a queued task of the kind back from every Sentinel that does not prefer it while a preferring one is live, in scope, not updating and has room. If the preferring Sentinel does not take the task in that time, the others may.
+- **Prefer** offers it and, for up to a minute (`CVENGINE_SENTINEL_PREFER_DEFER_SECONDS`, default 60, a ceiling; `0` turns it off) and never longer than the claim window a stage waits for a Sentinel (6 s by default) except for OpenVAS, whose tasks no stage waits for, holds a queued task of the kind back from every Sentinel that does not prefer it while a preferring one is live, in scope, not updating and has room. If the preferring Sentinel does not take the task in that time, the others may.
 - **Max** caps how many tasks of that kind the Sentinel runs at once, inside its own limit. A queued task of a kind at its cap waits while the Sentinel takes other work.
 
 Only what the Sentinel declares can be enabled: a kind whose tool is missing or off on the machine shows "not available on this Sentinel (tool missing or off on the machine)" and offers nothing, and a kind turned off on the machine shows "turned off on the machine": the server cannot lift that, only a change on the machine can. **Use default** removes a Sentinel's own policy for a kind.

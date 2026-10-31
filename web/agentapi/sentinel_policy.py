@@ -9,7 +9,7 @@ envelope every managed setting has, so last-write-wins and the audit trail are t
 defaults are ``SentinelDefaults.builtin_kinds`` and ``external_kinds`` in the same shape, without an envelope.
 
 ``mode`` is ``allow`` (offered: the default for a declared kind), ``deny`` (never offered; this is what ``disabled_kinds`` always meant) or ``prefer`` (offered,
-and work is held back from the others for a moment while a preferring Sentinel has room, ``sentinel_broker.PREFER_DEFER_SECONDS``). ``max_concurrent`` caps
+and work is held back from the others for a moment while a preferring Sentinel has room, ``sentinel_broker.prefer_defer_for``). ``max_concurrent`` caps
 how many tasks of that kind the Sentinel holds at once, inside its own ``max_concurrent``.
 
 Resolution, per Sentinel and kind: the machine's veto (``disabled_kinds`` it reported; the server cannot lift it) > the Sentinel's own policy > the

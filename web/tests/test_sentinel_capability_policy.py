@@ -415,29 +415,46 @@ class LegacyTests(PolicyBase):
 
 class ClaimOrderTests(PolicyBase):
     def test_prefer_holds_a_task_back_from_the_others_until_the_defer_has_passed(self):
-        first, second = self.external('X'), self.external('Y')
-        self.manage(first, {'kinds': {'nmap': {'mode': 'prefer', 'max_concurrent': None}}})
-        created = timezone.now()
-        task = self.queue('nmap', created=created)
-        taken, why = self.claim(second, ['nmap'], created + timedelta(seconds=1))
-        self.assertIsNone(taken)  # both idle: the preferring one gets the work first
-        self.assertIn('held for a Sentinel that prefers it', why)
-        self.assertEqual(self.claim(first, ['nmap'], created + timedelta(seconds=2))[0].pk, task.pk)
-        # the preferring Sentinel never answered: after the defer the other one takes it
-        late = self.queue('nmap', created=created)
-        self.assertIsNone(self.claim(second, ['nmap'], created + timedelta(seconds=59))[0])
-        self.assertEqual(self.claim(second, ['nmap'], created + timedelta(seconds=61))[0].pk, late.pk)
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '8'}):
+            first, second = self.external('X'), self.external('Y')
+            self.manage(first, {'kinds': {'nmap': {'mode': 'prefer', 'max_concurrent': None}}})
+            created = timezone.now()
+            task = self.queue('nmap', created=created)
+            taken, why = self.claim(second, ['nmap'], created + timedelta(seconds=1))
+            self.assertIsNone(taken)  # both idle: the preferring one gets the work first
+            self.assertIn('held for a Sentinel that prefers it', why)
+            self.assertEqual(self.claim(first, ['nmap'], created + timedelta(seconds=2))[0].pk, task.pk)
+            # the preferring Sentinel never answered: the hold ends before the stage's claim window (8 s) does, at 8 - 2 = 6 s
+            late = self.queue('nmap', created=created)
+            self.assertIsNone(self.claim(second, ['nmap'], created + timedelta(seconds=5))[0])
+            self.assertEqual(self.claim(second, ['nmap'], created + timedelta(seconds=7))[0].pk, late.pk)
 
-    def test_the_defer_is_the_environments_and_zero_turns_preferring_off(self):
+    def test_an_openvas_task_keeps_the_whole_defer_because_no_stage_waits_for_it(self):
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '8'}):
+            first, second = self.external('X'), self.external('Y')
+            self.manage(first, {'kinds': {'openvas': {'mode': 'prefer', 'max_concurrent': None}}})
+            created = timezone.now()
+            task = self.queue('openvas', created=created)
+            self.assertIsNone(self.claim(second, ['openvas'], created + timedelta(seconds=59))[0])
+            self.assertEqual(self.claim(second, ['openvas'], created + timedelta(seconds=61))[0].pk, task.pk)
+            self.assertEqual((sb.prefer_defer_for('openvas'), sb.prefer_defer_for('nmap')), (60, 6))
+
+    def test_the_defer_is_a_ceiling_the_environments_and_never_longer_than_the_claim_window(self):
         first, second = self.external('X'), self.external('Y')
         self.manage(first, {'kinds': {'nmap': {'mode': 'prefer', 'max_concurrent': None}}})
         created = timezone.now()
         self.queue('nmap', created=created)
-        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_PREFER_DEFER_SECONDS': '10'}):
-            self.assertEqual(sb.prefer_defer_seconds(), 10)
-            self.assertIsNotNone(self.claim(second, ['nmap'], created + timedelta(seconds=11))[0])
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_PREFER_DEFER_SECONDS': '4', 'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '8'}):
+            self.assertEqual((sb.prefer_defer_seconds(), sb.prefer_defer_for('nmap'), sb.prefer_defer_for('openvas')), (4, 4, 4))
+            self.assertIsNone(self.claim(second, ['nmap'], created + timedelta(seconds=3))[0])
+            self.assertIsNotNone(self.claim(second, ['nmap'], created + timedelta(seconds=5))[0])
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_PREFER_DEFER_SECONDS': '600', 'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '30'}):
+            self.assertEqual((sb.prefer_defer_for('nmap'), sb.prefer_defer_for('openvas')), (28, 600))
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '1'}):  # a claim window under two seconds leaves no room to hold anything
+            self.assertEqual(sb.prefer_defer_for('nmap'), 0)
         self.queue('nmap', created=created)
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_PREFER_DEFER_SECONDS': '0'}):
+            self.assertEqual((sb.prefer_defer_for('nmap'), sb.prefer_defer_for('openvas')), (0, 0))
             self.assertIsNotNone(self.claim(second, ['nmap'], created + timedelta(seconds=1))[0])
         self.assertEqual(sb.prefer_defer_seconds(), 60)
 
@@ -453,6 +470,73 @@ class ClaimOrderTests(PolicyBase):
         SentinelTask.objects.filter(pk=busy.pk).update(status='done')
         Agent.objects.filter(pk=preferred.pk).update(last_seen=created - timedelta(hours=1))  # offline: not a candidate
         self.assertEqual(self.claim(other, ['nmap'], created + timedelta(seconds=1))[0].pk, task2.pk)
+
+    def test_a_pass_over_many_queued_tasks_of_several_projects_does_not_query_per_task(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from dashboard.models import Project
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '8'}):
+            projects = [self.project] + [Project.objects.create(name=f'P{n}', slug=f'policy-p{n}', insert_date=timezone.now(), org=self.org) for n in range(2)]
+            first, second = self.external('X'), self.external('Y')
+            for agent in (first, second):
+                Agent.objects.filter(pk=agent.pk).update(scope={'orgs': [self.org.slug], 'projects': [], 'hosts': []}, max_concurrent=10)
+                ProjectMembership.objects.get_or_create(user=agent.token.user, project=projects[1], defaults={'role': 'user'})
+                ProjectMembership.objects.get_or_create(user=agent.token.user, project=projects[2], defaults={'role': 'user'})
+            self.manage(first, {'kinds': {'nmap': {'mode': 'prefer', 'max_concurrent': None}, 'naabu': {'mode': 'prefer', 'max_concurrent': None}}})
+            created = timezone.now()
+
+            def queue_many(n):
+                for project in projects:
+                    for kind in ('nmap', 'naabu'):
+                        for _ in range(n):
+                            task = SentinelTask.objects.create(project=project, kind=kind, target={}, ips=['192.0.2.10'])
+                            SentinelTask.objects.filter(pk=task.pk).update(created_at=created)
+
+            def queries(now):
+                with CaptureQueriesContext(connection) as captured:
+                    taken, why = self.claim(second, ['nmap', 'naabu'], now)
+                return len(captured), taken, why
+            queue_many(1)
+            few, taken, why = queries(created + timedelta(seconds=1))
+            self.assertIsNone(taken)  # every task is held for the preferring Sentinel
+            self.assertIn('held for a Sentinel that prefers it', why)
+            queue_many(9)  # ten times the tasks, the same projects and kinds
+            many, taken, _ = queries(created + timedelta(seconds=1))
+            self.assertIsNone(taken)
+            self.assertEqual(many, few, f'{many} queries for 60 tasks against {few} for 6: the prefer check must not query per task')
+
+    def test_a_task_that_only_one_preferring_sentinel_with_hosts_may_take_is_judged_task_by_task(self):
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '8'}):
+            first, second = self.external('X'), self.external('Y')
+            Agent.objects.filter(pk=first.pk).update(scope={'orgs': [], 'projects': [self.project.slug], 'hosts': ['only.test']})
+            self.manage(first, {'kinds': {'nmap': {'mode': 'prefer', 'max_concurrent': None}}})
+            created = timezone.now()
+            inside = SentinelTask.objects.create(project=self.project, kind='nmap', target={}, host='a.only.test', ips=[])
+            outside = SentinelTask.objects.create(project=self.project, kind='nmap', target={}, host='b.elsewhere.test', ips=[])
+            SentinelTask.objects.filter(pk__in=(inside.pk, outside.pk)).update(created_at=created)
+            taken, _ = self.claim(second, ['nmap'], created + timedelta(seconds=1))
+            self.assertEqual(taken.pk, outside.pk)  # the preferring Sentinel's scope does not reach it: nothing to wait for
+            inside.refresh_from_db()
+            self.assertEqual(inside.status, 'queued')  # but the one it could take is held for it
+
+    def test_a_policy_for_a_kind_the_sentinel_stopped_declaring_stays_stored_and_holds_nothing_back(self):
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '8'}):
+            first, second = self.external('X'), self.external('Y')
+            self.manage(first, {'kinds': {'nmap': {'mode': 'prefer', 'max_concurrent': 2}}})
+            created = timezone.now()
+            task = self.queue('nmap', created=created)
+            self.assertIsNone(self.claim(second, ['nmap'], created + timedelta(seconds=1))[0])  # held while X declares it
+            Agent.objects.filter(pk=first.pk).update(capabilities=['naabu', 'openvas'])  # it registered again without nmap
+            first.refresh_from_db()
+            self.assertEqual(policy.managed_kinds(first), {'nmap': {'mode': 'prefer', 'max_concurrent': 2}})  # the prefer entry is still there
+            self.assertEqual(self.claim(second, ['nmap'], created + timedelta(seconds=1))[0].pk, task.pk)  # and holds nothing back
+            kind = sb.kind_report(first)['nmap']
+            self.assertEqual((kind['state'], kind['mode'], kind['declared'], kind['effective'], kind['cap']), ('unavailable', 'prefer', False, False, 2))
+            Agent.objects.filter(pk=first.pk).update(capabilities=['nmap', 'naabu'])  # it declares it again: the policy is back in force
+            first.refresh_from_db()
+            kind = sb.kind_report(first)['nmap']
+            self.assertEqual((kind['state'], kind['mode'], kind['effective']), ('on', 'prefer', True))
 
     def test_two_preferring_sentinels_do_not_hold_each_other_back(self):
         first, second = self.external('X'), self.external('Y')

@@ -370,6 +370,19 @@ def prefer_defer_seconds():
     return max(0, _env_int('CVENGINE_SENTINEL_PREFER_DEFER_SECONDS', PREFER_DEFER_DEFAULT))
 
 
+def prefer_defer_for(kind):
+    """The seconds a queued task of ``kind`` is held back for a preferring Sentinel: ``prefer_defer_seconds()`` for ``openvas`` (no stage waits on it: it
+    sits in the queue until a Sentinel takes it), and for every other kind at most the claim window a dispatching stage waits for a Sentinel to take its
+    task (``sentinel_dispatch._claim_timeout()``) less two seconds. A preference can only reorder who takes a task, never cost the stage its Sentinel: were
+    the hold longer than the stage waits, the stage would give up (and run the work here, or leave the targets due) before the other Sentinels were
+    allowed to take it."""
+    defer = prefer_defer_seconds()
+    if kind == 'openvas':
+        return defer
+    from agentapi import sentinel_dispatch
+    return min(defer, max(0, sentinel_dispatch._claim_timeout() - 2))
+
+
 def effective_capabilities(agent, withheld=None, policy=None):
     """The capabilities this server credits a Sentinel with: what it declared, except ``network:internal``, which only the server grants (the
     Sentinel's ``network`` is ``internal``: set from its enrollment, or by an administrator). A Sentinel outside the network that declares
@@ -901,7 +914,10 @@ def _none_answer(kind, reason, clauses, any_sentinel):
 def explain_none(project, kind, internal=False, now=None, builtin_only=False):
     """``{'reason': ..., 'message': ...}`` for why ``kind`` work in ``project`` has no live, eligible Sentinel (``NONE_REASONS``), the sentence naming each
     Sentinel that has the kind and what keeps it from taking it, e.g. ``OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; Remote-1 has it
-    but is offline)``. A few queries, so asked only once the answer is already ``none``."""
+    but is offline)``. A few queries, so asked only once the answer is already ``none``.
+
+    The sentence names Sentinels, so it is for an administrator or a server log. If it is ever surfaced to a user in an activity line or a page, it must go
+    through the per-viewer redaction (``_live_task``, ``agent_broker._redacted``) first: a Sentinel's name is not another tenant's to read."""
     now = now or timezone.now()
     agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', token__revoked=False)
                   .exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
@@ -1182,34 +1198,60 @@ def _holders(agent_ids):
     return held, by_kind
 
 
-def _preferred_elsewhere(eff, task, now):
+def _preferring(task, exclude_pk, now, memo):
+    """The rights (``SentinelEff``) of the live, active Sentinels other than ``exclude_pk`` that cover ``task``'s project, declare its kind and prefer it. Cheap
+    pre-filter first (the policy is stored JSON), so rights are built only for the few that prefer the kind; built once per ``(project, kind)`` and per Sentinel
+    for the whole of one ``_try_claim`` call (``memo``), never once per task, with the tasks they hold now."""
+    key = ('candidates', task.project_id, task.kind)
+    if key not in memo:
+        pk = builtin_pk()
+        candidates = (Agent.objects.filter(_covers(task.project.slug, task.project.org.slug if task.project.org_id else None), kind='scanner', status='active',
+                                           token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=exclude_pk)
+                      .select_related('token__user')[:CANDIDATES])
+        preferring = [a for a in candidates if task.kind in (a.capabilities or []) and sentinel_policy.prefers(a, task.kind, builtin=(a.pk == pk))]
+        effs = memo.setdefault('effs', {})
+        for a in preferring:
+            if a.pk not in effs:
+                effs[a.pk] = SentinelEff(a, now)
+        held = _holders([a.pk for a in preferring]) if preferring else ({}, {})
+        memo[key] = [(effs[a.pk], held) for a in preferring]
+    return memo[key]
+
+
+def _preferred_elsewhere(eff, task, now, memo=None):
     """Whether another live Sentinel that could take ``task`` right now prefers its kind (``prefer`` in its capability policy) while this one does not, so
     the task is held back from this one for a moment: a Sentinel is *eligible* when its scope reaches the task, it is not updating, it is not at its
-    concurrency limit or its per-kind cap for the kind, and nothing but a preference keeps it from the task. Cheap pre-filter first (the policy is stored
-    JSON), so the rights are built only for the few Sentinels that prefer the kind."""
-    kind = task.kind
-    pk = builtin_pk()
-    candidates = (Agent.objects.filter(_covers(task.project.slug, task.project.org.slug if task.project.org_id else None), kind='scanner', status='active',
-                                       token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=eff.agent.pk)
-                  .select_related('token__user')[:CANDIDATES])
-    preferring = [a for a in candidates if kind in (a.capabilities or []) and sentinel_policy.prefers(a, kind, builtin=(a.pk == pk))]
-    if not preferring:
+    concurrency limit or its per-kind cap for the kind, and nothing but a preference keeps it from the task. ``memo`` is the per-call cache of one
+    ``_try_claim`` (the candidates' rights, and the answer): the answer depends on the task's project and kind and, because ``refusal`` is task specific, on
+    whether the task needs a stored credential or reaches an internal network, and on the task itself when a candidate's scope names hosts."""
+    memo = {} if memo is None else memo
+    found = _preferring(task, eff.agent.pk, now, memo)
+    if not found:
         return False
-    held, by_kind = _holders([a.pk for a in preferring])
-    for a in preferring:
-        other = SentinelEff(a, now)
-        if other.problem or not other.live or kind not in other.caps or kind not in other.preferred or other.refusal(task) is not None or _updating(a, now):
-            continue
-        if held.get(a.pk, 0) >= other.max_concurrent:
-            continue
-        cap = other.kind_caps.get(kind)
-        if cap is not None and by_kind.get((a.pk, kind), 0) >= cap:
-            continue
-        return True
-    return False
+    key = ('answer', task.pk) if any(other.hosts is not None for other, _ in found) else (
+        'answer', task.project_id, task.kind, bool(task.secret_ref), eff._internal(task))
+    if key not in memo:
+        memo[key] = False
+        for other, (held, by_kind) in found:
+            if other.problem or not other.live or task.kind not in other.caps or task.kind not in other.preferred or other.refusal(task) is not None \
+                    or _updating(other.agent, now):
+                continue
+            if held.get(other.agent.pk, 0) >= other.max_concurrent:
+                continue
+            cap = other.kind_caps.get(task.kind)
+            if cap is not None and by_kind.get((other.agent.pk, task.kind), 0) >= cap:
+                continue
+            memo[key] = True
+            break
+    return memo[key]
 
 
 def _try_claim(agent, kinds, now):
+    with sentinel_policy.shared_lookups():  # the instance defaults and the built-in scanner's id, read once for the rights built below
+        return _claim(agent, kinds, now)
+
+
+def _claim(agent, kinds, now):
     eff = effective(agent, now)
     if eff.problem:
         raise ApiError(403, f'no work can be assigned: {eff.problem}')
@@ -1222,8 +1264,8 @@ def _try_claim(agent, kinds, now):
         if held >= eff.max_concurrent:
             return None, f'at capacity ({held} of {eff.max_concurrent} tasks in progress)'
         held_back = {}  # kind -> why a queued task of it was passed over (a per-kind cap, or a preferring Sentinel)
-        deferred = {}  # (project, kind) -> whether a preferring Sentinel has room, asked once per call
-        defer_for = prefer_defer_seconds()
+        memo = {}  # one call's cache for the prefer check: the preferring Sentinels' rights and the answers
+        defers = {}  # kind -> how long a task of it is held back (``prefer_defer_for``)
         # the order of the policy: deny (``eff.caps`` already leaves a denied kind out of ``_claimable``), then the per-kind cap, then prefer
         for task in list(_claimable(eff, kinds, now)[:CANDIDATES]):
             if not eff._in_hosts(task):
@@ -1236,11 +1278,9 @@ def _try_claim(agent, kinds, now):
             if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
                 held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is at its limit of {cap} at once here')
                 continue  # at its per-kind cap: a later queued task of another kind may still be taken
+            defer_for = defers[task.kind] if task.kind in defers else defers.setdefault(task.kind, prefer_defer_for(task.kind))
             if defer_for and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < defer_for:
-                key = (task.project_id, task.kind)
-                if key not in deferred:
-                    deferred[key] = _preferred_elsewhere(eff, task, now)
-                if deferred[key]:
+                if _preferred_elsewhere(eff, task, now, memo):
                     held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a Sentinel that prefers it for up to {defer_for} seconds')
                     continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
