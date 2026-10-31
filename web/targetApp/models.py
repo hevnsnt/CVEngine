@@ -1,6 +1,7 @@
 from django.apps import apps
 from django.db import models
 from dashboard.models import Project
+from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 
 
 class HistoricalIP(models.Model):
@@ -138,6 +139,9 @@ class Domain(models.Model):
 	h1_team_handle = models.CharField(max_length=100, blank=True, null=True)
 	ip_address_cidr = models.CharField(max_length=100, blank=True, null=True)
 	description = models.TextField(blank=True, null=True)
+	# what a person calls this target and a few lines about it (targetApp.alias_note): shown beside the name, never in place of it
+	alias = models.CharField(max_length=ALIAS_MAX, blank=True, default='', db_default='')
+	note = models.CharField(max_length=NOTE_MAX, blank=True, default='', db_default='')
 	insert_date = models.DateTimeField(null=True)
 	start_scan_date = models.DateTimeField(null=True)
 	request_headers = models.JSONField(null=True, blank=True)

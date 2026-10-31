@@ -261,12 +261,19 @@ def list_engines(ctx, params=None):
 # --- targets and scans ---------------------------------------------------------
 
 def _target(d):
-    out = {'id': d.id, 'name': d.name, 'description': d.description,
+    out = {'id': d.id, 'name': d.name, 'alias': d.alias, 'note': d.note, 'description': d.description,
            'created': _iso(d.insert_date), 'last_scan': _iso(d.start_scan_date),
            'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode}
     if hasattr(d, 'n_hosts'):  # list view: how big the target is and how much of it is exposed
         out['hosts'], out['exposed'] = d.n_hosts, d.n_exposed
     return out
+
+
+def _target_search(qs, q):
+    """``qs`` (Domains) narrowed to the ones whose name, alias or note contains ``q``: the one search the target list and "delete all matching" share."""
+    from django.db.models import Q
+    q = str(q)
+    return qs.filter(Q(name__icontains=q) | Q(alias__icontains=q) | Q(note__icontains=q))
 
 
 def list_targets(ctx, slug, params):
@@ -284,7 +291,7 @@ def list_targets(ctx, slug, params):
     if everywhere:
         qs = qs.select_related('project')
     if params.get('q'):
-        qs = qs.filter(name__icontains=params['q'])
+        qs = _target_search(qs, params['q'])
     return paginate(qs, params, _tagged(_target, lambda d: d.project) if everywhere else _target)
 
 
@@ -309,6 +316,40 @@ def set_target_scope(ctx, slug, target_id, scope_mode):
         raise ApiError(404, 'target not found')
     d.scope_mode = scope_mode
     d.save(update_fields=['scope_mode'])
+    return _target(d)
+
+
+def clean_alias_note(alias=None, note=None):
+    """``{'alias': ..., 'note': ...}`` for the fields given (``None`` leaves a field alone, ``''`` clears it), cleaned and bounded
+    (targetApp.alias_note), or a 400 naming the field."""
+    from targetApp import alias_note
+    fields = {}
+    try:
+        if alias is not None:
+            fields['alias'] = alias_note.clean_alias(alias)
+        if note is not None:
+            fields['note'] = alias_note.clean_note(note)
+    except ValueError as e:
+        raise ApiError(400, str(e))
+    return fields
+
+
+def set_target_profile(ctx, slug, target_id, alias=None, note=None):
+    """Set the alias (a short display name) and/or the note of a target. Only the fields given change; an empty string clears one. Display
+    only: the target's name is what is scanned and never changes."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    fields = clean_alias_note(alias, note)
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    changed = [key for key, value in fields.items() if getattr(d, key) != value]
+    if changed:
+        for key in changed:
+            setattr(d, key, fields[key])
+        d.save(update_fields=changed)
+        audit(ctx.user, 'target.profile', f'{d.name} in {slug}', project.org, project=slug, name=d.name, fields=changed)
     return _target(d)
 
 
@@ -696,7 +737,7 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
     qs = Domain.objects.filter(project=project)
     if all_matching:
         if q:
-            qs = qs.filter(name__icontains=str(q)[:200])
+            qs = _target_search(qs, str(q)[:200])
     elif ids is not None:
         if not isinstance(ids, list) or not ids:
             raise ApiError(400, 'ids must be a non-empty list')
@@ -1386,6 +1427,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
+            # what a person calls the host and wrote about it (display only; ``aliases`` above are the other DNS names on its addresses)
+            **alias_and_note(sub, others, (shared or {}).get('tags') or {}),
             'inventory': _host_inventory(sub, others, shared)}
     if (shared or {}).get('coverage') is not None:
         row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
@@ -1542,6 +1585,28 @@ def _shared_for(project, subs):
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
 
 
+def alias_and_note(sub, others, tags):
+    """``{alias, alias_from, note, note_from}`` for one host, from ``tags`` (``_profiles_for``: the alias and note of every HostProfile among the page's
+    names). The host's own name first, then the other names on its addresses (the Hosts page shows them as one host, so a person's alias on
+    the name that used to be on display still shows when another name takes its place), then the target when the host is the target itself
+    (an IP added as a target): ``*_from`` says which, ``host`` or ``target``, or is empty. Display only."""
+    group = [sub, *sorted(others, key=lambda r: r.name.lower())]
+    out = {'alias': '', 'alias_from': '', 'note': '', 'note_from': ''}
+    for key in ('alias', 'note'):
+        for row in group:
+            pid = row.target_domain.project_id if row.target_domain else None
+            value = (tags.get((pid, row.name.lower())) or {}).get(key, '')
+            if value:
+                out[key], out[f'{key}_from'] = value, 'host'
+                break
+        else:
+            for row in group:
+                if row.target_domain and row.name.lower() == row.target_domain.name.lower() and getattr(row.target_domain, key):
+                    out[key], out[f'{key}_from'] = getattr(row.target_domain, key), 'target'
+                    break
+    return out
+
+
 def _pid_of(project, sub):
     """The id of the project a host row belongs to: the one project asked for, or (all-projects view) its own target's project."""
     return sub.target_domain.project_id if _is_all(project) else project.id
@@ -1552,20 +1617,24 @@ def _pids_of(project, subs):
     return sorted({_pid_of(project, s) for s in subs})
 
 
-def _profiles_for(project, subs):
-    """``({(project id, lowercase host): {owner, purpose, criticality}}, {(project id, lowercase host) that is excluded})`` for a page of
-    hosts: two queries however many projects the page spans. The asset information a person typed on the host page, and whether the
-    project's organization excluded the name."""
+def _profiles_for(project, subs, others=None):
+    """``({(project id, lowercase host): {owner, purpose, criticality}}, {(project id, lowercase host) that is excluded}, {(project id, lowercase host):
+    {alias, note}})`` for a page of hosts: two queries however many projects the page spans. The asset information a person typed on the host page,
+    whether the project's organization excluded the name, and the alias and note of every name that has one: the page's names and, with ``others``
+    (``_name_siblings``), the other names on the same addresses, so an alias still shows when another name of the host is the one on display."""
     from cveFeed.models import HostExclusion, HostProfile
-    wanted = {s.name.lower() for s in subs}
+    wanted = {s.name.lower() for s in subs} | {o.name.lower() for rows in (others or {}).values() for o in rows}
     pids = _pids_of(project, subs)
-    profiles = {(row.project_id, row.host): {'owner': row.owner, 'purpose': row.purpose, 'criticality': row.criticality}
-                for row in HostProfile.objects.filter(project_id__in=pids, host__in=wanted)}
+    profiles, tags = {}, {}
+    for row in HostProfile.objects.filter(project_id__in=pids, host__in=wanted):
+        profiles[(row.project_id, row.host)] = {'owner': row.owner, 'purpose': row.purpose, 'criticality': row.criticality}
+        if row.alias or row.note:
+            tags[(row.project_id, row.host)] = {'alias': row.alias, 'note': row.note}
     try:  # the organization's exclusions reach every project of the org
         excluded = set(HostExclusion.objects.filter(org__projects__id__in=pids, host__in=wanted).values_list('org__projects__id', 'host'))
     except Exception:  # noqa: BLE001 - same as cveFeed.exclusions: a lookup problem never breaks a listing
         excluded = set()
-    return profiles, excluded
+    return profiles, excluded, tags
 
 
 def _labels_for(project, subs):
@@ -1654,8 +1723,9 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
     subs = page['results']
     others = _name_siblings(project, subs)
     labels = _labels_for(project, subs)
-    profiles, excluded = _profiles_for(project, subs)
+    profiles, excluded, tags = _profiles_for(project, subs, others)
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
+    shared['tags'] = tags
     shared['inventories'] = _inventories_for(project, subs, others)
     if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
         shared['coverage'] = _coverage_for(subs, others, project)
@@ -1673,10 +1743,10 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
 
 def host_group(project, sub):
     """The single-host view of ``sub``: its name's other current rows folded in, whichever row was asked for."""
-    profiles, excluded = _profiles_for(project, [sub])
     key = (project.id, sub.name.lower())
     others = _name_siblings(project, [sub])
-    shared = {**_shared_for(project, [sub]), 'inventories': _inventories_for(project, [sub], others),
+    profiles, excluded, tags = _profiles_for(project, [sub], others)
+    shared = {**_shared_for(project, [sub]), 'tags': tags, 'inventories': _inventories_for(project, [sub], others),
               'coverage': _coverage_for([sub], others, project), 'coverage_rich': True}  # the single host also names each address, port or CVE judged
     return _host(sub, others[sub.id], _labels_for(project, [sub]).get(key, ()),
                  profiles.get(key), key in excluded, _roots_for(project, [sub]).get(key), shared)
@@ -1738,12 +1808,13 @@ def _internal_filter(qs, params, prefix=''):
 
 def list_hosts(ctx, slug, params):
     """The Shodan-style inventory: hosts with IPs, open ports and service/product/version, highest score first (?sort=name)."""
+    from django.db.models import Q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     from cveFeed.correlation import latest_scan_q
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
     if params.get('q'):
-        qs = qs.filter(name__icontains=params['q'])
+        qs = qs.filter(Q(name__icontains=params['q']) | _alias_note_q(params['q'], project))
     if params.get('target_id'):
         qs = qs.filter(target_domain_id=_int_param(params['target_id'], 'target_id'))
     qs = _internal_filter(qs, params)
@@ -1758,7 +1829,7 @@ def list_hosts(ctx, slug, params):
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
-                  'sensitive', 'zombie', 'country')
+                  'sensitive', 'zombie', 'country', 'alias', 'note')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
@@ -1824,6 +1895,24 @@ def _ip_filter(value):
         return Q(ip_addresses__address__startswith=value)
 
 
+def _alias_note_q(value, project, fields=('alias', 'note')):
+    """A Q matching the hosts whose alias or note (``fields``) contains ``value``: the HostProfile of the host's own name, and, for a host that is
+    its target itself (an address added as a target), the target's. One correlated subquery on the (project, host) key of HostProfile, so a search
+    costs no extra query. In the all-projects view the profile must be of the host's own project. A name is compared lowercase, as HostProfile
+    stores it."""
+    from django.db.models import Exists, F, OuterRef, Q
+    from django.db.models.functions import Lower
+
+    from cveFeed.models import HostProfile
+    text, target_text = Q(), Q()
+    for field in fields:
+        text |= Q(**{f'{field}__icontains': value})
+        target_text |= Q(**{f'target_domain__{field}__icontains': value})
+    own = HostProfile.objects.filter(text, host=Lower(OuterRef('name')))
+    own = own.filter(project_id=OuterRef('target_domain__project_id')) if _is_all(project) or project is None else own.filter(project=project)
+    return Q(Exists(own)) | (Q(name__iexact=F('target_domain__name')) & target_text)
+
+
 def _hosts_named_in(rows, project):
     """A Q matching the hosts named by ``rows`` (RouteAuth or HostState rows, narrowed to ``project`` or, when it is None, unnarrowed).
     By name inside one project. In the all-projects view by (project, name): a route or zombie state of one project must never
@@ -1886,7 +1975,7 @@ def _term_filter(field, value, project=None):
                        'vulnerability__name', 'cve_matches__cve_entry__cve_id'):
             q |= Q(**{f'{lookup}__icontains': value})
         q |= Q(**{ports + 'service_name__icontains': value}) & open_port
-        return q
+        return q | _alias_note_q(value, project)
     if field == 'tech':
         return _running_q(value, project)
     if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4), on a technology row or an open port, on the same row
@@ -1918,7 +2007,9 @@ def _term_filter(field, value, project=None):
     if field == 'ip':
         return _ip_filter(value)
     if field == 'host':
-        return Q(name__icontains=value)
+        return Q(name__icontains=value) | _alias_note_q(value, project, ('alias',))
+    if field in ('alias', 'note'):
+        return _alias_note_q(value, project, (field,))
     if field == 'vuln':
         return Q(vulnerability__name__icontains=value)
     if field == 'sev':
@@ -2058,6 +2149,21 @@ def _why_matched(sub, terms):
         if field == 'zombie' and v == 'yes':
             reasons.append('zombie: DNS gone, still answering')
     return list(dict.fromkeys(reasons))[:8]
+
+
+def _alias_reasons(row, terms):
+    """What each positive term matched in a host row's alias or note, for the results list (the row already carries both, so no query)."""
+    reasons = []
+    for neg, field, value, _quoted in terms:
+        v = value.lower()
+        if neg or field not in (None, 'host', 'alias', 'note'):
+            continue
+        if field != 'note' and v in row['alias'].lower():
+            reasons.append(f'alias {row["alias"]}')
+        if field in (None, 'note') and v in row['note'].lower():
+            note = ' '.join(row['note'].split())
+            reasons.append(f'note {note[:60]}{"…" if len(note) > 60 else ""}')
+    return reasons
 
 
 HEAT_FACET_VALUES = ('fire', 'smoke', 'ice', 'clean', 'unscanned')
@@ -2225,6 +2331,8 @@ def search_hosts(ctx, slug, params):
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    for row in page['results']:
+        row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
     page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id),
                                              **search_facets}
     page['has_internal'] = _any_internal()  # a project the caller sees declared an internal network: the page offers the scope filter
