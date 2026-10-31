@@ -70,3 +70,41 @@ class ExposedHostCountTests(TestCase):
         cve = CVEEntry.objects.create(cve_id='CVE-2099-71', affected=[])
         CVEMatch.objects.create(cve_entry=cve, subdomain=sub, matched_product='x', ai_verdict='not_affected')
         self.assertEqual(counts.exposed_host_count(), 0)
+
+
+class OnePerHostTests(TestCase):
+    def setUp(self):
+        now = timezone.now()
+        org = Org.objects.create(name='O', slug='oph-org')
+        self.p1 = Project.objects.create(name='P1', slug='oph1', insert_date=now, org=org)
+        self.p2 = Project.objects.create(name='P2', slug='oph2', insert_date=now, org=org)
+        self.d1 = Domain.objects.create(name='site.test', project=self.p1, insert_date=now)
+        self.d2 = Domain.objects.create(name='other.test', project=self.p2, insert_date=now)
+
+    def reps(self, **kwargs):
+        from agentapi import services
+        from startScan.models import Subdomain as S
+        return set(services._one_per_host(S.objects.all(), **kwargs).values_list('name', flat=True))
+
+    def test_the_host_ids_are_looked_up_in_an_array_and_not_in_a_subquery_postgres_rescans(self):
+        from agentapi import services
+        sql = str(services._one_per_host(Subdomain.objects.all()).query)
+        self.assertRegex(sql, r'"id" = ANY\(+ARRAY\(')  # id IN (subquery) took 4.8 s at 10,000 hosts, the array 0.1 s
+
+    def test_two_names_on_one_address_are_one_host_and_the_project_own_name_is_the_one_kept(self):
+        ip = IpAddress.objects.create(address='192.0.2.77')
+        for name in ('www.site.test', 'site.test'):
+            Subdomain.objects.create(target_domain=self.d1, name=name).ip_addresses.add(ip)
+        self.assertEqual(self.reps(), {'site.test'})
+
+    def test_the_same_name_in_two_projects_is_two_hosts_in_the_all_projects_view(self):
+        Subdomain.objects.create(target_domain=self.d1, name='shared.test')
+        Subdomain.objects.create(target_domain=self.d2, name='shared.test')
+        from startScan.models import Subdomain as S
+        from agentapi import services
+        self.assertEqual(services._one_per_host(S.objects.all(), per_project=True).count(), 2)
+
+    def test_a_name_without_an_address_stands_alone(self):
+        Subdomain.objects.create(target_domain=self.d1, name='a.site.test')
+        Subdomain.objects.create(target_domain=self.d1, name='b.site.test')
+        self.assertEqual(self.reps(), {'a.site.test', 'b.site.test'})
