@@ -516,7 +516,7 @@ circle.pop{animation:popin .5s ease}
 .gn.sel circle{stroke:var(--ink);stroke-width:3px}
 .gn.sel text{fill:var(--ink);font-weight:700}
 .gn .ring{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:3 3;pointer-events:none}
-/* a project too large to draw host by host: one cloud (graph.js cloudProjects, cloudArt). Rules start .gn.gn-cloud to beat .gn:hover circle */
+/* a project drawn as one cloud (graph.js cloudProjects, cloudArt). Rules start .gn.gn-cloud to beat .gn:hover circle */
 .gn.gn-cloud{--cloud:var(--graph-accent);cursor:zoom-in}
 .gn.gn-cloud .cg-glow-in{stop-color:var(--cloud);stop-opacity:.22}.gn.gn-cloud .cg-glow-out{stop-color:var(--cloud);stop-opacity:0}
 .gn.gn-cloud .cg-body-in{stop-color:var(--surface);stop-opacity:.95}.gn.gn-cloud .cg-body-mid{stop-color:var(--graph-project-bg);stop-opacity:.9}.gn.gn-cloud .cg-body-out{stop-color:var(--cloud);stop-opacity:.28}
@@ -531,11 +531,23 @@ circle.pop{animation:popin .5s ease}
 .gn.gn-cloud .cloud-n{font:800 30px var(--mono);fill:var(--graph-title);letter-spacing:-.02em;paint-order:stroke;stroke:color-mix(in srgb,var(--surface) 70%,transparent);stroke-width:5px;pointer-events:none}
 .gn.gn-cloud .cloud-u{font:650 10px var(--mono);fill:var(--graph-title-2);letter-spacing:.18em;text-transform:uppercase;stroke-width:3px;pointer-events:none}
 .gn.gn-cloud .cloud-f{font:700 11px var(--mono);fill:var(--fire);pointer-events:none}
+.gn.gn-cloud .cloud-f.cloud-calm{fill:var(--graph-port-text);font-weight:600}
 .gn.gn-cloud .cloud-hint{font:600 10px var(--mono);fill:var(--graph-port-text);opacity:0;transition:opacity .2s;pointer-events:none}
 .gn.gn-cloud:hover .cloud-hint,.gn.gn-cloud:focus-visible .cloud-hint{opacity:1}
 .gn.gn-cloud>text{font-size:15px;font-weight:800;fill:var(--graph-title)}
 .gn.gn-cloud.cloud-opening .cloud-bubbles{transform-origin:0 0;animation:cloud-burst .42s cubic-bezier(.2,.7,.2,1) forwards}
 .gn.gn-cloud.cloud-opening .cloud-halo{animation:cloud-flare .42s ease-out forwards}
+/* what hangs off a cloud: its fire, smoke and ice hosts and its open hygiene findings, one bubble each with the count inside */
+.gn.gn-tier{--tier:var(--ice);--tier-bg:var(--ice-bg);cursor:pointer}
+.gn.gn-tier[data-heat="fire"]{--tier:var(--fire);--tier-bg:var(--fire-bg)}
+.gn.gn-tier[data-heat="smoke"]{--tier:var(--smoke);--tier-bg:var(--smoke-bg)}
+.gn.gn-tier[data-heat="hygiene"]{--tier:var(--ok);--tier-bg:var(--ok-bg)}
+.gn.gn-tier .tier-body,.gn.gn-tier:hover .tier-body{fill:var(--tier-bg);stroke:var(--tier);stroke-width:2;transition:stroke-width .2s}
+.gn.gn-tier:hover .tier-body,.gn.gn-tier:focus-visible .tier-body{stroke-width:3}
+.gn.gn-tier[data-heat="fire"] .tier-body{filter:drop-shadow(0 0 6px color-mix(in srgb,var(--fire) 45%,transparent));animation:tier-glow 2.6s ease-in-out infinite}
+.gn.gn-tier .tier-n{font:800 12px var(--mono);fill:var(--tier);pointer-events:none}
+.gn.gn-tier>text:first-of-type{font-size:12px;font-weight:700;fill:var(--tier)}
+@keyframes tier-glow{50%{filter:drop-shadow(0 0 12px color-mix(in srgb,var(--fire) 65%,transparent))}}
 @keyframes cloud-drift{0%{transform:translate(-4px,3px)}50%{transform:translate(3px,-5px)}100%{transform:translate(5px,4px)}}
 @keyframes cloud-breathe{0%,100%{transform:scale(.94);opacity:.75}50%{transform:scale(1.04);opacity:1}}
 @keyframes cloud-turn{to{transform:rotate(360deg)}}
@@ -559,7 +571,7 @@ circle.pop{animation:popin .5s ease}
 .graph-focus-name{font:700 12px var(--mono);color:var(--graph-title);background:color-mix(in srgb,var(--surface) 85%,transparent);border:1px solid var(--line);border-radius:999px;padding:4px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .cloud-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .graph-focused{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--graph-accent) 40%,transparent)}
-@media (prefers-reduced-motion:reduce){.gn.gn-cloud .cb,.gn.gn-cloud .cloud-halo,.gn.gn-cloud .cloud-orbit,.gn.gn-cloud .cloud-twinkle{animation:none}}
+@media (prefers-reduced-motion:reduce){.gn.gn-cloud .cb,.gn.gn-cloud .cloud-halo,.gn.gn-cloud .cloud-orbit,.gn.gn-cloud .cloud-twinkle,.gn.gn-tier .tier-body{animation:none}}
 /* live scan highlighting: a domain or host a scan is working on right now pulses */
 .gn-live .ring{display:inline!important;stroke:var(--brand);stroke-width:3.5;stroke-dasharray:none;animation:gn-pulse 1.2s ease-in-out infinite}
 .gn-live circle:not(.ring){stroke:var(--brand);stroke-width:3px}
@@ -1437,7 +1449,6 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gn[data-heat="fire"]{--planet:var(--fire)}.gn[data-heat="smoke"]{--planet:var(--smoke)}.gn[data-heat="clean"]{--planet:var(--ok)}
 .gn[data-k="subdomain"] circle:not(.ring):not(.pod circle):not(.moons circle){fill:color-mix(in srgb,var(--planet) 24%,var(--surface))!important;stroke:var(--planet)!important;stroke-width:2.5!important;filter:drop-shadow(0 2px 7px color-mix(in srgb,var(--planet) 45%,transparent))}
 .gn[data-k="ip"] circle:not(.ring){opacity:.8}
-.gn.gn-dot[data-k="subdomain"] circle:not(.ring):not(.pod circle):not(.moons circle){fill:var(--fire)!important;stroke:var(--fire)!important;stroke-width:1!important;filter:none} /* a host with findings in a cloud: a plain red dot */
 .gn.has-pod .pod-n{fill:var(--ink)}
 @media (prefers-reduced-motion:reduce){.moon{animation:none}}
 
