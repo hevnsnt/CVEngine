@@ -5,6 +5,14 @@ Status: in progress, on the `1.4-develop` branch. Built so far, all of it off un
 `CVENGINE_LOCAL_FALLBACK` switch with the derived "scanner offline" state, and a dormant secure read of a stored credential.
 The sections below say which parts of each are not built. To try the built-in scanner, see [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
 
+## Quick start for the built-in scanner
+
+Testing the built-in scanner (off by default, and the image is not published yet) is written up in
+[BUILTIN-SCANNER.md](BUILTIN-SCANNER.md): build the Sentinel image, switch the service on, check it shows as online. The three `.env`
+settings it uses are in `.env.example` as comments (`COMPOSE_PROFILES=builtin-scanner`, `CVENGINE_BUILTIN_SCANNER=1`, and
+`CVENGINE_LOCAL_FALLBACK=none`, which is set only after the scanner is live). `sudo ./install.sh --builtin-scanner` writes the first
+two for you; a plain install changes nothing.
+
 ## Why
 
 cvENGINE and the Sentinel are two code bases that do the same scanning. The Sentinel image repeats the server's tool pins

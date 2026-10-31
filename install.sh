@@ -6,23 +6,27 @@
 #
 #   sudo ./install.sh                     # detect this machine's address and use it
 #   sudo ./install.sh --domain scan.example.com   # use a name people will type instead
-#   sudo ./install.sh -n                  # accepted for older scripts; the installer never prompts
+#   sudo ./install.sh --builtin-scanner   # opt in to the 1.4 built-in scanner (off by default; the image must be built first)
+#   sudo ./install.sh -n                # accepted for older scripts; the installer never prompts
 set -uo pipefail
 cd "$(dirname "$0")"
 
 usage() {
-  echo "Usage: sudo $0 [--domain NAME] [-n] [-h]"
+  echo "Usage: sudo $0 [--domain NAME] [--builtin-scanner] [-n] [-h]"
   echo "  --domain NAME  hostname or IPv4 address people will use to reach CVEngine (default: detected)"
+  echo "  --builtin-scanner  opt in to the built-in scanner (1.4, off by default): needs its image built first, see docs/SCANNER-ARCHITECTURE.md"
   echo "  -n             accepted and ignored: the installer never asks questions"
   echo "  -h             show this help"
 }
 
 original_args=("$@")
 domain=""
+builtin_scanner=0
 while [ $# -gt 0 ]; do
   case $1 in
     --domain) domain=${2:-}; [ -n "$domain" ] || { usage; exit 1; }; shift 2 ;;
     --domain=*) domain=${1#--domain=}; shift ;;
+    --builtin-scanner) builtin_scanner=1; shift ;;
     -n) shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 1 ;;
@@ -151,7 +155,7 @@ done
 
 # ---------------------------------------------------------------------------------------------------------------------------
 step "Preparing settings"
-./scripts/init-env.sh ${domain:+"$domain"} || die "Could not prepare .env"
+CVENGINE_ENABLE_BUILTIN_SCANNER=$builtin_scanner ./scripts/init-env.sh ${domain:+"$domain"} || die "Could not prepare .env"
 address=$(grep -E '^DOMAIN_NAME=' .env | tail -n 1 | cut -d= -f2-)
 address=${address:-localhost}
 ok "address: https://$address/"

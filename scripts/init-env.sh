@@ -93,7 +93,21 @@ fill_domain() {
   fi
 }
 
+# Opt-in, off unless CVENGINE_ENABLE_BUILTIN_SCANNER=1 (install.sh --builtin-scanner sets it): turn on the built-in scanner service and its
+# server side. COMPOSE_PROFILES keeps whatever profiles are already listed. CVENGINE_LOCAL_FALLBACK=none is never written here: it is for
+# the owner to set once the scanner shows as live (see .env.example). A default run leaves all of this alone.
+enable_builtin_scanner() {
+  local profiles
+  profiles=$(grep -E '^COMPOSE_PROFILES=' .env | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
+  case ",${profiles}," in
+    *,builtin-scanner,*) ;;
+    *) set_value COMPOSE_PROFILES "${profiles:+${profiles},}builtin-scanner"; echo "Enabled the builtin-scanner profile (COMPOSE_PROFILES)." ;;
+  esac
+  grep -qE '^CVENGINE_BUILTIN_SCANNER=1$' .env || { set_value CVENGINE_BUILTIN_SCANNER 1; echo "Set CVENGINE_BUILTIN_SCANNER=1."; }
+}
+
 fill POSTGRES_PASSWORD
 fill AUTHORITY_PASSWORD
 fill_domain "${1:-}"
+[ "${CVENGINE_ENABLE_BUILTIN_SCANNER:-}" != 1 ] || enable_builtin_scanner
 chmod 600 .env
