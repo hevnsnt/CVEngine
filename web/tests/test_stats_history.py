@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -95,6 +96,13 @@ class StatsHistoryApiTests(TestCase):
 		ProjectMembership.objects.create(user=cls.alice, project=cls.pa, role='user')
 		_, cls.token = create_token(cls.alice, 'hist')
 		_, cls.root_token = create_token(cls.root, 'hist-root')
+
+	def setUp(self):
+		# TODAY was read when this module was imported; a run that crosses midnight UTC (the whole suite takes about 17 minutes) would otherwise
+		# ask for a window ending a day after the one the fixtures were made for
+		patcher = mock.patch('django.utils.timezone.localdate', return_value=TODAY)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def test_history_is_a_bare_list_oldest_first(self):
 		status, body = call(self.token, 'GET', '/api/v1/projects/hist-a/stats/history?days=30')

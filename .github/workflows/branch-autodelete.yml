@@ -28,7 +28,7 @@ jobs:
             echo "::error::Refusing '$BRANCH': not a plain branch name"; exit 1
           fi
           case "$BRANCH" in
-            master|main|develop) echo "Keeping the long-lived branch $BRANCH"; exit 0 ;;
+            master|main|develop|1.4-develop) echo "Keeping the long-lived branch $BRANCH"; exit 0 ;;
             claude/*) echo "Keeping the session branch $BRANCH"; exit 0 ;;
           esac
           echo "Deleting $BRANCH"
