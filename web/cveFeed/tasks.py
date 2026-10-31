@@ -768,9 +768,8 @@ def validate_match_on_demand(request_id):
             activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(invalid_reason)})',
                             check_state='no_check', ai_state='not_needed', assessment_status='closed_not_applicable')
             return result
-        row = triage.track(triage.with_cves([match]))[0][0]
-        row.review_nonce = str(job.pk)
-        row.save(update_fields=['review_nonce', 'updated_at'])
+        row, described = triage.track(triage.with_cves([match]))[0]
+        triage.request_fresh_review(row, described, str(job.pk))
         row, _ = triage.track(triage.with_cves([match]))[0]
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(evidence_signature=row.signature)
         subject = validation.subject_for(row, match)
@@ -994,8 +993,7 @@ def automatic_validate_finding(job_id):
             return _skip_automatic_validation(job, progress, 'out_of_scope')
         # This is a new automatic assessment of the current evidence. A prior shared verdict
         # must not short circuit its AI review, while later sweeps still deduplicate this job.
-        row.review_nonce = str(job.pk)
-        row.save(update_fields=['review_nonce', 'updated_at'])
+        triage.request_fresh_review(row, described, str(job.pk))
         row, described = triage.track([finding])[0]
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(signature=row.signature)
         check_state = 'no_check'
