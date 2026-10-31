@@ -1045,23 +1045,28 @@ def _json_body(request):
 @require_POST
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_detect(request):
-    from reNgine.ai_providers import detect_provider
-    return JsonResponse({'provider': detect_provider(_json_body(request).get('key'))})
+    from reNgine.ai_providers import ambiguous_key, detect_provider
+    key = _json_body(request).get('key')
+    return JsonResponse({'provider': detect_provider(key), 'ambiguous': ambiguous_key(key)})  # ambiguous: an sk- key more than one vendor issues
 
 
 @require_POST
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_onboarding_save(request):
-    """Detect the provider from the key, verify it with a live call, then save + enable it."""
+    """Verify the key against the provider the user chose (or its unambiguous prefix names) with a live call, then save + enable it. A key
+    whose vendor is not certain is never tried anywhere: the user is asked to pick the provider."""
     from dashboard.models import AIProviderSettings
     from reNgine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
 
     body = _json_body(request)
     key = (body.get('key') or '').strip()
     previous = AIProviderSettings.objects.first()
-    provider_name = body.get('provider') or detect_provider(key) or (previous.provider if previous and previous.enabled else None)
+    # A pasted key goes only to the provider the user picked or its prefix names; the connected provider is the fallback only when no key was
+    # pasted (re-checking the stored one), never for a new key whose vendor is unknown.
+    provider_name = body.get('provider') or detect_provider(key) or (previous.provider if not key and previous and previous.enabled else None)
     if not provider_name:
-        return JsonResponse({'ok': False, 'error': 'Could not recognise this key. Pick a provider.'}, status=400)
+        return JsonResponse({'ok': False, 'error': 'This key does not say which vendor issued it (many do not). Pick the provider it belongs to; '
+                                                   'nothing was sent anywhere.'}, status=400)
     model = (body.get('model') or '').strip()
     if not key and previous and previous.provider == provider_name:
         key = previous.api_key or ''

@@ -80,6 +80,45 @@ class SettingsApiTests(TestCase):
 		send(self.c, 'PUT', 'ai', {'provider': 'anthropic'})  # another provider without a new key
 		self.assertEqual(AIProviderSettings.objects.get().api_key, '')
 
+	def test_a_stored_key_follows_the_host_for_every_provider_the_vendor_address_included(self):
+		def key():
+			return AIProviderSettings.objects.get().api_key
+
+		def fresh(provider, base_url=''):
+			AIProviderSettings.objects.all().delete()
+			send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': base_url, 'api_key': 'sk-vendor-key'})
+		for provider in ('openai', 'anthropic'):
+			fresh(provider)  # no Base URL: the vendor's own address
+			send(self.c, 'PUT', 'ai', {'base_url': 'https://gateway.example.net'})
+			self.assertEqual(key(), '', f'{provider}: a new host is a new service')
+			fresh(provider, 'https://gateway.example.net/v1')
+			send(self.c, 'PUT', 'ai', {'base_url': ''})  # back to the vendor: another host again
+			self.assertEqual(key(), '', provider)
+			fresh(provider, 'https://gateway.example.net/v1')
+			send(self.c, 'PUT', 'ai', {'base_url': 'https://GATEWAY.example.net/v1/', 'model': 'm'})  # the same host, spelled another way
+			self.assertEqual(key(), 'sk-vendor-key', provider)
+			send(self.c, 'PUT', 'ai', {'base_url': 'https://gateway.example.net:8443/v1'})  # another port
+			self.assertEqual(key(), '', provider)
+		fresh('openai')
+		send(self.c, 'PUT', 'ai', {'base_url': 'https://api.openai.com/v1'})  # the vendor's own address written out is not a new service
+		self.assertEqual(key(), 'sk-vendor-key')
+		fresh('openai')
+		self.assertEqual(send(self.c, 'PUT', 'ai', {'base_url': 'https://api.openai.com.evil.example.net/v1'})[0], 200)
+		self.assertEqual(key(), '')
+		fresh('vllm', 'http://h:8000/v1')
+		send(self.c, 'PUT', 'ai', {'base_url': 'http://h:8001/v1'})
+		self.assertEqual(key(), '')
+		fresh('openai')
+		send(self.c, 'PUT', 'ai', {'base_url': 'https://other.example.net/v1', 'api_key': 'sk-typed-for-it'})  # a key typed with the new host is kept
+		self.assertEqual(key(), 'sk-typed-for-it')
+
+	def test_every_provider_takes_a_base_url_and_refuses_a_metadata_address(self):
+		for provider in ('anthropic', 'openai', 'openrouter', 'ollama', 'vllm', 'lmstudio'):
+			status, data = send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': 'https://gateway.example.net'})
+			self.assertEqual((status, data['base_url']), (200, 'https://gateway.example.net'), provider)
+			self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': 'http://169.254.169.254/v1'})[0], 400, provider)
+			self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': 'ftp://gateway.example.net'})[0], 400, provider)
+
 	def test_model_listing_does_not_send_the_stored_key_to_another_address(self):
 		from unittest import mock
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})
