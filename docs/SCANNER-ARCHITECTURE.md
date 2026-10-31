@@ -149,6 +149,24 @@ which send nothing to the target and need no vantage point.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
 8. Drop the scan tools, Go and bbot from the server image.
 
+### Fallback telemetry: the gate for deleting a local path
+
+Step 5 deletes a local path only after the telemetry shows no fallbacks. `sentinel_dispatch._no_local` is the one place the decision "no Sentinel took it,
+the local run is allowed" is made, and when `CVENGINE_LOCAL_FALLBACK` allows the kind it writes one row to `agentapi.ScannerFallback` (`agentapi/scanner_fallback.py`):
+kind, project and a reason, never a target or an address. A kind that is off the list waits instead and records nothing, as does a Sentinel that answers and
+an internal task (which never had a local run). The reasons are `no_scanner` (nothing live could take it, including the last Sentinel leaving while the task
+queued), `not_claimed_in_time`, `slot_busy` (every slot stayed in use until the queue budget ran out), `failed_then_local`, `completion_timeout` (claimed, never
+reported) and `over_chunk` (the naabu addresses beyond one task, which run here). Recording is one INSERT in its own savepoint, catches every error and logs the
+first failure of a process once; it can never fail or slow a scan. The weekly maintenance prunes rows older than 30 days.
+
+`python manage.py scanner_fallbacks --days N [--kind K]` prints the counts by kind and reason and when each kind last ran locally. The system status carries
+`scanning.scanner.fallbacks`: `{days: 7, by_kind: {kind: {count, last_at}}}`. An App Admin also gets `ready_to_delete`, the kinds with no fallback in the last
+`SOAK_HOURS` (72) hours and a live built-in scanner that declares the kind; anyone else sees the counts only. That is the gate, together with the fake-scanner
+tests: a kind in `ready_to_delete` has soaked and may have its local path deleted. Two things it does not see: the clock starts when the table is first deployed
+(an empty table says nothing about the days before it, so read the soak from the upgrade on), and the by-design local runs that are not a fallback from a
+Sentinel (a signed-in nuclei pass, and the remaining targets of an nmap chunk a Sentinel did not report) are not recorded, so those paths need their own
+migration before their kind is deleted.
+
 ## Risks
 
 1. The scanner becomes a hard dependency. Healthcheck, restart policy, status line, and non-fatal waiting come first (phase 4).
