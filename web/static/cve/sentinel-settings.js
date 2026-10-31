@@ -108,7 +108,8 @@ const shown = (key, value) => {
 
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
 // when it does not report these keys.
-export function versionBlock(d, { onChange }) {
+// ``builtin`` (the install's own scanner) has no "Update now": it never updates itself, so the button would promise what cannot happen.
+export function versionBlock(d, { onChange, builtin = false }) {
   if (!reported(d)) return null;
   const box = el("div", "ss-version");
   const line = el("p", "ss-vline");
@@ -147,6 +148,7 @@ export function versionBlock(d, { onChange }) {
         sub,
       ),
     );
+  if (builtin) box.append(el("p", "note ss-detail", "The built-in scanner never updates itself, so there is no Update now."));
   const actions = el("div", "ss-actions");
   const now = button(
     pending ? "Update requested" : "Update now",
@@ -160,7 +162,7 @@ export function versionBlock(d, { onChange }) {
   now.title = MANUAL_NOTE;
   now.disabled =
     pending || ["waiting", "draining", "updating"].includes(u.status);
-  actions.append(now);
+  if (!builtin) actions.append(now);
   if (d.settings)
     actions.append(
       button("Settings", async () => openSettings(d, onChange), "btn sm ghost"),

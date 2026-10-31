@@ -25,6 +25,7 @@ follow-up once there is real-world experience with how many Sentinels a project 
 """
 import contextlib
 import ipaddress
+import logging
 import os
 import tempfile
 import time
@@ -38,30 +39,53 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # The longest a stage waits for a Sentinel that has claimed its task, by kind: a Sentinel that keeps heartbeating a running task is
 # doing the work, and a slow tool (nuclei over ten hosts, a full TLS audit) must not be run a second time locally because a short fixed
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
-# the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes.
+# the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
+# ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
+# Only the kinds that take a chunk of targets are listed; any other adds nothing.
 PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60}
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
 
+logger = logging.getLogger(__name__)
+
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
+_WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
+
+
+def _parse_local_fallback():
+    """``(allowed, unknown)``: the kinds ``CVENGINE_LOCAL_FALLBACK`` lets run here, and the names in it that are no kind. An unknown name is ignored (a
+    typo reads as ``none`` for that kind), but never silently: it is warned about once per process and shown in the scanner status."""
+    from agentapi.models import SentinelTask
+    raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
+    if raw in ('', 'all', '*'):
+        return set(SentinelTask.KINDS), []
+    if raw == 'none':
+        return set(), []
+    names = [k.strip() for k in raw.split(',') if k.strip()]
+    unknown = [k for k in dict.fromkeys(names) if k not in SentinelTask.KINDS]
+    if unknown and raw not in _WARNED_FALLBACK:
+        _WARNED_FALLBACK.add(raw)
+        logger.warning('%s names kinds that do not exist and are ignored: %s (valid: %s)', LOCAL_FALLBACK_ENV, ', '.join(unknown),
+                       ', '.join(SentinelTask.KINDS))
+    return {k for k in names if k in SentinelTask.KINDS}, unknown
 
 
 def local_fallback_kinds():
     """The task kinds that may still run on this server when no Sentinel can take them: ``CVENGINE_LOCAL_FALLBACK`` is unset or ``all`` (every kind,
     how it has always worked), ``none``, or a comma list of kinds. This is the switch of the move to one scanner (docs/SCANNER-ARCHITECTURE.md): a kind
-    taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead."""
-    from agentapi.models import SentinelTask
-    raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
-    if raw in ('', 'all', '*'):
-        return set(SentinelTask.KINDS)
-    if raw == 'none':
-        return set()
-    return {k.strip() for k in raw.split(',') if k.strip() in SentinelTask.KINDS}
+    taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead. A name in
+    the list that is no kind is ignored (see ``unknown_fallback_kinds``)."""
+    return _parse_local_fallback()[0]
+
+
+def unknown_fallback_kinds():
+    """The names in ``CVENGINE_LOCAL_FALLBACK`` that are not task kinds (in the order written, each once): empty when it is unset, ``all`` or ``none``."""
+    return _parse_local_fallback()[1]
 
 
 def fallback_allowed(kind):

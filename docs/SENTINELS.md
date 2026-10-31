@@ -12,7 +12,7 @@ A project with no live Sentinel scans on the server, as it always did.
 
 ## What a Sentinel runs
 
-Ten kinds of work, each a capability the Sentinel declares:
+Eleven kinds of work, each a capability the Sentinel declares (the list is `kind_since` in the [contract](../web/agentapi/sentinel_contract.json); the code reads it from there):
 
 | Kind                                             | Work                                                                         |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |
@@ -23,6 +23,7 @@ Ten kinds of work, each a capability the Sentinel declares:
 | `wpscan`                                         | WPScan on WordPress sites                                                    |
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
+| `waf`                                            | WAF fingerprinting (contract version 2; no stage dispatches it yet)          |
 
 Everything else (bbot, bucket checks, vhost and subdirectory sweeps, the weekly thorough WPScan pass, and any Nuclei pass that uses a stored sign-in) always runs on the server.
 
