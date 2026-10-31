@@ -11,6 +11,7 @@ testable on their own.
 """
 import logging
 import re
+from functools import cmp_to_key
 
 from cveFeed import cms
 from cveFeed import distro as distro_lib
@@ -138,8 +139,8 @@ def _vcmp(a, b):
 def version_in_range(ver, rng):
     """Return True / False / None(unknown) for ver within an affected range dict. A range with no usable bound is unknown,
     never "in range": only a real bound can put a version inside it."""
-    if ver is None:
-        return None
+    if ver is None or isinstance(rng, _Unpaired):
+        return None  # a bound that pairing could not place (``pair_split_ranges``) says nothing certain about any version
     if str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM"):
         return None  # a GIT range is commit hashes: it cannot be compared with a version
     bounds = [(rng.get(key), parse_version(rng.get(key), strict=True)) for key in ("introduced", "fixed", "lastAffected")]
@@ -508,31 +509,139 @@ def _bounded(rng):
     return version_in_range((0,), rng) is not None  # a range with at least one usable bound
 
 
+class _Unpaired(dict):
+    """A range whose bound ``pair_split_ranges`` could not place: it reads as a plain dict everywhere, and ``version_in_range`` says unknown."""
+
+
+def _only(rng, key):
+    """True for a range that carries ``key`` and no other bound."""
+    return bool(rng.get(key)) and not any(rng.get(other) for other in ("introduced", "fixed", "lastAffected") if other != key)
+
+
+def _kind(rng):
+    """``("open"|"fixed"|"last", parsed bound)`` for a range that is one bound of a branch and can be compared, else None."""
+    if isinstance(rng, _Unpaired) or str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM"):
+        return None
+    for kind, key in (("open", "introduced"), ("fixed", "fixed"), ("last", "lastAffected")):
+        if _only(rng, key):
+            parsed = parse_version(rng[key], strict=True)
+            return (kind, parsed) if parsed is not None else None
+    return None
+
+
+def _join(rng, nxt):
+    """The branch ``rng`` (introduced only) and the range right after it make, or None when they are not one branch."""
+    one = _kind(rng)
+    if not one or one[0] != "open":
+        return None
+    two = _kind(nxt)
+    if not two or two[0] == "open" or str(rng.get("type") or "SEMVER").upper() != str(nxt.get("type") or "SEMVER").upper():
+        return None
+    order = _vcmp(two[1], one[1])
+    if order < 0 or (order == 0 and two[0] == "fixed"):
+        return None  # the fix is older than the start (a branch with no release, "fixed" at its own start), or the last affected is
+    key = "fixed" if two[0] == "fixed" else "lastAffected"
+    return {**rng, key: nxt[key]}
+
+
+def _pair_interleaved(ranges):
+    """Pair what the adjacent pass left: introduced-only ranges and the fixed/lastAffected-only ranges that sit inside them.
+
+    A fix older than every start is one more fix-only range (a branch whose start was not published) and stays as it is. A fix at or after
+    the lowest start has an introduced range it could close: the bounds are sorted by version and read as the events they are, one
+    introduced and then the fix that ends it (``[i1.0, i2.0, f1.5, f2.5]`` is 1.0 to 1.5 and 2.0 to 2.5, wherever the feed listed them), and
+    the last introduced may be left open (a branch with no fix). Any other order (two starts then a fix, a fix at its own start, a type that
+    differs) cannot be paired without guessing: those ranges become ``_Unpaired``, which are unknown, never "in range"."""
+    if not (any(_only(r, "introduced") for r in ranges) and any(_only(r, "fixed") or _only(r, "lastAffected") for r in ranges)):
+        return ranges  # the common case, decided without reading a version
+    kinds = [_kind(r) for r in ranges]
+    opens = [i for i, k in enumerate(kinds) if k and k[0] == "open"]
+    closers = [i for i, k in enumerate(kinds) if k and k[0] != "open"]
+    if not opens or not closers:
+        return ranges
+    lowest = min(kinds[i][1] for i in opens)
+    inside = [i for i in closers if _vcmp(kinds[i][1], lowest) >= 0]
+    if not inside:
+        return ranges
+    rank = {"fixed": 0, "open": 1, "last": 2}  # at one version a fix comes before a start (an empty branch), a last affected after it (one release)
+
+    def order(a, b):
+        return _vcmp(kinds[a][1], kinds[b][1]) or rank[kinds[a][0]] - rank[kinds[b][0]]
+    events = sorted(opens + inside, key=cmp_to_key(order))
+    pairs, pending = {}, None
+    ok = len({str(ranges[i].get("type") or "SEMVER").upper() for i in events}) == 1
+    for i in events if ok else ():
+        if kinds[i][0] == "open":
+            if pending is not None:
+                ok = False  # two starts in a row: which one does the next fix end?
+                break
+            pending = i
+        elif pending is None:
+            ok = False  # a fix at its own start: no branch
+            break
+        else:
+            pairs[pending] = i
+            pending = None
+    if not ok:
+        unsure = set(opens + inside)
+        return [_Unpaired(r) if i in unsure else r for i, r in enumerate(ranges)]
+    joined = {o: {**ranges[o], **{k: ranges[c][k] for k in ("fixed", "lastAffected") if ranges[c].get(k)}} for o, c in pairs.items()}
+    used = set(pairs.values())
+    return [joined.get(i, r) for i, r in enumerate(ranges) if i not in used]
+
+
 def pair_split_ranges(ranges):
-    """The ranges with each ``introduced``-only range joined to the ``fixed``-only range right after it.
+    """The ranges with each ``introduced``-only range joined to the ``fixed``- or ``lastAffected``-only range that closes it.
 
     The CVE List writes a branch as two ``versions`` entries when its lower bound is "7.13.0" and its upper bound is "lessThan 7.13.7", and the
     conversion keeps them as two ranges: ``[{"introduced": "7.13.0"}, {"fixed": "7.13.7"}]``. Read alone, the first says "7.13.0 and every later
     version", the second "every version before 7.13.7", so the fixed 7.13.7, 7.18.1 and everything in between read as vulnerable (issue 205,
-    CVE-2022-26134). Joined, they are the branch the advisory means. Only a pair that alternates in order and whose fix is newer than its
-    introduction is joined; an ``introduced`` range with no fixed range after it stays open (a branch with no fix), and any other shape is
-    returned as it was."""
+    CVE-2022-26134). Joined, they are the branch the advisory means. First a pair that alternates in order and whose end is newer than its start
+    is joined; an ``introduced`` range with no closing range stays open (a branch with no fix). Then what is left is paired by version
+    (``_pair_interleaved``), and bounds that still cannot be placed are returned as ``_Unpaired``, which ``version_in_range`` reads as unknown. Any
+    other shape is returned as it was."""
     out, i = [], 0
     ranges = list(ranges)
     while i < len(ranges):
-        rng = ranges[i]
-        nxt = ranges[i + 1] if i + 1 < len(ranges) else None
-        if (nxt is not None and rng.get("introduced") and not rng.get("fixed") and not rng.get("lastAffected")
-                and nxt.get("fixed") and not nxt.get("introduced") and not nxt.get("lastAffected")
-                and str(rng.get("type") or "SEMVER").upper() == str(nxt.get("type") or "SEMVER").upper()):
-            intro, fixed = parse_version(rng["introduced"], strict=True), parse_version(nxt["fixed"], strict=True)
-            if intro is not None and fixed is not None and _vcmp(fixed, intro) > 0:
-                out.append({**rng, "fixed": nxt["fixed"]})
-                i += 2
-                continue
-        out.append(rng)
+        joined = _join(ranges[i], ranges[i + 1]) if i + 1 < len(ranges) else None
+        if joined is not None:
+            out.append(joined)
+            i += 2
+            continue
+        out.append(ranges[i])
         i += 1
-    return out
+    return _pair_interleaved(out)
+
+
+def prepared_ranges(ranges, keep_unusable=False):
+    """The ranges of one affected entry as every reader must see them: dict ranges only, those with a usable bound joined into branches
+    (``pair_split_ranges``). The matcher, the WordPress matcher, the triage brief, the detection strategy and the prompts all read this, so a
+    brief, a check and a match agree on what an advisory says. ``keep_unusable`` appends the ranges with no usable bound (a git range, an
+    "unspecified" bound) for a reader that shows the record rather than testing a version."""
+    ranges = [r for r in ranges or [] if isinstance(r, dict)]
+    paired = pair_split_ranges([r for r in ranges if _bounded(r)])
+    return paired + [r for r in ranges if not _bounded(r)] if keep_unusable else paired
+
+
+def range_verdict(ver, ranges):
+    """``(result, deciding range, no_lower_bound)`` for ``ver`` against the ranges of one affected entry: result True / False / None
+    (unknown) as for ``version_in_range``. The deciding range is the one that put ``ver`` inside (None for any other result);
+    ``no_lower_bound`` is True when the answer came from a fix-only branch list (``fix_only_branch_verdict``). One entry with no usable
+    bound is unknown. Main correlation and the WordPress matcher both decide through this, so they cannot read a range list differently."""
+    prepared = prepared_ranges(ranges)
+    if not prepared:
+        return None, None, False
+    if fix_only_branch_list(prepared):
+        # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
+        result, fixed = fix_only_branch_verdict(ver, prepared)
+        return result, ({"fixed": str(fixed)[:60]} if result is True else None), True
+    unknown = False
+    for rng in prepared:
+        result = version_in_range(ver, rng)
+        if result is True:
+            return True, {k: str(v)[:60] for k, v in rng.items() if k in ("introduced", "fixed", "lastAffected")}, False
+        unknown = unknown or result is None
+    return (None if unknown else False), None, False
 
 
 def _is_branch_range(rng):
@@ -636,45 +745,26 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if ver is not None:
             in_range, unknown = False, False
             for index, item in hit:
-                ranges = pair_split_ranges([r for r in (item.get("ranges") or []) if _bounded(r)])
-                if not ranges:
-                    unknown = True  # the advisory names the product but no version bound: nothing to test against
-                    continue
-                if fix_only_branch_list(ranges):
-                    # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
-                    result, fixed = fix_only_branch_verdict(ver, ranges)
-                    if result is True:
-                        in_range = True
-                        matched_product = item.get("product") or item.get("package") or name
-                        if details is not None:
-                            details[cve.id] = {"affected_index": index, "range": {"fixed": str(fixed)[:60]}, "no_lower_bound": True}
-                        break
-                    if result is None:
-                        unknown = True
-                    continue
-                for rng in ranges:
-                    result = version_in_range(ver, rng)
-                    if result is True:
-                        in_range = True
-                        matched_product = item.get("product") or item.get("package") or name
-                        if details is not None:
-                            details[cve.id] = {"affected_index": index, "range": {k: str(v)[:60] for k, v in rng.items()
-                                                                                  if k in ("introduced", "fixed", "lastAffected")}}
-                        break
-                    if result is None:
-                        unknown = True
-                if in_range is True:
+                result, rng, no_lower_bound = range_verdict(ver, item.get("ranges") or [])
+                if result is True:
+                    in_range = True
+                    matched_product = item.get("product") or item.get("package") or name
+                    if details is not None:
+                        details[cve.id] = {"affected_index": index, "range": rng, **({"no_lower_bound": True} if no_lower_bound else {})}
                     break
+                if result is None:
+                    unknown = True  # no version bound to test against, or bounds that cannot be read with certainty
             if in_range is not True and unknown:
                 in_range = None
-            if in_range is False and not _is_ice(cve) and any(
-                    branch_unlisted(ver, [r for r in (item.get("ranges") or []) if _bounded(r)]) for _i, item in hit):
-                in_range = None  # older than every branch the advisory fixes: unlisted, not cleared
-                if details is not None:
-                    low = next(lowest_listed_branch(item.get("ranges") or []) for _i, item in hit
-                               if branch_unlisted(ver, [r for r in (item.get("ranges") or []) if _bounded(r)]))
-                    details[cve.id] = {"affected_index": hit[0][0], "range": {}, "branch_unlisted": True,
-                                       "lowest_listed_branch": ".".join(map(str, low))}
+            if in_range is False and not _is_ice(cve):
+                for _i, item in hit:
+                    prepared = prepared_ranges(item.get("ranges") or [])  # read as matching read them: a branch the feed split in two is one
+                    if branch_unlisted(ver, prepared):
+                        in_range = None  # older than every branch the advisory fixes: unlisted, not cleared
+                        if details is not None:
+                            details[cve.id] = {"affected_index": hit[0][0], "range": {}, "branch_unlisted": True,
+                                               "lowest_listed_branch": ".".join(map(str, lowest_listed_branch(prepared)))}
+                        break
         if details is not None and cve.id not in details and hit:
             details[cve.id] = {"affected_index": hit[0][0], "range": {}}
         yield cve, matched_product, in_range
