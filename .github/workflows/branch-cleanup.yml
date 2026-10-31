@@ -33,7 +33,7 @@ jobs:
             if ! [[ $branch =~ ^[A-Za-z0-9._/-]+$ ]] || [[ $branch == -* || $branch == *..* ]]; then
               echo "::error::Refusing '$branch': not a plain branch name"; status=1; continue
             fi
-            case "$branch" in master|main|develop) echo "::error::Refusing to delete $branch"; status=1; continue ;; esac
+            case "$branch" in master|main|develop|1.4-develop) echo "::error::Refusing to delete $branch"; status=1; continue ;; esac
             echo "Deleting $branch"
             gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$branch" || status=1
           done < <(echo "$BRANCHES" | tr ',' '\n')
