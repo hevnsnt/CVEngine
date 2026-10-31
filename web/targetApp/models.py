@@ -152,6 +152,12 @@ class Domain(models.Model):
 	SCOPE_AUTO, SCOPE_HOST, SCOPE_PARENT = 'auto', 'host', 'parent'
 	SCOPE_MODES = ((SCOPE_AUTO, 'auto'), (SCOPE_HOST, 'host'), (SCOPE_PARENT, 'parent'))
 	scope_mode = models.CharField(max_length=8, choices=SCOPE_MODES, default=SCOPE_AUTO)
+	# How this target is discovered each time something starts discovery on its own (the work conductor, the assessment review, a move):
+	# the mode chosen when it was added, or later. 'manual' is "just add it, do not scan yet": nothing automatic ever scans it, only a person
+	# who picks a mode. The database default keeps every row from before the column on 'standard', what they were always scanned with.
+	DISCOVERY_STANDARD, DISCOVERY_DEEP, DISCOVERY_PASSIVE, DISCOVERY_MANUAL = 'standard', 'deep', 'passive', 'manual'
+	DISCOVERY_MODES = ((DISCOVERY_STANDARD, 'standard'), (DISCOVERY_DEEP, 'deep'), (DISCOVERY_PASSIVE, 'passive'), (DISCOVERY_MANUAL, 'manual'))
+	discovery_mode = models.CharField(max_length=8, choices=DISCOVERY_MODES, default=DISCOVERY_STANDARD, db_default=DISCOVERY_STANDARD)
 
 	class Meta:
 		constraints = [

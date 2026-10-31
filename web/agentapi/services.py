@@ -263,7 +263,7 @@ def list_engines(ctx, params=None):
 def _target(d):
     out = {'id': d.id, 'name': d.name, 'alias': d.alias, 'note': d.note, 'description': d.description,
            'created': _iso(d.insert_date), 'last_scan': _iso(d.start_scan_date),
-           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped()}
+           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode}
     if hasattr(d, 'n_hosts'):  # list view: how big the target is and how much of it is exposed
         out['hosts'], out['exposed'] = d.n_hosts, d.n_exposed
     return out
@@ -353,6 +353,24 @@ def set_target_profile(ctx, slug, target_id, alias=None, note=None):
     return _target(d)
 
 
+def set_target_discovery_mode(ctx, slug, target_id, discovery_mode):
+    """Change the mode a target is discovered in whenever discovery starts on its own: ``standard``, ``deep``, ``passive``, or ``manual``
+    (never started automatically; only a person's Discover or Scan, once a mode is chosen). Changing it starts nothing."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    if not isinstance(discovery_mode, str) or discovery_mode not in {m for m, _label in Domain.DISCOVERY_MODES}:
+        raise ApiError(400, 'discovery_mode must be standard, deep, passive or manual')
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    if d.discovery_mode != discovery_mode:
+        audit(ctx.user, 'target.discovery_mode', d.name, project.org, project=slug, was=d.discovery_mode, now=discovery_mode)
+        d.discovery_mode = discovery_mode
+        d.save(update_fields=['discovery_mode'])
+    return _target(d)
+
+
 def _expand_target(value, project=None):
     """Validate one pasted target and expand it: ``(kind, names)``. A CIDR or range is sized before expanding, so a /8 is
     never built. ``project`` (an id) lets an address inside a network that project declared internal
@@ -397,7 +415,18 @@ def _not_internal(project, domains):
     return [d for d in domains if not (nets and in_internal_range(d.name, nets))]
 
 
-def _create_domains(project, names, description='', excluded=None):
+def _discovery_mode(mode):
+    """The mode to store on new targets: ``mode`` (standard, deep, passive, or manual for "just add them, do not scan yet"), standard when
+    none is given. Anything else is refused, since the stored mode decides what every later automatic scan of the target may do."""
+    from targetApp.models import Domain
+    if mode in (None, ''):
+        return Domain.DISCOVERY_STANDARD
+    if not isinstance(mode, str) or mode not in {m for m, _label in Domain.DISCOVERY_MODES}:
+        raise ApiError(400, 'mode must be standard, deep, passive or manual')
+    return mode
+
+
+def _create_domains(project, names, description='', excluded=None, discovery_mode='standard'):
     """Create a Domain per name in bulk, in order. Returns (the rows created, the names that already existed). Domain
     names are unique within an organization, so a name another project of the same organization holds counts as existing (another
     organization's record of the same name is a different, separate record). A name the project's organization
@@ -422,7 +451,8 @@ def _create_domains(project, names, description='', excluded=None):
     for start in range(0, len(wanted), 1000):
         part = wanted[start:start + 1000]
         # ignore_conflicts: a concurrent add of the same name must not fail the whole batch; the re-read says what we own
-        Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now) for n in part],
+        Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now,
+                                                      discovery_mode=discovery_mode) for n in part],
                                    ignore_conflicts=True)
         created += Domain.objects.filter(project=project, name__in=part).order_by('id')
     created.sort(key=lambda d: d.id)
@@ -432,13 +462,15 @@ def _create_domains(project, names, description='', excluded=None):
 def add_target(ctx, slug, value, description='', discover=False, mode=None):
     """Add a domain, IP, CIDR or range as target(s); ranges expand to individual IPs (capped). Every address of a range is
     queued for discovery, in order."""
+    from targetApp.models import Domain
     from targetApp.target_types import DOMAIN
     project, _ = get_project(ctx, slug, write=True)
     if not isinstance(value, str):
         raise ApiError(400, 'value must be text')
+    stored = _discovery_mode(mode)
     kind, names = _expand_target(value, project.id)
     excluded = []
-    created, existing = _create_domains(project, names, description, excluded)
+    created, existing = _create_domains(project, names, description, excluded, stored)
     if excluded and not created and not existing:
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
@@ -448,8 +480,8 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
     scan_ids = []
     created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
     deferred = 0
-    if discover and created_for_discovery:  # bbot discovery streams into the dashboard as it runs
-        scans, deferred = _discover_new(created_for_discovery, mode, project.id, initiated_by=ctx.user)
+    if discover and created_for_discovery and stored != Domain.DISCOVERY_MANUAL:  # bbot discovery streams into the dashboard as it runs
+        scans, deferred = _discover_new(created_for_discovery, stored, project.id, initiated_by=ctx.user)
         scan_ids = [scan.id for scan in scans]
     return {'kind': kind, 'created': [_target(d) for d in created], 'already_exists': existing, 'excluded': excluded, 'scan_ids': scan_ids,
             'discovery_deferred': deferred}
@@ -618,7 +650,7 @@ def start_scan(ctx, slug, target_id, engine_id=None):
         return internal
     if engine_id is not None and not EngineType.objects.filter(id=engine_id).exists():
         raise ApiError(404, 'engine not found')
-    scan = start_discovery(domain, initiated_by=ctx.user)
+    scan = start_discovery(domain, _run_mode(domain), initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'queued'}
 
 
@@ -733,8 +765,21 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
     return {'deleted': deleted, 'skipped_running': len(busy), 'matched': len(wanted)}
 
 
+def _run_mode(domain, mode=None):
+    """The mode a person's discovery of ``domain`` runs in: the one asked for (standard, deep or passive), else the one stored on the target.
+    A manual only target has no mode to fall back on, so a run of it names one (and discover_target then keeps it)."""
+    from targetApp.models import Domain
+    if mode in (None, ''):
+        if domain.discovery_mode == Domain.DISCOVERY_MANUAL:
+            raise ApiError(409, f'{domain.name} is set to manual only (added with "just add them, do not scan yet"): choose standard, deep or passive to discover it')
+        return domain.discovery_mode
+    if mode not in (Domain.DISCOVERY_STANDARD, Domain.DISCOVERY_DEEP, Domain.DISCOVERY_PASSIVE):
+        raise ApiError(400, 'mode must be standard, deep or passive')
+    return mode
+
+
 def discover_target(ctx, slug, target_id, mode=None):
-    """Start a bbot discovery plus nuclei pipeline on one existing target."""
+    """Start a bbot discovery plus nuclei pipeline on one existing target, in ``mode`` (kept on the target) or the target's own."""
     from cveFeed.discovery import start_discovery
     from targetApp.models import Domain
     project, _ = get_project(ctx, slug, write=True)
@@ -745,7 +790,11 @@ def discover_target(ctx, slug, target_id, mode=None):
     internal = _internal_scan(ctx, project, domain)
     if internal:
         return internal
-    scan = start_discovery(domain, mode, initiated_by=ctx.user) if mode else start_discovery(domain, initiated_by=ctx.user)
+    run = _run_mode(domain, mode)
+    scan = start_discovery(domain, run, initiated_by=ctx.user)
+    if run != domain.discovery_mode:  # a mode chosen here is the mode the target is rescanned in from now on
+        domain.discovery_mode = run
+        domain.save(update_fields=['discovery_mode'])
     return {'scan_id': scan.id, 'status': 'started'}
 
 
@@ -1058,6 +1107,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     require_write_token(ctx)
     if not isinstance(text, str):
         raise ApiError(400, 'text must be pasted text')
+    manual = _discovery_mode(mode) == 'manual'
     org, current = _current_org(ctx.user, current_project)
     if org is None:  # authorize before the paste is read: a caller with no organization gets nothing parsed
         raise ApiError(403, 'you are not a member of any organization')
@@ -1093,9 +1143,9 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             res['slug'] = project.slug
             if not entries:
                 continue
-            added = _add_targets(ctx, project.slug, entries, False, None)
+            added = _add_targets(ctx, project.slug, entries, False, used)  # the mode is stored with the targets; discovery is queued below
             res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
-            if discover and added['domains']:
+            if discover and not manual and added['domains']:
                 scans, left = _discover_new(added['domains'], used, project.id, initiated_by=ctx.user)
                 scan_ids += [scan.id for scan in scans]
                 deferred += left
@@ -1134,6 +1184,7 @@ def _add_targets(ctx, slug, values, discover, mode):
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
     queued for discovery, first in, first out."""
     project, _ = get_project(ctx, slug, write=True)
+    _discovery_mode(mode)  # before the exclusions below, which cannot be undone
     if values is not None and not isinstance(values, (str, list)):
         raise ApiError(400, 'targets must be a list or pasted text')
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
@@ -1159,9 +1210,11 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
 
     ``initiated_by`` is recorded on the ``ScanHistory`` rows discovery queues for the newly-created targets; left unset (as the
     runZero import leaves it) for a source with no asking user."""
+    from targetApp.models import Domain
     from targetApp.target_types import DOMAIN
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
+    stored = _discovery_mode(mode)  # kept on every target this creates: the mode its later automatic scans use
     names, domain_names, invalid, seen = [], [], [], set()
     for entry in entries:
         if len(names) >= BULK_MAX_EXPANDED:
@@ -1182,7 +1235,7 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             if kind == DOMAIN:
                 domain_names.append(name)
     skipped = []
-    created, existing = _create_domains(project, names, excluded=skipped)
+    created, existing = _create_domains(project, names, excluded=skipped, discovery_mode=stored)
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
@@ -1193,7 +1246,7 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
     scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
-    if discover and to_discover:
+    if discover and to_discover and stored != Domain.DISCOVERY_MANUAL:  # manual: "just add them, do not scan yet"
         scans, deferred = _discover_new(to_discover, used, project.id, initiated_by=initiated_by)
         scan_ids = [scan.id for scan in scans]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
@@ -2385,7 +2438,7 @@ def _hygiene(f):
 
 
 def list_hygiene(ctx, slug, params):
-    """TLS, certificate and email-authentication (SPF, DKIM, DMARC, CAA) findings."""
+    """TLS, certificate, email-authentication (SPF, DKIM, DMARC, CAA) and cleartext-service findings."""
     from cveFeed.models import HygieneFinding
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
@@ -2397,7 +2450,7 @@ def list_hygiene(ctx, slug, params):
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
     if params.get('check'):
-        qs = qs.filter(check_name__startswith=params['check'])  # e.g. spf, dmarc, dkim, tls
+        qs = qs.filter(check_name__startswith=params['check'])  # e.g. spf, dmarc, dkim, tls, cleartext
     if params.get('q'):
         qs = qs.filter(host__icontains=params['q'])
     return paginate(qs, params, _tagged(_hygiene, lambda f: f.domain.project) if everywhere else _hygiene)

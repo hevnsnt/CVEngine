@@ -86,42 +86,75 @@ const stableAngle = (value) => {
   return ((hash >>> 0) % 3600) * Math.PI / 1800;
 };
 
-// Clouds. A project with more than CLOUD_HOSTS hosts is too many bubbles to lay out (the force layout and the SVG both crawl), so it is
-// drawn as one cloud of drifting bubbles instead. Only its hosts with findings stay on the picture, as red dots tied to the cloud; its
-// other hosts, targets, IPs and CVEs are left off. The Hosts page still lists every one of them.
+// Clouds. With more than one project on the picture, every project is drawn as one cloud of drifting bubbles with its host count, and
+// what needs attention hangs off it: a bubble each for its fire, smoke and ice hosts and its open hygiene findings, sized by how many.
+// Hundreds of hosts, targets, IPs and CVEs from several projects made one unreadable haze; the cloud says how big a project is and the
+// bubbles say where the trouble is. Double-click a cloud (or Open on its card) to go inside, host by host. With one project on the
+// picture it is drawn host by host straight away, unless it has more than CLOUD_HOSTS hosts (the force layout and the SVG both crawl).
 export const CLOUD_HOSTS = 500;
 const CLOUD_R = 84;
 const CLOUD_BUBBLES = 44;
 const CLOUD_EMBERS = 9; // at most this many red sparks inside a cloud, in proportion to its hosts with findings
-export function cloudProjects(data) {
+const HEATS = ["fire", "smoke", "ice"];
+export const TIERS = [...HEATS, "hygiene"];
+const TIER_NAMES = { fire: "Fire", smoke: "Smoke", ice: "Ice", hygiene: "Hygiene" };
+const CLOUD_CELL = [400, 320]; // a cloud's slot: its halo, its name above, its counts below and its bubbles on an arc to the right
+const TIER_ARC = [-38, -8, 22, 52]; // degrees from the cloud's right, top to bottom, in TIERS order
+// The clouds sit still in a grid (``aspect``: the drawing's width over its height shapes it), in name order so a project is in the same
+// place on every refresh, each with its bubbles on a fixed arc beside it: nothing links one project to another, so a force layout only
+// let clouds overlap and bubbles drift off toward the wrong cloud.
+export function cloudProjects(data, { aspect = 1.6 } = {}) {
   const counts = new Map();
-  for (const n of data.nodes) if (n.kind === "subdomain" && n.project) counts.set(n.project, (counts.get(n.project) || 0) + 1);
+  for (const n of data.nodes) {
+    if (!n.project || !["subdomain", "domain"].includes(n.kind)) continue;
+    counts.set(n.project, (counts.get(n.project) || 0) + (n.kind === "subdomain" ? 1 : 0));
+  }
   // the payload is capped, so a big project's drawn hosts are only some of them: the server's own per-project total is the count
   const totals = (data.hosts && data.hosts.projects) || {};
   for (const [slug, n] of Object.entries(totals)) if (counts.has(slug) && n > counts.get(slug)) counts.set(slug, n);
-  const big = new Set([...counts].filter(([, n]) => n > CLOUD_HOSTS).map(([slug]) => slug));
+  const big = new Set(counts.size > 1 ? counts.keys() : [...counts].filter(([, n]) => n > CLOUD_HOSTS).map(([slug]) => slug));
   if (!big.size) return data;
+  const about = data.projects || {};
   const names = new Map();
-  const clouded = new Set(); // every host and target of a clouded project, red dots included: their own links are dropped
-  const dots = new Map();
+  const heat = new Map(); // project -> {fire, smoke, ice}: hosts by their worst temperature
+  const clouded = new Set(); // every host and target of a clouded project: they are inside it
   for (const n of data.nodes) {
     if (!big.has(n.project) || !["subdomain", "domain"].includes(n.kind)) continue;
     clouded.add(n.id);
     if (n.kind === "domain") names.set(n.project, n.project_name || n.project);
-    else if (hostState(n) === "vulnerable") dots.set(n.id, { ...n, cloud: n.project });
+    else if (HEATS.includes(n.heat)) {
+      const t = heat.get(n.project) || { fire: 0, smoke: 0, ice: 0 };
+      t[n.heat] += 1;
+      heat.set(n.project, t);
+    }
   }
   const edges = data.edges.filter((e) => !clouded.has(e.from) && !clouded.has(e.to));
   const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
-  const findings = new Map();
-  for (const dot of dots.values()) {
-    findings.set(dot.cloud, (findings.get(dot.cloud) || 0) + 1);
-    edges.push({ from: `__cloud:${dot.cloud}`, to: dot.id });
+  const clouds = [], tiers = [];
+  for (const slug of big) {
+    const t = { fire: 0, smoke: 0, ice: 0, ...heat.get(slug), hygiene: (about[slug] && about[slug].hygiene) || 0 };
+    const cloud = { id: `__cloud:${slug}`, kind: "cloud", label: names.get(slug) || (about[slug] && about[slug].name) || slug, project: slug,
+      hosts: counts.get(slug), findings: t.fire + t.smoke + t.ice, hygiene: t.hygiene };
+    clouds.push(cloud);
+    for (const tier of TIERS) {
+      if (!t[tier]) continue;
+      tiers.push({ id: `__tier:${slug}:${tier}`, kind: "tier", tier, label: TIER_NAMES[tier], count: t[tier], project: slug, project_name: cloud.label });
+      edges.push({ from: cloud.id, to: `__tier:${slug}:${tier}` });
+    }
   }
-  const clouds = [...big].map((slug) => ({ id: `__cloud:${slug}`, kind: "cloud", label: names.get(slug) || slug, project: slug,
-    hosts: counts.get(slug), findings: findings.get(slug) || 0 }));
+  clouds.sort((a, b) => a.label.localeCompare(b.label));
+  const columns = Math.max(1, Math.min(clouds.length, Math.round(Math.sqrt(clouds.length * aspect * CLOUD_CELL[1] / CLOUD_CELL[0]))));
+  clouds.forEach((cloud, i) => {
+    const x = (i % columns) * CLOUD_CELL[0], y = Math.floor(i / columns) * CLOUD_CELL[1];
+    Object.assign(cloud, { seed_x: x, seed_y: y, anchored: true });
+    tiers.filter((t) => t.project === cloud.project).forEach((t, j) => {
+      const a = TIER_ARC[j] * Math.PI / 180, reach = CLOUD_R + 26 + tierRadius(t);
+      Object.assign(t, { seed_x: x + Math.cos(a) * reach, seed_y: y + Math.sin(a) * reach, anchored: true });
+    });
+  });
   // an IP or CVE that only clouded hosts pointed at goes with them
   const nodes = data.nodes.filter((n) => !clouded.has(n.id) && (!["ip", "cve"].includes(n.kind) || linked.has(n.id)));
-  return { ...data, nodes: [...nodes, ...dots.values(), ...clouds], edges };
+  return { ...data, nodes: [...nodes, ...clouds, ...tiers], edges };
 }
 
 // Diving into a cloud: one project's own hosts, targets and CVEs, drawn host by host whatever its size. An address only one host uses
@@ -300,7 +333,8 @@ function decorateMoons(g, d, r) {
   });
   g.append(moons);
 }
-const hostRadius = (d) => d.cloud ? 5 : (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
+const tierRadius = (d) => Math.min(30, 12 + 3 * Math.sqrt(d.count || 0));
+const hostRadius = (d) => (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
 // A cloud's look: a soft halo that breathes, a gradient body, two faint orbits turning opposite ways, bubbles drifting inside, a few
 // red sparks for its hosts with findings, and its host count in the middle. Placed and timed from the cloud's id, so a redraw looks
 // the same; CSS does every motion (and stops it for reduced motion). ``under`` goes beneath the body circle, ``over`` above it.
@@ -349,6 +383,7 @@ function cloudArt(d) {
   unitText.textContent = "hosts";
   const found = svgEl("text", { y: CLOUD_R + 26, "text-anchor": "middle" }, "cloud-f");
   found.textContent = d.findings ? `${d.findings} with findings` : "no findings";
+  found.classList.toggle("cloud-calm", !d.findings);
   const hint = svgEl("text", { y: CLOUD_R + 42, "text-anchor": "middle" }, "cloud-hint");
   hint.textContent = "double-click to open";
   over.append(bubbles, count, unitText, found, hint);
@@ -358,12 +393,26 @@ function refreshCloud(ui, d) {
   const n = ui.querySelector(".cloud-n");
   if (n) n.textContent = Number(d.hosts || 0).toLocaleString();
   const f = ui.querySelector(".cloud-f");
-  if (f) f.textContent = d.findings ? `${d.findings} with findings` : "no findings";
+  if (f) {
+    f.textContent = d.findings ? `${d.findings} with findings` : "no findings";
+    f.classList.toggle("cloud-calm", !d.findings);
+  }
   const t = ui.querySelector("title");
   if (t) t.textContent = `${d.label}: ${d.hosts} hosts, ${d.findings} with findings. Double-click to open it.`;
 }
 // the full name for a tooltip: the address (or name) with the alias a person gave it beside it; the drawn label stays the name
 const tipName = (d) => (d.alias && (d.kind === "subdomain" || d.kind === "domain") ? `${d.label} (${d.alias})` : d.label);
+const TIER_TIPS = { fire: "hosts on fire", smoke: "hosts in smoke", ice: "hosts on ice", hygiene: "open hygiene findings" };
+function refreshTier(ui, d) {
+  const n = ui.querySelector(".tier-n");
+  if (n) n.textContent = Number(d.count || 0).toLocaleString();
+  const r = tierRadius(d);
+  ui.querySelector("circle:not(.ring)")?.setAttribute("r", r);
+  ui.querySelector(".ring")?.setAttribute("r", r + 5);
+  ui.querySelector("text")?.setAttribute("x", r + 5);
+  const t = ui.querySelector("title");
+  if (t) t.textContent = `${d.project_name}: ${d.count} ${TIER_TIPS[d.tier]}. Click for the list, double-click to open the project.`;
+}
 const arc = (r, len, offset, color) => {
   const c = document.createElementNS(NS, "circle");
   const circumference = 2 * Math.PI * r;
@@ -619,7 +668,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         uis.set(node.id, g);
         return g;
       }
-      g.setAttribute("class", `gn gn-${d.kind}${d.cloud ? " gn-dot" : ""}${isActive(node) ? " gn-live" : ""}`);
+      g.setAttribute("class", `gn gn-${d.kind}${isActive(node) ? " gn-live" : ""}`);
       g.setAttribute("role", "button");
       g.setAttribute("tabindex", "0");
       g.dataset.heat = d.heat || d.tier || "";
@@ -631,7 +680,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
           ? `${tipName(d)}, ${d.status || "unscanned"}`
           : `${d.kind} ${tipName(d)}`,
       );
-      const r = d.kind === "cloud" ? CLOUD_R : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
+      const r = d.kind === "cloud" ? CLOUD_R : d.kind === "tier" ? tierRadius(d) : d.kind === "subdomain" ? hostRadius(d) : SIZES[d.kind] || 6;
       const ring = document.createElementNS(NS, "circle");
       ring.setAttribute("class", "ring");
       ring.setAttribute("r", r + 5);
@@ -643,6 +692,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         styleHost(c, d);
       } else if (d.kind === "cloud") {
         c.setAttribute("class", "cloud-body");
+      } else if (d.kind === "tier") {
+        c.setAttribute("class", "tier-body");
       } else if (d.kind === "project" || d.kind === "root") {
         c.setAttribute("fill", d.kind === "project" ? css("--graph-project-bg") : css("--graph-node-bg"));
         c.setAttribute("stroke", css("--graph-node-border"));
@@ -660,8 +711,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       t.setAttribute("x", above ? 0 : r + 4);
       t.setAttribute("y", above ? -(r + 8) : 3.5);
       if (above) t.setAttribute('text-anchor', 'middle');
-      // a red dot in a cloud carries no label (there can be hundreds); its name is in the tooltip and the card
-      t.textContent = d.cloud ? "" : shorten(shortLabel(d));
+      t.textContent = shorten(shortLabel(d));
       const title = document.createElementNS(NS, "title");
       title.textContent = tipName(d);
       g.append(ring, c, t, title);
@@ -671,6 +721,10 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         g.insertBefore(art.under, c);
         g.append(art.over);
         refreshCloud(g, d);
+      }
+      if (d.kind === "tier") { // its count sits inside it; the name label stays the group's first text
+        g.append(svgEl("text", { y: 4, "text-anchor": "middle" }, "tier-n"));
+        refreshTier(g, d);
       }
       if (d.kind === "subdomain" && d.internal) {
         // a host inside a network its project declared internal (only a Sentinel there scans it): a dashed outer boundary marks it
@@ -701,8 +755,8 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       });
       g.addEventListener("dblclick", (e) => {
         e.stopPropagation();
-        if (d.kind === "cloud") {
-          dive(node.id, d.project);
+        if (d.kind === "cloud" || d.kind === "tier") {
+          dive(`__cloud:${d.project}`, d.project);
           return;
         }
         unpin(node.id);
@@ -956,7 +1010,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
   };
   const isHub = (n) => {
     const d = n.data || {};
-    return ['project', 'root', 'domain', 'cloud'].includes(d.kind) ||
+    return ['project', 'root', 'domain', 'cloud', 'tier'].includes(d.kind) ||
       (d.kind === "ip" && (n.links || []).filter((l) => l.fromId !== "__hub").length >= HUB_LINKS);
   };
   function relabel() {
@@ -1249,7 +1303,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         bar.hidden = true;
         container.classList.remove("graph-focused");
       }
-      const clouded = focus ? focusProject(data, focus) : cloudProjects(data);
+      const clouded = focus ? focusProject(data, focus) : cloudProjects(data, { aspect: width / Math.max(container.clientHeight, 1) });
       const seeding = burst;
       burst = false;
       const base = clustered ? clusterGraph(clouded, {columns}) : clouded;
@@ -1277,6 +1331,10 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
           existing.data = n;
           const ui = uis.get(n.id);
           if (ui) refreshCloud(ui, n);
+        } else if (n.kind === "tier" && existing.data.count !== n.count) {
+          existing.data = n;
+          const ui = uis.get(n.id);
+          if (ui) refreshTier(ui, n);
         } else if (n.kind === "subdomain" && (existing.data.heat !== n.heat || existing.data.status !== n.status || existing.data.score !== n.score || JSON.stringify(existing.data.pod) !== JSON.stringify(n.pod) || existing.data.expanded !== n.expanded)) {
           existing.data = n; // a scan finished or found something: the host changes look without a reload
           const ui = uis.get(n.id);
@@ -1326,12 +1384,28 @@ export async function showNodeDetails(box, data) {
   if (data.kind === 'cloud') {
     const heading = Object.assign(document.createElement('strong'), { className: 'cve-id', textContent: data.label });
     const note = Object.assign(document.createElement('p'), { className: 'note',
-      textContent: `${data.hosts} hosts, ${data.findings} with findings. A project this large is drawn as a cloud, with only its hosts with findings outside it as red dots. Open it (or double-click it) to see every host.` });
+      textContent: `${data.hosts} hosts, ${data.findings} with findings${data.hygiene ? `, ${data.hygiene} open hygiene findings` : ""}. Open it (or double-click it) to see every host.` });
     const open = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sm', textContent: 'Open the cloud' });
     open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cve:open-cloud', { detail: data.project })));
     const link = Object.assign(document.createElement('a'), { className: 'btn ghost sm', href: `/cve/${encodeURIComponent(data.project)}/hosts/`, textContent: 'Every host' });
     const actions = Object.assign(document.createElement('div'), { className: 'cloud-actions' });
     actions.append(open, link);
+    box.append(heading, note, actions);
+    return;
+  }
+  if (data.kind === 'tier') {
+    const slug = encodeURIComponent(data.project);
+    const heading = Object.assign(document.createElement('strong'), { className: 'cve-id', textContent: `${data.project_name}: ${data.label}` });
+    const what = { fire: 'Their worst is a CVE that is exploited in the wild, has a public exploit or scores 9 or more, or a critical or high finding.',
+      smoke: 'Their worst is a CVE scoring 7 or more or likely to be exploited, or a medium finding.',
+      ice: 'Their worst is a lower-risk CVE or a low finding.', hygiene: 'Certificates, email authentication, headers, exposed storage and the like.' }[data.tier];
+    const note = Object.assign(document.createElement('p'), { className: 'note', textContent: `${data.count} ${TIER_TIPS[data.tier]}. ${what}` });
+    const list = Object.assign(document.createElement('a'), { className: 'btn sm',
+      href: data.tier === 'hygiene' ? `/cve/${slug}/hygiene/` : `/cve/${slug}/hosts/?heat=${data.tier}`, textContent: data.tier === 'hygiene' ? 'See the findings' : 'See the hosts' });
+    const open = Object.assign(document.createElement('button'), { type: 'button', className: 'btn ghost sm', textContent: 'Open the project' });
+    open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cve:open-cloud', { detail: data.project })));
+    const actions = Object.assign(document.createElement('div'), { className: 'cloud-actions' });
+    actions.append(list, open);
     box.append(heading, note, actions);
     return;
   }

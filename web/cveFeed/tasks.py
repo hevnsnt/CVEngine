@@ -1263,8 +1263,11 @@ def deep_scan_apexes():
     # a bug bounty project is never widened to a parent domain (the program's scope names what may be tested, and a Domain target counts as
     # a person's confirmation of it) and, until its owner confirmed automated testing, not deep-scanned either
     engaged = set(BountyEngagement._base_manager.values_list("project_id", flat=True))
-    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode").order_by("id"))
-    own = {(project_id, name): domain_id for domain_id, name, project_id, _mode in rows}  # a project's own row for a name
+    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode", "discovery_mode").order_by("id"))
+    own = {(project_id, name): domain_id for domain_id, name, project_id, _mode, _disc in rows}  # a project's own row for a name
+    # a target added as passive, or as "just add it", was never meant to be scanned deeply: it adds nothing to the sweep, and its own apex row is not scanned by it
+    held = (Domain.DISCOVERY_PASSIVE, Domain.DISCOVERY_MANUAL)
+    held_apex = {(project_id, name) for _domain_id, name, project_id, _mode, disc in rows if disc in held}
     from cveFeed.exclusions import excluded_names
     banned_by_project = {}  # project id -> the names its organization excluded for good (one read per project)
 
@@ -1274,8 +1277,8 @@ def deep_scan_apexes():
         return name.lower().rstrip(".") in banned_by_project[project_id]
     wanted = {}  # (project id, apex) -> the project's own Domain row for it, if there is one
     forced = set()  # apexes a target asked for with scope_mode='parent': promoted even when on the shared list
-    for _domain_id, name, project_id, mode in rows:
-        if classify_target(name) != DOMAIN or mode == Domain.SCOPE_HOST:
+    for _domain_id, name, project_id, mode, disc in rows:
+        if classify_target(name) != DOMAIN or mode == Domain.SCOPE_HOST or disc in held:
             continue  # scope_mode='host': never promoted to a parent
         if mode == Domain.SCOPE_PARENT:
             apex = apex_domain(name)
@@ -1288,7 +1291,7 @@ def deep_scan_apexes():
             apex, host_scoped = effective_apex(name)
             if host_scoped:
                 continue
-        if apex and not excluded(project_id, apex):  # an excluded apex is never promoted, queued or scanned
+        if apex and (project_id, apex) not in held_apex and not excluded(project_id, apex):  # an excluded apex is never promoted, queued or scanned
             wanted.setdefault((project_id, apex), own.get((project_id, apex)))
     due = ledger.stale_first("bbot-deep", [(key, key[1], key[0]) for key in wanted])
     busy = set(ScanHistory.objects.filter(

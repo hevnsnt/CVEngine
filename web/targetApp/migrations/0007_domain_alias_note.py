@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("targetApp", "0005_drop_organization"),
+        ("targetApp", "0006_domain_discovery_mode"),
     ]
 
     operations = [
