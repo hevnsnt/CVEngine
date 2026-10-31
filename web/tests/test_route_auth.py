@@ -1,8 +1,10 @@
 import datetime
+import gzip
 import http.server
 import json
 import re
 import threading
+import zlib
 from types import SimpleNamespace
 from unittest import mock
 
@@ -125,6 +127,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
 			self.send_header('Set-Cookie', 'sid=abc; Path=/')
 			self.end_headers()
 			return
+		if self.path == '/gzip-empty':
+			self.send_response(200)
+			self.send_header('Content-Type', 'text/html; charset=utf-8')
+			self.send_header('Content-Encoding', 'gzip')
+			self.send_header('Content-Length', '0')
+			self.end_headers()
+			return
+		if self.path in ('/gzip', '/deflate', '/deflate-raw', '/gzip-big', '/gzip-invalid'):
+			body = b'<html><title>Compressed Page</title>Device Model</html>'
+			if self.path == '/gzip-big':
+				body += b'A' * (70 * 1024)
+			encoding = 'gzip' if self.path.startswith('/gzip') else 'deflate'
+			encoded = gzip.compress(body) if encoding == 'gzip' else zlib.compress(body)
+			if self.path == '/deflate-raw':  # some devices send a bare deflate stream with no zlib header
+				raw_deflate = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+				encoded = raw_deflate.compress(body) + raw_deflate.flush()
+			if self.path == '/gzip-invalid':
+				encoded = b'not gzip'
+			self.send_response(200)
+			self.send_header('Content-Type', 'text/html; charset=utf-8')
+			self.send_header('Content-Encoding', encoding)
+			self.send_header('Content-Length', str(len(encoded)))
+			self.end_headers()
+			self.wfile.write(encoded)
+			return
 		body = b'<html><title>Big Page</title>' + b'A' * (70 * 1024) + b'</html>'
 		self.send_response(200)
 		self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -168,6 +195,29 @@ class ProbeTests(SimpleTestCase):
 		self.assertLessEqual(len(result['body']), ra.ROUTE_SAMPLE_BYTES)
 		self.assertEqual(result['title'], 'Big Page')
 		self.assertEqual(Handler.seen, [('/big', None, None)])
+
+	def test_gzip_page_ignoring_identity_is_read_with_a_decompressed_byte_cap(self):
+		result = ra.probe_url(f'http://127.0.0.1:{self.port}/gzip-big')
+		self.assertEqual(result['title'], 'Compressed Page')
+		self.assertIn('Device Model', result['body'])
+		self.assertEqual(result['bytes'], ra.ROUTE_SAMPLE_BYTES)
+		self.assertEqual(len(result['body']), ra.ROUTE_SAMPLE_BYTES)
+
+	def test_invalid_gzip_is_a_probe_error(self):
+		with self.assertRaisesRegex(ValueError, 'invalid compressed probe response'):
+			ra.probe_url(f'http://127.0.0.1:{self.port}/gzip-invalid')
+
+	def test_small_gzip_and_deflate_pages_have_usable_titles(self):
+		for path in ('gzip', 'deflate', 'deflate-raw'):
+			with self.subTest(path=path):
+				result = ra.probe_url(f'http://127.0.0.1:{self.port}/{path}')
+				self.assertEqual(result['title'], 'Compressed Page')
+				self.assertIn('Device Model', result['body'])
+				self.assertEqual(result['bytes'], len(result['body'].encode()))
+
+	def test_empty_compressed_body_is_an_empty_page_not_an_error(self):
+		result = ra.probe_url(f'http://127.0.0.1:{self.port}/gzip-empty')
+		self.assertEqual(result['body'], '')
 
 	def test_never_follows_a_redirect(self):
 		result = ra.probe_url(f'http://127.0.0.1:{self.port}/redir')
