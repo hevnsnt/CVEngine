@@ -220,6 +220,12 @@ A name in the list that is not a kind (`nmpa` for `nmap`) is ignored, which read
 process for each distinct value, the status's `scanner` block carries `unknown_kinds`, and for an App Admin `problems` says "CVENGINE_LOCAL_FALLBACK names kinds
 that do not exist: ...; check the spelling". The semantics do not change; the name is still ignored.
 
+Moving a kind also changes where its scans start from (risk 6): the built-in scanner container does not get this server's egress proxy (Settings > Proxy), the Tailscale network namespace
+the sidecar shares with celery, or `CVENGINE_ALLOW_PRIVATE_TARGETS`. Until those reach it through the managed settings channel, `scanner_state.vantage_warnings()` warns (it never refuses): when the
+policy takes a kind off and a proxy is configured, the `tailscale` profile is on, or private targets are allowed, `scanning.scanner.vantage` lists a sentence per cause ("CVENGINE_LOCAL_FALLBACK moves
+<kinds> to the built-in scanner, which does not use ...") and an App Admin gets each in `problems`. The proxy sentence names only the kinds whose tools take a proxy. Internal ranges are not a cause: they are
+Sentinel-only already.
+
 
 ### The "scanner offline" reading
 
