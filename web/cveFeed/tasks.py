@@ -1492,6 +1492,13 @@ def feed_sentinels():
     return coverage_topup.feed_sentinels()
 
 
+@app.task(name="ensure_builtin_scanner", bind=False, queue="cve_feed_queue")
+def ensure_builtin_scanner():
+    """Every few minutes: keep the built-in scanner's enrollment ready (a no-op unless CVENGINE_BUILTIN_SCANNER is on; see ``agentapi.builtin_scanner``)."""
+    from agentapi import builtin_scanner
+    return builtin_scanner.ensure()
+
+
 @app.task(name="refresh_sentinel_version", bind=False, queue="cve_feed_queue")
 def refresh_sentinel_version():
     """A few times a day (and once when a page finds nothing cached): ask GitHub for the latest Sentinel client version and how far behind each
