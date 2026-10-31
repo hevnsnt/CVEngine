@@ -94,6 +94,17 @@ A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md))
 - **Nuclei runs the server's policy.** On a Sentinel Nuclei skips denial-of-service templates (`-etags dos`) and uses the approved-template snapshot the server runs, fetched from `GET /api/v1/sentinel/template-policy` and its `/bundle`.
 - **Input guard.** Result and heartbeat bodies skip the attack-string scan, since they hold what scanned hosts said. Registration, bootstrap and every address are still checked.
 
+### Secure read of a stored sign-in (built-in scanner only)
+
+A task that needs a stored sign-in carries only a reference to it (`secret_ref`, such as `authcred:12`), never its value. `POST /api/v1/sentinel/tasks/<id>/secret` returns the decrypted credential (`{credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}`, `Cache-Control: no-store`) with these rules:
+
+- Only the built-in scanner may call it, with its own token, for a task assigned to it that is `claimed` or `running` and names a credential. An external Sentinel, a person's token (full or read only) or a Sentinel's token for another agent's task is refused: `403` for a caller that is not the built-in scanner, `404` for a task that is not its own or not signed in.
+- It works once per task. The server wins an atomic update of `secret_read_at` before it decrypts anything, so a second or concurrent read is a `409` and returns nothing.
+- Every call, granted or refused, is written to the audit log as `sentinel.secret.read` with the task, the Sentinel, the credential reference and the outcome. The value is never in the audit log, a task row, an activity line or a log. It is limited to 6 calls a minute per token.
+- A task with a `secret_ref` is never offered to any Sentinel but the built-in one (next task, queue counts and capacity all leave it out for the others).
+
+Not built yet: the scanner client that calls this endpoint, and the dispatch of signed-in work. Nothing sets `secret_ref` today, so signed-in Nuclei passes still run on the server as before.
+
 ## The result contract
 
 What a Sentinel sends back for each task kind is written down once, as a JSON Schema: [`web/agentapi/sentinel_contract.json`](../web/agentapi/sentinel_contract.json) (`contract_version` inside). The Sentinel repo copies the file at the version it targets and validates its own results against it, so a field the server needs is not a thing a client author finds out about from a rejected result. The server still clips and validates everything it receives (`clean_result`); the contract is what a correct client keeps to, so nothing a good Sentinel sends is ever clipped or dropped.

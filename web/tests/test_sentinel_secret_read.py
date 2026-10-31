@@ -156,8 +156,11 @@ class RefusalTests(SecretBase):
             row = self.audits()[-1]
             self.assertEqual(row.detail['agent_id'], agent.pk)
             self.assertEqual(row.detail['task_id'], task.pk)
-            self.assertTrue(row.detail['outcome'].startswith('refused'))
-        self.assertEqual(len(self.audits()), 2)
+            self.assertEqual(row.detail['outcome'], 'refused: not the built-in scanner')
+        builtins_task = self.task()  # a task that is not theirs: the same 403, so an external Sentinel learns nothing about which ids exist
+        self.assertEqual(self.read('external', builtins_task)[0], 403)
+        self.assertEqual(self.read('external', 999999)[0], 403)
+        self.assertEqual(len(self.audits()), 4)
 
     def test_the_builtin_scanner_gets_a_404_for_what_is_not_its_own_signed_in_task(self):
         others = self.task(agent=self.external)
