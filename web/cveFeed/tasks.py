@@ -1380,6 +1380,7 @@ def weekly_deep_nuclei():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import BackgroundCursor, HostState
     from django.db.models import Exists, OuterRef
+    from reNgine import resources
     from startScan.models import Subdomain
     from targetApp.target_types import scannable_hosts
     from django.db import transaction
@@ -1429,12 +1430,20 @@ def weekly_deep_nuclei():
                 from agentapi import sentinel_dispatch
                 stream = sentinel_dispatch.wrap_nuclei_stream(sub.scan_history, 'nuclei_deep')
                 outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service, stream=stream)
+                if outcome.get('skipped'):  # no scanner could take the work: the host is not marked checked, and is due again when the cursor returns to it
+                    activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {outcome["skipped"]}')
+                    return {'status': 'skipped', 'host': sub.name, 'skipped': outcome['skipped']}
                 if outcome.get('error'):
                     activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}: {str(outcome["error"])[:180]}')
                     return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
                 ledger.record(host_service, [sub.name], project_id, sub.scan_history)
                 activity.settle(run, 'done', f'Weekly deep Nuclei completed on {sub.name}: {outcome.get("findings", 0)} new findings')
                 return {'status': 'done', 'host': sub.name, 'targets': len(targets), 'findings': outcome.get('findings', 0)}
+            except resources.ScannerUnavailable as exc:  # the wrap found no scanner for this kind (and it may not run here): wait, do not fail
+                logger.warning('weekly deep Nuclei on host %s is waiting for a scanner: %s', sub.pk, exc)
+                message = f'no scanner could take this work ({exc.kind}); the host stays due until one can'
+                activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {message}')
+                return {'status': 'skipped', 'host': sub.name, 'skipped': message}
             except Exception:
                 logger.exception('weekly deep Nuclei failed on host %s', sub.pk)
                 activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}; see worker diagnostics')

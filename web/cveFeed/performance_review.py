@@ -29,6 +29,8 @@ CAPACITY_PATTERN = (r'waited too long for memory|timed out|timeout|exceeded its 
 CONFIGURATION_PATTERN = (r'unavailable|not installed|not found|no such file|passed the read-only policy|permission denied|invalid|'
                          r'unknown flag|unrecognized|missing|api key|unauthori[sz]ed|forbidden|not scanned:|is excluded|prohibited|'
                          r'is not allowed|not permitted|unsupported')
+# resources.ScannerUnavailable (a MemoryBusy): "no scanner could run <kind> work ...". Work that waits for a scanner says nothing about this server's memory.
+SCANNER_UNAVAILABLE_PATTERN = r'no scanner could (run|take)'
 COOLDOWN = 6 * 3600
 KEY = 'cvengine:adaptive:decision'
 SYSTEM = ('You review measured scanner capacity for the previous three hours. Reply with exactly one JSON object '
@@ -42,6 +44,8 @@ def failure_cause(message):
     (the stage ran out of something), because lowering a cap on a misjudged configuration error costs less than missing a real overload."""
     import re
     text = str(message or '')
+    if re.search(SCANNER_UNAVAILABLE_PATTERN, text, re.I):  # no scanner could take it (a Sentinel's own text may say "timed out"): that is not this server's load
+        return 'other'
     if re.search(CAPACITY_PATTERN, text, re.I):
         return 'capacity'
     if re.search(CONFIGURATION_PATTERN, text, re.I):
@@ -167,7 +171,8 @@ def review(now=None):
         failed = Q(status=0)
         for row in recent.filter(name__in=STAGE_KINDS, status__in=(0, 2)).values('name').annotate(
                 runs=Count('id'), failures=Count('id', filter=failed),
-                capacity=Count('id', filter=failed & Q(error_message__iregex=CAPACITY_PATTERN)),
+                capacity=Count('id', filter=failed & Q(error_message__iregex=CAPACITY_PATTERN)
+                               & ~Q(error_message__iregex=SCANNER_UNAVAILABLE_PATTERN)),
                 configuration=Count('id', filter=failed & ~Q(error_message__iregex=CAPACITY_PATTERN)
                                     & Q(error_message__iregex=CONFIGURATION_PATTERN))):
             kind = STAGE_KINDS[row['name']]

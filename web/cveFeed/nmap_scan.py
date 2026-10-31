@@ -469,6 +469,7 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
     its own naabu_runner when the caller left that argument out."""
     from cveFeed import activity, ledger
     from cveFeed.nuclei_scan import scan_targets
+    from reNgine import resources
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
@@ -532,6 +533,12 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                                           org_id=org_id)
                     fast = {key: fast.get(key, 0) + done.get(key, 0) for key in set(fast) | set(done)}
                 fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
+            except resources.ScannerUnavailable as exc:  # no scanner can take it and this kind may not run here: not the targets' failure, they stay due
+                logger.warning('nmap fast scan of scan %s is waiting for a scanner: %s', scan_id, exc)
+                activity.settle(fast_running, 'done', message=(
+                    f'nmap for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '
+                    f'the {_plural(len(targets), "IP")} stay due until one can'))
+                return {**result, 'skipped': f'no scanner could take this work ({exc.kind}): the targets stay due'}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)
                 ledger.record('nmap-fast', targets, project, scan, 'failed')

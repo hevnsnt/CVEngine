@@ -310,6 +310,10 @@ def run_db_exposure_checks(scan_id, checks=None):
                         activity.log('validate', f'{label} on {host}:{number} has no authentication required'
                                      + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
     except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the rest is checked on the next scan
+        if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
+            activity.settle(running, 'done', message=f'Database exposure check for {domain.name} is waiting: no scanner could take this work ({exc.kind}): '
+                            f'{exposed} of {checked} service(s) open with no authentication so far; the rest is checked on the next scan')
+            return {'checked': checked, 'exposed': exposed, 'skipped': f'no scanner could take this work ({exc.kind})'}
         activity.settle(running, 'done', message=f'Database exposure check for {domain.name} stopped early ({type(exc).__name__}): '
                         f'{exposed} of {checked} service(s) open with no authentication so far')
         return {'checked': checked, 'exposed': exposed, 'skipped': 'scanning was stopped or memory was short'}

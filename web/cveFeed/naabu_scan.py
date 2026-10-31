@@ -117,6 +117,14 @@ def known_open_ports(ips, org_id=None):
     return out
 
 
+def _waiting(exc, count, project, scan):
+    """The one activity line for a port sweep that no scanner could take: it names the scanner, not memory, and says the addresses stay due."""
+    from cveFeed import activity
+    activity.log('run_check', f'naabu port discovery for {count} address{"es" if count != 1 else ""} is waiting: no scanner could take this work '
+                 f'({exc.kind}); nmap keeps its default ports and the addresses stay due until one can',
+                 project=project, scan_id=getattr(scan, 'id', None))
+
+
 def discover(ips, scan=None, runner=None):
     """Open ports per address for ``ips``, or None to keep nmap's default flags.
 
@@ -124,6 +132,7 @@ def discover(ips, scan=None, runner=None):
     are claimed, scanned and recorded. The result for every address also carries the ports the inventory held open before, so the
     nmap pass that follows re-checks them and can close the ones that are gone. Never raises: any failure is None."""
     from cveFeed import ledger
+    from reNgine import resources
     from targetApp.target_types import scannable_hosts
     if runner is None and not naabu_path():
         return None
@@ -149,6 +158,10 @@ def discover(ips, scan=None, runner=None):
                         rejected = {ip for ip, ports in answer.items() if ip in won and
                                     (ports is None or len(ports) > MAX_OPEN_PER_IP)}
                         found = {ip: ports for ip, ports in answer.items() if ip in won and ip not in rejected}
+                    except resources.ScannerUnavailable as exc:  # no scanner could take it and naabu may not run here: not a naabu failure, so nothing is recorded and the addresses stay due
+                        logger.warning('naabu is waiting for a scanner; nmap keeps its default ports: %s', exc)
+                        _waiting(exc, len(won), project, scan)
+                        return None
                     except Exception:  # noqa: BLE001 - an optional stage: nmap's own flags are the fallback
                         logger.warning('naabu failed; nmap keeps its default ports', exc_info=True)
                         ledger.record(SERVICE, won, project, scan, 'failed')

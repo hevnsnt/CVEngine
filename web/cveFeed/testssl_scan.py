@@ -436,7 +436,10 @@ def sweep(project_id, runner=None, resolve=None):
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TestsslError(_why(items))
-            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped or short of memory: not the target's failure
+            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped, short of memory, or no scanner: not the target's failure
+                if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
+                    activity.settle(running, 'done', message=f'TLS audit of {where} is waiting: no scanner could take this work ({exc.kind}); the target stays due until one can')
+                    return {**summary, 'skipped': f'no scanner could take this work ({exc.kind}): the targets stay due until one can'}
                 activity.settle(running, 'done', message=f'TLS audit of {where} stopped before it finished ({type(exc).__name__}); the target stays due')
                 return {**summary, 'skipped': 'scanning was stopped or memory was short: the targets stay due'}
             except (TestsslError, OSError, ValueError) as exc:
