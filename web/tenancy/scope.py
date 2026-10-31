@@ -88,6 +88,7 @@ UNSCOPED = {
     'cveFeed.HostExclusion': 'per organization',
     'cveFeed.OpenvasOrg': 'per organization',
     'cveFeed.ServiceRun': 'engine bookkeeping (nmap rows are global), never read for a user',
+    'agentapi.ScannerFallback': 'instance level telemetry (kind, project id, reason; no target); read only by the App Admin deletion gate',
     'agentapi.SentinelEnrollment': 'organization or instance wide as often as project wide, and redeemed with no user at all',
 }
 

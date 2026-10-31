@@ -8,6 +8,7 @@ whole server, not a project, so for anyone else it is left out and ``system_note
 
 Every probe is wrapped, so one that fails or times out turns into ``{"error": ...}`` and a line in ``problems`` instead of failing
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
@@ -51,8 +54,13 @@ def _scanning():
 def _scanner(admin):
     """The derived "scanner offline" state (``agentapi.scanner_state``): the kinds that may not run on this server and have no live scanner, the ones no
     scanner ever registered for, and the wording the interface shows. Read only; nothing is paused or failed by it."""
-    from agentapi import scanner_state
-    return scanner_state.status(admin=admin)
+    from agentapi import scanner_fallback, scanner_state
+    out = scanner_state.status(admin=admin)
+    try:  # the telemetry is a nicety next to the state: a failure to read it leaves the block out rather than failing the scanner reading
+        out['fallbacks'] = scanner_fallback.status(admin=admin)
+    except Exception:  # noqa: BLE001
+        logger.warning('scanner fallback telemetry could not be read', exc_info=True)
+    return out
 
 
 BUILTIN_ENROLL_GRACE = timedelta(minutes=10)  # a freshly switched-on scanner needs a beat run, the blob and its own start; longer than this is a problem
