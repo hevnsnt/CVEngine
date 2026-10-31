@@ -1433,6 +1433,10 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
 
   const api = {
     setClustered(value) { clustered = Boolean(value); },
+    deselect() {
+      clearGroup();
+      select(null);
+    },
     // fold every host's CVEs into its bubble (the default), or draw each CVE as its own dot
     setPods(on) {
       pods = Boolean(on);
@@ -1590,6 +1594,44 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
 }
 
 // Fetch and draw a node's details into `box` (DOM built with textContent only).
+// The detail drawer: what was clicked on the graph slides out from the right edge, over the page, so the graph keeps its room
+// and the card is never off below the fold. Its X, Escape or a click on empty graph closes it (``onClose`` clears the selection).
+export function detailDrawer({ onClose } = {}) {
+  const aside = Object.assign(document.createElement("aside"), { className: "drawer", inert: true });
+  aside.setAttribute("aria-labelledby", "drawer-h");
+  const head = Object.assign(document.createElement("div"), { className: "drawer-head" });
+  const title = Object.assign(document.createElement("h2"), { id: "drawer-h", textContent: "Details" });
+  const close = Object.assign(document.createElement("button"), { type: "button", className: "btn ghost sm drawer-x", textContent: "Close" });
+  close.setAttribute("aria-label", "Close the details");
+  const body = Object.assign(document.createElement("div"), { className: "node-card drawer-body" });
+  body.setAttribute("aria-live", "polite");
+  head.append(title, close);
+  aside.append(head, body);
+  document.body.append(aside);
+  let shown = 0;
+  function hide() {
+    shown += 1;
+    aside.classList.remove("open");
+    aside.inert = true;
+  }
+  close.addEventListener("click", () => {
+    hide();
+    if (onClose) onClose();
+  });
+  return {
+    hide,
+    async show(data) {
+      if (!data) return hide();
+      const mine = ++shown;
+      aside.inert = false;
+      aside.classList.add("open");
+      const box = document.createElement("div"); // filled off the page, so a slow answer never lands over a newer click
+      await showNodeDetails(box, data);
+      if (mine === shown) body.replaceChildren(...box.childNodes);
+    },
+  };
+}
+
 export async function showNodeDetails(box, data) {
   box.textContent = "";
   if (!data) return;
