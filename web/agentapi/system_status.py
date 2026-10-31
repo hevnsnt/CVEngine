@@ -466,6 +466,8 @@ def system_status(ctx):
         notes.append(scanner['message'])
     if admin and scanner.get('never_seen'):
         problems.append(scanner['never_seen_message'])
+    if admin and scanner.get('unknown_kinds'):
+        problems.append(scanner['unknown_kinds_message'])
     scanning['scanner'] = scanner
     update = _probe(problems, 'update', _update)
     if update.get('phase') not in (None, 'idle', 'done'):

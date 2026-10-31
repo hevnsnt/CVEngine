@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from unittest import mock
@@ -5,6 +6,7 @@ from unittest import mock
 from django.test import SimpleTestCase
 from jsonschema import Draft202012Validator
 
+from agentapi import scanner_state
 from agentapi import sentinel_broker as broker
 from agentapi import sentinel_dispatch as broker_dispatch
 from agentapi import sentinel_contract as contract
@@ -14,6 +16,20 @@ from agentapi.services import ApiError
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'error': 'nmap'}
+
+
+V1_SHA256 = {
+    'discover.json': '6f9825383a3efbf69724ee168a07935d965b7b57add1605a79660d269cf8f5a6',
+    'error.json': 'f38516e7aecb480a2f749c9ee7fff22d0926d2056c82665754059ae05815f340',
+    'naabu.json': '91d1b7acdaeecedb10b027daf27dccac6cb1f833cfa58455264df3e7e846593d',
+    'nmap.json': '13328030712a13a881e8dbb94ccd109e10a72cb62ae2d2081e3b0b107dc057fd',
+    'nmap_udp.json': '517342dcf5e5c585cbd69aefd6a3f4849b9a4a26a9c9861d1f0a4f8eea4f666d',
+    'nuclei_light.json': 'ecb620b0742ef52e5af077d16f545fcc93791fc7ec33c95ced0a8a6153b7c60c',
+    'openvas.json': '1f6166c56867cd631e6789455e5d83a2d47be7a5a3fdfb5b4e8988413862b224',
+    'testssl.json': '0c3e9354aa1432420761aece78877e727bfca1b760dd22e26dac1769c0ba5d80',
+    'wpscan.json': '548ae1d7ad40e9c5a81bf183a39fba3b3b7a270d92380da8602384db0d53b736',
+}
+PASSES_THROUGH =('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp')  # unchanged by the server (openvas and wpscan fill in defaults)
 
 
 def fixture(name):
@@ -59,6 +75,65 @@ class FixtureTests(SimpleTestCase):
     def test_all_three_nuclei_kinds_share_one_result_shape(self):
         for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
             self.assertEqual(list(validator(kind).iter_errors(fixture('nuclei_light'))), [], kind)
+
+
+V1 = FIXTURES / 'v1'
+FROZEN = {'v1': V1}  # contract version -> its frozen fixtures: a bump to N copies the then-current set into v<N>/ and adds it here
+
+
+class KindRegistryTests(SimpleTestCase):
+    """The kinds are listed once (the contract's ``kind_since``); every other per-kind table is held to that list."""
+
+    def test_the_model_and_the_contract_share_one_list(self):
+        self.assertIs(SentinelTask.KINDS, contract.KINDS)
+        self.assertEqual(contract.KINDS, tuple(contract.load()['kind_since']))
+        self.assertEqual(len(set(contract.KINDS)), len(contract.KINDS))
+
+    def test_the_contract_halves_name_the_same_kinds(self):
+        defs = contract.load()['$defs']
+        self.assertEqual(set(defs['results']), set(contract.KINDS))
+        self.assertEqual(set(defs['targets']), set(contract.KINDS))
+
+    def test_every_kind_has_a_cleaner_and_no_cleaner_is_for_a_stranger(self):
+        self.assertEqual(set(broker._CLEANERS), set(contract.KINDS))
+
+    def test_every_kind_has_a_dispatch_budget_or_no_stage_yet(self):
+        self.assertEqual(set(broker_dispatch.COMPLETION_CEILING) | set(scanner_state.NO_STAGE), set(contract.KINDS))
+        self.assertFalse(set(broker_dispatch.COMPLETION_CEILING) & set(scanner_state.NO_STAGE))  # a kind with a stage is not "no stage"
+        self.assertLessEqual(set(broker_dispatch.PER_TARGET_SECONDS), set(contract.KINDS))  # a partial table, but never of a stranger
+
+    def test_the_kinds_the_slot_count_names_exist(self):
+        self.assertLessEqual({'nmap', 'nuclei_light'}, set(contract.KINDS))  # project_slots counts these two on purpose
+
+
+class FrozenFixtureTests(SimpleTestCase):
+    """Each frozen set is what a Sentinel of that contract version sent: the server keeps accepting it down to ``min_supported_contract_version``."""
+
+    def frozen(self):
+        return [(v, p) for v, folder in FROZEN.items() for p in sorted(folder.glob('*.json'))]
+
+    def test_every_frozen_set_is_complete_for_its_version(self):
+        for v, folder in FROZEN.items():
+            have = {p.stem for p in folder.glob('*.json')}
+            want = {name for name, kind in KIND_OF.items() if contract.kind_since(kind) <= int(v[1:])}
+            self.assertEqual(have, want, v)
+
+    def test_the_oldest_supported_version_is_frozen(self):
+        self.assertIn(f'v{contract.min_supported()}', FROZEN)
+
+    def test_a_frozen_set_is_never_edited(self):
+        """The hashes of ``v1/`` as it was copied from the fixtures of contract version 1. A fixture that needs to change belongs in a new version's set."""
+        digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in V1.glob('*.json')}
+        self.assertEqual(digests, V1_SHA256)
+
+    def test_the_server_accepts_every_frozen_fixture_and_it_is_in_contract(self):
+        for v, path in self.frozen():
+            kind, sent = KIND_OF[path.stem], json.loads(path.read_text())
+            self.assertEqual(list(validator(kind).iter_errors(sent)), [], f'{v}/{path.name}')
+            stored = broker.clean_result(kind, sent)
+            self.assertEqual(list(validator(kind).iter_errors(stored)), [], f'{v}/{path.name}')
+            if path.stem in PASSES_THROUGH:
+                self.assertEqual(stored, {'outcome': 'done', **sent}, f'{v}/{path.name}')
 
 
 class ContractRejectsTests(SimpleTestCase):

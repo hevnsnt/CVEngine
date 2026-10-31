@@ -318,6 +318,49 @@ class ScopeAndClaimTests(SentinelBase):
         self.assertEqual(task.status, 'expired')
         self.assertIsNone(task.agent_id)
 
+    def test_a_result_after_the_stage_stopped_waiting_is_audited_and_still_discarded(self):
+        from cveFeed.models import AgentActivity
+        from dashboard.models import AuditLog
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        sentinels.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
+        url = f'/api/v1/sentinel/tasks/{task.pk}/result'
+        host = {'ip': '192.0.2.50', 'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh'}]}
+        status, out = call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': [host]})
+        self.assertEqual((status, out['duplicate'], out['late']), (200, True, True))
+        self.assertEqual(out['task']['status'], 'expired')
+        task.refresh_from_db()
+        self.assertEqual((task.status, task.result), ('expired', {}))  # discarded: nothing stored on the task...
+        self.assertFalse(IpAddress.objects.get(address='192.0.2.50').ports.exists())  # ...and nothing persisted as ports
+        late = AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk)
+        self.assertEqual(late.count(), 1)
+        self.assertEqual(late.get().detail['agent'], 'scoped-sentinel')
+        self.assertIn('stage fell back', late.get().detail['reason'])
+        line = AgentActivity.objects.get(detail__sentinel_task_id=task.pk, message__contains='after the stage stopped waiting')
+        self.assertEqual(line.message, 'Sentinel scoped-sentinel reported nmap work for www.a.example after the stage stopped waiting '
+                                       '(the dispatch wait timed out; the stage fell back to local execution)')
+        status, again = call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': [host]})  # a retry says the same, and adds no second row
+        self.assertEqual((status, again['late']), (200, True))
+        self.assertEqual(late.count(), 1)
+
+    def test_a_result_for_an_expired_task_from_a_sentinel_that_never_held_it_is_still_not_found(self):
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        sentinels.expire(task, 'the dispatch wait timed out')
+        register_sentinel(self.t['root'], name='bystander', scope={'projects': ['sen-a']})
+        status, _ = call(self.t['root'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', {'outcome': 'done', 'hosts': []})
+        self.assertEqual(status, 404)
+
+    def test_a_result_for_a_finished_task_is_a_plain_duplicate_not_late(self):
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        url = f'/api/v1/sentinel/tasks/{task.pk}/result'
+        self.assertEqual(call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': []})[1]['duplicate'], False)
+        again = call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': []})[1]
+        self.assertEqual((again['duplicate'], 'late' in again), (True, False))
+
     def test_malformed_or_oversized_result_is_rejected_not_trusted(self):
         task = self._queue('sen-a')
         call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
