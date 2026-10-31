@@ -273,6 +273,11 @@ class FeedWatermark(models.Model):
     resume_cursor = models.TextField(blank=True, default="")
     resume_head = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)  # when a walk last reached its floor
+    # entries a walk listed but could not read, as {id: attempts}; one that failed ``MAX_ATTEMPTS`` runs in a row is set aside (reported, no longer
+    # allowed to keep the window from being declared covered)
+    failures = models.JSONField(default=dict, db_default={}, blank=True)
+    # set when the first walk had no seed time and no earlier walk to start from: the feed was only read back this many days
+    assumed_days = models.PositiveSmallIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
 
