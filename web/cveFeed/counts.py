@@ -148,14 +148,19 @@ def exposed_among(reps, project_ids=None):
     """The hosts of ``reps`` (one row each, see ``host_reps``) that are exposed. A host is exposed when any of its names is, so a
     finding on ``www`` exposes the host whose row is ``example.com``. ``project_ids``: the projects ``reps`` is drawn from, so the
     exposed set is not built over every other project's hosts too (a host's key and name never cross projects, so the answer is the same)."""
-    from django.db.models import Exists, OuterRef
+    from django.db.models import CharField, Value
+    from django.db.models.functions import Cast, Concat
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     exposed = Subdomain.objects.filter(latest_scan_q()).filter(exposure_filter())
     if project_ids is not None:
         exposed = exposed.filter(target_domain__project_id__in=list(project_ids))
-    same_name = Exists(exposed.filter(name=OuterRef('name'), target_domain__project_id=OuterRef('target_domain__project_id')))
-    return with_host_key(reps).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(same_name))
+
+    def named(qs):
+        """Project and name as one value (the same name in two projects is two hosts), so "some row of this name is exposed" is one
+        uncorrelated IN. A correlated EXISTS per host made this count take 14 s at 10,000 hosts."""
+        return qs.annotate(_named=Concat(Cast('target_domain__project_id', CharField()), Value(':'), 'name', output_field=CharField()))
+    return named(with_host_key(reps)).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(_named__in=named(exposed).values('_named')))
 
 
 def host_reps(domain_id=None, domain_ids=None):

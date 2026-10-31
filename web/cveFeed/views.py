@@ -132,8 +132,10 @@ def graph_payload(domain_id=None, scan_id=None):
         return False
 
     from cveFeed.counts import CLOSED, LIVE_HOST_Q, match_is_live
+    from django.db.models import F
     subs = subs.filter(LIVE_HOST_Q).distinct()
-    sub_list = list(subs[:GRAPH_NODE_CAP])
+    # the riskiest hosts first, then by name: past the node cap the drawn hosts are the ones that matter, and the same ones on every poll
+    sub_list = list(subs.order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
     # "scanned" = at least one finding exists at all, even an info-only one (something looked); a
     # second query narrows to the ones severe enough, open, and not ruled out, to call "vulnerable".
@@ -168,6 +170,7 @@ def graph_payload(domain_id=None, scan_id=None):
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
                                                   name__in=NUCLEI_SCAN_ACTIVITY_NAMES, status=2).values_list('scan_of_id', flat=True))
+    cut = False  # the node cap stopped the drawing before every host was in
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
@@ -194,6 +197,7 @@ def graph_payload(domain_id=None, scan_id=None):
                     status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
                     internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
                     network=internal_view.network_of(sub.target_domain.project_id if sub.target_domain_id else None, sub.name)):
+            cut = True
             break
         by_name[sub.name.lower()] = sid
         if sub.target_domain_id and node(f'dom:{sub.target_domain_id}', 'domain', sub.target_domain.name,
@@ -225,7 +229,10 @@ def graph_payload(domain_id=None, scan_id=None):
         a, b = by_name.get((parent or '').lower()), by_name.get((host or '').lower())
         if a and b and a != b:
             edges.add((a, b))
-    return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)]}
+    drawn_hosts = sum(1 for n in nodes.values() if n['kind'] == 'subdomain')
+    total_hosts = subs.count() if cut or len(sub_list) >= GRAPH_NODE_CAP else drawn_hosts  # counted only when the cap may have cut the list
+    return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
+            'hosts': {'drawn': drawn_hosts, 'total': max(total_hosts, drawn_hosts)}}
 
 
 def _running_scans(ScanHistory):
@@ -276,14 +283,16 @@ def stats_payload():
     from targetApp.models import Domain
     tiers = tier_counts()
     reps = counts.host_reps()
+    from django.db.models import Count
+    host_counts = reps.aggregate(total=Count('pk', distinct=True), live=Count('pk', filter=counts.LIVE_HOST_Q, distinct=True))  # one pass over the hosts, not two
     oldest = counts.oldest_open()
     return {
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
         'certs_total': TlsCertificate.objects.count(),
         'hygiene_open': counts.actionable_hygiene(HygieneFinding.objects.all()).count(),
-        'hosts': reps.count(),
-        'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
+        'hosts': host_counts['total'],
+        'hosts_live': host_counts['live'],
         **live_scan_counts(),
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
         'cves': CVEEntry.objects.count(),

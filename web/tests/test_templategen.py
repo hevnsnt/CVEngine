@@ -170,6 +170,13 @@ class _Job:
 
 
 class RunTimeHitTests(unittest.TestCase):
+	def setUp(self):
+		# run_template resolves every name again at launch and treats one it cannot resolve in time as blocked; these tests are about what is
+		# done with nuclei's output, so they must not depend on a real DNS lookup answering (it did not, once, on a busy CI runner)
+		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def _run(self, lines):
 		FakeProc.lines = lines
 		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
