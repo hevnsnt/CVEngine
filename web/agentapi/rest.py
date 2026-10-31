@@ -266,7 +266,7 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_routes(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/certificates', 'TLS certificates, soonest expiry first (?expiring_within=30)',
      lambda r, c, slug, **k: svc.list_certificates(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/hygiene', 'TLS, certificate and SPF/DKIM/DMARC findings',
+    ('GET', r'projects/(?P<slug>[-\w]+)/hygiene', 'TLS, certificate, SPF/DKIM/DMARC and cleartext-service findings (check=spf|dmarc|dkim|tls|caa|cleartext)',
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),

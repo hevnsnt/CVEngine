@@ -232,7 +232,7 @@ TOOLS = [
     ('list_certificates', 'TLS certificates on the project hosts, soonest expiry first. expiring_within = days.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'expiring_within': {'type': 'string'}, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_certificates(c, a.get('project'), a), False),
-    ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings. check: spf|dmarc|dkim|tls|caa.', _schema(
+    ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings, and cleartext services (Telnet, FTP, rlogin, a login over plain HTTP). check: spf|dmarc|dkim|tls|caa|cleartext.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'check': {'type': 'string'}, 'status': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_hygiene(c, a.get('project'), a), False),
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(

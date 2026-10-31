@@ -3570,7 +3570,7 @@ pages.hygiene = function hygiene(mount) {
   }).start();
 
   const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS and email authentication"));
+  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
   const tools = el("div", "tools");
   const sev = picker(
     "Severity",
@@ -3590,6 +3590,7 @@ pages.hygiene = function hygiene(mount) {
     [
       ["", "All areas"],
       ["tls", "TLS and certificates"],
+      ["cleartext", "Cleartext services"],
       ["spf", "SPF"],
       ["dkim", "DKIM"],
       ["dmarc", "DMARC"],
@@ -3615,7 +3616,7 @@ pages.hygiene = function hygiene(mount) {
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
     empty:
-      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC all look healthy.",
+      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
     onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
