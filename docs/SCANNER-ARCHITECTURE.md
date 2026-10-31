@@ -164,8 +164,12 @@ Sentinel image (`CVENGINE_SCANNER_IMAGE`), the client re-reading the blob after 
 
 Unset (or `all`), every kind may still run on this server when no Sentinel takes it: nothing changes. `none` or a comma list of kinds
 (`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
-`resources.ScannerUnavailable` (a `MemoryBusy`, so stages that already treat that as "not the target's failure, it stays due" wait
-correctly: testssl, UDP and WPScan do today) where it used to run the tool locally. The nmap, naabu and nuclei stages record a
-failure for it as they do for any error until their handlers are written, so a kind is taken off the list only in the same
-change that gives its stage a handler. Signed-in nuclei passes still run here by design until the secure read exists.
+`resources.ScannerUnavailable` (a `MemoryBusy`) where it used to run the tool locally. Every stage that can see it waits: it records
+nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released), the stage is not marked
+failed, and its activity line says "no scanner could take this work (<kind>)", never that memory was short. That covers the nmap
+fast scan, the naabu sweep (nmap keeps its default ports), the nuclei light, targeted and weekly deep passes, WPScan, testssl and
+UDP. Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
+signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
+for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
+(`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes still run here by design until the secure read exists.
 

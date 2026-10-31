@@ -57,6 +57,7 @@ WAIT_SECONDS = 2 * 3600  # the longest a sweep waits for memory
 RUN_BUDGET_SECONDS = 8 * 60  # a firing starts no new IP after this, so it ends before the next one
 MAX_ELIGIBLE = 5000  # in-scope addresses looked at per pick
 MAX_CHECKED = 50  # scope checks (they resolve names) per pick
+MAX_WAITING = 3  # addresses no scanner could take that end a firing: a scanner that is offline is offline for the rest too
 MAX_FINDING_HOSTS = 10  # names of one address that get its findings
 MAX_PORTS = 64
 UNANSWERED_LIMIT = 2  # sweeps in a row a port that was open may stay silent before it is no longer called open
@@ -256,11 +257,14 @@ def due(limit=MAX_ELIGIBLE):
     return [ip for _when, _pk, ip in sorted(wanted, key=lambda item: item[:2])]
 
 
-def pick():
+def pick(skip=()):
     """The next IpAddress to scan, or None. The gate is the TCP sweep's own (``fullscan.in_scope``): a scannable address, a name that
-    is not excluded or archived and does not resolve anywhere blocked, never a shared platform's edge."""
+    is not excluded or archived and does not resolve anywhere blocked, never a shared platform's edge. ``skip`` holds ids this firing
+    already found no scanner for."""
     from cveFeed import fullscan
     for ip in due()[:MAX_CHECKED]:
+        if ip.pk in skip:
+            continue
         try:
             if fullscan.in_scope(ip):
                 return ip
@@ -506,7 +510,7 @@ def scan_ip(ip, runner=None, pipeline=None):
     import functools
 
     from cveFeed import activity, fullscan, ledger, nmap_scan
-    from reNgine.resources import MemoryBusy, ScanAborted
+    from reNgine.resources import MemoryBusy, ScanAborted, ScannerUnavailable
     address, asset = ip.address, asset_of(ip)
     from cveFeed.conductor import bounty_blocked_projects
     project = fullscan.active_attached(ip).exclude(target_domain__project_id__in=bounty_blocked_projects()).values_list(
@@ -528,6 +532,11 @@ def scan_ip(ip, runner=None, pipeline=None):
         if host is None:
             raise UdpScanError('nmap reported nothing for the address')
         outcome = record_run(ip, host)
+    except ScannerUnavailable as exc:  # no scanner could take it and nmap -sU may not run here: not the address's failure, and it stays due
+        logger.warning('background UDP scan of %s is waiting for a scanner: %s', address, exc)
+        activity.settle(running, 'done', message=f'Background UDP scan of {address} is waiting: no scanner could take this work ({exc.kind}); '
+                        'the address stays due until one can')
+        return {'ip': address, 'ok': False, 'error': type(exc).__name__, 'waiting': True}
     except Exception as exc:  # noqa: BLE001 - failure stays visible, and the address is asked again tomorrow
         logger.warning('background UDP scan of %s failed', address, exc_info=True)
         if not isinstance(exc, (MemoryBusy, ScanAborted)):
@@ -577,7 +586,7 @@ def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
             return {'skipped': reason}
     if resources.global_pause_requested(fail_closed=True):
         return {'skipped': 'scanning is paused'}
-    scanned, started = [], clock()
+    scanned, started, waiting = [], clock(), set()
     with resources.redis_claim(CLAIM_KEY, f'udpscan-{os.getpid()}', CLAIM_TTL) as held:
         if held is not True:
             return {'skipped': f'another UDP sweep is running ({held})'}
@@ -586,10 +595,15 @@ def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
             if resources.global_pause_requested(fail_closed=True):
                 scanned.append({'skipped': 'scanning is paused'})
                 break
-            ip = pick()
+            ip = pick(waiting) if waiting else pick()
             if ip is None:
                 break
-            scanned.append(scan_ip(ip, runner=runner, pipeline=pipeline))
+            outcome = scan_ip(ip, runner=runner, pipeline=pipeline)
+            scanned.append(outcome)
+            if outcome.get('waiting'):  # no scanner could take it, so it is still due: not picked again by this firing (it would fail at once, over and over)
+                waiting.add(ip.pk)
+                if len(waiting) >= MAX_WAITING:  # a scanner that is down is down for everyone: the next firing asks again
+                    break
     return {'scanned': scanned}
 
 

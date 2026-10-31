@@ -126,6 +126,10 @@ def run_for_scan(scan_id, checker=run_check, force=False):
                 elif result.get('vulnerable') is None:
                     errors += 1
     except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the hosts not reached are asked again next scan
+        if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
+            activity.settle(running, 'done', message=f'node2shell check for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '
+                            'the remaining hosts are asked again next scan')
+            return {'checked': len(sites), 'tested': vulnerable + errors, 'skipped': f'no scanner could take this work ({exc.kind})'}
         activity.settle(running, 'done', message=f'node2shell check for {domain.name} stopped early ({type(exc).__name__}); the remaining hosts are asked again next scan')
         return {'checked': len(sites), 'tested': vulnerable + errors, 'skipped': 'scanning was stopped or memory was short'}
     activity.settle(running, 'done', message=(
