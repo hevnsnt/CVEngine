@@ -88,8 +88,9 @@ const stableAngle = (value) => {
 // drawn as one cloud of drifting bubbles instead. Only its hosts with findings stay on the picture, as red dots tied to the cloud; its
 // other hosts, targets, IPs and CVEs are left off. The Hosts page still lists every one of them.
 export const CLOUD_HOSTS = 500;
-const CLOUD_R = 70;
-const CLOUD_BUBBLES = 36;
+const CLOUD_R = 84;
+const CLOUD_BUBBLES = 44;
+const CLOUD_EMBERS = 9; // at most this many red sparks inside a cloud, in proportion to its hosts with findings
 export function cloudProjects(data) {
   const counts = new Map();
   for (const n of data.nodes) if (n.kind === "subdomain" && n.project) counts.set(n.project, (counts.get(n.project) || 0) + 1);
@@ -116,6 +117,18 @@ export function cloudProjects(data) {
   // an IP or CVE that only clouded hosts pointed at goes with them
   const nodes = data.nodes.filter((n) => !clouded.has(n.id) && (!["ip", "cve"].includes(n.kind) || linked.has(n.id)));
   return { ...data, nodes: [...nodes, ...dots.values(), ...clouds], edges };
+}
+
+// Diving into a cloud: one project's own hosts, targets and CVEs, drawn host by host whatever its size. An address only one host uses
+// is left to that host's card (at this size they would double the dots); an address several hosts share stays, it is the structure.
+export function focusProject(data, slug) {
+  const byId = new Map(data.nodes.map((n) => [n.id, n]));
+  const own = new Set(data.nodes.filter((n) => n.project === slug && ["subdomain", "domain"].includes(n.kind)).map((n) => n.id));
+  const users = new Map();
+  for (const e of data.edges) if (own.has(e.from) && byId.get(e.to)?.kind === "ip") users.set(e.to, (users.get(e.to) || 0) + 1);
+  const edges = data.edges.filter((e) => (own.has(e.from) || own.has(e.to)) && !(byId.get(e.to)?.kind === "ip" && users.get(e.to) < 2));
+  const keep = new Set([...own, ...edges.flatMap((e) => [e.from, e.to])]);
+  return { ...data, nodes: data.nodes.filter((n) => keep.has(n.id)), edges: edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
 }
 
 // Retain the original bubbles and discovery links. Invisible force anchors are
@@ -283,23 +296,66 @@ function decorateMoons(g, d, r) {
   g.append(moons);
 }
 const hostRadius = (d) => d.cloud ? 5 : (d.pod && d.pod.total ? Math.min(34, 11 + 3.2 * Math.sqrt(d.pod.total)) : SIZES.subdomain);
-// the bubbles floating in a cloud: placed and timed from the cloud's id, so a redraw looks the same; CSS drifts them
-function cloudBubbles(d) {
-  const bubbles = document.createElementNS(NS, "g");
-  bubbles.setAttribute("class", "cloud-bubbles");
+// A cloud's look: a soft halo that breathes, a gradient body, two faint orbits turning opposite ways, bubbles drifting inside, a few
+// red sparks for its hosts with findings, and its host count in the middle. Placed and timed from the cloud's id, so a redraw looks
+// the same; CSS does every motion (and stops it for reduced motion). ``under`` goes beneath the body circle, ``over`` above it.
+let cloudSeq = 0;
+const svgEl = (tag, attrs = {}, cls = "") => {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (cls) el.setAttribute("class", cls);
+  return el;
+};
+const unit = (seed) => stableAngle(seed) / (2 * Math.PI); // a stable 0..1 from a string
+function cloudArt(d) {
+  const id = `cloud${++cloudSeq}`;
+  const under = svgEl("g", {}, "cloud-under");
+  const defs = svgEl("defs");
+  const glow = svgEl("radialGradient", { id: `${id}-glow` });
+  glow.append(svgEl("stop", { offset: "55%" }, "cg-glow-in"), svgEl("stop", { offset: "100%" }, "cg-glow-out"));
+  const body = svgEl("radialGradient", { id: `${id}-body`, cx: "38%", cy: "32%", r: "75%" });
+  body.append(svgEl("stop", { offset: "0%" }, "cg-body-in"), svgEl("stop", { offset: "70%" }, "cg-body-mid"), svgEl("stop", { offset: "100%" }, "cg-body-out"));
+  defs.append(glow, body);
+  under.append(defs, svgEl("circle", { r: CLOUD_R + 34, fill: `url(#${id}-glow)` }, "cloud-halo"));
+
+  const over = svgEl("g", {}, "cloud-over");
+  over.append(svgEl("circle", { r: CLOUD_R - 12 }, "cloud-orbit"), svgEl("circle", { r: CLOUD_R + 12 }, "cloud-orbit cloud-orbit-2"));
+  const bubbles = svgEl("g", {}, "cloud-bubbles");
+  const embers = Math.min(CLOUD_EMBERS, d.findings ? Math.max(1, Math.round((d.findings / Math.max(d.hosts, 1)) * 60)) : 0);
   for (let i = 0; i < CLOUD_BUBBLES; i++) {
-    const a = stableAngle(`${d.id}:${i}`), b = stableAngle(`${d.id}:${i}:r`);
-    const reach = (CLOUD_R - 10) * Math.sqrt(b / (2 * Math.PI));
-    const c = document.createElementNS(NS, "circle");
-    c.setAttribute("class", "cb");
-    c.setAttribute("cx", (Math.cos(a) * reach).toFixed(1));
-    c.setAttribute("cy", (Math.sin(a) * reach).toFixed(1));
-    c.setAttribute("r", (2.5 + (b % 1) * 4.5).toFixed(1));
-    c.style.animationDuration = `${(6 + (a % 1) * 8).toFixed(1)}s`;
-    c.style.animationDelay = `-${(b * 2).toFixed(1)}s`;
+    const a = unit(`${d.id}:${i}`) * 2 * Math.PI;
+    const reach = (CLOUD_R - 14) * Math.sqrt(0.08 + 0.92 * unit(`${d.id}:${i}:r`));
+    const ember = i < embers;
+    const size = ember ? 2.6 + unit(`${d.id}:${i}:s`) * 1.8 : 2 + unit(`${d.id}:${i}:s`) ** 2 * 7;
+    const c = svgEl("circle", { cx: (Math.cos(a) * reach).toFixed(1), cy: (Math.sin(a) * reach).toFixed(1), r: size.toFixed(1) }, ember ? "cb cb-ember" : "cb");
+    c.style.animationDuration = `${(7 + unit(`${d.id}:${i}:t`) * 9).toFixed(1)}s`;
+    c.style.animationDelay = `-${(unit(`${d.id}:${i}:d`) * 12).toFixed(1)}s`;
     bubbles.append(c);
   }
-  return bubbles;
+  for (let i = 0; i < 6; i++) { // twinkles on the rim
+    const a = unit(`${d.id}:tw${i}`) * 2 * Math.PI;
+    const c = svgEl("circle", { cx: (Math.cos(a) * (CLOUD_R + 4)).toFixed(1), cy: (Math.sin(a) * (CLOUD_R + 4)).toFixed(1), r: 1.6 }, "cloud-twinkle");
+    c.style.animationDelay = `-${(unit(`${d.id}:tw${i}:d`) * 4).toFixed(1)}s`;
+    bubbles.append(c);
+  }
+  const count = svgEl("text", { y: 6, "text-anchor": "middle" }, "cloud-n");
+  count.textContent = Number(d.hosts || 0).toLocaleString();
+  const unitText = svgEl("text", { y: 24, "text-anchor": "middle" }, "cloud-u");
+  unitText.textContent = "hosts";
+  const found = svgEl("text", { y: CLOUD_R + 26, "text-anchor": "middle" }, "cloud-f");
+  found.textContent = d.findings ? `${d.findings} with findings` : "no findings";
+  const hint = svgEl("text", { y: CLOUD_R + 42, "text-anchor": "middle" }, "cloud-hint");
+  hint.textContent = "double-click to open";
+  over.append(bubbles, count, unitText, found, hint);
+  return { under, over, fill: `url(#${id}-body)` };
+}
+function refreshCloud(ui, d) {
+  const n = ui.querySelector(".cloud-n");
+  if (n) n.textContent = Number(d.hosts || 0).toLocaleString();
+  const f = ui.querySelector(".cloud-f");
+  if (f) f.textContent = d.findings ? `${d.findings} with findings` : "no findings";
+  const t = ui.querySelector("title");
+  if (t) t.textContent = `${d.label}: ${d.hosts} hosts, ${d.findings} with findings. Double-click to open it.`;
 }
 const arc = (r, len, offset, color) => {
   const c = document.createElementNS(NS, "circle");
@@ -373,7 +429,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     // leaves that share an IP get extra room, and a hub's links are long, so clusters fan out instead of stacking
     springTransform(link, spring) {
       if (link.fromId.startsWith('__project:')) { spring.length = 190; return; }
-      if (link.fromId.startsWith('__cloud:')) { spring.length = CLOUD_R + 40; return; }
+      if (link.fromId.startsWith('__cloud:')) { spring.length = CLOUD_R + 70; return; }
       if (link.fromId.startsWith('__root:')) { spring.length = 105; return; }
       if (link.data?.crossCluster) { spring.length = 550; return; }
       const ip = graph.getNode(link.toId);
@@ -598,11 +654,17 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       t.setAttribute("y", above ? -(r + 8) : 3.5);
       if (above) t.setAttribute('text-anchor', 'middle');
       // a red dot in a cloud carries no label (there can be hundreds); its name is in the tooltip and the card
-      t.textContent = d.cloud ? "" : d.kind === "cloud" ? `${shorten(d.label)} · ${d.hosts} hosts` : shorten(shortLabel(d));
+      t.textContent = d.cloud ? "" : shorten(shortLabel(d));
       const title = document.createElementNS(NS, "title");
-      title.textContent = d.kind === "cloud" ? `${d.label}: ${d.hosts} hosts, ${d.findings} with findings` : d.label;
+      title.textContent = d.label;
       g.append(ring, c, t, title);
-      if (d.kind === "cloud") g.insertBefore(cloudBubbles(d), t);
+      if (d.kind === "cloud") { // the name label stays the group's first text: relabel() finds it there
+        const art = cloudArt(d);
+        c.setAttribute("fill", art.fill);
+        g.insertBefore(art.under, c);
+        g.append(art.over);
+        refreshCloud(g, d);
+      }
       if (d.kind === "subdomain" && d.internal) {
         // a host inside a network its project declared internal (only a Sentinel there scans it): a dashed outer boundary marks it
         const boundary = document.createElementNS(NS, "circle");
@@ -632,6 +694,10 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       });
       g.addEventListener("dblclick", (e) => {
         e.stopPropagation();
+        if (d.kind === "cloud") {
+          dive(node.id, d.project);
+          return;
+        }
         unpin(node.id);
         if (node.data && node.data.pod && node.data.pod.total) {
           if (expanded.has(node.id)) expanded.delete(node.id);
@@ -866,6 +932,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
   });
   const onKey = (e) => {
     if (e.key === "Escape") {
+      if (focus && !selected && !group.size) surface();
       clearGroup();
       select(null);
     }
@@ -1025,6 +1092,72 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     wake();
   }
 
+  // Diving into a cloud. Double-clicking a cloud bursts its bubbles and zooms into that one project, drawn host by host with its hosts
+  // flying out from the middle; a bar on top names it and leads back (so does Escape). Polls keep the dive until the user leaves it.
+  let focus = null; // the project slug of the open cloud
+  let burst = false; // the next sync seeds new nodes at the center, so the exploded view grows out of where the cloud was
+  const bar = document.createElement("div");
+  bar.className = "graph-focus";
+  bar.hidden = true;
+  const back = Object.assign(document.createElement("button"), { type: "button", className: "btn sm graph-focus-back", textContent: "← All projects" });
+  const where = Object.assign(document.createElement("span"), { className: "graph-focus-name" });
+  bar.append(back, where);
+  ["pointerdown", "click", "dblclick", "wheel"].forEach((ev) => bar.addEventListener(ev, (e) => e.stopPropagation(), { passive: ev === "wheel" }));
+  back.addEventListener("click", () => surface());
+  container.append(bar);
+  const onOpenCloud = (e) => api.focus(e.detail); // the cloud's card has an Open button (a double-click is awkward on a phone)
+  document.addEventListener("cve:open-cloud", onOpenCloud);
+  function reset() {
+    graph.clear();
+    uis.clear();
+    group.clear();
+    selected = null;
+    if (onSelect) onSelect(null);
+    auto = true;
+    lastBox = "";
+    spread.x = spread.y = 1;
+  }
+  function transition(cls, then) {
+    if (!floatOn) return then();
+    container.classList.add(cls);
+    setTimeout(() => {
+      container.classList.remove(cls);
+      then();
+      container.classList.add(`${cls}-in`);
+      setTimeout(() => container.classList.remove(`${cls}-in`), 520);
+    }, 420);
+  }
+  function dive(cloudId, slug) {
+    if (focus) return;
+    const cloud = graph.getNode(cloudId);
+    const d = (cloud && cloud.data) || {};
+    uis.get(cloudId)?.classList.add("cloud-opening");
+    if (cloud) { // zoom toward the cloud while it opens
+      const p = layout.getNodePosition(cloudId);
+      auto = false;
+      renderer.moveTo(p.x * spread.x, p.y * spread.y);
+    }
+    transition("graph-diving", () => {
+      focus = slug;
+      burst = true;
+      where.textContent = `${d.label || slug} · ${Number(d.hosts || 0).toLocaleString()} hosts${d.findings ? ` · ${d.findings} with findings` : ""}`;
+      bar.hidden = false;
+      container.classList.add("graph-focused");
+      reset();
+      resync();
+    });
+  }
+  function surface() {
+    if (!focus) return;
+    transition("graph-surfacing", () => {
+      focus = null;
+      bar.hidden = true;
+      container.classList.remove("graph-focused");
+      reset();
+      resync();
+    });
+  }
+
   const api = {
     setClustered(value) { clustered = Boolean(value); },
     // fold every host's CVEs into its bubble (the default), or draw each CVE as its own dot
@@ -1079,6 +1212,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       clearInterval(zoomTimer);
       cancelAnimationFrame(floatRaf);
       document.removeEventListener("keydown", onKey);
+      document.removeEventListener("cve:open-cloud", onOpenCloud);
     },
     clear() {
       auto = true;
@@ -1091,13 +1225,26 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     },
     // test and debugging hooks: where a node is on screen, and what is pinned or selected
     inspect() {
-      return { pins: { ...pins }, group: [...group], selected, nodes: graph.getNodesCount() };
+      return { pins: { ...pins }, group: [...group], selected, nodes: graph.getNodesCount(), focus };
+    },
+    // open a cloud by its project, or leave the open one (null)
+    focus(slug) {
+      if (!slug) return surface();
+      const id = `__cloud:${slug}`;
+      if (graph.getNode(id)) dive(id, slug);
     },
     sync(data) {
       const width = container.clientWidth;
       const columns = width < 600 ? 1 : width < 1000 ? 2 : undefined;
       lastData = data;
-      const clouded = cloudProjects(data);
+      if (focus && !data.nodes.some((n) => n.project === focus)) { // the project is gone (moved, deleted): back to the whole graph
+        focus = null;
+        bar.hidden = true;
+        container.classList.remove("graph-focused");
+      }
+      const clouded = focus ? focusProject(data, focus) : cloudProjects(data);
+      const seeding = burst;
+      burst = false;
       const base = clustered ? clusterGraph(clouded, {columns}) : clouded;
       const view = pods ? collapsePods(base, expanded) : base;
       const ids = new Set();
@@ -1107,7 +1254,10 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
         if (!existing) {
           graph.addNode(n.id, n);
           if (pins[n.id]) pin(n.id, pins[n.id][0], pins[n.id][1]); // dropped here last time: stays here
-          else if (n.kind === "cve" && expanded.size) {
+          else if (seeding) { // a cloud just opened: everything starts in a small knot and the layout blows it apart
+            const a = stableAngle(n.id), reach = 6 + (a % 1) * 24;
+            layout.setNodePosition(n.id, Math.cos(a) * reach, Math.sin(a) * reach);
+          } else if (n.kind === "cve" && expanded.size) {
             // a pod just opened: its CVEs start on a ring around their host and fan out from there
             const host = view.edges.find((e) => e.to === n.id && expanded.has(e.from));
             const at = host && layout.getNodePosition(host.from);
@@ -1116,6 +1266,10 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
             layout.setNodePosition(n.id, n.seed_x, n.seed_y);
             if (n.anchored) layout.pinNode(graph.getNode(n.id), true);
           }
+        } else if (n.kind === "cloud" && (existing.data.hosts !== n.hosts || existing.data.findings !== n.findings)) {
+          existing.data = n;
+          const ui = uis.get(n.id);
+          if (ui) refreshCloud(ui, n);
         } else if (n.kind === "subdomain" && (existing.data.heat !== n.heat || existing.data.status !== n.status || existing.data.score !== n.score || JSON.stringify(existing.data.pod) !== JSON.stringify(n.pod) || existing.data.expanded !== n.expanded)) {
           existing.data = n; // a scan finished or found something: the host changes look without a reload
           const ui = uis.get(n.id);
@@ -1165,9 +1319,13 @@ export async function showNodeDetails(box, data) {
   if (data.kind === 'cloud') {
     const heading = Object.assign(document.createElement('strong'), { className: 'cve-id', textContent: data.label });
     const note = Object.assign(document.createElement('p'), { className: 'note',
-      textContent: `${data.hosts} hosts, ${data.findings} with findings. A project this large is drawn as a cloud: only the hosts with findings show, as red dots.` });
-    const link = Object.assign(document.createElement('a'), { className: 'btn sm', href: `/cve/${encodeURIComponent(data.project)}/hosts/`, textContent: 'Every host' });
-    box.append(heading, note, link);
+      textContent: `${data.hosts} hosts, ${data.findings} with findings. A project this large is drawn as a cloud, with only its hosts with findings outside it as red dots. Open it (or double-click it) to see every host.` });
+    const open = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sm', textContent: 'Open the cloud' });
+    open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cve:open-cloud', { detail: data.project })));
+    const link = Object.assign(document.createElement('a'), { className: 'btn ghost sm', href: `/cve/${encodeURIComponent(data.project)}/hosts/`, textContent: 'Every host' });
+    const actions = Object.assign(document.createElement('div'), { className: 'cloud-actions' });
+    actions.append(open, link);
+    box.append(heading, note, actions);
     return;
   }
   if (data.kind === 'project' || data.kind === 'root') {
