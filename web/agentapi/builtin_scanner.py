@@ -56,9 +56,16 @@ def _agent_from_enrollment():
 
 
 def _alive(agent, now):
-    """Whether the built-in Sentinel can still be heard from: its token is not revoked and has not expired."""
+    """Whether the built-in Sentinel can still be heard from: its token is not revoked and has not expired, and the user it belongs to can still act
+    (an Agent whose user was disabled, or has to set up two-step sign-in first, is set aside by ``agent_broker.Eff._problem``, so a scanner owned by
+    such a user is as good as lost and gets a new enrollment under a user who can). A suspended or pending scanner is left alone: that is an
+    administrator's decision, not a loss."""
+    from tenancy.middleware import TenancyMiddleware
     token = agent.token
-    return not token.revoked and (token.expires_at is None or token.expires_at > now)
+    if token.revoked or (token.expires_at is not None and token.expires_at <= now):
+        return False
+    user = token.user
+    return bool(user.is_active) and not TenancyMiddleware.must_enrol_mfa(user)
 
 
 def _write_blob(text):
