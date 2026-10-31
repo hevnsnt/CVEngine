@@ -432,6 +432,8 @@ ROUTES = [
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a SentinelTask: {outcome: done|error, ...the typed result fields for its kind, or error}',
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
+     lambda r, c, task_id, **k: sentinels.read_secret(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at, scope: "project"}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB, with ready-to-run setup steps; &network=external|internal and &profile=full|light (default external, full) choose the .env lines in them',
@@ -461,6 +463,7 @@ ROUTES = [
 NO_TOKEN_ROUTES = ('sentinels/bootstrap',)  # authenticated by their own one-time secret, not a bearer token
 MAX_ID_DIGITS = 18  # an id in a path longer than this cannot exist (the keys are 64-bit)
 READ_ONLY_POSTS =re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
+SELF_GATED_POSTS = re.compile(r'^sentinel/tasks/\d+/secret$')  # refuses a read-only token itself, so that the refusal is audited (sentinel_broker.read_secret)
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
 
 
@@ -497,7 +500,7 @@ def dispatch(request, path):
         if any(len(v) > MAX_ID_DIGITS for k, v in match.groupdict().items() if k.endswith('id') and v.isdigit()):
             return JsonResponse({'error': 'not found'}, status=404)  # no such id: and int() of thousands of digits is refused by Python
         try:
-            if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path):
+            if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path) and not SELF_GATED_POSTS.match(path):
                 raise ApiError(403, 'this token is read only')
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:

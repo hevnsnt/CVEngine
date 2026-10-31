@@ -94,6 +94,17 @@ A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md))
 - **Nuclei runs the server's policy.** On a Sentinel Nuclei skips denial-of-service templates (`-etags dos`) and uses the approved-template snapshot the server runs, fetched from `GET /api/v1/sentinel/template-policy` and its `/bundle`.
 - **Input guard.** Result and heartbeat bodies skip the attack-string scan, since they hold what scanned hosts said. Registration, bootstrap and every address are still checked.
 
+### Secure read of a stored sign-in (built-in scanner only)
+
+A task that needs a stored sign-in carries only a reference to it (`secret_ref`, such as `authcred:12`), never its value. `POST /api/v1/sentinel/tasks/<id>/secret` returns the decrypted credential (`{credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}`, `Cache-Control: no-store`) with these rules:
+
+- Only the built-in scanner may call it, with its own token, for a task assigned to it that is `claimed` or `running` and names a credential. An external Sentinel, a person's token (full or read only) or a Sentinel's token for another agent's task is refused: `403` for a caller that is not the built-in scanner, `404` for a task that is not its own or not signed in.
+- It works once per task. The server wins an atomic update of `secret_read_at` before it decrypts anything, so a second or concurrent read is a `409` and returns nothing.
+- Every call, granted or refused, is written to the audit log as `sentinel.secret.read` with the task, the Sentinel, the credential reference and the outcome. The value is never in the audit log, a task row, an activity line or a log. It is limited to 6 calls a minute per token.
+- A task with a `secret_ref` is never offered to any Sentinel but the built-in one (next task, queue counts and capacity all leave it out for the others).
+
+Not built yet: the scanner client that calls this endpoint, and the dispatch of signed-in work. Nothing sets `secret_ref` today, so signed-in Nuclei passes still run on the server as before.
+
 ## The result contract
 
 What a Sentinel sends back for each task kind is written down once, as a JSON Schema: [`web/agentapi/sentinel_contract.json`](../web/agentapi/sentinel_contract.json) (`contract_version` inside). The Sentinel repo copies the file at the version it targets and validates its own results against it, so a field the server needs is not a thing a client author finds out about from a rejected result. The server still clips and validates everything it receives (`clean_result`); the contract is what a correct client keeps to, so nothing a good Sentinel sends is ever clipped or dropped.
@@ -101,6 +112,8 @@ What a Sentinel sends back for each task kind is written down once, as a JSON Sc
 The tests tie the file to the server: every task kind has a schema, one fixture per kind (`web/tests/fixtures/sentinel_results/`) is valid and passes through the server unchanged, and every list bound, string length and enum in the file equals the broker's own limit, so changing one side alone fails CI. A change a client must follow bumps `contract_version` and is named in the CHANGELOG. This covers results (Sentinel to server); the targets the server hands out are the next piece.
 
 A Sentinel says which contract it speaks: `info.contract_version` (a whole number, 1 to 1000) in its registration and heartbeat. A client from before the field is taken to speak version 1. The file lists `kind_since` (the version that introduced each kind) and `min_supported_contract_version` (the server speaks the current contract and the one before it), and a Sentinel is offered only the kinds its version can run; one older than the server still speaks is offered nothing and shows as `unsupported`. Every register and heartbeat answer carries `contract: {version, min_supported}` so the client can see for itself that it is behind, and the Sentinels list shows each one's `contract_version` and `contract_state` (`current`, `previous`, `unsupported`, `newer` or `unreported`).
+
+Contract version 2 adds one kind, `waf` (wafw00f against the root of one web host): the target is `{host, ip, port, scheme}` and the result is `{outcome, products: [{name, manufacturer?}], generic}`, at most 20 products with names cut to 100 characters. It is dormant groundwork: the server can validate and store a `waf` result (`cveFeed.waf_scan.persist_waf_result`, the same code a local run stores through), but nothing creates `waf` tasks yet and the local scan keeps running as before. `waf` is offered only to a Sentinel that declares `contract_version` 2 or higher and lists `waf` in its capabilities; a Sentinel that declares 1, or nothing, is never offered it even if it lists it. The kinds a version-1 Sentinel can run are unchanged, and `min_supported_contract_version` stays 1, so a Sentinel declaring 1 now shows as `previous`.
 
 ## Troubleshooting
 

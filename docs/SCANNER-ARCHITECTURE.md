@@ -45,7 +45,7 @@ rough sizes of the work.
 |---|---|---|
 | `cveFeed/fullscan.py` (380) | nmap, all 65,535 ports of one IP | `nmap_full` |
 | `cveFeed/probes.py` (821, lines near 223 and 599) | nmap NSE scripts | part of the probe kinds |
-| `cveFeed/waf_scan.py` (146) | wafw00f | `waf` |
+| `cveFeed/waf_scan.py` (146) | wafw00f | `waf` (contract-ready since contract version 2, not wired: no dispatch, the local scan still runs) |
 | `cveFeed/node2shell_scan.py` (146) | vendored detector | `node2shell` |
 | `cveFeed/rdp_shot.py` (269) | xfreerdp screenshot | `rdp_shot` returns a blob; the AI reading stays on the server |
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` |
@@ -110,6 +110,13 @@ which send nothing to the target and need no vantage point.
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
+  - *Built (server side, dormant):* `POST /api/v1/sentinel/tasks/<id>/secret` (`agentapi.sentinel_broker.read_secret`). The task
+    carries `secret_ref` (an `AuthCredential` reference) and `secret_read_at`. Only the built-in agent, for its own claimed or
+    running task, may call it. An atomic update of `secret_read_at` is won before anything is decrypted, so it answers once
+    (409 after). Every call is audited as `sentinel.secret.read`. The broker leaves a `secret_ref` task out of next-task, queue and
+    capacity for every other Sentinel. Rate limited.
+  - *Not built:* the scanner client that calls it, and any dispatch of signed-in work (nothing sets `secret_ref`; the dispatch
+    wrappers still keep `secret_file` passes on the server).
 - **Updates**: the release manifest pins `(server tag, scanner digest)` and the updater swaps the pair with rollback. The
   built-in never updates itself. The version check compares against the digest the server expects, not GitHub's head.
 - **Contract**: the file gains a `targets` half (server to scanner) next to `results`, a `contract_version` declared at
@@ -120,7 +127,7 @@ which send nothing to the target and need no vantage point.
 
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
-2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done.
+2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done. Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`); it is dormant, offered only to a Sentinel that declares 2, and no stage dispatches it.
 3. The built-in scanner service in compose, enrolled automatically, shown in system status.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing
@@ -164,10 +171,14 @@ Sentinel image (`CVENGINE_SCANNER_IMAGE`), the client re-reading the blob after 
 
 Unset (or `all`), every kind may still run on this server when no Sentinel takes it: nothing changes. `none` or a comma list of kinds
 (`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
-`resources.ScannerUnavailable` (a `MemoryBusy`, so stages that already treat that as "not the target's failure, it stays due" wait
-correctly: testssl, UDP and WPScan do today) where it used to run the tool locally. The nmap, naabu and nuclei stages record a
-failure for it as they do for any error until their handlers are written, so a kind is taken off the list only in the same
-change that gives its stage a handler. Signed-in nuclei passes still run here by design until the secure read exists.
+`resources.ScannerUnavailable` (a `MemoryBusy`) where it used to run the tool locally. Every stage that can see it waits: it records
+nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released), the stage is not marked
+failed, and its activity line says "no scanner could take this work (<kind>)", never that memory was short. That covers the nmap
+fast scan, the naabu sweep (nmap keeps its default ports), the nuclei light, targeted and weekly deep passes, WPScan, testssl and
+UDP. Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
+signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
+for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
+(`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes still run here by design until the secure read exists.
 
 
 ### The "scanner offline" reading

@@ -17,7 +17,10 @@ class ContractFunctionTests(SimpleTestCase):
         self.assertLessEqual(contract.min_supported(), contract.version())
 
     def test_an_unreported_version_is_taken_as_one(self):
-        self.assertTrue(all(contract.can_run(None, kind) for kind in SentinelTask.KINDS))
+        self.assertTrue(all(contract.can_run(None, kind) for kind in SentinelTask.KINDS if contract.kind_since(kind) == 1))
+        self.assertEqual({kind for kind in SentinelTask.KINDS if not contract.can_run(None, kind)}, {'waf'})  # the one kind newer than version 1
+        self.assertTrue(all(contract.can_run(1, kind) == contract.can_run(None, kind) for kind in SentinelTask.KINDS))
+        self.assertTrue(all(contract.can_run(2, kind) for kind in SentinelTask.KINDS))
         self.assertEqual(contract.state(None), 'unreported')
 
     def test_a_kind_newer_than_what_the_sentinel_speaks_is_not_offered(self):
@@ -83,6 +86,31 @@ class ReportingTests(TestCase):
             caps = broker.effective_capabilities(agent)
         self.assertNotIn('nmap', caps)
         self.assertIn('naabu', caps)
+
+    def waf_agent(self, **info):
+        status, out = register_sentinel(self.tokens['alice'], capabilities=['nmap', 'waf'], **({'info': info} if info else {}))
+        self.assertIn(status, (200, 201), out)
+        agent = Agent.objects.get(pk=out['id'])
+        self.assertIn('waf', agent.capabilities)  # it said so; the question is whether the server believes it
+        return agent
+
+    def test_waf_is_offered_only_to_a_sentinel_that_declares_contract_version_two_and_lists_it(self):
+        self.assertEqual(contract.kind_since('waf'), 2)
+        for info in ({}, {'contract_version': 1}):
+            agent = self.waf_agent(**info)
+            caps = broker.effective_capabilities(agent)
+            self.assertNotIn('waf', caps, info)
+            self.assertIn('nmap', caps, info)
+            self.assertNotIn('waf', broker.effective(agent).caps, info)
+            self.assertFalse(contract.can_run(agent.info.get('contract_version'), 'waf'))
+        agent = self.waf_agent(contract_version=2)
+        self.assertEqual(broker.effective_capabilities(agent) & {'nmap', 'waf'}, {'nmap', 'waf'})
+        self.assertIn('waf', broker.effective(agent).caps)
+
+    def test_a_version_two_sentinel_that_does_not_list_waf_is_not_offered_it(self):
+        status, out = register_sentinel(self.tokens['alice'], info={'contract_version': 2})
+        self.assertIn(status, (200, 201), out)
+        self.assertNotIn('waf', broker.effective_capabilities(Agent.objects.get(pk=out['id'])))
 
     def test_a_sentinel_that_never_declared_a_version_keeps_working(self):
         agent, _ = self.register()

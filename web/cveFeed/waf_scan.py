@@ -25,6 +25,8 @@ DEFAULT_MAX_HOSTS = 25
 DEFAULT_TIMEOUT = 60
 WORKERS = 4
 GENERIC = {'generic', 'unknown', 'none', ''}
+NAME_LEN = 100  # a product or manufacturer name is cut to this, here and in the Sentinel result contract (agentapi/sentinel_contract.json, the ``waf`` kind)
+MAX_PRODUCTS = 20  # the most products one host's result names; the contract's list bound (wafw00f names a handful at the very most)
 
 
 def enabled():
@@ -65,6 +67,19 @@ def web_sites(scan):
     return sites
 
 
+def _named(pairs):
+    """``[{'firewall', 'manufacturer'}]`` from ``(name, manufacturer)`` pairs: names stripped and cut, a generic or empty name and a repeat (any case)
+    dropped. The one rule for a product, whether wafw00f's own output or a Sentinel's result (``persist_waf_result``) names it. Pure."""
+    found, seen = [], set()
+    for name, manufacturer in pairs:
+        product = str(name or '').strip()[:NAME_LEN]
+        if product.lower() in GENERIC or product.lower() in seen:
+            continue
+        seen.add(product.lower())
+        found.append({'firewall': product, 'manufacturer': str(manufacturer or '').strip()[:NAME_LEN]})
+    return found
+
+
 def parse_output(text):
     """The products wafw00f named, ``[{'firewall', 'manufacturer'}]``, from its JSON output. A generic detection (something blocks, no product
     known) and "no WAF" name nothing. Pure; bad input gives an empty list."""
@@ -72,16 +87,8 @@ def parse_output(text):
         rows = json.loads(text or '[]')
     except ValueError:
         return []
-    found, seen = [], set()
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict) or not row.get('detected'):
-            continue
-        product = str(row.get('firewall') or '').strip()[:100]
-        if product.lower() in GENERIC or product.lower() in seen:
-            continue
-        seen.add(product.lower())
-        found.append({'firewall': product, 'manufacturer': str(row.get('manufacturer') or '').strip()[:100]})
-    return found
+    return _named((row.get('firewall'), row.get('manufacturer')) for row in (rows if isinstance(rows, list) else [])
+                  if isinstance(row, dict) and row.get('detected'))
 
 
 def run_wafw00f(url, timeout_s=None):
@@ -108,11 +115,38 @@ def run_wafw00f(url, timeout_s=None):
     return {'products': products, 'generic': generic and not products, 'error': ''}
 
 
+def store_products(project, sub, products, scan=None):
+    """What one host's finished fingerprint leaves behind, whoever ran wafw00f (this server or a Sentinel): the host is recorded in the service ledger
+    (so it is not asked again inside the window) and each product becomes a technology of it. ``products`` is ``[{'firewall', ...}]`` as
+    ``parse_output`` makes it. Returns how many products were named. Never called for a run that failed: that host is asked again next scan."""
+    from cveFeed import ledger
+    from startScan.models import Technology
+    ledger.record(SERVICE, [sub.name], project.id, scan)
+    for product in products:
+        tech = Technology.objects.filter(name=product['firewall']).order_by('id').first() or Technology.objects.create(name=product['firewall'])
+        sub.technologies.add(tech)
+    return len(products)
+
+
+def persist_waf_result(project, host, result, scan=None):
+    """Store a Sentinel's ``waf`` result (``agentapi.sentinel_broker.clean_result``, contract kind ``waf``) for ``host`` (the ``Subdomain`` the task was
+    about) exactly as a local run would: the same product rules (``_named``) and the same storing function (``store_products``), so a product
+    is the same technology row whoever found it. Nothing calls this yet: the kind is dormant (docs/SCANNER-ARCHITECTURE.md). A result that is not
+    ``done`` stores nothing and records nothing. Returns ``{'named': n, 'generic': bool, 'recorded': bool}``."""
+    if not isinstance(result, dict) or result.get('outcome') != 'done':
+        return {'named': 0, 'generic': False, 'recorded': False}
+    if host.target_domain_id and host.target_domain.project_id != project.id:
+        raise ValueError('the host is not in this project')
+    products = _named((p.get('name'), p.get('manufacturer')) for p in (result.get('products') or [])[:MAX_PRODUCTS] if isinstance(p, dict))
+    named = store_products(project, host, products, scan)
+    return {'named': named, 'generic': result.get('generic') is True and not products, 'recorded': True}
+
+
 def run_for_scan(scan_id, runner=run_wafw00f, force=False):
     """Fingerprint the WAF in front of every web host this scan found, bounded and TTL-gated. Each product is stored as a technology of the host.
     Returns a summary dict; never raises."""
     from cveFeed import activity, ledger
-    from startScan.models import ScanHistory, Technology
+    from startScan.models import ScanHistory
     if not enabled():
         return {'checked': 0, 'skipped': 'disabled'}
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -133,13 +167,9 @@ def run_for_scan(scan_id, runner=run_wafw00f, force=False):
         if result.get('error'):
             errors += 1
             continue  # not recorded: the host is asked again on the next scan
-        ledger.record(SERVICE, [sub.name], project.id, scan)
         if result.get('generic'):
             generic += 1
-        for product in result.get('products') or []:
-            tech = Technology.objects.filter(name=product['firewall']).order_by('id').first() or Technology.objects.create(name=product['firewall'])
-            sub.technologies.add(tech)
-            named += 1
+        named += store_products(project, sub, result.get('products') or [], scan)
     activity.settle(running, 'done', message=(
         f'wafw00f for {domain.name}: {named} firewall(s) named on {len(todo)} host(s)'
         + (f', {generic} blocked without a known product' if generic else '') + (f', {errors} failed' if errors else '')))

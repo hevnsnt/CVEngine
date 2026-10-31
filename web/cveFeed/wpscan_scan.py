@@ -677,9 +677,13 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
     real_runner = runner is None
+    unavailable = None
     if real_runner:
         from agentapi import sentinel_dispatch
-        runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan, internal=internal)
+        try:
+            runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan, internal=internal)
+        except resources.ScannerUnavailable as exc:  # no scanner can take it and WPScan may not run here: said below, once there is a site to scan
+            unavailable = exc
     allowed, _ips, _ports = _scan_targets(scan)
     subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports'))
     by_name = {s.name.lower(): s for s in subs}
@@ -715,11 +719,19 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     if not todo:
         summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
         return summary
+    if unavailable is not None:  # nothing is recorded in the ledger (the sites stay due) and it is not a failure: the next scan asks again
+        message = f'no scanner could take this work ({unavailable.kind}); the sites stay due until one can'
+        logger.warning('WPScan of scan %s is waiting for a scanner: %s', scan_id, unavailable)
+        for host in todo:
+            record_state(project, domain.id, host, 'waiting', f'no scanner could take this work ({unavailable.kind}); it goes first next time')
+        activity.log('run_check', f'WPScan for {domain.name} is waiting: {message}', project=project, scan_id=scan.id)
+        return {**summary, 'skipped': message}
     token = api_token(domain.project)
     running = activity.log('run_check', f'WPScan is checking {len(todo)} WordPress site(s) of {domain.name}'
                            + ('' if token else ' (no API token: versions, plugins and exposures only)'),
                            project=project, status='running', scan_id=scan.id)
     errors, scanned, token_ok = [], [], bool(token)
+    no_scanner = None
     started = time.monotonic()
     for index, host in enumerate(todo):
         if time.monotonic() - started > stage_seconds():
@@ -750,8 +762,10 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
             errors.append(f'{host}: blocked by the edge')
             continue
         except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped, or no memory for it: not the site's fault, and nothing after it can run
+            no_scanner = exc if isinstance(exc, resources.ScannerUnavailable) else None  # a scanner that is offline is not memory pressure
             for waiting in todo[index:]:
-                record_state(project, domain.id, waiting, 'waiting', 'the scan was stopped or memory was short; it goes first next time')
+                record_state(project, domain.id, waiting, 'waiting', (f'no scanner could take this work ({no_scanner.kind}); it goes first next time' if no_scanner
+                                                                       else 'the scan was stopped or memory was short; it goes first next time'))
                 if not isinstance(exc, resources.ScanAborted):  # a person stopped the scan: nothing is queued behind them
                     deferred.append(waiting)
             break
@@ -787,7 +801,8 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
     message = (f'WPScan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
                + ('; the API token budget ran out, so later sites were scanned without vulnerability data' if token and not token_ok else '')
-               + (f'; {len(errors)} problem(s): {errors[0]}' if errors else ''))
+               + (f'; {len(errors)} problem(s): {errors[0]}' if errors else '')
+               + (f'; no scanner could take the remaining sites ({no_scanner.kind}), so they stay due until one can' if no_scanner else ''))
     activity.settle(running, 'failed' if failed_all else 'done', message=message, **summary)
     if failed_all:
         summary['error'] = errors[0][:290]

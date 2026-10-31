@@ -392,6 +392,11 @@ def reuse_findings(scan, project, targets):
     return copied, len(copied_hosts)
 
 
+def _waiting_message(exc, left):
+    """What a nuclei stage says when no scanner could take its work: it names the scanner kind, never memory, and that the targets stay due."""
+    return f'no scanner could take this work ({exc.kind}); the {left} target{"s" if left != 1 else ""} stay{"" if left != 1 else "s"} due until one can'
+
+
 def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
     """Run nuclei over the scan's discovered assets and persist every result. Returns a summary dict.
     ``tags`` narrows the template set to a focused pass (see cveFeed.nuclei_templates); omitted, this
@@ -401,7 +406,7 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
     ``severities`` narrows what is reported."""
     from cveFeed import activity, ledger
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import MemoryKill
+    from reNgine.resources import MemoryKill, ScannerUnavailable
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
     from reNgine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import ScanHistory, Subdomain
@@ -496,6 +501,11 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
                     os.unlink(path)
                 ledger.record(service, chunk, project, scan)
                 scanned += chunk
+        except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
+            logger.warning('nuclei for scan %s is waiting for a scanner: %s', scan_id, exc)
+            message = _waiting_message(exc, len([t for t in won_targets if t not in set(scanned)]))
+            activity.settle(running, 'done', message=f'Nuclei for {domain.name} is waiting: {message}')
+            return {'targets': len(targets), 'findings': new, 'reused': reused, 'skipped': message, **counts}
         except Exception as exc:  # noqa: BLE001
             logger.exception('nuclei failed for scan %s', scan_id)
             ledger.record(service, [t for t in won_targets if t not in set(scanned)], project, scan, 'failed')
@@ -576,7 +586,7 @@ def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
     and the AI see them. Hosts this project's light pass covered inside the TTL are not scanned again: they take the
     technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
     from cveFeed import activity, ledger
-    from reNgine.resources import MemoryKill
+    from reNgine.resources import MemoryKill, ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain, Technology
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
@@ -636,6 +646,12 @@ def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
                     flush_links()  # what a killed chunk already saw is kept
                 ledger.record(service, chunk, project, scan)
                 scanned += chunk
+        except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
+            logger.warning('nuclei technology pass for scan %s is waiting for a scanner: %s', scan_id, exc)
+            message = _waiting_message(exc, len([t for t in won_targets if t not in set(scanned)]))
+            activity.settle(running, 'done', message=f'Nuclei technology pass for {domain.name} is waiting: {message}')
+            return {'targets': len(targets), 'technologies': sum(len(v) for v in found.values()), 'hosts': len(found),
+                    'techs': {h: sorted(v) for h, v in found.items()}, 'reused': reused, 'skipped': message}
         except Exception as exc:  # noqa: BLE001 - includes MemoryKill: the pass is best effort, the pipeline carries on
             logger.exception('nuclei technology pass failed for scan %s', scan_id)
             ledger.record(service, [t for t in won_targets if t not in set(scanned)], project, scan, 'failed')
@@ -764,9 +780,12 @@ def run_targeted_nuclei(scan_id, stream=stream_nuclei, provider=False, light_tec
             logger.exception('targeted nuclei group failed for scan %s', scan_id)
             errors.append(str(exc))
             continue
-        result['targets'] += out.get('targets', 0)
         result['findings'] += out.get('findings', 0)
         result['reused'] += out.get('reused', 0)
+        if out.get('skipped'):  # no scanner could take this group: it was not scanned and stays due
+            result['skipped'] = out['skipped']
+            continue
+        result['targets'] += out.get('targets', 0)
         if out.get('error'):
             errors.append(out['error'])
     try:

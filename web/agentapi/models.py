@@ -96,7 +96,7 @@ class SentinelTask(models.Model):
     """One unit of scan-stage work: run this tool against this server-constructed target, leased to a ``kind='scanner'`` Agent (a
     Sentinel) until it reports back. ``target`` and ``result`` are each a small typed, clipped record (see
     ``agentapi.sentinel_broker.TARGET_SCHEMA`` / ``clean_result``); neither is ever built from, or interpreted as, a command."""
-    KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'discover')
+    KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'discover', 'waf')
     STATUSES = ('queued', 'claimed', 'running', 'done', 'failed', 'expired')
 
     project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')
@@ -117,6 +117,11 @@ class SentinelTask(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     result = models.JSONField(default=dict, blank=True)
     error = models.CharField(max_length=300, blank=True, default='')
+    # Signed-in work (docs/SCANNER-ARCHITECTURE.md, decision 4). ``secret_ref`` names the stored credential the task needs ("authcred:<id>", an
+    # ``AuthCredential``), never its value: a task that carries one is offered only to the built-in scanner, which redeems it once through
+    # ``sentinel_broker.read_secret``. ``secret_read_at`` is the compare-and-set that makes that read single use. Nothing sets ``secret_ref`` yet.
+    secret_ref = models.CharField(max_length=40, null=True, blank=True)
+    secret_read_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

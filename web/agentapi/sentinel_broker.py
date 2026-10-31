@@ -17,6 +17,7 @@ import base64
 import binascii
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import threading
@@ -24,9 +25,11 @@ import time
 from contextlib import contextmanager
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Avg, Count, DurationField, F, Q, Value
 from django.db.models.functions import Coalesce, Greatest
+from django.http import JsonResponse
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
@@ -41,6 +44,8 @@ from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment,
 from agentapi.services import ApiError, AssetFilter
 from tenancy import audit, roles
 
+logger = logging.getLogger(__name__)
+
 # Leasing timing, the live window, rate limits and MAX_WAIT are all agent_broker's: a Sentinel is an Agent like any other, and
 # reusing the constants here means a change to one never drifts from the other.
 LIVE_WINDOW = broker.LIVE_WINDOW
@@ -51,7 +56,9 @@ CANDIDATES = broker.CANDIDATES
 INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed inside a private network; the only kind that may claim work for an address of a declared internal range
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
-         'policy': (60, 60), 'bundle': (12, 60)}  # the template policy is a cheap read, the bundle a download of several MiB
+         'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
+         'secret': (6, 60)}  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
+SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
 SENTINEL_TOKEN_RENEW_BELOW = timedelta(days=60)  # ...and a heartbeat renews it only once less than this is left, so renewal is one write a month, not one a minute
 ENROLLMENT_TTL = timedelta(minutes=30)  # long enough to copy the token into a Sentinel's setup, short enough to limit exposure if it leaks
@@ -620,6 +627,14 @@ class SentinelEff:
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
         self._internal_nets = {}
+        self._builtin = None
+
+    @property
+    def builtin(self):
+        """Whether this is the install's own scanner (``builtin_scanner.builtin_agent``): the only Sentinel signed-in work may go to."""
+        if self._builtin is None:
+            self._builtin = is_builtin(self.agent)
+        return self._builtin
 
     @property
     def live(self):
@@ -632,6 +647,8 @@ class SentinelEff:
             return 'scope', "the target is outside this Sentinel's scope"
         if task.kind not in self.caps:
             return 'capability', task.kind
+        if task.secret_ref and not self.builtin:
+            return 'capability', SIGNED_IN  # signed-in work is the built-in scanner's alone: its stored credential never reaches another Sentinel
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         return None
@@ -659,6 +676,19 @@ def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
 
 
+def builtin_pk():
+    """The id of the built-in scanner's Agent, or ``None`` while there is none."""
+    agent = builtin_scanner.builtin_agent()
+    return agent.pk if agent is not None else None
+
+
+def is_builtin(agent):
+    """Whether ``agent`` is the built-in scanner. The only thing that makes an Agent one is the server-minted built-in enrollment it redeemed, so a
+    Sentinel cannot claim to be it by its name, scope or capabilities."""
+    pk = builtin_pk()
+    return pk is not None and pk == agent.pk
+
+
 def _covers(project_slug, org_slug):
     """The SQL pre-filter for "this Sentinel's declared scope may reach this project": named directly, via its organization,
     or instance-wide. ``SentinelEff`` then applies the rest (the owner's reach, the administrator's limits)."""
@@ -673,15 +703,18 @@ def _declares_cover(scope, project_slug, org_slug):
     return bool(scope.get('instance') or project_slug in (scope.get('projects') or []) or (org_slug and org_slug in (scope.get('orgs') or [])))
 
 
-def eligible_sentinels(project, kind, now=None, internal=False, live_only=False):
+def eligible_sentinels(project, kind, now=None, internal=False, live_only=False, builtin_only=False):
     """Live, active Sentinels whose scope covers ``project`` and who declare capability ``kind``: candidates for dispatch, or
     to claim a queued task. Found in SQL first (same pattern as ``agent_broker._effs_for``), so a call never builds the
     rights of every Sentinel on the instance. ``internal`` keeps only Sentinels that declare ``network:internal``: the work is
     for an address inside a private network, which no other Sentinel can reach. ``live_only`` leaves out the Sentinels not heard from within
-    the live window already in SQL, so a caller that only wants those never builds the rights of the silent ones."""
+    the live window already in SQL, so a caller that only wants those never builds the rights of the silent ones. ``builtin_only`` keeps only the
+    built-in scanner: the candidates for signed-in work, which no other Sentinel may be offered."""
     now = now or timezone.now()
     agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                   token__revoked=False)
+    if builtin_only:
+        agents = agents.filter(pk=builtin_pk() or 0)
     if live_only:
         agents = agents.filter(last_seen__gte=now - LIVE_WINDOW)
     agents = agents.select_related('token__user')[:CANDIDATES]
@@ -751,14 +784,19 @@ def queued_ttl(kind):
     return timedelta(seconds=max(sentinel_dispatch._queue_timeout(kind), sentinel_dispatch._claim_timeout())) + QUEUE_GRACE
 
 
-def capacity_state(project, kind, internal=False, now=None, exclude=None):
+def capacity_state(project, kind, internal=False, now=None, exclude=None, builtin_only=False):
     """``{'state': 'none'|'free'|'busy', 'live': n, 'slots': n, 'free': n}`` for ``kind`` work in ``project``: ``none`` when no live, eligible Sentinel
     exists (the work cannot go to one), ``free`` when at least one has a slot to take it now, ``busy`` when live eligible Sentinels exist and every
     one is at its concurrency limit (the work should wait for a slot, not run somewhere else). A Sentinel's slots are its ``max_concurrent``, and
     a slot is in use while it holds a task (claimed or running), whatever the kind. A task already queued for ``kind`` in this project is promised
-    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, a dispatcher's own)."""
+    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, a dispatcher's own). Work that needs a
+    stored credential asks with ``builtin_only``: only the built-in scanner counts, and every queued task of the kind (signed-in or not) is waiting for
+    its slots; for any other work the signed-in tasks in the queue are not counted, as no one else's slot will take them."""
     now = now or timezone.now()
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+    if builtin_only:
+        own = builtin_pk()
+        live = [e for e in live if e.agent.pk == own]
     if not live:
         return {'state': 'none', 'live': 0, 'slots': 0, 'free': 0}
     held = dict(SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES)
@@ -767,6 +805,8 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None):
     free = sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live)
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
+        if not builtin_only:
+            waiting = waiting.filter(secret_ref__isnull=True)
         if exclude is not None:
             waiting = waiting.exclude(pk=exclude)
         free = max(0, free - waiting.count())
@@ -805,12 +845,12 @@ def waiting_tasks(now=None):
     return SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS)).count()
 
 
-def any_scanner_for(project, kind=None, internal=False):
+def any_scanner_for(project, kind=None, internal=False, builtin_only=False):
     """Whether at least one live, eligible Sentinel exists for ``kind`` work in ``project``, **busy or not**: a cheap existence check so a project
     with no Sentinels pays for nothing beyond this one query, and the scan pipeline behaves exactly as it did before Sentinels existed (see
     ``agentapi.sentinel_dispatch``, which gates every dispatch attempt on this). A Sentinel at its concurrency limit still counts: the work
-    waits for a slot there (``sentinel_dispatch`` queues it, with its own wait budget) instead of silently running somewhere else."""
-    return capacity_state(project, kind, internal)['state'] != 'none'
+    waits for a slot there (``sentinel_dispatch`` queues it, with its own wait budget) instead of silently running somewhere else. ``builtin_only``: only the built-in scanner counts (work that needs a stored credential)."""
+    return capacity_state(project, kind, internal, builtin_only=builtin_only)['state'] != 'none'
 
 
 def slot_usage(agent_ids):
@@ -827,9 +867,10 @@ def queued_for(agent, now=None):
     eff = effective(agent, now or timezone.now())
     if eff.problem:
         return {}
-    rows = (SentinelTask.objects.filter(status='queued', kind__in=eff.caps, project__slug__in=eff.projects)
-            .values_list('kind').annotate(n=Count('id')))
-    return {kind: n for kind, n in rows}
+    queued = SentinelTask.objects.filter(status='queued', kind__in=eff.caps, project__slug__in=eff.projects)
+    if not eff.builtin:
+        queued = queued.filter(secret_ref__isnull=True)  # signed-in work is not this Sentinel's to take
+    return {kind: n for kind, n in queued.values_list('kind').annotate(n=Count('id'))}
 
 
 # --- leases (mirrors agent_broker's shape, for SentinelTask) ------------------------------------------------
@@ -943,8 +984,10 @@ def prune_enrollments(now=None):
 # --- claiming ------------------------------------------------------------------------------------------
 
 def _claimable(eff, kinds, now):
-    return SentinelTask.objects.filter(status='queued', kind__in=kinds & eff.caps, project__slug__in=eff.projects) \
-        .select_related('project__org').order_by('-priority', 'created_at', 'id')
+    queued = SentinelTask.objects.filter(status='queued', kind__in=kinds & eff.caps, project__slug__in=eff.projects)
+    if not eff.builtin:
+        queued = queued.filter(secret_ref__isnull=True)  # a task that needs a stored credential is never offered to any Sentinel but the built-in one
+    return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
 def _updating(agent, now):
@@ -978,6 +1021,8 @@ def _try_claim(agent, kinds, now):
                 continue
             if INTERNAL_CAPABILITY not in eff.caps and eff._internal(task):
                 continue  # only a Sentinel inside the private network can reach it
+            if task.secret_ref and not eff.builtin:
+                continue  # (the query already left it out; this is the same rule where the task is actually taken)
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
@@ -1062,6 +1107,137 @@ def get_task(ctx, task_id):
     if task is None:
         raise ApiError(404, 'task not found')
     return task_payload(task)
+
+
+# --- signed-in work: the one secure read of a stored credential ---------------------------------------------
+
+SECRET_REF_PREFIX = 'authcred:'  # a ``SentinelTask.secret_ref`` names an ``AuthCredential`` (cveFeed.models) this way: a reference, never a value
+SECRET_ACTIVE = ('claimed', 'running')
+
+
+def secret_ref_for(credential_id):
+    """The ``SentinelTask.secret_ref`` that names the stored credential ``credential_id`` (a reference to it, not any of its content)."""
+    return f'{SECRET_REF_PREFIX}{int(credential_id)}'
+
+
+def _credential_id(ref):
+    tail = ref[len(SECRET_REF_PREFIX):] if isinstance(ref, str) and ref.startswith(SECRET_REF_PREFIX) else ''
+    return int(tail) if tail.isdigit() and len(tail) <= 18 else None
+
+
+def _secret_audit(ctx, outcome, task_id, agent_id=None, ref=None, org=None):
+    """One ``sentinel.secret.read`` row for every call: who asked, for which task and credential reference, and how it ended. Never the secret."""
+    audit.record(ctx.user, 'sentinel.secret.read', f'sentinel task #{task_id}', org=org, task_id=task_id, agent_id=agent_id, secret_ref=ref,
+                 outcome=outcome)
+
+
+def _credential_row(credential_id):
+    from cveFeed.models import AuthCredential
+    return AuthCredential.objects.filter(pk=credential_id).values('project_id', 'expires_at').first()
+
+
+def _stored_credential(credential_id, task, now):
+    """``(refusal status, reason)`` when the credential a task names cannot be read for it, else ``None``. Looks at the row's plain columns only:
+    nothing is decrypted before ``read_secret`` has won the single-use update."""
+    row = _credential_row(credential_id)
+    if row is None:
+        return 410, 'the stored credential no longer exists'
+    if row['project_id'] != task.project_id:
+        return 403, "the stored credential belongs to another project than the task's"
+    if row['expires_at'] is not None and row['expires_at'] <= now:
+        return 410, 'the stored credential has expired'
+    return None
+
+
+def _credential_payload(credential_id, project_id, now):
+    """The decrypted credential of one task, in the shape the authenticated nuclei pass consumes (``cveFeed.auth_checks.secrets_document``): the header
+    pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``reNgine.crypto_fields``, the field-key ring)."""
+    from cveFeed import auth_checks
+    from cveFeed.models import AuthCredential
+    cred = AuthCredential.objects.select_related('domain').filter(pk=credential_id, project_id=project_id).first()
+    if cred is None or auth_checks.is_expired(cred, now):
+        return None
+    headers = [list(pair) for pair in auth_checks.stored_headers(cred)]
+    cookie = auth_checks.stored_cookie(cred)
+    if not headers and not cookie:  # nothing came back: the key changed since it was stored, or it was cleared
+        return None
+    AuthCredential.objects.filter(pk=cred.pk).update(last_used_at=now)
+    return {'headers': headers, 'cookie': cookie, 'target': cred.domain.name, 'host': cred.host or None, 'origins': list(cred.origins or []),
+            'allow_untrusted_certificate': bool(cred.allow_untrusted_certificate), 'expires_at': svc._iso(cred.expires_at),
+            'revision': auth_checks.revision(cred)}
+
+
+def read_secret(ctx, task_id):
+    """``POST sentinel/tasks/<id>/secret``: the decrypted stored credential of one signed-in task, to the built-in scanner that holds it, exactly once.
+
+    Only the built-in scanner (``builtin_scanner.builtin_agent``) with its own sentinel-scope token may call it, for a task assigned to it, claimed
+    or running, that names a stored credential (``secret_ref``). Any other caller (an external Sentinel, a person's token, a read-only token) is a 403,
+    and a task that is not the built-in scanner's own, or not signed-in, is a 404, as for every other Sentinel endpoint. The read is redeemed by an atomic
+    compare-and-set on ``secret_read_at`` (as ``consume_enrollment`` redeems an enrollment), and the credential is decrypted only after that update was
+    won, so a second read, or a concurrent one that lost, is a 409 and never decrypts anything. Every call is audited (``sentinel.secret.read``) with
+    the task, the agent, the credential reference and the outcome, and never the value; the value is in no row, message or log, only the response.
+    """
+    task_pk = _int(task_id)
+    token = ctx.token
+    seen = {'agent_id': None, 'ref': None, 'org': None}
+
+    def refuse(status, reason, message):
+        _secret_audit(ctx, f'refused: {reason}', task_pk, **seen)
+        raise ApiError(status, message)
+
+    if token is None:
+        refuse(403, 'no token', 'this is for the built-in scanner only')
+    try:
+        _limit(token, 'secret')
+    except ApiError as exc:
+        if exc.status == 429 and cache.add(f'agentapi:secret-limited:{token.key_hash[:16]}', 1, RATES['secret'][1]):  # once per window: a flood cannot flood the audit log
+            _secret_audit(ctx, 'refused: rate limit', task_pk)
+        raise
+    if token.read_only:
+        refuse(403, 'read-only token', 'this is for the built-in scanner only')
+    if token.scope != SCOPE_SENTINEL:
+        refuse(403, 'not a sentinel token', 'this is for the built-in scanner only')
+    agent = Agent.objects.filter(token=token).select_related('token__user').first()
+    if agent is None or agent.kind != 'scanner':
+        refuse(403, 'the token has no Sentinel', 'this is for the built-in scanner only')
+    seen['agent_id'] = agent.pk
+    if not is_builtin(agent):
+        refuse(403, 'not the built-in scanner', 'this is for the built-in scanner only')
+    now = timezone.now()
+    eff = effective(agent, now)
+    if eff.problem:
+        refuse(403, f'the built-in scanner cannot take work: {eff.problem}', 'this Sentinel cannot be given work now')
+    task = SentinelTask.objects.select_related('project').filter(pk=task_pk).first()
+    if task is not None:
+        seen['org'] = task.project.org_id
+    if task is None or task.agent_id != agent.pk or not task.secret_ref:
+        refuse(404, 'no such task, not its own, or not signed-in', 'task not found')
+    seen['ref'] = task.secret_ref
+    if task.status not in SECRET_ACTIVE:
+        refuse(409, f'the task is {task.status}', 'the task is not in progress on this Sentinel')
+    if eff.refusal(task):
+        refuse(403, "the task is outside the built-in scanner's rights", 'this Sentinel does not cover that task')
+    credential_id = _credential_id(task.secret_ref)
+    problem = _stored_credential(credential_id, task, now) if credential_id is not None else (410, 'the task names no readable credential')
+    if problem:
+        refuse(problem[0], problem[1], 'the stored credential is not available for this task')
+    # The single use: whoever moves secret_read_at from null wins, whatever else is happening. Nothing has been decrypted yet.
+    won = SentinelTask.objects.filter(pk=task.pk, agent=agent, secret_ref=task.secret_ref, secret_read_at__isnull=True,
+                                      status__in=SECRET_ACTIVE).update(secret_read_at=now)
+    if not won:
+        refuse(409, 'already read, or no longer held by this Sentinel', 'the stored credential was already read for this task')
+    try:
+        credential = _credential_payload(credential_id, task.project_id, now)
+    except Exception as exc:  # noqa: BLE001 - nothing of the credential may reach a log or a message: the type is all that is kept
+        credential = None
+        logger.error('could not read the stored credential for sentinel task %s (%s)', task.pk, type(exc).__name__)
+    if credential is None:
+        refuse(410, 'the stored credential could not be read', 'the stored credential is not available for this task')
+    _secret_audit(ctx, 'granted', task.pk, agent_id=agent.pk, ref=task.secret_ref, org=seen['org'])
+    response = JsonResponse({'credential': credential, 'task_id': task.pk})
+    response['Cache-Control'] = 'no-store'
+    response['Pragma'] = 'no-cache'
+    return response
 
 
 # --- results: typed, clipped, never a command (mirrors agent_broker.clean_result) --------------------------
@@ -1302,10 +1478,31 @@ def _clean_openvas_result(body):
             'partial': body.get('partial') is True}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
+def _clean_waf_result(body):
+    """A Sentinel's wafw00f run on one web host, reshaped into what ``cveFeed.waf_scan.persist_waf_result`` stores: the products it named (``name``,
+    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else wafw00f prints is kept. The
+    bounds are ``cveFeed.waf_scan``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
+    left for ``persist_waf_result`` to drop, by the one rule a local run's output goes through."""
+    from cveFeed.waf_scan import MAX_PRODUCTS, NAME_LEN
+    products = body.get('products')
+    if not isinstance(products, list) or len(products) > MAX_PRODUCTS:
+        raise ApiError(400, f'products must be a list of at most {MAX_PRODUCTS} entries')
+    out = []
+    for item in products:
+        if not isinstance(item, dict) or not isinstance(item.get('name'), str) or not item['name'].strip():
+            continue
+        row = {'name': _text(item['name'], NAME_LEN)}
+        manufacturer = _text(item.get('manufacturer'), NAME_LEN)
+        if manufacturer:
+            row['manufacturer'] = manufacturer
+        out.append(row)
+    return {'products': out, 'generic': body.get('generic') is True}
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
-             'discover': _clean_discover_result}
+             'discover': _clean_discover_result, 'waf': _clean_waf_result}
 
 
 def _bind_to_task(kind, result, task):

@@ -526,6 +526,16 @@ def _stage(scan, title, name, run, failed=lambda result: bool(result.get('error'
     return result
 
 
+def _waiting_for_scanner(scan, what, exc, result):
+    """A stage no scanner could take, and whose kind may not run on this server (``CVENGINE_LOCAL_FALLBACK``): nothing ran, nothing is recorded in
+    the ledger (the targets stay due) and the stage is not a failure. ``result`` (no ``error``) is what the stage reports, plus why it did not run."""
+    from cveFeed import activity
+    message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
+    logger.warning('%s of scan %s is waiting for a scanner: %s', what, scan.id, exc)
+    activity.log('run_check', f'{what} for {scan.domain.name} is waiting: {message}', project=scan.domain.project_id, scan_id=scan.id)
+    return {**result, 'skipped': message}
+
+
 def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, light_stream=None, targeted_stream=None,
                   nmap_runner=None, db_exposure_checks=None, provider=False, cve_runner=None, ip_lookups=None, route_probe=None):
     """Discovery (bbot for a domain; a reverse lookup and the certificate for a bare IP), then nmap (fingerprint + full port
@@ -577,6 +587,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
     from cveFeed import db_exposure, nuclei_scan, service_intel
+    from reNgine import resources
     from startScan.models import ScanActivity, ScanHistory
     gone = {'scan_id': scan_id, 'status': 'aborted'}
     if stopped(scan_id):
@@ -613,11 +624,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     # at the stage (agentapi.sentinel_dispatch), and wrap_nuclei_stream returns the real stream_nuclei, unwrapped, when
     # none is eligible, so a project with no Sentinels runs exactly as before this existed.
     from agentapi import sentinel_dispatch
-    light_kwargs = {'stream': light_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_light')}
-    if force:
-        light_kwargs['force'] = True
-    light_result = _stage(scan, 'Nuclei HTTP and technology pass', 'nuclei_light_scan',
-                          lambda: nuclei_scan.run_light_nuclei(scan_id, **light_kwargs), fallback={'targets': 0, 'techs': {}})
+
+    def run_light():
+        try:
+            light_kwargs = {'stream': light_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_light')}
+        except resources.ScannerUnavailable as exc:  # no scanner can take it and this kind may not run here: the stage waits, it does not fail
+            return _waiting_for_scanner(scan, 'Nuclei technology pass', exc, {'targets': 0, 'techs': {}})
+        if force:
+            light_kwargs['force'] = True
+        return nuclei_scan.run_light_nuclei(scan_id, **light_kwargs)
+    light_result = _stage(scan, 'Nuclei HTTP and technology pass', 'nuclei_light_scan', run_light, fallback={'targets': 0, 'techs': {}})
 
     if stopped(scan_id):
         return gone
@@ -681,13 +697,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     from cveFeed import openvas_scan
     openvas_scan.carry_forward(scan)  # the optional OpenVAS add-on's findings are evidence on this scan's host rows too (a no-op while it is off)
 
-    targeted_kwargs = {'stream': targeted_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_targeted')}
-    if force:
-        targeted_kwargs['force'] = True
-    targeted_result = _stage(scan, 'AI-targeted nuclei scan', 'nuclei_targeted_scan',
-                             lambda: nuclei_scan.run_targeted_nuclei(scan_id, provider=provider, light_techs=light_result.get('techs'),
-                                                                     cve_runner=cve_runner, force_cve_checks=retest or force, **targeted_kwargs),
-                             fallback={'targets': 0, 'findings': 0})
+    def run_targeted():
+        try:
+            targeted_kwargs = {'stream': targeted_stream or sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_targeted')}
+        except resources.ScannerUnavailable as exc:  # as for the light pass: waits, never fails
+            return _waiting_for_scanner(scan, 'AI-targeted nuclei scan', exc, {'targets': 0, 'findings': 0})
+        if force:
+            targeted_kwargs['force'] = True
+        return nuclei_scan.run_targeted_nuclei(scan_id, provider=provider, light_techs=light_result.get('techs'),
+                                               cve_runner=cve_runner, force_cve_checks=retest or force, **targeted_kwargs)
+    targeted_result = _stage(scan, 'AI-targeted nuclei scan', 'nuclei_targeted_scan', run_targeted, fallback={'targets': 0, 'findings': 0})
 
     if stopped(scan_id):
         return gone
