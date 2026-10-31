@@ -20,8 +20,9 @@ SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL = 'full', 'inventory', 'sentinel'
 TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL)
 USER_TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY)  # what a person may ask for; a sentinel token is only ever minted by an enrollment (sentinel_broker.bootstrap)
 INVENTORY_PATH = re.compile(r'^/api/v1/projects/(?P<slug>[-\w]+)/inventory/?$')
-# The Sentinel loop and nothing else: register/identity/unregister, heartbeat, the template policy and its bundle, and lease/accept/report/release of its own tasks.
-SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|release))?)?/?$')
+# The Sentinel loop and nothing else: register/identity/unregister, heartbeat, the template policy and its bundle, and lease/accept/report/release of its own tasks
+# (and ``secret``, the built-in scanner's single-use read of a stored credential: the route answers 403 to any other Sentinel itself, see sentinel_broker.read_secret).
+SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|release|secret))?)?/?$')
 DENIED_MESSAGE = ('this token is not allowed to do that (an inventory token can only post inventory reports to its own project, '
                   'a sentinel token can only call the sentinel endpoints)')
 

@@ -117,6 +117,11 @@ class SentinelTask(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     result = models.JSONField(default=dict, blank=True)
     error = models.CharField(max_length=300, blank=True, default='')
+    # Signed-in work (docs/SCANNER-ARCHITECTURE.md, decision 4). ``secret_ref`` names the stored credential the task needs ("authcred:<id>", an
+    # ``AuthCredential``), never its value: a task that carries one is offered only to the built-in scanner, which redeems it once through
+    # ``sentinel_broker.read_secret``. ``secret_read_at`` is the compare-and-set that makes that read single use. Nothing sets ``secret_ref`` yet.
+    secret_ref = models.CharField(max_length=40, null=True, blank=True)
+    secret_read_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
