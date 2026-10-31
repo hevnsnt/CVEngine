@@ -128,3 +128,40 @@ class RedeemTests(BuiltinBase):
         self.assertTrue(builtin.status()['live'])
         with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': ''}):
             self.assertEqual(builtin.status(), {'enabled': False})
+
+
+class OwnerLifecycleTests(BuiltinBase):
+    """The scanner's token belongs to the App Admin that owned the enrollment: losing that user must not strand the scanner."""
+
+    def test_a_scanner_whose_owner_was_disabled_gets_a_new_enrollment_under_another_admin(self):
+        builtin.ensure()
+        self.redeem()
+        second = User.objects.create_superuser('second-admin', 'b@example.test', 'x')
+        self.admin.is_active = False
+        self.admin.save(update_fields=['is_active'])
+        out = builtin.ensure()
+        self.assertEqual(out['state'], 'blob_written')
+        self.assertEqual(SentinelEnrollment.objects.get(used_at__isnull=True).created_by, second)
+
+    def test_with_no_other_active_admin_it_says_so_and_writes_nothing(self):
+        builtin.ensure()
+        self.redeem()
+        self.admin.is_active = False
+        self.admin.save(update_fields=['is_active'])
+        os.remove(builtin.blob_path()) if os.path.exists(builtin.blob_path()) else None
+        self.assertEqual(builtin.ensure()['state'], 'no_admin')
+        self.assertFalse(os.path.exists(builtin.blob_path()))
+
+    def test_a_scanner_whose_owner_must_enrol_in_two_step_sign_in_is_replaced_too(self):
+        builtin.ensure()
+        self.redeem()
+        User.objects.create_superuser('second-admin', 'b@example.test', 'x')
+        with mock.patch('tenancy.middleware.TenancyMiddleware.must_enrol_mfa', side_effect=lambda user: user.pk == self.admin.pk):
+            self.assertEqual(builtin.ensure()['state'], 'blob_written')
+
+    def test_a_suspended_scanner_is_an_administrators_decision_and_is_not_resurrected(self):
+        builtin.ensure()
+        self.redeem()
+        Agent.objects.update(status='suspended')
+        self.assertEqual(builtin.ensure()['state'], 'enrolled')
+        self.assertFalse(os.path.exists(builtin.blob_path()))
