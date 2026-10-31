@@ -120,7 +120,7 @@ which send nothing to the target and need no vantage point.
 
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
-2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract.
+2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done.
 3. The built-in scanner service in compose, enrolled automatically, shown in system status.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing

@@ -32,6 +32,7 @@ from django.utils import timezone
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
 from agentapi import sentinel_settings
+from agentapi import sentinel_contract
 from agentapi import sentinel_version
 from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
@@ -92,6 +93,7 @@ def register(ctx, body):
     reported = sentinel_settings.clean_settings(settings) if settings is not None else None  # refused before anything is stored
     out = broker.register(ctx, body)
     out = _with_settings(out, reported)
+    out['contract'] = sentinel_contract.reply()
     if info:
         agent = Agent.objects.filter(pk=out['id']).first()
         if agent is not None:
@@ -119,6 +121,7 @@ def heartbeat(ctx, body=None):
             agent.refresh_from_db()
         out['settings'] = sentinel_settings.reply(agent)  # what the Sentinel should run with: an edit made in cvENGINE reaches it within a heartbeat
         out['update'] = sentinel_settings.update_reply(agent)
+    out['contract'] = sentinel_contract.reply()
     return out
 
 
@@ -358,6 +361,8 @@ def effective_capabilities(agent, withheld=None):
             caps.add(INTERNAL_CAPABILITY)
         caps -= sentinel_settings.disabled_kinds(agent)  # a kind the machine or an administrator switched off is never offered (it would only be refused)
         caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
+        reported = (agent.info or {}).get('contract_version')
+        caps = {c for c in caps if c not in SentinelTask.KINDS or sentinel_contract.can_run(reported, c)}  # a kind its contract version predates is never sent
     return caps
 
 
@@ -1572,6 +1577,7 @@ def live_overview(ctx):
             'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
             'withheld_kinds': {k: {'failures': v['failures'], 'retry_at': svc._iso(v['retry_at'])} for k, v in eff.withheld.items()},
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
+            'contract_version': (agent.info or {}).get('contract_version'), 'contract_state': sentinel_contract.state((agent.info or {}).get('contract_version')),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
             'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
