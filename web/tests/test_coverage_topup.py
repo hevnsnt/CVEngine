@@ -1,4 +1,5 @@
 """Deterministic, no-model-call top-up of host-assessment coverage (cveFeed.coverage_topup)."""
+import os
 from unittest import mock
 
 from django.test import TestCase
@@ -19,6 +20,10 @@ class CoverageTopupTests(TestCase):
         self.org = Org.objects.create(name='Topup org', slug='topup-org')
         self.project = Project.objects.create(name='Topup', slug='topup', org=self.org, insert_date=self.now)
         self.domain = Domain.objects.create(name='topup.example', project=self.project, insert_date=self.now)
+        # these tests pin the caps as they count one host per pipeline run; hosts carried in batches are tests/test_assess_batch.py's
+        patcher = mock.patch.dict(os.environ, {'CVENGINE_ASSESS_BATCH': '1'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def hosts(self, n, prefix='h'):
         return [Subdomain.objects.create(target_domain=self.domain, name=f'{prefix}{i}.topup.example') for i in range(n)]
