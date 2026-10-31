@@ -173,7 +173,6 @@ ALLOWED = {
     'wpscan': [
         'Dockerfile',
         'agentapi/mcp.py',
-        'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
@@ -203,7 +202,6 @@ ALLOWED = {
     'testssl': [
         'Dockerfile',
         'agentapi/mcp.py',
-        'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
