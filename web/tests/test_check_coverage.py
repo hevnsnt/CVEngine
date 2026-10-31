@@ -489,11 +489,16 @@ class StoredHostTests(TestCase):
 			self.assertEqual(status, 200, data)
 			return ctx, data
 		queries()  # the first request of a user does its own one-off work (preferences, token use)
-		with_it, data = queries()
-		self.assertTrue(all('check_coverage' in h for h in data['results']))
-		with mock.patch.object(services, '_coverage_for', return_value=None):
-			without, _ = queries()
-		return len(with_it) - len(without)
+		costs = []
+		# A one-off query (a cache entry expiring between two requests in a slow full run) adds to one measure and not the other; a real per-host
+		# or per-check query shows in every repetition. The cheapest of three is the steady-state cost.
+		for _ in range(3):
+			with_it, data = queries()
+			self.assertTrue(all('check_coverage' in h for h in data['results']))
+			with mock.patch.object(services, '_coverage_for', return_value=None):
+				without, _ = queries()
+			costs.append(len(with_it) - len(without))
+		return min(costs)
 
 	def test_the_host_record_carries_the_field(self):
 		now = timezone.now()
