@@ -36,9 +36,21 @@ class GraphCapTests(TestCase):
         with mock.patch.object(views, 'GRAPH_NODE_CAP', 20):
             self.assertEqual(self.hosts(views.graph_payload()), drawn)  # the same hosts on every poll
 
+    def test_past_the_cap_each_project_reports_its_own_host_total(self):
+        now = timezone.now()
+        other = Project.objects.create(name='D', slug='cap2', insert_date=now, org=Org.objects.create(name='D', slug='cap2-org'))
+        domain = Domain.objects.create(name='cap2.test', project=other, insert_date=now)
+        for i in range(5):
+            sub = Subdomain.objects.create(target_domain=domain, name=f'o{i}.cap2.test', score=0)
+            sub.ip_addresses.add(IpAddress.objects.create(address=f'198.51.100.{i + 1}'))
+        with mock.patch.object(views, 'GRAPH_NODE_CAP', 20):
+            payload = views.graph_payload()
+        self.assertEqual(payload['hosts']['projects'], {'cap': 30, 'cap2': 5})
+        self.assertEqual(payload['hosts']['total'], 35)
+
     def test_under_the_cap_every_host_is_drawn_and_there_is_nothing_to_report(self):
         payload = views.graph_payload()
-        self.assertEqual(payload['hosts'], {'drawn': 30, 'total': 30})
+        self.assertEqual(payload['hosts'], {'drawn': 30, 'total': 30, 'projects': {}})
 
 
 class ExposedHostCountTests(TestCase):
@@ -108,3 +120,60 @@ class OnePerHostTests(TestCase):
         Subdomain.objects.create(target_domain=self.d1, name='a.site.test')
         Subdomain.objects.create(target_domain=self.d1, name='b.site.test')
         self.assertEqual(self.reps(), {'a.site.test', 'b.site.test'})
+
+
+class HostsPageOnceTests(TestCase):
+    """The Hosts page used to run the one-row-per-host collapse twice (a COUNT, then the page); it runs it once now."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        from agentapi.auth import create_token
+        from dashboard.models import ProjectMembership
+        now = timezone.now()
+        org = Org.objects.create(name='H', slug='hp-org')
+        self.project = Project.objects.create(name='H', slug='hp', insert_date=now, org=org)
+        self.domain = Domain.objects.create(name='hp.test', project=self.project, insert_date=now)
+        for i in range(7):
+            sub = Subdomain.objects.create(target_domain=self.domain, name=f'h{i}.hp.test', score=(i * 3) % 5)
+            sub.ip_addresses.add(IpAddress.objects.create(address=f'192.0.2.{i + 1}'))
+        user = User.objects.create_user('hp-user', password='x')
+        ProjectMembership.objects.create(user=user, project=self.project, role='user')
+        _, self.token = create_token(user, 'agent')
+
+    def get(self, query=''):
+        from tests.test_agentapi import call
+        return call(self.token, 'GET', f'/api/v1/projects/hp/hosts{query}')
+
+    def names(self, query=''):
+        status, body = self.get(query)
+        self.assertEqual(status, 200, body)
+        return body['count'], [h['host'] for h in body['results']]
+
+    def test_pages_in_both_orders_cover_every_host_once_and_in_order(self):
+        for sort in ('score', 'name'):
+            seen = []
+            for page in (1, 2, 3, 4):
+                count, names = self.names(f'?sort={sort}&page={page}&page_size=3')
+                self.assertEqual(count, 7)
+                seen += names
+            self.assertEqual(len(seen), 7)
+            self.assertEqual(len(set(seen)), 7)
+            if sort == 'name':
+                self.assertEqual(seen, sorted(seen))
+            else:
+                self.assertEqual(seen, [s.name for s in Subdomain.objects.order_by('-score', 'name')])
+
+    def test_a_page_past_the_end_is_empty_and_the_count_is_still_right(self):
+        self.assertEqual(self.names('?page=9&page_size=3'), (7, []))
+
+    def test_page_size_zero_answers_the_count_alone(self):
+        self.assertEqual(self.names('?page_size=0'), (7, []))
+
+    def test_the_collapse_runs_once_for_a_page(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as ctx:
+            status, body = self.get('?page_size=3')
+        self.assertEqual(status, 200)
+        runs = [q for q in ctx.captured_queries if 'ROW_NUMBER()' in q['sql']]
+        self.assertEqual(len(runs), 1)  # it was two: a COUNT and the page

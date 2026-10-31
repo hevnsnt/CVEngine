@@ -177,6 +177,19 @@ def paginate(queryset, params, serialize):
             'results': [serialize(o) for o in queryset[start:start + size]] if size else []}
 
 
+def paginate_by_ids(queryset, params, load):
+    """The same page ``paginate`` gives, with the heavy query run once. ``queryset`` is the ordered set of rows; its ids are read in one query, the
+    count is their number and the page is a slice of them, and only that slice is loaded (``load(ids)``, rows in the order given). ``paginate``
+    runs the queryset twice, a COUNT and the page, and when the queryset is the one-row-per-host collapse each run costs 0.5 s at 10,000 hosts.
+    ``page_size=0`` keeps the count query: it needs no ids."""
+    page, size = page_args(params, zero_ok=True)
+    if not size:
+        return {'count': queryset.count(), 'page': page, 'page_size': 0, 'results': []}
+    ids = list(queryset.values_list('pk', flat=True))
+    start = (page - 1) * size
+    return {'count': len(ids), 'page': page, 'page_size': size, 'results': load(ids[start:start + size])}
+
+
 def _digits(value, longest=9):
     """True when ``value`` is a short run of ASCII digits, so int() of it cannot fail (str.isdigit() is also true of superscripts) or
     run past the database's integer."""
@@ -1579,12 +1592,12 @@ def _one_per_host(qs, per_project=False):
     return Subdomain.objects.filter(id__in_array=ArraySubquery(rep))
 
 
-def _hosts_page(project, qs, params, extra=None, coverage=True):
+def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
     """Paginate hosts with each row's same-name copies folded in (one extra query per page). ``coverage=False`` leaves out ``check_coverage``
     (the PDF report does not print it). In the all-projects view each row
     also names its project, and everything folded in (copies, labels, asset info, exclusions) is looked up per (project, host)."""
     everywhere = _is_all(project)
-    page = paginate(qs, params, lambda sub: sub)
+    page = paginate_by_ids(qs, params, load) if load else paginate(qs, params, lambda sub: sub)
     subs = page['results']
     others = _name_siblings(project, subs)
     labels = _labels_for(project, subs)
@@ -1681,9 +1694,14 @@ def list_hosts(ctx, slug, params):
     if params.get('target_id'):
         qs = qs.filter(target_domain_id=_int_param(params['target_id'], 'target_id'))
     qs = _internal_filter(qs, params)
-    qs = _one_per_host(qs, per_project=_is_all(project)).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
-        .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
-    return _mark_zombies(project, _hosts_page(project, qs, params))
+    ordered = _one_per_host(qs, per_project=_is_all(project)).order_by(*_host_order(params))
+
+    def load(ids):  # the page's rows with what the host cards read, in the order of ``ids``
+        rows = Subdomain.objects.filter(pk__in=ids).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
+            .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')
+        by_id = {row.pk: row for row in rows}
+        return [by_id[i] for i in ids if i in by_id]
+    return _mark_zombies(project, _hosts_page(project, ordered, params, load=load))
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
