@@ -125,7 +125,7 @@ which send nothing to the target and need no vantage point.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing
    pause the conductor honours, re-queue stages with a delay instead of failing them, and show a banner.
-5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>`, delete each local path after the telemetry shows no fallbacks
+5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. Add the missing kinds from section B as they move.
 6. Extract the shared library and delete the server's copies of the parsers and flags.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
@@ -148,3 +148,13 @@ which send nothing to the target and need no vantage point.
 Add about 2 GB of memory and 1.5 GB of disk. If the scanner is offline, scans pause with a banner and are never marked failed.
 Air-gapped installs get a release bundle with both image tarballs, the CVE seed and the template bundle, with the version
 check off for the built-in.
+
+## `CVENGINE_LOCAL_FALLBACK`
+
+Unset (or `all`), every kind may still run on this server when no Sentinel takes it: nothing changes. `none` or a comma list of kinds
+(`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
+`resources.ScannerUnavailable` (a `MemoryBusy`, so stages that already treat that as "not the target's failure, it stays due" wait
+correctly: testssl, UDP and WPScan do today) where it used to run the tool locally. The nmap, naabu and nuclei stages record a
+failure for it as they do for any error until their handlers are written, so a kind is taken off the list only in the same
+change that gives its stage a handler. Signed-in nuclei passes still run here by design until the secure read exists.
+
