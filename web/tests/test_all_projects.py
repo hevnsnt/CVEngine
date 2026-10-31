@@ -370,6 +370,8 @@ class AllProjectsQueryTests(AllProjectsBase):
 		ctx = self.ctx(self.boss)
 		lists = (svc.list_vulnerabilities, svc.list_matches, svc.list_changes, svc.list_scans, svc.list_targets, svc.list_hygiene,
 			svc.list_certificates, svc.list_routes, svc.list_activity, svc.list_hosts, svc.search_hosts)
+		for fn in lists:  # the first list of a process builds the internal network table (cveFeed.internal_view): one query, once, not per row
+			fn(ctx, '_all', {})
 		small = {fn.__name__: self.count_queries(fn, ctx, '_all', {}) for fn in lists}
 		for project in (self.pa, self.pb, self.pc):
 			domain = self.data[project.slug]['domain']
