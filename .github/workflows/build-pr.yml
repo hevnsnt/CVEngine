@@ -93,6 +93,9 @@ jobs:
           DEBUG: '0'
         # the celery container no longer writes migrations at start (it used to, into the host's checkout): a model change must carry its migration
         run: python manage.py makemigrations --check --dry-run
+      - name: No migration number used twice
+        # makemigrations --check passes when the second file depends on the first (one leaf); two files with one number still leave the run order unclear
+        run: python scripts/check_migrations.py
       - name: Django test suite
         working-directory: web
         env:
