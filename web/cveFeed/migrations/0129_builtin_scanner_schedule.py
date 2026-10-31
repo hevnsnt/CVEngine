@@ -16,5 +16,5 @@ def unschedule(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0128_updatesettings_reference_unknown_db_default'), ('django_celery_beat', '0001_initial')]
+    dependencies = [('cveFeed', '0129_feedwatermark_failures_assumed'), ('django_celery_beat', '0001_initial')]  # develop's 0129 landed first: one leaf
     operations = [migrations.RunPython(schedule, unschedule)]
