@@ -70,6 +70,19 @@ test('a project over the cloud threshold becomes one cloud with its vulnerable h
   assert.equal(data.nodes.length, CLOUD_HOSTS + 7); // the payload is left alone
 });
 
+test('a project the payload cap cut short is counted by the server total, and clouded by it', () => {
+  const data = bigProject(CLOUD_HOSTS - 100, 2);
+  data.hosts = {drawn: CLOUD_HOSTS - 100, total: 10000, projects: {big: 10000}};
+  const cloud = cloudProjects(data).nodes.find(n => n.kind === 'cloud');
+  assert.equal(cloud.hosts, 10000);
+});
+
+test('a total that is not larger than what is drawn changes nothing', () => {
+  const data = bigProject(CLOUD_HOSTS, 3);
+  data.hosts = {drawn: CLOUD_HOSTS, total: CLOUD_HOSTS, projects: {big: CLOUD_HOSTS}};
+  assert.equal(cloudProjects(data), data);
+});
+
 test('a project at the threshold is drawn host by host', () => {
   const data = bigProject(CLOUD_HOSTS, 3);
   assert.equal(cloudProjects(data), data);

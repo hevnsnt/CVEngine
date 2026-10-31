@@ -230,9 +230,14 @@ def graph_payload(domain_id=None, scan_id=None):
         if a and b and a != b:
             edges.add((a, b))
     drawn_hosts = sum(1 for n in nodes.values() if n['kind'] == 'subdomain')
-    total_hosts = subs.count() if cut or len(sub_list) >= GRAPH_NODE_CAP else drawn_hosts  # counted only when the cap may have cut the list
+    capped = cut or len(sub_list) >= GRAPH_NODE_CAP  # counted only when the cap may have cut the list
+    total_hosts, per_project = drawn_hosts, {}
+    if capped:
+        from django.db.models import Count
+        per_project = {slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}
+        total_hosts = max(sum(per_project.values()), drawn_hosts)
     return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
-            'hosts': {'drawn': drawn_hosts, 'total': max(total_hosts, drawn_hosts)}}
+            'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project}}
 
 
 def _running_scans(ScanHistory):

@@ -93,6 +93,9 @@ const CLOUD_BUBBLES = 36;
 export function cloudProjects(data) {
   const counts = new Map();
   for (const n of data.nodes) if (n.kind === "subdomain" && n.project) counts.set(n.project, (counts.get(n.project) || 0) + 1);
+  // the payload is capped, so a big project's drawn hosts are only some of them: the server's own per-project total is the count
+  const totals = (data.hosts && data.hosts.projects) || {};
+  for (const [slug, n] of Object.entries(totals)) if (counts.has(slug) && n > counts.get(slug)) counts.set(slug, n);
   const big = new Set([...counts].filter(([, n]) => n > CLOUD_HOSTS).map(([slug]) => slug));
   if (!big.size) return data;
   const names = new Map();
