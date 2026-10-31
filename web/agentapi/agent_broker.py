@@ -20,6 +20,7 @@ from django.utils import timezone
 from agentapi import agent_scope as scope_lib
 from agentapi import agent_tasks
 from agentapi import services as svc
+from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
 from tenancy import audit, roles, throttle
@@ -507,14 +508,20 @@ def release_for_tokens(token_ids):
 # --- claiming ---------------------------------------------------------------------------------------
 
 @contextmanager
-def _waiter_slot(wanted, token):
+def _waiter_slot(wanted, token, per_user=True, exempt_instance=False):
     """Whether this caller may hold a web thread for a long poll: the instance, the token's user and the token each have a cap, so one
-    user cannot take every slot by minting tokens. Yields False when a cap is reached, and the caller answers at once."""
+    user cannot take every slot by minting tokens. Yields False when a cap is reached, and the caller answers at once.
+    A Sentinel's token is not counted against its user (``per_user``): every Sentinel an enrollment makes belongs to the person who made it, and
+    the built-in scanner's belongs to the oldest App Admin, so that person's own Sentinels would otherwise push each other onto short polls. They
+    are bounded by the instance cap and by one poll per token. ``exempt_instance`` (the built-in scanner) skips the instance cap too and takes no
+    slot from it, so the scanner the instance depends on is never turned away because other callers hold every one."""
     if not wanted:
         yield False
         return
-    caps = (('agentapi:waiters', MAX_WAITERS), (f'agentapi:waiters:user:{token.user_id}', MAX_WAITERS_PER_USER),
-            (f'agentapi:waiters:{token.key_hash[:16]}', 1))
+    caps = [] if exempt_instance else [('agentapi:waiters', MAX_WAITERS)]
+    if per_user and token.scope != SCOPE_SENTINEL:
+        caps.append((f'agentapi:waiters:user:{token.user_id}', MAX_WAITERS_PER_USER))
+    caps.append((f'agentapi:waiters:{token.key_hash[:16]}', 1))
     taken, within = [], True
     try:
         for key, cap in caps:
