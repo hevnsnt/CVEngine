@@ -2,9 +2,12 @@
 import os
 import tempfile
 from datetime import timedelta
+from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 
@@ -165,3 +168,26 @@ class OwnerLifecycleTests(BuiltinBase):
         Agent.objects.update(status='suspended')
         self.assertEqual(builtin.ensure()['state'], 'enrolled')
         self.assertFalse(os.path.exists(builtin.blob_path()))
+
+
+class StartupEnrollmentTests(TestCase):
+    """The first blob does not wait for beat: celery's entrypoint asks for it once migrations are applied, and that call can never stop the container."""
+    ENTRYPOINT = Path(__file__).resolve().parent.parent / 'celery-entrypoint.sh'
+
+    def test_the_celery_entrypoint_ensures_the_enrollment_non_fatally_after_the_migrate_wait(self):
+        text = self.ENTRYPOINT.read_text()
+        line = 'python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true'
+        self.assertEqual(text.count(line), 1)
+        self.assertGreater(text.index(line), text.index('until python3 manage.py migrate --check'))
+        self.assertLess(text.index(line), text.index('collectstatic'))
+
+    def test_the_command_does_nothing_while_the_switch_is_off(self):
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'CVENGINE_SCANNER_BOOTSTRAP_DIR': tmp}):
+            os.environ.pop('CVENGINE_BUILTIN_SCANNER', None)
+            User.objects.create_superuser('root-admin', 'a@example.test', 'x')
+            call_command('ensure_builtin_scanner', stdout=out)
+            self.assertEqual(os.listdir(tmp), [])
+        self.assertEqual(out.getvalue().strip(), 'built-in scanner: disabled')
+        self.assertFalse(Agent.objects.exists())
+        self.assertFalse(SentinelEnrollment.objects.exists())

@@ -874,20 +874,26 @@ def cancel_task(ctx, slug, task_id):
 
 # --- agents: listing and administration ---------------------------------------------------------------
 
-def agent_dict(agent, detail=False, counts=None, viewer=None):
+_UNKNOWN = object()
+
+
+def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOWN):
+    """``builtin_id`` is the id of the built-in scanner's Agent (or ``None``), which a caller building many rows reads once; left out, a Sentinel
+    looks it up (one query)."""
     now = timezone.now()
     token = agent.token
     live = bool(agent.last_seen and now - agent.last_seen <= LIVE_WINDOW)
     counts = counts if counts is not None else {}
     out = {'id': agent.pk, 'name': agent.name, 'kind': agent.kind, 'status': agent.status, 'status_note': agent.status_note, 'live': live,
-           'last_seen': svc._iso(agent.last_seen), 'registered': svc._iso(agent.registered_at), 'owner': token.user.username,
+           'builtin': False, 'last_seen': svc._iso(agent.last_seen), 'registered': svc._iso(agent.registered_at), 'owner': token.user.username,
            'token': {'id': token.pk, 'name': token.name, 'prefix': token.prefix}, 'scope': agent.scope, 'capabilities': agent.capabilities,
            'os': agent.os, 'tools': agent.tools, 'max_concurrent': agent.max_concurrent, 'limits': agent.limits,
            'tasks': {'open': counts.get('assigned', 0) + counts.get('running', 0), 'completed': counts.get('completed', 0),
                      'failed': counts.get('failed', 0)}}
     if agent.kind == 'scanner':  # cheap (stored JSON only), so the list shows a Sentinel that cannot update itself
         from agentapi import sentinel_settings
-        out['version'] = (agent.info or {}).get('version')
+        out['builtin'] = _sentinel().is_builtin(agent) if builtin_id is _UNKNOWN else agent.pk == builtin_id  # the install's own scanner (its updater is the server's)
+        out['version'] =(agent.info or {}).get('version')
         out['version_label'] = out['version'] or 'unknown (built without the updater)'  # a Sentinel installed with plain docker compose reports the build's commit; one with neither says so
         out['self_update'] = sentinel_settings.effective(agent)['self_update']
         out['updater'] = sentinel_settings.updater_state(agent)
@@ -987,7 +993,8 @@ def list_agents(ctx, params):
         qs = qs.filter(Q(name__icontains=str(params['q'])[:100]) | Q(token__user__username__icontains=str(params['q'])[:100]))
     page = svc.paginate(qs.order_by('name', 'id'), params, lambda a: a)
     counts = _counts([a.pk for a in page['results']])
-    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user) for a in page['results']]
+    builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
+    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
     return page
 
 

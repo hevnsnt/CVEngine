@@ -78,6 +78,7 @@ function card(s, reload, detail, group) {
   const title = el("div", "sl-title");
   const state = el("p", "sl-state", WORDS[s.state] || s.state);
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
+  if (s.builtin) state.append(" ", el("span", "chip sl-builtin", "Built-in", { title: "This install's own scanner" }));
   title.append(el("h3", "", s.name), state);
   head.append(title);
   const actions = el("div", "sl-actions");
@@ -104,7 +105,7 @@ function card(s, reload, detail, group) {
   const beat = el("p", "sl-beat");
   beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
   c.append(beat);
-  const version = versionBlock(detail, { onChange: reload });
+  const version = versionBlock(detail, { onChange: reload, builtin: s.builtin });
   if (version) c.append(version);
   if (s.problem) c.append(el("p", "sl-note", s.problem));
   else if (s.status_note) c.append(el("p", "sl-note", s.status_note));

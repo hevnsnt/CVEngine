@@ -887,10 +887,13 @@ def _scrubbed(task):
     return {'target': {**target, 'token': '***'}} if task.kind == 'wpscan' and target.get('token') not in (None, '', '***') else {}
 
 
-def expire(task, reason='the dispatch wait timed out; the stage fell back to local execution', actor=None):
+def expire(task, reason=None, actor=None):
     """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
-    caller already fell back to running the tool locally, so this task's work is simply over), its lease cleared. Also
-    the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
+    caller already fell back to running the tool locally, or, for a kind taken off ``CVENGINE_LOCAL_FALLBACK``, left the targets due, so this
+    task's work is simply over), its lease cleared. Also the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
+    if reason is None:
+        from agentapi import sentinel_dispatch
+        reason = f'the dispatch wait timed out; {sentinel_dispatch.outcome_text(task.kind)}'
     now = timezone.now()
     won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
         status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, **_scrubbed(task))
@@ -1763,6 +1766,7 @@ def live_overview(ctx):
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
     orgs, org_of = _visible_orgs(ctx.user)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
+    builtin_id = builtin_pk()  # likewise: one read, then each card compares ids
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)
@@ -1770,7 +1774,7 @@ def live_overview(ctx):
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'status': agent.status, 'status_note': agent.status_note,
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,

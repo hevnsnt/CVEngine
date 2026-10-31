@@ -17,7 +17,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-user openvas-down
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-user openvas-down scanner-build scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -96,6 +96,12 @@ openvas-user:	## Create the GVM user cvENGINE uses and save its generated login,
 
 openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}
+
+scanner-build:	## Build the optional built-in scanner image from the pinned Sentinel commit (docs/SCANNER-ARCHITECTURE.md; needs COMPOSE_PROFILES=builtin-scanner to run).
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile builtin-scanner build scanner
+
+scanner-logs:	## Tail the optional built-in scanner's log.
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile builtin-scanner logs --follow --tail=200 scanner
 
 inventory-sync:	## Copy the host inventory reporter scripts to the copies the server hands out (web/static/cve/inventory).
 	cp -p scripts/inventory/cvengine-inventory.sh scripts/inventory/cvengine-inventory.py scripts/inventory/cvengine-inventory.ps1 web/static/cve/inventory/
