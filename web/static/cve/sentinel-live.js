@@ -17,7 +17,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {

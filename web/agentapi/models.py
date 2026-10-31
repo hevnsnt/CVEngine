@@ -96,7 +96,7 @@ class SentinelTask(models.Model):
     """One unit of scan-stage work: run this tool against this server-constructed target, leased to a ``kind='scanner'`` Agent (a
     Sentinel) until it reports back. ``target`` and ``result`` are each a small typed, clipped record (see
     ``agentapi.sentinel_broker.TARGET_SCHEMA`` / ``clean_result``); neither is ever built from, or interpreted as, a command."""
-    KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'discover')
+    KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'discover', 'waf')
     STATUSES = ('queued', 'claimed', 'running', 'done', 'failed', 'expired')
 
     project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')

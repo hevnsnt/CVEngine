@@ -3,9 +3,9 @@
   "$id": "https://github.com/hevnsnt/CVEngine/agentapi/sentinel_contract.json",
   "title": "cvENGINE Sentinel result contract",
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
-  "contract_version": 1,
+  "contract_version": 2,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -678,6 +678,65 @@
             }
           }
         ]
+      },
+      "waf": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "products": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    },
+                    "manufacturer": {
+                      "type": "string",
+                      "maxLength": 100,
+                      "description": "informational: cvENGINE stores the product, as a local wafw00f run does, not who makes it"
+                    }
+                  }
+                }
+              },
+              "generic": {
+                "type": "boolean",
+                "description": "something blocked the probes but wafw00f could name no product"
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "products",
+                "generic"
+              ]
+            }
+          }
+        ]
       }
     },
     "targets": {
@@ -1043,6 +1102,37 @@
           },
           "preferences": {
             "type": "object"
+          }
+        }
+      },
+      "waf": {
+        "type": "object",
+        "required": [
+          "host",
+          "ip",
+          "port",
+          "scheme"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string",
+            "maxLength": 260
+          },
+          "ip": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "scheme": {
+            "enum": [
+              "http",
+              "https"
+            ]
           }
         }
       }

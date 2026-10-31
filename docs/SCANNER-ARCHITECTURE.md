@@ -45,7 +45,7 @@ rough sizes of the work.
 |---|---|---|
 | `cveFeed/fullscan.py` (380) | nmap, all 65,535 ports of one IP | `nmap_full` |
 | `cveFeed/probes.py` (821, lines near 223 and 599) | nmap NSE scripts | part of the probe kinds |
-| `cveFeed/waf_scan.py` (146) | wafw00f | `waf` |
+| `cveFeed/waf_scan.py` (146) | wafw00f | `waf` (contract-ready since contract version 2, not wired: no dispatch, the local scan still runs) |
 | `cveFeed/node2shell_scan.py` (146) | vendored detector | `node2shell` |
 | `cveFeed/rdp_shot.py` (269) | xfreerdp screenshot | `rdp_shot` returns a blob; the AI reading stays on the server |
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` |
@@ -120,7 +120,7 @@ which send nothing to the target and need no vantage point.
 
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
-2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done.
+2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done. Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`); it is dormant, offered only to a Sentinel that declares 2, and no stage dispatches it.
 3. The built-in scanner service in compose, enrolled automatically, shown in system status.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing

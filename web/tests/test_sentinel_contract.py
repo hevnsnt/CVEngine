@@ -9,10 +9,11 @@ from agentapi import sentinel_broker as broker
 from agentapi import sentinel_dispatch as broker_dispatch
 from agentapi import sentinel_contract as contract
 from agentapi.models import SentinelTask
+from agentapi.services import ApiError
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
-           'discover': 'discover', 'openvas': 'openvas', 'error': 'nmap'}
+           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'error': 'nmap'}
 
 
 def fixture(name):
@@ -51,7 +52,7 @@ class FixtureTests(SimpleTestCase):
 
     def test_a_good_result_goes_through_the_server_unchanged(self):
         """The server clips and drops; a correct client never loses anything to it. openvas is left out: its cleaner fills in defaults."""
-        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp'):
+        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf'):
             sent = fixture(name)
             self.assertEqual(broker.clean_result(KIND_OF[name], sent), sent, name)
 
@@ -78,6 +79,72 @@ class ContractRejectsTests(SimpleTestCase):
         bad = fixture('nuclei_light')
         bad['findings'][0]['severity'] = 'catastrophic'
         self.assertTrue(list(validator('nuclei_light').iter_errors(bad)))
+
+
+class WafContractTests(SimpleTestCase):
+    """The ``waf`` kind (contract version 2): the shape, and what the server does with a result that is not."""
+
+    def bad(self, **changes):
+        body = fixture('waf')
+        body.update(changes)
+        return body
+
+    def test_the_fixture_is_a_valid_done_result_and_so_is_an_error(self):
+        self.assertEqual(list(validator('waf').iter_errors(fixture('waf'))), [])
+        self.assertEqual(list(validator('waf').iter_errors({'outcome': 'error', 'error': 'wafw00f is not installed'})), [])
+        self.assertEqual(list(validator('waf').iter_errors({'outcome': 'done', 'products': [], 'generic': True})), [])
+
+    def test_a_done_result_must_say_its_products_and_whether_it_was_generic(self):
+        self.assertTrue(list(validator('waf').iter_errors({'outcome': 'done', 'products': []})))
+        self.assertTrue(list(validator('waf').iter_errors({'outcome': 'done', 'generic': False})))
+
+    def test_shapes_outside_the_contract_are_rejected(self):
+        from cveFeed import waf_scan
+        for body in (
+                self.bad(products=[{'name': f'W{i}'} for i in range(waf_scan.MAX_PRODUCTS + 1)]),  # too many
+                self.bad(products=[{'name': 'x' * (waf_scan.NAME_LEN + 1)}]),  # name too long
+                self.bad(products=[{'name': ''}]),
+                self.bad(products=[{'name': 'x', 'manufacturer': 'y' * (waf_scan.NAME_LEN + 1)}]),
+                self.bad(products=[{'name': 'x', 'version': '1.0'}]),  # unknown field of a product
+                self.bad(products=[{'manufacturer': 'only a maker'}]),
+                self.bad(products='FortiWeb'), self.bad(generic='yes'),
+                self.bad(surprise=1),  # unknown field of the result
+                self.bad(outcome='ok')):
+            self.assertTrue(list(validator('waf').iter_errors(body)), body)
+
+    def test_the_server_refuses_what_it_cannot_shape_and_clips_the_rest(self):
+        from cveFeed import waf_scan
+        with self.assertRaises(ApiError):
+            broker.clean_result('waf', self.bad(products=[{'name': f'W{i}'} for i in range(waf_scan.MAX_PRODUCTS + 1)]))
+        with self.assertRaises(ApiError):
+            broker.clean_result('waf', self.bad(products='FortiWeb'))
+        with self.assertRaises(ApiError):
+            broker.clean_result('waf', {'outcome': 'done', 'generic': False})
+        clipped = broker.clean_result('waf', {'outcome': 'done', 'generic': 'yes', 'surprise': 1, 'products': [
+            {'name': 'A' * 500, 'manufacturer': 'M' * 500, 'version': '9', 'url': 'http://x/'}, 'junk', {'name': '  '}, {'name': 5}, {'manufacturer': 'x'}]})
+        self.assertEqual(clipped, {'outcome': 'done', 'generic': False,
+                                   'products': [{'name': 'A' * waf_scan.NAME_LEN, 'manufacturer': 'M' * waf_scan.NAME_LEN}]})
+        self.assertEqual(list(validator('waf').iter_errors(clipped)), [])
+        self.assertEqual(broker.clean_result('waf', {'outcome': 'done', 'products': [], 'generic': True}),
+                         {'outcome': 'done', 'products': [], 'generic': True})
+
+    def test_an_error_result_keeps_only_its_error(self):
+        self.assertEqual(broker.clean_result('waf', {'outcome': 'error', 'error': 'x' * 900, 'products': [{'name': 'y'}]}),
+                         {'outcome': 'error', 'error': 'x' * 300})
+
+    def test_the_bounds_are_the_ones_the_local_scan_uses(self):
+        from cveFeed import waf_scan
+        body = contract.load()['$defs']['results']['waf']['allOf'][1]['properties']['products']
+        self.assertEqual(body['maxItems'], waf_scan.MAX_PRODUCTS)
+        self.assertEqual(body['items']['properties']['name']['maxLength'], waf_scan.NAME_LEN)
+        self.assertEqual(body['items']['properties']['manufacturer']['maxLength'], waf_scan.NAME_LEN)
+        self.assertEqual(waf_scan.parse_output('[{"detected": true, "firewall": "%s"}]' % ('A' * 500))[0]['firewall'], 'A' * waf_scan.NAME_LEN)
+
+    def test_the_kind_is_new_in_version_two_and_nothing_older_changed(self):
+        self.assertGreaterEqual(contract.version(), 2)
+        self.assertEqual(contract.min_supported(), 1)
+        self.assertEqual(contract.kind_since('waf'), 2)
+        self.assertEqual({k: v for k, v in contract.load()['kind_since'].items() if k != 'waf'}, {k: 1 for k in SentinelTask.KINDS if k != 'waf'})
 
 
 class ContractMatchesTheServerTests(SimpleTestCase):
@@ -157,6 +224,14 @@ class TargetContractTests(SimpleTestCase):
         self.assertTrue(list(target_validator('nmap').iter_errors(bad)))
         self.assertTrue(list(target_validator('nmap').iter_errors({'addresses': ['192.0.2.1'], 'surprise': 1})))
         self.assertTrue(list(target_validator('testssl').iter_errors({'host': 'example.com', 'ip': '192.0.2.1', 'port': 70000})))
+
+    def test_a_waf_target_outside_the_contract_is_rejected(self):
+        good = json.loads((TARGETS / 'waf.json').read_text())
+        for change in ({'scheme': 'ftp'}, {'scheme': 'HTTPS'}, {'port': 0}, {'port': 70000}, {'port': '443'}, {'host': 'h' * 261}, {'ip': '1' * 61},
+                       {'surprise': 1}):
+            self.assertTrue(list(target_validator('waf').iter_errors({**good, **change})), change)
+        for missing in ('host', 'ip', 'port', 'scheme'):
+            self.assertTrue(list(target_validator('waf').iter_errors({k: v for k, v in good.items() if k != missing})), missing)
 
     def test_the_address_cap_equals_the_dispatchers(self):
         defs = contract.load()['$defs']['targets']
