@@ -1,7 +1,9 @@
 # One scanner for cvENGINE: the plan for 1.4
 
-Status: design, on the `1.4-develop` branch. Nothing in this file is built yet except the result contract
-(`web/agentapi/sentinel_contract.json`).
+Status: in progress, on the `1.4-develop` branch. Built so far, all of it off unless switched on: the result contract
+(`web/agentapi/sentinel_contract.json`), the built-in scanner as an opt-in compose service with its enrollment, the
+`CVENGINE_LOCAL_FALLBACK` switch with the derived "scanner offline" state, and a dormant secure read of a stored credential.
+The sections below say which parts of each are not built. To try the built-in scanner, see [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
 
 ## Why
 
@@ -95,7 +97,8 @@ which send nothing to the target and need no vantage point.
   It contains the tools, the daemon and the library. It does not contain the GVM stack, git, Go or a docker socket.
 - **Built-in scanner**: a compose service with `restart: unless-stopped`, a healthcheck, a memory limit, `NET_RAW`, automatic
   enrolment at instance scope from a bootstrap secret in a shared volume, `self_update` off, and re-enrolment when its token
-  expires. External Sentinels enrol the way they do today.
+  expires. External Sentinels enrol the way they do today. The service, the hand-over of the blob and the healthcheck exist as an
+  opt-in profile (see "The built-in scanner's enrollment" below).
 - **Transport**: HTTP pull for the built-in as well, with the same token, validation and trust model. A second channel would
   be a second code path. Latency is cut inside the one path: a Redis notify wakes the long poll and the dispatcher in place of
   polling every half second, and the long-poll waiter cap is lifted for the built-in token.
@@ -128,7 +131,7 @@ which send nothing to the target and need no vantage point.
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
 2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sending `info.contract_version` and the published image are not done. Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`); it is dormant, offered only to a Sentinel that declares 2, and no stage dispatches it.
-3. The built-in scanner service in compose, enrolled automatically, shown in system status.
+3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done as an opt-in profile: System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing
    pause the conductor honours, re-queue stages with a delay instead of failing them, and show a banner.
@@ -167,7 +170,12 @@ file at its next run, and writes a new blob if the scanner is later lost (token 
 setting is on, because the scanner reaches the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides). Until the image is published, compose
 builds it (`make scanner-build`) from a pinned Sentinel commit (`CVENGINE_SCANNER_SOURCE` overrides). Celery writes the first blob at start-up instead of waiting for beat, and a
 scanner with no saved token waits up to ten minutes for the blob before it starts. What is not built: the published
-Sentinel image (`CVENGINE_SCANNER_IMAGE`), the client re-reading the blob after its token expires, and the status line in System status.
+Sentinel image (`CVENGINE_SCANNER_IMAGE`) and the client re-reading the blob after its token expires.
+
+It is shown in System status as `scanning.builtin_scanner` (`builtin_scanner.status()`: `enabled`, `enrolled`, `live`, `agent_id`, `name`,
+`last_seen`; just `{'enabled': False}` while the switch is off), with a `problems` line for an App Admin when it is on and not enrolled ten minutes after the
+server wrote its enrollment, or enrolled and not heard from for three minutes. Every Sentinel row of the Sentinels page and the agent list carries `builtin`;
+the card of the built-in scanner shows a Built-in chip and no Update now button. The steps to try it are in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
 
 ## `CVENGINE_LOCAL_FALLBACK`
 
