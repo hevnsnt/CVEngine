@@ -445,7 +445,7 @@ class CatchAllTests(RouteFixture, TestCase):
 		self.assertIn('/N.php', kinds)
 		self.assertIn('/swagger/N.html', kinds)
 		self.assertIn('/actuator/N', kinds)
-		self.assertLessEqual(len(self.extra()), ra.MAX_BASELINES_PER_HOST)
+		self.assertLessEqual(len(self.extra()), ra.MAX_BASELINES_PER_BASE)
 		self.assertEqual(len(self.extra()), len(set(self.extra())))  # each kind is read once per host
 
 	def test_a_server_that_answers_a_missing_path_with_not_found_keeps_its_open_routes(self):
@@ -493,6 +493,26 @@ class CatchAllTests(RouteFixture, TestCase):
 			path = url.split('rt.test', 1)[1]
 			return probe(url=url, status=200, title=f'Not found: {path}', body=f'<html><title>Not found: {path}</title><body><p>We could not find {path} here.</p></body></html>')
 		self.run_it(self.scan(), probe=lambda url: (self.asked.append(url), make(url))[1])
+		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
+
+	def test_a_soft_404_that_names_the_bare_slug_is_a_catch_all(self):
+		def fn(url):
+			self.asked.append(url)
+			name = url.split('rt.test', 1)[1].strip('/').rsplit('/', 1)[-1]
+			if not name:
+				return probe(url=url, status=200, title='Home', body='<html><title>Home</title>welcome</html>')
+			return probe(url=url, status=200, title='Not found - Example', body=f'<html><head><title>Not found - Example</title></head><body><h1>Oops</h1><p>The page "{name}" could not be found.</p><p>Try the search box.</p></body></html>')
+		self.run_it(self.scan(), probe=fn)
+		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
+
+	def test_a_page_whose_title_names_the_slug_is_a_catch_all_and_its_login_routes_too(self):
+		chrome = 'Portal navigation menu footer copyright 2026 ' * 20
+
+		def fn(url):
+			self.asked.append(url)
+			name = url.split('rt.test', 1)[1].strip('/').rsplit('/', 1)[-1] or 'Home'
+			return probe(url=url, status=200, title=f'{name} - Portal', body=f'<html><head><title>{name} - Portal</title></head><body>{chrome}<h2>{name}</h2></body></html>')
+		self.run_it(self.scan(), probe=fn)
 		self.assertEqual({v for k, v in self.states().items() if k != '/'}, {'catch_all'})
 
 	def test_a_shell_with_a_changing_nonce_and_no_title_is_a_catch_all(self):
@@ -581,6 +601,120 @@ class CatchAllTests(RouteFixture, TestCase):
 			return probe(url=url, status=200, title='NAS', body=self.SHELL)
 		self.run_it(self.scan(), probe=fn)
 		self.assertEqual(self.states()['/admin'], 'open')
+
+
+class RecheckMigrationTests(RouteFixture, TestCase):
+	"""Migration 0123 only ages the route-auth ledger. A stored false ``open`` row is left as it is until its host is probed again, which
+	the aged ledger makes the host's next scan do; the migration corrects no row itself."""
+
+	def migrate(self):
+		import importlib
+
+		from django.apps import apps
+		importlib.import_module('cveFeed.migrations.0123_recheck_routes').recheck(apps, None)
+
+	def test_the_migration_ages_the_ledger_and_leaves_the_rows_as_they_are(self):
+		from cveFeed import ledger
+		scan = self.scan()
+		self.run_it(scan, probe=lambda url: probe(url=url, status=200, body='<html><title>NAS</title>x</html>', title='NAS'))
+		url = 'https://www.rt.test/admin'
+		self.assertIn(ledger._norm(url), ledger.fresh(ra.SERVICE, [url], self.project.id))
+		RouteAuth.objects.filter(path='/admin').update(auth_state='open')  # as a version before the soft-404 comparison stored it
+		self.migrate()
+		self.assertEqual(ledger.fresh(ra.SERVICE, [url], self.project.id), set())
+		self.assertEqual(RouteAuth.objects.get(path='/admin').auth_state, 'open')
+
+	def test_the_next_scan_of_the_host_asks_every_route_again_and_corrects_the_row(self):
+		shell = lambda url: probe(url=url, status=200, body='<html><title>NAS</title>x</html>', title='NAS')  # noqa: E731
+		self.run_it(self.scan(), probe=shell)
+		RouteAuth.objects.filter(path='/admin').update(auth_state='open')
+		self.migrate()
+		out = self.run_it(self.scan(), probe=shell)
+		self.assertEqual(out['reused'], 0)
+		self.assertEqual(out['routes'], len(ra.COMMON_PATHS))
+		self.assertEqual(RouteAuth.objects.get(path='/admin').auth_state, 'catch_all')
+
+	def test_without_the_migration_the_routes_would_have_been_reused(self):
+		shell = lambda url: probe(url=url, status=200, body='<html><title>NAS</title>x</html>', title='NAS')  # noqa: E731
+		self.run_it(self.scan(), probe=shell)
+		self.assertEqual(self.run_it(self.scan(), probe=shell)['reused'], len(ra.COMMON_PATHS))
+
+	def test_a_target_scanned_before_the_conductors_minimum_gap_is_picked_for_a_new_discovery_scan(self):
+		from cveFeed import conductor
+		scan = self.scan()
+		ScanHistory.objects.filter(pk=scan.pk).update(start_scan_date=timezone.now() - datetime.timedelta(days=3))
+		self.migrate()
+		with mock.patch.dict('os.environ', {'CVENGINE_WORK_MIN_GAP_HOURS': '2'}):
+			self.assertEqual(conductor.next_targets(5), [self.domain.id])
+
+
+class BudgetHandler(http.server.BaseHTTPRequestHandler):
+	"""A server whose real routes answer 200 with a page of their own and every other path 404, counting what it is asked."""
+
+	def do_GET(self):
+		self.server.asked.append(self.path)
+		real = self.path.split('?')[0] in self.server.real
+		body = (f'<html><title>{self.path}</title>' + f'page for {self.path} ' * 30 + '</html>').encode() if real else b'<html><title>404</title>gone</html>'
+		self.send_response(200 if real else 404)
+		self.send_header('Content-Type', 'text/html')
+		self.send_header('Content-Length', str(len(body)))
+		self.end_headers()
+		self.wfile.write(body)
+
+	def log_message(self, *args):
+		pass
+
+
+class BaselineBudgetTests(RouteFixture, TestCase):
+	"""The extra requests that ask what a missing page looks like come on top of the routes, so the most one host is asked is the routes
+	plus the baselines, a number the code names (MAX_REQUESTS_PER_HOST)."""
+
+	def server(self, real):
+		server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), BudgetHandler)
+		server.asked, server.real = [], set(real)
+		threading.Thread(target=server.serve_forever, daemon=True).start()
+		self.addCleanup(server.server_close)
+		self.addCleanup(server.shutdown)
+		return server
+
+	def local_probe(self, server):
+		def probe_local(url):
+			path = url.split('://', 1)[1].split('/', 1)[1]
+			return ra.probe_url(f'http://127.0.0.1:{server.server_address[1]}/{path}', connect_ip='127.0.0.1')
+		return probe_local
+
+	def test_the_bound_is_the_routes_plus_the_baselines(self):
+		self.assertEqual(ra.MAX_REQUESTS_PER_HOST, ra.MAX_URLS_PER_HOST + ra.MAX_BASELINES_PER_HOST)
+
+	def test_a_host_on_two_bases_is_asked_no_more_than_the_bound(self):
+		from startScan.models import EndPoint
+		paths = list(ra.COMMON_PATHS) + [f'/d{i}/page{i}.php' for i in range(12)]
+		server = self.server(paths)
+		scan = self.scan(ports=((443, 'https'), (80, 'http')))
+		sub = Subdomain.objects.get(scan_history=scan)
+		for i in range(12):
+			EndPoint.objects.create(scan_history=scan, target_domain=self.domain, subdomain=sub, http_url=f'https://www.rt.test/d{i}/page{i}.php')
+		with mock.patch('cveFeed.pinned_transport.is_scannable_ip', return_value=True), mock.patch('targetApp.target_types.is_scannable_ip', return_value=True):
+			self.run_it(scan, probe=self.local_probe(server))
+		baselines = [p for p in server.asked if '/cvengine-' in p]
+		self.assertTrue(baselines)
+		self.assertLessEqual(len(server.asked), ra.MAX_REQUESTS_PER_HOST)
+
+	def test_the_baselines_of_twenty_urls_over_two_bases_and_many_directories_stay_inside_the_bound(self):
+		asked = []
+
+		def fn(url):
+			asked.append(url)
+			return probe(url=url, status=200, body='<html><title>x</title>' + 'real page ' * 30 + '</html>', title='x') if '/cvengine-' not in url \
+				else probe(url=url, status=404)
+		urls = [f'{base}/d{i}/' + (f'p{i}.php' if i % 2 else f'n{i}') for i in range(10) for base in ('https://h.rt.test', 'http://h.rt.test')]
+		self.assertEqual(len(urls), ra.MAX_URLS_PER_HOST)
+		known = {}
+		with mock.patch.object(ra, 'PER_REQUEST_GAP', 0):
+			for url in urls:
+				ra._against_missing_page(ra.analyse(fn(url)), url, fn, known)
+		self.assertLessEqual(len(asked), ra.MAX_REQUESTS_PER_HOST)
+		self.assertTrue([u for u in asked if '/cvengine-' in u])
 
 
 class ApiTests(TestCase):

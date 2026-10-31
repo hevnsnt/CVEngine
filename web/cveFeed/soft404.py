@@ -12,9 +12,10 @@ and times removed) and compared as a hash, or, for a page that still moves, as a
 
 Pure: nothing here asks the network.
 """
+import functools
 import hashlib
 import re
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, quote_plus, unquote, urlsplit
 
 MARKER = '{path}'
 MAX_SHINGLES = 400
@@ -34,12 +35,41 @@ _PASSWORD_FIELD = re.compile(r'<input\b[^<>]{0,1000}?type=["\']?password', re.I)
 _WORD = re.compile(r'[A-Za-z0-9]{2,}')
 
 
+MIN_SLUG = 3  # a bare name shorter than this is not taken out of a page: "a" or "id" are ordinary words
+
+
+def _forms(value):
+    """``value`` as a page may print it: raw, percent-decoded, percent-encoded and form-encoded."""
+    return {value, unquote(value), quote(value, safe=''), quote_plus(value)} - {''}
+
+
+@functools.lru_cache(maxsize=256)
+def _path_pattern(path):
+    """One case-insensitive pattern for every way a page can name the requested ``path``: with its slash (``/admin``, ``%2Fadmin``), and as the
+    bare last segment (with or without its extension) or the bare path without its slashes (``"admin"``, ``admin/users``, ``admin - Portal``), which a "page not found" text
+    or a title prints. A bare name is only taken out as a whole word: ``administrator`` is left alone. None when there is nothing to take out."""
+    slashed = _forms(path) - {'/'}
+    stripped = path.strip('/')
+    last = stripped.rsplit('/', 1)[-1]
+    bare = set()
+    for name in (stripped, last, last.rsplit('.', 1)[0] if '.' in last else ''):  # the file name's stem too: a page for wp-login.php may say "wp-login"
+        if len(unquote(name)) >= MIN_SLUG:
+            bare |= _forms(name)
+    parts = []
+    if slashed:
+        parts.append('|'.join(re.escape(f) for f in sorted(slashed, key=len, reverse=True)))
+    if bare:
+        parts.append('(?<![A-Za-z0-9])(?:' + '|'.join(re.escape(f) for f in sorted(bare, key=len, reverse=True)) + ')(?![A-Za-z0-9])')
+    return re.compile('|'.join(parts), re.I) if parts else None
+
+
 def normalise(text, path=''):
-    """``text`` with what differs between two requests for the same page taken out: the requested path (raw, percent-encoded and decoded),
-    ids and long hex or base64 strings, dates and times, long numbers, and nonce, CSRF and token values."""
+    """``text`` with what differs between two requests for the same page taken out: the requested path (with or without its slash, in any case,
+    raw, percent-encoded and decoded), ids and long hex or base64 strings, dates and times, long numbers, and nonce, CSRF and token values."""
     text = str(text or '')
-    for form in {path, unquote(path), quote(path, safe='')} - {'', '/'}:
-        text = text.replace(form, MARKER)  # with its slash only: the bare word may be part of the page's own text
+    pattern = _path_pattern(path) if path else None
+    if pattern:
+        text = pattern.sub(MARKER, text)
     text = _META_TOKEN.sub(r'\1', text)
     text = _TOKEN_ATTR.sub(r'\1\2', text)
     for pattern in (_UUID, _LONG_HEX, _ISO_TIME, _DATE, _BASE64ISH, _BIG_NUMBER):
