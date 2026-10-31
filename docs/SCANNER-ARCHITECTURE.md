@@ -159,7 +159,11 @@ which send nothing to the target and need no vantage point.
    Batch them in contract version 2.
 6. Egress proxy, Tailscale and `CVENGINE_ALLOW_PRIVATE_TARGETS` lab installs apply to local scans and not to dispatched ones;
    they must reach the built-in through the managed settings channel.
-7. Server tests that exercise scanning need a fake scanner.
+7. Server tests that exercise scanning need a fake scanner. Addressed by `web/tests/fake_scanner.py`: a real built-in Sentinel that
+   serves tasks through the broker (contract fixtures by default; fail, timeout, idle and offline on request), with
+   `assert_ran_nowhere_locally(self, kind)` and `LocalFallback('none')`. A delete PR proves its kind with the pattern in
+   `web/tests/test_fake_scanner.py`: real stage entry point, fake serving the result, assert what was stored and that no local runner or
+   heavy job ran; then the fake offline, where the stage waits and the target stays due.
 
 ## Single-box install
 
