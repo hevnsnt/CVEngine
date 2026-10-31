@@ -58,9 +58,9 @@ def bounty_blocked_projects():
     return set(BountyEngagement.objects.exclude(confirmed).values_list('project_id', flat=True))
 
 
-# The kinds of work this conductor itself starts: one discovery scan (bbot, which runs on this server) per target. It has no per-kind work to hold back
-# while a scanner is offline, so ``scanner_state`` only annotates its rounds; the sweeps that dispatch one kind on their own schedule are the ones that
-# stop (testssl, UDP, WPScan), and they do it themselves.
+# The conductor starts one thing: a discovery scan per target, whose first stage (bbot) runs on this server. It has no per-kind work to hold back while a
+# scanner is offline, so ``scanner_state`` only annotates its rounds; the sweeps that dispatch one kind on their own schedule are the ones that stop
+# (testssl, UDP, WPScan), and they do it themselves. Stopping discovery here would stop local work for a reason that is not local.
 def scanner_waiting():
     """The kinds waiting for a scanner (``agentapi.scanner_state``), for the round's record; never raises, and never changes what the round does."""
     try:
