@@ -29,7 +29,7 @@ import os
 import tempfile
 import time
 
-MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: everything beyond this in one stage call is scanned locally
+MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: the most addresses one dispatched task names (a longer list goes in several)
 DISPATCH_POLL_INTERVAL = 0.5  # seconds between checks while waiting for a dispatched task to finish
 RESOLVE_WORKERS = 16  # matches targetApp.target_types.blocked_names: one bounded parallel pass, never one lookup per target serially
 RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
@@ -210,17 +210,23 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
     local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
     if not any_scanner_for(project, 'nmap'):
         return targets, zero, local_ports
-    chunk = targets[:MAX_ADDRESSES]
-    result = dispatch_or_none(project, 'nmap', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
-    if result is None:
-        return targets, zero, local_ports
     from cveFeed.nmap_scan import persist_inventory
-    inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                 for host in result.get('hosts', []) if host.get('ip') in chunk]
-    totals = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
-    reported = {}
-    for host in inventory:
-        reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    # every chunk of MAX_ADDRESSES goes to a Sentinel in turn (a batch of hosts has more addresses than one task takes); the first one no
+    # Sentinel takes ends it, and that chunk and the rest are what the caller fingerprints here, as before
+    totals, reported = None, {}
+    for start in range(0, len(targets), MAX_ADDRESSES):
+        chunk = targets[start:start + MAX_ADDRESSES]
+        result = dispatch_or_none(project, 'nmap', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
+        if result is None:
+            break
+        inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
+                     for host in result.get('hosts', []) if host.get('ip') in chunk]
+        done = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
+        totals = done if totals is None else {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
+        for host in inventory:
+            reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    if totals is None:
+        return targets, zero, local_ports
     remaining = []
     for ip in targets:
         if ip not in reported:
@@ -281,11 +287,14 @@ def wrap_naabu_runner(project, scan, timeout=None):
     def runner(ips):
         from cveFeed.naabu_scan import run_naabu
         ips = list(ips)
-        chunk, rest = ips[:MAX_ADDRESSES], ips[MAX_ADDRESSES:]
-        result = dispatch_or_none(project, 'naabu', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
-        found = dict((result or {}).get('ports') or {}) if result is not None else run_naabu(chunk)
-        if rest:
-            found.update(run_naabu(rest))
+        found = {}
+        for start in range(0, len(ips), MAX_ADDRESSES):  # a batch of hosts has more addresses than one task takes: each chunk is dispatched in turn
+            chunk = ips[start:start + MAX_ADDRESSES]
+            result = dispatch_or_none(project, 'naabu', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
+            if result is None:  # no Sentinel took this chunk: it and everything after it is scanned here, as before
+                found.update(run_naabu(ips[start:]))
+                break
+            found.update(dict(result.get('ports') or {}))
         return found
     return runner
 
