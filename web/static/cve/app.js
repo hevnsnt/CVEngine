@@ -2632,7 +2632,7 @@ const pages = {
       };
       label.append(box, document.createTextNode(` Only hosts with a screenshot (${withShot.length} of ${shown.length})`));
       galleryHead.append(label);
-      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken when a scan finds a web page." : "No hosts match."));
+      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot. Screenshots are only taken by a full (standard or deep) discovery of a target, not by Rescan host; open a host to see why it has none." : "No hosts match."));
       cards.forEach((h) => {
         const card = el("button", "shot-card", null, { type: "button", "data-heat": h.heat || "unscanned", "aria-label": `Open ${h.host}` });
         const frame = el("span", "shot-frame");

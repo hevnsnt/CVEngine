@@ -475,8 +475,8 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
     if kind == DOMAIN and created:  # every domain target is "subscribed": watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
-        watch_certificate_transparency.delay(created[0].id)
+        from cveFeed import ct_queue
+        ct_queue.queue_lookups([created[0].id], ct_queue.ADD_LIFETIME)  # one marker per domain: adding it twice queues one lookup
     scan_ids = []
     created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
     deferred = 0
@@ -926,10 +926,8 @@ def _discover_new(domains, mode, project_id, initiated_by=None):
     longest, one per project per minute, so the targets left for it are scanned all the same and interleaved with everyone else's. With the
     conductor off (``CVENGINE_WORK_DEPTH=0``) nothing would pick them up, so then every target is queued now."""
     from cveFeed import activity, conductor
-    try:
-        cap = max(1, int(os.environ.get('CVENGINE_BULK_DISCOVER_NOW', BULK_DISCOVER_NOW)))
-    except ValueError:
-        cap = BULK_DISCOVER_NOW
+    from cveFeed import tunables
+    cap = max(1, int(tunables.value('bulk_discover_now', BULK_DISCOVER_NOW)))  # saved on Settings, configMaxxing, else CVENGINE_BULK_DISCOVER_NOW, else 50
     if not conductor.wanted_depth():
         cap = len(domains) or 1
     else:  # what the project already has waiting counts against the batch: two pastes in a row are not two batches
@@ -1251,11 +1249,10 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
+        from cveFeed import ct_queue
         names_wanted = set(domain_names)
         wanted = [d for d in created if d.name in names_wanted]
-        for i, d in enumerate(wanted):  # crt.sh blocks a burst, so each check starts a couple of seconds after the last
-            watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
+        ct_queue.queue_lookups([d.id for d in wanted], ct_queue.ADD_LIFETIME)  # spaced out (crt.sh blocks a burst), marked, and expiring
     scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
     if discover and to_discover and stored != Domain.DISCOVERY_MANUAL:  # manual: "just add them, do not scan yet"
@@ -1402,7 +1399,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
-            'screenshot': bool(sub.screenshot_path), 'screenshot_note': _screenshot_note(sub, http),
+            'screenshot': bool(sub.screenshot_path), 'screenshot_note': _screenshot_note(sub, http, ips, network),
             'technologies': sorted(techs),
             'technology_details': details,
             # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
@@ -1503,14 +1500,57 @@ def _unverified_products(sub, others, ips):
     return match_policy.unversioned_leads(technologies, ports)[:50]
 
 
-def _screenshot_note(sub, http):
-    """Why a host has no front-page screenshot, in a line for the host page (empty when it has one). Screenshots are taken by discovery
-    (bbot's gowitness) of a host that answers over HTTP; a host found before that was on, or that never answered, has none."""
+SCREENSHOT_HOW = 'Screenshots are only taken by a full (standard or deep) discovery of the target, not by Rescan host.'
+
+
+def _is_ip_name(name):
+    import ipaddress
+    try:
+        ipaddress.ip_address(str(name or '').strip().strip('[]'))
+    except ValueError:
+        return False
+    return True
+
+
+def _has_web_port(ips):
+    """True when any open port recorded for the host looks like a web service (the same test the route checks use)."""
+    from cveFeed import route_auth
+    return any(p.number in route_auth.WEB_PORTS or (p.service_name or '').lower() in route_auth.HTTP_SERVICE_NAMES
+               or 'http' in (p.product or '').lower() for entry in (ips or {}).values() for p in entry['ports'])
+
+
+def _screenshot_note(sub, http, ips=None, network=None):
+    """Why a host has no front-page screenshot, in a line for the host page (empty when it has one). The only capture is bbot's gowitness
+    module inside a full (standard or deep) discovery of the target, run by this server: Rescan host, certificate-transparency finds,
+    retests and top-ups never take one. The reason given is the first one the data already loaded for the host supports; when none does,
+    a plain statement of how a screenshot is taken. ``ips`` is the host's merged ``{address: {'ip', 'ports'}}`` and ``network`` the
+    internal network it is inside (or None)."""
+    from urllib.parse import urlparse
     if sub.screenshot_path:
         return ''
-    if not (http.get('url') or http.get('status')):
-        return 'None: no web page has answered on this host, so there is nothing to capture.'
-    return 'None yet: screenshots are taken when a host is discovered, and this one has not been rediscovered since; rescan the host to take one.'
+    domain = getattr(sub, 'target_domain', None)
+    if network:
+        return (f'No screenshot: this host is inside the internal network {network}. Only a Sentinel there scans it, and Sentinels do not '
+                'take screenshots; this server never captures internal hosts.')
+    if _is_ip_name(sub.name) or _is_ip_name(getattr(domain, 'name', '')):
+        return 'No screenshot: this target is a bare IP address, and discovery of an IP address takes no screenshots.'
+    if getattr(domain, 'discovery_mode', '') == 'passive':
+        return ('No screenshot: this target is discovered in passive mode, which only reads public sources and takes none. '
+                'Set it to standard or deep and run a discovery.')
+    status = http.get('status') or 0
+    if not (http.get('url') or status):
+        if ips and any(entry['ports'] for entry in ips.values()) and not _has_web_port(ips):
+            return 'No screenshot: no web port (such as 80 or 443) is recorded open on this host, so there is no page to capture.'
+        return 'No screenshot: no web page has answered on this host, so there is nothing to capture.'
+    target = (http.get('redirect_to') or '').strip()
+    where = (urlparse(target).hostname or '').lower() if '://' in target else ''
+    if where and where != (sub.name or '').lower():
+        return (f'No screenshot: the front page redirects to {target}. A redirect is not captured, and a page is filed under the host it '
+                f'finally loads from ({where}), so look for a screenshot on that host.')
+    if 300 <= status < 400:
+        return (f'No screenshot: the front page answered with a redirect (HTTP {status}), and redirects are not captured. '
+                f'{SCREENSHOT_HOW}')
+    return f'No screenshot has been captured for this host. {SCREENSHOT_HOW}'
 
 
 def _rdp_screenshot_field(sub, shot):

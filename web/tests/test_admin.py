@@ -133,7 +133,21 @@ class AdminMatrixTests(TestCase):
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
 			unknown = api(client_for(self.root), 'GET', 'health')[1]
 			self.assertEqual(unknown['workers_state'], 'unknown')
-			self.assertIn('did not return queue', unknown['worker_note'])
+			self.assertIn('No worker replied', unknown['worker_note'])
+
+	def test_worker_inspection_tells_a_silent_worker_from_one_that_replied_without_its_queue(self):
+		inspector = mock.Mock()
+		inspector.active_queues.return_value = {
+			'cve_feed_worker@local': [{'name': 'cve_feed_queue'}],
+			'classic_worker@local': [{'name': 'celery'}]}  # replied, but not consuming api_queue
+		inspector.active.return_value = {}
+		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
+			data = api(client_for(self.root), 'GET', 'health')[1]
+		replies = {w['worker']: w['reply'] for w in data['workers']}
+		self.assertEqual(replies, {'discovery_worker': 'no_reply_within_5s', 'cve_feed_worker': 'consuming',
+								   'validation_priority_worker': 'no_reply_within_5s', 'classic_worker': 'replied_without_queue'})
+		self.assertIn('Did not reply within 5 seconds: discovery_worker, validation_priority_worker.', data['worker_note'])
+		self.assertIn('Replied without its queue: classic_worker.', data['worker_note'])
 
 	def test_worker_inspection_accepts_celery_at_worker_names(self):
 		inspector = mock.Mock()

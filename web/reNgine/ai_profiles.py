@@ -203,6 +203,71 @@ def reasoning_plan(provider_id, model, level, max_tokens=None):
 	return {'thinking': {'type': 'enabled', 'budget_tokens': budget}}, ''
 
 
+# ----------------------------------------------------------------------------- the settings an operator can change
+
+# What the Settings page (and the API behind it) may store, with the range each accepts. Every one is optional: empty means "not set here",
+# and the request then follows the environment variable of the same name (CVENGINE_AI_TIMEOUT and the others, see docs/CONFIGURATION.md)
+# and then the provider's own default. A value outside its range is rejected when it is saved, and ignored (as the environment's are) when it
+# is read, so a row edited by hand cannot send a request a provider would refuse.
+NUMBER_SETTINGS = {  # name: (low, high, environment variable, unit)
+	'request_timeout': (10, 3600, 'CVENGINE_AI_TIMEOUT', 'seconds'),
+	'connect_timeout': (1, 300, 'CVENGINE_AI_CONNECT_TIMEOUT', 'seconds'),
+	'max_tokens': (64, 32768, 'CVENGINE_AI_MAX_TOKENS', 'tokens'),
+	'context_tokens': (512, 1048576, 'CVENGINE_OLLAMA_NUM_CTX', 'tokens'),
+}
+STRUCTURED_MODES = ('auto', 'all', 'off')  # CVENGINE_AI_STRUCTURED
+REASONING_CHOICES = ('default',) + REASONING_LEVELS  # 'default' sends no reasoning field even when CVENGINE_AI_REASONING is set
+KEEP_ALIVE_PATTERN = re.compile(r'^(?:-1|0|\d{1,5}[smh])$')  # Ollama: how long a model stays loaded after a request ("30m", "1h", "0" unloads, "-1" keeps)
+SETTING_ENV = {**{name: spec[2] for name, spec in NUMBER_SETTINGS.items()},
+	'structured_mode': 'CVENGINE_AI_STRUCTURED', 'reasoning': 'CVENGINE_AI_REASONING'}  # keep_alive has no environment variable
+# The providers a setting is sent to; a setting that is not listed applies to every provider. The page hides what does not apply.
+SETTING_APPLIES = {
+	'context_tokens': ('ollama',),  # num_ctx; the OpenAI-style servers take the window from how the server was started
+	'keep_alive': ('ollama',),
+}
+
+
+def setting_applies(name, provider_id):
+	return provider_id in SETTING_APPLIES.get(name, tuple(PROFILES))
+
+
+def clean_number(name, value):
+	"""``value`` as an integer inside the range of setting ``name``, or None (not set, not a number, or out of range)."""
+	low, high = NUMBER_SETTINGS[name][:2]
+	if isinstance(value, bool) or value in (None, ''):
+		return None
+	try:
+		number = int(str(value).strip())
+	except ValueError:
+		return None
+	return number if low <= number <= high else None
+
+
+@dataclass(frozen=True)
+class AIRuntime:
+	"""The operator's settings for one request, read from the settings row: ``None`` or ``''`` means "not set here" (follow the environment,
+	then the provider's default). Frozen and free of Django, so the provider layer can take one without importing the models."""
+	request_timeout: object = None
+	connect_timeout: object = None
+	max_tokens: object = None
+	context_tokens: object = None
+	structured_mode: str = ''
+	reasoning: str = ''
+	keep_alive: str = ''
+
+	@classmethod
+	def from_row(cls, row):
+		"""Read the settings off an ``AIProviderSettings`` row (or any object with the same attributes); a bad stored value is dropped."""
+		values = {name: clean_number(name, getattr(row, name, None)) for name in NUMBER_SETTINGS}
+		mode = (getattr(row, 'structured_mode', '') or '').strip().lower()
+		values['structured_mode'] = mode if mode in STRUCTURED_MODES else ''
+		reasoning = (getattr(row, 'reasoning', '') or '').strip().lower()
+		values['reasoning'] = reasoning if reasoning in REASONING_CHOICES else ''
+		keep = (getattr(row, 'keep_alive', '') or '').strip().lower()
+		values['keep_alive'] = keep if KEEP_ALIVE_PATTERN.match(keep) else ''
+		return cls(**values)
+
+
 # ----------------------------------------------------------------------------- which service an address is
 
 _PORTS = {'http': 80, 'https': 443}

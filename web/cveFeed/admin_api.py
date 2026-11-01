@@ -641,7 +641,7 @@ def scheduler_health(request, actor):
     expected = {'discovery_worker': 'discovery_queue', 'cve_feed_worker': 'cve_feed_queue',
                 'validation_priority_worker': 'validation_priority_queue', 'classic_worker': 'api_queue'}
     worker_state = 'unknown'
-    worker_note = 'Worker inspection did not return queue information.'
+    worker_note = 'No worker replied to the inspection within 5 seconds (all busy, or none running).'
     workers = []
     try:
         inspector = app.control.inspect(timeout=5)
@@ -658,13 +658,18 @@ def scheduler_health(request, actor):
                 active_warning = ' Active-task inspection did not respond.'
             for prefix, queue in expected.items():
                 names = [name for name in queues if is_worker_name(name, prefix)]
-                workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names),
-                                'consuming': any(any(q.get('name') == queue for q in queues.get(name) or []) for name in names)
-                                if names else None,
+                consuming = (any(any(q.get('name') == queue for q in queues.get(name) or []) for name in names)
+                             if names else None)
+                workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names), 'consuming': consuming,
+                                'reply': 'consuming' if consuming else ('replied_without_queue' if names else 'no_reply_within_5s'),
                                 'active': sum(len(active.get(name) or []) for name in names) if active and names else None})
             missing = [row['worker'] for row in workers if row['consuming'] is not True]
+            silent = [row['worker'] for row in workers if row['reply'] == 'no_reply_within_5s']
+            without_queue = [row['worker'] for row in workers if row['reply'] == 'replied_without_queue']
             worker_state = 'degraded' if missing else 'responding'
-            worker_note = ('Missing or unconfirmed required queue consumers: ' + ', '.join(missing)
+            detail = ''.join([f" Did not reply within 5 seconds: {', '.join(silent)}." if silent else '',
+                              f" Replied without its queue: {', '.join(without_queue)}." if without_queue else ''])
+            worker_note = ('Missing or unconfirmed required queue consumers: ' + ', '.join(missing) + '.' + detail
                            if missing else 'Required queue names were reported by workers; this does not prove scheduled tasks executed.') + active_warning
     except Exception as exc:  # noqa: BLE001 - expose a safe category, never raw broker addresses or credentials
         worker_note = ('Worker inspection failed (broker connection).' if isinstance(exc, (ConnectionError, OSError))

@@ -1149,7 +1149,9 @@ def api_onboarding_save(request):
     needs_model = provider_name in SELECTABLE and not model
     try:
         base_url = previous.base_url if previous and previous.provider == provider_name else None
-        provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url)
+        from reNgine.ai_profiles import AIRuntime
+        provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url,
+                                runtime=AIRuntime.from_row(previous) if previous else None)  # the timeouts saved in Settings apply to the first check too
         with usage_stage('connection_test'):
             if needs_model:
                 provider.list_models()  # OpenRouter/Ollama/vLLM/LM Studio: prove the connection, the user picks the model in Settings
