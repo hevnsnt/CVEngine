@@ -1035,6 +1035,39 @@ class ApprovalTests(AgentBrokerTestCase):
 		queue(self.t['alice'], 'validate', [self.m_linux.pk])
 		self.assertEqual(next_task(self.t['alice2'])[0], 403)
 
+	def test_reinstating_an_agent_clears_the_note_of_its_suspension(self):
+		_, body = register(self.t['alice'])
+		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'revoked'})
+		_, fresh = register(self.t['alice2'], approve=False)
+		url = f'/api/v1/agents/{fresh["id"]}'
+		self.assertEqual(fresh['status_note'], broker.INHERITED_SUSPENSION_NOTE)
+		status, out = call(self.t['dana'], 'PATCH', url, {'status': 'active'})  # the Sentinels page's Reinstate button
+		self.assertEqual((status, out['status'], out['status_note']), (200, 'active', ''))
+		call(self.t['dana'], 'PATCH', url, {'status': 'suspended', 'note': 'looping on one host'})
+		self.assertEqual(Agent.objects.get(pk=fresh['id']).status_note, 'looping on one host')
+		# the admin dialog sends the note field back unchanged with every action: that is no new note, so it is cleared too
+		status, out = call(self.t['dana'], 'PATCH', url, {'status': 'active', 'note': 'looping on one host'})
+		self.assertEqual((out['status'], out['status_note']), ('active', ''))
+
+	def test_a_new_note_given_with_a_status_change_is_kept(self):
+		_, body = register(self.t['alice'])
+		url = f'/api/v1/agents/{body["id"]}'
+		call(self.t['dana'], 'PATCH', url, {'status': 'suspended', 'note': 'first'})
+		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'status': 'active', 'note': 'back, watch it'})[1]['status_note'], 'back, watch it')
+		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'limits': {'max_concurrent': 1}})[1]['status_note'], 'back, watch it')  # no status change: kept
+		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'note': ''})[1]['status_note'], '')
+
+	def test_the_migration_clears_the_stale_note_of_agents_already_active(self):
+		import importlib
+		from django.apps import apps
+		_, body = register(self.t['alice'])
+		_, other = register(self.t['alice2'])
+		Agent.objects.filter(pk=body['id']).update(status='active', status_note=broker.INHERITED_SUSPENSION_NOTE)
+		Agent.objects.filter(pk=other['id']).update(status='suspended', status_note=broker.INHERITED_SUSPENSION_NOTE)
+		importlib.import_module('agentapi.migrations.0008_clear_stale_status_note').clear(apps, None)
+		self.assertEqual(Agent.objects.get(pk=body['id']).status_note, '')
+		self.assertEqual(Agent.objects.get(pk=other['id']).status_note, broker.INHERITED_SUSPENSION_NOTE)  # still suspended: still true
+
 	def test_an_admin_with_a_revoked_agent_also_inherits_the_suspension(self):
 		_, body = register(self.t['dana'], scope={'orgs': ['one']})
 		call(self.t['root'], 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'revoked'})
