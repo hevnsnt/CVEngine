@@ -73,7 +73,7 @@ def _heavy_fields():
 
 FIELDS = _heavy_fields() + [
     Field('discovery_concurrency', 'Hosts assessed at once',
-          'How many discovery tasks and host assessments run at the same time. A task that waits on a Sentinel holds one of these while it waits. It is the ceiling of the discovery worker\'s autoscaler: a few more can briefly run above it.',
+          'How many discovery tasks and host assessments run at the same time. A task that waits on a Sentinel holds one of these while it waits. It is the ceiling of the discovery worker\'s autoscaler, which adds a slot a second while work is waiting, up to this number.',
           'discovery', 'DISCOVERY_CONCURRENCY', DISCOVERY_DEFAULT, 1, 32, 1),
     Field('assess_batch', 'Hosts per assessment batch',
           'How many hosts of one target are carried through one assessment run together, so a Sentinel is handed a batch instead of one host at a time. 1 runs every host on its own. Projects this server scans without a Sentinel always use 1.',

@@ -746,8 +746,12 @@ stop_grace=$(( force ? 10 : 60 ))
 "${compose[@]}" stop -t "$stop_grace" celery
 workers_stopped=1
 
-step 'Applying migrations; the database and broker containers stay in place'
+step 'Applying migrations; the broker container stays in place (the database container is recreated only when its compose definition changed)'
 "${compose[@]}" up -d --no-recreate db redis
+# The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
+# definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
+"${compose[@]}" up -d --no-deps db
+for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
 # A dump of the database first: a migration is never rolled back. A dump that fails stops the update here, before anything is changed (the
 # previous workers are resumed and the checkout is put back). CVENGINE_UPDATE_BACKUPS=0 skips it.
 if backup_file=$(scripts/db-backup.sh "$STATE" -- "${compose[@]}"); then
