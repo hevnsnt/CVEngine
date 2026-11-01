@@ -1,3 +1,4 @@
+from reNgine.ai_profiles import PROFILES
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.db import models
 from reNgine.definitions import *
@@ -73,7 +74,7 @@ class AIProviderSettings(models.Model):
 
 	The API key lives here (Postgres), set via the settings UI, never in git or .env.
 	"""
-	PROVIDER_CHOICES = [('anthropic', 'Anthropic'), ('openai', 'OpenAI'), ('openrouter', 'OpenRouter'), ('ollama', 'Ollama'), ('vllm', 'vLLM'), ('lmstudio', 'LM Studio')]
+	PROVIDER_CHOICES = [(profile.id, profile.label) for profile in PROFILES.values()]  # the provider table (reNgine/ai_profiles.py)
 	id = models.AutoField(primary_key=True)
 	provider = models.CharField(max_length=32, choices=PROVIDER_CHOICES, default='anthropic')
 	model = models.CharField(max_length=200, blank=True, default='')

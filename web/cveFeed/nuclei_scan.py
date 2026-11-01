@@ -392,6 +392,19 @@ def reuse_findings(scan, project, targets):
     return copied, len(copied_hosts)
 
 
+def _chunk_size(stream, total):
+    """Targets handed to ``stream`` per call. A local stream gets ``NUCLEI_CHUNK`` at a time (a memory kill then only repeats one chunk). The Sentinel
+    wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) splits each call into 64-target chunk tasks and runs them side by side, so it is
+    handed enough to fill its window (``MAX_ADDRESSES`` times ``CVENGINE_STAGE_PARALLEL``, 256 by default) and no more: the ledger is written
+    after each call, so a failure part way marks only the targets of the calls that did not finish. ``CVENGINE_STAGE_PARALLEL=1`` keeps the serial,
+    100 at a time, behaviour exactly."""
+    if getattr(stream, 'chunks_itself', False):
+        from agentapi.sentinel_dispatch import MAX_ADDRESSES, stage_parallel
+        if stage_parallel() > 1:
+            return max(NUCLEI_CHUNK, MAX_ADDRESSES * stage_parallel())
+    return NUCLEI_CHUNK
+
+
 def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
     """Run nuclei over the scan's discovered assets and persist every result. Returns a summary dict.
     ``tags`` narrows the template set to a focused pass (see cveFeed.nuclei_templates); omitted, this
@@ -452,9 +465,10 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
         if covered:
             message += f' ({len(covered)} already scanned in the last {ledger.ttl_label(service)})'
         running = activity.log('run_check', message, project=project, status='running', scan_id=scan.id)
+        chunk_size = _chunk_size(stream, len(won_targets))
         try:
-            for start in range(0, len(won_targets), NUCLEI_CHUNK):
-                chunk = won_targets[start:start + NUCLEI_CHUNK]
+            for start in range(0, len(won_targets), chunk_size):
+                chunk = won_targets[start:start + chunk_size]
                 with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
                     f.write('\n'.join(chunk) + '\n')
                     path = f.name
@@ -614,9 +628,10 @@ def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
         if covered:
             message += f' ({len(covered)} already scanned in the last {ledger.ttl_label(service)})'
         running = activity.log('run_check', message, project=project, status='running', scan_id=scan.id)
+        chunk_size = _chunk_size(stream, len(won_targets))
         try:
-            for start in range(0, len(won_targets), NUCLEI_CHUNK):
-                chunk = won_targets[start:start + NUCLEI_CHUNK]
+            for start in range(0, len(won_targets), chunk_size):
+                chunk = won_targets[start:start + chunk_size]
                 with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
                     f.write('\n'.join(chunk) + '\n')
                     path = f.name

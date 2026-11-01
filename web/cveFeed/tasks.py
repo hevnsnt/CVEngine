@@ -752,6 +752,8 @@ def validate_match_on_demand(request_id):
     try:
         require_authority(job)
         owned = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id)
+        def still_current():
+            return owned.filter(latest_scan_q('subdomain__')).exists()
         match = owned.filter(latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
         if not match:
             # a rescan replaced the match while the job waited (or the host left the inventory): superseded work, not a worker failure.
@@ -788,6 +790,10 @@ def validate_match_on_demand(request_id):
         plans = [plan]
         activity.settle(planning, 'done', f'Validation request #{job.pk}: {plan["reason"]}',
                         check_kinds=plan['check_kinds'], plan_source=plan['source'])
+        if not still_current():
+            # a scan finished while the plan was asked for: stop before the checks, the template draft and the review, which are the
+            # rest of the work (and of the AI calls) and would all be spent on a match nobody sees any more
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         candidate = None
         if plan['generate_template']:
             draft_step = activity.log('write_check', f'Validation request #{job.pk}: testing an AI-written template draft for {cve_id}',
@@ -850,6 +856,8 @@ def validate_match_on_demand(request_id):
                      f'{check_result.get("reused", 0)} reused, {check_result.get("capped", 0)} deferred'
                      + ('; no executable check available' if no_check else ''), project=job.project_id,
                      cve_id=cve_id, **detail)
+        if not still_current():
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         # Rebuild the signature after checks, so a fresh template hit is part of the AI review.
         match.refresh_from_db()
         row, described = triage.track(triage.with_cves([match]))[0]
@@ -883,8 +891,14 @@ def validate_match_on_demand(request_id):
         status = 'failed' if broken or capped_only else 'completed'  # capped: no coverage was established yet
         if capped_only:
             result['deferred_by_cap'] = True  # retried once the per-day caps reset, without spending an attempt
+        # what the job answered for. The signature it recorded when it started is not the row's once the checks ran: the probe results and
+        # the earlier checks a validation stores are part of the host context the signature is made from, so the next sweep took the
+        # finished job for one of other evidence and queued the same match again (issue 338, jobs 4750 and 4752).
+        row.refresh_from_db()
+        match.refresh_from_db()  # the review writes the match's ai_verdict, which closure_basis reads: key the state enqueue will read
+        result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-            status=status, result=result, finished_at=timezone.now(),
+            status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
             next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
             error=('deferred until the daily validation cap resets' if capped_only else
                    'a check or AI review failed or was blocked') if status == 'failed' else '')
@@ -1263,8 +1277,11 @@ def deep_scan_apexes():
     # a bug bounty project is never widened to a parent domain (the program's scope names what may be tested, and a Domain target counts as
     # a person's confirmation of it) and, until its owner confirmed automated testing, not deep-scanned either
     engaged = set(BountyEngagement._base_manager.values_list("project_id", flat=True))
-    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode").order_by("id"))
-    own = {(project_id, name): domain_id for domain_id, name, project_id, _mode in rows}  # a project's own row for a name
+    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode", "discovery_mode").order_by("id"))
+    own = {(project_id, name): domain_id for domain_id, name, project_id, _mode, _disc in rows}  # a project's own row for a name
+    # a target added as passive, or as "just add it", was never meant to be scanned deeply: it adds nothing to the sweep, and its own apex row is not scanned by it
+    held = (Domain.DISCOVERY_PASSIVE, Domain.DISCOVERY_MANUAL)
+    held_apex = {(project_id, name) for _domain_id, name, project_id, _mode, disc in rows if disc in held}
     from cveFeed.exclusions import excluded_names
     banned_by_project = {}  # project id -> the names its organization excluded for good (one read per project)
 
@@ -1274,8 +1291,8 @@ def deep_scan_apexes():
         return name.lower().rstrip(".") in banned_by_project[project_id]
     wanted = {}  # (project id, apex) -> the project's own Domain row for it, if there is one
     forced = set()  # apexes a target asked for with scope_mode='parent': promoted even when on the shared list
-    for _domain_id, name, project_id, mode in rows:
-        if classify_target(name) != DOMAIN or mode == Domain.SCOPE_HOST:
+    for _domain_id, name, project_id, mode, disc in rows:
+        if classify_target(name) != DOMAIN or mode == Domain.SCOPE_HOST or disc in held:
             continue  # scope_mode='host': never promoted to a parent
         if mode == Domain.SCOPE_PARENT:
             apex = apex_domain(name)
@@ -1288,7 +1305,7 @@ def deep_scan_apexes():
             apex, host_scoped = effective_apex(name)
             if host_scoped:
                 continue
-        if apex and not excluded(project_id, apex):  # an excluded apex is never promoted, queued or scanned
+        if apex and (project_id, apex) not in held_apex and not excluded(project_id, apex):  # an excluded apex is never promoted, queued or scanned
             wanted.setdefault((project_id, apex), own.get((project_id, apex)))
     due = ledger.stale_first("bbot-deep", [(key, key[1], key[0]) for key in wanted])
     busy = set(ScanHistory.objects.filter(
@@ -1351,6 +1368,14 @@ def assess_host(self, assessment_id):
     """Execute one stored, scope-checked host assessment; the broker carries no target text."""
     from cveFeed.host_assessment import execute
     return execute(assessment_id, celery_id=self.request.id)
+
+
+@app.task(name='assess_hosts', bind=True, queue='discovery_queue')
+def assess_hosts(self, assessment_ids):
+    """Execute a batch of stored, scope-checked host assessments of one target as one pipeline run (each host keeps its own row and outcome);
+    the broker carries no target text, only row ids. The time limit is the discovery queue's, as for ``assess_host``."""
+    from cveFeed.host_assessment import execute_batch
+    return execute_batch(assessment_ids, celery_id=self.request.id)
 
 
 @app.task(name="retest_hosts", bind=True, queue="discovery_queue")
@@ -1666,7 +1691,17 @@ def report_resources():
     container) can show it. See reNgine/resources.py."""
     from reNgine import resources
     resources.report_state()
+    from cveFeed import scan_concurrency
+    scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
     return {}
+
+
+@app.task(name="apply_scan_concurrency", bind=False, queue="cve_feed_queue")
+def apply_scan_concurrency():
+    """After a save on Settings, configMaxxing: resize the running discovery worker to the saved value with celery's ``autoscale`` remote
+    control (the other numbers are read live by the workers). report_resources does the same every 30 seconds."""
+    from cveFeed import scan_concurrency
+    return scan_concurrency.apply_discovery()
 
 
 PRUNE_ROUNDS, PRUNE_BATCH = 20, 5000

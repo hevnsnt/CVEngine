@@ -3,6 +3,9 @@
 import { ask } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
+import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
+import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
+import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const root = document.getElementById("settings");
 const csrf = root.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -132,6 +135,8 @@ const sections = {
       vllm: "required, e.g. http://100.64.0.5:8000/v1, or http://localhost:8000/v1 if it runs on this server",
       lmstudio: "required, e.g. http://100.64.0.5:1234/v1, or http://localhost:1234/v1 if it runs on this server (the API key is only needed when you turned on authentication in LM Studio)",
       openrouter: "optional, defaults to https://openrouter.ai/api/v1",
+      openai: "optional, empty uses OpenAI (https://api.openai.com/v1); set it for a LiteLLM proxy or another OpenAI-compatible service, which then gets the key you type here",
+      anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
     const sync = () => {
       const p = provider.value;
@@ -148,7 +153,6 @@ const sections = {
           ? "saved (leave blank to keep)"
           : "API key";
       base.placeholder = BASE_HINT[p] || "optional";
-      baseField.style.display = ["anthropic", "openai"].includes(p) ? "none" : "";
       keyField.style.display = p === "ollama" ? "none" : "";
     };
     const load = async () => {
@@ -175,6 +179,7 @@ const sections = {
     provider.addEventListener("change", () => {
       model.value = "";
       models.textContent = "";
+      base.value = provider.value === s.provider ? (s.base_url || "") : ""; // an address belongs to the service it was saved for
       sync();
     });
     sync();
@@ -241,8 +246,8 @@ const sections = {
         (() => {
           const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
           f.append(guideNote);
-          const row = el("div", "tools");
-          row.append(el("span", "note", "Or write the next"), guideNow, el("span", "note", "CVEs now, whatever is left of today's budget:"), guideRun);
+          const row = el("div", "tools guide-now");
+          row.append(el("span", "note", "Or, from what is left of today's budget, write the next"), guideNow, el("span", "note", "CVEs now"), guideRun);
           f.append(row);
           return f;
         })(),
@@ -584,8 +589,24 @@ const sections = {
       rows.forEach((r) => wrap.append(el("div", "find", r)));
       return wrap;
     };
+    // Always shown, also when no worker has reported yet (the cards below are not drawn then).
+    const pointer = () => {
+      const note = el("p", "note", "Scan concurrency moved to configMaxxing: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. ", { style: "margin:0" });
+      note.append(
+        Object.assign(el("a", "", "Open configMaxxing", { href: `#${SECTION_ID}` }), {
+          onclick: (event) => {
+            event.preventDefault();
+            open(SECTION_ID);
+          },
+        }),
+      );
+      const box = el("div", "card", null, { style: "max-width:640px;margin-bottom:16px" });
+      box.append(note);
+      return box;
+    };
     const draw = (snap) => {
       host.textContent = "";
+      host.append(pointer());
       if (!snap.containers.length) {
         host.append(card("Resources", el("p", "note", "No worker has reported yet. The celery worker publishes its memory every 30 seconds.")));
         return;
@@ -625,7 +646,7 @@ const sections = {
           "Tuning",
           el("p", "note", "Container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m). Memory reserved per job (an estimate at first, raised to what real runs needed): " +
             Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") +
-            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment. DISCOVERY_CONCURRENCY (default 3) sets how many discoveries may queue at once."),
+            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment."),
         ),
       );
     };
@@ -640,6 +661,10 @@ const sections = {
       if (document.body.contains(host)) timer = setTimeout(refresh, 5000);
     };
     await refresh();
+  },
+
+  async [SECTION_ID](m) {
+    await buildSection(m, { card: parseHash(location.hash).card });
   },
 
   async tailscale(m) {
@@ -1225,14 +1250,37 @@ const labels = {
   reset: "Factory reset",
 };
 
-async function open(name) {
+// configMaxxing: the advanced tunables. A group of its own that is collapsed until opened; whether it is open is remembered per viewer.
+let storage = null;
+try {
+  storage = window.localStorage;
+} catch (_) {
+  /* blocked: the group stays collapsed by default and nothing is remembered */
+}
+const cmItems = el("div", "set-group-items", null, { id: "set-cm-items" });
+const cmToggle = el("button", "set-group-title set-toggle", SECTION_LABEL, {
+  type: "button",
+  "aria-controls": "set-cm-items",
+});
+function setCmOpen(isOpen, remember = true) {
+  cmItems.hidden = !isOpen;
+  cmToggle.setAttribute("aria-expanded", String(isOpen));
+  cmToggle.dataset.open = isOpen ? "1" : "0";
+  if (remember) writeOpen(storage, isOpen);
+}
+
+async function open(name, card = "") {
   tabs
-    .querySelectorAll("button")
+    .querySelectorAll("button[data-tab]")
     .forEach((b) =>
-      b.setAttribute("aria-selected", String(b.dataset.tab === name)),
+      b.setAttribute(
+        "aria-selected",
+        String(b.dataset.tab === name && (!b.dataset.card || b.dataset.card === (card || b.dataset.card))),
+      ),
     );
+  if (name === SECTION_ID) setCmOpen(true);
   panel.textContent = "";
-  history.replaceState(null, "", `#${name}`);
+  history.replaceState(null, "", card ? `#${name}/${card}` : `#${name}`);
   try {
     await sections[name](panel);
   } catch (err) {
@@ -1254,7 +1302,29 @@ groups.forEach(([title, names]) => {
   });
   tabs.append(group);
 });
+const cmGroup = el("div", "set-group", null, { role: "presentation" });
+cmToggle.onclick = () => setCmOpen(cmItems.hidden);
+cards().forEach((entry) => {
+  const b = el("button", "btn ghost sm", entry.title, {
+    role: "tab",
+    "data-tab": SECTION_ID,
+    "data-card": entry.id,
+    "aria-selected": "false",
+  });
+  b.type = "button";
+  b.onclick = () => open(SECTION_ID, entry.id);
+  cmItems.append(b);
+});
+cmGroup.append(cmToggle, cmItems);
+tabs.append(cmGroup);
+setCmOpen(readOpen(storage), false);
+
 // an old link to #engines (the tab this replaced) opens the scan policy
 const legacyTabs = { engines: "scan_policy" };
-const hashTab = legacyTabs[location.hash.slice(1)] || location.hash.slice(1);
-open(sections[hashTab] ? hashTab : "ai");
+const hash = location.hash.slice(1);
+const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
+open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "");
+window.addEventListener("hashchange", () => {
+  if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card);
+  else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
+});

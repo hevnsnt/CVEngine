@@ -745,7 +745,7 @@
           <table class="table" cellspacing="0" style="border-collapse: collapse;">
             <tr>
               <td style="width: 2%" class="cell table-border">{{ forloop.counter }}.</td>
-              <td style="width: 80%" class="cell table-border">{{subdomain.name}}</td>
+              <td style="width: 80%" class="cell table-border">{{subdomain.name}}{% if subdomain.report_alias %} ({{ subdomain.report_alias }}){% endif %}</td>
               {% if subdomain.http_status == 200 %}
                 <td style="width: 10%" class="cell table-border bg-success">{{subdomain.http_status}}</td>
               {% elif subdomain.http_status >= 300 and subdomain.http_status < 400 %}

@@ -101,7 +101,14 @@ classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,buckets
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
-commands+="$(generate_worker_command "discovery_queue" "${DISCOVERY_CONCURRENCY:-8}" "discovery_worker")"$'\n'
+# How many discovery tasks and host assessments run at once: what an App Admin saved on Settings, configMaxxing, else DISCOVERY_CONCURRENCY, else 8.
+# (A save also resizes the running worker live, see cveFeed/scan_concurrency.py; this makes a restart or an update land on the same number.)
+discovery_concurrency=$(python3 manage.py scan_concurrency_value discovery_concurrency 2>/dev/null | tail -n 1)
+if ! [[ "$discovery_concurrency" =~ ^[0-9]+$ ]] || [ "$discovery_concurrency" -lt 1 ]; then
+    discovery_concurrency="${DISCOVERY_CONCURRENCY:-8}"
+fi
+echo "Discovery pool size (autoscale ceiling): $discovery_concurrency"
+commands+="$(generate_worker_command "discovery_queue" "$discovery_concurrency" "discovery_worker")"$'\n'
 commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\n'
 # A reserved one-at-a-time lane keeps requested validation ahead of routine feed work.
 # Redis priority 0 is highest; this worker reserves one task for future severity-aware dispatch.

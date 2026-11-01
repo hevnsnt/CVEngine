@@ -84,28 +84,33 @@ TOOLS = [
     ('list_engines', 'Legacy: scan engines are only labels, every scan runs the same fixed pipeline.', _schema(), lambda c, a: svc.list_engines(c), False),
     ('list_targets', 'Targets (domains, IPs) in a project.', _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_targets(c, a.get('project'), a), False),
-    ('add_target', 'Add a domain, IP, CIDR or range as a target.', _schema(
+    ('add_target', 'Add a domain, IP, CIDR or range as a target. mode is kept on the target and is what every later automatic scan of it uses: standard (default), deep, passive (public sources only), or manual (never scanned automatically).', _schema(
         {'project': SLUG, 'value': {'type': 'string'}, 'description': {'type': 'string'},
-         'discover': {'type': 'boolean', 'description': 'also start live bbot discovery'}}, ['project', 'value']),
-     lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover'))), True),
-    ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive. A line starting with - (for example -example.com) EXCLUDES that domain and every name under it for the whole organization and removes its hosts and targets (needs an organization-level role).', _schema(
+         'discover': {'type': 'boolean', 'description': 'also start live bbot discovery'},
+         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}}, ['project', 'value']),
+     lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover')), a.get('mode')), True),
+    ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive, or manual to just add them and never scan them automatically; it is kept on each target and used for every later automatic scan. A line starting with - (for example -example.com) EXCLUDES that domain and every name under it for the whole organization and removes its hosts and targets (needs an organization-level role).', _schema(
         {'project': SLUG, 'targets': {'type': 'array', 'items': {'type': 'string'}}, 'discover': {'type': 'boolean'},
-         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']}}, ['project', 'targets']),
+         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}}, ['project', 'targets']),
      lambda c, a: svc.add_targets(c, a.get('project'), a.get('targets'), bool(a.get('discover', True)), a.get('mode')), True),
     ('add_targets_by_org', 'Bulk add across one organization. text: "##Org" once, then "#Project" above each list of domains/IPs/CIDRs. Creates missing projects (needs org admin).', _schema(
-        {'text': {'type': 'string'}, 'discover': {'type': 'boolean'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']},
+        {'text': {'type': 'string'}, 'discover': {'type': 'boolean'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']},
          'current_project': {'type': 'string', 'description': 'slug of the project in use; its organization is used when the paste names none'}}, ['text']),
      lambda c, a: svc.add_targets_by_org(c, a.get('text', ''), bool(a.get('discover', True)), a.get('mode'), a.get('current_project')), True),
     ('delete_targets', 'Delete targets (and their hosts, scans and results) by ids, or all matching q. Targets with a running scan are skipped. Irreversible.', _schema(
         {'project': SLUG, 'ids': {'type': 'array', 'items': {'type': 'integer'}}, 'all_matching': {'type': 'boolean'}, 'q': {'type': 'string'}}, ['project']),
      lambda c, a: svc.delete_targets(c, a.get('project'), a.get('ids'), bool(a.get('all_matching')), a.get('q') or ''), True),
-    ('discover_target', 'Run standard (default), deep or passive bbot discovery and then nuclei on an existing target.', _schema(
+    ('discover_target', "Run standard, deep or passive bbot discovery and then nuclei on an existing target. Without mode the target's own mode is used (a manual only target needs one); a mode given here is kept on the target.", _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']}}, ['project', 'target_id']),
      lambda c, a: svc.discover_target(c, a.get('project'), int(a['target_id']), a.get('mode')), True),
     ('set_target_scope', 'Set a target\'s scope_mode: auto (the shared-domain list decides: a tenant on a provider domain such as acme.jfrog.com is host-only), host (this host only, never its parent domain) or parent (the parent domain is yours even if it is a provider domain; use with care).', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'scope_mode': {'type': 'string', 'enum': ['auto', 'host', 'parent']}},
         ['project', 'target_id', 'scope_mode']),
      lambda c, a: svc.set_target_scope(c, a.get('project'), int(a['target_id']), a.get('scope_mode')), True),
+    ('set_target_discovery_mode', "Set the mode a target is discovered in whenever discovery starts on its own (the work conductor's rescans, the weekly sweeps): standard, deep, passive (public sources only) or manual (never started automatically). Changing it starts nothing.", _schema(
+        {'project': SLUG, 'target_id': {'type': 'integer'}, 'discovery_mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}},
+        ['project', 'target_id', 'discovery_mode']),
+     lambda c, a: svc.set_target_discovery_mode(c, a.get('project'), int(a['target_id']), a.get('discovery_mode')), True),
     ('rescan_hosts', 'Scan specific hosts of a target now (nmap, exposure check, nuclei, CVE correlation) without a bbot run. Hosts must be the target or under it; up to 200. Work done recently is skipped.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'hosts': {'type': 'array', 'items': {'type': 'string'}}},
         ['project', 'target_id', 'hosts']),
@@ -134,7 +139,7 @@ TOOLS = [
     ('start_scan', 'Start a scan of a target: bbot discovery, then nmap and nuclei (work already done recently is reused). engine_id is optional and ignored.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'engine_id': {'type': 'integer'}}, ['project', 'target_id']),
      lambda c, a: svc.start_scan(c, a.get('project'), int(a['target_id']), int(a['engine_id']) if a.get('engine_id') else None), True),
-    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
+    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name) alias: note: (the display name and note a person gave a host or target; a bare word and host: also match the alias); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
@@ -163,10 +168,16 @@ TOOLS = [
     ('list_hosts', 'Inventory: hosts with IPs, open ports, product/version per service and a 0-100 score with its reasons, highest score first. Each host carries check_coverage: {done, applicable, checks: [{id, label, state done|due|not_applicable, last_run}]}, which of the checks that apply to it have run.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'target_id': {'type': 'integer'}, 'sort': {'type': 'string', 'enum': ['score', 'name']}}), ['project']),
      lambda c, a: svc.list_hosts(c, a.get('project'), a), False),
-    ('set_host_profile', 'Set the asset information of a host: owner, purpose and criticality (unknown, low, medium, high, critical). Only the fields given change.', _schema(
+    ('set_host_profile', 'Set the asset information of a host: owner, purpose, criticality (unknown, low, medium, high, critical), alias (a short display name shown beside the address in lists, search, reports and the graph; the address and discovered names never change) and note (free text). Only the fields given change; an empty alias or note clears it.', _schema(
         {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'owner': {'type': 'string'}, 'purpose': {'type': 'string'},
-         'criticality': {'type': 'string', 'enum': ['unknown', 'low', 'medium', 'high', 'critical']}}, ['project', 'host']),
-     lambda c, a: hosts.update_host_profile(c, a.get('project'), a['host'], a.get('owner'), a.get('purpose'), a.get('criticality')), True),
+         'criticality': {'type': 'string', 'enum': ['unknown', 'low', 'medium', 'high', 'critical']},
+         'alias': {'type': 'string', 'maxLength': 60, 'description': 'a short display name, one line of plain text'},
+         'note': {'type': 'string', 'maxLength': 1000, 'description': 'free text'}}, ['project', 'host']),
+     lambda c, a: hosts.update_host_profile(c, a.get('project'), a['host'], a.get('owner'), a.get('purpose'), a.get('criticality'), a.get('alias'), a.get('note')), True),
+    ('set_target_profile', 'Set the alias (a short display name) and/or note of a target, shown beside its name in lists, search and reports. Only the fields given change; an empty alias or note clears it. The target\'s name, which is what is scanned, never changes.', _schema(
+        {'project': SLUG, 'target_id': {'type': 'integer'}, 'alias': {'type': 'string', 'maxLength': 60, 'description': 'a short display name, one line of plain text'},
+         'note': {'type': 'string', 'maxLength': 1000, 'description': 'free text'}}, ['project', 'target_id']),
+     lambda c, a: svc.set_target_profile(c, a.get('project'), int(a['target_id']), a.get('alias'), a.get('note')), True),
     ('archive_host', 'Reversibly archive one stored host of a project, preserving evidence. Pinned hosts cannot be archived.',
      _schema({'project': SLUG, 'host': {'type': 'string'}, 'reason': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.host_archive(c, a.get('project'), a['host'], 'archive', reason=a.get('reason', '')), True),
@@ -232,7 +243,7 @@ TOOLS = [
     ('list_certificates', 'TLS certificates on the project hosts, soonest expiry first. expiring_within = days.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'expiring_within': {'type': 'string'}, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_certificates(c, a.get('project'), a), False),
-    ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings. check: spf|dmarc|dkim|tls|caa.', _schema(
+    ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings, and cleartext services (Telnet, FTP, rlogin, a login over plain HTTP). check: spf|dmarc|dkim|tls|caa|cleartext.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'check': {'type': 'string'}, 'status': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_hygiene(c, a.get('project'), a), False),
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(

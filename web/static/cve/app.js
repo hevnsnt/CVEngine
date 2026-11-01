@@ -68,6 +68,20 @@ const internalBadge = (network) => {
 // a hostname printed anywhere (except the host page itself) links to that host's page
 const hostUrl = hostHref;
 const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
+// What a person calls a host or target, and the note they wrote, shown beside its address and never in place of it. Both are typed text: they only
+// ever become text nodes (el() sets textContent), the note is a tooltip and a clipped line.
+const aliasTag = (row) => (row && row.alias ? el("span", "alias-tag", row.alias, { title: [row.alias, row.note].filter(Boolean).join("\n") }) : null);
+const named = (link, row) => {
+  const box = el("span", "named");
+  box.append(link);
+  const tag = aliasTag(row);
+  if (tag) box.append(" ", tag);
+  if (row && row.note) box.append(el("span", "note alias-note", row.note, { title: row.note }));
+  return box;
+};
+// the two fields, bounded like the server bounds them (60 characters on one line, 1000 for the note); the host page and the target dialog share them
+const aliasInput = (value) => uiText(value || "", { maxlength: "60", placeholder: "A short name, e.g. Lab printer" });
+const noteInput = (value) => Object.assign(el("textarea", "alias-note-box", null, { rows: "3", maxlength: "1000", placeholder: "Anything worth remembering" }), { value: value || "" });
 // a CVE id printed anywhere links to its match on that host; without a match id, to the matches that name it
 const cveLink = (project, cveId, matchId, host) => (project ? cveAnchor(project, cveId, matchId, host) : el("span", "", cveId));
 // "CVE CVE-2026-1" in a host's search reasons links to that CVE's match on the host; the host and IP are this row itself
@@ -797,6 +811,8 @@ const hostOverview = (h) => {
   const http = h.http || {};
   const hosting = h.hosting || {};
   const rows = [];
+  if (h.alias) rows.push({ label: "Alias", value: h.alias });
+  if (h.note) rows.push({ label: "Note", value: h.note });
   const coverage = coverageLine(h.check_coverage);
   if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
@@ -1889,8 +1905,9 @@ function allTargets(mount) {
     empty: 'No targets yet. Use "Add targets" with #Project headers to paste a list of domains, IPs or ranges.',
     render: table(
       withProject([
-        { label: "Target", render: (t) => hostLink(t.name, projectOf(t)) },
+        { label: "Target", render: (t) => named(hostLink(t.name, projectOf(t)), t) },
         { label: "Scope", render: (t) => (t.host_scoped ? "this host only" : t.scope_mode === "parent" ? "includes parent domain" : "auto") },
+        { label: "Discovery", render: (t) => (t.discovery_mode === "manual" ? "manual only" : t.discovery_mode || "standard") },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2028,6 +2045,67 @@ const pages = {
       box.append(pick, note);
       return box;
     };
+    // The alias (a short display name) and the note of a target: shown beside its name in lists, search and reports, searchable, never scanned
+    const editLabel = (t) =>
+      dialog(`Alias and note: ${t.name}`, (body, close) => {
+        const alias = aliasInput(t.alias);
+        const note = noteInput(t.note);
+        body.append(
+          field("Alias", alias, "A short display name. The target's name stays as it is."),
+          field("Note", note),
+        );
+        const failure = el("p", "msg err", "", { role: "alert", style: "display:none" });
+        const actions = el("div", "actions");
+        const no = el("button", "btn ghost", "Cancel", { type: "button" });
+        no.onclick = close;
+        const save = uiButton("Save", async () => {
+          failure.style.display = "none";
+          try {
+            const r = await post(`targets/${t.id}/profile`, { alias: alias.value, note: note.value });
+            t.alias = r.alias;
+            t.note = r.note;
+            close();
+            toast(`${t.name}: saved`);
+            list.reload();
+          } catch (err) {
+            failure.textContent = err.message;
+            failure.style.display = "block";
+          }
+        });
+        actions.append(no, save);
+        body.append(failure, actions);
+        setTimeout(() => alias.focus(), 0);
+      });
+    // The mode discovery runs in whenever it starts on its own (the work conductor's rescans, the weekly sweeps). "Manual only" is
+    // "just add it, do not scan yet": nothing automatic scans it until a person picks a mode here and presses Discover or Scan.
+    const discoveryCell = (t) => {
+      const pick = el("select", "", null, { "aria-label": `Discovery mode of ${t.name}` });
+      for (const [value, label] of [
+        ["standard", "Standard"],
+        ["deep", "Deep"],
+        ["passive", "Passive (public sources only)"],
+        ["manual", "Manual only (never scanned automatically)"],
+      ]) {
+        const o = el("option", "", label, { value });
+        o.selected = t.discovery_mode === value;
+        pick.append(o);
+      }
+      pick.onchange = async () => {
+        pick.disabled = true;
+        try {
+          const r = await post(`targets/${t.id}/discovery-mode`, { discovery_mode: pick.value });
+          t.discovery_mode = r.discovery_mode;
+          toast(`${t.name}: discovery ${r.discovery_mode}`);
+        } catch (err) {
+          pick.value = t.discovery_mode;
+          toast(err.message, true);
+        }
+        pick.disabled = false;
+      };
+      const box = el("div", "scope-cell");
+      box.append(pick);
+      return box;
+    };
     const rowBox = (t) => {
       const b = el("input", "", null, { type: "checkbox", "aria-label": `Select ${t.name}` });
       b.checked = allMatching || selected.has(t.id);
@@ -2059,8 +2137,20 @@ const pages = {
         'No targets yet. Use "Add targets" to paste a list of domains, IPs or ranges.',
       render: table([
         { label: "", cls: "sel", head: () => headBox, render: rowBox },
-        { label: "Target", render: (t) => hostLink(t.name) },
+        {
+          label: "Target",
+          render: (t) => {
+            const box = named(hostLink(t.name), t);
+            // the edit sits with the name it labels (the actions column is already full)
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
+            edit.onclick = () => editLabel(t);
+            box.append(el("br"), edit);
+            return box;
+          },
+        },
         { label: "Scope", render: (t) => scopeCell(t) },
+        { label: "Discovery", render: (t) => discoveryCell(t) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2490,6 +2580,8 @@ const pages = {
         const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => (p.protocol === "udp" ? `${p.number}/udp` : p.number))))];
         const columns = [
           { label: "Host", value: (h) => h.host },
+          { label: "Alias", value: (h) => h.alias || "" },
+          { label: "Note", value: (h) => h.note || "" },
           { label: "Also answers to", value: (h) => (h.aliases || []).join(" ") },
           ...(ALL ? [{ label: "Project", value: (h) => projectOf(h) || "" }] : []),
           { label: "Temperature", value: (h) => h.heat || "unscanned" },
@@ -2553,7 +2645,7 @@ const pages = {
           frame.append(img);
         } else frame.append(el("span", "shot-none", "No screenshot"));
         const meta = el("span", "shot-meta");
-        meta.append(el("b", "mono", h.host), el("span", "note", [`score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
+        meta.append(el("b", "mono", h.host), el("span", "note", [h.alias, `score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
         card.append(frame, meta);
         card.onclick = () => {
           galleryOn = false;
@@ -2608,6 +2700,8 @@ const pages = {
       box.append(el("h3", "sec", "Asset info"));
       const p = h.profile || {};
       const rows = [
+        ["Alias", h.alias],
+        ["Note", h.note],
         ["Owner", p.owner],
         ["Purpose", p.purpose],
         ["Criticality", p.criticality && p.criticality !== "unknown" ? p.criticality : ""],
@@ -2627,12 +2721,23 @@ const pages = {
       crit.value = CRITICALITY.includes(p.criticality) ? p.criticality : "unknown";
       const grid = el("div", "asset-grid");
       grid.append(field("Owner", owner), field("Purpose", purpose), field("Criticality", crit));
+      // the alias and note are the host's own (saved per project and host name); one that only the target has is shown as a hint, not edited here
+      const own = (key) => (h[`${key}_from`] === "target" ? "" : h[key] || "");
+      const alias = aliasInput(own("alias"));
+      const note = noteInput(own("note"));
+      if (h.alias_from === "target") alias.placeholder = `${h.alias} (from the target)`;
+      if (h.note_from === "target") note.placeholder = "A note on the target is shown for this host";
+      const names = el("div", "asset-grid alias-grid");
+      names.append(field("Alias", alias, "A short display name, shown beside the address. The address and discovered names stay."), field("Note", note));
       const save = uiButton("Save", async () => {
-        const r = await api("POST", hostPath(h, "profile"), { owner: owner.value, purpose: purpose.value, criticality: crit.value });
+        const r = await api("POST", hostPath(h, "profile"), { owner: owner.value, purpose: purpose.value, criticality: crit.value, alias: alias.value, note: note.value });
         h.profile = { owner: r.owner, purpose: r.purpose, criticality: r.criticality };
+        Object.assign(h, { alias: r.alias, alias_from: r.alias ? "host" : "", note: r.note, note_from: r.note ? "host" : "" });
+        paintAlias(h);
+        list.reload();
         toast("Asset info saved");
       }, "btn sm");
-      box.append(grid, save);
+      box.append(grid, names, save);
       return box;
     }
     // After a removal the host is gone from the list: back to the Hosts list, refreshed
@@ -2807,6 +2912,14 @@ const pages = {
       return box;
     }
 
+    // the alias beside the title of the open host, after it was saved
+    function paintAlias(h) {
+      const tag = pane.querySelector(".host-alias");
+      if (!tag) return;
+      tag.textContent = h.alias || "";
+      tag.title = h.note || "";
+      tag.hidden = !h.alias;
+    }
     function showHost(h) {
       current = h && h.id;
       rows.querySelectorAll(".host-row").forEach((r) =>
@@ -2826,6 +2939,7 @@ const pages = {
       };
       const head = el("div", "host-head");
       head.append(el("h2", "host-title", h.host));
+      head.append(el("span", "alias-tag host-alias", h.alias || "", { title: h.note || "" }));
       head.append(copyButton(h.host, "hostname"), copyButton(() => `${location.origin}${location.pathname}#${h.id}`, "link to this host", "link"));
       const HEAT = { fire: ["Fire", "fire"], smoke: ["Smoke", "smoke"], ice: ["Ice", "ice"], clean: ["Clean", "success"], unscanned: ["Not scanned", "queued"] };
       if (HEAT[h.heat]) head.append(badge(HEAT[h.heat][0], HEAT[h.heat][1]));
@@ -3220,6 +3334,8 @@ const pages = {
           const top = el("span", "hr-top");
           const nameBox = el("span", "cve-id");
           nameBox.append(selfLink(hostAnchor(projectOf(h), h.host)));
+          const tag = aliasTag(h);
+          if (tag) nameBox.append(" ", tag); // beside the address, which stays the link
           top.append(nameBox, el("span", "hr-score", String(h.score || 0), { title: "Score" }));
           const meta = el("span", "host-meta");
           meta.append(h.ips[0] ? rowIp(projectOf(h), h.ips[0].address) : el("span", "note", "no IP"));
@@ -3536,7 +3652,7 @@ pages.hygiene = function hygiene(mount) {
       d < 0 ? "critical" : d <= 7 ? "high" : d <= 30 ? "medium" : "success";
     return badge(d < 0 ? `expired ${-d}d ago` : `${d} days`, cls);
   };
-  const certs = el("section", "card hy-card");
+  const certs = el("section", "card hy-card hy-certs");
   certs.append(
     el("h2", "", "Certificates"),
     el(
@@ -3570,7 +3686,7 @@ pages.hygiene = function hygiene(mount) {
   }).start();
 
   const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS and email authentication"));
+  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
   const tools = el("div", "tools");
   const sev = picker(
     "Severity",
@@ -3590,6 +3706,7 @@ pages.hygiene = function hygiene(mount) {
     [
       ["", "All areas"],
       ["tls", "TLS and certificates"],
+      ["cleartext", "Cleartext services"],
       ["spf", "SPF"],
       ["dkim", "DKIM"],
       ["dmarc", "DMARC"],
@@ -3615,7 +3732,7 @@ pages.hygiene = function hygiene(mount) {
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
     empty:
-      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC all look healthy.",
+      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
     onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },

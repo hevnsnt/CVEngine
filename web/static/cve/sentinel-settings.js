@@ -367,19 +367,21 @@ export function openSettings(first, onChange) {
 }
 
 // The detail of every Sentinel on the page, asked for now and then: the list does not carry settings, version or update.
+// ``refresh(ids, only)`` asks for ``only`` (default: all of ``ids``) and forgets Sentinels that are no longer in ``ids``.
 export function detailCache(onUpdate) {
   const cache = new Map();
   let busy = false;
   return {
     get: (id) => cache.get(id),
-    async refresh(ids) {
-      if (busy) return;
+    has: (id) => cache.has(id),
+    async refresh(ids, only = ids) {
+      if (busy) return false;
       busy = true;
       try {
         const got = await Promise.all(
-          ids.map((id) => api("GET", detailUrl(id)).catch(() => null)),
+          only.map((id) => api("GET", detailUrl(id)).catch(() => null)),
         );
-        ids.forEach((id, i) => {
+        only.forEach((id, i) => {
           if (got[i]) cache.set(id, got[i]);
         });
         [...cache.keys()].forEach((id) => {
@@ -389,6 +391,7 @@ export function detailCache(onUpdate) {
         busy = false;
       }
       onUpdate();
+      return true;
     },
   };
 }

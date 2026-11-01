@@ -157,7 +157,8 @@ ROUTES = [
      lambda r, c, cve_id, **k: svc.get_cve(c, cve_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets', 'List targets', lambda r, c, slug, **k: svc.list_targets(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets', 'Add a domain, IP, CIDR or range',
-     lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover'))), 201)),
+     lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover')),
+                                            mode=_body(r).get('mode')), 201)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/bulk', 'Add many targets (list or pasted text), optionally start discovery',
      lambda r, c, slug, **k: (svc.add_targets(c, slug, _body(r).get('targets') or _body(r).get('text') or '',
                                               discover=bool(_body(r).get('discover', True)), mode=_body(r).get('mode')), 201)),
@@ -168,7 +169,7 @@ ROUTES = [
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/delete', 'Delete targets by ids, or all matching a search (skips running scans)',
      lambda r, c, slug, **k: svc.delete_targets(c, slug, ids=_body(r).get('ids'), all_matching=bool(_body(r).get('all_matching')),
                                                 q=_body(r).get('q') or '')),
-    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discover', 'Run bbot discovery then nuclei on a target',
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discover', 'Run bbot discovery then nuclei on a target; body {mode} (standard, deep or passive; kept on the target), else the target\'s own mode',
      lambda r, c, slug, target_id, **k: (svc.discover_target(c, slug, int(target_id), _body(r).get('mode')), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/rescan-hosts',
      'Scan specific hosts of a target now (nmap, exposure check, nuclei, CVE correlation) without a bbot run; body {hosts: [...]}',
@@ -176,6 +177,14 @@ ROUTES = [
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/scope',
      'Set a target\'s scope_mode: auto (shared-domain list decides), host (this host only) or parent (parent domain is owned); body {scope_mode}',
      lambda r, c, slug, target_id, **k: svc.set_target_scope(c, slug, int(target_id), _need(_body(r), 'scope_mode')[0])),
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile',
+     'Set a target\'s alias (a short display name, up to 60 characters, one line) and/or note (free text, up to 1000 characters); body {alias, note}, any subset, an empty one clears it. Display only: the target\'s name is what is scanned',
+     lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile', 'Same as POST: set a target\'s alias and note',
+     lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discovery-mode',
+     'Set the mode discovery runs in whenever it starts on its own for a target: standard, deep, passive, or manual (never started automatically); body {discovery_mode}',
+     lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)', 'One target',
      lambda r, c, slug, target_id, **k: svc.get_target(c, slug, int(target_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
@@ -206,9 +215,9 @@ ROUTES = [
      lambda r, c, slug, assessment_id, **k: svc.get_host_assessment(c, slug, int(assessment_id))),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments/(?P<assessment_id>\d+)/stop', 'Stop a queued or running host assessment',
      lambda r, c, slug, assessment_id, **k: svc.stop_host_assessment(c, slug, int(assessment_id))),
-    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical}, any subset',
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical, alias (a short display name, up to 60 characters, one line), note (free text, up to 1000 characters)}, any subset; an empty alias or note clears it',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
-                                                             criticality=_body(r).get('criticality'))),
+                                                             criticality=_body(r).get('criticality'), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/bulk', 'Archive, restore, pin or unpin many hosts; body {hosts: [names], action: archive|restore|pin|unpin, reason}. Up to 200; each host is independent',
      lambda r, c, slug, **k: hosts.host_bulk(c, slug, _body(r).get('hosts'), _body(r).get('action'), reason=_body(r).get('reason', ''))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/archive', 'Reversibly archive an inventoried host; body {reason}',
@@ -219,7 +228,7 @@ ROUTES = [
      lambda r, c, slug, host, **k: hosts.host_archive(c, slug, host, 'pin', pinned=_body(r).get('pinned'))),
     ('PATCH', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Same as POST: set a host\'s asset information',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
-                                                             criticality=_body(r).get('criticality'))),
+                                                             criticality=_body(r).get('criticality'), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/delete', 'Delete a host\'s data from this project only (it can be rediscovered); exact name, irreversible',
      lambda r, c, slug, host, **k: hosts.delete_host(c, slug, host, with_aliases=bool(_body(r).get('with_aliases')))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/move', 'Move a host to another project you can write to; body {to_project, whole_target}. It is added there as a target and scanned; its data is deleted here and this project never brings it back. A host that is a target here with other hosts under it moves only with whole_target (the 409 says how many)',
@@ -266,7 +275,7 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_routes(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/certificates', 'TLS certificates, soonest expiry first (?expiring_within=30)',
      lambda r, c, slug, **k: svc.list_certificates(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/hygiene', 'TLS, certificate and SPF/DKIM/DMARC findings',
+    ('GET', r'projects/(?P<slug>[-\w]+)/hygiene', 'TLS, certificate, SPF/DKIM/DMARC and cleartext-service findings (check=spf|dmarc|dkim|tls|caa|cleartext)',
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
@@ -480,6 +489,21 @@ def openapi_spec():
             'security': [{'bearer': []}], 'paths': paths}
 
 
+# Polled lists that answer a conditional request: the same list gets a 304 and no body (the live pages poll these every few seconds, and the browser
+# then skips the redraw). The ETag is a token of the body without the clocks in it (they move every second and mean nothing: the page counts the time
+# from the dates it already holds). The work behind the list is not saved; what a 304 saves is the transfer, the parse and the redraw.
+ETAG_ROUTES = re.compile(r'^(sentinels/live|projects/[-\w]+/scans)$')
+CLOCK_FIELDS = {'server_time', 'seconds_since_seen'}
+
+
+def _without_clocks(value):
+    if isinstance(value, dict):
+        return {k: _without_clocks(v) for k, v in value.items() if k not in CLOCK_FIELDS}
+    if isinstance(value, list):
+        return [_without_clocks(v) for v in value]
+    return value
+
+
 # Not csrf_exempt: bearer-token requests are exempted by AgentTokenMiddleware, session ones stay CSRF-checked.
 def dispatch(request, path):
     path = path.strip('/')
@@ -510,6 +534,9 @@ def dispatch(request, path):
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
             return result
         data, status = result if isinstance(result, tuple) else (result, 200)
+        if request.method == 'GET' and status == 200 and ETAG_ROUTES.match(path):
+            from cveFeed import snapshot_cache
+            return snapshot_cache.respond_payload(request, data, etag=snapshot_cache.token_of(_without_clocks(data)))
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
         response = JsonResponse({'error': 'method not allowed'}, status=405)
