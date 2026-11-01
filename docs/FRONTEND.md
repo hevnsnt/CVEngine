@@ -96,7 +96,7 @@ The page also provisions Sentinels. A scope selector (**Project**, **Organizatio
 
 Under **Settings** (App Admins) there is one tab for each of these:
 
-- **AI model**: the provider (Anthropic, OpenAI, OpenRouter, Ollama, vLLM, or LM Studio) with **Load models** and **Save and test**, the daily budgets for validation planning and for CVE guidance written by the model, the **CVE catalog seed** card, and the **Auto-fire** card.
+- **AI model**: the provider (Anthropic, OpenAI, OpenRouter, Ollama, vLLM, or LM Studio) with **Load models** and **Save and test**, the daily budgets for validation planning and for CVE guidance written by the model, the **CVE catalog seed** card, and the **Auto-fire** card. How a request is made (timeouts, reply limit, context window, JSON mode, reasoning, Ollama keep-alive) is saved by the same `PUT /cve/api/settings/ai` and described in [Configuration](CONFIGURATION.md#ai-requests).
 - **API keys**: the one place for OSINT and scanner keys. Choose **Organizations** (a key applies to all their projects, present and future) or **Projects** (a key overrides the organization's), then add, change or remove a key per service. Secrets are write-only. The Chaos key also has an instance-wide fallback. Organization admins set organization keys from Administration, Organizations.
 - **Tailscale**: connect a tailnet to a project ([TAILSCALE.md](TAILSCALE.md)).
 - **OpenVAS**: switch the optional add-on on or off and choose which organizations and projects it scans ([OPENVAS.md](OPENVAS.md)). Organization admins choose what their own organizations scan from Administration, OpenVAS.

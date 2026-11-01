@@ -210,6 +210,8 @@ What this protects: a database dump, a backup, or SQL injection reads only ciphe
 
 ## AI requests
 
+Each variable below has a counterpart in **Settings, AI model** (the same name in the settings API: `request_timeout`, `connect_timeout`, `max_tokens`, `context_tokens`, `structured_mode`, `reasoning`). **The setting wins over the variable**: a value saved on the page replaces the variable, so a change made in the browser is not undone by an old line in `.env`; an empty setting follows the variable, and with neither set the request is exactly what earlier versions sent. A saved value is checked against the range written below when it is saved and again when it is used. The page and `GET /cve/api/settings/ai` show, for each setting, the value in force and where it comes from (the setting, the environment variable, or the provider's default). One more setting has no variable: `keep_alive` (Ollama: how long the model stays loaded after a request: `30m`, `1h`, `90s`, `0` to unload at once, `-1` to keep it loaded; empty is the server's default, five minutes). The settings apply to every stage and to the connection test; every change is recorded in the audit log (`ai.settings`, the names of what changed and the new value of the numbers and words, never a key or an address).
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CVENGINE_AI_TIMEOUT` | `120` (`300` for LM Studio) | Seconds one AI request may wait for its answer, 10 to 3600. A local model on a laptop can go past 120 seconds on a long stage; the setting applies to every provider. |
