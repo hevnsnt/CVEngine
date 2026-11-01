@@ -1315,6 +1315,11 @@ def _preferring(task, exclude_pk, now, memo):
     """The rights (``SentinelEff``) of the live, active Sentinels other than ``exclude_pk`` that cover ``task``'s project, declare its kind and prefer it. Cheap
     pre-filter first (the policy is stored JSON), so rights are built only for the few that prefer the kind; built once per ``(project, kind)`` and per Sentinel
     for the whole of one ``_try_claim`` call (``memo``), never once per task, with the tasks they hold now."""
+    if balance_defer_for(task.kind):  # balancing reads the same candidates and what they hold: one lookup serves both checks
+        key = ('preferring', task.project_id, task.kind)
+        if key not in memo:
+            memo[key] = [(e, held) for e, held in _peers(task, exclude_pk, now, memo) if task.kind in e.preferred]
+        return memo[key]
     key = ('candidates', task.project_id, task.kind)
     if key not in memo:
         pk = builtin_pk()
@@ -1333,13 +1338,15 @@ def _preferring(task, exclude_pk, now, memo):
 
 def _can_take(other, held_pair, task, now):
     """Whether the Sentinel with rights ``other`` could take ``task`` right now: usable and live, its capabilities (the kind not denied, capped out or withheld)
-    and its scope, hosts and internal-network rules let it have this task (``refusal``), it is not updating, and it has a free slot and room under its per-kind cap.
+    and its scope, hosts and internal-network rules let it have this task (``refusal``), it is not updating, and it has a free slot and room under its per-kind cap (and, for OpenVAS, no run in flight: one at a time).
     ``held_pair`` is ``_holders`` for it."""
     held, by_kind = held_pair
     if other.problem or not other.live or task.kind not in other.caps or other.refusal(task) is not None or _updating(other.agent, now):
         return False
     if held.get(other.agent.pk, 0) >= other.max_concurrent:
         return False
+    if task.kind == 'openvas' and by_kind.get((other.agent.pk, 'openvas'), 0) >= 1:
+        return False  # one OpenVAS run at a time: a Sentinel running one stops asking for more, so waiting for it would only waste the window
     cap = other.kind_caps.get(task.kind)
     return cap is None or by_kind.get((other.agent.pk, task.kind), 0) < cap
 

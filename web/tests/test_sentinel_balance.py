@@ -230,6 +230,31 @@ class NeverHoldBackTests(BalanceBase):
             self.assertEqual(inside.status, 'queued')
 
 
+class OpenvasAndSharedLookupTests(BalanceBase):
+    def test_a_peer_running_an_openvas_task_is_not_waited_for_openvas(self):
+        with mock.patch.dict('os.environ', CLAIM_8):
+            x, y = self.pair(x_held=2, y_held=0)
+            self.hold(y, 1, kind='openvas')  # y: 1 of 4 against x's 2 of 4: lighter, but it takes no second OpenVAS run
+            created = timezone.now()
+            task = self.queue('openvas', created=created)
+            self.assertEqual(self.claim(x, ['openvas'], created + timedelta(seconds=1))[0].pk, task.pk)
+            nmap = self.queue('nmap', created=created)
+            self.assertIsNone(self.claim(x, ['nmap'], created + timedelta(seconds=1))[0])  # other kinds are still shared by load
+            self.assertEqual(self.claim(y, ['nmap'], created + timedelta(seconds=1))[0].pk, nmap.pk)
+
+    def test_the_prefer_and_balance_checks_share_one_lookup_of_the_peers(self):
+        with mock.patch.dict('os.environ', CLAIM_8):
+            x, y = self.pair(x_held=2, y_held=0)
+            created = timezone.now()
+            self.queue('nmap', created=created)
+            with CaptureQueriesContext(connection) as captured:
+                self.assertIsNone(self.claim(x, ['nmap'], created + timedelta(seconds=1))[0])
+            lookups = [q for q in captured.captured_queries if '"agentapi_agent"."last_seen" >=' in q['sql']]
+            self.assertEqual(len(lookups), 1, 'the candidates are looked up once for both checks')
+        with mock.patch.dict('os.environ', {**CLAIM_8, 'CVENGINE_SENTINEL_BALANCE': '0'}):  # with balancing off the prefer check keeps its own cheap lookup
+            self.assertIsNotNone(self.claim(x, ['nmap'], created + timedelta(seconds=1))[0])
+
+
 class PolicyInterplayTests(BalanceBase):
     def test_prefer_wins_over_balance_for_the_one_that_prefers(self):
         with mock.patch.dict('os.environ', CLAIM_8):
