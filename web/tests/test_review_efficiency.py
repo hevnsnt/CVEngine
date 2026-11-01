@@ -71,7 +71,7 @@ class ExposedAmongTests(Fixture):
 
 class DiscoveryCountsTests(Fixture):
 	def test_the_ticker_counts_are_kept_for_a_few_seconds_and_dropped_with_the_stats(self):
-		views._DISCOVERY_COUNTS_CACHE.clear()
+		views.clear_stats_cache()
 		scan = self.scan()
 		self.host('one.eff.example', scan, ip='192.0.2.10')
 		user = User.objects.create_user('effuser', password='x')
