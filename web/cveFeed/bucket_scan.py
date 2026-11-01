@@ -505,7 +505,7 @@ def sweep(project_id, fetch=None, dns=None):
         if holder is not True:
             return {**summary, 'skipped': 'another bucket sweep is running for this project'}
         candidates, complete = collect(project_id)
-        domains = {d.pk: d for d in Domain.objects.filter(project_id=project_id)}
+        domains = {d.pk: d for d in Domain.objects.filter(project_id=project_id).exclude(discovery_mode=Domain.DISCOVERY_MANUAL)}  # a manual only target's names are not checked on a schedule
         found_by_domain, checked_by_domain = {}, {}
         running = activity.log('run_check', f'Cloud storage check: {len(candidates)} candidate bucket{"s" if len(candidates) != 1 else ""}',
                                project=project_id, status='running')

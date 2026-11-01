@@ -360,11 +360,14 @@ def tls_ports(ports):
 
 def targets(project_id):
     """``[(host, port, starttls, domain_id)]`` for the project's hosts: the TLS ports nmap found open, and 443 for a host with no port data.
-    Names a scanner must not be pointed at (excluded, or resolving to a prohibited range) are dropped."""
+    Names a scanner must not be pointed at (excluded, or resolving to a prohibited range) are dropped, and so are the hosts of a target set to
+    manual only."""
     from startScan.models import Subdomain, open_ports
+    from targetApp.models import Domain
     from targetApp.target_types import scannable_hosts
     found, seen = [], set()
-    rows = (Subdomain.objects.filter(target_domain__project_id=project_id).order_by('-id').select_related('target_domain')
+    rows = (Subdomain.objects.filter(target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never audited on a schedule
+            .order_by('-id').select_related('target_domain')
             .prefetch_related('ip_addresses__ports'))
     for sub in rows.iterator(chunk_size=500):
         if sub.name in seen:

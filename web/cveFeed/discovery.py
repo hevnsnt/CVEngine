@@ -881,6 +881,8 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     suffix = domain.name.lower()
+    if not by_person and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's own request takes its hosts through the stages
+        return {'status': 'inconclusive', 'hosts': 0, 'error': 'the target is set to manual only; nothing was scanned'}
     wanted = sorted({n.strip().lower().rstrip('.') for n in names if n and n.strip()})
     requested = list(wanted)
     from cveFeed.exclusions import drop_excluded

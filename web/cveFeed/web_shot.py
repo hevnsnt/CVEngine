@@ -276,6 +276,7 @@ def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None
     ``{'queued', 'kept', 'blocked', 'hosts', 'rdp'}``. A host the organization excluded or archived is left alone (no row), one the bug bounty
     scope or confirmation holds back, or inside a network only a Sentinel can reach, gets a row that says so."""
     from cveFeed.bounty_gate import Gate
+    from targetApp.models import Domain
     from targetApp.target_types import sentinel_only_target
     gate, seen = Gate(), set()
     summary = {'queued': 0, 'kept': 0, 'blocked': 0, 'hosts': 0, 'rdp': 0, 'targets': []}
@@ -287,6 +288,8 @@ def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None
             continue
         seen.add(host)
         domain_id = sub.target_domain_id
+        if not by_person and sub.target_domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": no page is opened unless a person asks
+            continue
         why = queue_refusal(project_id, host, gate, unattended=not by_person)
         if why in ('excluded', 'archived'):
             continue
@@ -404,7 +407,9 @@ def _due_names(project_id, limit, now):
     limit = min(limit, 200)
     banned = excluded_names(project_id)
     names = []
-    never = (Subdomain.objects.filter(target_domain__project_id=project_id).filter(_web_evidence_q()).annotate(lname=Lower('name'))
+    from targetApp.models import Domain
+    never = (Subdomain.objects.filter(target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: not photographed on a schedule
+             .filter(_web_evidence_q()).annotate(lname=Lower('name'))
              .exclude(lname__in=list(archived_names(project_id)))
              .annotate(has=Exists(HostScreenshot.objects.filter(project_id=project_id, host=OuterRef('lname'))))
              .filter(has=False).values('lname').annotate(newest=Max('id')).order_by('-newest'))
@@ -417,7 +422,7 @@ def _due_names(project_id, limit, now):
             break
     if len(names) < limit:
         stale = Q(outcome=OK, captured_at__lt=now - ttl()) | Q(outcome__in=FAILURES + STATIC, attempted_at__lt=now - retry_after())
-        due = (HostScreenshot.objects.filter(project_id=project_id).filter(stale).exclude(scheme='rdp')
+        due = (HostScreenshot.objects.filter(project_id=project_id).filter(stale).exclude(scheme='rdp').exclude(domain__discovery_mode=Domain.DISCOVERY_MANUAL)
                .order_by(F('attempted_at').asc(nulls_first=True)).values_list('host', flat=True)[:limit * 4])
         for host in due:
             if host not in names and normalize(host) not in banned:
@@ -994,6 +999,9 @@ def _precheck(row, ctx, resolve):
     why = project['gate'].refusal(project_id, row.host, unattended=not row.by_person)
     if why:
         return BLOCKED, f'Not captured: {why}'
+    from targetApp.models import Domain
+    if not row.by_person and Domain.objects.filter(pk=row.domain_id, discovery_mode=Domain.DISCOVERY_MANUAL).exists():  # made manual only while the page waited
+        return BLOCKED, 'Not captured: the target is set to manual only.'
     try:
         address = resolve(row.host, row.port, project_id)
     except ValueError:
