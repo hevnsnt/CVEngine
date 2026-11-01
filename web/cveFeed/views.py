@@ -526,13 +526,18 @@ def project_page(request, slug, section):
 
 
 def host_screenshot(request, slug, subdomain_id):
-    """Serve a gowitness screenshot for a host. The tenancy middleware already confirmed the caller may
-    see ``slug``; this only needs to confirm the subdomain actually belongs to that project."""
+    """Serve a host's screenshot. The tenancy middleware already confirmed the caller may see ``slug``; this confirms the subdomain belongs to
+    that project and then looks the picture up by the project and the host's name, never by a path the caller names.
+
+    The browser's captures (``HostScreenshot``) come first (``?scheme=&port=`` picks one page, else the best one; ``?previous=1`` is the capture it
+    replaced). Without one, the discovery screenshot of the newest same-name row that has one is served (a rescan writes a newer row without it).
+    ``?row=1`` serves only the row's own discovery file, which the change history's before and after pictures name."""
     import os
 
     from django.conf import settings
-    from django.http import FileResponse
 
+    from cveFeed import shots, web_shot
+    from cveFeed.models import HostScreenshot
     from dashboard.models import Project
     from startScan.models import Subdomain
     project = Project.objects.filter(slug=slug).first()
@@ -540,18 +545,46 @@ def host_screenshot(request, slug, subdomain_id):
         raise Http404
     sub = Subdomain.objects.filter(pk=subdomain_id, scan_history__domain__project=project).first() or \
         Subdomain.objects.filter(pk=subdomain_id, target_domain__project=project).first()
-    if not sub or not sub.screenshot_path:
-        raise Http404
-    media_root = os.path.realpath(settings.MEDIA_ROOT)
-    path = os.path.realpath(os.path.join(media_root, sub.screenshot_path))
-    if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
+    if not sub:
         raise Http404
     size = request.GET.get('size', 'full')
     if size not in ('full', 'thumb'):
         return HttpResponseBadRequest('size must be full or thumb')
+    rel = thumb_rel = None
+    if request.GET.get('row') != '1':
+        rows = HostScreenshot.objects.filter(project=project, host=sub.name.lower().rstrip('.'))
+        if request.GET.get('port') or request.GET.get('scheme'):
+            try:
+                port = int(request.GET.get('port', ''))
+            except ValueError:
+                return HttpResponseBadRequest('port must be a number')
+            shot = rows.filter(port=port, scheme=request.GET.get('scheme', 'https')).first()
+            if shot is None or not shot.image_path:
+                raise Http404
+        else:
+            shot = web_shot.primary(list(rows))
+        if shot is not None and request.GET.get('previous') == '1':
+            rel, thumb_rel = shot.previous_image_path, None
+            if not rel:
+                raise Http404
+        elif shot is not None:
+            rel, thumb_rel = shot.image_path, shot.thumb_path
+    if rel is None:
+        rel = sub.screenshot_path
+        if not rel and request.GET.get('row') != '1':
+            legacy = Subdomain.objects.filter(target_domain__project=project, name=sub.name).exclude(screenshot_path__isnull=True) \
+                .exclude(screenshot_path='').order_by('-id').values_list('screenshot_path', flat=True).first()
+            rel = legacy
+    if not rel:
+        raise Http404
+    media_root = os.path.realpath(settings.MEDIA_ROOT)
+    path = os.path.realpath(os.path.join(media_root, rel))
+    if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
+        raise Http404
     if size == 'thumb':
-        from cveFeed import shots
-        thumb = shots.thumbnail_path(path)
+        thumb = os.path.realpath(os.path.join(media_root, thumb_rel)) if thumb_rel else ''
+        if not (thumb and thumb.startswith(media_root + os.sep) and os.path.isfile(thumb)):
+            thumb = shots.thumbnail_path(path)
         if thumb:
             return _cacheable_file(request, thumb, 'image/jpeg')
     return _cacheable_file(request, path)

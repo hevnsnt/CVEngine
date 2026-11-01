@@ -48,10 +48,11 @@ BASE_COSTS_MB = {
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
     'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
     'testssl': 150,         # testssl.sh and its openssl children against one TLS port
+    'screenshot': 450,      # one headless Chromium and its driver, one page at a time (cveFeed.web_shot); a batch of pages is one job
 }
 # How many of each kind may run at once in a container, whatever memory is free: these are CPU and network bound, so more
 # in parallel only makes every one of them slower. Override with HEAVY_MAX_<KIND>, e.g. HEAVY_MAX_NMAP=2.
-MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2}
+MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2, 'screenshot': 1}
 DEFAULT_WAIT_SECONDS = 24 * 3600  # a queued deep discovery may wait behind several others, one at a time
 RESERVATION_TTL = 90        # a holder that stops heartbeating loses its reservation after this many seconds
 HEARTBEAT_SECONDS = 3
@@ -352,6 +353,49 @@ def effective_cost(kind, store):
     return int(max(cost_mb(kind), learned * LEARNED_MARGIN))
 
 
+def _proc_table():
+    """``{pid: (ppid, pgrp, rss bytes)}`` of every process (Linux /proc)."""
+    page = os.sysconf('SC_PAGE_SIZE') if hasattr(os, 'sysconf') else 4096
+    table = {}
+    try:
+        pids = [p for p in os.listdir('/proc') if p.isdigit()]
+    except OSError:
+        return table
+    for pid in pids:
+        stat = _read(f'/proc/{pid}/stat')
+        if not stat:
+            continue
+        try:  # the command name may contain spaces and parentheses: fields start after the last ')'
+            fields = stat.rsplit(')', 1)[1].split()
+            statm = (_read(f'/proc/{pid}/statm') or '0 0').split()
+            table[int(pid)] = (int(fields[1]), int(fields[2]), int(statm[1]) * page)
+        except (IndexError, ValueError):
+            continue
+    return table
+
+
+def tree_pids(root, table=None):
+    """The pids of ``root``'s process group and of every descendant by parent pid, however many sessions or groups they started. A browser starts its
+    own session: measuring or stopping the group alone saw only the launcher, not the several hundred MB behind it."""
+    table = _proc_table() if table is None else table
+    found = {pid for pid, (_ppid, pgrp, _rss) in table.items() if pgrp == root}
+    found.add(root)
+    changed = True
+    while changed:
+        changed = False
+        for pid, (ppid, _pgrp, _rss) in table.items():
+            if ppid in found and pid not in found:
+                found.add(pid)
+                changed = True
+    return {pid for pid in found if pid in table}
+
+
+def tree_rss_mb(root):
+    """Resident memory of ``root``'s group and all its descendants, in MB."""
+    table = _proc_table()
+    return sum(table[pid][2] for pid in tree_pids(root, table)) // (1 << 20)
+
+
 def group_rss_mb(pgid):
     """Resident memory of every process in a process group, in MB (Linux /proc)."""
     page = os.sysconf('SC_PAGE_SIZE') if hasattr(os, 'sysconf') else 4096
@@ -636,7 +680,13 @@ def redis_claim(key, owner, ttl):
 # --- the gate ------------------------------------------------------------------------------------------------------
 
 def terminate_group(proc, grace=10):
-    """Stop a subprocess and everything it started: SIGTERM to its process group, SIGKILL if it lingers."""
+    """Stop a subprocess and everything it started: SIGTERM to its process group, SIGKILL if it lingers. Descendants that left the group (a browser
+    starts its own session) are found by parent pid first and stopped with it."""
+    try:
+        others = tree_pids(proc.pid) - {proc.pid}
+    except Exception:  # noqa: BLE001 - the group kill below still happens
+        others = set()
+
     def send(sig):
         try:
             if os.getpgid(proc.pid) == proc.pid:
@@ -645,11 +695,16 @@ def terminate_group(proc, grace=10):
                 proc.send_signal(sig)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        for pid in others:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
     send(signal.SIGTERM)
     deadline = time.time() + grace
     while proc.poll() is None and time.time() < deadline:
         time.sleep(0.5)
-    if proc.poll() is None:
+    if proc.poll() is None or any(os.path.exists(f'/proc/{pid}') for pid in others):
         send(signal.SIGKILL)
 
 
@@ -708,7 +763,7 @@ class Job:
             terminate_group(proc, grace=5)
 
     def rss_mb(self):
-        return group_rss_mb(self.proc.pid) if self.proc is not None and self.proc.poll() is None else 0
+        return tree_rss_mb(self.proc.pid) if self.proc is not None and self.proc.poll() is None else 0
 
     def check_once(self):
         """One watchdog tick: publish this job's memory, and stop it if it is the biggest job while memory is critical."""

@@ -102,6 +102,8 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # hours; the slots here are greenlets (20), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
 # tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
 classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
+# screenshot_queue: the web screenshot drain (one Chromium, one page at a time, under the memory gate, one drain at a time: a second task returns at once)
+classic_queues+=",screenshot_queue"
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own

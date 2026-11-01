@@ -97,6 +97,21 @@ def subdir_apps_sweep():
     return subdir_apps.sweep_all()
 
 
+@app.task(name='drain_screenshots', bind=False, queue='screenshot_queue')
+def drain_screenshots():
+    """Capture the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``), one browser, one page at a time, one drain
+    at a time: see ``cveFeed.web_shot``. Kicked by a scan stage, the Take screenshot button and the hourly sweep; a second call while one runs returns at once."""
+    from cveFeed import web_shot
+    return web_shot.drain()
+
+
+@app.task(name='screenshot_backfill', bind=False, queue='screenshot_queue')
+def screenshot_backfill():
+    """Hourly: queue the hosts that have no web screenshot (or an old one), a few per project per run, then drain: see ``cveFeed.web_shot.backfill``."""
+    from cveFeed import web_shot
+    return web_shot.sweep()
+
+
 @app.task(name='refresh_live_snapshots', bind=False, queue='live_cache_queue', ignore_result=True)
 def refresh_live_snapshots():
     """Every few seconds (``CVENGINE_LIVE_REFRESH_SECONDS``, 5): recompute the live screen's snapshots of the scopes people are looking at, so a
@@ -1924,6 +1939,11 @@ def weekly_maintenance():
         return {'error': type(exc).__name__}
     finally:
         cache.delete('cvengine:weekly-maintenance')
+    try:
+        from cveFeed import web_shot
+        result['screenshot_files_removed'] = web_shot.sweep_orphans()  # picture files no row names (a project or target deleted with its rows)
+    except Exception:  # noqa: BLE001 - housekeeping only
+        logger.exception('screenshot file sweep failed')
     archived = sum(result['archived'].values())
     activity.log('feed', (f'Weekly log maintenance archived and removed {archived:,} log rows older than their retention '
                           f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '
