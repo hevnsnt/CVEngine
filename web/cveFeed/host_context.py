@@ -190,7 +190,7 @@ def _steps(project_id, host):
 
 def _matches(sub, names):
     from cveFeed.models import CVEMatch
-    rows = CVEMatch.objects.filter(subdomain=sub).select_related('cve_entry').order_by('-confidence')[:MAX_MATCHES]
+    rows = CVEMatch.objects.filter(subdomain=sub).select_related('cve_entry').order_by('-confidence', 'cve_entry__cve_id', 'matched_product', 'matched_version', 'source', 'id')[:MAX_MATCHES]
     return [{'cve': r.cve_entry.cve_id, 'product': _s(r.matched_product, 60, names), 'version': _s(r.matched_version, 40, names),
              'in_range': r.version_in_range, 'verdict': r.ai_verdict} for r in rows]
 
@@ -281,17 +281,25 @@ def signal_digest(context):
 # What a re-scan or a clock changes without the host having changed. ``stable_view`` (the host text key of a match's signature) leaves these
 # out, so the same host evidence is the same key tomorrow (issue 338 follow-up: one AI review per rescan for every match without a floor).
 PER_REQUEST_HEADERS = frozenset({'cf-ray', 'x-amz-cf-id', 'x-amz-cf-pop', 'x-request-id', 'x-fastly-request-id', 'x-azure-ref', 'x-nf-request-id',
-                                 'x-vercel-id', 'x-sucuri-id', 'x-served-by', 'x-envoy-upstream-service-time'})  # a new value on every response
+                                 'x-vercel-id', 'x-sucuri-id', 'x-served-by', 'x-envoy-upstream-service-time', 'x-iinfo'})  # a new value on every response
 CACHE_STATE_HEADERS = frozenset({'x-cache', 'cf-cache-status', 'x-nextjs-cache', 'x-drupal-cache', 'x-litespeed-cache',
                                  'x-magento-cache-debug'})  # HIT or MISS, depending on who asked last
 _HEADER = re.compile(r'^\s*([a-z0-9-]+)\s*:')
 _NONCE = re.compile(r"nonce-[A-Za-z0-9+/_=-]+", re.I)  # a Content-Security-Policy nonce is new on every response
 _CLOCK = re.compile(r'\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b')  # a time of day in a banner or a check summary
+_MONTH = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*'
+# a whole timestamp in a banner (Exim, Sendmail and Microsoft SMTP greet with "Sun, 01 Nov 2026 10:15:32 +0000"; others write ISO 8601): the date
+# moves daily and the time every second, so both go. A date with no time of day stays (a certificate's expiry is one).
+_TIMESTAMP = re.compile(rf'(?:\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?\b\d{{1,2}}[ -]{_MONTH}[ -]\d{{2,4}}\s+\d{{1,2}}:\d{{2}}(?::\d{{2}})?'
+                        rf'(?:\.\d+)?(?:\s*(?:Z|UTC|GMT|[+-]\d{{2}}:?\d{{2}}))?'
+                        rf'|\b\d{{4}}-\d{{2}}-\d{{2}}[T ]\d{{1,2}}:\d{{2}}(?::\d{{2}})?(?:\.\d+)?(?:Z|[+-]\d{{2}}:?\d{{2}})?', re.I)
+_CLOUDFRONT_EDGE = re.compile(r'\b[0-9a-f]{8,}\.cloudfront\.net\b', re.I)  # the edge node that answered, in "via: 1.1 <id>.cloudfront.net (CloudFront)"
 CERT_SOON_DAYS = 30
 
 
-def _stable_text(text):
-    return _CLOCK.sub('hh:mm:ss', _NONCE.sub('nonce-*', text))
+def _stable_text(text, dates=True):
+    text = _CLOUDFRONT_EDGE.sub('*.cloudfront.net', _NONCE.sub('nonce-*', text))
+    return _CLOCK.sub('hh:mm:ss', _TIMESTAMP.sub('timestamp', text) if dates else text)
 
 
 def _stable_header(line):
@@ -314,7 +322,8 @@ def _canonical(items):
 
 def _stable(value, key=''):
     if isinstance(value, str):
-        return _stable_header(_stable_text(value)) if key == 'kept_response_headers' else _stable_text(value)
+        text = _stable_text(value, dates=key != 'certificate')  # a certificate's expiry date is evidence (a renewal), unlike a banner's clock
+        return _stable_header(text) if key == 'kept_response_headers' else text
     if isinstance(value, dict):
         return {k: _stable(v, k) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -323,13 +332,21 @@ def _stable(value, key=''):
 
 
 def stable_view(context):
-    """``context`` (the clipped host context the model is shown) without what changes while the host does not, for hashing into a match's
-    signature (``triage.bind_host_text``): a certificate's days left (reduced to expired, expiring within CERT_SOON_DAYS days, or valid), the
-    date a probe observed what it observed, when the host's inventory was reported and how many packages it lists, whether a Tailscale device
-    is online right now, the AI's verdicts on the host's other matches, per-request and cache-state response headers (the header stays, its value goes), Content-Security-Policy nonces
-    and times of day, and the order of rows that carry no order of their own (probe results, certificates, ports on one number). A value that
-    is evidence (a product, a version, an outcome, a banner, a header's content, a certificate's issuer, expired or not) stays. A context with
-    none of these is returned as it is, so its key does not change."""
+    """``context`` without what changes while the host does not, or what only a host chooses to say. It is both what the model is SHOWN in a
+    triage prompt (``clipped(..., stable=True)``) and what a match's host text key is made of (``triage.bind_host_text``): the verdict a
+    model gives is stored under a signature shared by every host and project with the same signature, so any host-controlled text it was
+    shown has to be in the key, and what is left out of the key has to be left out of the prompt. Per field:
+
+    - certificate ``days_left``: replaced by ``expiry`` (expired, expiring within CERT_SOON_DAYS days, or valid);
+    - probe ``observed``, host inventory ``reported_at`` and ``packages``, Tailscale ``online``: removed;
+    - the AI's ``verdict`` on the host's other matches (this match's own among them): blanked (a rescan's new row of the match starts with
+      none; the verdict of another CVE flipping does not re-ask this one);
+    - per-request and cache-state response headers (and Imperva's ``x-iinfo``): the header stays, its value is ``*``;
+    - Content-Security-Policy nonces, the CloudFront edge node in ``via``, whole timestamps and times of day in banners and check summaries
+      (a certificate's expiry date in a port record is kept): masked;
+    - probe results, certificates, and ports on one number: sorted, they have no order of their own.
+
+    A value that is evidence (a product, a version, an outcome, a banner, a header's content, a certificate's issuer, expired or not) stays."""
     if not isinstance(context, dict):
         return context
     out = _stable(context)
@@ -366,10 +383,12 @@ def _deep(value, depth=0):
     return value if value is None or isinstance(value, (bool, int, float)) else clean_text(value, 100, strict=True)
 
 
-def clipped(context, limit=9000):
-    """``context`` as prompt-safe data no larger than ``limit`` characters once serialised: cleaned at every depth, then the long sections are
-    halved until it fits."""
+def clipped(context, limit=9000, stable=False):
+    """``context`` as prompt-safe data no larger than ``limit`` characters once serialised: cleaned at every depth, put through ``stable_view``
+    when ``stable`` (before the long sections are halved, so what is cut is the end of a sorted list), then halved until it fits."""
     data = _deep(context)
+    if stable:
+        data = stable_view(data)
     for key in ('earlier_checks', 'other_cve_matches', 'probe_results', 'ports', 'technologies', 'certificates'):
         if len(json.dumps(data)) <= limit:
             break

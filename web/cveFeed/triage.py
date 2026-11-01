@@ -509,7 +509,7 @@ def attach_host_context(d, match):
     except Exception:  # noqa: BLE001
         logger.exception('could not read the host context of match %s', match.pk)
         return
-    d['host_context'] = _strip_deep(host_context.clipped(context))
+    d['host_context'] = _strip_deep(host_context.clipped(context, stable=True))  # the model is shown the stable view (see bind_host_text)
     d['facts']['closure_basis'] = basis
     digest = host_context.signal_digest(context)
     if digest:
@@ -524,11 +524,15 @@ def bind_host_text(d):
     host's crafted banner could set the stored verdict of every other host with the same product and version. A match with a floor
     needs no such key: the model can only raise it, never clear it.
 
-    The key is made from ``host_context.stable_view`` of the context, not the context as shown: what changes while the host does not (a
-    certificate's days left, the date a probe observed something, a request id, a cache state) would otherwise move the signature every day
-    and every rescan would ask the model the same question again (one AI call per match without a floor, per rescan). A host whose context
-    holds none of those has the key it always had, so changing the definition re-asks nothing for it; for the rest, the reviews it queues
-    once keep the verdict and are bounded by the daily triage caps (``_rereview_fields``, ``DEFAULT_CAPS``)."""
+    What the model is shown of the host (``d['host_context']``) is ``host_context.stable_view`` of the context, and this key is made from that
+    same view: a value the model was shown is in the key, and a value that changes while the host does not (a certificate's days left, a
+    probe's observed date, a request id, a cache state, a banner's clock) is in neither, so it no longer moves the signature every day and every
+    rescan no longer asks the same question again (one AI call per match without a floor, per rescan). The view is applied once more here, which
+    changes nothing for a view already made, so the agreement holds whoever built ``d``. The hash formula is the one it always was, so a row
+    keyed before this change keeps its key only where the old and the new view agree; for the others the signature moves once, which queues one
+    review per such match (the verdict, classification and validation record stay until it answers), bounded by the daily triage caps
+    (``_rereview_fields``, ``DEFAULT_CAPS``). Deliberate: the AI's verdicts on the host's other matches are blanked in the view, so another CVE's
+    verdict flipping does not re-ask this match; the host inventory's package count is not in it, so a package change alone does not either."""
     if d['kind'] != 'cve_match' or hard_evidence('cve_match', d['facts'])[0]:
         return
     from cveFeed import host_context

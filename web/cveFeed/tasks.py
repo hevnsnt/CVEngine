@@ -904,12 +904,22 @@ def validate_match_on_demand(request_id):
                 error=('deferred until the daily validation cap resets' if capped_only else
                        'a check or AI review failed or was blocked') if status == 'failed' else '')
             if done:
-                # The key is made AFTER the job left 'running', in the same transaction (nobody sees the finished job without it). A manual
-                # job counts as standing (match_policy.has_standing) once it is no longer running, and closure_basis reads that: a key made
-                # while it still ran described an edge-fronted match as clearable, the key enqueue makes from the database does not, so the
-                # two never matched and CVENGINE_VALIDATE_MIN_GAP_HOURS never held after a manual validation.
-                result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
-                OnDemandValidation.objects.filter(pk=job.pk).update(result=result)
+                # What the job answered for is described AFTER it left 'running', in the same transaction (nobody sees the finished job
+                # without it). A manual job counts as standing (match_policy.has_standing) once it is no longer running, and closure_basis
+                # reads that: the key, and the signature, made while it still ran described an edge-fronted match as clearable, the ones
+                # enqueue and track make from the database do not, so the gap never held after a manual validation (the key), and the job
+                # was never taken for the evidence the row has (the signature), so the same match was validated again later.
+                after = triage.describe(match)
+                result['revalidation_key'] = triage.revalidation_key(after)
+                signature = triage.effective_signature(after, row.review_nonce)
+                OnDemandValidation.objects.filter(pk=job.pk).update(result=result, evidence_signature=signature)
+                if (row.status == 'triaged' and row.verdict_id and row.signature != signature
+                        and triage.rank(row.classification) >= triage.rank(triage.hard_evidence('cve_match', after['facts'])[0])):
+                    # The review above was made with the signature the running job gave the match. The answer it stored already satisfies
+                    # the floor the finished job leaves (so nothing it said is out of date): the row takes the new signature without a
+                    # second review. A classification below that floor keeps the old signature, and is asked again.
+                    Triage.objects.filter(pk=row.pk, signature=row.signature).update(
+                        signature=signature, evidence_key=triage.evidence_key_for(after['kind'], after['signature_fields'], row.review_nonce))
         activity.settle(progress, 'failed' if status == 'failed' else 'done',
                         f'Validation request #{job.pk} {status} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
