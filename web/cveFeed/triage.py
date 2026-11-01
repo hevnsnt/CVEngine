@@ -527,20 +527,24 @@ def bind_host_text(d):
     What the model is shown of the host (``d['host_context']``) is ``host_context.stable_view`` of the context, and this key is made from that
     same view: a value the model was shown is in the key, and a value that changes while the host does not (a certificate's days left, a
     probe's observed date, a request id, a cache state, a banner's clock) is in neither, so it no longer moves the signature every day and every
-    rescan no longer asks the same question again (one AI call per match without a floor, per rescan). The view is applied once more here, which
-    changes nothing for a view already made, so the agreement holds whoever built ``d``. The hash formula is the one it always was, so a row
+    rescan no longer asks the same question again (one AI call per match without a floor, per rescan). The key hashes ``d['host_context']`` itself, so the
+    agreement holds by construction (a path that forgot ``stable=True`` would show and key the raw context). The hash formula is the one it always was, so a row
     keyed before this change keeps its key only where the old and the new view agree; for the others the signature moves once, which queues one
     review per such match (the verdict, classification and validation record stay until it answers), bounded by the daily triage caps
     (``_rereview_fields``, ``DEFAULT_CAPS``). Deliberate: the AI's verdicts on the host's other matches are blanked in the view, so another CVE's
     verdict flipping does not re-ask this match; the host inventory's package count is not in it, so a package change alone does not either."""
     if d['kind'] != 'cve_match' or hard_evidence('cve_match', d['facts'])[0]:
         return
-    from cveFeed import host_context
+    key = host_text_key(d)
+    if key:
+        d['signature_fields']['host_text'] = key
+
+
+def host_text_key(d):
+    """The host text key of a description (see ``bind_host_text``), whether or not the match has a floor; '' when there is no text."""
     payload = d['payload']
-    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]
-    if any(text):
-        stable = [text[0], text[1], host_context.stable_view(text[2])]
-        d['signature_fields']['host_text'] = hashlib.sha1(json.dumps(stable, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]  # exactly what the model is shown: nothing is made of it here
+    return hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16] if any(text) else ''
 
 
 def describe(finding):

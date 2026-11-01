@@ -341,14 +341,15 @@ class ManualJobKeyTests(Base):
     the ones ``enqueue`` and ``track`` make from the database (the job finished by then) did not: the minimum gap failed open, the job was never
     taken for the evidence the row had, and the match was reviewed and validated again."""
 
-    def run_manual_job(self, review):
+    def run_manual_job(self, review, match=None, attempts=0, describe_hook=None, status='completed'):
         from cveFeed.tasks import validate_match_on_demand
-        match = self.match(self.scan(), source='tech')
+        default_match = match is None
+        match = match or self.match(self.scan(), source='tech')
         (row,) = self.track(match)
         user = User.objects.create_user('bob', password='x')
         ProjectMembership.objects.create(user=user, project=self.project, role='user')
         job = OnDemandValidation.objects.create(match=match, project=self.project, evidence_signature=row.signature, priority=0,
-                                                source='manual', requested_by=user)
+                                                source='manual', requested_by=user, attempts=attempts)
         plan = {'check_kinds': [], 'reason': 'edge', 'generate_template': False, 'source': 'test'}
         edge = {'fronted': True, 'verified': True, 'providers': ['cloudflare'], 'basis': ['cname']}
         patches = [mock.patch('cveFeed.host_context.edge_of', return_value=edge),
@@ -358,21 +359,30 @@ class ManualJobKeyTests(Base):
                    mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)),
                    mock.patch('cveFeed.validation.run_validation', return_value={}),
                    mock.patch('cveFeed.triage.run_triage', side_effect=review)]
+        if describe_hook:
+            real = triage.describe
+
+            def describe(finding):
+                describe_hook(finding)
+                return real(finding)
+            patches.append(mock.patch('cveFeed.triage.describe', side_effect=describe))
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
         OnDemandValidation.objects.filter(pk=job.pk).update(status='running')
-        running = triage.describe(triage.with_cves([CVEMatch.objects.get(pk=match.pk)])[0])
-        self.assertEqual(running['facts']['closure_basis'], ['cdn_edge_only'])  # while it runs, the edge may clear the match
+        if default_match and not describe_hook:
+            running = triage.describe(triage.with_cves([CVEMatch.objects.get(pk=match.pk)])[0])
+            self.assertEqual(running['facts']['closure_basis'], ['cdn_edge_only'])  # while it runs, the edge may clear the match
         OnDemandValidation.objects.filter(pk=job.pk).update(status='queued')
         validate_match_on_demand(job.pk)
         job.refresh_from_db()
-        self.assertEqual((job.status, job.source), ('completed', 'manual'))
+        self.assertEqual((job.status, job.source), (status, 'manual'))
         match = CVEMatch.objects.select_related('cve_entry', 'subdomain__target_domain').get(pk=match.pk)
         after = triage.describe(match)
         self.assertEqual(after['facts']['closure_basis'], [])  # the finished manual job vouches for the match: the state the job has to describe
         self.assertEqual(job.result['revalidation_key'], triage.revalidation_key(after))
-        self.assertEqual(job.evidence_signature, triage.effective_signature(after, Triage.objects.get(match=match).review_nonce))
+        if not describe_hook:
+            self.assertEqual(job.evidence_signature, triage.effective_signature(after, Triage.objects.get(match=match).review_nonce))
         return match, job
 
     def answer(self, classification):
@@ -412,6 +422,74 @@ class ManualJobKeyTests(Base):
         (row,) = self.track(match)
         self.assertEqual((row.status, row.classification), ('pending', 'likely_false_positive'))  # queued again, the record kept meanwhile
         self.assertEqual(row.signature, job.evidence_signature)
+
+
+    # Only the job's own standing (``closure_basis``) is absorbed into the row's signature when the job ends. Whatever else moved while the checks
+    # and the review ran is tracked as a change, as it always was.
+
+    def test_a_floor_lowered_during_the_review_is_not_left_confirmed(self):
+        match = self.match(self.scan(), source='tech')
+        CVEMatch.objects.filter(pk=match.pk).update(template_result='vulnerable')  # the floor is 'confirmed'
+        answer = self.answer('confirmed')
+
+        def review(rows):
+            answer(rows)
+            CVEMatch.objects.filter(pk=match.pk).update(template_result='')  # a later template run found it clean while the review ran
+            return {}
+        match, job = self.run_manual_job(review, match=CVEMatch.objects.get(pk=match.pk))
+        row = Triage.objects.get(match=match)
+        self.assertEqual((row.status, row.classification, row.verdict_id), ('pending', '', None))  # reset: the evidence it rested on is gone
+        self.assertEqual(row.signature, job.evidence_signature)
+
+    def test_a_banner_that_changed_during_the_review_is_asked_about(self):
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-340', cvss=7.5, published_at=timezone.now(),
+                                      affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
+        match = CVEMatch.objects.create(cve_entry=cve, matched_product='nginx', matched_version='1.21.0', source='port', version_in_range=None,
+                                        evidence={'branch_unlisted': True},
+                                        subdomain=Subdomain.objects.create(name='www.k.example', target_domain=self.domain, scan_history=self.scan()))
+        answer = self.answer('needs_validation')
+
+        def review(rows):
+            answer(rows)
+            CVEMatch.objects.filter(pk=match.pk).update(evidence={'branch_unlisted': True, 'service_extra': 'nginx (a new banner)'})
+            return {}
+        match, job = self.run_manual_job(review, match=match)
+        row = Triage.objects.get(match=match)
+        self.assertEqual((row.status, row.classification, row.verdict_id is not None), ('pending', 'needs_validation', True))  # queued, record kept
+        self.assertEqual(row.signature, job.evidence_signature)
+
+    def test_a_failed_first_manual_job_on_an_edge_fronted_match_keeps_its_backoff(self):
+        def review(rows):
+            Triage.objects.filter(pk__in=[row.pk for row, _ in rows]).update(status='error')
+            return {'errors': 1}
+        match, job = self.run_manual_job(review, attempts=1, status='failed')
+        self.assertEqual(job.status, 'failed')
+        self.assertGreater(job.next_attempt_at, timezone.now())
+        (row,) = self.track(match)
+        self.assertEqual(row.signature, job.evidence_signature)  # one description of the evidence, not two
+        outcome, dispatch = self.enqueue(row)
+        self.assertEqual(outcome, 'fresh')  # not queued again at once
+        dispatch.assert_not_called()
+        OnDemandValidation.objects.filter(pk=job.pk).update(next_attempt_at=timezone.now() - timedelta(minutes=1))
+        outcome, dispatch = self.enqueue(row)
+        self.assertEqual(outcome, 'queued')
+        self.assertEqual(OnDemandValidation.objects.filter(match=match).order_by('-id').first().attempts, 2)  # the attempt number goes on
+
+    def test_a_fresh_review_requested_meanwhile_keeps_its_evidence_key(self):
+        state = {}
+
+        def hook(finding):
+            if state.get('done') or OnDemandValidation.objects.filter(status='running').exists():
+                return
+            state['done'] = True  # the first description after the job left 'running': a person asks for a fresh review just now
+            row = Triage.objects.get(match_id=finding.pk)
+            triage.request_fresh_review(row, self.real_describe(finding), 'nonce-1')
+        self.real_describe = triage.describe  # the hook runs inside the patched describe
+        match, job = self.run_manual_job(self.answer('likely'), describe_hook=hook)
+        row = Triage.objects.get(match=match)
+        self.assertEqual(row.review_nonce, 'nonce-1')
+        self.assertEqual(row.evidence_key, triage.evidence_key_for('cve_match', self.real_describe(match)['signature_fields'], 'nonce-1'))
+        self.assertEqual((row.status, row.classification, row.verdict_id is not None), ('pending', 'likely', True))  # queued, the record kept (not reset)
 
 
 class StableViewTests(TestCase):

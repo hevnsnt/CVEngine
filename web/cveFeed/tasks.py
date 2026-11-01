@@ -913,13 +913,29 @@ def validate_match_on_demand(request_id):
                 result['revalidation_key'] = triage.revalidation_key(after)
                 signature = triage.effective_signature(after, row.review_nonce)
                 OnDemandValidation.objects.filter(pk=job.pk).update(result=result, evidence_signature=signature)
-                if (row.status == 'triaged' and row.verdict_id and row.signature != signature
+                # Equal but for the job's own standing: closure_basis, and the host text key that only a match with no floor has (the
+                # standing is what gives this one its floor back), which is compared as the match would have it
+                ignored = ('closure_basis', 'host_text')
+                standing_only = (
+                    {k: v for k, v in described['signature_fields'].items() if k not in ignored}
+                    == {k: v for k, v in after['signature_fields'].items() if k not in ignored}
+                    and described['signature_fields'].get('host_text') in (None, triage.host_text_key(after)))
+                if (standing_only and row.status == 'triaged' and row.verdict_id and row.signature != signature
                         and triage.rank(row.classification) >= triage.rank(triage.hard_evidence('cve_match', after['facts'])[0])):
-                    # The review above was made with the signature the running job gave the match. The answer it stored already satisfies
-                    # the floor the finished job leaves (so nothing it said is out of date): the row takes the new signature without a
-                    # second review. A classification below that floor keeps the old signature, and is asked again.
-                    Triage.objects.filter(pk=row.pk, signature=row.signature).update(
+                    # The review above was made with the signature the running job gave the match, and the only thing that differs now is the
+                    # job's own standing (closure_basis): the evidence is the one the model answered for. The answer it stored already
+                    # satisfies the floor the finished job leaves, so the row takes the new signature without a second review (and not over
+                    # a fresh review requested meanwhile). A classification below the floor is asked again.
+                    Triage.objects.filter(pk=row.pk, signature=row.signature, review_nonce=row.review_nonce).update(
                         signature=signature, evidence_key=triage.evidence_key_for(after['kind'], after['signature_fields'], row.review_nonce))
+        if done:
+            # Anything else that moved while the checks and the review ran (a lowered floor, a new banner, a new template result) is NOT
+            # absorbed above: track the match as it is now, so a real change resets or queues the row as always, and the row and the finished
+            # job describe the same evidence (a failed job's backoff then holds: enqueue sees one signature, not two).
+            try:
+                triage.track(triage.with_cves([match]))
+            except Exception:  # noqa: BLE001 - the job is finished; the next sweep tracks the match
+                logger.exception('could not track match %s after validation request %s', match.pk, job.pk)
         activity.settle(progress, 'failed' if status == 'failed' else 'done',
                         f'Validation request #{job.pk} {status} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
