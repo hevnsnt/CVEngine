@@ -127,11 +127,10 @@ STOP_CHECK_EVERY = 2  # seconds between checks, while a fanned-out stage waits, 
 
 def stage_parallel():
     """CVENGINE_STAGE_PARALLEL: the hard ceiling on how many chunk tasks one scan stage keeps in flight across Sentinel slots (default 4).
-    ``1`` is the serial behaviour of before this existed: one chunk task at a time, each waited for before the next is created."""
-    try:
-        return max(1, int(os.environ.get('CVENGINE_STAGE_PARALLEL', str(DEFAULT_STAGE_PARALLEL))))
-    except ValueError:
-        return DEFAULT_STAGE_PARALLEL
+    ``1`` is the serial behaviour of before this existed: one chunk task at a time, each waited for before the next is created. What an App Admin
+    saved on Settings, configMaxxing wins over the environment and is read on every call (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    return max(1, int(tunables.value('stage_parallel', DEFAULT_STAGE_PARALLEL)))
 
 
 class _Dispatch:

@@ -926,10 +926,8 @@ def _discover_new(domains, mode, project_id, initiated_by=None):
     longest, one per project per minute, so the targets left for it are scanned all the same and interleaved with everyone else's. With the
     conductor off (``CVENGINE_WORK_DEPTH=0``) nothing would pick them up, so then every target is queued now."""
     from cveFeed import activity, conductor
-    try:
-        cap = max(1, int(os.environ.get('CVENGINE_BULK_DISCOVER_NOW', BULK_DISCOVER_NOW)))
-    except ValueError:
-        cap = BULK_DISCOVER_NOW
+    from cveFeed import tunables
+    cap = max(1, int(tunables.value('bulk_discover_now', BULK_DISCOVER_NOW)))  # saved on Settings, configMaxxing, else CVENGINE_BULK_DISCOVER_NOW, else 50
     if not conductor.wanted_depth():
         cap = len(domains) or 1
     else:  # what the project already has waiting counts against the batch: two pastes in a row are not two batches

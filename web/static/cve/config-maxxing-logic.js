@@ -122,6 +122,7 @@ export function discoveryNotice(field, status) {
   return field.running == null ? "What the discovery worker's ceiling is now is not known." : `The discovery worker's ceiling is ${field.running}.`;
 }
 export function runningText(field) {
+  if (field.applies === "restart") return "Applies after the next restart";
   if (field.applies !== "pool") return "Applies within a few seconds, with no restart";
   if (field.running == null) return "Worker ceiling now: not reported yet";
   return `Worker ceiling now: ${field.running}`;

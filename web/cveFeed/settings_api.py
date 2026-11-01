@@ -632,6 +632,27 @@ def scan_concurrency_put(request):
     return scan_concurrency.snapshot()
 
 
+def tunables_get(request):
+    from cveFeed import tunables
+    return tunables.snapshot()
+
+
+def tunables_put(request):
+    """Save a partial change: {"values": {"triage_max_per_day": 1000, "stage_parallel": null}}. A number sets a tunable, null puts it back to the default."""
+    from cveFeed import tunables
+    data = _body(request)
+    values = data.get('values')
+    if not isinstance(values, dict) or not values:
+        raise SettingsError(400, 'values must be an object of setting: number (or null to reset)')
+    try:
+        tunables.update(values, request.user)
+    except ValueError as exc:
+        raise SettingsError(400, str(exc))
+    except PermissionError as exc:
+        raise SettingsError(403, str(exc))
+    return tunables.snapshot()
+
+
 # --- updates -------------------------------------------------------------------------
 
 def _update_row():
@@ -764,6 +785,7 @@ ROUTES = [
     ('GET', r'resources', lambda r, **k: resources_get(r)),
     ('GET', r'config_maxxing', lambda r, **k: config_maxxing_get(r)), ('POST', r'config_maxxing/reset', lambda r, **k: config_maxxing_reset(r)),
     ('GET', r'scan_concurrency', lambda r, **k: scan_concurrency_get(r)), ('PUT', r'scan_concurrency', lambda r, **k: scan_concurrency_put(r)),
+    ('GET', r'tunables', lambda r, **k: tunables_get(r)), ('PUT', r'tunables', lambda r, **k: tunables_put(r)),
     ('GET', r'updates', lambda r, **k: updates_get(r)), ('PUT', r'updates', lambda r, **k: updates_put(r)),
     ('POST', r'updates/check', lambda r, **k: updates_check(r)), ('POST', r'updates/approve', lambda r, **k: updates_approve(r)),
     ('POST', r'updates/cancel', lambda r, **k: updates_cancel(r)), ('POST', r'updates/dismiss', lambda r, **k: updates_dismiss(r)),

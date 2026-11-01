@@ -36,11 +36,10 @@ def validate_all_matches():
 
 def min_gap_hours():
     """The least time between two automatic validations of the same host, CVE, product and version whose evidence did not change, from
-    CVENGINE_VALIDATE_MIN_GAP_HOURS (default 12; 0 or any negative number turns it off; a value that is not a number is the default)."""
-    try:
-        return max(0.0, float(os.environ.get('CVENGINE_VALIDATE_MIN_GAP_HOURS', '')))
-    except ValueError:
-        return MIN_GAP_HOURS
+    what an App Admin saved on Settings, configMaxxing, else CVENGINE_VALIDATE_MIN_GAP_HOURS (default 12; 0 or any negative number turns it off; a
+    value that is not a number is the default), read on every use (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    return max(0.0, float(tunables.value('validate_min_gap_hours', MIN_GAP_HOURS)))
 
 
 def retry_after(attempts, capped_only=False):
