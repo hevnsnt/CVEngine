@@ -190,6 +190,10 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 | --- | --- | --- |
 | `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` | `8`, `300` | Threads per worker, and seconds before a stuck request is stopped (matches the proxy read timeout). |
 | `CACHE_URL` | broker URL, next database | Redis URL of the shared cache. Keep it apart from the Celery broker's database, because a factory reset clears it. |
+| `CVENGINE_LIVE_REFRESH` | on | The Live screen's background refresher. `0`, `false`, `no` or `off` is the kill switch: no scope is registered, the refresher task returns at once and every Live poll is computed by the request that finds its snapshot stale, as before stage 1 of the live-screen caching. Read by the web, celery and celery-beat containers; beat applies it at its next start (it switches the schedule row off), the web workers at once on restart. |
+| `CVENGINE_LIVE_REFRESH_SECONDS` | `5` | How often the refresher runs, `2` to `60`. Each run recomputes the snapshots (headline counts, ticker counts, graph version and payload, graph-live) of the scopes someone is looking at that are about to go stale, so a Live poll is served from the cache and a number can be up to about this many seconds older than its own freshness window (10, 5 and 2 seconds). Applied when beat restarts. |
+| `CVENGINE_LIVE_HOT_SECONDS` | `60` | How long a scope (a set of projects, with the selected project and organization) stays "hot" after its last poll, `15` to `600`. Only hot scopes are refreshed, so a scope nobody opens costs nothing. |
+| `CVENGINE_AUTH_CACHE_SECONDS` | `15` | How long the Live polls (`GET /cve/api/stats`, `graph`, `graph-live`, `discovery`) keep the list of projects a user may see, `0` to `30`, `0` turns it off. A change to a membership, an organization or a project made through the application takes effect on the next poll; a change that bypasses it (raw SQL, a bulk update) within this many seconds. Other requests always read the list fresh. See [Architecture](ARCHITECTURE.md#the-live-screens-cache). |
 
 ## Templates and secrets
 

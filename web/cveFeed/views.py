@@ -718,15 +718,18 @@ def bump_stats_revision():
 
 
 def clear_stats_cache():
-    """Make every shared live-screen snapshot stale (tests, and a factory reset): the next poll of each scope rebuilds its own."""
+    """Make every shared live-screen snapshot stale (tests, and a factory reset): the next poll of each scope rebuilds its own. The hot scopes and the
+    refresher's heartbeat are forgotten too, so nothing is served on the strength of a refresher that was running before."""
     snapshot_cache.bump_revision()
+    snapshot_cache.reset_hot()
 
 
 def cached_stats_snapshot(params=(), scope=None):
     """The headline counts snapshot (``{'payload', 'etag', ...}``) of the current scope, shared by every viewer of that scope in every worker for
     STATS_CACHE_SECONDS. Run it inside ``project_scoped``: ``scope_hash`` reads the scope the counts are filtered by, so the key is who may see
     the rows, not who asks."""
-    return snapshot_cache.snapshot('stats', scope or snapshot_cache.scope_hash(*params), stats_payload, STATS_CACHE_SECONDS)
+    return snapshot_cache.snapshot('stats', scope or snapshot_cache.scope_hash(*params), stats_payload, STATS_CACHE_SECONDS,
+                                   hot={'params': params, 'args': {}})
 
 
 def cached_stats(params=()):
@@ -796,6 +799,10 @@ def graph_version(domain_id=None, scan_id=None):
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:16]
 
 
+def graph_cache_key(scope, version):
+    return f'cve-graph:{scope}:{snapshot_cache.revision()}:{version}'  # a revision bump (a finding was closed) drops it with the snapshots
+
+
 @require_GET
 @project_scoped
 def api_graph(request):
@@ -808,11 +815,13 @@ def api_graph(request):
     from tenancy.roles import scope_org
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
-    scope = snapshot_cache.scope_hash(request.GET.get('project', ''), scope_org(request), domain_id, scan_id)
-    version = snapshot_cache.snapshot('graph-version', scope, lambda: graph_version(domain_id, scan_id), GRAPH_VERSION_SECONDS)['payload']
+    params = (request.GET.get('project', ''), scope_org(request), domain_id, scan_id)
+    scope = snapshot_cache.scope_hash(*params)
+    version = snapshot_cache.snapshot('graph-version', scope, lambda: graph_version(domain_id, scan_id), GRAPH_VERSION_SECONDS,
+                                      hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    key = f'cve-graph:{scope}:{snapshot_cache.revision()}:{version}'  # a revision bump (a finding was closed) drops it with the snapshots
+    key = graph_cache_key(scope, version)
     try:
         payload = cache.get(key)
     except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
@@ -837,8 +846,10 @@ def api_graph_live(request):
     slug, domain = request.GET.get('project', ''), request.GET.get('domain', '')
     project = slug if slug and slug != ALL_PROJECTS else None
     domain_id = int(domain) if domain.isdigit() else None
-    snap = snapshot_cache.snapshot('graph-live', snapshot_cache.scope_hash(slug, scope_org(request), domain_id),
-                                   lambda: graph_live.live(project, domain_id), GRAPH_LIVE_SECONDS, etag_of=_graph_live_token)
+    params = (slug, scope_org(request), domain_id)
+    snap = snapshot_cache.snapshot('graph-live', snapshot_cache.scope_hash(*params),
+                                   lambda: graph_live.live(project, domain_id), GRAPH_LIVE_SECONDS, etag_of=_graph_live_token,
+                                   hot={'params': params, 'args': {'project': project, 'domain_id': domain_id}})
     return snapshot_cache.respond(request, snap['etag'], lambda: snap['payload'])
 
 
@@ -1047,7 +1058,8 @@ def cached_discovery_counts(params=()):
     """``discovery_counts`` of the current scope from a snapshot shared by every viewer of that scope in every worker for STATS_CACHE_SECONDS:
     the dashboard polls the ticker every 2.5 s and the three distinct counts walk the caller's whole inventory. Dropped with the headline
     counts by ``bump_stats_revision``. Run it inside ``project_scoped``."""
-    return snapshot_cache.snapshot('discovery-counts', snapshot_cache.scope_hash(*params), discovery_counts, STATS_CACHE_SECONDS)['payload']
+    return snapshot_cache.snapshot('discovery-counts', snapshot_cache.scope_hash(*params), discovery_counts, STATS_CACHE_SECONDS,
+                                   hot={'params': params, 'args': {}})['payload']
 
 
 @require_GET
