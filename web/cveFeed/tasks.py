@@ -1693,6 +1693,8 @@ def report_resources():
     resources.report_state()
     from cveFeed import scan_concurrency
     scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
+    from cveFeed import tunables
+    tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     return {}
 
 

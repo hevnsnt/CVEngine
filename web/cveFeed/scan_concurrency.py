@@ -165,6 +165,17 @@ def saved_row():
     return ScanConcurrency.current()
 
 
+def recover(publish_again=True):
+    """The saved values from the database without creating the row, published again when Redis is there: what a process does when Redis answers
+    but has lost the published copy (``reNgine.resources.saved_values``). Raises when the database cannot be read."""
+    from cveFeed.models import ScanConcurrency
+    row = ScanConcurrency.objects.order_by('pk').first()
+    values = {k: v for k, v in ((row.values if row else None) or {}).items() if k in BY_KEY and isinstance(v, int) and not isinstance(v, bool)}
+    if publish_again:
+        publish(values)
+    return values
+
+
 def saved_values():
     """The saved values straight from the database (the truth), keeping only what is still valid."""
     row = saved_row()

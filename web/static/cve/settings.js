@@ -5,6 +5,7 @@ import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
 import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
+import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)
 import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const root = document.getElementById("settings");
