@@ -209,7 +209,7 @@ def _purge(project, name, subtree=False):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
     it). Returns the counts."""
     from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
-                                HostInventory, HostLabel, HostProfile, HostState, HygieneFinding, ProbeObservation, RdpScreenshot,
+                                HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, ProbeObservation, RdpScreenshot,
                                 RouteAuth, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
@@ -238,13 +238,17 @@ def _purge(project, name, subtree=False):
     # evidence kept per host name: a screenshot's file goes with its row
     shots = RdpScreenshot.objects.filter(_host_q('host', name, subtree), project=project)
     shot_files = [path for path in shots.values_list('image_path', flat=True) if path]
+    web_shots = HostScreenshot.objects.filter(_host_q('host', name, subtree), project=project)  # the browser's captures: the picture, its thumbnail and the one before
+    for row in web_shots.values('image_path', 'thumb_path', 'previous_image_path'):
+        shot_files += sorted({os.path.dirname(path) for path in (row['image_path'], row['thumb_path'], row['previous_image_path']) if path})  # a host's own directory: pictures, thumbnails and the one before
     for label, model, flt in (
             ('states', HostState, {'project': project}), ('labels', HostLabel, {'project': project}),
             ('routes', RouteAuth, {'project': project}), ('changes', AssetChange, {'project': project}),
             ('profiles', HostProfile, {'project': project}), ('triage', Triage, {'project': project}),
             ('inventories', HostInventory, {'project': project}),
             ('probes', ProbeObservation, {'project': project}), ('archives', HostArchive, {'project': project}),
-            ('screenshots', RdpScreenshot, {'project': project}), ('assessments', HostAssessment, {'project': project}),
+            ('screenshots', RdpScreenshot, {'project': project}), ('web_screenshots', HostScreenshot, {'project': project}),
+            ('assessments', HostAssessment, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
             ('events', DiscoveryEvent, {'domain__project': project})):

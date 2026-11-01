@@ -856,6 +856,52 @@ def request_host_assessment(ctx, slug, host_id):
     return {**serialize(job), 'created': created}
 
 
+def _screenshot_host_row(ctx, slug, host_id, write):
+    from startScan.models import Subdomain
+    project, _ = get_project(ctx, slug, write=True) if write else get_one_project(ctx, slug)
+    sub = (Subdomain.objects.filter(pk=_host_id(host_id), target_domain__project=project).select_related('target_domain')
+           .prefetch_related('ip_addresses__ports').first())
+    if not sub:
+        raise ApiError(404, 'host not found')
+    return project, sub
+
+
+def request_host_screenshot(ctx, slug, host_id):
+    """Take screenshot: queue a fresh browser capture of every web page of one inventoried host (cveFeed.web_shot). It goes through the same
+    gates as a host assessment (scope, exclusions, archive, the bug bounty program's scope) and is allowed for a person even where the program has
+    not confirmed automated testing. The pictures arrive within a minute or so; ``GET .../screenshots`` shows how it went."""
+    from cveFeed import web_shot
+    from cveFeed.host_assessment import _admit
+    project, sub = _screenshot_host_row(ctx, slug, host_id, write=True)  # first: an ``_all`` or read-only caller is refused before anything else
+    try:
+        _admit(project, sub, unattended=False)
+    except ValueError as exc:
+        raise ApiError(409, str(exc)) from exc
+    why = web_shot.unavailable_reason()
+    if why:
+        raise ApiError(503, why)
+    summary = web_shot.queue_host(project, sub, by_person=True)
+    rows = host_screenshots(ctx, slug, host_id)
+    if summary['blocked'] and not summary['queued']:
+        raise ApiError(409, rows['note'] or 'this host cannot be photographed from this server', screenshots=rows['screenshots'])
+    return {**rows, 'status': 'queued' if summary['queued'] or summary['kept'] else 'nothing_to_capture', 'queued': summary['queued'],
+            'pages': summary['targets']}
+
+
+def host_screenshots(ctx, slug, host_id):
+    """What the browser captures of one host say: every page's outcome and reason, and whether anything is waiting."""
+    from cveFeed import web_shot
+    from cveFeed.models import HostScreenshot
+    project, sub = _screenshot_host_row(ctx, slug, host_id, write=False)
+    name = web_shot.host_of(sub)
+    rows = list(HostScreenshot.objects.filter(project=project, host=name))
+    shown = web_shot.pictures(rows)
+    return {'host': name, 'host_id': sub.pk, 'available': web_shot.available(), 'unavailable_reason': web_shot.unavailable_reason() or None,
+            'queued': sum(1 for r in rows if r.outcome == 'queued'),
+            'screenshots': [web_shot.describe(r, name) for r in sorted(rows, key=web_shot.rank)],
+            'note': web_shot.note_for(rows, has_web_evidence=bool(web_shot.web_targets(sub)), legacy=not shown and bool(sub.screenshot_path))}
+
+
 def get_host_assessment(ctx, slug, assessment_id):
     from cveFeed.host_assessment import serialize
     from cveFeed.models import HostAssessment
@@ -1382,6 +1428,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
     host_key = (sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())
     rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
+    static_rdp = {r.port: r for r in ((shared or {}).get('shots') or {}).get(host_key, []) if r.scheme == 'rdp'}  # an RDP port that requires NLA: the outcome, not nothing
     from cveFeed import host_context, subdir_apps
     probe_rows = ((shared or {}).get('probes') or {}).get(host_key) or []
     unverified = _unverified_products(sub, others, ips)
@@ -1399,7 +1446,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
-            'screenshot': bool(sub.screenshot_path), 'screenshot_note': _screenshot_note(sub, http, ips, network),
+            **_screenshot_fields(sub, http, ips, (shared or {}).get('shots', {}).get(host_key, []), (shared or {}).get('legacy_shots', {}).get(host_key), network),
             'technologies': sorted(techs),
             'technology_details': details,
             # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
@@ -1427,7 +1474,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'db': (p.extra or {}).get('db') or None,
                  'http': p.http or None, 'tls': p.tls or None,
-                 'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
+                 'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number), static_rdp.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
             # the list above is capped and includes informational detections; these are the real counts, split the way the Scanner
@@ -1500,65 +1547,37 @@ def _unverified_products(sub, others, ips):
     return match_policy.unversioned_leads(technologies, ports)[:50]
 
 
-SCREENSHOT_HOW = 'Screenshots are only taken by a full (standard or deep) discovery of the target, not by Rescan host.'
+def _screenshot_fields(sub, http, ips, rows, legacy_id, network=None):
+    """The screenshot part of a host record. The browser's captures (``HostScreenshot``, cveFeed.web_shot) come first; a discovery screenshot
+    (``Subdomain.screenshot_path``, bbot's gowitness) is the fallback, and it is the newest same-name row that has one, not just ``sub``: a rescan
+    writes a new row with no screenshot, and it used to hide the older row's. ``screenshot_note`` says why there is none (or what the latest
+    attempt did), never "none yet" without a reason."""
+    from cveFeed import web_shot
+    pictures = web_shot.pictures(rows)
+    legacy = sub.id if sub.screenshot_path else legacy_id
+    legacy_shown = not pictures and legacy is not None
+    web_ports = any(web_shot.KNOWN_WEB_PORTS.get(p.number) or 'http' in (p.service_name or '').lower() for e in ips.values() for p in e['ports'])
+    ports_known = any(e['ports'] for e in ips.values())
+    note = web_shot.note_for(rows, has_web_evidence=bool(http.get('url') or http.get('status') or web_ports), legacy=legacy_shown,
+                             network=network, ports_known=ports_known)
+    shown = pictures[0] if pictures else None
+    return {'screenshot': bool(pictures) or legacy_shown, 'screenshot_note': note,
+            'screenshot_source': 'browser' if pictures else 'discovery' if legacy_shown else None,
+            'screenshot_alt': web_shot.alt_text(sub.name.lower().rstrip('.'), shown) if shown else f'Screenshot of {sub.name}',
+            'screenshot_version': int(shown.captured_at.timestamp()) if shown and shown.captured_at else 0,
+            'screenshots': [web_shot.describe(r, sub.name.lower().rstrip('.')) for r in sorted((r for r in rows if r.scheme != 'rdp'), key=web_shot.rank)]}
 
 
-def _is_ip_name(name):
-    import ipaddress
-    try:
-        ipaddress.ip_address(str(name or '').strip().strip('[]'))
-    except ValueError:
-        return False
-    return True
-
-
-def _has_web_port(ips):
-    """True when any open port recorded for the host looks like a web service (the same test the route checks use)."""
-    from cveFeed import route_auth
-    return any(p.number in route_auth.WEB_PORTS or (p.service_name or '').lower() in route_auth.HTTP_SERVICE_NAMES
-               or 'http' in (p.product or '').lower() for entry in (ips or {}).values() for p in entry['ports'])
-
-
-def _screenshot_note(sub, http, ips=None, network=None):
-    """Why a host has no front-page screenshot, in a line for the host page (empty when it has one). The only capture is bbot's gowitness
-    module inside a full (standard or deep) discovery of the target, run by this server: Rescan host, certificate-transparency finds,
-    retests and top-ups never take one. The reason given is the first one the data already loaded for the host supports; when none does,
-    a plain statement of how a screenshot is taken. ``ips`` is the host's merged ``{address: {'ip', 'ports'}}`` and ``network`` the
-    internal network it is inside (or None)."""
-    from urllib.parse import urlparse
-    if sub.screenshot_path:
-        return ''
-    domain = getattr(sub, 'target_domain', None)
-    if network:
-        return (f'No screenshot: this host is inside the internal network {network}. Only a Sentinel there scans it, and Sentinels do not '
-                'take screenshots; this server never captures internal hosts.')
-    if _is_ip_name(sub.name) or _is_ip_name(getattr(domain, 'name', '')):
-        return 'No screenshot: this target is a bare IP address, and discovery of an IP address takes no screenshots.'
-    if getattr(domain, 'discovery_mode', '') == 'passive':
-        return ('No screenshot: this target is discovered in passive mode, which only reads public sources and takes none. '
-                'Set it to standard or deep and run a discovery.')
-    status = http.get('status') or 0
-    if not (http.get('url') or status):
-        if ips and any(entry['ports'] for entry in ips.values()) and not _has_web_port(ips):
-            return 'No screenshot: no web port (such as 80 or 443) is recorded open on this host, so there is no page to capture.'
-        return 'No screenshot: no web page has answered on this host, so there is nothing to capture.'
-    target = (http.get('redirect_to') or '').strip()
-    where = (urlparse(target).hostname or '').lower() if '://' in target else ''
-    if where and where != (sub.name or '').lower():
-        return (f'No screenshot: the front page redirects to {target}. A redirect is not captured, and a page is filed under the host it '
-                f'finally loads from ({where}), so look for a screenshot on that host.')
-    if 300 <= status < 400:
-        return (f'No screenshot: the front page answered with a redirect (HTTP {status}), and redirects are not captured. '
-                f'{SCREENSHOT_HOW}')
-    return f'No screenshot has been captured for this host. {SCREENSHOT_HOW}'
-
-
-def _rdp_screenshot_field(sub, shot):
-    """What the host record sends about one port's RDP capture (cveFeed.rdp_shot), or None when there is none."""
+def _rdp_screenshot_field(sub, shot, static=None):
+    """What the host record sends about one port's RDP capture (cveFeed.rdp_shot), or None when there is none. A port that needs NLA has no picture
+    to send; its outcome (``cveFeed.web_shot``) is sent instead of nothing."""
     if not shot:
+        if static is not None and static.outcome == 'nla_required':
+            return {'url': None, 'outcome': 'nla_required', 'reason': static.reason, 'logged_in_user': '', 'summary': '', 'error': '',
+                    'captured_at': static.attempted_at.isoformat() if static.attempted_at else None}
         return None
     return {'url': f'/cve/{sub.target_domain.project.slug}/hosts/{sub.id}/rdp-screenshot/{shot.port}/' if sub.target_domain else None,
-            'logged_in_user': shot.logged_in_user, 'summary': shot.ai_summary, 'error': shot.ai_error,
+            'outcome': 'ok', 'logged_in_user': shot.logged_in_user, 'summary': shot.ai_summary, 'error': shot.ai_error,
             'captured_at': shot.captured_at.isoformat() if shot.captured_at else None}
 
 
@@ -1622,6 +1641,15 @@ def _shared_for(project, subs):
     rdp_shots = {}
     for row in RdpScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}):
         rdp_shots.setdefault((row.project_id, row.host), {})[row.port] = row
+    from cveFeed.models import HostScreenshot
+    shots = {}
+    for row in HostScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower().rstrip('.') for s in subs}):
+        shots.setdefault((row.project_id, row.host), []).append(row)
+    # the newest row of each name that has a discovery screenshot: what the host shows when its own row has none (a rescan writes a row without one)
+    legacy_shots = {}
+    for pid, name, row_id in Subdomain.objects.filter(target_domain__project_id__in=_pids_of(project, subs), name__in={s.name for s in subs}) \
+            .exclude(screenshot_path__isnull=True).exclude(screenshot_path='').order_by('id').values_list('target_domain__project_id', 'name', 'id'):
+        legacy_shots[(pid, name.lower())] = row_id
     from cveFeed.models import ProbeObservation
     probe_rows = {}
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}).order_by('-observed_at'):
@@ -1631,7 +1659,8 @@ def _shared_for(project, subs):
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), probe='vhost-probe', kind='vhost', outcome='found',
                                                product__in=list(addresses)).order_by('host'):
         vhosts.setdefault((row.project_id, row.product), []).append(row)
-    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'probes': probe_rows, 'vhosts': vhosts}
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
+            'probes': probe_rows, 'vhosts': vhosts}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}

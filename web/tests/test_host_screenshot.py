@@ -143,64 +143,38 @@ class HostScreenshotThumbnailTests(HostScreenshotTests):
 
 
 class ScreenshotNoteTests(TestCase):
-	"""The host page says why a host has no screenshot instead of showing nothing, and never tells a person to Rescan host for one."""
+	"""The host page says why a host has no screenshot instead of showing nothing, and never tells a person to Rescan host for one. (The full set of
+	reasons the browser attempts record is in tests/test_web_shot.py.)"""
 
-	def _sub(self, name='www.a.example', path='', mode='standard', target='a.example'):
-		from types import SimpleNamespace
-		return SimpleNamespace(screenshot_path=path, name=name, target_domain=SimpleNamespace(name=target, discovery_mode=mode))
+	def _note(self, rows=(), has_web_evidence=True, **kwargs):
+		from unittest import mock
 
-	def _note(self, http=None, ips=None, network=None, **kwargs):
-		from agentapi import services
-		return services._screenshot_note(self._sub(**kwargs), http or {}, ips, network)
-
-	def _ports(self, *numbers, service=''):
-		from types import SimpleNamespace
-		return {'192.0.2.1': {'ip': None, 'ports': [SimpleNamespace(number=n, service_name=service, product='') for n in numbers]}}
-
-	def test_no_note_when_there_is_a_shot(self):
-		self.assertEqual(self._note(path='x/screenshots/a.jpeg', http={'status': 200}), '')
+		from cveFeed import web_shot
+		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
+			return web_shot.note_for(list(rows), has_web_evidence=has_web_evidence, **kwargs)
 
 	def test_no_web_page_answered(self):
-		self.assertIn('no web page has answered', self._note())
+		self.assertIn('no web page has answered', self._note(has_web_evidence=False))
 
 	def test_no_web_port_recorded(self):
-		note = self._note(ips=self._ports(22, 3389))
-		self.assertIn('no web port', note)
-		self.assertNotIn('no web port', self._note(ips=self._ports(22, 443)))  # a web port is open: the generic line instead
-		self.assertNotIn('no web port', self._note(ips=self._ports(7000, service='http')))
-		self.assertIn('no web page has answered', self._note(ips=self._ports()))  # no ports known at all
+		self.assertIn('no web port', self._note(has_web_evidence=False, ports_known=True))
+		self.assertNotIn('no web port', self._note(has_web_evidence=True, ports_known=True))
 
-	def test_the_front_page_redirects_to_another_host(self):
-		note = self._note(http={'url': 'https://www.a.example/', 'status': 301, 'redirect_to': 'https://other.example/home'})
-		self.assertIn('redirects to https://other.example/home', note)
-		self.assertIn('other.example', note)
-		self.assertNotIn('Rescan', note.replace('not by Rescan host', ''))
-		# the same host (http to https, a path) is not "another host"
-		same = self._note(http={'url': 'http://www.a.example/', 'status': 301, 'redirect_to': 'https://WWW.a.example/'})
-		self.assertNotIn('redirects to', same)
-		self.assertIn('redirect (HTTP 301)', same)
-		self.assertNotIn('redirects to', self._note(http={'url': 'x', 'status': 200, 'redirect_to': '/login'}))  # relative: same host
+	def test_internal_hosts_say_that_only_a_sentinel_scans_them(self):
+		self.assertIn('internal network 10.20.0.0/24', self._note(network='10.20.0.0/24'))
 
-	def test_a_redirect_status_without_a_known_target(self):
-		note = self._note(http={'url': 'https://www.a.example/', 'status': 302})
-		self.assertIn('redirect (HTTP 302)', note)
-
-	def test_bare_ip_internal_and_passive_targets(self):
-		http = {'url': 'http://192.0.2.9/', 'status': 200}
-		self.assertIn('bare IP address', self._note(http=http, name='192.0.2.9', target='192.0.2.9'))
-		self.assertIn('bare IP address', self._note(http=http, name='192.0.2.9'))
-		self.assertIn('internal network 10.20.0.0/24', self._note(http=http, network='10.20.0.0/24'))
-		self.assertIn('passive mode', self._note(http=http, mode='passive'))
-
-	def test_the_default_is_an_honest_statement_of_how_a_shot_is_taken(self):
-		note = self._note(http={'status': 200, 'url': 'https://www.a.example/'})
-		self.assertEqual(note, 'No screenshot has been captured for this host. Screenshots are only taken by a full (standard or deep) '
-		                       'discovery of the target, not by Rescan host.')
-		self.assertNotIn('rescan the host to take one', note)
+	def test_a_host_that_answers_on_the_web_says_when_a_picture_will_be_taken(self):
+		note = self._note()
+		self.assertTrue(note.startswith('No screenshot yet'))
+		self.assertIn('Take screenshot', note)
+		self.assertNotIn('Rescan host to take one', note)
 		self.assertNotIn('rediscovered', note)
 
 	def test_the_host_record_carries_the_note(self):
+		from unittest import mock
+
 		from agentapi.services import Ctx, list_hosts
+		from cveFeed import web_shot
 		now = timezone.now()
 		org = Org.objects.create(name='N', slug='n-shot')
 		project = Project.objects.create(name='N', slug='n-shot-p', insert_date=now, org=org)
@@ -211,7 +185,8 @@ class ScreenshotNoteTests(TestCase):
 		Subdomain.objects.create(scan_history=scan, name='shot.n.example', target_domain=domain, http_status=200, http_url='https://shot.n.example/',
 		                         screenshot_path='n.example_1/screenshots/s.jpeg')
 		user = User.objects.create_user('n-admin', password='x', is_superuser=True)
-		hosts = {h['host']: h for h in list_hosts(Ctx(user=user), 'n-shot-p', {})['results']}
-		self.assertIn('not by Rescan host', hosts['www.n.example']['screenshot_note'])
+		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
+			hosts = {h['host']: h for h in list_hosts(Ctx(user=user), 'n-shot-p', {})['results']}
+		self.assertIn('waiting for the next screenshot pass', hosts['www.n.example']['screenshot_note'])
 		self.assertFalse(hosts['www.n.example']['screenshot'])
 		self.assertEqual((hosts['shot.n.example']['screenshot'], hosts['shot.n.example']['screenshot_note']), (True, ''))

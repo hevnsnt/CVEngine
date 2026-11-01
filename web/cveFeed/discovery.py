@@ -247,6 +247,29 @@ def _report_key_problems(problems, extra_args, scan):
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
+MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
+
+
+def _report_no_web_pages(scan, mode, web_events, bbot_scan_name=''):
+    """One activity line when a standard or deep discovery found many hosts and bbot reported no web page at all (no URL and no HTTP_RESPONSE event).
+    Its web module (``http``) is what turns a host into a URL, so without it a discovery records no endpoint, no HTTP status and no page title, and
+    gowitness has nothing to photograph; that was seen on a live instance (a 43 host discovery with 0 endpoints) and the cause was not in the logs
+    cvENGINE keeps. The line says what to look at, with the name of bbot's own scan directory."""
+    if mode not in ('standard', 'deep') or any(web_events.values()):
+        return
+    from cveFeed import activity
+    from startScan.models import Subdomain
+    hosts = Subdomain.objects.filter(scan_history=scan).count()
+    if hosts < MIN_HOSTS_FOR_WEB_CHECK:
+        return
+    where = f'~/.bbot/scans/{bbot_scan_name}/scan.log' if bbot_scan_name else "bbot's scan.log"
+    activity.log('discovery', f'{mode.capitalize()} discovery of {scan.domain.name} found {hosts} hosts but bbot reported no web page for any of them '
+                 f'(no URL and no HTTP_RESPONSE event), so no endpoint, HTTP status or title was recorded from it. bbot\'s web module may have failed '
+                 f'to start or reach the hosts: look in {where} in the celery container (docs/PIPELINE.md, "When discovery finds no web pages"). '
+                 'Web screenshots and the route checks make their own requests and are not affected.',
+                 project=scan.domain.project_id, status='failed', scan_id=scan.id, hosts=hosts)
+
+
 def _report_screenshot_failure(hard_failures, scan):
     """One activity line when bbot's gowitness module (the only front-page screenshot taker) failed to set up. With --force bbot
     carries on without it, so without this line a discovery that took no screenshots looks like one that found no web pages."""
@@ -256,7 +279,7 @@ def _report_screenshot_failure(hard_failures, scan):
         return
     reason = ((reasons[0] or '').strip().splitlines() or ['no reason given'])[0][:160] or 'no reason given'
     activity.log('discovery', f'Screenshots unavailable: the gowitness module failed to set up ({reason}); '
-                 'no screenshots will be taken until it is fixed', project=scan.domain.project_id, status='failed', scan_id=scan.id)
+                 'no discovery-time screenshots will be taken until it is fixed (the browser screenshot stage is separate and not affected)', project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
@@ -286,6 +309,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
     problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
+    web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what bbot's web module reported, counted over the whole run (``batch`` is emptied at every flush)
     hard_failures = []  # (bbot module, reason) for modules whose set-up hard-failed, e.g. gowitness without a working Chrome
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
@@ -303,6 +327,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                                strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
+                    if event.get('type') in web_events:
+                        web_events[event['type']] += 1
                     seen = bbot_lib.parse_event(event, batch, hosts)
                     if seen and (seen.type, seen.label) not in shown:
                         shown.add((seen.type, seen.label))
@@ -323,6 +349,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                 raise
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
         _report_key_problems(problems, extra_args, scan)
+        _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name)
         _report_screenshot_failure(hard_failures, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
@@ -604,7 +631,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None):
+                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -634,6 +661,14 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if (rdp_capturer or rdp_shot.available()) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
         rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
                             fallback={'attempted': 0})
+        if stopped(scan_id):
+            return gone
+    from cveFeed import web_shot
+    shot_result = None
+    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by the screenshot worker (its own queue and memory gate)
+        shot_result = _stage(scan, 'Web screenshots', 'web_screenshot',
+                             lambda: (screenshot_queuer or web_shot.queue_for_scan)(scan_id, by_person=by_person or scan.initiated_by_id is not None, force=retest or force),
+                             fallback={'queued': 0})
         if stopped(scan_id):
             return gone
     db_result = _stage(scan, 'Database exposure check', 'db_exposure_scan',
@@ -765,6 +800,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['node2shell'] = node2shell_result
     if rdp_result is not None:
         result['rdp_screenshot'] = rdp_result
+    if shot_result is not None:
+        result['web_screenshot'] = shot_result
     _announce(scan, result, summary=hygiene)
     return result
 
@@ -930,7 +967,7 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                 return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             scanned = [n for n in wanted if n in resolved_names] if force else wanted  # the hosts the stages have something to do for
             result = _run_stages(scan.id, found, hygiene=hygiene, hygiene_host=scanned if assessment_ids else None,
-                                 retest=retest, force=force, **stage_kwargs)
+                                 retest=retest, force=force, by_person=by_person, **stage_kwargs)
             if per_host:
                 result['per_host'] = per_host
             return result

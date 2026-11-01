@@ -735,7 +735,7 @@ function shotPair(c, project = slug) {
   [c.before, c.after].forEach((side, i) => {
     if (!side || !side.subdomain_id) return;
     const img = el("img", "shot", null, {
-      src: `/cve/${encodeURIComponent(project)}/hosts/${side.subdomain_id}/screenshot/`,
+      src: `/cve/${encodeURIComponent(project)}/hosts/${side.subdomain_id}/screenshot/?row=1`,
       alt: `${i ? "Current" : "Previous"} screenshot of ${c.host}`,
       loading: "lazy",
     });
@@ -1061,10 +1061,101 @@ const subdirectoryCard = (h) => {
   });
   return box;
 };
+// The browser's screenshots of a host (cveFeed.web_shot): the best picture, then every captured page with its final URL, status and
+// title, and what happened to the pages that have no picture. "Take screenshot" queues a fresh capture and follows it until it is done.
+const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
+const OUTCOME_TEXT = {
+  ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
+};
+function screenshotsSection(h, project, isCurrent) {
+  const box = el("div", "shots-box");
+  const head = el("div", "host-assess-head");
+  head.append(el("h3", "sec", "Screenshots"));
+  const button = el("button", "btn sm", "Take screenshot", { type: "button" });
+  button.title = "Queue a fresh browser capture of every web page of this host";
+  button.disabled = !!(h.excluded || h.archived);
+  head.append(button);
+  const body = el("div", "shots-body");
+  box.append(head, body);
+  const paint = (data) => {
+    body.textContent = "";
+    const rows = data.screenshots || [];
+    const withImage = rows.filter((r) => r.has_image);
+    const note = data.note !== undefined ? data.note : h.screenshot_note;
+    if (!withImage.length && !h.screenshot) body.append(el("p", "note", note || "No screenshot yet."));
+    withImage.forEach((r) => {
+      const figure = el("figure", "shot-figure");
+      const img = el("img", "shot", null, {
+        src: shotUrl(project, h, `scheme=${encodeURIComponent(r.scheme)}&port=${r.port}&v=${encodeURIComponent(r.captured_at || "")}`),
+        alt: r.alt || `Screenshot of ${h.host} port ${r.port}`, loading: "lazy",
+      });
+      img.onerror = () => img.remove();
+      const caption = el("figcaption", "note", [`${r.scheme}://${h.host}:${r.port}`, r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.final_url && r.final_url.replace(/\/$/, "") !== `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}` ? `ended at ${r.final_url}` : "", r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean).join(" · "));
+      figure.append(img, caption);
+      if (r.outcome !== "ok" && r.outcome !== "queued") figure.append(el("p", "note", `Latest attempt: ${r.reason || OUTCOME_TEXT[r.outcome] || r.outcome}`));
+      if (r.has_previous) {
+        const toggle = el("button", "btn ghost sm", "Compare with previous", { type: "button" });
+        const before = el("img", "shot", null, { src: shotUrl(project, h, `scheme=${encodeURIComponent(r.scheme)}&port=${r.port}&previous=1`), alt: `Previous screenshot of ${h.host} port ${r.port}`, loading: "lazy" });
+        before.hidden = true;
+        before.onerror = () => toggle.remove();
+        toggle.onclick = () => { before.hidden = !before.hidden; toggle.textContent = before.hidden ? "Compare with previous" : "Hide previous"; };
+        figure.append(toggle, before);
+      }
+      body.append(figure);
+    });
+    if (!withImage.length && h.screenshot) {
+      // only a discovery screenshot exists (the older bbot capture): the host's own picture URL serves it
+      const img = el("img", "shot", null, { src: shotUrl(project, h, `v=${h.screenshot_version || 0}`), alt: h.screenshot_alt || `Screenshot of ${h.host}`, loading: "lazy" });
+      img.onerror = () => img.remove();
+      body.append(img);
+      if (note) body.append(el("p", "note", note));
+    }
+    rows.filter((r) => !r.has_image).forEach((r) =>
+      body.append(el("p", "note", `${r.scheme}://${h.host}:${r.port}: ${OUTCOME_TEXT[r.outcome] || r.outcome}${r.reason ? `. ${r.reason}` : ""}`)),
+    );
+    if (data.unavailable_reason) body.append(el("p", "note", data.unavailable_reason));
+  };
+  paint({ screenshots: h.screenshots || [], note: h.screenshot_note });
+  let polling = 0;
+  const follow = async (token, tries) => {
+    if (!isCurrent() || token !== polling) return;
+    try {
+      const data = await api("GET", `${baseOf(project)}/hosts/${h.id}/screenshots`);
+      paint(data);
+      if (data.queued && tries > 0) return void setTimeout(() => follow(token, tries - 1), 5000);
+    } catch (e) {
+      body.append(el("p", "note", `Status refresh failed: ${e.message}`));
+    }
+    button.disabled = !!(h.excluded || h.archived);
+    button.textContent = "Take screenshot";
+  };
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "Queued…";
+    try {
+      const data = await api("POST", `${baseOf(project)}/hosts/${h.id}/screenshot`, {});
+      paint(data);
+      toast("Screenshot queued");
+      follow(++polling, 30);
+    } catch (e) {
+      toast(e.message, true);
+      body.append(el("p", "note", e.message));
+      button.disabled = !!(h.excluded || h.archived);
+      button.textContent = "Take screenshot";
+    }
+  };
+  return box;
+}
 // A port's RDP login-screen capture (cveFeed.rdp_shot): the image, exactly as read by the AI (never guessed), and its summary.
 // Only ever present when nmap already confirmed the server accepts a connection without Network Level Authentication.
 const rdpShotCard = (shot) => {
   const box = el("div", "rdp-shot");
+  if (shot.outcome === "nla_required") {
+    // no picture exists to take: the server insists on Network Level Authentication and paints nothing before sign-in
+    box.append(el("div", "note", `RDP login screen: not captured. ${shot.reason || "NLA is required, so there is no sign-in screen to photograph."}`));
+    return box;
+  }
   box.append(el("div", "note", "RDP login screen (captured with no credentials sent)"));
   if (shot.url) {
     const img = el("img", "shot rdp-shot-img", null, { src: shot.url, alt: "RDP login screen capture", loading: "lazy" });
@@ -2712,18 +2803,18 @@ const pages = {
       };
       label.append(box, document.createTextNode(` Only hosts with a screenshot (${withShot.length} of ${shown.length})`));
       galleryHead.append(label);
-      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot. Screenshots are only taken by a full (standard or deep) discovery of a target, not by Rescan host; open a host to see why it has none." : "No hosts match."));
+      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken by a browser after a scan finds a web page, and hourly for hosts that have none; open a host and press Take screenshot to take one now." : "No hosts match."));
       cards.forEach((h) => {
         const card = el("button", "shot-card", null, { type: "button", "data-heat": h.heat || "unscanned", "aria-label": `Open ${h.host}` });
         const frame = el("span", "shot-frame");
         if (h.screenshot) {
-          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb`, alt: "", loading: "lazy", decoding: "async" });
+          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb&v=${h.screenshot_version || 0}`, alt: h.screenshot_alt || `Screenshot of ${h.host}`, loading: "lazy", decoding: "async" });
           img.onerror = () => {
             img.remove();
             frame.append(el("span", "shot-none", "No screenshot"));
           };
           frame.append(img);
-        } else frame.append(el("span", "shot-none", "No screenshot"));
+        } else frame.append(el("span", "shot-none", "No screenshot", h.screenshot_note ? { title: h.screenshot_note } : {}));
         const meta = el("span", "shot-meta");
         meta.append(el("b", "mono", h.host), el("span", "note", [h.alias, `score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
         card.append(frame, meta);
@@ -3219,16 +3310,8 @@ const pages = {
       if (h.title) hdr.append(el("p", "sub", h.title));
       if (h.target) hdr.append(el("p", "note", `Target ${h.target}`));
       const compareBox = el("div", "shot-compare");
-      if (h.screenshot) {
-        const img = el("img", "shot", null, {
-          src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${h.id}/screenshot/`,
-          alt: `Screenshot of ${h.host}`,
-          loading: "lazy",
-        });
-        img.onerror = () => img.remove();
-        S.web.append(img);
-        S.web.append(compareBox);
-      }
+      S.web.append(screenshotsSection(h, projectOf(h), () => current === h.id));
+      S.web.append(compareBox);
       const techBox = technologyTable(h);
       if (techBox) OV.side.append(techBox);
       [wordpressCard(h), probeCard(h), alsoServedCard(h)].forEach((card) => {
@@ -3248,7 +3331,7 @@ const pages = {
             // the front page changed: let the previous screenshot be looked at next to the current one
             const toggle = el("button", "btn ghost sm", "Compare with previous", { type: "button" });
             const before = el("img", "shot", null, {
-              src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${shot.before.subdomain_id}/screenshot/`,
+              src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${shot.before.subdomain_id}/screenshot/?row=1`,
               alt: `Previous screenshot of ${h.host}`,
               loading: "lazy",
             });
