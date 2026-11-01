@@ -225,11 +225,11 @@ class AiRequestSettingsApiTests(TestCase):
 	# --- the connection test ---
 
 	def test_the_connection_test_uses_the_saved_settings(self):
-		self.put(provider='anthropic', api_key='k', model='claude-x', request_timeout=777, connect_timeout=7, max_tokens=999)
+		self.put(provider='anthropic', api_key='k', model='claude-x', request_timeout=200, connect_timeout=7, max_tokens=999)
 		with mock.patch('requests.post', return_value=mock.Mock(json=lambda: {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn'})) as post:
 			status, data = send(self.c, 'POST', 'ai/test')
 		self.assertEqual((status, data['ok']), (200, True))
-		self.assertEqual(post.call_args[1]['timeout'], (7, 777))
+		self.assertEqual(post.call_args[1]['timeout'], (7, 200))
 		self.assertEqual(post.call_args[1]['json']['max_tokens'], 999)
 		self.assertIsNotNone(AIProviderSettings.objects.get().verified_at)
 
@@ -246,7 +246,8 @@ class AiRequestSettingsApiTests(TestCase):
 			response.raise_for_status.side_effect = requests.HTTPError(response=response)
 			return mock.Mock(return_value=response)
 		cases = (
-			(requests.Timeout(), 'longer "Request timeout"'), (requests.ConnectionError('boom'), 'could not be reached'),
+			(requests.Timeout(), 'longer "Request timeout" (Settings, AI model, Request settings)'), (requests.ConnectionError('boom'), 'could not be reached'),
+			(requests.ConnectTimeout(), 'did not accept a connection in 10 seconds'),
 		)
 		for exc, hint in cases:
 			status, data = self.fail_with(exc)
@@ -262,6 +263,42 @@ class AiRequestSettingsApiTests(TestCase):
 			self.assertIn(hint, data['error'], code)
 			self.assertNotIn('nope', data['error'])  # what the provider said is never repeated
 		self.assertIsNone(AIProviderSettings.objects.get().verified_at)
+
+	def test_a_connect_timeout_names_the_connect_setting_not_the_answer_time(self):
+		import requests
+		self.put(provider='anthropic', api_key='k', model='claude-x', request_timeout=600, connect_timeout=5)
+		with mock.patch('requests.post', side_effect=requests.ConnectTimeout()):
+			error = send(self.c, 'POST', 'ai/test')[1]['error']
+		self.assertIn('did not accept a connection in 5 seconds', error)
+		self.assertIn('Connect timeout', error)
+		self.assertNotIn('600', error)
+
+	def test_the_test_never_waits_longer_than_the_web_request_lives_and_says_so(self):
+		import requests
+		self.put(provider='anthropic', api_key='k', model='claude-x', request_timeout=3600)
+		ok = mock.Mock(json=lambda: {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn'})
+		with mock.patch('requests.post', return_value=ok) as post:
+			status, data = send(self.c, 'POST', 'ai/test')
+		self.assertEqual(status, 200)
+		self.assertEqual(post.call_args[1]['timeout'], (10, 240))
+		self.assertIn('at most 240 seconds', data['note'])
+		self.assertEqual(AIProviderSettings.objects.get().request_timeout, 3600)  # the saved value is untouched
+		with mock.patch('requests.post', side_effect=requests.ReadTimeout()):
+			error = send(self.c, 'POST', 'ai/test')[1]['error']
+		self.assertIn('No answer in 240 seconds', error)
+		self.assertIn('real requests', error)
+		self.put(request_timeout=240)  # at the cap: nothing to say
+		with mock.patch('requests.post', return_value=ok):
+			self.assertNotIn('note', send(self.c, 'POST', 'ai/test')[1])
+
+	def test_a_stored_provider_this_version_does_not_know_does_not_break_the_page_or_the_test(self):
+		AIProviderSettings.objects.create(provider='retired', api_key='k', enabled=True)
+		status, data = send(self.c, 'GET', 'ai')
+		self.assertEqual((status, data['effective']), (200, {}))
+		status, data = send(self.c, 'POST', 'ai/test')
+		self.assertEqual(status, 400)
+		self.assertIn('not one this version knows', data['error'])
+		self.assertEqual(self.put(provider='ollama', base_url='http://h:11434')[0], 200)  # and the person can fix it
 
 	def test_the_timeout_hint_names_the_seconds_in_force(self):
 		import requests
@@ -286,7 +323,7 @@ class AiRequestSettingsApiTests(TestCase):
 
 	def test_every_hint_is_a_sentence_for_a_category_the_provider_layer_raises(self):
 		from cveFeed.settings_api import AI_ERROR_HINTS
-		raised = {'provider_auth', 'provider_rate_limit', 'provider_timeout', 'provider_network', 'provider_http', 'provider_json', 'provider_shape',
+		raised = {'provider_auth', 'provider_rate_limit', 'provider_timeout', 'provider_connect_timeout', 'provider_network', 'provider_http', 'provider_json', 'provider_shape',
 			'output_truncated', 'empty_response'}
 		self.assertEqual(set(AI_ERROR_HINTS), raised)
 		self.assertEqual(ai.AIProviderError('x', category='provider_timeout').category, 'provider_timeout')

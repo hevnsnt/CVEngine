@@ -381,6 +381,8 @@ class AIProvider:
 			body = getattr(getattr(e, 'response', None), 'text', '')
 			raise AIProviderError(f'{self.name} HTTP request failed (status {status or "unknown"})',
 				category=category, http_status=status, hint=str(body or '')[:400].lower()) from e
+		except requests.ConnectTimeout as e:  # the server was not reached in time (a ConnectTimeout is a Timeout too, so it is caught first)
+			raise AIProviderError(f'{self.name} connection timed out', category='provider_connect_timeout') from e
 		except requests.Timeout as e:
 			raise AIProviderError(f'{self.name} request timed out', category='provider_timeout') from e
 		except requests.RequestException as e:
@@ -671,6 +673,13 @@ class LMStudioProvider(OpenAIProvider):
 		return [m for m in super().list_models() if 'embed' not in m['id'].lower()]
 
 
+def _keep_alive_value(text):
+	"""Ollama reads a JSON string as a Go duration ("30m", "1h", "90s"), which has no spelling for "unload now" or "never unload": ``"-1"`` is
+	refused with a 400 ("missing unit in duration"). Those two are sent as the integers 0 and -1 (seconds, negative means forever), which is the
+	other form it takes; a duration stays a string."""
+	return int(text) if re.fullmatch(r'-?\d+', text) else text
+
+
 def _ollama_text(data):
 	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
 	try:
@@ -710,7 +719,7 @@ class OllamaProvider(AIProvider):
 		for key, allowed in (('temperature', profile.temperature_ok), ('seed', profile.seed_ok)):
 			if allowed and pinned.get(key) is not None:
 				options[key] = pinned[key]
-		keep = {'keep_alive': self.runtime.keep_alive} if self.runtime.keep_alive else {}  # how long the model stays loaded after the request
+		keep = {'keep_alive': _keep_alive_value(self.runtime.keep_alive)} if self.runtime.keep_alive else {}  # how long the model stays loaded after the request
 		return {**({'options': options} if options else {}), **keep, **reasoning_fields(self, cap)}
 
 	def _check_text(self, data):
@@ -1033,7 +1042,10 @@ def _ask_triage(provider, stage, system, user):
 		except AIProviderError as error:
 			if error.category != 'output_truncated' or not reply_limit(provider):
 				raise
+			cut_off, sent = error, reply_limit(provider)
 	with usage_stage(stage), request_options(**options, token_factor=2):
+		if reply_limit(provider) == sent:  # a limit already at the ceiling (32768): the same paid request cannot answer differently
+			raise cut_off
 		return provider.complete(system, user)
 
 
