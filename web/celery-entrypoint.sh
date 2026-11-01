@@ -97,7 +97,11 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # openvas_queue: the optional OpenVAS sweep (one GVM task at a time, polled for hours); nothing is queued on it unless the add-on is switched on
 # supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
 # ctwatch_queue: certificate transparency lookups of new targets (crt.sh rate limits them; a bulk add queues hundreds) must not hold the feed worker
-classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,ctwatch_queue"
+# live_cache_queue: the Live screen's snapshot refresher (cveFeed/live_refresh.py), a few seconds of work every CVENGINE_LIVE_REFRESH_SECONDS. Its own queue
+# (a long sweep ahead of it in another queue never blocks it) on this worker, not the discovery, feed or validation ones, whose slots scan work holds for
+# hours; the slots here are greenlets (20), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
+# tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
+classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own

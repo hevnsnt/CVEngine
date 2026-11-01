@@ -6,7 +6,7 @@ from django.shortcuts import render
 from django.shortcuts import redirect
 from django.urls import reverse
 
-from tenancy import roles, scope
+from tenancy import membership_cache, roles, scope
 
 PROJECT_PARAMS = ('slug', 'project_slug', 'project')
 
@@ -19,7 +19,7 @@ class TenancyMiddleware:
         user = getattr(request, 'user', None)
         if not (user and user.is_authenticated):
             return self.get_response(request)
-        tokens = scope.set_scope(roles.allowed_project_ids(user), user)
+        tokens = scope.set_scope(membership_cache.allowed_for_request(request, user), user)
         try:
             return self.get_response(request)
         finally:

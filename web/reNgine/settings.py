@@ -256,6 +256,13 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # pipeline safe.
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': env.int('CELERY_VISIBILITY_TIMEOUT', default=12 * 3600)}
+
+# The Live screen's snapshot refresher (cveFeed/live_refresh.py). Unlike the schedules a migration creates, this one is written by beat itself at
+# every start, so its cadence follows CVENGINE_LIVE_REFRESH_SECONDS and its row is switched off by CVENGINE_LIVE_REFRESH=0 (reNgine/livecache_config.py).
+from reNgine import livecache_config as _livecache  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry()}
+
 '''
 ROLES and PERMISSIONS
 '''
