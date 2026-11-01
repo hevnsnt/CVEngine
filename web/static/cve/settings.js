@@ -589,8 +589,24 @@ const sections = {
       rows.forEach((r) => wrap.append(el("div", "find", r)));
       return wrap;
     };
+    // Always shown, also when no worker has reported yet (the cards below are not drawn then).
+    const pointer = () => {
+      const note = el("p", "note", "Scan concurrency moved to configMaxxing: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. ", { style: "margin:0" });
+      note.append(
+        Object.assign(el("a", "", "Open configMaxxing", { href: `#${SECTION_ID}` }), {
+          onclick: (event) => {
+            event.preventDefault();
+            open(SECTION_ID);
+          },
+        }),
+      );
+      const box = el("div", "card", null, { style: "max-width:640px;margin-bottom:16px" });
+      box.append(note);
+      return box;
+    };
     const draw = (snap) => {
       host.textContent = "";
+      host.append(pointer());
       if (!snap.containers.length) {
         host.append(card("Resources", el("p", "note", "No worker has reported yet. The celery worker publishes its memory every 30 seconds.")));
         return;
@@ -631,13 +647,6 @@ const sections = {
           el("p", "note", "Container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m). Memory reserved per job (an estimate at first, raised to what real runs needed): " +
             Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") +
             ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment."),
-          el("p", "note", "Scan concurrency moved to configMaxxing: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. "),
-          Object.assign(el("a", "", "Open configMaxxing", { href: `#${SECTION_ID}` }), {
-            onclick: (event) => {
-              event.preventDefault();
-              open(SECTION_ID);
-            },
-          }),
         ),
       );
     };

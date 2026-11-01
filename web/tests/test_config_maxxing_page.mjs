@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {register} from 'node:module';
 import {test} from 'node:test';
 
@@ -15,7 +16,7 @@ register('data:text/javascript,' + encodeURIComponent(hook));
 
 class Node {
   constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.style = {}; this.dataset = {}; this._text = ''; this.className = ''; this.disabled = false; this.hidden = false; }
-  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = String(v); }
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = String(v); if (k === 'hidden') this.hidden = true; }
   getAttribute(k) { return this.attrs[k]; }
   append(...kids) { kids.forEach((k) => this.children.push(typeof k === 'string' ? Object.assign(new Node('#text'), {_text: k}) : k)); }
   appendChild(k) { this.children.push(k); return k; }
@@ -144,4 +145,40 @@ test('Reset all is a button of the section (it asks before it posts)', async () 
   await maxxing.buildSection(host);
   const resetAll = find(host, (n) => n.tag === 'button' && /^Reset all configMaxxing/.test(n.textContent))[0];
   assert.ok(resetAll && typeof resetAll.onclick === 'function', String(dialogs));
+});
+
+test('the error bar under Save is hidden while it is empty and shown only with an error', async () => {
+  const host = new Node('div');
+  await maxxing.buildSection(host);
+  const bar = find(host, (n) => n.tag === 'p' && n.className === 'msg err')[0];
+  assert.ok(bar, 'no error bar found');
+  assert.equal(bar.hidden, true, 'an empty error bar is visible');
+  const nmap = find(host, (n) => n.dataset.key === 'heavy.nmap')[0];
+  nmap.value = '99';
+  nmap.oninput();
+  assert.equal(bar.hidden, false);
+  assert.match(bar.textContent, /must be from 1 to 8/);
+  nmap.value = '2';
+  nmap.oninput();
+  assert.equal(bar.hidden, true);
+  assert.equal(bar.textContent, '');
+});
+
+test('the discovery status line uses the note style of the lines around it, and both cards have the same width', async () => {
+  const host = new Node('div');
+  await maxxing.buildSection(host);
+  const status = find(host, (n) => n.tag === 'p' && /Being applied/.test(n.textContent))[0];
+  assert.equal(status.className, 'note');
+  const widths = find(host, (n) => n.className === 'card').map((n) => n.style['max-width'] ?? /max-width:(\d+px)/.exec(n.attrs.style || '')?.[1]);
+  assert.equal(new Set(widths).size, 1, String(widths));
+});
+
+test('the Resources tab shows the pointer to configMaxxing even when no worker has reported', () => {
+  const src = readFileSync(new URL('../static/cve/settings.js', import.meta.url), 'utf8');
+  const draw = src.slice(src.indexOf('const draw = (snap) => {'), src.indexOf('const refresh = async'));
+  const pointerAt = draw.indexOf('host.append(pointer())');
+  const emptyAt = draw.indexOf('!snap.containers.length');
+  assert.ok(pointerAt > 0 && emptyAt > 0 && pointerAt < emptyAt, 'the pointer is drawn after the no-worker early return');
+  assert.match(src, /Scan concurrency moved to configMaxxing/);
+  assert.match(src, /Open configMaxxing/);
 });

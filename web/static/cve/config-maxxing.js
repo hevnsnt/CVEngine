@@ -15,7 +15,7 @@ export const cardAnchor = (id) => `${SECTION_ID}-${id}`;
 
 export async function buildSection(host, { card = "" } = {}) {
   host.textContent = "";
-  const head = el("div", "card", null, { style: "max-width:640px;margin-bottom:16px" });
+  const head = el("div", "card", null, { style: "max-width:720px;margin-bottom:16px" });
   head.append(el("h2", "", SECTION_LABEL, { style: "margin-bottom:8px" }), el("p", "note", WARNING_TEXT, { style: "margin:0 0 12px" }));
   head.append(
     button(

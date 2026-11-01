@@ -6,6 +6,7 @@ Three groups of numbers, each with a built-in default and an environment variabl
                             (``HEAVY_MAX_<KIND>``; the memory gate in ``reNgine.resources`` still holds work back when memory is short)
 * ``discovery_concurrency`` how many discovery tasks and host assessments run at once (``DISCOVERY_CONCURRENCY``; the discovery worker's
                             autoscale ceiling)
+* ``assess_batch``          how many hosts one assessment run carries (``CVENGINE_ASSESS_BATCH``)
 * ``work_depth``            how many discovery scans the work conductor keeps running or queued (``CVENGINE_WORK_DEPTH``)
 
 Precedence, one rule for every key: the value an App Admin saved here, else the environment variable, else the built-in default.
@@ -74,6 +75,9 @@ FIELDS = _heavy_fields() + [
     Field('discovery_concurrency', 'Hosts assessed at once',
           'How many discovery tasks and host assessments run at the same time. A task that waits on a Sentinel holds one of these while it waits. It is the ceiling of the discovery worker\'s autoscaler: a few more can briefly run above it.',
           'discovery', 'DISCOVERY_CONCURRENCY', DISCOVERY_DEFAULT, 1, 32, 1),
+    Field('assess_batch', 'Hosts per assessment batch',
+          'How many hosts of one target are carried through one assessment run together, so a Sentinel is handed a batch instead of one host at a time. 1 runs every host on its own. Projects this server scans without a Sentinel always use 1.',
+          'discovery', 'CVENGINE_ASSESS_BATCH', 8, 1, 64, 1),
     Field('work_depth', 'Discovery scans kept running',
           'How many discovery scans the work conductor keeps running or queued, starting the targets that have waited longest. 0 turns the conductor off: only people start scans.',
           'depth', 'CVENGINE_WORK_DEPTH', WORK_DEPTH_DEFAULT, 0, 32, 0),

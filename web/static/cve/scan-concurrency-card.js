@@ -36,7 +36,7 @@ function fieldRow(field, data, onInput, save) {
   row.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts);
   if (field.key === "discovery_concurrency") {
     const status = data.discovery || {};
-    const line = el("p", "msg", null, { style: "margin:6px 0 0" });
+    const line = el("p", "note", null, { style: "margin:6px 0 0" });
     line.append(badge(STATE_LABEL[status.state] || STATE_LABEL.unknown, TONE[status.state] || ""), document.createTextNode(` ${discoveryNotice(field, status)}`));
     row.append(line);
   }
@@ -84,13 +84,14 @@ async function build(host) {
     plan.warnings.forEach((w) => warnings.append(el("p", "msg err", w)));
     const { error, changes } = changesFrom(data.fields, current);
     problem.textContent = error || "";
+    problem.hidden = !error; // an empty error bar must not show
     saveButton.disabled = !!error || !Object.keys(changes).length;
   };
   const save = async (values) => {
     await api("PUT", PATH, { values });
     await rebuild();
   };
-  const problem = el("p", "msg err", "", { style: "margin:8px 0 0" });
+  const problem = el("p", "msg err", "", { style: "margin:8px 0 0", hidden: "" });
   const saveButton = button("Save", async () => {
     const { changes, error } = changesFrom(data.fields, drafts());
     if (error) throw new Error(error);

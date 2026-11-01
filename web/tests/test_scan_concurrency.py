@@ -53,7 +53,7 @@ class FieldTests(Isolated, unittest.TestCase):
 			field = sc.BY_KEY[f'heavy.{kind}']
 			self.assertEqual((field.default, field.low), (default, 1), kind)
 			self.assertTrue(default <= field.high <= 16, kind)
-		self.assertEqual((sc.BY_KEY['discovery_concurrency'].default, sc.BY_KEY['work_depth'].default), (8, 3))
+		self.assertEqual((sc.BY_KEY['discovery_concurrency'].default, sc.BY_KEY['work_depth'].default, sc.BY_KEY['assess_batch'].default), (8, 3, 8))
 
 	def test_clean_accepts_whole_numbers_in_range_and_none_for_reset(self):
 		self.assertEqual(sc.clean('heavy.nmap', 4), 4)
@@ -107,6 +107,18 @@ class PrecedenceTests(Isolated, TestCase):
 		self.assertEqual((sc.effective('heavy.nmap'), sc.resolve('heavy.nmap')['source']), (3, 'environment'))
 		del os.environ['HEAVY_MAX_NMAP']
 		self.assertEqual(sc.effective('heavy.nmap'), 2)
+
+	def test_the_assessment_batch_size_is_saved_then_environment_then_default(self):
+		from cveFeed import host_assessment
+		self.assertEqual(host_assessment.batch_size(), 8)
+		os.environ['CVENGINE_ASSESS_BATCH'] = '16'
+		self.assertEqual(host_assessment.batch_size(), 16)
+		sc.update({'assess_batch': 24}, self.root)
+		self.assertEqual((host_assessment.batch_size(), sc.resolve('assess_batch')['source']), (24, 'admin'))
+		sc.update({'assess_batch': None}, self.root)
+		self.assertEqual(host_assessment.batch_size(), 16)
+		with self.assertRaises(ValueError):
+			sc.clean('assess_batch', 65)
 
 	def test_the_conductor_reads_the_saved_depth_then_the_environment(self):
 		os.environ['CVENGINE_WORK_DEPTH'] = '4'
