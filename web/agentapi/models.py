@@ -197,6 +197,11 @@ class SentinelDefaults(models.Model):
     configuration set a value. ``self_update`` is ``off``, ``manual`` (it updates only when an administrator presses Update now) or
     ``automatic``; empty means "follow the instance's own Automatic or Manual update choice" (``cveFeed.updater.read_mode``)."""
     self_update = models.CharField(max_length=10, blank=True, default='')
+    # The capability policy defaults (``agentapi.sentinel_policy``): ``{kind: {'mode': 'allow'|'deny'|'prefer', 'max_concurrent': int|None}}`` applied to a
+    # Sentinel with no policy of its own for a kind. ``builtin_kinds`` is for the install's own scanner (``None``: nothing was ever chosen, so the shipped
+    # default applies: OpenVAS denied; ``{}``: an administrator chose no defaults), ``external_kinds`` for every other Sentinel (empty: all declared kinds allowed).
+    builtin_kinds = models.JSONField(null=True, blank=True, default=None)
+    external_kinds = models.JSONField(blank=True, default=dict)
     changed_by = models.CharField(max_length=150, blank=True, default='')
     changed_at = models.DateTimeField(null=True, blank=True)
 

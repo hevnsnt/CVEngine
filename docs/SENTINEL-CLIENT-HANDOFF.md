@@ -279,6 +279,10 @@ What the Sentinel must do:
   {"settings": {"values": {"network": {"value": "internal"}, "disabled_kinds": {"value": []}}, "rev": "..."}}
   ```
 
+- Honour `settings.values.disabled_kinds` (a list of kinds) and never claim or declare those. Since the per-Sentinel capability policy (1.4) the server derives
+  it: it is every kind an administrator (or the instance default of its class, for the built-in scanner OpenVAS until changed) denies, plus the machine's own
+  list. The policy itself (`allow`, `deny`, `prefer`, per-kind caps) stays on the server, which enforces the caps and the preference where it hands out work,
+  so nothing else is sent and a client that already honours `disabled_kinds` needs no change.
 - Stop assuming the local value is what the server is using. An internal Sentinel that is demoted by the server must stop
   claiming internal work at its next heartbeat. A client older than 1.3 cannot enforce the template policy; keep the self-update
   path working so the Sentinels page can move it forward.

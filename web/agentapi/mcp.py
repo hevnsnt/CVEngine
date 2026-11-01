@@ -62,6 +62,14 @@ def _schema(props=None, required=()):
     return {'type': 'object', 'properties': props or {}, 'required': list(required)}
 
 
+def _only(args, keys):
+    """``args`` restricted to ``keys``, which must include at least one: a call that sends none changes nothing (an omitted value is never a reset)."""
+    out = {k: args[k] for k in keys if k in args}
+    if not out:
+        raise ApiError(400, f'send at least one of {", ".join(keys)}')
+    return out
+
+
 def _page_props(extra=None):
     props = {'page': {'type': 'integer'}, 'page_size': {'type': 'integer'}}
     props.update(extra or {})
@@ -414,16 +422,17 @@ TOOLS = [
     ('list_agents', 'Registered agents you may see: your own, and for an administrator those of the users they manage. Shows scope, capabilities, last seen, live, and open, completed and failed counts.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'kind': {'type': 'string'}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, a), False),
-    ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now. It applies to every Sentinel with no value of its own.',
+    ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now, and the capability policy defaults builtin_kinds (for the built-in scanner; OpenVAS denied until changed) and external_kinds (every other Sentinel; empty allows every declared kind), each {kind: {mode: allow|deny|prefer, max_concurrent}}. They apply to every Sentinel with no value of its own.',
      _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
-    ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',
-     _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]}}, ['self_update']),
-     lambda c, a: sentinel_settings.set_defaults(c.user, {'self_update': a['self_update']}), True),
+    ('set_sentinel_defaults', 'App Admin only. Set instance-wide Sentinel defaults, any of: self_update (off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice); builtin_kinds and external_kinds, the capability policy {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}} that applies to the built-in scanner and to every other Sentinel for a kind it has no policy of its own for (deny never offers the kind, prefer holds work for a Sentinel that prefers it, max_concurrent caps the kind at once). A map replaces the whole map; builtin_kinds null restores the shipped default (OpenVAS denied on the built-in scanner), external_kinds null or {} means every declared kind is allowed.',
+     _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]},
+              'builtin_kinds': {'type': ['object', 'null']}, 'external_kinds': {'type': ['object', 'null']}}),
+     lambda c, a: sentinel_settings.set_defaults(c.user, _only(a, ('self_update', 'builtin_kinds', 'external_kinds'))), True),
     ('get_sentinel_dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (a Sentinel with a free slot), queue_seconds (a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) and per_target_seconds for each target beyond the first. A Sentinel row (list_sentinels, get_sentinel) carries slots {max, in_use, free, by_kind}, and get_sentinel queued_for_it (tasks waiting that it could take, by kind).',
      _schema(), lambda c, a: sentinel_dispatch.budgets(), False),
     ('get_agent', 'One agent with its effective rights and recent tasks.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
-    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), disabled_kinds, max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null restores the provisioned network grant or clears another server value; a Sentinel cannot grant itself internal access), and update=now asks its host updater to update it now.',
+    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), kinds ({kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null} or null to remove the policy of that kind}, merged per kind: what the Sentinel may take, prefer or run at once, for the built-in scanner too; only a kind get_agent shows as declared can be allowed or preferred, and a kind its machine turned off cannot be turned back on from here), disabled_kinds (the older list of denied kinds), max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null restores the provisioned network grant or clears another server value; a Sentinel cannot grant itself internal access), and update=now asks its host updater to update it now.',
      _schema({'agent_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': list(broker.ADMIN_STATUSES)}, 'note': {'type': 'string'},
               'limits': {'type': 'object'}, 'settings': {'type': 'object'}, 'update': {'type': 'string', 'enum': ['now']}}, ['agent_id']),
      lambda c, a: broker.update_agent(c, a.get('agent_id'), {k: v for k, v in a.items() if k != 'agent_id'}), True),
@@ -469,7 +478,7 @@ TOOLS = [
     ('list_sentinels', 'Registered Sentinels (kind=scanner) you may see: your own, and for an administrator those of the users they manage. Same shape as list_agents, filtered to Sentinels.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, {**a, 'kind': 'scanner'}), False),
-    ('get_sentinel', 'One Sentinel with its effective rights and recent SentinelTask history.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
+    ('get_sentinel', 'One Sentinel with its effective rights and recent SentinelTask history, and kinds: per task kind whether it declares it, whether cvENGINE offers it work of that kind (effective), its policy mode (allow, deny, prefer), where that comes from (agent, instance default, machine, contract, cool-off, default), its per-kind cap and how many it holds now.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
     ('suspend_sentinel', 'Administrator only (not for your own Sentinel). Suspend a Sentinel: no new work is offered and its in-flight SentinelTasks are released at once.',
      _schema({'agent_id': {'type': 'integer'}, 'note': {'type': 'string'}}, ['agent_id']),

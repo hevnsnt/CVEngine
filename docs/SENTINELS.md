@@ -54,7 +54,8 @@ A Sentinel enrolled by an administrator starts active. One registered by anyone 
 The **Sentinels** page groups cards by the organizations each Sentinel covers (an instance-wide one sits under Every organization). Each card has:
 
 - A status orb and word: Working, Idle, Offline (not heard from for three minutes), Waiting for approval, or Suspended.
-- Its version, an **Update now** button and an update status. In **Settings** you can change its name, where it runs, its size, which kinds it never takes, and how many tasks it runs at once. The most recent change wins, whether made here or in the Sentinel's own `.env`.
+- Its version, an **Update now** button and an update status. In **Settings** you can change its name, where it runs, its size, what it may take (below), and how many tasks it runs at once. The most recent change wins, whether made here or in the Sentinel's own `.env`.
+- A chip for each kind it has, in three styles: allowed (with "preferred" and a cap when set), denied (strikethrough; hover for who denied it, or that it is turned off on the machine) and withheld (it kept failing, or its client is too old; hover for the time it is tried again). A kind the Sentinel does not declare has no chip.
 - The tasks it holds now and its last five, each with kind, host, project and outcome (completed, partial, failed, lost).
 - Counts for the last hour and day, and its average task time.
 
@@ -77,11 +78,28 @@ From there an internal Sentinel does the work:
 
 **Example: offload OpenVAS.** Provision a Full Sentinel at organization scope on a roomy machine. With the add-on on, OpenVAS batches go to it, and an App Admin can turn on Sentinel-only mode so they never run on the server ([OPENVAS.md](OPENVAS.md)).
 
+## What each Sentinel may take (capability policy)
+
+A Sentinel *declares* what it can do (the tools it found, whether its OpenVAS stack is ready, and what its own machine turned off with `CVENGINE_SENTINEL_DISABLE`). The administrator chooses what cvENGINE hands it, per Sentinel and per kind, **for the built-in scanner exactly as for an external one**. In the card's **Settings**, "What it may take" has a row per kind:
+
+- **Allow** offers the kind. This is what a declared kind gets when nothing is set.
+- **Deny** never offers it: it is not claimed, not dispatched to it and a task of the kind it holds is released when you deny it.
+- **Prefer** offers it and, for up to a minute (`CVENGINE_SENTINEL_PREFER_DEFER_SECONDS`, default 60, a ceiling; `0` turns it off) and never longer than the claim window a stage waits for a Sentinel (6 s by default) except for OpenVAS, whose tasks no stage waits for, holds a queued task of the kind back from every Sentinel that does not prefer it while a preferring one is live, in scope, not updating and has room. If the preferring Sentinel does not take the task in that time, the others may.
+- **Max** caps how many tasks of that kind the Sentinel runs at once, inside its own limit. A queued task of a kind at its cap waits while the Sentinel takes other work.
+
+Only what the Sentinel declares can be enabled: a kind whose tool is missing or off on the machine shows "not available on this Sentinel (tool missing or off on the machine)" and offers nothing, and a kind turned off on the machine shows "turned off on the machine": the server cannot lift that, only a change on the machine can. **Use default** removes a Sentinel's own policy for a kind.
+
+**Instance defaults** apply to a Sentinel with no policy of its own for a kind: one set for the built-in scanner (`builtin_kinds`, shipped as OpenVAS denied, so a fresh built-in scanner does not run OpenVAS until you allow it there) and one for every other Sentinel (`external_kinds`, empty by default: every declared kind is allowed). An App Admin sets them with `PUT sentinels/defaults` or `set_sentinel_defaults` ([AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents)). The order is: the machine's veto, the Sentinel's own policy, the default of its class, allow.
+
+**Example: OpenVAS only on the Remote Sentinel.** Leave the shipped default (OpenVAS denied on the built-in scanner). The Remote Sentinel declares OpenVAS and has no policy against it, so only it takes OpenVAS work; the built-in scanner keeps everything else. If you deny it on both, the work stays due and every message says so ("OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; off on Remote-1)").
+
 ## When no Sentinel is live
 
 Before a stage runs its tool, it asks for a live, eligible Sentinel with the right capability. With none, the stage runs on the server, as before. With one, the work is queued and the stage waits: 8 seconds for a Sentinel with a free slot to claim it, 5 minutes for a slot when every Sentinel is at its limit, then a per-kind ceiling for the run itself (counted from the claim). On a timeout or failure the stage runs locally.
 
 Two exceptions never run locally: targets inside an internal network, and OpenVAS while Sentinel-only mode is on. Each dispatch shows as a line in the AI activity feed. Timings are in [CONFIGURATION.md](CONFIGURATION.md).
+
+The message says why a kind has nowhere to go: **disabled** (a live Sentinel has it and the capability policy keeps it off), **offline** (a Sentinel that has it is not heard from), **withheld** (it keeps failing the kind, or its client is too old), **inactive** (pending or suspended) or **never** (no Sentinel declares it), for example "OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; Remote-1 has it but is offline); the targets stay due". A kind turned off on every Sentinel that has it also shows on the page strip as "OpenVAS is turned off on every Sentinel that has it", not as an offline scanner.
 
 ## Security model
 

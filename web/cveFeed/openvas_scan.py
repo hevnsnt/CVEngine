@@ -1195,6 +1195,43 @@ def _claimable(run, task):
     return sentinel_broker.any_scanner_for(run.project, 'openvas', internal=internal)
 
 
+class _SkippedProjects:
+    """The projects one OpenVAS tick passed over because no live Sentinel could take OpenVAS work for them, and why (``sentinel_broker.capacity_state``'s reason:
+    ``disabled``, ``offline``, ``withheld``, ``inactive``, ``never``). The tick used to ``continue`` past them without a word, so an administrator who turned
+    OpenVAS off everywhere (or whose only Sentinel with it was offline) saw nothing happen and no reason. ``log`` writes one line per tick naming the state. The
+    reason is worked out once, for the first project passed over (it names every Sentinel that has the kind); the others are counted."""
+
+    def __init__(self):
+        self.projects, self.first, self._checked = [], None, {}
+
+    def eligible(self, project, internal):
+        from agentapi import sentinel_broker, sentinel_dispatch
+        key = (project.pk, internal)
+        if key not in self._checked:
+            ok = bool(sentinel_dispatch.any_scanner_for(project, 'openvas', internal=internal))
+            self._checked[key] = ok
+            if not ok:
+                self.projects.append(project.slug)
+                if self.first is None:
+                    self.first = sentinel_broker.explain_none(project, 'openvas', internal=internal)
+        return self._checked[key]
+
+    def summary(self):
+        return (f'OpenVAS has no live Sentinel for {len(set(self.projects))} project(s) ({self.first["reason"]}): {self.first["message"]}'
+                if self.first else '')
+
+    def log(self):
+        """One line per tick. An install that has no Sentinel for the project at all (``never``, the way every install ran before Sentinels) is the ordinary
+        route to this server's own OpenVAS, so it is logged at debug level; every other state is something an administrator can act on, at info level."""
+        if self.first:
+            level = logging.DEBUG if self.first['reason'] == 'never' and not self.first['message'].startswith('no Sentinel that covers') else logging.INFO
+            logger.log(level, 'OpenVAS tick: %s; their hosts stay due', self.summary())
+
+    def suffix(self):
+        """What to add to the tick's ``skipped`` text: nothing when there is simply no Sentinel for the project (the text already says so), else the reason."""
+        return f' ({self.first["message"]})' if self.first and self.first['reason'] != 'never' else ''
+
+
 def poll_sentinel(run):
     """One step of a Sentinel-dispatched run: ask its ``SentinelTask``'s own status, exactly as ``poll`` asks gvmd's for a
     local one. No GMP session is opened for this: the Sentinel talks to its own sidecar, never this instance's."""
@@ -1445,7 +1482,6 @@ def tick(session_factory=None, resolve=None, blocked=None):
     eligible Sentinel right now is simply left due rather than ever touching this instance's own sidecar - the next tick
     tries again, same as a batch that failed to vet. It does not touch a local run already in progress (started before
     the toggle was turned on, or one this process itself is mid-poll of), which is let finish."""
-    from agentapi import sentinel_dispatch
     from cveFeed import activity, ledger
     from cveFeed.models import OpenvasRun, OpenvasSettings
     from cveFeed.scan_control import operator_pause_requested
@@ -1467,8 +1503,9 @@ def tick(session_factory=None, resolve=None, blocked=None):
             return poll_sentinel(run)
         if run is None:
             found_due = False
+            skipped = _SkippedProjects()
             for link in sweep_links():
-                if not sentinel_dispatch.any_scanner_for(link.project, 'openvas'):
+                if not skipped.eligible(link.project, internal=False):
                     continue
                 batch = next_batch(link, resolve=resolve, blocked=blocked)
                 if not batch:
@@ -1478,7 +1515,7 @@ def tick(session_factory=None, resolve=None, blocked=None):
                 if started is not None:
                     return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'sentinel'}
             for link in sweep_links():  # a project's declared internal networks: only a Sentinel inside them can scan, never this server
-                if not sentinel_dispatch.any_scanner_for(link.project, 'openvas', internal=True):
+                if not skipped.eligible(link.project, internal=True):
                     continue
                 batch = internal_batch(link)
                 if not batch:
@@ -1487,9 +1524,10 @@ def tick(session_factory=None, resolve=None, blocked=None):
                 started = dispatch_to_sentinel(link, batch)
                 if started is not None:
                     return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'internal sentinel'}
+            skipped.log()
             if row.sentinel_only:
                 return {'skipped': ('Sentinel-only mode is on: a due host has no eligible Sentinel right now; it stays due' if found_due
-                                    else 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due')}
+                                    else 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due') + skipped.suffix()}
         try:
             if session_factory is None:
                 ensure_login()

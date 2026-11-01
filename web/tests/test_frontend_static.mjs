@@ -105,16 +105,27 @@ test('a count or a badge asks for the count alone, and an export or a palette pr
 });
 
 class SentinelElement {
-  constructor(tag, cls = '', text = '') {
+  constructor(tag, cls = '', text = '', attrs = {}) {
     this.tag = tag;
     this.cls = cls;
     this.text = text == null ? '' : String(text);
+    this.attrs = attrs;
     this.children = [];
+    this.hidden = false;
+    this.value = '';
+    this.listeners = {};
+    this.classes = new Set();
+    this.classList = {toggle: (name, on) => (on ? this.classes.add(name) : this.classes.delete(name))};
   }
   append(...children) { this.children.push(...children); }
+  get textContent() { return this.text; }
+  set textContent(value) { this.text = String(value); }
+  addEventListener(type, fn) { this.listeners[type] = fn; }
+  setAttribute(name, value) { this.attrs = {...this.attrs, [name]: value}; }
+  removeAttribute(name) { const {[name]: _gone, ...rest} = this.attrs; this.attrs = rest; }
 }
 
-const sentinelEl = (tag, cls, text) => new SentinelElement(tag, cls, text);
+const sentinelEl = (tag, cls, text, attrs) => new SentinelElement(tag, cls, text, attrs);
 const sentinelText = (node) => typeof node === 'string' ? node : [node.text, ...node.children.map(sentinelText)].join(' ');
 globalThis.localStorage = {getItem: () => null};
 globalThis.document = {createTextNode: (text) => new SentinelElement('#text', '', text), getElementById: () => null};
@@ -158,8 +169,9 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
-const {versionBlock} = await import(`data:text/javascript,${encodeURIComponent(
-  `const {el, badge, button} = globalThis.__sentinelUi;\n${settingsSource}`,
+globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
+const {versionBlock, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
 
@@ -176,4 +188,145 @@ test('a Sentinel card has Update now, the built-in scanner does not and says why
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
   assert.match(sentinelSource, /if \(s\.builtin\) state\.append\(" ", el\("span", "chip sl-builtin", "Built-in"/);
   assert.match(sentinelSource, /versionBlock\(detail, \{ onChange: reload, builtin: s\.builtin \}\)/);
+});
+
+// --- the capability policy of a Sentinel (GET agents/{id} `kinds`, PATCH settings.kinds) ---------------------------------------------------------
+const kindInfo = (changes = {}) => ({declared: true, effective: true, mode: 'allow', source: 'default', cap: null, held: 0, by: null, at: null, retry_at: null, state: 'on', note: '', ...changes});
+const policyKinds = {
+  nmap: kindInfo(),
+  openvas: kindInfo({mode: 'deny', source: 'agent', by: 'alice', state: 'denied', effective: false}),
+  nuclei_light: kindInfo({state: 'cool_off', source: 'cool-off', effective: false, retry_at: '2026-10-31T12:30:00Z'}),
+  wpscan: kindInfo({declared: false, effective: false, state: 'unavailable'}),
+  testssl: kindInfo({mode: 'deny', source: 'machine', declared: true, effective: false, state: 'machine_off'}),
+  naabu: kindInfo({mode: 'prefer', cap: 2}),
+};
+
+test('a kind says what it is on this Sentinel, in words that name the cause', () => {
+  assert.equal(kindState(policyKinds.nmap), 'on');
+  assert.equal(kindState(policyKinds.openvas), 'denied');
+  assert.match(kindNote(policyKinds.openvas), /Denied by alice/);
+  assert.match(kindNote(policyKinds.wpscan), /Not available on this Sentinel \(tool missing or off on the machine\)/);
+  assert.match(kindNote(policyKinds.testssl), /Turned off on the machine/);
+  assert.match(kindNote(policyKinds.nuclei_light), /Withheld after repeated failures until/);
+  assert.match(kindNote(policyKinds.naabu), /Preferred.*at most 2 at once/);
+  assert.match(kindNote({...policyKinds.openvas, source: 'instance default', by: 'root'}), /Denied by the instance default \(set by root\)/);
+  // an older server without `state` is read from the other fields
+  assert.equal(kindState({declared: true, mode: 'allow', source: 'cool-off'}), 'cool_off');
+  assert.equal(kindState({declared: false, mode: 'allow', source: 'default'}), 'unavailable');
+  assert.equal(kindState({declared: true, mode: 'deny', source: 'machine'}), 'machine_off');
+});
+
+test('the panel offers Allow, Deny and Prefer only for what the Sentinel declares and its machine left on', () => {
+  assert.deepEqual(modesOffered(policyKinds.nmap), ['allow', 'deny', 'prefer']);
+  assert.deepEqual(modesOffered(policyKinds.openvas), ['allow', 'deny', 'prefer']);
+  assert.deepEqual(modesOffered(policyKinds.wpscan), []);
+  assert.deepEqual(modesOffered(policyKinds.testssl), []);
+  assert.equal(canReset(policyKinds.openvas), true);
+  assert.equal(canReset(policyKinds.nmap), false);
+});
+
+test('only a kind that changed is sent, a reset sends null, and a bad cap is refused before anything is sent', () => {
+  assert.deepEqual(kindsChange(policyKinds, {nmap: {mode: 'allow', cap: ''}, openvas: {mode: 'deny', cap: ''}}), {});
+  assert.deepEqual(kindsChange(policyKinds, {openvas: {mode: 'allow', cap: ''}}), {openvas: {mode: 'allow', max_concurrent: null}});
+  assert.deepEqual(kindsChange(policyKinds, {nmap: {mode: 'prefer', cap: '3'}}), {nmap: {mode: 'prefer', max_concurrent: 3}});
+  assert.deepEqual(kindsChange(policyKinds, {naabu: {mode: 'prefer', cap: ''}}), {naabu: {mode: 'prefer', max_concurrent: null}});
+  assert.deepEqual(kindsChange(policyKinds, {openvas: {reset: true}, nmap: {reset: true}}), {openvas: null});
+  assert.deepEqual(kindsChange(policyKinds, {wpscan: {mode: 'allow', cap: ''}, testssl: {mode: 'allow', cap: ''}}), {});
+  for (const cap of ['0', '11', '2.5', 'abc']) assert.throws(() => kindsChange(policyKinds, {nmap: {mode: 'allow', cap}}), /whole number from 1 to 10/);
+});
+
+test('a card shows a chip per kind in three styles, with who or what decided in the tooltip, and none for a kind it does not have', () => {
+  const chips = kindChips(policyKinds);
+  const byText = Object.fromEntries(chips.children.map((c) => [c.text, c]));
+  assert.equal(byText['nmap'].cls, 'chip kind-on');
+  assert.equal(byText['OpenVAS (denied)'].cls, 'chip kind-denied');
+  assert.match(byText['OpenVAS (denied)'].attrs.title, /Denied by alice/);
+  assert.equal(byText['nuclei (light) (withheld)'].cls, 'chip kind-held');
+  assert.match(byText['nuclei (light) (withheld)'].attrs.title, /Withheld after repeated failures until/);
+  // turned off on the machine is its own style (hatched, dashed, "off on machine"), not the denied one, and says so in words as well
+  assert.equal(byText['testssl (off on machine)'].cls, 'chip kind-locked');
+  assert.match(byText['testssl (off on machine)'].attrs.title, /Turned off on the machine/);
+  assert.notEqual(byText['testssl (off on machine)'].cls, byText['OpenVAS (denied)'].cls);
+  assert.ok(byText['naabu (preferred) x2'], 'preferred and capped kinds say so');
+  assert.equal(byText['WPScan'], undefined);
+  assert.equal(kindChips({wpscan: policyKinds.wpscan}), null);
+  assert.equal(kindChips(undefined), null);
+});
+
+test('the capability policy is drawn with textContent only', () => {
+  for (const name of ['sentinel-settings.js', 'sentinel-live.js', 'scannerbar.js']) {
+    assert.doesNotMatch(read(name), /innerHTML|insertAdjacentHTML|outerHTML/, `${name} sets server text with textContent only`);
+  }
+  assert.match(settingsSource, /settings: \{ kinds: \{ \[kind\]: null \} \}/, 'Use default removes the Sentinel\'s own policy of a kind');
+  assert.match(sentinelSource, /kindChips\(detail\.kinds\)/);
+  assert.match(read('scannerbar.js'), /disabled_message/);
+});
+
+// --- the settings panel: a cap that cannot be saved says why under its field, and the instance default is explained -----------------------------
+const walk = (node, found = []) => { found.push(node); (node.children || []).forEach((c) => typeof c !== 'string' && walk(c, found)); return found; };
+
+test('a cap that is not a whole number from 1 to 10 has a sentence of its own, and empty means no limit', () => {
+  assert.equal(capProblem(''), '');
+  assert.equal(capProblem('  '), '');
+  for (const ok of ['1', '3', '10']) assert.equal(capProblem(ok), '');
+  for (const bad of ['0', '11', '2.5', '-1', 'abc', '1e1']) assert.match(capProblem(bad), /whole number from 1 to 10, or empty for no limit/);
+});
+
+test('the panel marks an invalid cap inline with an alert, tells Save, and clears when it is fixed', () => {
+  {
+    const validity = [];
+    const panel = kindsPanel({nmap: kindInfo()}, async () => {}, (ok) => validity.push(ok));
+    assert.equal(validity.at(-1), true, 'a panel that opens clean can be saved');
+    const row = walk(panel.node).find((n) => n.cls === 'ss-pol-row');
+    const cap = row.children.find((c) => c.tag === 'input');
+    const err = row.children.find((c) => c.cls && c.cls.includes('ss-pol-err'));
+    assert.equal(err.attrs.role, 'alert');
+    assert.equal(err.attrs['aria-live'], 'assertive');
+    assert.equal(err.hidden, true);
+    cap.value = '99';
+    cap.listeners.input();
+    assert.match(err.text, /whole number from 1 to 10/);
+    assert.equal(err.hidden, false);
+    assert.equal(cap.attrs['aria-invalid'], 'true');
+    assert.ok(cap.classes.has('invalid'));
+    assert.equal(validity.at(-1), false, 'Save is told to stay disabled');
+    assert.equal(panel.invalid(), true);
+    cap.value = '3';
+    cap.listeners.input();
+    assert.equal(err.hidden, true);
+    assert.equal(cap.attrs['aria-invalid'], undefined);
+    assert.equal(validity.at(-1), true);
+    assert.equal(panel.invalid(), false);
+    cap.validity = {badInput: true};  // letters typed into a number field read as empty, which is not "no limit"
+    cap.value = '';
+    cap.listeners.input();
+    assert.equal(panel.invalid(), true);
+  }
+});
+
+test('a kind denied by the instance default gets a one-line hint that Allow overrides it for this Sentinel only', () => {
+  const builtin = {openvas: kindInfo({mode: 'deny', source: 'instance default', by: 'root', state: 'denied', effective: false}), nmap: kindInfo()};
+  assert.match(defaultHint(builtin), /^OpenVAS is denied here by the instance default\. Choosing Allow overrides that default for this Sentinel only\.$/);
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'agent', state: 'denied'})}), '');
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'machine', state: 'machine_off'})}), '');
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'instance default', declared: false, state: 'denied'})}), '', 'nothing to override for a kind the Sentinel does not have');
+  assert.match(defaultHint({openvas: builtin.openvas, wpscan: kindInfo({mode: 'deny', source: 'instance default', state: 'denied'})}), /^OpenVAS, WPScan are denied here/);
+});
+
+test('the rows keep a stable grid: every row reserves its columns and the note and error take their own lines', () => {
+  const css = readFileSync(new URL('../static/cve/cve.css', import.meta.url), 'utf8');
+  // the tracks fit any container: fluid (fr) tracks, and the fixed ones add up to well under the narrowest dialog, so the row never overflows it
+  const grid = css.match(/\.ss-pol-row\{display:grid;grid-template-columns:([^;]+);/)[1];
+  assert.match(grid, /minmax\(0,1\.3fr\)/);
+  assert.match(grid, /fr\)/);
+  const fixed = [...grid.replace(/minmax\(0,[^)]*\)/g, '').matchAll(/(\d+)px/g)].map((m) => Number(m[1]));
+  assert.ok(fixed.reduce((a, b) => a + b, 0) + 3 * 10 <= 360, `fixed tracks ${fixed} plus gaps must stay far under a 530px container`);
+  assert.match(css, /\.ss-pol-row\{[^}]*min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol-row>\*\{min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol\{[^}]*min-width:0;max-width:100%\}/);
+  assert.match(css, /\.ss-pol-note\{grid-column:1\/-1/);
+  assert.match(css, /\.ss-pol-row \[hidden\]\{display:block;visibility:hidden\}/, 'a control a row does not offer keeps its column');
+  assert.match(css, /\.chip\.kind-locked\{[^}]*dashed/);
+  assert.match(css, /\.chip\.kind-denied\{[^}]*var\(--fire-ink\)/);
+  assert.match(settingsSource, /role: "alert"/);
 });

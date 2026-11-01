@@ -14,6 +14,7 @@ let bar = null;
 function paint(s) {
   const lines = [];
   if (s && s.message) lines.push(["waiting", s.message]);
+  if (s && s.disabled_message) lines.push(["disabled", s.disabled_message]); // turned off by a setting, not a scanner that is gone
   if (s && s.never_seen_message) lines.push(["never", s.never_seen_message]);
   if (!lines.length) {
     if (bar) bar.remove();
