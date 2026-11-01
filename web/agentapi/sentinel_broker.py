@@ -83,6 +83,7 @@ RUNNING_GRACE = timedelta(seconds=120)  # a task accepted more recently than thi
 MAX_RUNNING_IDS = 100
 TEMPLATE_POLICY_PATH = '/api/v1/sentinel/template-policy'
 PREFER_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel that does not prefer its kind while one that does is live and has room (CVENGINE_SENTINEL_PREFER_DEFER_SECONDS)
+BALANCE_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel while a less loaded, eligible one has room for it (CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS)
 ENROLLMENT_KEEP = timedelta(days=7)  # an expired, never redeemed enrollment secret is deleted this long after it expired
 
 
@@ -370,17 +371,40 @@ def prefer_defer_seconds():
     return max(0, _env_int('CVENGINE_SENTINEL_PREFER_DEFER_SECONDS', PREFER_DEFER_DEFAULT))
 
 
-def prefer_defer_for(kind):
-    """The seconds a queued task of ``kind`` is held back for a preferring Sentinel: ``prefer_defer_seconds()`` for ``openvas`` (no stage waits on it: it
-    sits in the queue until a Sentinel takes it), and for every other kind at most the claim window a dispatching stage waits for a Sentinel to take its
-    task (``sentinel_dispatch._claim_timeout()``) less two seconds. A preference can only reorder who takes a task, never cost the stage its Sentinel: were
+def _stage_window(defer, kind):
+    """``defer`` seconds, held to what a stage can afford for ``kind``: all of it for ``openvas`` (no stage waits on it: it sits in the queue until a
+    Sentinel takes it), and for every other kind at most the claim window a dispatching stage waits for a Sentinel to take its task
+    (``sentinel_dispatch._claim_timeout()``) less two seconds. Holding a task back can only reorder who takes it, never cost the stage its Sentinel: were
     the hold longer than the stage waits, the stage would give up (and run the work here, or leave the targets due) before the other Sentinels were
     allowed to take it."""
-    defer = prefer_defer_seconds()
     if kind == 'openvas':
         return defer
     from agentapi import sentinel_dispatch
     return min(defer, max(0, sentinel_dispatch._claim_timeout() - 2))
+
+
+def prefer_defer_for(kind):
+    """The seconds a queued task of ``kind`` is held back for a preferring Sentinel: ``prefer_defer_seconds()`` limited to the stage's claim window
+    (``_stage_window``)."""
+    return _stage_window(prefer_defer_seconds(), kind)
+
+
+def balance_enabled():
+    """``CVENGINE_SENTINEL_BALANCE=0`` (or ``false``, ``no``, ``off``) is the kill switch of least-loaded balancing: every Sentinel then takes the first task it asks for."""
+    import os
+    return os.environ.get('CVENGINE_SENTINEL_BALANCE', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def balance_defer_seconds():
+    """``CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS`` (default 60, ``0`` or ``CVENGINE_SENTINEL_BALANCE=0`` turns balancing off): how long a queued task is held back
+    from a Sentinel while another live, eligible Sentinel that is less loaded has room for it."""
+    return max(0, _env_int('CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS', BALANCE_DEFER_DEFAULT)) if balance_enabled() else 0
+
+
+def balance_defer_for(kind):
+    """The seconds a queued task of ``kind`` is held back for a less loaded Sentinel: ``balance_defer_seconds()`` limited the way ``prefer_defer_for`` is
+    (``_stage_window``), so balancing never costs a stage its Sentinel either."""
+    return _stage_window(balance_defer_seconds(), kind)
 
 
 def effective_capabilities(agent, withheld=None, policy=None):
@@ -956,6 +980,22 @@ def kinds_overview(now=None):
     return out
 
 
+def load_overview(now=None):
+    """``{'balancing': {...}, 'per_agent': [...], 'by_kind': {...}}`` over the whole instance, for the system status: how the live Sentinels share the work. ``per_agent`` has a
+    row for every live Sentinel (``id``, ``name``, ``builtin``, ``max_concurrent``, ``held`` now, ``load`` = held / max_concurrent, and the last hour's ``utilisation_1h``,
+    ``tasks_1h``, queue ``wait_p50_seconds`` / ``wait_p95_seconds`` and ``wait_by_kind``, see ``activity_metrics``); ``by_kind`` the queue depth, tasks finished and queue wait
+    of each kind. ``balancing`` says whether least-loaded claiming is on and for how long a task is held back (``balance_defer_seconds``)."""
+    now = now or timezone.now()
+    live = _live_scanners(now)
+    held = _holders([e.agent.pk for e in live])[0] if live else {}
+    activity = activity_metrics([e.agent.pk for e in live], now, max_concurrent={e.agent.pk: e.max_concurrent for e in live})
+    builtin_id = builtin_pk()
+    per_agent = [{'id': e.agent.pk, 'name': e.agent.name, 'builtin': e.agent.pk == builtin_id, 'max_concurrent': e.max_concurrent,
+                  'held': held.get(e.agent.pk, 0), 'load': round(held.get(e.agent.pk, 0) / e.max_concurrent, 3) if e.max_concurrent else None,
+                  **activity['agents'][e.agent.pk]} for e in sorted(live, key=lambda e: (e.agent.name, e.agent.pk))]
+    return {'balancing': {'enabled': balance_defer_seconds() > 0, 'defer_seconds': balance_defer_seconds()}, 'per_agent': per_agent, 'by_kind': activity['kinds']}
+
+
 def project_slots(project, now=None):
     """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over. Counted over the two
     kinds every scan stage starts with (``nmap``, ``nuclei_light``), not over every kind: a Sentinel that only runs OpenVAS or ``discover`` does not
@@ -1005,6 +1045,79 @@ def slot_usage(agent_ids):
                               .values_list('agent_id', 'kind').annotate(n=Count('id'))):
         out.setdefault(agent_id, {})[kind] = n
     return out
+
+
+METRICS_WINDOW = timedelta(hours=1)
+METRICS_MAX_ROWS = 20000  # the rows one metrics read looks at: an hour of even a large fleet is far below this
+
+
+def _percentile(values, q):
+    """The ``q`` quantile (0-1) of ``values`` by linear interpolation, in seconds to a tenth, or ``None`` for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * q
+    low = int(pos)
+    high = min(low + 1, len(ordered) - 1)
+    return round(ordered[low] + (ordered[high] - ordered[low]) * (pos - low), 1)
+
+
+def _waits(values):
+    return {'n': len(values), 'p50_seconds': _percentile(values, 0.5), 'p95_seconds': _percentile(values, 0.95)}
+
+
+def activity_metrics(agent_ids=None, now=None, viewer=None, max_concurrent=None):
+    """What the Sentinels did in the last hour, for the Sentinels page and the system status (two reads of the task table and one count, whatever the number of Sentinels):
+    ``{'agents': {id: {...}}, 'kinds': {kind: {...}}}``. ``agent_ids`` limits it to those Sentinels (``None``: every task a Sentinel took).
+
+    Per Sentinel: ``utilisation_1h``, the time its slots were busy in the hour (each task counted from its acceptance, or the start of the hour, to its finish, or now
+    while it runs) over the hour of every slot it has (``3600 * max_concurrent[id]``), at most 1; ``tasks_1h``, the tasks it finished (done or failed) in the hour;
+    ``wait_p50_seconds`` and ``wait_p95_seconds``, how long the tasks it claimed in the hour had waited in the queue (``claimed_at - created_at``), and ``wait_by_kind``
+    (``{kind: {n, p50_seconds, p95_seconds}}``) the same per kind. Per kind: the tasks queued now (``queued``, only the projects ``viewer`` may read when one is given),
+    ``tasks_1h`` and the queue wait of the tasks of the kind claimed in the hour (``wait_p50_seconds``, ``wait_p95_seconds``). A percentile is ``None`` without a task."""
+    now = now or timezone.now()
+    start = now - METRICS_WINDOW
+    max_concurrent = max_concurrent or {}
+    tasks = SentinelTask._base_manager.all()
+    tasks = tasks.filter(agent_id__in=list(agent_ids)) if agent_ids is not None else tasks.filter(agent_id__isnull=False)
+    busy, finished, finished_kind = {}, {}, {}
+    work = tasks.filter(Q(finished_at__gte=start) | Q(status='running', accepted_at__isnull=False)).order_by().values_list(
+        'agent_id', 'kind', 'status', 'accepted_at', 'finished_at')[:METRICS_MAX_ROWS]
+    for agent_id, kind, status, accepted, ended in work:
+        if accepted is not None:
+            seconds = ((ended or now) - max(accepted, start)).total_seconds()
+            if seconds > 0:
+                busy[agent_id] = busy.get(agent_id, 0.0) + seconds
+        if ended is not None and ended >= start and status in ('done', 'failed'):
+            finished[agent_id] = finished.get(agent_id, 0) + 1
+            finished_kind[kind] = finished_kind.get(kind, 0) + 1
+    waits, waits_by_kind, kind_waits = {}, {}, {}
+    claimed = tasks.filter(claimed_at__gte=start).order_by().values_list('agent_id', 'kind', 'claimed_at', 'created_at')[:METRICS_MAX_ROWS]
+    for agent_id, kind, claimed_at, created_at in claimed:
+        wait = max(0.0, (claimed_at - created_at).total_seconds())
+        waits.setdefault(agent_id, []).append(wait)
+        waits_by_kind.setdefault(agent_id, {}).setdefault(kind, []).append(wait)
+        kind_waits.setdefault(kind, []).append(wait)
+    ids = set(agent_ids) if agent_ids is not None else set(busy) | set(finished) | set(waits)
+    agents = {}
+    for agent_id in ids:
+        size = max_concurrent.get(agent_id) or 0
+        mine = waits.get(agent_id, [])
+        agents[agent_id] = {
+            'utilisation_1h': round(min(1.0, busy.get(agent_id, 0.0) / (3600 * size)), 3) if size else 0.0,
+            'tasks_1h': finished.get(agent_id, 0),
+            'wait_p50_seconds': _percentile(mine, 0.5), 'wait_p95_seconds': _percentile(mine, 0.95),
+            'wait_by_kind': {kind: _waits(v) for kind, v in sorted(waits_by_kind.get(agent_id, {}).items())}}
+    queued = SentinelTask.objects.filter(status='queued')
+    if viewer is not None:
+        queued = _for_viewer(queued, viewer)
+    depth = dict(queued.order_by().values_list('kind').annotate(n=Count('id')))
+    kinds = {}
+    for kind in SentinelTask.KINDS:
+        w = kind_waits.get(kind, [])
+        kinds[kind] = {'queued': depth.get(kind, 0), 'tasks_1h': finished_kind.get(kind, 0),
+                       'wait_p50_seconds': _percentile(w, 0.5), 'wait_p95_seconds': _percentile(w, 0.95)}
+    return {'agents': agents, 'kinds': kinds}
 
 
 def queued_for(agent, now=None):
@@ -1202,6 +1315,11 @@ def _preferring(task, exclude_pk, now, memo):
     """The rights (``SentinelEff``) of the live, active Sentinels other than ``exclude_pk`` that cover ``task``'s project, declare its kind and prefer it. Cheap
     pre-filter first (the policy is stored JSON), so rights are built only for the few that prefer the kind; built once per ``(project, kind)`` and per Sentinel
     for the whole of one ``_try_claim`` call (``memo``), never once per task, with the tasks they hold now."""
+    if balance_defer_for(task.kind):  # balancing reads the same candidates and what they hold: one lookup serves both checks
+        key = ('preferring', task.project_id, task.kind)
+        if key not in memo:
+            memo[key] = [(e, held) for e, held in _peers(task, exclude_pk, now, memo) if task.kind in e.preferred]
+        return memo[key]
     key = ('candidates', task.project_id, task.kind)
     if key not in memo:
         pk = builtin_pk()
@@ -1218,31 +1336,75 @@ def _preferring(task, exclude_pk, now, memo):
     return memo[key]
 
 
+def _can_take(other, held_pair, task, now):
+    """Whether the Sentinel with rights ``other`` could take ``task`` right now: usable and live, its capabilities (the kind not denied, capped out or withheld)
+    and its scope, hosts and internal-network rules let it have this task (``refusal``), it is not updating, and it has a free slot and room under its per-kind cap (and, for OpenVAS, no run in flight: one at a time).
+    ``held_pair`` is ``_holders`` for it."""
+    held, by_kind = held_pair
+    if other.problem or not other.live or task.kind not in other.caps or other.refusal(task) is not None or _updating(other.agent, now):
+        return False
+    if held.get(other.agent.pk, 0) >= other.max_concurrent:
+        return False
+    if task.kind == 'openvas' and by_kind.get((other.agent.pk, 'openvas'), 0) >= 1:
+        return False  # one OpenVAS run at a time: a Sentinel running one stops asking for more, so waiting for it would only waste the window
+    cap = other.kind_caps.get(task.kind)
+    return cap is None or by_kind.get((other.agent.pk, task.kind), 0) < cap
+
+
+def _answer_key(task, found, eff):
+    """The memo key of an answer about ``task`` over the candidates ``found`` (``(rights, ...)`` pairs): it depends on the task's project and kind and, because
+    ``refusal`` is task specific, on whether the task needs a stored credential or reaches an internal network, and on the task itself when a candidate's
+    scope names hosts."""
+    if any(other.hosts is not None for other, *_ in found):
+        return ('answer', task.pk)
+    return ('answer', task.project_id, task.kind, bool(task.secret_ref), eff._internal(task))
+
+
 def _preferred_elsewhere(eff, task, now, memo=None):
     """Whether another live Sentinel that could take ``task`` right now prefers its kind (``prefer`` in its capability policy) while this one does not, so
     the task is held back from this one for a moment: a Sentinel is *eligible* when its scope reaches the task, it is not updating, it is not at its
-    concurrency limit or its per-kind cap for the kind, and nothing but a preference keeps it from the task. ``memo`` is the per-call cache of one
-    ``_try_claim`` (the candidates' rights, and the answer): the answer depends on the task's project and kind and, because ``refusal`` is task specific, on
-    whether the task needs a stored credential or reaches an internal network, and on the task itself when a candidate's scope names hosts."""
+    concurrency limit or its per-kind cap for the kind, and nothing but a preference keeps it from the task (``_can_take``). ``memo`` is the per-call cache of one
+    ``_try_claim`` (the candidates' rights, and the answer; ``_answer_key`` says what the answer depends on)."""
     memo = {} if memo is None else memo
     found = _preferring(task, eff.agent.pk, now, memo)
     if not found:
         return False
-    key = ('answer', task.pk) if any(other.hosts is not None for other, _ in found) else (
-        'answer', task.project_id, task.kind, bool(task.secret_ref), eff._internal(task))
+    key = _answer_key(task, found, eff)
     if key not in memo:
-        memo[key] = False
-        for other, (held, by_kind) in found:
-            if other.problem or not other.live or task.kind not in other.caps or task.kind not in other.preferred or other.refusal(task) is not None \
-                    or _updating(other.agent, now):
-                continue
-            if held.get(other.agent.pk, 0) >= other.max_concurrent:
-                continue
-            cap = other.kind_caps.get(task.kind)
-            if cap is not None and by_kind.get((other.agent.pk, task.kind), 0) >= cap:
-                continue
-            memo[key] = True
-            break
+        memo[key] = any(task.kind in other.preferred and _can_take(other, pair, task, now) for other, pair in found)
+    return memo[key]
+
+
+def _peers(task, exclude_pk, now, memo):
+    """``[(rights, holders)]`` of the live, active Sentinels other than ``exclude_pk`` that cover ``task``'s project and declare its kind: the Sentinels that may
+    share its load. Built once per ``(project, kind)`` for the whole of one ``_try_claim`` call (``memo``; the rights are shared with ``_preferring``), and the
+    tasks all of them hold now are read in one query, never one per task or per Sentinel."""
+    key = ('peers', task.project_id, task.kind)
+    if key not in memo:
+        candidates = [a for a in (Agent.objects.filter(_covers(task.project.slug, task.project.org.slug if task.project.org_id else None), kind='scanner',
+                                                       status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=exclude_pk)
+                                  .select_related('token__user')[:CANDIDATES]) if task.kind in (a.capabilities or [])]
+        effs = memo.setdefault('effs', {})
+        for a in candidates:
+            if a.pk not in effs:
+                effs[a.pk] = SentinelEff(a, now)
+        held = _holders([a.pk for a in candidates]) if candidates else ({}, {})
+        memo[key] = [(effs[a.pk], held) for a in candidates]
+    return memo[key]
+
+
+def _lighter_elsewhere(eff, task, own_held, now, memo):
+    """Whether another live Sentinel that could take ``task`` right now (``_can_take``: eligible for it, with room) is strictly less loaded than this one, so the
+    task is held back from this one for a moment. Load is the tasks a Sentinel holds (claimed or running) over its ``max_concurrent``, compared by cross
+    multiplication, so a Sentinel with twice the slots carries twice the tasks at the same load; equal loads are no reason to hold anything back (the first to
+    ask takes it). ``own_held`` is what this Sentinel holds. ``memo`` is the per-call cache of one ``_try_claim``."""
+    found = _peers(task, eff.agent.pk, now, memo)
+    if not found:
+        return False
+    key = _answer_key(task, found, eff) + ('lighter',)
+    if key not in memo:
+        memo[key] = any(pair[0].get(other.agent.pk, 0) * eff.max_concurrent < own_held * other.max_concurrent and _can_take(other, pair, task, now)
+                        for other, pair in found)
     return memo[key]
 
 
@@ -1266,7 +1428,8 @@ def _claim(agent, kinds, now):
         held_back = {}  # kind -> why a queued task of it was passed over (a per-kind cap, or a preferring Sentinel)
         memo = {}  # one call's cache for the prefer check: the preferring Sentinels' rights and the answers
         defers = {}  # kind -> how long a task of it is held back (``prefer_defer_for``)
-        # the order of the policy: deny (``eff.caps`` already leaves a denied kind out of ``_claimable``), then the per-kind cap, then prefer
+        balances = {}  # kind -> how long a task of it is held back for a less loaded Sentinel (``balance_defer_for``)
+        # the order of the policy: deny (``eff.caps`` already leaves a denied kind out of ``_claimable``), then the per-kind cap, then prefer, then the least loaded
         for task in list(_claimable(eff, kinds, now)[:CANDIDATES]):
             if not eff._in_hosts(task):
                 continue
@@ -1282,6 +1445,12 @@ def _claim(agent, kinds, now):
             if defer_for and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < defer_for:
                 if _preferred_elsewhere(eff, task, now, memo):
                     held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a Sentinel that prefers it for up to {defer_for} seconds')
+                    continue
+            balance_for = balances[task.kind] if task.kind in balances else balances.setdefault(task.kind, balance_defer_for(task.kind))
+            # a Sentinel that holds nothing is never less loaded than another; one that prefers the kind is not held back for a Sentinel that does not (prefer wins)
+            if balance_for and held and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < balance_for:
+                if _lighter_elsewhere(eff, task, held, now, memo):
+                    held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a less loaded Sentinel for up to {balance_for} seconds')
                     continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
@@ -2055,12 +2224,14 @@ def _live_overview(ctx):
     for agent_id in ids:
         finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
+    effs = {a.pk: SentinelEff(a, now) for a in agents}
+    activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()})
     orgs, org_of = _visible_orgs(ctx.user)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
     builtin_id = sentinel_policy.builtin_pk()  # likewise: one read, then each card compares ids
     out = []
     for agent in agents:
-        eff = SentinelEff(agent, now)
+        eff = effs[agent.pk]
         mine = held.get(agent.pk, [])
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
@@ -2082,11 +2253,12 @@ def _live_overview(ctx):
                        for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
                       'failed_24h': st.get('failed_24h', 0),
-                      'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None}})
+                      'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None},
+            'load': {'held': len(mine), **activity['agents'][agent.pk]}})
     from cveFeed import internal_view, openvas_scan
     networks = internal_view.declared_networks()
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
-            'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out,
+            'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out, 'kinds': activity['kinds'],
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
             'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user))}
 

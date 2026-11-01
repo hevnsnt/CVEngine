@@ -71,6 +71,19 @@ function recent(t) {
 
 const INTERNAL = "network:internal";
 
+// How busy a Sentinel's slots were in the last hour (the server's `load`): a meter and one line, both set with textContent / attributes only.
+function utilisationBar(load) {
+  if (!load || load.utilisation_1h == null) return null;
+  const pct = Math.round(Math.min(1, Math.max(0, Number(load.utilisation_1h) || 0)) * 100);
+  const wrap = el("div", "sl-util");
+  const wait = load.wait_p50_seconds == null ? "no tasks claimed" : `queue wait ${span(load.wait_p50_seconds)} typical, ${span(load.wait_p95_seconds)} at worst`;
+  wrap.append(
+    el("meter", "sl-util-bar", `${pct}%`, { min: 0, max: 100, value: pct, "aria-label": `Slots busy in the last hour: ${pct} percent` }),
+    el("p", "sl-util-text", `Busy ${pct}% of the last hour · ${load.tasks_1h || 0} finished · ${wait}`),
+  );
+  return wrap;
+}
+
 function card(s, reload, detail, group) {
   const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
   const head = el("header", "sl-head");
@@ -124,6 +137,8 @@ function card(s, reload, detail, group) {
   };
   stats.append(stat("Done, last hour", st.done_1h), stat("Failed, last hour", st.failed_1h), stat("Done, 24 hours", st.done_24h), stat("Average task", st.average_seconds == null ? "none yet" : span(st.average_seconds)));
   c.append(stats);
+  const util = utilisationBar(s.load);
+  if (util) c.append(util);
 
   if (s.recent.length) {
     const list = el("ul", "sl-recent", null, { "aria-label": `Recent tasks of ${s.name}` });

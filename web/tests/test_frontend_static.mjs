@@ -132,8 +132,8 @@ globalThis.document = {createTextNode: (text) => new SentinelElement('#text', ''
 globalThis.__sentinelUi = {el: sentinelEl, badge: (text) => sentinelEl('span', 'badge', text)};
 const sentinelSource = read('sentinel-live.js');
 const sentinelModule = sentinelSource.replace(/^import .*;\n/gm, '');
-const {task, recent, openvasQueue} = await import(`data:text/javascript,${encodeURIComponent(
-  `const {el, badge} = globalThis.__sentinelUi;\n${sentinelModule}\nexport {task, recent, openvasQueue};`,
+const {task, recent, openvasQueue, utilisationBar} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge} = globalThis.__sentinelUi;\n${sentinelModule}\nexport {task, recent, openvasQueue, utilisationBar};`,
 )}`);
 
 test('current and recent Sentinel tasks prefer the server label for multi-host work', () => {
@@ -157,6 +157,17 @@ test('Sentinel page renders OpenVAS running, due and deferred hosts with reasons
   }
   assert.equal(panel.tag, 'section');
   assert.match(sentinelSource, /if \(data\.openvas\) mount\.append\(openvasQueue\(data\.openvas\)\)/);
+});
+
+test('the Sentinel card shows how busy its slots were in the last hour', () => {
+  const bar = utilisationBar({utilisation_1h: 0.4237, tasks_1h: 7, wait_p50_seconds: 2.4, wait_p95_seconds: 31});
+  const meter = bar.children[0];
+  assert.equal(meter.tag, 'meter');
+  assert.equal(meter.attrs.value, 42);
+  assert.match(sentinelText(bar), /Busy 42% of the last hour · 7 finished · queue wait 2s typical, 31s at worst/);
+  assert.match(sentinelText(utilisationBar({utilisation_1h: 7, tasks_1h: 0, wait_p50_seconds: null})), /Busy 100% of the last hour · 0 finished · no tasks claimed/);
+  assert.equal(utilisationBar(undefined), null, 'an older server sends no load');
+  assert.match(sentinelSource, /const util = utilisationBar\(s\.load\)/);
 });
 
 test('Sentinel page shows the OpenVAS idle state without a deferred list', () => {

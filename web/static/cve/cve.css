@@ -1637,6 +1637,12 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .sl-stats div{display:flex;flex-direction:column;gap:2px}
 .sl-stats dt{order:2;font:600 10px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
 .sl-stats dd{order:1;margin:0;font:700 17px/1.1 var(--font);letter-spacing:-.03em}
+.sl-util{display:flex;flex-direction:column;gap:4px}
+.sl-util-bar{width:100%;height:8px;border:0;border-radius:4px;background:var(--sunk)}
+.sl-util-bar::-webkit-meter-bar{height:8px;border:0;border-radius:4px;background:var(--sunk)}
+.sl-util-bar::-webkit-meter-optimum-value,.sl-util-bar::-webkit-meter-suboptimum-value,.sl-util-bar::-webkit-meter-even-less-good-value{border-radius:4px;background:var(--ok)}
+.sl-util-bar::-moz-meter-bar{border-radius:4px;background:var(--ok)}
+.sl-util-text{margin:0;font:500 11.5px var(--mono);color:var(--muted)}
 .sl-recent{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
 .sl-r{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px}
 .sl-r .sl-dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
