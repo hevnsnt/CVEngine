@@ -119,7 +119,7 @@ class Fixture:
         self.project = Project.objects.create(name='Alpha', slug='sup-a', insert_date=now, org=self.org1)
         self.other_project = Project.objects.create(name='Beta', slug='sup-b', insert_date=now, org=self.org2)
         for patch in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('reNgine.tasks.geo_localize.delay'),
-                      mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.delay')):
+                      mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async')):
             patch.start()
         self.addCleanup(mock.patch.stopall)
         self.own = Domain.objects.create(name='example.test', project=self.project, insert_date=now)

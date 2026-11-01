@@ -241,6 +241,22 @@ class SystemStatusTests(TestCase):
 		_, data = self.run_status(self.t_root, health=degraded)
 		self.assertTrue(any('classic_worker' in p for p in data['problems']))
 
+	def test_the_certificate_lookup_backlog_is_shown_and_warned_about_before_it_reaches_the_reapers_limit(self):
+		def status(waiting):
+			return self.run_status(self.t_root, broker=FakeBroker({'ctwatch_queue': waiting}))[1]
+		quiet = status(300)
+		self.assertEqual(quiet['system']['queues']['ct_backlog'], {'waiting': 300, 'cap': 500, 'warn_at': 5000, 'scan_limit': 20000})
+		self.assertEqual(quiet['system']['queues']['waiting']['ctwatch_queue'], 300)  # the existing shape is unchanged
+		self.assertFalse(any('ctwatch_queue' in p for p in quiet['problems']))
+		long = status(6000)
+		warn = next(p for p in long['problems'] if 'ctwatch_queue' in p)
+		self.assertIn('6000', warn)
+		self.assertIn("orphan recovery above 20000", warn)
+		self.assertEqual(long['overall'], 'degraded')
+		self.assertIn('close to 20000', next(p for p in status(16000)['problems'] if 'ctwatch_queue' in p))
+		over = next(p for p in status(20001)['problems'] if 'ctwatch_queue' in p)
+		self.assertIn('has stopped', over)
+
 	def test_low_memory_and_a_stale_report_are_problems(self):
 		low = {'store': 'redis', 'containers': [dict(CLUSTER['containers'][0], memory={'total_mb': 8000, 'used_mb': 7900, 'available_mb': 100},
 													 age_seconds=900)]}

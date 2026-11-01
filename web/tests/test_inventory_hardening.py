@@ -274,7 +274,7 @@ class CreateHostsTests(Base):
 		super().setUp()
 		ProjectSettings.objects.create(project=self.project, inventory_create_hosts=True)
 		self.discovery = mock.patch('cveFeed.discovery.start_discoveries', return_value=[])
-		self.ct = mock.patch('cveFeed.tasks.watch_certificate_transparency.delay')
+		self.ct = mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async')
 		self.discovery.start()
 		self.ct.start()
 		self.addCleanup(self.discovery.stop)

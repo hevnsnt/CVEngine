@@ -467,7 +467,7 @@ class EndpointTests(Base):
 
 	def test_a_project_that_allows_it_adds_an_unknown_host_as_a_target(self):
 		ProjectSettings.objects.create(project=self.project, inventory_create_hosts=True)
-		with mock.patch('cveFeed.discovery.start_discoveries', return_value=[]) as start, mock.patch('cveFeed.tasks.watch_certificate_transparency.delay'):
+		with mock.patch('cveFeed.discovery.start_discoveries', return_value=[]) as start, mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'):
 			status, data = self.post(self.t_alice, report())
 		self.assertEqual((status, data['status']), (201, 'created'))
 		self.assertTrue(Domain.objects.filter(project=self.project, name='web01.example.test').exists())

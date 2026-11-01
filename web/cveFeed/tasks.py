@@ -1148,29 +1148,51 @@ def watch_certificate_transparency(self, domain_id):
     """Check one target against crt.sh for hosts not already known (see cveFeed.ctmonitor). When crt.sh could not be reached
     (rate limit, timeout) the check is tried again later instead of the target being skipped. It has a queue of its own, off the
     feed queue that runs the work conductor, the reaper and the Sentinel feed: hundreds of lookups wait behind one shared rate limit,
-    and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``)."""
+    and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``).
+    Every publish carries a lifetime (``expires``, kept by the retries) and a per-domain marker (``cveFeed.ct_queue``): the marker is
+    cleared here once the lookup ends for good, and a lookup that ends in failure is remembered so the sweep stops re-queuing it."""
     import random
 
+    from cveFeed import ct_queue
     from cveFeed.ctmonitor import CtBusy, run_ct_watch
+    retrying = False
     try:
-        result = run_ct_watch(domain_id)
-    except CtBusy as busy:  # waiting for crt.sh's pacing is not a failure: it is asked again when the slot is due, with no slot held meanwhile
-        raise self.retry(exc=busy, countdown=int(busy.wait) + random.randint(1, 60), max_retries=None)
-    if result.get("failed") and self.request.retries < 3:
-        raise self.retry(countdown=600 * (self.request.retries + 1), max_retries=3)
-    return result
+        try:
+            result = run_ct_watch(domain_id)
+        except CtBusy as busy:  # waiting for crt.sh's pacing is not a failure: it is asked again when the slot is due, with no slot held meanwhile
+            retrying = True
+            raise self.retry(exc=busy, countdown=int(busy.wait) + random.randint(1, 60), max_retries=None)
+        except Exception:  # a target the lookup cannot handle (a timeout, a reply it cannot read): not at the head of every sweep
+            ct_queue.record_failure(domain_id)
+            raise
+        if result.get("failed"):
+            if self.request.retries < 3:
+                retrying = True
+                raise self.retry(countdown=600 * (self.request.retries + 1), max_retries=3)
+            ct_queue.record_failure(domain_id)
+        return result
+    finally:
+        if not retrying:  # a retry is the same lookup still on its way: its marker stays
+            ct_queue.clear(domain_id)
 
 
 @app.task(name="watch_certificates_all", bind=False, queue="cve_feed_queue")
 def watch_certificates_all():
     """Periodic sweep: every target is "subscribed" to certificate-transparency monitoring this way. Targets checked in the
-    last 24 hours are skipped; the rest go oldest first, as many as fit in one interval (a check starts every ~3 seconds)."""
-    from cveFeed import ledger
+    last 24 hours are skipped; the rest go oldest first, as many as fit in one interval (a check starts every ~3 seconds).
+    It is bounded: nothing is queued while ``ctwatch_queue`` holds ``CVENGINE_CT_BACKLOG_MAX`` messages, a sweep adds at most the room
+    left under that cap, a target already queued or that recently failed for good is left out, and every message expires."""
+    from cveFeed import ct_queue, ledger
     from dashboard.models import SystemTimings
     from targetApp.models import Domain
     from targetApp.shared_domains import is_provider_domain
     from targetApp.target_types import IP, classify_target
     window = SystemTimings.current().ct_watch_minutes * 60
+    size = max(1, window // 3)
+    cap = ct_queue.backlog_max(size)
+    waiting = ct_queue.backlog()
+    if waiting is not None and waiting >= cap:  # the consumer is behind: more lookups would only lengthen the line
+        return {"queued": 0, "skipped": f"ctwatch_queue already holds {waiting} (cap {cap})", "backlog": waiting, "cap": cap}
     if not ledger.sweep_claim('ct-watch', int(window * 0.8)):
         return {"queued": 0, "skipped": "another sweep is running"}
     # crt.sh has nothing on a bare IP, so only names are asked about
@@ -1180,10 +1202,13 @@ def watch_certificates_all():
     rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
-    batch = due[:max(1, window // 3)]
-    for i, (domain_id, _name, _project) in enumerate(batch):  # spread out: crt.sh blocks a burst, so each check starts a couple of seconds after the last
-        watch_certificate_transparency.apply_async(args=[domain_id], countdown=int(i * 2.5))
-    return {"queued": len(batch), "due": len(due)}
+    failed = ct_queue.recently_failed(due)
+    batch = [r for r in due if r[0] not in failed][:size]
+    room = cap if waiting is None else cap - waiting
+    # spread out: crt.sh blocks a burst, so each check starts a couple of seconds after the last
+    queued = ct_queue.queue_lookups([r[0] for r in batch], lifetime=window, limit=room)
+    return {"queued": len(queued), "due": len(due), "backlog": waiting, "cap": cap,
+            "held_back": len(batch) - len(queued), "recently_failed": len(failed)}  # held_back: already on its way, or past the cap's room
 
 
 DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's lock held is asked again (run_bbot_discovery)
