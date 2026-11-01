@@ -3,6 +3,7 @@
 // raise a desktop notification. The server's own channels (Slack, webhooks, mail) are separate and unchanged.
 // It watches the project in view by asking for its running and queued scans every POLL_MS; the first answer is only a baseline.
 import { el } from "/staticfiles/cve/ui.js";
+import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 
 const POLL_MS = 20000;
 const NOTICE_MS = 12000;
@@ -20,10 +21,20 @@ function start() {
   let previous = null; // ids of scans seen running or queued on the last poll
   let unread = 0;
 
-  const get = async (path) => {
-    const res = await fetch(`${base}/${path}`, { credentials: "same-origin" });
-    if (!res.ok) throw new Error(String(res.status));
-    return res.json();
+  const pace = createPace();
+  const conditional = createGet();
+  const held = new Map(); // path -> the last list: a 304 says it still holds
+  const get = async (path, keep = false) => {
+    try {
+      const fresh = await conditional(`${base}/${path}`);
+      pace.ok();
+      if (!keep) return fresh;
+      if (fresh) held.set(path, fresh);
+      return held.get(path);
+    } catch (err) {
+      pace.fail(err);
+      throw err;
+    }
   };
   const desktopOn = () => {
     try {
@@ -90,8 +101,8 @@ function start() {
   async function poll() {
     try {
       const [running, queued] = await Promise.all([
-        get("scans?status=running&page_size=50"),
-        get("scans?status=queued&page_size=50"),
+        get("scans?status=running&page_size=50", true),
+        get("scans?status=queued&page_size=50", true),
       ]);
       const now = new Set(
         [...(running.results || []), ...(queued.results || [])].map(
@@ -115,8 +126,8 @@ function start() {
       /* keep the last baseline; the next poll tries again */
     }
   }
-  poll();
-  setInterval(poll, POLL_MS);
+  // One request round at a time, jittered, on every page: a hidden tab keeps watching, four times as seldom, and asks at once when it comes back.
+  every(poll, POLL_MS, { pace, hidden: "slow", slow: 4 });
 }
 
 // The account menu entry: turns desktop notifications on or off. Permission is asked only on this click, as browsers require.

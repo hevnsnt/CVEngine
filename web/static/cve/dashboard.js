@@ -6,6 +6,7 @@ import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -20,23 +21,21 @@ const el = (tag, cls, text, attrs = {}) => {
   Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v));
   return n;
 };
-let failures = 0; // requests in a row that failed: the pollers wait longer between rounds while the server is not answering
+// One pace for every poller of the page: the waits grow while requests fail and honour the server's Retry-After (static/cve/poll.js).
+// A GET remembers each URL's ETag and a 304 resolves to null ("nothing changed"): the pollers whose endpoints send one return before redrawing.
+const pace = createPace();
+const conditional = createGet();
 const get = (url) =>
-  fetch(url, { credentials: "same-origin" })
-    .then((r) => {
-      if (!r.ok) throw new Error(r.status);
-      return r.json();
-    })
-    .then(
-      (d) => {
-        failures = 0;
-        return d;
-      },
-      (err) => {
-        failures += 1;
-        throw err;
-      },
-    );
+  conditional(url).then(
+    (d) => {
+      pace.ok();
+      return d;
+    },
+    (err) => {
+      pace.fail(err);
+      throw err;
+    },
+  );
 const post = (url, body) =>
   fetch(url, {
     method: "POST",
@@ -215,6 +214,7 @@ function paintInternal(x) {
 async function pollStats() {
   try {
     const s = await get(`/cve/api/stats${projParam ? "?" + projParam : ""}`);
+    if (s === null) return; // 304: the same numbers
     const flat = {
       hosts: s.hosts,
       exposed_hosts: s.exposed_hosts,
@@ -640,16 +640,13 @@ let graphVersion = ""; // the server answers 304 while the graph has not changed
 
 async function pollGraph() {
   try {
-    const r = await fetch(`/cve/api/graph?v=${encodeURIComponent(graphVersion)}${projParam ? "&" + projParam : ""}`, { credentials: "same-origin" });
-    if (r.status === 304) return;
-    if (!r.ok) throw new Error(r.status);
-    const g = await r.json();
+    const g = await get(`/cve/api/graph?v=${encodeURIComponent(graphVersion)}${projParam ? "&" + projParam : ""}`);
+    if (g === null) return; // 304: the graph has not changed
     graphVersion = g.version || "";
     graphNodeCount = graph.sync(g).nodes;
     $("d-empty").style.display = graphNodeCount ? "none" : "";
     drawMap(g.nodes);
   } catch (_) {
-    failures += 1;
     setOnline(false);
   }
 }
@@ -660,6 +657,7 @@ async function pollDiscovery() {
       `/cve/api/discovery?scan=${followScan}&after=${lastEvent}${projParam ? "&" + projParam : ""}`,
     );
     setOnline(true);
+    if (d === null) return; // 304: no new events
     if (!d.scan) {
       $("d-status").style.display = "none";
       $("d-target").textContent = "No discovery has run yet.";
@@ -766,8 +764,9 @@ async function pollAgent() {
     const d = await get(
       `/cve/api/activity?after=${lastActivity}&running=${ids}&since=${encodeURIComponent(activityNow)}${projParam ? "&" + projParam : ""}`,
     );
-    activityNow = d.now || activityNow;
     setOnline(true);
+    if (d === null) return; // 304: the same lines, the same cursor
+    activityNow = d.now || activityNow;
     const list = $("agent");
     keepPlace(list, () => {
     d.settled.forEach((a) => {
@@ -872,34 +871,15 @@ async function pollFeed() {
   }
 }
 
-// Each poller re-arms itself when its request finishes, instead of firing from setInterval: when the server is busy
+// Each poller re-arms itself when its request finishes (static/cve/poll.js), instead of firing from setInterval: when the server is busy
 // with scans several requests were in flight with the same cursor, and each one drew the same lines again. A hidden tab does not
-// poll (visibilitychange starts the loop again), and the wait doubles, up to 16 times, while requests keep failing.
-const every = (fn, ms) => {
-  let timer = 0;
-  let busy = false;
-  const tick = async () => {
-    if (document.hidden || busy) return;
-    busy = true;
-    try {
-      await fn();
-    } finally {
-      busy = false;
-      timer = setTimeout(tick, ms * 2 ** Math.min(failures, 4));
-    }
-  };
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) return;
-    clearTimeout(timer);
-    tick();
-  });
-  tick();
-};
-every(pollStats, 6000);
-every(pollGraph, 10000);
-every(pollDiscovery, 2500);
-every(pollAgent, 2000);
-every(pollFeed, 6000);
+// poll (visibilitychange starts the loop again), every wait is jittered, and it grows while requests keep failing.
+const poll = (fn, ms) => every(fn, ms, { pace });
+poll(pollStats, 6000);
+poll(pollGraph, 10000);
+poll(pollDiscovery, 2500);
+poll(pollAgent, 2000);
+poll(pollFeed, 6000);
 
 // --- changes since you last looked ---------------------------------------------------------------
 // A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Live page
@@ -995,10 +975,12 @@ every(pollFeed, 6000);
 // They pulse on the graph and are listed as chips above it; a chip pans and zooms the graph to its node.
 const SCAN_TOKEN = /\b(?:\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/gi;
 const MAX_CHIPS = 6;
+let lastLive = null; // the last graph-live answer: a 304 means it still holds, and the chips still follow the running AI-activity lines
 async function pollScanning() {
-  if (document.hidden) return;
   try {
-    const live = await get(`/cve/api/graph-live${projParam ? "?" + projParam : ""}`);
+    lastLive = (await get(`/cve/api/graph-live${projParam ? "?" + projParam : ""}`)) || lastLive;
+    const live = lastLive;
+    if (!live) return;
     const labels = new Set();
     running.forEach((li) => (String(li.dataset.msg || "").split("|").slice(1).join("|").match(SCAN_TOKEN) || []).forEach((t) => labels.add(t.toLowerCase())));
     graph.setActive(live.domains, live.hosts, [...labels]);
@@ -1024,8 +1006,7 @@ async function pollScanning() {
     /* the next poll tries again */
   }
 }
-pollScanning();
-setInterval(pollScanning, 3000);
+poll(pollScanning, 3000);
 
 // The "Group CVEs" toggle: fold each host's CVEs into its bubble (default), or draw every CVE as its own dot.
 {

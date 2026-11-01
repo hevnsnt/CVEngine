@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 from rolepermissions.decorators import has_permission_decorator
 
-from cveFeed import match_policy
+from cveFeed import match_policy, snapshot_cache
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
@@ -282,10 +282,11 @@ def tier_counts():
 
 def live_scan_counts():
     """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
-    the first thing a person watches)."""
+    the first thing a person watches). The running window (a settings lookup) is read once for all three."""
     from cveFeed import counts
-    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count(),
-            'scans_background_running': counts.background_running().count()}
+    window = counts.running_window()
+    return {'scans_running': counts.running_scans(window=window).count(), 'scans_queued': counts.queued_scans().count(),
+            'scans_background_running': counts.background_running(window=window).count()}
 
 
 def _oldest_open_what(kind, row_id):
@@ -705,41 +706,31 @@ def api_feed(request):
     return JsonResponse({'items': [serialize_cve(e, counts.get(e.pk, 0)) for e in entries]})
 
 
-STATS_CACHE_SECONDS = 10
-_STATS_CACHE = {}  # (user id, project slug) -> (computed at, payload)
-STATS_CACHE_ENTRIES = 256
-STATS_REVISION_KEY = 'cvengine:stats:revision'
+STATS_CACHE_SECONDS = 10  # how long a headline snapshot is fresh; it is kept three times as long to serve while one request refreshes it
+STATS_REVISION_KEY = snapshot_cache.REVISION_KEY
 
 
 def bump_stats_revision():
-    """Invalidate every web worker's short dashboard cache after a finding is closed."""
-    from django.core.cache import cache
-    _STATS_CACHE.clear()
-    _DISCOVERY_COUNTS_CACHE.clear()
-    try:
-        cache.set(STATS_REVISION_KEY, timezone.now().isoformat(), timeout=None)
-    except Exception:  # noqa: BLE001 - other workers still expire within ten seconds
-        pass
+    """Make every dashboard snapshot (headline counts, discovery counts, the graph's version) stale in every web worker after a finding is
+    closed: the next poll of each scope rebuilds it."""
+    snapshot_cache.bump_revision()
 
 
-def cached_stats(key='', now=None):
-    """stats_payload, kept per process for STATS_CACHE_SECONDS: every open dashboard polls it every few seconds and it runs a dozen
-    full-table counts, so the polls of one viewer share one computation. The counts go through the tenancy-scoped managers, so they
-    differ per caller and per selected project: ``key`` (user id and project slug) is part of the cache key, never shared."""
-    import time
-    from django.core.cache import cache
-    try:
-        revision = cache.get(STATS_REVISION_KEY) or ''
-    except Exception:  # noqa: BLE001
-        revision = ''
-    key = (key, revision)
-    now = time.monotonic() if now is None else now
-    hit = _STATS_CACHE.get(key)
-    if hit is None or now - hit[0] >= STATS_CACHE_SECONDS:
-        if len(_STATS_CACHE) >= STATS_CACHE_ENTRIES:
-            _STATS_CACHE.clear()
-        hit = _STATS_CACHE[key] = (now, stats_payload())
-    return hit[1]
+def clear_stats_cache():
+    """Make every shared live-screen snapshot stale (tests, and a factory reset): the next poll of each scope rebuilds its own."""
+    snapshot_cache.bump_revision()
+
+
+def cached_stats_snapshot(params=(), scope=None):
+    """The headline counts snapshot (``{'payload', 'etag', ...}``) of the current scope, shared by every viewer of that scope in every worker for
+    STATS_CACHE_SECONDS. Run it inside ``project_scoped``: ``scope_hash`` reads the scope the counts are filtered by, so the key is who may see
+    the rows, not who asks."""
+    return snapshot_cache.snapshot('stats', scope or snapshot_cache.scope_hash(*params), stats_payload, STATS_CACHE_SECONDS)
+
+
+def cached_stats(params=()):
+    """``stats_payload`` of the current scope from the shared snapshot (see ``cached_stats_snapshot``)."""
+    return cached_stats_snapshot(params)['payload']
 
 
 @require_GET
@@ -755,10 +746,15 @@ def api_alive(request):
 @project_scoped
 def api_stats(request):
     from tenancy.roles import scope_org
-    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''), scope_org(request))), **live_scan_counts()})
+    snap = cached_stats_snapshot((request.GET.get('project', ''), scope_org(request)))
+    live = live_scan_counts()  # fresh on every poll: five cheap counts, and the first thing a person watches
+    # the ETag is the snapshot's (computed once, when it was built) and the live counts: a poll that finds both unchanged gets a 304 and no body
+    return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
 
 
 GRAPH_CACHE_SECONDS = 30
+GRAPH_LIVE_SECONDS = 2  # how long what the running scans are doing is shared between tabs
+GRAPH_VERSION_SECONDS = 5  # the version token is itself kept this long per scope: the 304 path of every open graph asked eight aggregate queries per poll
 GRAPH_VERSION_WINDOW = 300  # a graph that "has not changed" is still re-sent this often: edits to existing rows move no id
 
 
@@ -803,32 +799,52 @@ def graph_version(domain_id=None, scan_id=None):
 @project_scoped
 def api_graph(request):
     """The asset graph. ``?v=<version>`` equal to the current version answers 304, so the dashboard's poller costs a few
-    aggregate queries when nothing changed; otherwise the payload is served from a short per-user cache."""
+    aggregate queries when nothing changed; otherwise the payload is served from a short per-scope cache (shared by every viewer of the
+    same projects). The version is itself a snapshot kept GRAPH_VERSION_SECONDS per scope, so a change shows within that many seconds (at once
+    after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
     from django.core.cache import cache
     from django.http import HttpResponseNotModified
+    from tenancy.roles import scope_org
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
-    version = graph_version(domain_id, scan_id)
+    scope = snapshot_cache.scope_hash(request.GET.get('project', ''), scope_org(request), domain_id, scan_id)
+    version = snapshot_cache.snapshot('graph-version', scope, lambda: graph_version(domain_id, scan_id), GRAPH_VERSION_SECONDS)['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    from tenancy.roles import scope_org
-    key = f'cve-graph:{request.user.pk}:{request.GET.get("project", "")}:{scope_org(request)}:{domain_id}:{scan_id}:{version}'
-    payload = cache.get(key)
+    key = f'cve-graph:{scope}:{snapshot_cache.revision()}:{version}'  # a revision bump (a finding was closed) drops it with the snapshots
+    try:
+        payload = cache.get(key)
+    except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
+        payload = None
     if payload is None:
         payload = {**graph_payload(domain_id, scan_id), 'version': version}
-        cache.set(key, payload, GRAPH_CACHE_SECONDS)
+        try:
+            cache.set(key, payload, GRAPH_CACHE_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
     return JsonResponse(payload)
 
 
 @require_GET
 @project_scoped
 def api_graph_live(request):
-    """Running scans, their current step and the hosts they are working on: what the graph pulses and SOC mode lists. Never cached."""
+    """Running scans, their current step and the hosts they are working on: what the graph pulses and SOC mode lists. A snapshot kept two seconds
+    per scope (the page polls every three: every open tab of a project shares one set of queries), with an ETag of what the scans are doing, so
+    an unchanged poll is a 304. ``elapsed`` and ``at`` move every second and are left out of the ETag: the page counts the time from ``started``."""
     from cveFeed import graph_live
+    from tenancy.roles import scope_org
     slug, domain = request.GET.get('project', ''), request.GET.get('domain', '')
-    response = JsonResponse(graph_live.live(slug if slug and slug != ALL_PROJECTS else None, int(domain) if domain.isdigit() else None))
-    response['Cache-Control'] = 'no-store'
-    return response
+    project = slug if slug and slug != ALL_PROJECTS else None
+    domain_id = int(domain) if domain.isdigit() else None
+    snap = snapshot_cache.snapshot('graph-live', snapshot_cache.scope_hash(slug, scope_org(request), domain_id),
+                                   lambda: graph_live.live(project, domain_id), GRAPH_LIVE_SECONDS, etag_of=_graph_live_token)
+    return snapshot_cache.respond(request, snap['etag'], lambda: snap['payload'])
+
+
+def _graph_live_token(payload):
+    """What the running scans are doing, without the clock (``at``, and each scan's ``elapsed``), as an ETag."""
+    return snapshot_cache.token_of({**{k: v for k, v in payload.items() if k != 'at'},
+                                    'scans': [{k: v for k, v in s.items() if k != 'elapsed'} for s in payload['scans']]})
 
 
 def _kv(*pairs):
@@ -1004,12 +1020,10 @@ def api_activity(request):
         since = None
     if since and after.isdigit() and int(after) > 0:
         bumped = list(activity.filter(id__lte=int(after), repeat__gt=1, created_at__gt=since).order_by('id')[:50])
-    return JsonResponse({'items': [_serialize_activity(a) for a in items],
-                         'settled': [_serialize_activity(a) for a in settled],
-                         'bumped': [_serialize_activity(a) for a in bumped], 'now': timezone.now().isoformat()})
-
-
-_DISCOVERY_COUNTS_CACHE = {}  # (user id, project slug) -> (computed at, counts)
+    body = {'items': [_serialize_activity(a) for a in items], 'settled': [_serialize_activity(a) for a in settled],
+            'bumped': [_serialize_activity(a) for a in bumped]}
+    # the ETag is the lines themselves, never ``now``: a poll that finds the same lines gets a 304 (the page keeps its cursor, and asks again)
+    return snapshot_cache.respond(request, snapshot_cache.token_of(body), lambda: {**body, 'now': timezone.now().isoformat()})
 
 
 def discovery_counts():
@@ -1021,17 +1035,11 @@ def discovery_counts():
     return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
 
 
-def cached_discovery_counts(key='', now=None):
-    """``discovery_counts`` kept per process for STATS_CACHE_SECONDS: the dashboard polls the ticker every 2.5 s and the three distinct
-    counts walk the caller's whole inventory. Per caller and project like ``cached_stats``, and dropped with it by ``bump_stats_revision``."""
-    import time
-    now = time.monotonic() if now is None else now
-    hit = _DISCOVERY_COUNTS_CACHE.get(key)
-    if hit is None or now - hit[0] >= STATS_CACHE_SECONDS:
-        if len(_DISCOVERY_COUNTS_CACHE) >= STATS_CACHE_ENTRIES:
-            _DISCOVERY_COUNTS_CACHE.clear()
-        hit = _DISCOVERY_COUNTS_CACHE[key] = (now, discovery_counts())
-    return hit[1]
+def cached_discovery_counts(params=()):
+    """``discovery_counts`` of the current scope from a snapshot shared by every viewer of that scope in every worker for STATS_CACHE_SECONDS:
+    the dashboard polls the ticker every 2.5 s and the three distinct counts walk the caller's whole inventory. Dropped with the headline
+    counts by ``bump_stats_revision``. Run it inside ``project_scoped``."""
+    return snapshot_cache.snapshot('discovery-counts', snapshot_cache.scope_hash(*params), discovery_counts, STATS_CACHE_SECONDS)['payload']
 
 
 @require_GET
@@ -1047,19 +1055,20 @@ def api_discovery(request):
         qs = ScanHistory.objects.select_related('domain', 'scan_type')
         scan = _running_scans(qs.model).order_by('-id').first() or qs.order_by('-id').first()
     if not scan:
-        return JsonResponse({'scan': None, 'events': [], 'counts': {}})
+        return snapshot_cache.respond_payload(request, {'scan': None, 'events': [], 'counts': {}})
     after = request.GET.get('after', '')
     events = DiscoveryEvent.objects.filter(scan=scan)
     events = events.filter(id__gt=int(after)) if after.isdigit() and int(after) else events.order_by('-id')[:60]  # after=0 is no cursor: the tail, not every event of the scan
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
-    return JsonResponse({
+    from tenancy.roles import scope_org
+    return snapshot_cache.respond_payload(request, {
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': _public_error(scan.error_message),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': cached_discovery_counts((request.user.pk, request.GET.get('project', ''))),
+        'counts': cached_discovery_counts((request.GET.get('project', ''), scope_org(request))),
     })
 
 
