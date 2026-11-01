@@ -320,3 +320,53 @@ class QueuedThenMadeManualTests(DiscoveryModeBase):
 		with mock.patch('cveFeed.discovery.covering_scan', return_value=None):
 			out, bbot = self.run_it(scan)
 		bbot.assert_called_once()
+
+
+class DiscoverAnswerTests(DiscoveryModeBase):
+	"""Discover answers with the mode it stored and the mode the scan it returned runs in, so a page shows what happened, not what it asked for."""
+
+	def setUp(self):
+		super().setUp()
+		from agentapi.auth import create_token
+		from dashboard.models import ProjectMembership
+		self.user = User.objects.create_user('answerer', password='x')
+		ProjectMembership.objects.create(user=self.user, project=self.p1, role='user')
+		self.tok = create_token(self.user, 't')[1]
+
+	def discover(self, domain, body=None):
+		from tests.test_discovery_mode import call
+		return call(self.tok, 'POST', f'/api/v1/projects/p1/targets/{domain.id}/discover', body or {})
+
+	def test_the_answer_names_the_stored_mode_and_the_mode_the_scan_runs_in(self):
+		status, out = self.discover(self.domain('a.example', mode='passive'))
+		self.assertEqual((status, out['discovery_mode'], out['scan_mode']), (202, 'passive', 'passive'))
+		status, out = self.discover(self.domain('b.example', mode='manual'), {'mode': 'deep'})
+		self.assertEqual((status, out['discovery_mode'], out['scan_mode']), (202, 'deep', 'deep'))
+		self.assertEqual(Domain.objects.get(name='b.example').discovery_mode, 'deep')
+
+	def test_a_scan_already_going_keeps_its_mode_and_the_answer_says_so(self):
+		target = self.domain('busy.example')
+		first = self.discover(target)[1]
+		self.assertEqual((first['discovery_mode'], first['scan_mode']), ('standard', 'standard'))
+		status, out = self.discover(target, {'mode': 'deep'})
+		self.assertEqual((status, out['scan_id']), (202, first['scan_id']))  # the same scan: it was not started again
+		self.assertEqual((out['discovery_mode'], out['scan_mode']), ('deep', 'standard'))  # the target is deep from now on; this scan stays standard
+		self.assertEqual(Domain.objects.get(name='busy.example').discovery_mode, 'deep')
+		self.assertEqual(ScanHistory.objects.get(pk=first['scan_id']).discovery_mode, 'standard')
+
+	def test_an_internal_target_keeps_its_mode_whatever_was_picked_and_the_answer_says_so(self):
+		from cveFeed.models import InternalRange
+		InternalRange.objects.create(project=self.p1, cidr='10.20.0.0/24')
+		target = self.domain('10.20.0.7', mode='manual')
+		with mock.patch('cveFeed.tasks.run_internal_scan'):
+			status, out = self.discover(target, {'mode': 'passive'})
+		self.assertEqual(status, 202)
+		self.assertEqual((out['internal'], out['discovery_mode'], out['scan_mode']), (True, 'manual', ''))
+		self.assertEqual(Domain.objects.get(pk=target.pk).discovery_mode, 'manual')  # nothing was stored: the page must not show passive
+
+	def test_mcp_answers_the_same_way(self):
+		from tests.test_discovery_mode import tool
+		target = self.domain('mcp.example', mode='passive')
+		error, out = tool(self.tok, 'discover_target', {'project': 'p1', 'target_id': target.id})
+		self.assertFalse(error)
+		self.assertEqual((out['discovery_mode'], out['scan_mode']), ('passive', 'passive'))

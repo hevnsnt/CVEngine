@@ -226,3 +226,134 @@ class ScreenshotTests(test_web_shot.ShotFixture, TestCase):
             self.assertEqual(row.outcome, outcome, by_person)
             if not by_person:
                 self.assertIn('manual only', row.reason)
+
+
+class SharedHostTests(PlainWorld):
+    """A host that two targets hold is held back only when EVERY target holding it is manual only. The row of the manual only one is the newest
+    here (a certificate-transparency find has no scan, which sorts first when rows are put newest-first), so a sweep that lets the newest row
+    decide would refuse a host a standard target also holds."""
+
+    HOST = 'www.shared.test'
+
+    def shared(self, standard_mode=STANDARD):
+        n = Project.objects.count()
+        org = Org.objects.create(name=f'S{n}', slug=f'shared-o{n}')
+        project = Project.objects.create(name=f'SP{n}', slug=f'shared-p{n}', insert_date=self.now, org=org)
+        std = Domain.objects.create(name='shared.test', project=project, insert_date=self.now, discovery_mode=standard_mode)
+        man = Domain.objects.create(name=self.HOST, project=project, insert_date=self.now, discovery_mode=MANUAL)
+        scan = ScanHistory.objects.create(domain=std, scan_type=self.engine, scan_status=2, start_scan_date=self.now, results_dir='/tmp')
+        ip = IpAddress.objects.create(address=PUBLIC_IP, org=org)
+        scanned = Subdomain.objects.create(name=self.HOST, target_domain=std, scan_history=scan)
+        scanned.ip_addresses.add(ip)
+        found = Subdomain.objects.create(name=self.HOST, target_domain=man)  # certificate transparency: no scan, the newest row
+        found.ip_addresses.add(ip)
+        return type('World', (), {'project': project, 'std': std, 'man': man, 'scan': scan, 'ip': ip, 'scanned': scanned, 'found': found})
+
+    def test_the_helpers_hold_a_host_back_only_when_every_holder_is_manual_only(self):
+        from cveFeed import manual_only
+        w = self.shared()
+        self.assertEqual(manual_only.only_manual_hosts(w.project.id, [self.HOST]), set())
+        self.assertEqual(manual_only.other_holder(w.project.id, self.HOST), w.std)
+        Domain.objects.filter(pk=w.std.pk).update(discovery_mode=MANUAL)
+        self.assertEqual(manual_only.only_manual_hosts(w.project.id, [self.HOST, 'SHARED.test.']), {self.HOST, 'shared.test'})
+        self.assertIsNone(manual_only.other_holder(w.project.id, self.HOST))
+        self.assertEqual(manual_only.only_manual_hosts(w.project.id, []), set())
+
+    def test_openvas_scans_a_host_a_standard_target_also_holds_and_refuses_one_only_manual_targets_hold(self):
+        w = self.shared()
+        ready, verdicts = openvas_scan.assess(w.project.id, [self.HOST], gate=False, resolve=lambda host, project: PUBLIC_IP, blocked=lambda host: False)
+        self.assertEqual([h for h, _ip, _d in ready], [self.HOST], verdicts)
+        self.assertEqual(ready[0][2], w.std.id)  # attributed to the target that may be scanned
+        Domain.objects.filter(pk=w.std.pk).update(discovery_mode=MANUAL)
+        ready, verdicts = openvas_scan.assess(w.project.id, [self.HOST], gate=False, resolve=lambda host, project: PUBLIC_IP, blocked=lambda host: False)
+        self.assertEqual(ready, [])
+        self.assertIn('manual only', verdicts[self.HOST]['reason'])
+
+    def test_the_tls_audit_and_wpscan_use_the_row_of_the_target_that_may_be_scanned(self):
+        w = self.shared()
+        self.assertEqual(testssl_scan._latest_row(w.project.id, self.HOST).target_domain, w.std)
+        self.assertEqual(wpscan_scan._latest_row(w.project.id, self.HOST).target_domain, w.std)
+        with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)):
+            self.assertEqual({t[0] for t in testssl_scan.targets(w.project.id)}, {self.HOST})
+            Domain.objects.filter(pk=w.std.pk).update(discovery_mode=MANUAL)
+            self.assertEqual(testssl_scan.targets(w.project.id), [])
+        self.assertIsNone(wpscan_scan._latest_row(w.project.id, self.HOST))
+
+    def test_an_automatic_assessment_of_the_manual_only_row_goes_to_the_standard_target(self):
+        from cveFeed.host_assessment import _admit
+        w = self.shared()
+        domain, host = _admit(w.project, Subdomain.objects.select_related('target_domain').get(pk=w.found.pk))
+        self.assertEqual((domain, host), (w.std, self.HOST))
+        Domain.objects.filter(pk=w.std.pk).update(discovery_mode=MANUAL)
+        with self.assertRaisesRegex(ValueError, 'manual only'):
+            _admit(w.project, Subdomain.objects.select_related('target_domain').get(pk=w.found.pk))
+
+    def test_the_coverage_backlog_counts_the_host_through_the_standard_targets_row(self):
+        from cveFeed import assessment_review
+        w = self.shared()
+        count, due = assessment_review.host_coverage_due(w.project, self.now)
+        self.assertEqual(due, [w.scanned.pk])  # the row of the target that may be scanned, not the manual only one
+
+
+class SharedHostBucketTests(test_bucket_scan.Fixture, TestCase):
+    def test_a_bucket_a_shared_host_leads_to_is_checked_and_attributed_to_the_standard_target(self):
+        self.host('static.example.test', cname='ex-static.s3.amazonaws.com')
+        manual = Domain.objects.create(name='other.example.test', project=self.project, insert_date=timezone.now(), discovery_mode=MANUAL)
+        Subdomain.objects.create(name='static.example.test', target_domain=manual, cname='ex-static.s3.amazonaws.com')  # the newest row
+        out = self.sweep()
+        self.assertEqual(out['checked'], 1)
+        self.assertTrue(self.net.calls)
+
+    def test_a_bucket_only_manual_only_targets_hosts_lead_to_is_not_checked(self):
+        manual = Domain.objects.create(name='other.example.test', project=self.project, insert_date=timezone.now(), discovery_mode=MANUAL)
+        Subdomain.objects.create(name='static.example.test', target_domain=manual, cname='ex-static.s3.amazonaws.com')
+        self.assertEqual(self.sweep()['checked'], 0)
+        self.assertEqual(self.net.calls, [])
+
+
+class SharedHostScreenshotTests(test_web_shot.ShotFixture, TestCase):
+    def shared(self):
+        sub = self.host()  # www.rt.test, scanned, under the project's own (standard) target
+        manual = Domain.objects.create(name='www.rt.test', project=self.project, insert_date=timezone.now(), discovery_mode=MANUAL)
+        newest = Subdomain.objects.create(name='www.rt.test', target_domain=manual)
+        newest.ip_addresses.add(*sub.ip_addresses.all())
+        return sub, manual, newest
+
+    def test_the_backfill_photographs_a_host_a_standard_target_also_holds(self):
+        sub, manual, newest = self.shared()
+        self.assertEqual(web_shot._current_row(self.project.id, 'www.rt.test').target_domain_id, self.domain.id)
+        self.assertGreater(web_shot.backfill()['queued'], 0)
+        self.assertTrue(HostScreenshot.objects.filter(project=self.project, host='www.rt.test').exists())
+
+    def test_it_is_not_left_due_and_does_not_burn_a_backfill_slot_every_hour(self):
+        self.shared()
+        web_shot.backfill()
+        HostScreenshot.objects.update(outcome='timeout', attempted_at=timezone.now() - timedelta(days=30))
+        self.assertEqual(web_shot._due_names(self.project.id, 10, timezone.now()), ['www.rt.test'])  # due again: and it is queued, not skipped
+        self.assertGreater(web_shot.backfill()['queued'], 0)
+
+    def test_a_host_only_manual_only_targets_hold_is_not_due_for_a_new_picture(self):
+        self.shared()
+        Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=MANUAL)
+        self.make_row(host='www.rt.test', outcome='timeout', attempted_at=timezone.now() - timedelta(days=30), domain=self.domain)
+        self.assertEqual(web_shot._due_names(self.project.id, 10, timezone.now()), [])
+        self.assertEqual(web_shot.backfill()['queued'], 0)
+
+    def test_a_queued_page_of_a_shared_host_is_photographed(self):
+        self.shared()
+        HostScreenshot.objects.all().delete()
+        self.make_row(host='www.rt.test', by_person=False)
+        test_web_shot.FakeProxy.instances = []
+        with mock.patch('cveFeed.web_shot._resolve', mock.Mock(return_value='203.0.113.5')):
+            web_shot.drain(runner=test_web_shot.runner_for({}), proxy_factory=test_web_shot.FakeProxy)
+        self.assertEqual(HostScreenshot.objects.get().outcome, 'ok')
+
+
+class SubdirectoryVirtualHostLookupTests(test_subdir_apps.SubdirFixture, TestCase):
+    def test_a_virtual_host_found_under_a_manual_only_target_is_not_asked(self):
+        test_vhost_scan.vhost_scan.sweep(self.project.id, fetch=self.server, pace=test_vhost_scan.pace())
+        names = {e['name'] for e in test_subdir_apps.subdir_apps.web_hosts(self.project.id)}
+        self.assertIn('portal.example.test', names)  # control: found by the virtual host sweep, asked at its own address
+        Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=MANUAL)
+        self.assertEqual(test_subdir_apps.subdir_apps.web_hosts(self.project.id), [])
+        self.assertEqual(self.run_subdirs()['hosts'], 0)

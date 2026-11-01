@@ -184,7 +184,10 @@ def _admit(project, sub, unattended=True):
     if sentinel_only_target(host, project.pk):
         raise ValueError('internal hosts are assessed by an internal Sentinel scan')
     if unattended and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's request assesses its hosts
-        raise ValueError('the target is set to manual only; assess its hosts yourself, or pick a discovery mode for it')
+        from cveFeed.manual_only import other_holder
+        domain = other_holder(project.pk, host)  # unless a target that is not manual only holds the host too: then it is that target's
+        if domain is None:
+            raise ValueError('the target is set to manual only; assess its hosts yourself, or pick a discovery mode for it')
     if is_excluded(project.pk, host):
         raise ValueError('host is excluded')
     from cveFeed.bounty_gate import Gate

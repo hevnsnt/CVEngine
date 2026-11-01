@@ -393,8 +393,9 @@ def due(project_id, limit=None):
 
 def _latest_row(project_id, host):
     from startScan.models import Subdomain
+    from cveFeed.manual_only import held_expr
     return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).select_related('scan_history', 'target_domain')
-            .order_by('-scan_history_id').first())
+            .annotate(held=held_expr()).order_by('held', '-scan_history_id').first())
 
 
 def _address(host, port, project_id):

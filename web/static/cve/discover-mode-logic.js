@@ -3,7 +3,8 @@
 //
 // A target's stored mode (`discovery_mode`) is what every automatic scan uses: standard, deep, passive, or manual ("just add them, do not
 // scan yet": nothing automatic scans it). Discover runs in the mode chosen next to the button; the one picked there is kept on the target, so
-// the work conductor's next rescan uses it too (the server does that, POST targets/<id>/discover with `mode`).
+// the work conductor's next rescan uses it too (the server does that, POST targets/<id>/discover with `mode`). A manual only target has no
+// mode to run: its choice starts empty and Discover waits until one is picked, so one click never turns it into a scanned target.
 
 export const RUNNABLE = [
   ["standard", "Standard"],
@@ -12,37 +13,49 @@ export const RUNNABLE = [
 ];
 export const MANUAL = "manual";
 export const MANUAL_LABEL = "Manual only (never scanned automatically)";
+export const PLACEHOLDER = ["", "Choose a mode…"];
 
 // the choices of the Discovery column: the three modes and manual only
 export const STORED = [...RUNNABLE, [MANUAL, MANUAL_LABEL]];
 
 export const isRunnable = (mode) => RUNNABLE.some(([value]) => value === mode);
+const isStored = (mode) => STORED.some(([value]) => value === mode);
 
 // what the Discovery column of the all-projects view says
 export const modeText = (mode) => (mode === MANUAL ? "manual only" : isRunnable(mode) ? mode : "standard");
 
-// The mode Discover offers first: the stored one. A manual only target has no mode to run, so standard is offered, and
-// choosing to run it is what ends manual only.
-export const defaultChoice = (stored) => (isRunnable(stored) ? stored : "standard");
+// The options next to Discover: the three modes, and for a manual only target an empty "Choose a mode" first.
+export const discoverOptions = (stored) => (isRunnable(stored) ? RUNNABLE : [PLACEHOLDER, ...RUNNABLE]);
+
+// What the choice shows first: the stored mode; for a manual only target nothing (the placeholder).
+export const defaultChoice = (stored) => (isRunnable(stored) ? stored : "");
+
+// Discover can be pressed once a mode to run is chosen.
+export const canDiscover = (picked) => isRunnable(picked);
 
 // The request body for Discover. Without `mode` the server runs the stored mode, so that is what is sent whenever the choice is the stored
 // mode; a manual only target always names one (the server refuses to guess for it).
 export const discoverBody = (stored, picked) => (isRunnable(picked) && (picked !== stored || !isRunnable(stored)) ? { mode: picked } : {});
 
-// The mode the target has after Discover, as the server keeps it: the picked one, else the stored one.
-export const modeAfter = (stored, picked) => (isRunnable(picked) ? picked : stored);
+// The mode the target has after Discover: what the server says it stored (it keeps the old one for an internal target, and may for others),
+// else the stored one. The page shows this, never what it asked for.
+export const modeAfter = (response, stored) => (response && isStored(response.discovery_mode) ? response.discovery_mode : stored);
 
 // A sentence for the tooltip of the choice next to Discover, so it is clear the choice is kept.
 export function discoverHint(stored) {
   if (!isRunnable(stored)) {
-    return "This target is manual only. Choosing a mode and pressing Discover scans it once and keeps that mode: the work conductor rescans it in that mode from then on.";
+    return "This target is manual only. Choose a mode, then press Discover: it is scanned once in that mode and the mode is kept, so the work conductor rescans it in that mode from then on.";
   }
   return `Discover runs in the mode chosen here (${modeText(stored)} is this target's own). Another mode is kept for this target, and the work conductor rescans it in that mode from then on.`;
 }
 
-// The toast after Discover started: names the mode, and says so when it replaced the stored one.
-export function startedText(scanId, stored, picked) {
-  const after = modeAfter(stored, picked);
-  const changed = after !== stored;
-  return `Discovery #${scanId} started (${after})${changed ? `; ${after} is now this target's mode` : ""}`;
+// The toast after Discover started, from the server's answer: the scan and the mode it runs in, and what the target's mode is now.
+export function startedText(response, stored) {
+  const after = modeAfter(response, stored);
+  if (response.internal) return `Internal scan #${response.scan_id} queued for a Sentinel (discovery modes do not apply to it; the target stays ${modeText(after)})`;
+  const ran = response.scan_mode || after;
+  let text = `Discovery #${response.scan_id} started (${ran})`;
+  if (ran !== after) text += `; it was already going in ${ran}, and ${modeText(after)} is now this target's mode`;
+  else if (after !== stored) text += `; ${modeText(after)} is now this target's mode`;
+  return text;
 }

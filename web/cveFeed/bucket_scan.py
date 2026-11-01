@@ -283,7 +283,8 @@ def collect(project_id):
 
     named = set(Subdomain.objects.filter(target_domain__project_id=project_id).filter(
         _marked('cname', 'http_url') | Q(webserver__iregex=r'^(amazons3|uploadserver)')).values_list('name', flat=True))
-    rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=sorted(named)).order_by('name', '-id').distinct('name')
+    from cveFeed.manual_only import held_expr
+    rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=sorted(named)).annotate(held=held_expr()).order_by('name', 'held', '-id').distinct('name')
             .values_list('name', 'cname', 'webserver', 'http_url', 'target_domain_id'))  # the newest row of each host: a CNAME that was removed is gone
     for name, cname, webserver, http_url, domain_id in rows:
         host = (name or '').lower()
@@ -505,7 +506,8 @@ def sweep(project_id, fetch=None, dns=None):
         if holder is not True:
             return {**summary, 'skipped': 'another bucket sweep is running for this project'}
         candidates, complete = collect(project_id)
-        domains = {d.pk: d for d in Domain.objects.filter(project_id=project_id).exclude(discovery_mode=Domain.DISCOVERY_MANUAL)}  # a manual only target's names are not checked on a schedule
+        domains = {d.pk: d for d in Domain.objects.filter(project_id=project_id)}
+        manual = {pk for pk, d in domains.items() if d.discovery_mode == Domain.DISCOVERY_MANUAL}
         found_by_domain, checked_by_domain = {}, {}
         running = activity.log('run_check', f'Cloud storage check: {len(candidates)} candidate bucket{"s" if len(candidates) != 1 else ""}',
                                project=project_id, status='running')
@@ -516,6 +518,12 @@ def sweep(project_id, fetch=None, dns=None):
             banned = exclusions.excluded_names(project_id)  # read again: an exclusion made while the sweep runs stops the next request
             if cand.name in banned or any(h in banned for h in cand.hosts) or cand.domain_id not in domains:
                 continue
+            if cand.domain_id in manual:  # a manual only target's names are not checked on a schedule, unless a target that is not manual only holds a host that leads here
+                from cveFeed.manual_only import other_holder
+                holders = [d for d in (other_holder(project_id, h) for h in cand.hosts) if d is not None]
+                if not holders:
+                    continue
+                cand.domain_id = holders[0].pk
             verdict = probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
             summary['checked'] += 1
             if verdict.state == 'unknown':

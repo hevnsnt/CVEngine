@@ -422,10 +422,13 @@ def _due_names(project_id, limit, now):
             break
     if len(names) < limit:
         stale = Q(outcome=OK, captured_at__lt=now - ttl()) | Q(outcome__in=FAILURES + STATIC, attempted_at__lt=now - retry_after())
-        due = (HostScreenshot.objects.filter(project_id=project_id).filter(stale).exclude(scheme='rdp').exclude(domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+        due = (HostScreenshot.objects.filter(project_id=project_id).filter(stale).exclude(scheme='rdp')
                .order_by(F('attempted_at').asc(nulls_first=True)).values_list('host', flat=True)[:limit * 4])
+        due = list(due)
+        from cveFeed.manual_only import only_manual_hosts
+        held = only_manual_hosts(project_id, set(due))  # held only by manual only targets: not photographed on a schedule
         for host in due:
-            if host not in names and normalize(host) not in banned:
+            if host not in names and normalize(host) not in banned and host.strip().lower().rstrip('.') not in held:
                 names.append(host)
             if len(names) >= limit:
                 break
@@ -433,9 +436,10 @@ def _due_names(project_id, limit, now):
 
 
 def _current_row(project_id, name):
+    from cveFeed.manual_only import held_expr
     from startScan.models import Subdomain
     return (Subdomain.objects.filter(target_domain__project_id=project_id, name__iexact=name).select_related('target_domain')
-            .prefetch_related('ip_addresses__ports').order_by('-id').first())
+            .prefetch_related('ip_addresses__ports').annotate(held=held_expr()).order_by('held', '-id').first())  # a host two targets hold is photographed as the one that is not manual only
 
 
 def backfill(now=None, per_project=None, total=None):
@@ -999,8 +1003,8 @@ def _precheck(row, ctx, resolve):
     why = project['gate'].refusal(project_id, row.host, unattended=not row.by_person)
     if why:
         return BLOCKED, f'Not captured: {why}'
-    from targetApp.models import Domain
-    if not row.by_person and Domain.objects.filter(pk=row.domain_id, discovery_mode=Domain.DISCOVERY_MANUAL).exists():  # made manual only while the page waited
+    from cveFeed.manual_only import only_manual_hosts
+    if not row.by_person and row.host.strip().lower().rstrip('.') in only_manual_hosts(project_id, [row.host]):  # made manual only while the page waited
         return BLOCKED, 'Not captured: the target is set to manual only.'
     try:
         address = resolve(row.host, row.port, project_id)

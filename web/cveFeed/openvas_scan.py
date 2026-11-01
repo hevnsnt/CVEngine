@@ -472,9 +472,11 @@ def _address(host, project_id):
 
 
 def _latest_row(project_id, host):
+    """The newest row of ``host``, a row of a target that is not manual only before one that is (a host two targets hold is the first one's to scan)."""
+    from cveFeed.manual_only import held_expr
     from startScan.models import Subdomain
     return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).select_related('scan_history', 'target_domain')
-            .order_by('-scan_history_id').first())
+            .annotate(held=held_expr()).order_by('held', '-scan_history_id').first())
 
 
 def _names(items):
