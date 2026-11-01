@@ -1047,10 +1047,11 @@ def update_agent(ctx, agent_id, body):
     if 'limits' in body:
         agent.limits = _clean_limits(body['limits'])
     note = _text(body['note'], MAX_NOTE) if 'note' in body else None
-    if agent.status != before['status'] and note in (None, agent.status_note):
-        # The note explains the status it was written with ("another agent of this user is suspended ..."): a change of status that brings no
-        # new note clears it, so an approved or reinstated agent is not shown with the reason it was held back. (The admin dialog sends the note
-        # field back unchanged with every action, which counts as no new note.)
+    if agent.status != before['status'] and note in (None, agent.status_note) and (
+            agent.status == 'active' or agent.status_note == INHERITED_SUSPENSION_NOTE):
+        # Approving or reinstating clears the reason the agent was held back, so an active agent is not shown with it; the automatic "another
+        # agent of this user is suspended ..." note goes with any change of status. An administrator's own reason stays when the agent is
+        # suspended or revoked. (The admin dialog sends the note field back unchanged with every action, which counts as no new note.)
         agent.status_note = ''
     elif note is not None:
         agent.status_note = note
