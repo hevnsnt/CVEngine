@@ -243,7 +243,16 @@ class OrphanedRunningTests(ReaperTests):
 class CapacityTests(TestCase):
 	"""A queued row whose Celery task no longer exists must not hold a slot toward the caps."""
 
-	setUp_base, assessment = ReaperTests.setUp, ReaperTests.assessment
+	setUp_base = ReaperTests.setUp
+
+	def assessment(self, host, status, hours, started=True):
+		"""As ``ReaperTests.assessment``, but aged from the clock the code under test reads (``host_assessment._live_rows`` compares a row's age
+		with the real time now). The module's ``NOW`` is taken when the file is imported: late in a long run it is minutes behind, and a row
+		meant to be 36 seconds old was then older than ``ORPHAN_AFTER_MINUTES`` and no longer counted."""
+		job = HostAssessment.objects.create(project=self.project, domain=self.domain, host=host, status=status)
+		when = timezone.now() - timedelta(hours=hours)
+		HostAssessment.objects.filter(pk=job.pk).update(created_at=when, started_at=when if started else None)
+		return job
 
 	def count(self, live, project=None):
 		from django.core.cache import cache
@@ -304,13 +313,13 @@ class QueuedScanRedispatchTests(ReaperTests):
 		lost = self.queued(2)
 		count, send = self.redispatch(set())
 		self.assertEqual(count, 1)
-		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk], queue='discovery_queue')
+		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk, 'standard'], queue='discovery_queue')
 
 	def test_a_scan_with_a_message_in_a_queue_or_a_worker_is_only_waiting_its_turn(self):
 		waiting, lost = self.queued(2), self.queued(2)
 		count, send = self.redispatch({waiting.pk})
 		self.assertEqual(count, 1)
-		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk], queue='discovery_queue')
+		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk, 'standard'], queue='discovery_queue')
 
 	def test_nothing_is_sent_when_the_broker_cannot_be_asked(self):
 		self.queued(2)
@@ -370,3 +379,13 @@ class BrokerScanIdTests(ReaperTests):
 		self.assertEqual(br._scan_refs('not json'), [])
 		self.assertEqual(br._scan_refs(self.message('run_bbot_discovery', [])), [])
 		self.assertEqual(br._scan_refs(self.message('run_bbot_discovery', ['x'])), [])
+
+
+class CapacityTestsLateInARun(CapacityTests):
+	"""The same checks as if the suite had been running for 45 minutes since this file was imported (the module clock far behind the real one)."""
+
+	def setUp(self):
+		late = mock.patch(f'{__name__}.NOW', timezone.now() - timedelta(minutes=45))
+		late.start()
+		self.addCleanup(late.stop)
+		super().setUp()

@@ -1195,7 +1195,8 @@ def run_hygiene_all():
     if not ledger.sweep_claim('hygiene', 1800):
         return {"queued": 0, "skipped": "another sweep is running"}
     from cveFeed.conductor import bounty_blocked_projects
-    due = ledger.stale_first('hygiene', Domain.objects.exclude(project_id__in=bounty_blocked_projects()).values_list("id", "name", "project_id"))  # not a bug bounty project that has not confirmed automated testing
+    due = ledger.stale_first('hygiene', Domain.objects.exclude(project_id__in=bounty_blocked_projects()).exclude(discovery_mode=Domain.DISCOVERY_MANUAL)  # a manual only target is not touched on its own
+                             .values_list("id", "name", "project_id"))  # not a bug bounty project that has not confirmed automated testing
     for domain_id, _name, _project in due[:HYGIENE_SWEEP_MAX]:
         run_hygiene_task.delay(domain_id)
     return {"queued": min(len(due), HYGIENE_SWEEP_MAX), "due": len(due)}
@@ -1542,8 +1543,9 @@ def weekly_deep_nuclei():
                                                 archived_at__isnull=False)
             from cveFeed.bounty_gate import Gate
             gate = Gate()  # a bug bounty project that has not confirmed automated testing is not swept; a host outside its scope is never a target
+            from targetApp.models import Domain
             base = Subdomain.objects.filter(scan_history__scan_status=2, target_domain__project__isnull=False).exclude(
-                target_domain__project_id__in=gate.blocked).filter(latest_scan_q()).filter(~Exists(archived)).select_related(
+                target_domain__project_id__in=gate.blocked).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL).filter(latest_scan_q()).filter(~Exists(archived)).select_related(
                 'scan_history__domain', 'target_domain').order_by('pk')
             rows = list(base.filter(pk__gt=cursor.last_pk)[:100])
             if not rows:
