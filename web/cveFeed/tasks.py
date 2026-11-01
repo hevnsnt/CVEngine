@@ -1166,9 +1166,12 @@ def watch_certificate_transparency(self, domain_id):
             ct_queue.record_failure(domain_id)
             raise
         if result.get("failed"):
-            if self.request.retries < 3:
+            delay = 600 * (self.request.retries + 1)
+            # a retry that would start after the message's lifetime is dropped unseen by the worker, so this failure is the last this
+            # lookup will see: record it now (the sweep's messages live about 20 minutes, the retries wait 10, 20 and 30)
+            if self.request.retries < 3 and not ct_queue.expires_within(self.request.expires, delay):
                 retrying = True
-                raise self.retry(countdown=600 * (self.request.retries + 1), max_retries=3)
+                raise self.retry(countdown=delay, max_retries=3)
             ct_queue.record_failure(domain_id)
         return result
     finally:
@@ -1203,12 +1206,13 @@ def watch_certificates_all():
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
     failed = ct_queue.recently_failed(due)
-    batch = [r for r in due if r[0] not in failed][:size]
+    candidates = [r[0] for r in due if r[0] not in failed]
     room = cap if waiting is None else cap - waiting
-    # spread out: crt.sh blocks a burst, so each check starts a couple of seconds after the last
-    queued = ct_queue.queue_lookups([r[0] for r in batch], lifetime=window, limit=room)
+    # oldest first, as many as fit in one interval and under the cap; a domain already on its way is skipped without using a place,
+    # and each lookup starts a couple of seconds after the last (crt.sh blocks a burst)
+    queued = ct_queue.queue_lookups(candidates, lifetime=window, limit=min(size, room))
     return {"queued": len(queued), "due": len(due), "backlog": waiting, "cap": cap,
-            "held_back": len(batch) - len(queued), "recently_failed": len(failed)}  # held_back: already on its way, or past the cap's room
+            "not_queued": len(candidates) - len(queued), "recently_failed": len(failed)}  # not_queued: already on its way, or past the batch and the cap's room
 
 
 DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's lock held is asked again (run_bbot_discovery)

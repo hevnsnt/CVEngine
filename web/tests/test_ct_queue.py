@@ -83,7 +83,7 @@ class SweepBoundTests(Base):
 			self.redis.waiting = 94
 			out, publish = self.sweep()
 		self.assertEqual((out['queued'], publish.call_count), (6, 6))
-		self.assertEqual(out['held_back'], 4)
+		self.assertEqual(out['not_queued'], 4)
 
 	def test_the_cap_is_one_sweep_batch_at_least(self):
 		self.assertEqual(ct_queue.backlog_max(0), ct_queue.DEFAULT_BACKLOG_MAX)
@@ -111,6 +111,21 @@ class MarkerTests(Base):
 		publish2.assert_not_called()
 		self.assertTrue(all(ttl > 20 * 60 for ttl in self.redis.ttls.values()))
 
+	def test_domains_already_on_their_way_do_not_take_the_places_of_new_ones(self):
+		old = self.domains(400, 'old')
+		new = self.domains(5, 'new')
+		with mock.patch.object(tasks.watch_certificate_transparency, 'apply_async'):
+			ct_queue.queue_lookups([d.id for d in old], 3600)  # in flight: as many as a whole batch (400 at a 20 minute interval)
+		out, publish = self.sweep()
+		queued = sorted(c.kwargs['args'][0] for c in publish.call_args_list)
+		self.assertEqual(queued, sorted(d.id for d in new))
+		self.assertEqual(out['queued'], 5)
+
+	def test_a_batch_is_still_at_most_one_intervals_worth(self):
+		self.domains(30)
+		_, publish = self.sweep(window_minutes=1)  # 60 s / 3 = 20 checks
+		self.assertEqual(publish.call_count, 20)
+
 	def test_the_marker_is_set_before_publishing_and_dropped_if_publishing_fails(self):
 		domain = self.domains(1)[0]
 		with mock.patch.object(tasks.watch_certificate_transparency, 'apply_async', side_effect=OSError('broker')):
@@ -120,7 +135,8 @@ class MarkerTests(Base):
 
 	def test_the_marker_is_cleared_when_the_lookup_ends(self):
 		domain = self.domains(1)[0]
-		ct_queue.queue_lookups([domain.id], 3600)
+		with mock.patch.object(tasks.watch_certificate_transparency, 'apply_async'):
+			ct_queue.queue_lookups([domain.id], 3600)
 		with mock.patch('cveFeed.ctmonitor.run_ct_watch', return_value={'checked': 1, 'new': 0}):
 			tasks.watch_certificate_transparency.run(domain.id)
 		self.assertFalse(ct_queue.is_queued(domain.id))
@@ -128,7 +144,8 @@ class MarkerTests(Base):
 	def test_the_marker_is_cleared_when_the_lookup_fails_for_good_or_raises(self):
 		domain = self.domains(1)[0]
 		for outcome in ({'return_value': {'checked': 0, 'new': 0, 'failed': True}}, {'side_effect': ValueError('unreadable')}):
-			ct_queue.queue_lookups([domain.id], 3600)
+			with mock.patch.object(tasks.watch_certificate_transparency, 'apply_async'):
+				ct_queue.queue_lookups([domain.id], 3600)
 			task = tasks.watch_certificate_transparency
 			task.push_request(retries=3)  # the retries are used up
 			try:
@@ -143,7 +160,8 @@ class MarkerTests(Base):
 
 	def test_the_marker_stays_while_the_lookup_is_retried(self):
 		domain = self.domains(1)[0]
-		ct_queue.queue_lookups([domain.id], 3600)
+		with mock.patch.object(tasks.watch_certificate_transparency, 'apply_async'):
+			ct_queue.queue_lookups([domain.id], 3600)
 		with mock.patch('cveFeed.ctmonitor.run_ct_watch', side_effect=ctmonitor.CtBusy(120.0)), \
 				mock.patch.object(tasks.watch_certificate_transparency, 'retry', side_effect=Retry()):
 			with self.assertRaises(Retry):
@@ -194,6 +212,41 @@ class FailedDomainTests(Base):
 		self.redis.keys.clear()
 		_, publish = self.sweep()
 		self.assertEqual(sorted(c.kwargs['args'][0] for c in publish.call_args_list), sorted([poison.id, fine.id]))  # asked again after 6 hours
+
+	def test_a_failure_whose_retry_would_outlive_the_message_is_final(self):
+		"""A sweep message lives about 20 minutes; its retries wait 10, 20 and 30: the second would be dropped unseen, so record at once."""
+		from datetime import timedelta
+		poison, _ = self.domains(2)
+		task = tasks.watch_certificate_transparency
+		failed = {'checked': 0, 'new': 0, 'failed': True}
+
+		def attempt(expires, retries=0):
+			task.push_request(retries=retries, expires=expires)
+			try:
+				with mock.patch('cveFeed.ctmonitor.run_ct_watch', return_value=failed), \
+						mock.patch.object(task, 'retry', side_effect=Retry()) as retry:
+					try:
+						task.run(poison.id)
+					except Retry:
+						return True
+					return False
+			finally:
+				task.pop_request()
+		now = timezone.now()
+		self.assertTrue(attempt(now + timedelta(minutes=20)))  # the first retry (10 minutes) still fits
+		self.assertEqual(ct_queue.recently_failed([(poison.id, poison.name, self.project.id)]), set())
+		self.assertFalse(attempt(now + timedelta(minutes=20), retries=1))  # the second (20 minutes) would not: final
+		self.assertEqual(ct_queue.recently_failed([(poison.id, poison.name, self.project.id)]), {poison.id})
+		self.assertFalse(ct_queue.is_queued(poison.id))
+
+	def test_expires_within_reads_what_celery_hands_over(self):
+		from datetime import timedelta
+		now = timezone.now()
+		self.assertFalse(ct_queue.expires_within(None, 600))
+		self.assertFalse(ct_queue.expires_within(now + timedelta(hours=1), 600))
+		self.assertTrue(ct_queue.expires_within(now + timedelta(minutes=5), 600))
+		self.assertTrue(ct_queue.expires_within((now + timedelta(minutes=5)).isoformat(), 600))
+		self.assertFalse(ct_queue.expires_within('not a date', 600))
 
 	def test_an_exception_in_the_lookup_is_a_failure_too(self):
 		poison, _ = self.domains(2)

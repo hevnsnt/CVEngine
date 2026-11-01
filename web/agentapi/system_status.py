@@ -160,8 +160,13 @@ def _queues():
     from cveFeed import ct_queue
     from cveFeed.broker_recovery import MAX_QUEUE_SCAN
     ct = waiting.get('ctwatch_queue', 0)
+    try:  # the cap the sweep itself works to: it is never below one sweep's batch
+        from dashboard.models import SystemTimings
+        batch = max(1, SystemTimings.current().ct_watch_minutes * 60 // 3)
+    except Exception:  # noqa: BLE001
+        batch = 0
     return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': client.hlen('unacked'),
-            'ct_backlog': {'waiting': ct, 'cap': ct_queue.backlog_max(), 'warn_at': CT_BACKLOG_WARN, 'scan_limit': MAX_QUEUE_SCAN}}
+            'ct_backlog': {'waiting': ct, 'cap': ct_queue.backlog_max(batch), 'warn_at': CT_BACKLOG_WARN, 'scan_limit': MAX_QUEUE_SCAN}}
 
 
 def _ct_backlog_problem(queues):

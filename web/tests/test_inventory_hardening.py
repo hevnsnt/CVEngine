@@ -275,10 +275,13 @@ class CreateHostsTests(Base):
 		ProjectSettings.objects.create(project=self.project, inventory_create_hosts=True)
 		self.discovery = mock.patch('cveFeed.discovery.start_discoveries', return_value=[])
 		self.ct = mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async')
+		self.ct_marks = mock.patch('cveFeed.ct_queue._client', return_value=None)  # no per-domain markers left in Redis
 		self.discovery.start()
 		self.ct.start()
+		self.ct_marks.start()
 		self.addCleanup(self.discovery.stop)
 		self.addCleanup(self.ct.stop)
+		self.addCleanup(self.ct_marks.stop)
 
 	def test_a_name_the_machine_does_not_own_is_not_scanned(self):
 		rep = report(host=machine('a', fqdn='bank.victim.test', hostname='bank'))

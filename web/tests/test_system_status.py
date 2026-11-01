@@ -257,6 +257,12 @@ class SystemStatusTests(TestCase):
 		over = next(p for p in status(20001)['problems'] if 'ctwatch_queue' in p)
 		self.assertIn('has stopped', over)
 
+	def test_the_shown_ct_cap_is_the_one_the_sweep_works_to(self):
+		from dashboard.models import SystemTimings
+		with mock.patch.object(SystemTimings, 'current', return_value=SystemTimings(ct_watch_minutes=60)):
+			_, data = self.run_status(self.t_root, broker=FakeBroker({'ctwatch_queue': 10}))
+		self.assertEqual(data['system']['queues']['ct_backlog']['cap'], 1200)  # a 60 minute interval is a 1200 lookup batch
+
 	def test_low_memory_and_a_stale_report_are_problems(self):
 		low = {'store': 'redis', 'containers': [dict(CLUSTER['containers'][0], memory={'total_mb': 8000, 'used_mb': 7900, 'available_mb': 100},
 													 age_seconds=900)]}

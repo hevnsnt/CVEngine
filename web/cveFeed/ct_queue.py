@@ -61,6 +61,25 @@ def backlog():
         return None
 
 
+def expires_within(expires, seconds):
+    """True when a message that expires at ``expires`` (a datetime or ISO string, as Celery hands it over; None for no expiry) would already
+    be expired ``seconds`` from now, so a retry that far ahead would be dropped by the worker unseen."""
+    if not expires:
+        return False
+    try:
+        from datetime import datetime, timedelta, timezone as dt_timezone
+
+        from celery.utils.time import maybe_iso8601
+        when = maybe_iso8601(expires)
+        if isinstance(when, (int, float)):  # seconds from now
+            return when <= seconds
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt_timezone.utc)
+        return datetime.now(dt_timezone.utc) + timedelta(seconds=seconds) >= when
+    except Exception:  # noqa: BLE001 - when it cannot be told, keep retrying as before
+        return False
+
+
 def _key(domain_id):
     return f'{MARKER_PREFIX}{domain_id}'
 
