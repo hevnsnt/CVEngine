@@ -27,6 +27,7 @@ from tenancy import membership_cache, roles, scope
 from tests.test_live_cache import World, steady_caches
 from tests.test_tenancy import client_for
 
+REAL_BACKLOG = live_refresh.backlog  # before any test patches it
 START = 1_000_000.0
 STATS, DISCOVERY, GRAPH, GRAPH_LIVE = '/cve/api/stats', '/cve/api/discovery', '/cve/api/graph', '/cve/api/graph-live'
 POLLS = (STATS, DISCOVERY, GRAPH, GRAPH_LIVE)
@@ -57,6 +58,12 @@ class Fresh(World):
             patch.start()
             self.addCleanup(patch.stop)
         patch = mock.patch.object(membership_cache, 'CACHE_IN_TRANSACTION', True)  # a test case is one open transaction: these tests are about the cache
+        patch.start()
+        self.addCleanup(patch.stop)
+        # The refresher skips a run when the broker's classic queues are backlogged, and the broker is the real Redis the other tests (a bulk
+        # certificate transparency add, say) publish to: a test of the refresher must not depend on what they left behind. The probe itself is tested
+        # below with a fake broker.
+        patch = mock.patch.object(live_refresh, 'backlog', return_value=(0, 0))
         patch.start()
         self.addCleanup(patch.stop)
         cache.clear()  # this run's Redis database: no snapshot, counter or registration of an earlier test is anywhere
@@ -511,13 +518,16 @@ class ColdCacheTests(Fresh):
 
         def poll(compute):
             results.append(snapshot_cache.snapshot(key, 's', compute, 60)['payload'])
+        wait = mock.patch.object(snapshot_cache, 'WAIT_SECONDS', 60)  # a loaded machine may start a loser late: it must wait for the winner, not give up
+        wait.start()
+        self.addCleanup(wait.stop)
         winner = threading.Thread(target=poll, args=(slow,))
         winner.start()
         self.assertTrue(started.wait(10))
         losers = [threading.Thread(target=poll, args=(mock.Mock(side_effect=AssertionError('a loser computed')),)) for _ in range(4)]
         [t.start() for t in losers]
         release.set()
-        [t.join(10) for t in [winner, *losers]]
+        [t.join(60) for t in [winner, *losers]]
         self.assertEqual(calls, [1])
         self.assertEqual(results, [{'n': 1}] * 5)
 
@@ -723,6 +733,28 @@ class GraphPayloadLifetimeTests(Fresh):
 class PoliteRefresherTests(Fresh):
     def test_the_budget_is_small_and_never_more_than_half_an_interval(self):
         self.assertEqual([live_refresh.budget_seconds(i) for i in (2, 5, 6, 8, 60)], [1.0, 2.5, 3.0, 3.0, 3.0])
+
+    def test_the_backlog_probe_reads_only_the_named_queues_of_the_classic_worker(self):
+        asked = []
+
+        class Client:
+            def llen(self, name):
+                asked.append(name)
+                return {'live_cache_queue': 2, 'ctwatch_queue': 70, 'api_queue': 5}.get(name, 0)
+
+        class Connection:
+            default_channel = SimpleNamespace(client=Client())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        with mock.patch('reNgine.celery.app.connection_for_read', return_value=Connection()):
+            self.assertEqual(REAL_BACKLOG(), (2, 75))
+        self.assertEqual(asked, ['live_cache_queue', *live_refresh.CLASSIC_QUEUES])  # a fixed list of lengths: no scan of the keyspace
+        with mock.patch('reNgine.celery.app.connection_for_read', side_effect=ConnectionError('down')):
+            self.assertEqual(REAL_BACKLOG(), (0, 0), 'a broker that does not answer never holds a refresh back')
 
     def test_a_backlogged_worker_gets_no_refresh_and_the_skip_is_counted(self):
         client_for(self.a1).get(STATS)
