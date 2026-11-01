@@ -37,7 +37,7 @@ You choose two things when you provision a Sentinel, and can change both later.
 
 1. Open **Sentinels** (the Agents group in the side rail). In **Provision a Sentinel**, pick a scope, **Where it runs** and **Size**, then press **Provision**.
 2. Copy the blob. It is one string holding a single-use secret that expires in 30 minutes.
-3. On the machine that will scan (it needs Docker and outbound HTTPS to cvENGINE), clone the client from its own repository, [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel), put the blob in `CVENGINE_SENTINEL_BLOB` in its `.env`, and run `docker compose up -d`. The page also shows the equivalent one-line `./setup.sh` command.
+3. On the machine that will scan (it needs Docker and outbound HTTPS to cvENGINE), clone the client from its own repository, [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel), put the blob in `CVENGINE_SENTINEL_BLOB` in its `.env`, and run `docker compose up -d`. The page does this for you: after Provision it shows one command to paste on that machine (it clones the client, or reuses a clone already there, runs `setup.sh` with the blob, names the Sentinel after the machine and starts it), and a finished prompt to hand an AI agent with a shell on that machine, with the blob and your choices already in it. The same two strings are in the enrollment reply as `setup.one_liner` and `setup.agent_prompt`.
 4. Watch it appear on the Sentinels page. The client keeps its own token in a Docker volume, so a restart never needs the blob again.
 
 The client is a Docker Compose service. An AI agent can do all of this with the `generate_sentinel_enrollment` MCP tool.
