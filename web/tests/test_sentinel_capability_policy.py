@@ -453,7 +453,7 @@ class ClaimOrderTests(PolicyBase):
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '1'}):  # a claim window under two seconds leaves no room to hold anything
             self.assertEqual(sb.prefer_defer_for('nmap'), 0)
         self.queue('nmap', created=created)
-        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_PREFER_DEFER_SECONDS': '0'}):
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_PREFER_DEFER_SECONDS': '0', 'CVENGINE_SENTINEL_BALANCE': '0'}):  # (balancing would hold it: second holds a task already)
             self.assertEqual((sb.prefer_defer_for('nmap'), sb.prefer_defer_for('openvas')), (0, 0))
             self.assertIsNotNone(self.claim(second, ['nmap'], created + timedelta(seconds=1))[0])
         self.assertEqual(sb.prefer_defer_seconds(), 60)
