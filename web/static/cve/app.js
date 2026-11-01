@@ -3652,7 +3652,7 @@ pages.hygiene = function hygiene(mount) {
       d < 0 ? "critical" : d <= 7 ? "high" : d <= 30 ? "medium" : "success";
     return badge(d < 0 ? `expired ${-d}d ago` : `${d} days`, cls);
   };
-  const certs = el("section", "card hy-card");
+  const certs = el("section", "card hy-card hy-certs");
   certs.append(
     el("h2", "", "Certificates"),
     el(

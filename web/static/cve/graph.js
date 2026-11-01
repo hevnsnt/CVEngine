@@ -1707,37 +1707,183 @@ export function detailDrawer({ onClose } = {}) {
   };
 }
 
+// What a click on the graph answers at once, without a second click: for a host, why it has its colour (each CVE and finding behind it,
+// hottest first); for a fire, smoke or ice bubble, its hosts and what put each one there; for hygiene, the open findings by kind and
+// where; for a project, its hottest hosts and why. Built with textContent only; every list links on to the full record.
+const mk = (tag, cls = "", text = null, attrs = {}) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+};
+const HEAT_WORDS = { fire: "on fire", smoke: "in smoke", ice: "on ice", clean: "clean", unscanned: "not scanned yet" };
+const HEAT_RANKS = { fire: 3, smoke: 2, ice: 1 };
+const HYGIENE_HEAT = { critical: "fire", high: "fire", medium: "smoke", low: "ice" };
+const plural = (n, one, many = `${one}s`) => `${Number(n).toLocaleString()} ${n === 1 ? one : many}`;
+async function getJson(url) {
+  const res = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(res.status);
+  return res.json();
+}
+const sayFailed = (what) => mk("p", "msg err", `Could not load ${what}. Try again, or open the full list.`);
+function whySection(title, sub) {
+  const sec = mk("section", "why-sec");
+  const head = mk("div", "why-sec-head");
+  head.append(mk("h3", "", title));
+  if (sub) head.append(mk("span", "why-sec-sub", sub));
+  sec.append(head);
+  return sec;
+}
+// one reason a host is hot: a CVE match (its id, score, exploited or not, what it is) or a scanner finding (its name and severity)
+function reasonCard(r, { compact = false } = {}) {
+  const card = mk(r.href ? "a" : "div", `why-card why-${r.temp || "ice"}${compact ? " why-compact" : ""}`);
+  if (r.href) card.href = r.href;
+  const top = mk("span", "why-top");
+  top.append(mk("b", "why-label", r.label));
+  if (!compact) top.append(mk("span", "why-temp", r.temp || "")); // in a bubble's list the stripe says it; the host's own list spells it out
+  card.append(top);
+  const facts = [r.kind === "cve" ? r.detail : `${r.detail || ""} finding`.trim(), r.classification].filter(Boolean).join(", ");
+  if (facts) card.append(mk("span", "why-facts", facts));
+  if (r.description) card.append(mk("span", "why-desc", r.description));
+  return card;
+}
+// the worst first: hotter, then listed as exploited, then the higher score (a host's list comes hottest first, but not in that order inside a heat)
+const reasonWeight = (r) => (HEAT_RANKS[r.temp] || 0) * 100 + (/exploited/.test(r.detail || "") ? 20 : 0) +
+  (Number((/CVSS ([\d.]+)/.exec(r.detail || "") || [])[1]) || ({ critical: 9.5, high: 8, medium: 5, low: 2 }[r.detail] || 0));
+const worstFirst = (reasons) => [...reasons].sort((a, b) => reasonWeight(b) - reasonWeight(a));
+function hostReasons(reasons, total, link) {
+  reasons = worstFirst(reasons);
+  const sec = whySection(`Why it is ${HEAT_WORDS[reasons[0].temp] || "hot"}`, plural(total, "reason"));
+  const list = mk("div", "why-list");
+  reasons.forEach((r) => list.append(reasonCard(r)));
+  sec.append(list);
+  if (total > reasons.length && link) sec.append(mk("a", "why-more", `${total - reasons.length} more on the host page`, { href: link }));
+  return sec;
+}
+// a host in a bubble's list: its name, what it is, and the reasons that put it at this heat
+function hostWhy(row, slug, tier) {
+  const card = mk("article", `why-host why-${row.heat || tier}`);
+  const head = mk("div", "why-host-head");
+  head.append(mk("a", "why-host-name", row.host, { href: `/cve/${encodeURIComponent(slug)}/hosts/?host=${encodeURIComponent(row.host)}` }));
+  if (row.score != null) head.append(mk("span", "why-score", `score ${row.score}`));
+  card.append(head);
+  const what = [row.title, row.http_status ? `HTTP ${row.http_status}` : "", ...(row.technologies || []).slice(0, 3)].filter(Boolean).join(" · ");
+  if (what) card.append(mk("p", "why-what", what));
+  const reasons = worstFirst((row.heat_reasons || []).filter((r) => (HEAT_RANKS[r.temp] || 0) >= (HEAT_RANKS[tier] || 0)));
+  const list = mk("div", "why-list");
+  reasons.slice(0, 3).forEach((r) => list.append(reasonCard({ ...r, classification: (r.classification || "").replace(/_/g, " "),
+    href: `/cve/${encodeURIComponent(slug)}/vulns/#${r.finding}-${r.id}` }, { compact: true })));
+  card.append(list);
+  if (reasons.length > 3) card.append(mk("span", "why-more", `and ${reasons.length - 3} more`));
+  return card;
+}
+function actionsOf(...buttons) {
+  const row = mk("div", "cloud-actions why-actions");
+  row.append(...buttons.filter(Boolean));
+  return row;
+}
+function openProject(slug, label = "Open the project") {
+  const open = mk("button", "btn ghost sm", label, { type: "button" });
+  open.addEventListener("click", () => document.dispatchEvent(new CustomEvent("cve:open-cloud", { detail: slug })));
+  return open;
+}
+async function tierDetails(box, data) {
+  const slug = encodeURIComponent(data.project);
+  const title = data.tier === "hygiene" ? `${plural(data.count, "open hygiene finding")}` : `${plural(data.count, "host")} ${HEAT_WORDS[data.tier]}`;
+  const head = mk("div", `why-hero why-${data.tier === "hygiene" ? "hygiene" : data.tier}`);
+  head.append(mk("span", "why-kicker", `${data.project_name} · ${data.label}`), mk("strong", "why-title", title));
+  const what = { fire: "Each has a CVE exploited in the wild, with a public exploit or scoring 9 or more, or a critical or high finding.",
+    smoke: "Each one's worst is a CVE scoring 7 or more or likely to be exploited, or a medium finding.",
+    ice: "Each one's worst is a lower-risk CVE or a low finding.",
+    hygiene: "Certificates, email authentication, headers, exposed storage and the like, by kind." }[data.tier];
+  head.append(mk("p", "why-lede", what));
+  box.append(head);
+  if (data.tier === "hygiene") return hygieneDetails(box, data, slug);
+  let page;
+  try {
+    page = await getJson(`/api/v1/projects/${slug}/search?heat=${data.tier}&page_size=25`);
+  } catch (_) {
+    box.append(sayFailed("these hosts"));
+  }
+  if (page) {
+    const sec = whySection("The hosts and why", page.count > page.results.length ? `the ${page.results.length} riskiest of ${page.count}` : "");
+    page.results.forEach((row) => sec.append(hostWhy(row, data.project, data.tier)));
+    if (!page.results.length) sec.append(mk("p", "note", "None right now: a scan since may have cooled them."));
+    box.append(sec);
+  }
+  box.append(actionsOf(mk("a", "btn sm", `Every host ${HEAT_WORDS[data.tier]}`, { href: `/cve/${slug}/hosts/?heat=${data.tier}` }), openProject(data.project)));
+}
+async function hygieneDetails(box, data, slug) {
+  let page;
+  try {
+    page = await getJson(`/api/v1/projects/${slug}/hygiene?page_size=200`);
+  } catch (_) {
+    box.append(sayFailed("the hygiene findings"));
+  }
+  if (page) {
+    const kinds = new Map(); // the same finding on many hosts reads once, with its hosts under it
+    for (const f of page.results) {
+      if (f.severity === "info" || ["fixed", "accepted_risk"].includes(f.remediation_status)) continue;
+      const kind = kinds.get(f.title) || { title: f.title, severity: f.severity, detail: f.detail, check: f.check, items: [] };
+      kind.items.push(f);
+      kinds.set(f.title, kind);
+    }
+    const order = { critical: 4, high: 3, medium: 2, low: 1 };
+    const sorted = [...kinds.values()].sort((a, b) => (order[b.severity] || 0) - (order[a.severity] || 0) || b.items.length - a.items.length);
+    const sec = whySection("What is open", plural(sorted.length, "kind"));
+    for (const kind of sorted) {
+      const card = mk("article", `why-host why-${HYGIENE_HEAT[kind.severity] || "ice"}`);
+      const head = mk("div", "why-host-head");
+      head.append(mk("b", "why-host-name", kind.title), mk("span", "why-temp", kind.severity));
+      card.append(head);
+      if (kind.detail) card.append(mk("p", "why-what", kind.detail.length > 220 ? `${kind.detail.slice(0, 220)}…` : kind.detail));
+      const hosts = mk("div", "why-chips");
+      kind.items.slice(0, 6).forEach((f) => hosts.append(mk("a", "why-chip", f.host || f.domain, { href: `/cve/${slug}/vulns/#hygiene-${f.id}` })));
+      if (kind.items.length > 6) hosts.append(mk("span", "why-more", `and ${kind.items.length - 6} more`));
+      card.append(hosts);
+      sec.append(card);
+    }
+    if (!sorted.length) sec.append(mk("p", "note", "Nothing open right now."));
+    box.append(sec);
+  }
+  box.append(actionsOf(mk("a", "btn sm", "Every hygiene finding", { href: `/cve/${slug}/hygiene/` }), openProject(data.project)));
+}
+async function cloudDetails(box, data) {
+  const slug = encodeURIComponent(data.project);
+  const sum = (key) => (data.parts || []).reduce((n, p) => n + (p[key] || 0), 0);
+  const head = mk("div", `why-hero why-${data.hot === "calm" ? "clean" : data.hot}`);
+  head.append(mk("span", "why-kicker", "Project"), mk("strong", "why-title", data.label),
+    mk("p", "why-lede", `${plural(data.hosts || 0, "host")}, ${data.findings ? `${data.findings} with findings` : "none with findings"}.`));
+  const tally = mk("div", "why-tally");
+  for (const [key, n] of [["fire", sum("fire")], ["smoke", sum("smoke")], ["ice", sum("ice")], ["hygiene", data.hygiene || 0]]) {
+    const cell = mk("span", `why-tally-cell why-${key}`);
+    cell.append(mk("b", "", Number(n).toLocaleString()), mk("span", "", key));
+    tally.append(cell);
+  }
+  head.append(tally);
+  box.append(head);
+  if (data.findings) {
+    try {
+      const page = await getJson(`/api/v1/projects/${slug}/search?page_size=5`);
+      const hot = page.results.filter((row) => HEAT_RANKS[row.heat]);
+      if (hot.length) {
+        const sec = whySection("Its hottest hosts", "");
+        hot.forEach((row) => sec.append(hostWhy(row, data.project, "ice")));
+        box.append(sec);
+      }
+    } catch (_) {
+      box.append(sayFailed("its hosts"));
+    }
+  }
+  box.append(actionsOf(openProject(data.project, "Open the cloud"), mk("a", "btn ghost sm", "Every host", { href: `/cve/${slug}/hosts/` })));
+}
+
 export async function showNodeDetails(box, data) {
   box.textContent = "";
   if (!data) return;
-  if (data.kind === 'cloud') {
-    const heading = Object.assign(document.createElement('strong'), { className: 'cve-id', textContent: data.label });
-    const note = Object.assign(document.createElement('p'), { className: 'note',
-      textContent: `${data.hosts} hosts, ${data.findings} with findings${data.hygiene ? `, ${data.hygiene} open hygiene findings` : ""}. Open it (or double-click it) to see every host.` });
-    const open = Object.assign(document.createElement('button'), { type: 'button', className: 'btn sm', textContent: 'Open the cloud' });
-    open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cve:open-cloud', { detail: data.project })));
-    const link = Object.assign(document.createElement('a'), { className: 'btn ghost sm', href: `/cve/${encodeURIComponent(data.project)}/hosts/`, textContent: 'Every host' });
-    const actions = Object.assign(document.createElement('div'), { className: 'cloud-actions' });
-    actions.append(open, link);
-    box.append(heading, note, actions);
-    return;
-  }
-  if (data.kind === 'tier') {
-    const slug = encodeURIComponent(data.project);
-    const heading = Object.assign(document.createElement('strong'), { className: 'cve-id', textContent: `${data.project_name}: ${data.label}` });
-    const what = { fire: 'Their worst is a CVE that is exploited in the wild, has a public exploit or scores 9 or more, or a critical or high finding.',
-      smoke: 'Their worst is a CVE scoring 7 or more or likely to be exploited, or a medium finding.',
-      ice: 'Their worst is a lower-risk CVE or a low finding.', hygiene: 'Certificates, email authentication, headers, exposed storage and the like.' }[data.tier];
-    const note = Object.assign(document.createElement('p'), { className: 'note', textContent: `${data.count} ${TIER_TIPS[data.tier]}. ${what}` });
-    const list = Object.assign(document.createElement('a'), { className: 'btn sm',
-      href: data.tier === 'hygiene' ? `/cve/${slug}/hygiene/` : `/cve/${slug}/hosts/?heat=${data.tier}`, textContent: data.tier === 'hygiene' ? 'See the findings' : 'See the hosts' });
-    const open = Object.assign(document.createElement('button'), { type: 'button', className: 'btn ghost sm', textContent: 'Open the project' });
-    open.addEventListener('click', () => document.dispatchEvent(new CustomEvent('cve:open-cloud', { detail: data.project })));
-    const actions = Object.assign(document.createElement('div'), { className: 'cloud-actions' });
-    actions.append(list, open);
-    box.append(heading, note, actions);
-    return;
-  }
+  if (data.kind === "cloud") return cloudDetails(box, data);
+  if (data.kind === "tier") return tierDetails(box, data);
   if (data.kind === 'project' || data.kind === 'root') {
     const heading = document.createElement('strong');
     heading.className = 'cve-id';
@@ -1777,7 +1923,9 @@ export async function showNodeDetails(box, data) {
   head.append(kind, title);
   const list = document.createElement("dl");
   list.className = "node-rows";
-  detail.rows.forEach((r) => {
+  const reasons = detail.reasons || [];
+  // a host's matches and findings are its reasons above, in full; the rows keep the facts about the host itself
+  detail.rows.filter((r) => !(reasons.length && ["CVE matches", "Findings"].includes(r.k))).forEach((r) => {
     const dd = document.createElement("dd");
     if (Array.isArray(r.links) && r.links.length) {
       // each item names a record (a host, an address, a match): it links there when it has an address
@@ -1798,7 +1946,17 @@ export async function showNodeDetails(box, data) {
       }),
     );
   }
-  box.append(head, list);
+  box.append(head);
+  if (reasons.length) box.append(hostReasons(reasons, detail.reasons_total || reasons.length, detail.link));
+  else if (detail.kind === "host") {
+    box.append(mk("p", "why-calm", detail.heat === "clean" ? "Nothing open on this host: no live CVE match and no open finding." :
+      "Not scanned for vulnerabilities yet, so there is nothing to say about its heat."));
+  }
+  if (detail.kind === "host") {
+    const sec = whySection("The host", "");
+    sec.append(list);
+    box.append(sec);
+  } else box.append(list);
   if (detail.link) {
     box.append(
       Object.assign(document.createElement("a"), {

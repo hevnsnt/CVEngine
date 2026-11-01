@@ -96,6 +96,17 @@
   {% include "cveFeed/_switcher.html" with sfx="" place="top" %}
   {% if slug %}<button class="btn sm add-btn" type="button" data-add-targets><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg><span>Add targets</span></button>{% endif %}
 </header>
+{% if show_all_option %}
+<div class="scope-row">
+  <button class="scope" type="button" id="scope-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="scope-sheet">
+    <span class="scope-text">
+      <span class="scope-k">{% if orgs %}{% if all_projects %}{{ scope_org_name|default:"All organizations" }}{% else %}{{ here_org_name|default:"No organization" }}{% endif %}{% else %}Project{% endif %}</span>
+      <span class="scope-v">{% if all_projects %}All projects{% else %}{{ here_name }}{% endif %}</span>
+    </span>
+    <span class="scope-go">Switch<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></span>
+  </button>
+</div>
+{% endif %}
 <main class="wrap" id="main">
   {% block content %}{% endblock %}
 </main>
@@ -118,7 +129,6 @@
 <div class="sheet-scrim" id="sheet-scrim" hidden></div>
 <div class="sheet" id="sheet" role="dialog" aria-label="More" hidden>
   <div class="sheet-grip" aria-hidden="true"></div>
-  {% include "cveFeed/_switcher.html" with sfx="-m" %}
   <div class="sheet-grid">
     {% if slug %}
     <a href="{% url 'cve_section' slug 'targets' %}"><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
@@ -134,6 +144,31 @@
     <a href="{% url 'cve_agents' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens</a>
   </div>
 </div>
+
+{% if show_all_option %}
+<div class="sheet scope-sheet" id="scope-sheet" role="dialog" aria-labelledby="scope-h" data-section="{{ active }}" hidden>
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="scope-head">
+    <h2 id="scope-h">Switch project</h2>
+    {% if projects|length > 6 %}<input class="scope-q" type="search" placeholder="Find a project" aria-label="Find a project" autocomplete="off" enterkeyhint="go">{% endif %}
+  </div>
+  <div class="scope-list">
+    <button type="button" class="all" data-scope="_all" data-org="" {% if all_projects and not scope_org %}aria-current="true"{% endif %}><span>All projects{% if orgs %}, every organization{% endif %}</span><small>{{ projects|length }}</small></button>
+    {% if orgs %}{% for o in orgs %}
+    <section class="scope-org">
+      <h3>{{ o.name }}</h3>
+      <button type="button" class="all" data-scope="_all" data-org="{{ o.slug }}" {% if all_projects and scope_org == o.slug %}aria-current="true"{% endif %}><span>All projects in {{ o.name }}</span></button>
+      {% for p in projects %}{% if p.org_slug == o.slug %}<button type="button" data-scope="{{ p.slug }}" data-org="{{ o.slug }}" {% if not all_projects and p.slug == slug %}aria-current="true"{% endif %}><span>{{ p.name }}</span></button>{% endif %}{% endfor %}
+    </section>
+    {% endfor %}{% else %}
+    <section class="scope-org">
+      {% for p in projects %}<button type="button" data-scope="{{ p.slug }}" data-org="" {% if not all_projects and p.slug == slug %}aria-current="true"{% endif %}><span>{{ p.name }}</span></button>{% endfor %}
+    </section>
+    {% endif %}
+    <p class="note scope-none" hidden>No project matches that.</p>
+  </div>
+</div>
+{% endif %}
 
 <div class="sheet" id="acct-sheet" role="dialog" aria-label="Account" hidden>
   <div class="sheet-grip" aria-hidden="true"></div>

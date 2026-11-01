@@ -405,7 +405,8 @@ class AllProjectsPageTests(AllProjectsBase):
 
 	def test_the_switcher_offers_all_projects_selected(self):
 		html = client_for(self.ann).get('/cve/_all/vulns/').content.decode()
-		self.assertEqual(len(re.findall(r'<option value="_all" selected>All projects</option>', html)), 2)  # sidebar and mobile sheet
+		self.assertEqual(len(re.findall(r'<option value="_all" selected>All projects</option>', html)), 1)  # the top bar; phones get the project bar
+		self.assertRegex(html, r'<button type="button" class="all" data-scope="_all" data-org="" aria-current="true">')
 		self.assertNotIn('<option value="acme" selected', html)
 		self.assertIn('<title>CVEngine · Findings · All projects</title>', html)
 		self.assertIn('/cve/_all/hosts/', html)
@@ -414,6 +415,23 @@ class AllProjectsPageTests(AllProjectsBase):
 		html = client_for(self.ann).get('/cve/acme/vulns/').content.decode()
 		self.assertIn('<option value="_all" >All projects</option>', html)
 		self.assertIn('<option value="acme" selected>Acme</option>', html)
+
+	def test_phones_get_a_project_bar_that_opens_the_switch_sheet(self):
+		html = client_for(self.ann).get('/cve/acme/vulns/').content.decode()
+		bar = html[html.index('class="scope-row"'):html.index('<main')]
+		self.assertIn('aria-controls="scope-sheet"', bar)
+		self.assertIn('<span class="scope-v">Acme</span>', bar)  # the project you are on, named in the bar
+		sheet = html[html.index('id="scope-sheet"'):html.index('id="acct-sheet"')]
+		self.assertIn('data-section="vulns"', sheet)
+		self.assertRegex(sheet, r'data-scope="acme" data-org="[^"]*" aria-current="true"><span>Acme</span>')
+		self.assertIn('data-scope="_all"', sheet)
+		more = html[html.index('id="sheet"'):html.index('id="scope-sheet"')]
+		self.assertNotIn('<select', more)  # switching lives in the project bar, not in More
+
+	def test_one_project_gets_no_project_bar(self):
+		html = client_for(self.solo).get('/cve/acme/vulns/').content.decode()
+		self.assertNotIn('scope-row', html)
+		self.assertNotIn('id="scope-sheet"', html)
 
 	def test_a_user_with_one_project_does_not_get_the_option(self):
 		c = client_for(self.solo)
