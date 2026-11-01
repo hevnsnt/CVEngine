@@ -489,6 +489,21 @@ def openapi_spec():
             'security': [{'bearer': []}], 'paths': paths}
 
 
+# Polled lists that answer a conditional request: the same list gets a 304 and no body (the live pages poll these every few seconds, and the browser
+# then skips the redraw). The ETag is a token of the body without the clocks in it (they move every second and mean nothing: the page counts the time
+# from the dates it already holds). The work behind the list is not saved; what a 304 saves is the transfer, the parse and the redraw.
+ETAG_ROUTES = re.compile(r'^(sentinels/live|projects/[-\w]+/scans)$')
+CLOCK_FIELDS = {'server_time', 'seconds_since_seen'}
+
+
+def _without_clocks(value):
+    if isinstance(value, dict):
+        return {k: _without_clocks(v) for k, v in value.items() if k not in CLOCK_FIELDS}
+    if isinstance(value, list):
+        return [_without_clocks(v) for v in value]
+    return value
+
+
 # Not csrf_exempt: bearer-token requests are exempted by AgentTokenMiddleware, session ones stay CSRF-checked.
 def dispatch(request, path):
     path = path.strip('/')
@@ -519,6 +534,9 @@ def dispatch(request, path):
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
             return result
         data, status = result if isinstance(result, tuple) else (result, 200)
+        if request.method == 'GET' and status == 200 and ETAG_ROUTES.match(path):
+            from cveFeed import snapshot_cache
+            return snapshot_cache.respond_payload(request, data, etag=snapshot_cache.token_of(_without_clocks(data)))
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
         response = JsonResponse({'error': 'method not allowed'}, status=405)

@@ -103,10 +103,28 @@ test('request bodies and links the review found wrong stay fixed', () => {
 });
 
 test('a poller does not keep running in a hidden tab', () => {
-  assert.match(read('dashboard.js'), /const every = [\s\S]*?document\.hidden/);
+  // the shared helper (static/cve/poll.js, tested in test_poll.mjs) owns the hidden-tab rule; every page imports it instead of a bare setInterval
+  assert.match(read('poll.js'), /export function every[\s\S]*?doc\.hidden/);
+  assert.match(read('dashboard.js'), /import \{[^}]*\bevery\b[^}]*\} from "\/staticfiles\/cve\/poll\.js"/);
+  assert.doesNotMatch(read('dashboard.js'), /const every = /, 'the dashboard uses the shared poller');
+  assert.doesNotMatch(read('dashboard.js'), /setInterval\(poll/, 'no poller of the dashboard is a bare setInterval');
   const graphPage = readFileSync(new URL('../cveFeed/templates/cveFeed/graph.html', import.meta.url), 'utf8');
   assert.match(graphPage, /params\.set\('v', version\)/, 'the graph page sends the version so an unchanged graph answers 304');
-  assert.doesNotMatch(graphPage, /setInterval\(poll,/);
+  assert.doesNotMatch(graphPage, /setInterval\(poll/);
+  assert.match(graphPage, /every\(pollLive, 3000/, 'the SOC highlight poll is a busy-guarded, jittered loop');
+  assert.match(read('sentinel-live.js'), /every\(reload, POLL_MS/);
+  assert.doesNotMatch(read('sentinel-live.js'), /setInterval\(\(\) => \{\s*if \(document\.hidden\)/);
+  assert.match(read('notify.js'), /every\(poll, POLL_MS, \{[^}]*hidden: "slow"/, 'the scan watcher slows down in a hidden tab instead of stopping');
+  assert.doesNotMatch(read('notify.js'), /setInterval\(poll/);
+});
+
+test('the pollers send If-None-Match through the shared GET and treat a 304 as unchanged', () => {
+  const dash = read('dashboard.js');
+  assert.match(dash, /createGet\(\)/);
+  for (const poller of ['pollStats', 'pollDiscovery', 'pollAgent']) {
+    assert.match(dash, new RegExp(`async function ${poller}\\(\\)[\\s\\S]*?=== null\\) return`), `${poller} returns on a 304`);
+  }
+  assert.match(dash, /lastLive = \(await get\(`\/cve\/api\/graph-live/, 'the scanning chips keep the last answer on a 304');
 });
 
 test('a count or a badge asks for the count alone, and an export or a palette preview asks for no facets', () => {

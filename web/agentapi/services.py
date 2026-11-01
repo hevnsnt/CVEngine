@@ -491,12 +491,16 @@ SCAN_STATUS_FILTER = {'queued': -1, '-1': -1, 'failed': 0, '0': 0, 'running': 1,
                       'aborted': 3, '3': 3}
 
 
-def _scan(s, detail=False, queued=None):
-    """``queued`` is a callable returning the queued scan ids, so a page of scans looks the queue up at most once."""
+def _scan(s, detail=False, queued=None, stalled_before=None):
+    """``queued`` is a callable returning the queued scan ids, so a page of scans looks the queue up at most once. ``stalled_before`` is the
+    moment a running scan counts as stalled when it started earlier (``now - running_window()``): a list computes it once for the whole page,
+    because running_window() reads the timing settings and would otherwise cost one query per row."""
+    if stalled_before is None:
+        stalled_before = timezone.now() - running_window()
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
            'status': s.scan_status, 'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
-           'stalled': s.scan_status == 1 and s.start_scan_date < timezone.now() - running_window(),  # marked running, but older than any scan can run
+           'stalled': s.scan_status == 1 and s.start_scan_date < stalled_before,  # marked running, but older than any scan can run
            'kind': 'retest' if 'retest' in (s.tasks or []) else 'hosts' if 'host_pipeline' in (s.tasks or []) else 'discovery'}
     if s.scan_status == -1:  # how many scans are ahead of this one in the queue
         from cveFeed.discovery import queue_position
@@ -554,7 +558,9 @@ def list_scans(ctx, slug, params):
         if not cache:
             cache.append(queued_ids())
         return cache[0]
-    serialize = _tagged(lambda sc: _scan(sc, queued=queued), lambda sc: sc.domain.project) if everywhere else (lambda sc: _scan(sc, queued=queued))
+    stalled_before = timezone.now() - running_window()  # once per page, not once per row
+    serialize = _tagged(lambda sc: _scan(sc, queued=queued, stalled_before=stalled_before), lambda sc: sc.domain.project) if everywhere \
+        else (lambda sc: _scan(sc, queued=queued, stalled_before=stalled_before))
     return {'count': total, 'page': page, 'page_size': size, 'results': [serialize(sc) for sc in scans]}
 
 

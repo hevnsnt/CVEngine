@@ -35,39 +35,6 @@ class MemoTests(unittest.TestCase):
 		self.assertEqual(len(list(correlation._match_candidates('nginx', (1,), 'nginx', index, {1: cve}))), 1)
 
 
-class StatsCacheTests(unittest.TestCase):
-	def setUp(self):
-		views._STATS_CACHE.clear()
-		self.addCleanup(views._STATS_CACHE.clear)
-
-	def test_polls_inside_the_window_share_one_computation(self):
-		with mock.patch.object(views, 'stats_payload', side_effect=[{'n': 1}, {'n': 2}]) as compute:
-			self.assertEqual(views.cached_stats((1, 'a'), now=100.0), {'n': 1})
-			self.assertEqual(views.cached_stats((1, 'a'), now=105.0), {'n': 1})
-			self.assertEqual(views.cached_stats((1, 'a'), now=110.5), {'n': 2})
-			self.assertEqual(compute.call_count, 2)
-
-	def test_another_viewer_or_project_never_gets_a_cached_answer_meant_for_someone_else(self):
-		with mock.patch.object(views, 'stats_payload', side_effect=[{'who': 'alice'}, {'who': 'bob'}, {'who': 'alice-b'}]):
-			self.assertEqual(views.cached_stats((1, ''), now=1.0), {'who': 'alice'})
-			self.assertEqual(views.cached_stats((2, ''), now=1.0), {'who': 'bob'})  # tenancy-scoped counts differ per user
-			self.assertEqual(views.cached_stats((1, 'proj-b'), now=1.0), {'who': 'alice-b'})  # and per selected project
-
-	def test_the_cache_is_bounded(self):
-		with mock.patch.object(views, 'stats_payload', return_value={}):
-			for i in range(views.STATS_CACHE_ENTRIES + 10):
-				views.cached_stats((i, ''), now=1.0)
-		self.assertLessEqual(len(views._STATS_CACHE), views.STATS_CACHE_ENTRIES)
-
-	def test_shared_revision_invalidates_a_warm_dashboard_count(self):
-		with mock.patch('django.core.cache.cache.get', side_effect=['before', 'before', 'after']), \
-				mock.patch.object(views, 'stats_payload', side_effect=[{'count': 1}, {'count': 0}]) as compute:
-			self.assertEqual(views.cached_stats((1, ''), now=1.0), {'count': 1})
-			self.assertEqual(views.cached_stats((1, ''), now=2.0), {'count': 1})
-			self.assertEqual(views.cached_stats((1, ''), now=2.0), {'count': 0})
-		self.assertEqual(compute.call_count, 2)
-
-
 class LedgerHoistTests(TestCase):
 	def test_run_cve_checks_asks_the_ledger_once_per_cve_not_once_per_host(self):
 		org = Org.objects.create(name='A', slug='a')

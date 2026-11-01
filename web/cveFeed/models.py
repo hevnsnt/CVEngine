@@ -1789,6 +1789,25 @@ class OpenvasSettings(models.Model):
         return f"OpenVAS add-on ({'on' if self.enabled else 'off'})"
 
 
+class ScanConcurrency(models.Model):
+    """Single-row scan concurrency chosen on Settings, configMaxxing (see cveFeed.scan_concurrency): ``values`` maps a setting key (``heavy.nmap``,
+    ``discovery_concurrency``, ``work_depth``) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that is
+    absent was never set (or was reset), so the environment variable, then the built-in default, applies. The row is the durable truth; the
+    workers read a copy published to Redis (a few seconds old at most) so that admission never waits on the database."""
+
+    values = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)  # {key: {"by": username, "at": iso time}}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return f"scan concurrency ({len(self.values)} set)"
+
+
 class SmtpSettings(models.Model):
     """Single-row outgoing mail server (Settings, Email; see cveFeed.mailer). Off by default: with it off, or with no address on the
     account, adding a person shows a temporary password as it always did. The password is encrypted like every other stored secret and
