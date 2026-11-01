@@ -5,6 +5,8 @@ superseded matches included; the rescan's new rows then took the twin with the n
 pointed at an old job that was stale, and ``enqueue`` only looked at the row's own inherited validation when there was no carried job
 at all. A validation also moved its own match's signature (the probe results it stores are part of it), so the same match was queued
 once more."""
+import json
+import types
 from datetime import timedelta
 from unittest import mock
 
@@ -12,8 +14,8 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import hot_validation, triage, validation
-from cveFeed.models import CVEEntry, CVEMatch, OnDemandValidation, Triage
+from cveFeed import host_context, hot_validation, triage, validation
+from cveFeed.models import CVEEntry, CVEMatch, OnDemandValidation, ProbeObservation, TlsCertificate, Triage, TriageCall, TriageVerdict
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain
@@ -331,3 +333,551 @@ class PostReviewKeyTests(Base):
             outcome, dispatch = self.enqueue(row)
         self.assertEqual(outcome, 'min_gap')
         dispatch.assert_not_called()
+
+
+class ManualJobKeyTests(Base):
+    """A manual job counts as standing (``match_policy.has_standing``) once it is no longer running, and an edge-verified host's closure basis
+    reads that. The key and the signature the job recorded were made while it still ran, so they described the match as clearable by the edge;
+    the ones ``enqueue`` and ``track`` make from the database (the job finished by then) did not: the minimum gap failed open, the job was never
+    taken for the evidence the row had, and the match was reviewed and validated again."""
+
+    def run_manual_job(self, review, match=None, attempts=0, describe_hook=None, status='completed'):
+        from cveFeed.tasks import validate_match_on_demand
+        default_match = match is None
+        match = match or self.match(self.scan(), source='tech')
+        (row,) = self.track(match)
+        user = User.objects.create_user('bob', password='x')
+        ProjectMembership.objects.create(user=user, project=self.project, role='user')
+        job = OnDemandValidation.objects.create(match=match, project=self.project, evidence_signature=row.signature, priority=0,
+                                                source='manual', requested_by=user, attempts=attempts)
+        plan = {'check_kinds': [], 'reason': 'edge', 'generate_template': False, 'source': 'test'}
+        edge = {'fronted': True, 'verified': True, 'providers': ['cloudflare'], 'basis': ['cname']}
+        patches = [mock.patch('cveFeed.host_context.edge_of', return_value=edge),
+                   mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.k.example']),
+                   mock.patch('cveFeed.correlation.invalid_identity_reason', return_value=''),
+                   mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')),
+                   mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)),
+                   mock.patch('cveFeed.validation.run_validation', return_value={}),
+                   mock.patch('cveFeed.triage.run_triage', side_effect=review)]
+        if describe_hook:
+            real = triage.describe
+
+            def describe(finding):
+                describe_hook(finding)
+                return real(finding)
+            patches.append(mock.patch('cveFeed.triage.describe', side_effect=describe))
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        OnDemandValidation.objects.filter(pk=job.pk).update(status='running')
+        if default_match and not describe_hook:
+            running = triage.describe(triage.with_cves([CVEMatch.objects.get(pk=match.pk)])[0])
+            self.assertEqual(running['facts']['closure_basis'], ['cdn_edge_only'])  # while it runs, the edge may clear the match
+        OnDemandValidation.objects.filter(pk=job.pk).update(status='queued')
+        validate_match_on_demand(job.pk)
+        job.refresh_from_db()
+        self.assertEqual((job.status, job.source), (status, 'manual'))
+        match = CVEMatch.objects.select_related('cve_entry', 'subdomain__target_domain').get(pk=match.pk)
+        after = triage.describe(match)
+        self.assertEqual(after['facts']['closure_basis'], [])  # the finished manual job vouches for the match: the state the job has to describe
+        self.assertEqual(job.result['revalidation_key'], triage.revalidation_key(after))
+        if not describe_hook:
+            self.assertEqual(job.evidence_signature, triage.effective_signature(after, Triage.objects.get(match=match).review_nonce))
+        return match, job
+
+    def answer(self, classification):
+        def review(rows):
+            for row, d in rows:
+                verdict = TriageVerdict.objects.create(kind='cve_match', signature=d['signature'], classification=classification)
+                Triage.objects.filter(pk=row.pk).update(status='triaged', verdict=verdict, classification=classification)
+            return {}
+        return review
+
+    def test_a_manual_validation_of_an_edge_fronted_match_holds_the_gap_for_the_next_automatic_one(self):
+        match, job = self.run_manual_job(lambda rows: {})
+        (row,) = self.track(match)
+        self.assertEqual(row.signature, job.evidence_signature)
+        # not 'fresh' (the job is of this evidence) is what the signature gives; the gap is what is asked when it is not
+        Triage.objects.filter(pk=row.pk).update(signature='moved')
+        outcome, dispatch = self.enqueue(Triage.objects.get(pk=row.pk))
+        self.assertEqual(outcome, 'min_gap')
+        dispatch.assert_not_called()
+        self.assertEqual(OnDemandValidation.objects.filter(match=match).count(), 1)
+
+    def test_the_job_is_taken_for_the_evidence_the_row_has_so_nothing_is_validated_again(self):
+        match, job = self.run_manual_job(self.answer('likely'))
+        (row,) = self.track(match)
+        self.assertEqual((row.status, row.classification, row.signature), ('triaged', 'likely', job.evidence_signature))
+        outcome, dispatch = self.enqueue(row)
+        self.assertEqual(outcome, 'fresh')
+        dispatch.assert_not_called()
+        # a row that is triaged under its current signature is not queued for the review (run_triage and the sweep only take pending rows)
+        self.assertFalse(Triage.objects.filter(status__in=('pending', 'error', 'not_triaged')).exists())
+        self.assertEqual(OnDemandValidation.objects.filter(match=match).count(), 1)
+
+    def test_an_answer_below_the_floor_the_finished_job_leaves_is_asked_again(self):
+        """The review ran while the edge could clear the match. The finished job gives the match standing and the in-range floor applies: an answer
+        that said it was cleared is not carried over under the new signature."""
+        match, job = self.run_manual_job(self.answer('likely_false_positive'))
+        (row,) = self.track(match)
+        self.assertEqual((row.status, row.classification), ('pending', 'likely_false_positive'))  # queued again, the record kept meanwhile
+        self.assertEqual(row.signature, job.evidence_signature)
+
+
+    # Only the job's own standing (``closure_basis``) is absorbed into the row's signature when the job ends. Whatever else moved while the checks
+    # and the review ran is tracked as a change, as it always was.
+
+    def test_a_floor_lowered_during_the_review_is_not_left_confirmed(self):
+        match = self.match(self.scan(), source='tech')
+        CVEMatch.objects.filter(pk=match.pk).update(template_result='vulnerable')  # the floor is 'confirmed'
+        answer = self.answer('confirmed')
+
+        def review(rows):
+            answer(rows)
+            CVEMatch.objects.filter(pk=match.pk).update(template_result='')  # a later template run found it clean while the review ran
+            return {}
+        match, job = self.run_manual_job(review, match=CVEMatch.objects.get(pk=match.pk))
+        row = Triage.objects.get(match=match)
+        self.assertEqual((row.status, row.classification, row.verdict_id), ('pending', '', None))  # reset: the evidence it rested on is gone
+        self.assertEqual(row.signature, job.evidence_signature)
+
+    def test_a_banner_that_changed_during_the_review_is_asked_about(self):
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-340', cvss=7.5, published_at=timezone.now(),
+                                      affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
+        match = CVEMatch.objects.create(cve_entry=cve, matched_product='nginx', matched_version='1.21.0', source='port', version_in_range=None,
+                                        evidence={'branch_unlisted': True},
+                                        subdomain=Subdomain.objects.create(name='www.k.example', target_domain=self.domain, scan_history=self.scan()))
+        answer = self.answer('needs_validation')
+
+        def review(rows):
+            answer(rows)
+            CVEMatch.objects.filter(pk=match.pk).update(evidence={'branch_unlisted': True, 'service_extra': 'nginx (a new banner)'})
+            return {}
+        match, job = self.run_manual_job(review, match=match)
+        row = Triage.objects.get(match=match)
+        self.assertEqual((row.status, row.classification, row.verdict_id is not None), ('pending', 'needs_validation', True))  # queued, record kept
+        self.assertEqual(row.signature, job.evidence_signature)
+
+    def test_a_failed_first_manual_job_on_an_edge_fronted_match_keeps_its_backoff(self):
+        def review(rows):
+            Triage.objects.filter(pk__in=[row.pk for row, _ in rows]).update(status='error')
+            return {'errors': 1}
+        match, job = self.run_manual_job(review, attempts=1, status='failed')
+        self.assertEqual(job.status, 'failed')
+        self.assertGreater(job.next_attempt_at, timezone.now())
+        (row,) = self.track(match)
+        self.assertEqual(row.signature, job.evidence_signature)  # one description of the evidence, not two
+        outcome, dispatch = self.enqueue(row)
+        self.assertEqual(outcome, 'fresh')  # not queued again at once
+        dispatch.assert_not_called()
+        OnDemandValidation.objects.filter(pk=job.pk).update(next_attempt_at=timezone.now() - timedelta(minutes=1))
+        outcome, dispatch = self.enqueue(row)
+        self.assertEqual(outcome, 'queued')
+        self.assertEqual(OnDemandValidation.objects.filter(match=match).order_by('-id').first().attempts, 2)  # the attempt number goes on
+
+    def test_a_fresh_review_requested_meanwhile_keeps_its_evidence_key(self):
+        state = {}
+
+        def hook(finding):
+            if state.get('done') or OnDemandValidation.objects.filter(status='running').exists():
+                return
+            state['done'] = True  # the first description after the job left 'running': a person asks for a fresh review just now
+            row = Triage.objects.get(match_id=finding.pk)
+            triage.request_fresh_review(row, self.real_describe(finding), 'nonce-1')
+        self.real_describe = triage.describe  # the hook runs inside the patched describe
+        match, job = self.run_manual_job(self.answer('likely'), describe_hook=hook)
+        row = Triage.objects.get(match=match)
+        self.assertEqual(row.review_nonce, 'nonce-1')
+        self.assertEqual(row.evidence_key, triage.evidence_key_for('cve_match', self.real_describe(match)['signature_fields'], 'nonce-1'))
+        self.assertEqual((row.status, row.classification, row.verdict_id is not None), ('pending', 'likely', True))  # queued, the record kept (not reset)
+
+
+class StableViewTests(TestCase):
+    """``host_context.stable_view``: what the host text key of a match's signature is made from."""
+
+    def context(self, **over):
+        base = {'technologies': [{'name': 'nginx', 'version': '1.18.0', 'category': 'web', 'source': 'scan'}],
+                'ports': [{'number': 443, 'product': 'nginx', 'version': '1.18.0', 'banner': ''}],
+                'web': {'status': 200, 'title': 'x', 'kept_response_headers': ['server: nginx', 'content-type: text/html']},
+                'certificates': [{'port': 443, 'issuer': 'R3', 'days_left': 90, 'protocol': 'TLSv1.3', 'legacy_tls': False, 'san_count': 2}],
+                'probe_results': [{'probe': 'nginx-version', 'kind': 'version', 'product': 'nginx', 'version': '1.18.0', 'variant': '',
+                                   'outcome': 'found', 'confidence': 0.9, 'source': 'header:server', 'port': 443, 'observed': '2026-10-01'}],
+                'host_inventory': {'os': 'Ubuntu 22.04', 'kernel': '5.15', 'packages': 400, 'reported_at': '2026-10-01T10:00:00+00:00'},
+                'tailscale': {'online': True, 'os': 'linux'}, 'other_cve_matches': [{'cve': 'CVE-2099-1', 'product': 'nginx', 'version': '1.18.0',
+                                                                                      'in_range': True, 'verdict': ''}],
+                'operating_system': {'guesses': [], 'reported_by_other_tools': {}}}
+        return {**base, **over}
+
+    def test_what_changes_while_the_host_does_not_is_left_out(self):
+        today = self.context()
+        later = self.context(
+            certificates=[{'port': 443, 'issuer': 'R3', 'days_left': 61, 'protocol': 'TLSv1.3', 'legacy_tls': False, 'san_count': 2}],
+            probe_results=[{**today['probe_results'][0], 'observed': '2026-10-30'}],
+            host_inventory={'os': 'Ubuntu 22.04', 'kernel': '5.15', 'packages': 417, 'reported_at': '2026-10-30T09:00:00+00:00'},
+            tailscale={'online': False, 'os': 'linux'},
+            other_cve_matches=[{'cve': 'CVE-2099-1', 'product': 'nginx', 'version': '1.18.0', 'in_range': True, 'verdict': 'uncertain'}])
+        self.assertNotEqual(today, later)
+        self.assertEqual(host_context.stable_view(today), host_context.stable_view(later))
+
+    def test_what_the_review_conditions_on_is_kept(self):
+        base = host_context.stable_view(self.context())
+        probe = self.context()['probe_results'][0]
+        changes = {
+            'a probe found another version': {'probe_results': [{**probe, 'version': '1.18.1'}]},
+            'a probe found the version hidden': {'probe_results': [{**probe, 'outcome': 'hidden'}]},
+            'the banner changed': {'ports': [{'number': 443, 'product': 'nginx', 'version': '1.18.0', 'banner': 'nginx/1.18.0 (Ubuntu)'}]},
+            'the kernel changed': {'host_inventory': {'os': 'Ubuntu 22.04', 'kernel': '6.1', 'packages': 400, 'reported_at': 'x'}},
+            'the certificate issuer changed': {'certificates': [{'port': 443, 'issuer': 'Other CA', 'days_left': 90, 'protocol': 'TLSv1.3',
+                                                                 'legacy_tls': False, 'san_count': 2}]},
+            'TLS 1.0 is accepted': {'certificates': [{'port': 443, 'issuer': 'R3', 'days_left': 90, 'protocol': 'TLSv1.3',
+                                                      'legacy_tls': True, 'san_count': 2}]},
+            'a header changed': {'web': {'status': 200, 'title': 'x', 'kept_response_headers': ['server: Apache', 'content-type: text/html']}},
+            'another CVE matches the host': {'other_cve_matches': [{'cve': 'CVE-2099-1', 'product': 'nginx', 'version': '1.18.0',
+                                                                    'in_range': True, 'verdict': ''},
+                                                                   {'cve': 'CVE-2099-2', 'product': 'nginx', 'version': '1.18.0',
+                                                                    'in_range': True, 'verdict': ''}]},
+            'a match is now inside the range': {'other_cve_matches': [{'cve': 'CVE-2099-1', 'product': 'nginx', 'version': '1.18.0',
+                                                                       'in_range': False, 'verdict': ''}]},
+            'a technology appeared': {'technologies': [{'name': 'php', 'version': '8.1', 'category': 'lang', 'source': 'scan'}]},
+        }
+        for what, change in changes.items():
+            self.assertNotEqual(base, host_context.stable_view(self.context(**change)), what)
+
+    def test_a_certificate_matters_when_it_expires_not_every_day_before_that(self):
+        def state(days):
+            return host_context.stable_view(self.context(certificates=[{'port': 443, 'issuer': 'R3', 'days_left': days, 'san_count': 2}]))
+        self.assertEqual(state(90), state(31))
+        self.assertEqual(state(29), state(1))
+        self.assertEqual(state(-3), state(-200))
+        self.assertEqual(len({str(state(90)), str(state(29)), str(state(-1))}), 3)
+        self.assertNotEqual(state(None), state(90))  # no certificate date is not a valid certificate
+
+    def test_the_order_rows_came_back_in_does_not_matter_where_the_rows_have_none(self):
+        probes = [{'probe': 'a', 'kind': 'version', 'product': 'nginx', 'version': '1', 'outcome': 'found', 'observed': '2026-10-01'},
+                  {'probe': 'b', 'kind': 'identity', 'product': 'nginx', 'version': '', 'outcome': 'absent', 'observed': '2026-10-02'}]
+        certs = [{'port': 443, 'issuer': 'R3', 'days_left': 5}, {'port': 8443, 'issuer': 'R3', 'days_left': 6}]
+        ports = [{'number': 80, 'product': 'a', 'banner': 'x'}, {'number': 80, 'product': 'b', 'banner': 'y'}, {'number': 22, 'product': 'ssh'}]
+        one = host_context.stable_view(self.context(probe_results=probes, certificates=certs, ports=ports))
+        two = host_context.stable_view(self.context(probe_results=probes[::-1], certificates=certs[::-1], ports=ports[::-1]))
+        self.assertEqual(one, two)
+
+    def test_per_request_headers_keep_their_presence_and_lose_their_value(self):
+        def headers(*lines):
+            return host_context.stable_view(self.context(web={'kept_response_headers': list(lines)}))
+        self.assertEqual(headers('server: cloudflare', 'cf-ray: 8a1b2c3d-AMS', 'cf-cache-status: HIT', 'x-request-id: abc'),
+                         headers('server: cloudflare', 'cf-ray: 99ffee00-FRA', 'cf-cache-status: MISS', 'x-request-id: def'))
+        self.assertNotEqual(headers('server: cloudflare', 'cf-ray: 1'), headers('server: cloudflare'))  # the edge header being there is evidence
+        self.assertNotEqual(headers('server: nginx'), headers('server: Apache'))
+        policy = "content-security-policy: script-src 'nonce-{}' 'self'"
+        self.assertEqual(headers(policy.format('AbC123+/=')), headers(policy.format('zzz999')))
+        self.assertNotEqual(headers(policy.format('x')), headers("content-security-policy: script-src 'self' evil.example"))
+
+    def test_a_time_of_day_in_a_banner_is_not_evidence(self):
+        def banner(text):
+            return host_context.stable_view(self.context(ports=[{'number': 25, 'banner': text}]))
+        self.assertEqual(banner('220 mail ESMTP Postfix 10:15:32'), banner('220 mail ESMTP Postfix 23:59:01'))
+        self.assertNotEqual(banner('220 mail ESMTP Postfix'), banner('220 mail ESMTP Exim'))
+
+    def test_a_context_with_none_of_it_is_returned_as_it_is(self):
+        plain = {'technologies': [{'name': 'nginx', 'version': '1.18.0'}], 'ports': [{'number': 22}, {'number': 443}],
+                 'web': {'status': 200, 'kept_response_headers': ['server: nginx']}, 'labels': ['a'], 'certificates': [],
+                 'probe_results': [], 'host_inventory': None, 'tailscale': None}
+        self.assertEqual(host_context.stable_view(plain), plain)
+        self.assertEqual(host_context.stable_view(None), None)
+        self.assertEqual(host_context.stable_view({}), {})
+
+
+class HostTextSignatureTests(Base):
+    """Issue 338 follow-up: ``triage.bind_host_text`` keyed the verdict of every match without a floor to the whole host context, so
+    a certificate's days left or a probe's observed date moved the signature daily and every rescan asked the model the same question again."""
+
+    def setUp(self):
+        super().setUp()
+        self.cve = CVEEntry.objects.create(cve_id='CVE-2099-339', cvss=7.5, affected=[{'product': 'nginx', 'ranges': [
+            {'introduced': '1.0.0', 'fixed': '1.20.0'}]}], published_at=timezone.now())
+        self.host = 'www.k.example'
+
+    def floorless(self, scan=None):
+        """A match with no hard evidence floor (the version is not inside the range), so its verdict is keyed to the host text."""
+        sub = Subdomain.objects.create(name=self.host, target_domain=self.domain, scan_history=scan or self.scan())
+        return CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub, matched_product='nginx', matched_version='1.21.0', source='port',
+                                       version_in_range=None, evidence={'branch_unlisted': True})  # a candidate, not closed for want of a bound
+
+    def describe(self, match):
+        return triage.describe(triage.with_cves([CVEMatch.objects.get(pk=match.pk)])[0])
+
+    def certificate(self, days, issuer='R3'):
+        # days is far from a band edge, so the second a test takes cannot matter
+        TlsCertificate.objects.update_or_create(domain=self.domain, host=self.host, port=443, defaults={
+            'issuer': issuer, 'not_after': timezone.now() + timedelta(days=days, hours=12)})
+
+    def probe(self, observed_days_ago, outcome='found', version='1.21.0'):
+        ProbeObservation.objects.update_or_create(project=self.project, domain=self.domain, host=self.host, probe='nginx-version', port=443,
+                                                  kind='version', product='nginx', defaults={
+            'version': version, 'outcome': outcome, 'confidence': 0.9, 'source': 'header:server',
+            'observed_at': timezone.now() - timedelta(days=observed_days_ago)})
+
+    def test_only_a_match_without_a_floor_has_the_key(self):
+        self.assertIn('host_text', self.describe(self.floorless())['signature_fields'])
+
+    def test_the_same_host_a_day_later_has_the_same_signature(self):
+        match = self.floorless()
+        self.certificate(100)
+        self.probe(3)
+        before = self.describe(match)
+        self.assertIn('context', before['signature_fields'])  # the probe is in the signature too (its digest does not hold the date)
+        self.assertEqual(before['host_context']['certificates'][0]['expiry'], 'valid')  # the model is shown what the key is made of
+        self.certificate(99)
+        self.probe(0)
+        after = self.describe(match)
+        self.assertEqual(before['host_context'], after['host_context'])
+        self.assertEqual(before['signature'], after['signature'])
+        self.assertEqual(before['evidence_key'], after['evidence_key'])
+
+    def test_evidence_that_changes_still_changes_the_signature(self):
+        match = self.floorless()
+        self.certificate(100)
+        self.probe(3)
+        base = self.describe(match)['signature']
+        seen = {base}
+        self.certificate(10)  # now expiring
+        seen.add(self.describe(match)['signature'])
+        self.certificate(-5)  # expired
+        seen.add(self.describe(match)['signature'])
+        self.certificate(100, issuer='Other CA')
+        seen.add(self.describe(match)['signature'])
+        self.certificate(100)
+        self.probe(0, outcome='hidden')
+        seen.add(self.describe(match)['signature'])
+        self.probe(0, version='1.22.0')
+        seen.add(self.describe(match)['signature'])
+        self.assertEqual(len(seen), 6)
+
+    def test_a_host_with_nothing_volatile_keeps_the_key_it_always_had(self):
+        """The first deploy of the new definition re-asks nothing for a host whose context has no date or counter in it: the key is made
+        from the context exactly as before."""
+        import hashlib
+        import json
+        match = self.floorless()
+        d = self.describe(match)
+        text = [d['payload'].get('cpe'), d['payload'].get('service_extra'), d['host_context']]
+        legacy = hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        self.assertEqual(d['signature_fields']['host_text'], legacy)
+
+    def reviewed_row(self, match, provider):
+        (row, d), = triage.track(triage.with_cves([match]))
+        triage.run_triage([(row, d)], provider=provider)
+        row.refresh_from_db()
+        self.assertEqual((row.status, bool(row.classification)), ('triaged', True))
+        self.kept = row.classification  # whatever the rules made of the answer: the record that has to survive a re-review
+        return row
+
+    def provider(self):
+        import json
+        answer = {'classification': 'likely', 'reason': 'because', 'impact': 'bad', 'severity_adjust': 0, 'severity_reason': '',
+                  'remediation': 'patch', 'validation_steps': []}
+        provider = mock.Mock(model='m')
+        provider.name = 'anthropic'
+        provider.complete.return_value = json.dumps(answer)
+        return provider
+
+    def test_a_rescan_a_day_later_asks_the_model_nothing(self):
+        self.certificate(100)
+        self.probe(3)
+        provider = self.provider()
+        first = self.floorless()
+        row = self.reviewed_row(first, provider)
+        self.assertEqual(provider.complete.call_count, 1)
+        self.certificate(99)
+        self.probe(0)
+        second = self.floorless()  # the rescan's match: a new row, which takes the record of the first (issue 206)
+        (row2, d2), = triage.track(triage.with_cves([second]))
+        self.assertEqual((row2.status, row2.classification, row2.carried_from), ('triaged', self.kept, first.pk))
+        self.assertEqual(row2.signature, row.signature)
+        stats = triage.run_triage([(row2, d2)], provider=provider)
+        self.assertEqual(provider.complete.call_count, 1)
+        self.assertEqual(stats['asked'], 0)
+        # and the same row tracked again (the sweep, a validation) is not touched either
+        (row3, d3), = triage.track(triage.with_cves([second]))
+        self.assertEqual((row3.status, row3.signature), ('triaged', row.signature))
+
+    def test_a_rescan_whose_host_really_changed_asks_again(self):
+        self.certificate(100)
+        self.probe(3)
+        provider = self.provider()
+        row = self.reviewed_row(self.floorless(), provider)
+        self.probe(0, outcome='hidden')  # the probe now says the host hides its version
+        second = self.floorless()
+        (row2, d2), = triage.track(triage.with_cves([second]))
+        self.assertEqual((row2.status, row2.classification), ('pending', self.kept))  # asked again, the record kept meanwhile
+        self.assertNotEqual(row2.signature, row.signature)
+        triage.run_triage([(row2, d2)], provider=provider)
+        self.assertEqual(provider.complete.call_count, 2)
+
+    def with_headers(self, headers, **extra):
+        root = types.SimpleNamespace(evidence={'headers': headers}, http_status=200, title='t', redirect_to='', url='https://www.k.example/')
+        return mock.patch('cveFeed.host_context._root_route', return_value=root)
+
+    def prompt_and_key(self, match, headers):
+        with self.with_headers(headers):
+            d = self.describe(match)
+        return json.dumps(d['host_context'], sort_keys=True), d['signature_fields']['host_text']
+
+    def test_the_prompt_and_the_key_agree_on_a_value_that_is_left_out(self):
+        """The verdict a model gives is stored under the signature, shared by every host and project that has it, and the model is shown one
+        host's context: a host-controlled value the model sees but the key leaves out would let one tenant's host set another tenant's verdict.
+        Two hosts that differ only in a masked value get the same key AND the same prompt; the value never reaches the prompt."""
+        claim = 'origin nginx 1.24.0 with vendor backport of the fix for this CVE applied'
+        match = self.floorless()
+        one = self.prompt_and_key(match, {'server': 'nginx', 'x-served-by': claim, 'cf-ray': '8a1b2c3d4e5f-AMS', 'x-cache': 'HIT',
+                                          'content-security-policy': "script-src 'nonce-AbC123xyz' 'self'"})
+        two = self.prompt_and_key(match, {'server': 'nginx', 'x-served-by': 'cache-ams1', 'cf-ray': '0f0f0f0f0f0f-FRA', 'x-cache': 'MISS',
+                                          'content-security-policy': "script-src 'nonce-QQQ999' 'self'"})
+        self.assertEqual(one, two)
+        for leaked in (claim, 'backport', 'cache-ams1', '8a1b2c3d4e5f', 'AbC123xyz', 'HIT'):
+            self.assertNotIn(leaked, one[0])
+        self.assertIn('x-served-by: *', one[0])  # the header being there is still said
+        other = self.prompt_and_key(match, {'server': 'Apache', 'x-served-by': 'cache-ams1', 'cf-ray': '0f0f0f0f0f0f-FRA', 'x-cache': 'MISS',
+                                            'content-security-policy': "script-src 'nonce-QQQ999' 'self'"})
+        self.assertNotEqual(one[1], other[1])  # a header's content is still evidence, shown and keyed
+
+    def test_every_value_the_key_leaves_out_is_also_left_out_of_the_prompt(self):
+        """Per field: the raw value is not in the prompt, and what replaces it is what the key is made of."""
+        secrets = {'days_left': '"days_left"', 'observed': '2026-10-01', 'packages': '"packages"', 'reported_at': '2026-10-01T10:00:00',
+                   'online': '"online"', 'clock': '10:15:32', 'banner date': '01 Nov 2026', 'cf-ray': '8a1b2c3d4e5f', 'nonce': 'AbC123xyz'}
+        context = {
+            'ports': [{'number': 25, 'banner': '220 mail.example ESMTP Exim 4.96 Sun, 01 Nov 2026 10:15:32 +0000'}],
+            'web': {'kept_response_headers': ['cf-ray: 8a1b2c3d4e5f-AMS', "content-security-policy: script-src 'nonce-AbC123xyz'"]},
+            'certificates': [{'port': 443, 'issuer': 'R3', 'days_left': 90}],
+            'probe_results': [{'probe': 'p', 'kind': 'version', 'product': 'nginx', 'version': '1', 'outcome': 'found', 'observed': '2026-10-01'}],
+            'host_inventory': {'os': 'Ubuntu', 'kernel': '5', 'packages': 400, 'reported_at': '2026-10-01T10:00:00+00:00'},
+            'tailscale': {'online': True, 'os': 'linux'}}
+        shown = json.dumps(host_context.clipped(context, stable=True), sort_keys=True)
+        for name, raw in secrets.items():
+            self.assertNotIn(raw, shown, name)
+        self.assertIn('"expiry": "valid"', shown)
+        self.assertIn('hh:mm:ss', shown.replace('timestamp', 'hh:mm:ss'))
+        # the view is its own fixed point: hashing it again (bind_host_text) cannot disagree with what is shown
+        view = host_context.clipped(context, stable=True)
+        self.assertEqual(host_context.stable_view(view), view)
+
+    def test_a_banner_that_carries_the_date_is_the_same_banner_tomorrow(self):
+        def banner(text):
+            return host_context.clipped({'ports': [{'number': 25, 'banner': text}]}, stable=True)
+        for greeting in ('220 mail.example ESMTP Exim 4.96 {}', '220 mail.example Microsoft ESMTP MAIL Service ready at {}',
+                         '220 mail.example ESMTP Sendmail 8.15.2; {}'):
+            self.assertEqual(banner(greeting.format('Sun, 01 Nov 2026 10:15:32 +0000')), banner(greeting.format('Mon, 02 Nov 2026 23:59:01 +0100')))
+            self.assertEqual(banner(greeting.format('2026-11-01T10:15:32Z')), banner(greeting.format('2026-11-02 23:59:01')))
+        self.assertNotEqual(banner('220 mail.example ESMTP Exim 4.96 Sun, 01 Nov 2026 10:15:32'), banner('220 mail.example ESMTP Exim 4.97 Sun, 01 Nov 2026 10:15:32'))
+
+    def test_a_certificates_expiry_date_in_a_port_record_is_still_evidence(self):
+        def cert(text):
+            return host_context.clipped({'ports': [{'number': 443, 'certificate': text}]}, stable=True)
+        self.assertNotEqual(cert('subject x; issuer R3; expires 2027-01-01 00:00:00'), cert('subject x; issuer R3; expires 2027-04-01 00:00:00'))
+
+    def test_the_edge_nodes_and_ids_that_change_with_each_response_are_masked(self):
+        def shown(*lines):
+            return host_context.clipped({'web': {'kept_response_headers': list(lines)}}, stable=True)
+        self.assertEqual(shown('via: 1.1 d111111abcdef8.cloudfront.net (CloudFront)', 'x-iinfo: 11-222-333 NNNN CT(0 0 0) RT(1 0)'),
+                         shown('via: 1.1 e999999fedcba1.cloudfront.net (CloudFront)', 'x-iinfo: 9-8-7 NNNN CT(1 1 1) RT(2 2)'))
+        self.assertNotEqual(shown('via: 1.1 d111111abcdef8.cloudfront.net (CloudFront)'), shown('via: 1.1 varnish'))
+        self.assertIn('x-iinfo: *', json.dumps(shown('x-iinfo: 1-2-3')))
+
+    def test_the_host_matches_are_listed_in_an_order_the_database_does_not_decide(self):
+        """Matches of equal confidence came back in whatever order the database liked (and the list is cut at ten): the same host could
+        hash differently with nothing changed."""
+        scan = self.scan()
+        sub = Subdomain.objects.create(name=self.host, target_domain=self.domain, scan_history=scan)
+        cves = [CVEEntry.objects.create(cve_id=f'CVE-2099-{n}', cvss=5.0, affected=[], published_at=timezone.now()) for n in (905, 901, 903)]
+        for cve in cves:
+            CVEMatch.objects.create(cve_entry=cve, subdomain=sub, matched_product='nginx', matched_version='1.21.0', source='port', confidence=0.5)
+        listed = [m['cve'] for m in host_context._matches(sub, ())]
+        self.assertEqual(listed, sorted(listed))
+
+    def test_the_halving_of_a_long_list_cuts_the_end_of_the_sorted_list(self):
+        rows = [{'probe': f'p{n:02d}', 'kind': 'version', 'product': 'x' * 60, 'version': '1', 'outcome': 'found', 'observed': f'2026-10-{n % 28 + 1:02d}'}
+                for n in range(36)]  # the rows ``host_context`` reads are at most MAX_PROBES (30), below the cap of 40 per list in ``_deep``
+        one = host_context.clipped({'probe_results': rows}, limit=2000, stable=True)
+        two = host_context.clipped({'probe_results': rows[::-1]}, limit=2000, stable=True)
+        self.assertEqual(one, two)
+        self.assertLess(len(one['probe_results']), 36)
+        self.assertEqual([p['probe'] for p in one['probe_results']], [f'p{n:02d}' for n in range(len(one['probe_results']))])
+
+    def legacy_view(self):
+        """The definition before this change: the whole context, as shown."""
+        return mock.patch('cveFeed.host_context.stable_view', side_effect=lambda context: context)
+
+    def test_the_definition_change_asks_only_where_the_model_would_be_shown_something_else(self):
+        """Rows as production wrote them: keyed under the old definition, and keyed AGAIN once their own review had written the match's verdict
+        (the context lists the host's matches, this one among them). A host with a certificate or a probe date in its context has no stored
+        answer for its new signature and is asked once, keeping its verdict meanwhile. A host without one lands on the signature its first review
+        was stored under, so the stored answer applies: no AI call at all."""
+        plain_host = 'plain.k.example'
+        self.certificate(100)
+        self.probe(3)
+        provider = self.provider()
+        scan = self.scan()
+        dated = self.floorless(scan)
+        plain = CVEMatch.objects.create(cve_entry=self.cve, matched_product='nginx', matched_version='1.21.0', source='port', version_in_range=None,
+                                        evidence={'branch_unlisted': True},
+                                        subdomain=Subdomain.objects.create(name=plain_host, target_domain=self.domain, scan_history=scan))
+        with self.legacy_view():
+            first = {m.pk: self.reviewed_row(m, provider).signature for m in (dated, plain)}
+            again = {m.pk: row.signature for m in (dated, plain) for row, _ in triage.track(triage.with_cves([CVEMatch.objects.get(pk=m.pk)]))}
+        self.assertNotEqual(first, again)  # the verdict the review wrote moved the old key: this is what production holds
+        self.assertEqual(provider.complete.call_count, 2)
+        self.certificate(99)  # a day later, under the new definition
+        self.probe(0)
+        rows = {m.pk: pair for m in (dated, plain) for pair in triage.track(triage.with_cves([CVEMatch.objects.get(pk=m.pk)]))}
+        for pk, (row, d) in rows.items():
+            self.assertEqual((row.status, row.classification, row.verdict_id is not None), ('pending', self.kept, True))  # queued, the record kept
+        stats = triage.run_triage(list(rows.values()), provider=provider)
+        self.assertEqual((stats['asked'], stats['cached']), (1, 1))  # the plain host's stored answer applies; the dated host is asked once
+        self.assertEqual(provider.complete.call_count, 3)
+        for row, _ in rows.values():
+            row.refresh_from_db()
+            self.assertEqual(row.status, 'triaged')
+        # and from here on the same host a day later is the same key, and asks nothing
+        self.certificate(98)
+        self.probe(0)
+        (row, d), = triage.track(triage.with_cves([CVEMatch.objects.get(pk=dated.pk)]))
+        self.assertEqual((row.status, row.signature), ('triaged', rows[dated.pk][0].signature))
+
+    def burst(self):
+        """Four rows whose keys the definition change moves (a certificate and a probe date in the context), all reviewed today."""
+        self.certificate(100)
+        self.probe(3)
+        provider = self.provider()
+        scan = self.scan()
+        matches = []
+        for n in range(4):
+            sub = Subdomain.objects.create(name=self.host, target_domain=self.domain, scan_history=scan)
+            matches.append(CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub, matched_product='nginx', matched_version=f'1.21.{n}',
+                                                   source='port', version_in_range=None, evidence={'branch_unlisted': True}))
+        with self.legacy_view():
+            for m in matches:
+                self.reviewed_row(m, provider)
+        self.assertEqual((provider.complete.call_count, TriageCall.objects.count()), (4, 4))
+        self.certificate(99)
+        self.probe(0)
+        pairs = triage.track(triage.with_cves(matches))
+        self.assertEqual({row.status for row, _ in pairs}, {'pending'})
+        return matches, provider, pairs
+
+    def spread(self, cap, limit):
+        """Each cap, set to admit one call more than the four already made today, asks one row and leaves the rest pending with their verdicts."""
+        matches, provider, pairs = self.burst()
+        with mock.patch.dict('os.environ', {cap: str(limit(TriageCall.objects.count()))}):
+            stats = triage.run_triage(pairs, provider=provider)
+        self.assertEqual((stats['asked'], stats['queued']), (1, 3))
+        self.assertEqual(provider.complete.call_count, 5)
+        self.assertEqual(Triage.objects.filter(status='pending', classification=self.kept).count(), 3)  # waiting, verdicts kept
+
+    def test_the_one_time_review_burst_is_spread_by_the_run_cap(self):
+        self.spread('CVENGINE_TRIAGE_MAX_PER_RUN', lambda today: 1)
+
+    def test_the_one_time_review_burst_is_spread_by_the_project_day_cap(self):
+        self.spread('CVENGINE_TRIAGE_MAX_PER_PROJECT_DAY', lambda today: today + 1)
+
+    def test_the_one_time_review_burst_is_spread_by_the_day_cap(self):
+        self.spread('CVENGINE_TRIAGE_MAX_PER_DAY', lambda today: today + 1)

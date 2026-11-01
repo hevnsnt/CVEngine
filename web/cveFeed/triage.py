@@ -512,7 +512,7 @@ def attach_host_context(d, match):
     except Exception:  # noqa: BLE001
         logger.exception('could not read the host context of match %s', match.pk)
         return
-    d['host_context'] = _strip_deep(host_context.clipped(context))
+    d['host_context'] = _strip_deep(host_context.clipped(context, stable=True))  # the model is shown the stable view (see bind_host_text)
     d['facts']['closure_basis'] = basis
     digest = host_context.signal_digest(context)
     if digest:
@@ -525,13 +525,29 @@ def bind_host_text(d):
     """Key a CVE match's verdict to the host-controlled text the model was shown (banner extras, CPE, host metadata) when no hard
     evidence bounds the answer. The verdict is shared by every host and organization with the same signature, so without this one
     host's crafted banner could set the stored verdict of every other host with the same product and version. A match with a floor
-    needs no such key: the model can only raise it, never clear it."""
+    needs no such key: the model can only raise it, never clear it.
+
+    What the model is shown of the host (``d['host_context']``) is ``host_context.stable_view`` of the context, and this key is made from that
+    same view: a value the model was shown is in the key, and a value that changes while the host does not (a certificate's days left, a
+    probe's observed date, a request id, a cache state, a banner's clock) is in neither, so it no longer moves the signature every day and every
+    rescan no longer asks the same question again (one AI call per match without a floor, per rescan). The key hashes ``d['host_context']`` itself, so the
+    agreement holds by construction (a path that forgot ``stable=True`` would show and key the raw context). The hash formula is the one it always was, so a row
+    keyed before this change keeps its key only where the old and the new view agree; for the others the signature moves once, which queues one
+    review per such match (the verdict, classification and validation record stay until it answers), bounded by the daily triage caps
+    (``_rereview_fields``, ``DEFAULT_CAPS``). Deliberate: the AI's verdicts on the host's other matches are blanked in the view, so another CVE's
+    verdict flipping does not re-ask this match; the host inventory's package count is not in it, so a package change alone does not either."""
     if d['kind'] != 'cve_match' or hard_evidence('cve_match', d['facts'])[0]:
         return
+    key = host_text_key(d)
+    if key:
+        d['signature_fields']['host_text'] = key
+
+
+def host_text_key(d):
+    """The host text key of a description (see ``bind_host_text``), whether or not the match has a floor; '' when there is no text."""
     payload = d['payload']
-    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]
-    if any(text):
-        d['signature_fields']['host_text'] = hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]  # exactly what the model is shown: nothing is made of it here
+    return hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16] if any(text) else ''
 
 
 def describe(finding):
