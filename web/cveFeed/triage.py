@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 from django.utils import timezone
 
 from cveFeed import match_policy
+from cveFeed.secret_redaction import mask_extracted, redact_text
 from reNgine.ai_providers import AIProviderError, clean_text, triage_finding
 
 logger = logging.getLogger(__name__)
@@ -373,15 +374,19 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
     except the response's status code, parsed, never quoted."""
     kind = kind_of_vulnerability(v)
     names = _vuln_names(v)
-    extracted = [_s(e, 120, names) for e in (v.extracted_results or [])[:5]]
+    values = list((v.extracted_results or [])[:5])
+    signed = [_s(e, 120, names) for e in values]  # what the signature hashes: unchanged, so the verdicts already stored keep their key
+    # What the model sees: a value a secret template extracted is masked whole (provider class, length, keyed fingerprint), anything else
+    # passes the generic secret patterns. The signature is a hash of ``signed``; no prompt carries it.
+    extracted = [_s(e, 120, names) for e in mask_extracted(values, v.template_id if kind == 'nuclei' else '', tags if kind == 'nuclei' else ())]
     severity = v.severity if v.severity is not None else 0
     source = v.source or ''
     if kind == 'db_exposure':
         label = (v.template_id or '').replace('db-exposure-', '', 1)
         number = _safe_url_port(v.http_url)
-        reply = extracted[0] if extracted else ''
+        reply = signed[0] if signed else ''
         facts = {'reply': reply}
-        payload = {'service': _s(label, 40), 'port': number, 'server_reply': reply,
+        payload = {'service': _s(label, 40), 'port': number, 'server_reply': extracted[0] if extracted else '',
                    'product': _s((port or ('', ''))[0], 120, names), 'version': _s((port or ('', ''))[1], 120, names),
                    'name': _prose(v.name, 200, names)}
         fields = {'label': label, 'port': number, 'reply': reply}
@@ -389,7 +394,7 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
     elif kind == 'bbot':
         facts = {}
         payload = {'module': _s(v.template_id, 60, names), 'name': _prose(v.name, 200, names), 'severity': SEVERITY_NAMES.get(severity),
-                   'description': _prose(v.description, 1000, names), 'path': _path_only(v.http_url, names),
+                   'description': _prose(redact_text(v.description), 1000, names), 'path': _path_only(v.http_url, names),
                    'snippet': (extracted or [''])[0][:200]}
         fields = {'module': v.template_id or '', 'name': v.name, 'severity': severity}
         priority = (4, -severity)
@@ -399,10 +404,10 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
         payload = {'template_id': _s(v.template_id, 120, names), 'name': _prose(v.name, 200, names), 'severity': SEVERITY_NAMES.get(severity),
                    'matcher_name': matcher, 'extracted_results': extracted, 'cve_ids': sorted(_s(c, 40) for c in cves)[:10],
                    'cwe_ids': sorted(_s(c, 40) for c in cwes)[:10], 'tags': sorted(_s(t, 40) for t in tags)[:15],
-                   'description': _prose(v.description, 1500, names), 'path': _path_only(v.http_url, names),
+                   'description': _prose(redact_text(v.description), 1500, names), 'path': _path_only(v.http_url, names),
                    'http_status': _status_of(v.response), 'source': _s(source, 40)}
         fields = {'source': source, 'template_id': v.template_id or '', 'matcher': v.matcher_name or '', 'name': v.name,
-                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(extracted)}
+                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(signed)}
         priority = (0, 0) if source == 'nuclei-cve' else (3, -severity)
     return {'kind': kind, 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': severity, 'priority': priority}
 

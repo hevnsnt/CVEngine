@@ -32,6 +32,32 @@ MODES = {
 }
 MODE_ARGS = {name: m['args'] for name, m in MODES.items()}  # kept for callers that read the extra args
 DEFAULT_MODE = 'standard'
+# bbot's trufflehog module (part of the deep preset, through the code-enum flag) checks every secret it finds against the issuer's live API:
+# bbot 3.0.2 never passes trufflehog's --no-verification, and its only_verified option only filters what is reported, so the credential of a
+# third party found on a target is always used. That cannot be turned off from the module's options, so the module is excluded (-em) unless a
+# person opted in with CVENGINE_BBOT_TRUFFLEHOG=1 and the project is not a bug bounty project (see trufflehog_allowed).
+TRUFFLEHOG_ENV = 'CVENGINE_BBOT_TRUFFLEHOG'
+TRUFFLEHOG_FLAG = '--cvengine-trufflehog'  # internal: run_discovery adds it for a project that may use trufflehog; build_command consumes it
+
+
+def trufflehog_enabled():
+    """True when CVENGINE_BBOT_TRUFFLEHOG is set to 1, true, yes or on. Off by default."""
+    return os.environ.get(TRUFFLEHOG_ENV, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def trufflehog_allowed(project_id=None):
+    """May bbot's trufflehog module run for this project: the setting is on and the project has no bug bounty engagement (a program's rules
+    almost always forbid using a credential found on its assets, and cvENGINE cannot read a program's exceptions, so a bounty project is
+    always off, whatever the setting)."""
+    if not trufflehog_enabled():
+        return False
+    if project_id:
+        from cveFeed.models import BountyEngagement
+        if BountyEngagement._base_manager.filter(project_id=project_id).exists():
+            return False
+    return True
+
+
 PRESET_FLAG = '--cvengine-preset'  # internal: marks the private preset file private_config passes to build_command
 HEAVY_KIND = {'deep': 'bbot-deep', 'passive': 'bbot-passive'}  # any other mode is the standard weight
 BBOT_SEVERITIES = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
@@ -285,6 +311,10 @@ def build_command(targets, presets=None, mode=DEFAULT_MODE, extra_args=(), stric
         names.append(args[at + 1])
         del args[at:at + 2]
     cmd += ['-p', *names]  # one -p with every preset: bbot's -p takes the list and a second -p replaces the first
+    verify_secrets = TRUFFLEHOG_FLAG in args
+    args = [a for a in args if a != TRUFFLEHOG_FLAG]
+    if not (verify_secrets and trufflehog_enabled()):
+        cmd += ['-em', 'trufflehog']  # excluded in every mode; the next token is always another option (-rf, --force or --json), which ends -em's list
     if strict_scope:
         cmd.append('--strict-scope')
     return cmd + cfg['args'] + ['--json', '-y', '--no-color', *args]

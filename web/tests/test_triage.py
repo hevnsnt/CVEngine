@@ -236,6 +236,81 @@ class BuilderTests(unittest.TestCase):
 		self.assertNotIn('secret-corp', self.prompt(bbot))
 
 
+GOOGLE_KEY = 'AIzaSyD' + '1234567890abcdefghijklmnopqrstuv'
+
+
+class SecretMaskingTests(unittest.TestCase):
+	"""A secret a scanner found never reaches the AI provider: the prompt carries a mask (class, length, fingerprint), while the evidence
+	signature, and so every stored verdict's key, stays what it was."""
+
+	def prompt(self, d):
+		return ai_providers.build_triage_prompt(d['kind'], d['payload'])
+
+	def google(self, **kw):
+		return fake_vuln(template_id='google-api-key', name='Google API Key', extracted_results=[GOOGLE_KEY], severity=1, **kw)
+
+	def test_a_token_template_extract_is_masked_in_the_prompt(self):
+		d = triage.describe_vulnerability(self.google(), tags=['exposure', 'token', 'google'])
+		prompt = self.prompt(d)
+		self.assertNotIn(GOOGLE_KEY, prompt)
+		self.assertNotIn(GOOGLE_KEY[4:], prompt)
+		self.assertIn('google_api_key', prompt)
+		self.assertIn('redacted 39 chars', prompt)
+		self.assertIn('AIza', prompt)
+
+	def test_a_secret_template_masks_the_value_even_when_the_value_has_no_known_shape(self):
+		v = fake_vuln(template_id='generic-token-leak', extracted_results=['hunter2-hunter2-hunter2'])
+		prompt = self.prompt(triage.describe_vulnerability(v, tags=['token']))
+		self.assertNotIn('hunter2', prompt)
+		self.assertIn('redacted 23 chars', prompt)
+
+	def test_a_secret_in_a_template_nobody_tagged_is_caught_by_the_shape(self):
+		prompt = self.prompt(triage.describe_vulnerability(fake_vuln(template_id='some-panel', extracted_results=[GOOGLE_KEY]), tags=['panel']))
+		self.assertNotIn(GOOGLE_KEY, prompt)
+
+	def test_a_secret_in_the_description_is_masked(self):
+		v = fake_vuln(description='Leaked key ' + GOOGLE_KEY + ' and postgres://root:hunter2pw@db.example.test/x')
+		prompt = self.prompt(triage.describe_vulnerability(v))
+		self.assertNotIn(GOOGLE_KEY, prompt)
+		self.assertNotIn('hunter2pw', prompt)
+
+	def test_a_bbot_secret_is_masked_in_the_prompt(self):
+		v = fake_vuln(source='bbot', template_id='badsecrets', name='BadSecrets - Known Secret',
+					  description='Known Secret Found. Secret Type: [ASP.NET] Secret: [s3cr3t-signing-value] Product Type: [ViewState] '
+								  'Product: [' + 'Zm9vYmFy' * 8 + '] Detecting Module: [x]')
+		d = triage.describe_vulnerability(v)
+		prompt = self.prompt(d)
+		for leaked in ('s3cr3t-signing-value', 'Zm9vYmFy'):
+			self.assertNotIn(leaked, prompt)
+		self.assertIn('Known Secret Found', prompt)
+		self.assertIn('Secret Type: [ASP.NET]', prompt)
+
+	def test_the_signature_is_what_it_was_before_the_masking(self):
+		d = triage.describe_vulnerability(self.google(), tags=['token'])
+		self.assertEqual(d['signature_fields']['extracted'], [GOOGLE_KEY])  # the raw cleaned value, as before: the hash of the evidence is unchanged
+		legacy = {'source': 'nuclei', 'template_id': 'google-api-key', 'matcher': 'word', 'name': 'Google API Key', 'cves': [], 'severity': 1,
+				  'extracted': [GOOGLE_KEY]}
+		self.assertEqual(triage.signature_for('nuclei', d['signature_fields']), triage.signature_for('nuclei', legacy))
+		self.assertNotIn(GOOGLE_KEY, json.dumps(d['payload']))
+
+	def test_the_signature_of_an_ordinary_finding_is_unchanged_and_so_is_its_payload(self):
+		d = triage.describe_vulnerability(fake_vuln(), cves=['CVE-2099-5'], tags=['panel', 'exposure'])
+		self.assertEqual(d['payload']['extracted_results'], ['v1.2'])
+		self.assertEqual(d['signature_fields']['extracted'], ['v1.2'])
+
+	def test_db_exposure_reply_keeps_its_hard_evidence_and_masks_a_secret(self):
+		db = triage.describe_vulnerability(fake_vuln(source='db_exposure', template_id='db-exposure-redis', http_url='redis://203.0.113.5:6379',
+													 extracted_results=['PONG (redis 7.0.1) ' + GOOGLE_KEY], name='Unauthenticated Redis exposure'),
+										   port=('redis', '7.0.1'))
+		self.assertIn(GOOGLE_KEY[:20], db['facts']['reply'])  # the facts and the signature read the raw reply
+		self.assertNotIn(GOOGLE_KEY, json.dumps(db['payload']))
+
+	def test_the_triage_clean_pass_masks_a_secret_a_builder_missed(self):
+		prompt = ai_providers.build_triage_prompt('nuclei', {'note': 'saw ' + GOOGLE_KEY + ' there', 'nested': [{'x': 'AKIAIOSFODNN7EXAMPLE'}]})
+		self.assertNotIn(GOOGLE_KEY, prompt)
+		self.assertNotIn('AKIAIOSFODNN7EXAMPLE', prompt)
+
+
 class TriageDbBase(TestCase):
 	def setUp(self):
 		org = Org.objects.create(name='T', slug='t')
