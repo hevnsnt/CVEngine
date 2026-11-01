@@ -531,6 +531,24 @@ class ColdCacheTests(Fresh):
         self.assertEqual(calls, [1])
         self.assertEqual(results, [{'n': 1}] * 5)
 
+    def test_a_poll_that_wins_the_lock_just_after_another_stored_the_entry_serves_it_and_computes_nothing(self):
+        """The race behind a CI flake of the test above: a poll reads the key (nothing there), the winner then stores its entry and lets go of the
+        lock, and only then does the poll try for the lock and win it. It must read the key again, not compute a second time."""
+        key = f'unit-race-{threading.get_ident()}'
+        entry_key = f'cve:snap:{key}:s'
+        self.addCleanup(lambda: cache.delete_many([entry_key, f'{entry_key}:lock']))
+        real_add = cache.add
+
+        def add_after_the_winner_finished(name, value, timeout=None, **kw):
+            cache.set(entry_key, {'payload': {'n': 1}, 'etag': 'e', 'at': snapshot_cache._now(), 'rev': snapshot_cache.revision(), 'by': 'request'}, 60)
+            return real_add(name, value, timeout, **kw)  # the winner has let go of the lock: this one is granted
+        compute = mock.Mock(side_effect=AssertionError('a second computation'))
+        with mock.patch.object(cache, 'add', add_after_the_winner_finished):
+            got = snapshot_cache.snapshot(key, 's', compute, 60)
+        self.assertEqual(got['payload'], {'n': 1})
+        compute.assert_not_called()
+        self.assertIsNone(cache.get(f'{entry_key}:lock'))  # and the lock it won is let go of
+
     def test_a_cache_that_raises_still_answers_with_the_refresher_registered_and_counted(self):
         broken = mock.Mock(side_effect=ConnectionError('redis is down'))
         client = client_for(self.a1)
