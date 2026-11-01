@@ -11,7 +11,7 @@ the Hosts page, search and the graph already read.
 | Open findings: critical/high 25, medium 10, low 3 | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
 | Sensitive data on a route (cveFeed.sensitive.sensitive_score) | worst route | 25 |
-| Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
+| Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS, cleartext Telnet, FTP and r-services): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
 | Exposure: any public IP 10 | | 10 |
 | Recency: new or returned in the last 7 days 10, port opened or version changed 5 | | 10 |
 | Zombie host 15, zombie route 5 | | 15 |

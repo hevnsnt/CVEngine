@@ -544,7 +544,7 @@ class TlsCertificate(models.Model):
 
 
 class HygieneFinding(models.Model):
-    """A configuration-hygiene finding for a domain or host: TLS, certificates, SPF, DKIM, DMARC, CAA."""
+    """A configuration-hygiene finding for a domain or host: TLS, certificates, SPF, DKIM, DMARC, CAA, cleartext services."""
 
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)
