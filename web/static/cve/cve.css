@@ -1830,12 +1830,19 @@ section.internal[hidden]{display:none}
 .set-group{display:flex;flex-direction:column;gap:2px}
 .set-group-title{font:600 10px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.14em;color:var(--muted);padding:0 10px 4px}
 .set-nav [role=tab]{justify-content:flex-start;text-align:left;width:100%;padding:0 10px!important}
+.set-group-items{display:flex;flex-direction:column;gap:2px}
+.set-group-items[hidden]{display:none}
+.set-toggle{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;cursor:pointer;text-align:left;text-transform:none;letter-spacing:.04em;font-size:12px}
+.set-toggle::before{content:"\25B8";display:inline-block;transition:transform .15s}
+.set-toggle[aria-expanded=true]::before{transform:rotate(90deg)}
+.set-toggle:focus-visible{outline:2px solid var(--accent, currentColor);outline-offset:2px}
 .set-panel{min-width:0}
 @media (max-width:900px){
   .set-layout{grid-template-columns:minmax(0,1fr);gap:12px}
   .set-nav[role=tablist]{position:static;gap:8px}
   .set-group{flex-direction:row;flex-wrap:wrap;align-items:center}
   .set-group-title{width:100%;padding:0 4px 2px}
+  .set-group-items{flex-direction:row;flex-wrap:wrap;align-items:center}
   .set-nav [role=tab]{width:auto}
 }
 

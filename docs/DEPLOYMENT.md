@@ -139,6 +139,34 @@ Everything below is what the code does with a model on your own server (Ollama, 
 - **Limits.** `CVENGINE_AI_MAX_TOKENS` (default 2048, 400 for a triage), `CVENGINE_AI_TIMEOUT` (default 120 seconds, 300 for LM Studio, which may load a model on the first request), `CVENGINE_AI_CONNECT_TIMEOUT` (10 seconds), `CVENGINE_OLLAMA_NUM_CTX`, `CVENGINE_AI_STRUCTURED`. See [Configuration](CONFIGURATION.md).
 - **When a reply is cut off.** A triage that hit its limit (the server said `length`) is asked once more with twice the limit (800, or twice yours up to 32768). If that is cut off too, the call fails with the category `output_truncated`, the finding is not triaged by that attempt, and the failure is recorded with the AI usage of that stage. A reply with no text at all is `empty_response`. The other stages do not retry: the call fails and the stage carries on as it does for any model error.
 
+## Scan more targets at once
+
+cvENGINE scans as much as the machine can hold without running out of memory, and by default that is not much: a handful of scanners at a time, and a few discovery scans in flight. On a small machine that is right. On a bigger one, or when you watch the queue and only one or two targets move at a time, you can allow more.
+
+**Where.** Sign in as an App Admin, open **Settings**, then **configMaxxing** (collapsed in the left column until you click it; the address is `/cve/settings/#configmaxxing`), then **Scan concurrency**. Each number shows its default, the environment variable behind it if you set one, and who changed it and when; **Reset to default** puts one back, and **Reset all configMaxxing settings to defaults** puts everything back. No restart is needed for the scanner limits and the discovery scans kept running; they apply within seconds. The number of hosts assessed at once is the ceiling of the discovery worker's autoscaler: the page resizes the running worker and shows the ceiling the worker reports (the worker may briefly run a few more than the ceiling, it is not an exact cap), and if the worker does not confirm the change it says so and the number takes effect after the next restart or update.
+
+**What the numbers mean.**
+
+- **Scanners at once** (one number for each of nmap, nuclei, bbot, naabu and the others): how many runs of that kind are allowed together in the scanning container. More runs of a kind finish more targets sooner, and use more CPU and memory.
+- **Hosts assessed at once** (`DISCOVERY_CONCURRENCY`): how many discovery tasks and host assessments run together. Each assessment works through one host from start to finish, so this is the number of hosts being assessed at one time. Most of an assessment is waiting (on a scanner's turn, or on a Sentinel), so this can be higher than the number of CPUs.
+- **Discovery scans kept running** (`CVENGINE_WORK_DEPTH`): how many scans of whole targets the work conductor keeps going or queued. Raise it when you have many targets and the scanners are not busy; `0` stops cvENGINE from starting scans on its own.
+
+**The memory gate still applies.** Whatever you choose, a scanner starts only when its memory estimate fits the scanning container's budget (75% of `CELERY_MEM_LIMIT`), so raising a number past what the machine can carry makes runs wait for memory; it does not make the machine run out. The page shows the container's budget and warns when your choices could want much more than it. If the warning appears, give the container more memory (`CELERY_MEM_LIMIT` in `.env`, then `make up`) before you raise the numbers further.
+
+**Safe starting values.** Change a few numbers, watch **Settings, Resources** for a day (the memory used, anything waiting for memory, anything stopped for memory), then go on. The AI review every three hours may lower a number when memory is short and raise it again, but never above the number you saved.
+
+| Machine | `CELERY_MEM_LIMIT` | nmap | nuclei, nuclei light | bbot standard, passive | bbot deep | hosts assessed at once | discovery scans kept running |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 vCPU, 8 GB | `4g` (the default) | 2 (default) to 3 | 1 | 2 | 1 | 8 (default) | 3 (default) to 4 |
+| 8 vCPU, 16 GB | `8g` | 4 | 2 | 3 | 1 | 12 | 6 |
+| 16 vCPU, 32 GB | `16g` | 6 | 3 | 4 | 2 | 16 | 10 |
+
+Leave the other scanner kinds at their defaults unless a particular queue is the one that is slow. The slow background sweeps (`nmap-full-bg`, `nmap-udp-bg`) are meant to wait behind everything else, and a higher number sends more probes at the same address.
+
+**More concurrency sends more traffic to your targets.** Ten nmap scans at once are ten times the packets. Check that the networks and the devices you scan can take it (small routers and printers often cannot), and that your scope allows it.
+
+**The best way to scale is a second machine.** A Sentinel scans from its own machine with its own CPU, memory and network path, takes work from this server and reports back, so it adds capacity instead of squeezing more out of one container. Add one before you push the numbers on a single server far above the table ([Sentinels](SENTINELS.md)).
+
 ## Backups
 
 Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).

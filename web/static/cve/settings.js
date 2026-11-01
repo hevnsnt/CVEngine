@@ -3,6 +3,9 @@
 import { ask } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
+import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
+import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
+import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const root = document.getElementById("settings");
 const csrf = root.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -627,7 +630,14 @@ const sections = {
           "Tuning",
           el("p", "note", "Container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m). Memory reserved per job (an estimate at first, raised to what real runs needed): " +
             Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") +
-            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment. DISCOVERY_CONCURRENCY (default 3) sets how many discoveries may queue at once."),
+            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment."),
+          el("p", "note", "Scan concurrency moved to configMaxxing: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. "),
+          Object.assign(el("a", "", "Open configMaxxing", { href: `#${SECTION_ID}` }), {
+            onclick: (event) => {
+              event.preventDefault();
+              open(SECTION_ID);
+            },
+          }),
         ),
       );
     };
@@ -642,6 +652,10 @@ const sections = {
       if (document.body.contains(host)) timer = setTimeout(refresh, 5000);
     };
     await refresh();
+  },
+
+  async [SECTION_ID](m) {
+    await buildSection(m, { card: parseHash(location.hash).card });
   },
 
   async tailscale(m) {
@@ -1227,14 +1241,37 @@ const labels = {
   reset: "Factory reset",
 };
 
-async function open(name) {
+// configMaxxing: the advanced tunables. A group of its own that is collapsed until opened; whether it is open is remembered per viewer.
+let storage = null;
+try {
+  storage = window.localStorage;
+} catch (_) {
+  /* blocked: the group stays collapsed by default and nothing is remembered */
+}
+const cmItems = el("div", "set-group-items", null, { id: "set-cm-items" });
+const cmToggle = el("button", "set-group-title set-toggle", SECTION_LABEL, {
+  type: "button",
+  "aria-controls": "set-cm-items",
+});
+function setCmOpen(isOpen, remember = true) {
+  cmItems.hidden = !isOpen;
+  cmToggle.setAttribute("aria-expanded", String(isOpen));
+  cmToggle.dataset.open = isOpen ? "1" : "0";
+  if (remember) writeOpen(storage, isOpen);
+}
+
+async function open(name, card = "") {
   tabs
-    .querySelectorAll("button")
+    .querySelectorAll("button[data-tab]")
     .forEach((b) =>
-      b.setAttribute("aria-selected", String(b.dataset.tab === name)),
+      b.setAttribute(
+        "aria-selected",
+        String(b.dataset.tab === name && (!b.dataset.card || b.dataset.card === (card || b.dataset.card))),
+      ),
     );
+  if (name === SECTION_ID) setCmOpen(true);
   panel.textContent = "";
-  history.replaceState(null, "", `#${name}`);
+  history.replaceState(null, "", card ? `#${name}/${card}` : `#${name}`);
   try {
     await sections[name](panel);
   } catch (err) {
@@ -1256,7 +1293,29 @@ groups.forEach(([title, names]) => {
   });
   tabs.append(group);
 });
+const cmGroup = el("div", "set-group", null, { role: "presentation" });
+cmToggle.onclick = () => setCmOpen(cmItems.hidden);
+cards().forEach((entry) => {
+  const b = el("button", "btn ghost sm", entry.title, {
+    role: "tab",
+    "data-tab": SECTION_ID,
+    "data-card": entry.id,
+    "aria-selected": "false",
+  });
+  b.type = "button";
+  b.onclick = () => open(SECTION_ID, entry.id);
+  cmItems.append(b);
+});
+cmGroup.append(cmToggle, cmItems);
+tabs.append(cmGroup);
+setCmOpen(readOpen(storage), false);
+
 // an old link to #engines (the tab this replaced) opens the scan policy
 const legacyTabs = { engines: "scan_policy" };
-const hashTab = legacyTabs[location.hash.slice(1)] || location.hash.slice(1);
-open(sections[hashTab] ? hashTab : "ai");
+const hash = location.hash.slice(1);
+const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
+open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "");
+window.addEventListener("hashchange", () => {
+  if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card);
+  else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
+});

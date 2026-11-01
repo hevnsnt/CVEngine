@@ -220,8 +220,73 @@ def _cost_override(kind):
     return _env_float('HEAVY_COST_' + kind.upper().replace('-', '_') + '_MB')
 
 
+def _static_cap(kind):
+    """The cap before anything an App Admin saved: HEAVY_MAX_<KIND>, else the built-in default."""
+    return int(_env_float('HEAVY_MAX_' + kind.upper().replace('-', '_')) or MAX_CONCURRENT.get(kind, 2))
+
+
+# What an App Admin saved on Settings, configMaxxing (cveFeed.scan_concurrency): the web process writes the saved values to this Redis key on every
+# save and the 30 second tick writes them again, and each process keeps a copy for SAVED_CACHE_SECONDS. This module only reads the key (it must stay
+# importable by itself: it runs inside every scanner task and in a child interpreter in the tests), and only for the caps of the scanner kinds.
+SAVED_VALUES_KEY = 'cvengine:scanconc:values'
+SAVED_CACHE_SECONDS = 5
+_saved = {'at': None, 'values': {}}
+_saved_clients = {}
+_saved_lock = threading.Lock()
+
+
+def redis_client():
+    """A Redis client for the broker URL, or None when the broker is not Redis. Created once per URL; connects on first use."""
+    url = os.environ.get('CELERY_BROKER') or os.environ.get('CELERY_BROKER_URL') or ''
+    if not url.startswith(('redis://', 'rediss://', 'unix://')):
+        return None
+    if url not in _saved_clients:
+        import redis
+        _saved_clients[url] = redis.Redis.from_url(url, socket_connect_timeout=2, socket_timeout=3, decode_responses=True)
+    return _saved_clients[url]
+
+
+def invalidate_saved():
+    with _saved_lock:
+        _saved.update(at=None)
+
+
+def saved_values(now_fn=time.monotonic):
+    """The values saved on the configMaxxing page, {key: whole number}, cached SAVED_CACHE_SECONDS. When Redis cannot be read the last copy this
+    process saw is kept; with none, nothing is saved as far as this process knows and the environment and the built-in defaults apply."""
+    now = now_fn()
+    with _saved_lock:
+        if _saved['at'] is not None and now - _saved['at'] < SAVED_CACHE_SECONDS:
+            return _saved['values']
+    try:
+        client = redis_client()
+        raw = client.get(SAVED_VALUES_KEY) if client is not None else None
+        values = json.loads(raw).get('values', {}) if raw else {}
+        values = values if isinstance(values, dict) else {}
+    except Exception:  # noqa: BLE001 - a cache that cannot be read must never stop admission or the conductor
+        logger.debug('saved scan concurrency could not be read', exc_info=False)
+        with _saved_lock:
+            _saved['at'] = now  # no retry on every call during an outage
+            return _saved['values']
+    with _saved_lock:
+        _saved.update(at=now, values=values)
+    return values
+
+
+def _admin_cap(kind):
+    """The cap an App Admin saved for a kind, or None."""
+    value = saved_values().get('heavy.' + kind)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
+
+
+def base_cap(kind):
+    """Where the cap starts: what the admin saved, else HEAVY_MAX_<KIND>, else the built-in default. The AI review moves from here."""
+    saved = _admin_cap(kind)
+    return saved if saved is not None else _static_cap(kind)
+
+
 def max_concurrent(kind):
-    baseline = int(_env_float('HEAVY_MAX_' + kind.upper().replace('-', '_')) or MAX_CONCURRENT.get(kind, 2))
+    baseline = base_cap(kind)
     low, high = adaptive_bounds(kind, baseline)
     try:
         client = getattr(get_store(), 'r', None)
@@ -233,12 +298,17 @@ def max_concurrent(kind):
 
 
 def adaptive_bounds(kind, baseline=None):
-    """Operator-controlled bounds; the default maximum is the established static cap."""
-    baseline = baseline or int(_env_float('HEAVY_MAX_' + kind.upper().replace('-', '_')) or MAX_CONCURRENT.get(kind, 2))
+    """The range the AI review may move a kind's cap within. The cap an App Admin saved is the default maximum (and is never pushed outside
+    the range by HEAVY_TUNE_MIN/MAX in the environment: the review may not go above it unless HEAVY_TUNE_MAX_<KIND> says so explicitly);
+    without one, the maximum is the HEAVY_MAX_<KIND> or built-in cap, as before."""
+    baseline = baseline or base_cap(kind)
+    saved = _admin_cap(kind)
     suffix = kind.upper().replace('-', '_')
-    low = max(1, int(_env_float('HEAVY_TUNE_MIN_' + suffix) or 1))
-    high = max(low, int(_env_float('HEAVY_TUNE_MAX_' + suffix) or baseline))
-    return low, high
+    env_low = max(1, int(_env_float('HEAVY_TUNE_MIN_' + suffix) or 1))
+    env_high = int(_env_float('HEAVY_TUNE_MAX_' + suffix) or baseline)
+    if saved is None:
+        return env_low, max(env_low, env_high)
+    return min(env_low, saved), max(env_high, saved)
 
 
 def cost_mb(kind):
