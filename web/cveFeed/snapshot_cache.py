@@ -39,10 +39,12 @@ WAIT_STEP = 0.05
 HOT_KEY = 'cve:snap:hot'  # {'<name>:<scope>': recipe}: the scopes asked for lately, and how to recompute each
 HOT_LOCK = 'cve:snap:hot:lock'
 MAX_HOT = 500  # a larger fleet of scopes is not registered (they are computed by the requests, as before)
+MAX_HOT_PER_USER = 24  # one user's share of them (a screen asks for about four snapshots per scope): the first registered keep their place, later ones are not registered
 BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval', ...}
 METRIC_TTL = 3 * 3600
-OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed')  # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed
-NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live')
+# a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
+OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
+NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'refresher')
 
 _hot_seen = {}  # (name, scope) -> when this process last registered it: a poll does not write to the cache each time
 
@@ -60,8 +62,11 @@ def count(name, outcome, n=1):
     """Add to this hour's counter of ``outcome`` for the snapshot ``name`` (shared by every worker; a cache that does not answer counts nothing)."""
     key = f'cve:snap:m:{int(_clock() // 3600)}:{name}:{outcome}'
     try:
-        if not cache.add(key, n, METRIC_TTL):
-            cache.incr(key, n)
+        try:
+            cache.incr(key, n)  # one round trip for every count but the first of an hour
+        except ValueError:
+            if not cache.add(key, n, METRIC_TTL):
+                cache.incr(key, n)
     except Exception:  # noqa: BLE001 - a counter is never worth a failed poll
         pass
 
@@ -92,33 +97,42 @@ def metrics():
 
 def mark_hot(name, scope, hot):
     """Register ``scope`` as asked for just now, for the refresher: ``hot`` is ``{'params': the scope_hash parameters, 'args': what the compute
-    function needs}``. Run inside ``project_scoped`` (the project ids the request runs under are what the refresher computes under, and what ``scope``
-    was hashed from). At most one cache write per scope, process and third of the hot window; a registration that loses the race to another worker's
-    is simply made by the next poll."""
+    function needs, 'check': optional, returns False for a scope that names nothing the caller may see}``. Run inside ``project_scoped`` (the project
+    ids the request runs under are what the refresher computes under, and what ``scope`` was hashed from). At most one cache write, and one run of
+    ``check``, per scope, process and third of the hot window; a registration that loses the race to another worker's is made by the next poll.
+    A scope is not registered when ``check`` refuses it, when the registry is full (``MAX_HOT``) or when the caller already holds
+    ``MAX_HOT_PER_USER`` of them, so one member cannot fill the registry (or the refresher's time) with scopes of their own making."""
     if not livecache_config.refresh_enabled():
         return
     key, hot_seconds, now = (name, scope), livecache_config.hot_seconds(), _clock()
     if now - _hot_seen.get(key, 0.0) < hot_seconds / 3:
         return
+    if len(_hot_seen) > 2000:
+        _hot_seen.clear()
+    _hot_seen[key] = now  # also when refused below: a refused scope is not asked about again at every poll
+    check = hot.get('check')
+    try:
+        if check is not None and not check():
+            return
+    except Exception:  # noqa: BLE001
+        return
     from tenancy import scope as tenancy_scope
-    allowed = tenancy_scope.current_allowed()
+    allowed, user = tenancy_scope.current_allowed(), getattr(tenancy_scope.current_user(), 'pk', None)
     try:
         if not cache.add(HOT_LOCK, 1, 5):
+            _hot_seen.pop(key, None)  # another worker is writing the index: ask again at the next poll
             return
         try:
             index = {k: v for k, v in (cache.get(HOT_KEY) or {}).items() if v['seen'] + hot_seconds > now}
             ident = f'{name}:{scope}'
-            if ident in index or len(index) < MAX_HOT:
-                index[ident] = {'name': name, 'scope': scope, 'allowed': None if allowed is None else sorted(allowed),
+            if ident in index or (len(index) < MAX_HOT and sum(1 for v in index.values() if v.get('user') == user) < MAX_HOT_PER_USER):
+                index[ident] = {'name': name, 'scope': scope, 'allowed': None if allowed is None else sorted(allowed), 'user': user,
                                 'params': [str(p) for p in hot.get('params', ())], 'args': dict(hot.get('args') or {}), 'seen': now}
                 cache.set(HOT_KEY, index, hot_seconds * 5)
         finally:
             cache.delete(HOT_LOCK)
     except Exception:  # noqa: BLE001
-        return
-    if len(_hot_seen) > 2000:
-        _hot_seen.clear()
-    _hot_seen[key] = now
+        _hot_seen.pop(key, None)
 
 
 def hot_recipes():
@@ -276,7 +290,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
 
 
 def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
-    """What the refresher does for one hot scope: ``(status, entry)``. ``'fresh'`` when the stored snapshot is of the current revision and younger
+    """What the refresher does for one hot scope: ``(status, entry, previous)`` (``previous`` is the snapshot it replaced, or None). ``'fresh'`` when the stored snapshot is of the current revision and younger
     than ``due_age`` (default ``fresh``), ``'busy'`` when a request or another refresher holds the lock, else ``'refreshed'`` with the new
     snapshot, stored under the key a request would have written (``by: 'refresher'``, so requests know to leave it to us). Raises what
     ``compute`` raises (the lock is released first)."""
@@ -284,15 +298,16 @@ def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
     lock = f'{key}:lock'
     due = fresh if due_age is None else due_age
     entry, rev = cache.get(key), revision()
-    if isinstance(entry, dict) and 'payload' in entry and entry['rev'] == rev and _now() - entry['at'] < due:
-        return 'fresh', entry
+    previous = entry if isinstance(entry, dict) and 'payload' in entry else None
+    if previous is not None and previous['rev'] == rev and _now() - previous['at'] < due:
+        return 'fresh', previous, previous
     if not cache.add(lock, 1, LOCK_SECONDS):
-        return 'busy', entry if isinstance(entry, dict) and 'payload' in entry else None
+        return 'busy', previous, previous
     try:
         entry = _build(compute, etag_of, rev, by='refresher')
         cache.set(key, entry, keep_seconds(fresh))
         count(name, 'refreshed')
-        return 'refreshed', entry
+        return 'refreshed', entry, previous
     finally:
         try:
             cache.delete(lock)

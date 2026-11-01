@@ -354,7 +354,7 @@ def _live_cache(notes):
            'auth_cache_seconds': livecache_config.auth_cache_seconds(),
            'hot_scopes': len(snapshot_cache.hot_recipes()),
            'last_run': None if not last else {'seconds_ago': round(snapshot_cache._clock() - last['at'], 1),
-                                              **{k: last[k] for k in ('hot', 'refreshed', 'errors', 'seconds') if k in last}},
+                                              **{k: last[k] for k in ('state', 'hot', 'refreshed', 'errors', 'seconds', 'overran', 'skipped') if k in last}},
            'polls': snapshot_cache.metrics()}
     if enabled and out['refresher'] == 'silent' and out['hot_scopes']:  # people are on the Live screen and nothing keeps it warm
         notes.append('the live cache refresher has not run lately (is celery beat running, and does the classic worker consume live_cache_queue?): the Live screen computes '

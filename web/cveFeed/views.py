@@ -675,6 +675,7 @@ def project_scoped(view):
             ids = set(Project.objects.filter(org__slug=org).values_list('id', flat=True)) if org else set()
             if allowed is not None:
                 ids &= set(allowed)
+            request.live_org = org if ids else ''  # only an organization that narrowed the projects is part of a snapshot's scope (see _live_org)
             if not ids:
                 return view(request, *args, **kwargs)
             tokens = scope.set_scope(ids, scope.current_user())
@@ -685,6 +686,7 @@ def project_scoped(view):
         project = Project.objects.filter(slug=slug).only('id').first()
         if not project or (allowed is not None and project.id not in allowed):
             return JsonResponse({'error': 'project not found'}, status=404)
+        request.live_org = ''  # a named project ignores the organization
         tokens = scope.set_scope({project.id}, scope.current_user())
         try:
             return view(request, *args, **kwargs)
@@ -705,6 +707,26 @@ def api_feed(request):
         CVEMatch.objects.filter(cve_entry__in=entries).exclude(ai_verdict='not_affected')
         .values_list('cve_entry').annotate(n=Count('id')))
     return JsonResponse({'items': [serialize_cve(e, counts.get(e.pk, 0)) for e in entries]})
+
+
+def _live_org(request):
+    """The organization slug a snapshot's scope carries: the one ``project_scoped`` found to narrow the projects, else ''. A ``?org=`` that names
+    nothing (or nothing of the caller's) never becomes a scope of its own, so a caller cannot mint scopes, and hot recipes, by varying it."""
+    return getattr(request, 'live_org', '')
+
+
+def _hot_check(domain_id=None, scan_id=None):
+    """Whether a ``?domain=`` and ``?scan=`` of a poll name rows the caller may see (run inside ``project_scoped``, only when a scope is about to be
+    registered as hot): a made-up id is answered as before but never refreshed in the background."""
+    def check():
+        from startScan.models import ScanHistory
+        from targetApp.models import Domain
+        try:
+            return ((not domain_id or Domain.objects.filter(id=domain_id).exists())
+                    and (not scan_id or ScanHistory.objects.filter(id=scan_id).exists()))
+        except Exception:  # noqa: BLE001 - an id the database refuses (out of range) is not a scope
+            return False
+    return check
 
 
 STATS_CACHE_SECONDS = 10  # how long a headline snapshot is fresh; it is kept three times as long to serve while one request refreshes it
@@ -749,8 +771,7 @@ def api_alive(request):
 @require_GET
 @project_scoped
 def api_stats(request):
-    from tenancy.roles import scope_org
-    snap = cached_stats_snapshot((request.GET.get('project', ''), scope_org(request)))
+    snap = cached_stats_snapshot((request.GET.get('project', ''), _live_org(request)))
     live = live_scan_counts()  # fresh on every poll: five cheap counts, and the first thing a person watches
     # the ETag is the snapshot's (computed once, when it was built) and the live counts: a poll that finds both unchanged gets a 304 and no body
     return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
@@ -812,13 +833,12 @@ def api_graph(request):
     after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
     from django.core.cache import cache
     from django.http import HttpResponseNotModified
-    from tenancy.roles import scope_org
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
-    params = (request.GET.get('project', ''), scope_org(request), domain_id, scan_id)
+    params = (request.GET.get('project', ''), _live_org(request), domain_id, scan_id)
     scope = snapshot_cache.scope_hash(*params)
     version = snapshot_cache.snapshot('graph-version', scope, lambda: graph_version(domain_id, scan_id), GRAPH_VERSION_SECONDS,
-                                      hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}})['payload']
+                                      hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}, 'check': _hot_check(domain_id, scan_id)})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
     key = graph_cache_key(scope, version)
@@ -842,14 +862,13 @@ def api_graph_live(request):
     per scope (the page polls every three: every open tab of a project shares one set of queries), with an ETag of what the scans are doing, so
     an unchanged poll is a 304. ``elapsed`` and ``at`` move every second and are left out of the ETag: the page counts the time from ``started``."""
     from cveFeed import graph_live
-    from tenancy.roles import scope_org
     slug, domain = request.GET.get('project', ''), request.GET.get('domain', '')
     project = slug if slug and slug != ALL_PROJECTS else None
     domain_id = int(domain) if domain.isdigit() else None
-    params = (slug, scope_org(request), domain_id)
+    params = (slug, _live_org(request), domain_id)
     snap = snapshot_cache.snapshot('graph-live', snapshot_cache.scope_hash(*params),
                                    lambda: graph_live.live(project, domain_id), GRAPH_LIVE_SECONDS, etag_of=_graph_live_token,
-                                   hot={'params': params, 'args': {'project': project, 'domain_id': domain_id}})
+                                   hot={'params': params, 'args': {'project': project, 'domain_id': domain_id}, 'check': _hot_check(domain_id)})
     return snapshot_cache.respond(request, snap['etag'], lambda: snap['payload'])
 
 
@@ -1082,13 +1101,12 @@ def api_discovery(request):
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
-    from tenancy.roles import scope_org
     return snapshot_cache.respond_payload(request, {
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': _public_error(scan.error_message),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': cached_discovery_counts((request.GET.get('project', ''), scope_org(request))),
+        'counts': cached_discovery_counts((request.GET.get('project', ''), _live_org(request))),
     })
 
 

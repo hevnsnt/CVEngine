@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import threading
+from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -631,3 +632,220 @@ class BeatTableTests(Fresh):
             row = PeriodicTask.objects.get(name='cvengine-live-refresh')
             self.assertEqual((row.task, row.queue, row.enabled, row.expire_seconds), ('refresh_live_snapshots', 'live_cache_queue', enabled, seconds * 3))
             self.assertEqual((row.interval.every, row.interval.period), (seconds, 'seconds'))
+
+
+# --- review fixes: made-up scopes, graph payload lifetime, a small polite refresher, the run lock, the commit-time bump ---------------
+
+
+class MadeUpScopeTests(Fresh):
+    def register(self, user, name, scope_id, ids):
+        tokens = scope.set_scope(set(ids), user)
+        try:
+            snapshot_cache.mark_hot(name, scope_id, {'params': (scope_id,), 'args': {}})
+        finally:
+            scope.reset_scope(tokens)
+
+    def test_an_organization_that_narrows_nothing_is_not_a_scope(self):
+        client = client_for(self.a1)
+        client.get(STATS)
+        client.get(GRAPH_LIVE)
+        plain = len(snapshot_cache.hot_recipes())
+        for i in range(30):
+            for path in (STATS, GRAPH_LIVE, DISCOVERY):
+                self.assertEqual(client.get(f'{path}?org=junk{i}').status_code, 200)
+            self.assertEqual(client.get(f'{STATS}?project=_all&org=other-{i}').status_code, 200)
+        self.assertEqual(len(snapshot_cache.hot_recipes()), plain + 2, 'the discovery ticker and the _all spelling of stats: no scope per made-up organization')
+        self.assertEqual(client.get(f'{STATS}?org=org-b').json()['targets'], 1, 'an organization of another tenant still shows the caller only their own')
+        self.assertEqual(len(snapshot_cache.hot_recipes()), plain + 2)
+        client.get(f'{STATS}?project=lc-alpha&org=junk')  # a named project ignores the organization
+        self.assertEqual(len([r for r in snapshot_cache.hot_recipes() if r['name'] == 'stats']), 3)  # plain, _all and the named project: none per organization
+
+    def test_a_real_organization_that_narrows_is_still_its_own_scope(self):
+        root = client_for(self.root)
+        root.get(STATS)
+        root.get(f'{STATS}?org=org-a')
+        root.get(f'{STATS}?org=org-b')
+        self.assertEqual(len(snapshot_cache.hot_recipes()), 3)
+        self.assertEqual(root.get(f'{STATS}?org=org-a').json()['targets'], 1)
+
+    def test_a_domain_or_scan_that_is_not_the_callers_is_answered_but_never_refreshed(self):
+        client = client_for(self.a1)
+        mine, theirs = self.hosts['alpha'], self.hosts['beta']
+        for i in range(30):
+            self.assertEqual(client.get(f'{GRAPH_LIVE}?domain={10 ** 6 + i}').status_code, 200)
+            self.assertEqual(client.get(f'{GRAPH}?scan={10 ** 6 + i}').status_code, 200)
+        self.assertEqual(client.get(f'{GRAPH_LIVE}?domain={theirs[0].id}').status_code, 200)
+        self.assertEqual(client.get(f'{GRAPH}?scan={theirs[1].id}').status_code, 200)
+        self.assertEqual(client.get(f'{GRAPH}?domain={10 ** 40}').status_code, 200)
+        self.assertEqual(snapshot_cache.hot_recipes(), [])
+        client.get(f'{GRAPH_LIVE}?domain={mine[0].id}')
+        client.get(f'{GRAPH}?scan={mine[1].id}')
+        self.assertEqual(sorted(r['name'] for r in snapshot_cache.hot_recipes()), ['graph-live', 'graph-version'])
+
+    def test_one_user_holds_at_most_a_share_of_the_registry_and_others_still_register(self):
+        for i in range(snapshot_cache.MAX_HOT_PER_USER + 20):
+            self.register(self.a1, 'stats', f'scope-{i}', {self.alpha.id})
+        mine = snapshot_cache.hot_recipes()
+        self.assertEqual(len(mine), snapshot_cache.MAX_HOT_PER_USER)
+        self.assertEqual({r['scope'] for r in mine}, {f'scope-{i}' for i in range(snapshot_cache.MAX_HOT_PER_USER)}, 'the first registered keep their place')
+        self.register(self.b1, 'stats', 'b-scope', {self.beta.id})
+        self.assertEqual(len(snapshot_cache.hot_recipes()), snapshot_cache.MAX_HOT_PER_USER + 1)
+        self.register(self.a1, 'stats', 'scope-0', {self.alpha.id})  # one that is already registered is renewed, not refused
+        self.assertEqual(len(snapshot_cache.hot_recipes()), snapshot_cache.MAX_HOT_PER_USER + 1)
+
+
+class GraphPayloadLifetimeTests(Fresh):
+    def test_a_prebuilt_graph_is_kept_as_long_as_one_a_request_builds_and_only_when_the_version_moved(self):
+        client = client_for(self.a1)
+        client.get(GRAPH)
+        host = self.hosts['alpha'][3]
+        Subdomain.objects.create(name='fresh.alpha.lcexample.test', target_domain=host.target_domain, scan_history=host.scan_history, http_status=200)
+        self.clock.advance(6)
+        writes = []
+        real_set = cache.set
+
+        def spy(key, value, timeout=None, *a, **k):
+            writes.append((key, timeout))
+            return real_set(key, value, timeout, *a, **k)
+        with mock.patch.object(live_refresh.cache, 'set', spy), Counting() as computed:
+            live_refresh.refresh_hot_scopes()
+            self.assertEqual(computed.calls()['graph'], 1)
+            self.clock.advance(6)
+            live_refresh.refresh_hot_scopes()  # nothing changed since: nothing is built
+            self.assertEqual(computed.calls()['graph'], 1)
+        graph_writes = [timeout for key, timeout in writes if key.startswith('cve-graph:')]
+        self.assertEqual(graph_writes, [views.GRAPH_CACHE_SECONDS])
+
+
+class PoliteRefresherTests(Fresh):
+    def test_the_budget_is_small_and_never_more_than_half_an_interval(self):
+        self.assertEqual([live_refresh.budget_seconds(i) for i in (2, 5, 6, 8, 60)], [1.0, 2.5, 3.0, 3.0, 3.0])
+
+    def test_a_backlogged_worker_gets_no_refresh_and_the_skip_is_counted(self):
+        client_for(self.a1).get(STATS)
+        self.clock.advance(11)
+        for backlog in ((0, live_refresh.BACKLOG_SKIP), (live_refresh.OWN_BACKLOG_SKIP, 0)):
+            with mock.patch.object(live_refresh, 'backlog', return_value=backlog), Counting() as computed:
+                summary = live_refresh.refresh_hot_scopes()
+            self.assertIn('skipped', summary)
+            self.assertEqual(computed.calls()['stats'], 0)
+        self.assertEqual(snapshot_cache.metrics()['this_hour']['skipped'], 2)
+        self.assertEqual(system_status._live_cache([])['last_run']['skipped'].split()[0], '3')
+        with mock.patch.object(live_refresh, 'backlog', return_value=(0, live_refresh.BACKLOG_SKIP - 1)), Counting() as computed:
+            self.assertEqual(live_refresh.refresh_hot_scopes()['refreshed'], 1)
+
+    def test_a_run_that_overran_is_counted_and_the_next_one_is_skipped_once(self):
+        client_for(self.a1).get(STATS)
+        self.clock.advance(11)
+        ticks = iter([0.0, 0.1, 9.0])  # started, the check before the one scope, the end: nine seconds against a budget of 2.5
+        fake_time = SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda s: None)
+        with mock.patch.object(live_refresh, 'time', fake_time), mock.patch.object(live_refresh, '_yield'):
+            summary = live_refresh.refresh_hot_scopes()
+        self.assertEqual(summary['refreshed'], 1)
+        self.assertEqual(snapshot_cache.metrics()['this_hour']['overran'], 1)
+        self.assertTrue(snapshot_cache.last_beat()['overran'])
+        self.clock.advance(11)
+        with Counting() as computed:
+            self.assertIn('overran', live_refresh.refresh_hot_scopes()['skipped'])
+            self.assertEqual(computed.calls()['stats'], 0)
+            self.assertEqual(live_refresh.refresh_hot_scopes()['refreshed'], 1)  # the skip cleared it
+
+    def test_the_worker_is_yielded_to_between_scopes(self):
+        client_for(self.a1).get(STATS)
+        client_for(self.b1).get(STATS)
+        self.clock.advance(11)
+        with mock.patch.object(live_refresh, '_yield') as yielded:
+            summary = live_refresh.refresh_hot_scopes()
+        self.assertEqual((summary['refreshed'], yielded.call_count), (2, 2))
+
+    def test_the_scopes_a_short_run_leaves_are_done_first_next_time(self):
+        client_for(self.a1).get(STATS)
+        client_for(self.b1).get(STATS)
+        self.clock.advance(11)
+        first = live_refresh.refresh_hot_scopes(budget=-1)  # no time for any
+        self.assertEqual((first['refreshed'], first['out_of_time']), (0, 2))
+        snapshot_cache.beat({'state': 'idle'})  # (a budget of -1 counts as an overrun, which would skip the next run)
+        calls = []
+        real = views.stats_payload
+        with mock.patch.object(views, 'stats_payload', lambda: calls.append(1) or real()), \
+                mock.patch.object(live_refresh, 'time', SimpleNamespace(monotonic=iter([0, 0, 9, 9, 9]).__next__, sleep=lambda s: None)), \
+                mock.patch.object(live_refresh, '_yield'):
+            second = live_refresh.refresh_hot_scopes(budget=2)
+        self.assertEqual((second['refreshed'], second['out_of_time']), (1, 1), 'one scope is served per short run')
+
+    def test_the_fast_snapshot_of_a_scope_nobody_polls_any_more_is_left_alone(self):
+        client_for(self.a1).get(GRAPH_LIVE)
+        client_for(self.a1).get(STATS)
+        self.clock.advance(40)  # still hot (60 s) but not polled for longer than a few intervals plus the registration throttle
+        with Counting() as computed:
+            summary = live_refresh.refresh_hot_scopes()
+        self.assertEqual(summary['idle'], 1)
+        self.assertEqual((computed.calls()['live'], computed.calls()['stats']), (0, 1))
+
+    def test_the_run_lock_is_a_token_and_a_run_never_deletes_one_another_run_holds(self):
+        client_for(self.a1).get(STATS)
+        client_for(self.b1).get(STATS)
+        self.clock.advance(11)
+        real = views.stats_payload
+        calls = []
+
+        def steal():
+            calls.append(1)
+            cache.set(live_refresh.RUN_LOCK, 'another-run', 30)  # our lock ran out and a later run took it
+            return real()
+        with mock.patch.object(views, 'stats_payload', steal):
+            summary = live_refresh.refresh_hot_scopes()
+        self.assertEqual(len(calls), 1, 'the run that lost its lock stops')
+        self.assertEqual(summary['skipped'], 'the run lock was lost')
+        self.assertEqual(cache.get(live_refresh.RUN_LOCK), 'another-run')
+        cache.delete(live_refresh.RUN_LOCK)
+        live_refresh.refresh_hot_scopes()
+        self.assertIsNone(cache.get(live_refresh.RUN_LOCK), 'a run releases its own lock')
+
+
+class CommitTimeBumpTests(Fresh):
+    def test_a_poll_that_cached_the_old_answer_before_the_commit_is_dropped_at_the_commit(self):
+        both = User.objects.create_user('lc-commit', password='x')
+        for project in (self.alpha, self.beta):
+            ProjectMembership.objects.create(user=both, project=project, role='user')
+        client = client_for(both)
+        self.assertEqual(client.get(STATS).json()['targets'], 2)
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            ProjectMembership.objects.filter(user=both, project=self.beta).delete()
+            # a poll running between the change and its commit saw the old rows and cached them under the (already bumped) epoch
+            cache.set(membership_cache._key(both), {'epoch': cache.get(membership_cache.EPOCH_KEY), 'ids': [self.alpha.id, self.beta.id]}, 15)
+        self.assertGreaterEqual(len(callbacks), 1)
+        self.assertEqual(client.get(STATS).json()['targets'], 1)
+
+    def test_the_commit_time_bump_is_robust(self):
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            ProjectMembership.objects.create(user=self.a1, project=self.beta, role='user')
+        self.assertTrue(callbacks)
+        epoch = cache.get(membership_cache.EPOCH_KEY)
+        for callback in callbacks:
+            callback()
+        self.assertNotEqual(cache.get(membership_cache.EPOCH_KEY), epoch)
+
+    def test_demoting_and_promoting_a_superuser_changes_the_next_poll(self):
+        user = User.objects.create_user('lc-su', password='x', is_superuser=True)
+        ProjectMembership.objects.create(user=user, project=self.alpha, role='admin')
+        client = client_for(user)
+        self.assertEqual(client.get(STATS).json()['targets'], 2)
+        user.is_superuser = False
+        user.save()
+        self.assertEqual(client.get(STATS).json()['targets'], 1)
+        self.assertEqual(client.get(STATS).json()['targets'], 1)  # cached now
+        user.is_superuser = True
+        user.save()
+        self.assertEqual(client.get(STATS).json()['targets'], 2)
+
+
+class CounterTests(Fresh):
+    def test_a_count_is_one_round_trip_after_the_first(self):
+        snapshot_cache.count('stats', 'hit')
+        with mock.patch.object(snapshot_cache.cache, 'add', wraps=snapshot_cache.cache.add) as add, \
+                mock.patch.object(snapshot_cache.cache, 'incr', wraps=snapshot_cache.cache.incr) as incr:
+            snapshot_cache.count('stats', 'hit')
+            snapshot_cache.count('stats', 'hit')
+        self.assertEqual((add.call_count, incr.call_count), (0, 2))
+        self.assertEqual(snapshot_cache.metrics()['this_hour']['hit'], 3)

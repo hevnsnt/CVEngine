@@ -42,4 +42,4 @@ def forget_cached_scopes(sender, **kwargs):
     """What a user may see changed: drop every user's cached set of project ids (tenancy.membership_cache). Once now, for what reads next in this
     transaction, and once more when it commits, so a poll that cached the old answer in between is not believed."""
     membership_cache.bump_epoch()
-    transaction.on_commit(membership_cache.bump_epoch)
+    transaction.on_commit(membership_cache.bump_epoch, robust=True)  # robust: a failure here is logged, it never stops the commit's other callbacks
