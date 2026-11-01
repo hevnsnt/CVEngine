@@ -1049,6 +1049,23 @@ class ApprovalTests(AgentBrokerTestCase):
 		status, out = call(self.t['dana'], 'PATCH', url, {'status': 'active', 'note': 'looping on one host'})
 		self.assertEqual((out['status'], out['status_note']), ('active', ''))
 
+	def test_an_administrators_reason_survives_suspend_and_revoke(self):
+		_, body = register(self.t['alice'])
+		url = f'/api/v1/agents/{body["id"]}'
+		call(self.t['dana'], 'PATCH', url, {'note': 'scanned out of scope on 1 Nov'})
+		call(self.t['dana'], 'PATCH', url, {'status': 'suspended'})  # the Sentinels page's Suspend button sends no note
+		self.assertEqual(Agent.objects.get(pk=body['id']).status_note, 'scanned out of scope on 1 Nov')
+		call(self.t['dana'], 'PATCH', url, {'status': 'revoked', 'note': 'scanned out of scope on 1 Nov'})  # the admin dialog's unchanged note
+		self.assertEqual(Agent.objects.get(pk=body['id']).status_note, 'scanned out of scope on 1 Nov')
+
+	def test_the_automatic_suspension_note_goes_with_any_change_of_status(self):
+		_, body = register(self.t['alice'])
+		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'revoked'})
+		_, fresh = register(self.t['alice2'], approve=False)
+		self.assertEqual(fresh['status_note'], broker.INHERITED_SUSPENSION_NOTE)
+		out = call(self.t['dana'], 'PATCH', f'/api/v1/agents/{fresh["id"]}', {'status': 'revoked'})[1]
+		self.assertEqual((out['status'], out['status_note']), ('revoked', ''))
+
 	def test_a_new_note_given_with_a_status_change_is_kept(self):
 		_, body = register(self.t['alice'])
 		url = f'/api/v1/agents/{body["id"]}'
