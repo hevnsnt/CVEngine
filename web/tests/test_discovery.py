@@ -409,6 +409,50 @@ class DiscoveryApiCredentialWiringTests(TestCase):
 		self.assertEqual(seen_kwargs.get('extra_args'), [])
 
 
+class TrufflehogBountyTests(TestCase):
+	"""CVENGINE_BBOT_TRUFFLEHOG=1 lets a project's discovery use bbot's live-verifying trufflehog module, except a bug bounty project's."""
+
+	def setUp(self):
+		self.org = Org.objects.create(name='T', slug='truffle')
+		self.project = Project.objects.create(name='T', slug='ptruffle', insert_date=timezone.now(), org=self.org)
+		self.domain = Domain.objects.create(name='truffle.test', project=self.project, insert_date=timezone.now())
+		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+
+	def run_with(self, env):
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
+			scan = discovery.start_discovery(self.domain)
+		seen = {}
+
+		def capturing_stream(targets, **kwargs):
+			seen.update(kwargs)
+			return iter(EVENTS)
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': env}), mock.patch('reNgine.tasks.geo_localize.delay'), \
+				mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=capturing_stream)
+		return seen.get('extra_args', [])
+
+	def bounty(self):
+		from cveFeed.models import BountyEngagement, BountyProgram
+		program = BountyProgram.objects.create(platform='hackerone', handle='acme-t', name='Acme')
+		BountyEngagement.objects.create(project=self.project, program=program, status='active')
+
+	def test_off_by_default(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		self.assertNotIn(TRUFFLEHOG_FLAG, self.run_with(''))
+
+	def test_opt_in_reaches_the_stream_for_an_ordinary_project(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		self.assertIn(TRUFFLEHOG_FLAG, self.run_with('1'))
+
+	def test_a_bug_bounty_project_never_gets_it_even_with_the_setting_on(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG, trufflehog_allowed
+		self.bounty()
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': '1'}):
+			self.assertFalse(trufflehog_allowed(self.project.id))
+			self.assertTrue(trufflehog_allowed(None))
+		self.assertNotIn(TRUFFLEHOG_FLAG, self.run_with('1'))
+
+
 class ActivityTests(TestCase):
 	def test_step_runs_then_settles_and_failure_is_recorded(self):
 		with activity.step('feed', 'Reading') as handle:

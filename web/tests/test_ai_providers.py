@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest import mock
 
@@ -64,6 +65,64 @@ class ProviderTests(unittest.TestCase):
 			with self.assertRaises(ai.AIProviderError) as caught:
 				ai.get_provider('ollama', model='llama3', base_url='http://100.64.0.5:11434').complete('s', 'u')
 		self.assertEqual(caught.exception.category, 'provider_json')
+
+
+class SecretRedactionTests(unittest.TestCase):
+	"""Every prompt and every reply passes the provider wrapper: a secret is masked on the way out and on the way back."""
+	KEY = 'AIzaSyD' + '1234567890abcdefghijklmnopqrstuv'
+
+	def test_anthropic_prompt_and_reply(self):
+		reply = {'content': [{'type': 'text', 'text': 'the key ' + self.KEY + ' is exposed'}]}
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			p = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+			out = p.complete('sys prompt', 'evidence: ' + self.KEY)
+		sent = post.call_args[1]['json']
+		self.assertNotIn(self.KEY, json.dumps(sent))
+		self.assertIn('google_api_key', sent['messages'][0]['content'])
+		self.assertEqual(sent['system'], 'sys prompt')
+		self.assertNotIn(self.KEY, out)
+		self.assertIn('redacted 39 chars', out)
+
+	def test_openai_ollama_and_keyword_arguments(self):
+		with mock.patch('requests.post', return_value=FakeResp({'choices': [{'message': {'content': 'ok ' + self.KEY}}]})) as post:
+			out = ai.get_provider('openai', api_key='k', model='m').complete(system='s', user='x ' + self.KEY)
+		self.assertNotIn(self.KEY, json.dumps(post.call_args[1]['json']))
+		self.assertNotIn(self.KEY, out)
+		with mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}})) as post:
+			ai.get_provider('ollama', base_url='http://localhost:11434', model='m').complete('s', 'AKIAIOSFODNN7EXAMPLE')
+		self.assertNotIn('AKIAIOSFODNN7EXAMPLE', json.dumps(post.call_args[1]['json']))
+
+	def test_vision_text_is_masked_too(self):
+		reply = {'content': [{'type': 'text', 'text': 'x'}]}
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5').complete_vision('s', 'see ' + self.KEY, b'png')
+		self.assertNotIn(self.KEY, json.dumps(post.call_args[1]['json']))
+
+	def test_text_without_a_secret_is_sent_as_it_was(self):
+		reply = {'content': [{'type': 'text', 'text': '{"classification": "likely"}'}]}
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			out = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5').complete('sys', 'nginx 1.18.0 and CVE-2021-23017')
+		self.assertEqual(post.call_args[1]['json']['messages'][0]['content'], 'nginx 1.18.0 and CVE-2021-23017')
+		self.assertEqual(out, '{"classification": "likely"}')
+
+	def test_a_triage_reply_that_echoes_a_secret_is_masked_before_it_is_parsed(self):
+		text = json.dumps({'classification': 'confirmed', 'reason': 'the key ' + self.KEY + ' is exposed', 'severity_adjust': 0})
+		with mock.patch('requests.post', return_value=FakeResp({'content': [{'type': 'text', 'text': text}]})):
+			out = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5').complete('sys', 'usr')
+		parsed = ai.parse_triage(out)
+		self.assertEqual(parsed['classification'], 'confirmed')
+		self.assertNotIn(self.KEY, parsed['reason'])
+
+	def test_a_stage_can_keep_its_reply_literal_but_never_its_prompt(self):
+		reply = {'content': [{'type': 'text', 'text': 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'}]}
+		provider = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			with ai.request_options(redact_reply=False):
+				literal = provider.complete('sys', 'evidence ' + self.KEY)
+			masked = provider.complete('sys', 'plain')
+		self.assertIn('eyJzdWIiOiIxMjM0NTY3ODkwIn0', literal)
+		self.assertNotIn('eyJzdWIiOiIxMjM0NTY3ODkwIn0', masked)  # any other caller: a hallucinated or echoed key is still masked
+		self.assertNotIn(self.KEY, json.dumps(post.call_args_list[0][1]['json']))  # the prompt was masked all the same
 
 
 class VisionTests(unittest.TestCase):

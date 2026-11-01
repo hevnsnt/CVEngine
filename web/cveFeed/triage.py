@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 from django.utils import timezone
 
 from cveFeed import match_policy
+from cveFeed.secret_redaction import mask_extracted, redact_text
 from reNgine.ai_providers import AIProviderError, clean_text, triage_finding
 
 logger = logging.getLogger(__name__)
@@ -373,15 +374,19 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
     except the response's status code, parsed, never quoted."""
     kind = kind_of_vulnerability(v)
     names = _vuln_names(v)
-    extracted = [_s(e, 120, names) for e in (v.extracted_results or [])[:5]]
+    values = list((v.extracted_results or [])[:5])
+    signed = [_s(e, 120, names) for e in values]  # what the signature hashes: unchanged, so the verdicts already stored keep their key
+    # What the model sees: a value a secret template extracted is masked whole (provider class, length, keyed fingerprint), anything else
+    # passes the generic secret patterns. The signature is a hash of ``signed``; no prompt carries it.
+    extracted = [_s(e, 120, names) for e in mask_extracted(values, v.template_id if kind == 'nuclei' else '', tags if kind == 'nuclei' else ())]
     severity = v.severity if v.severity is not None else 0
     source = v.source or ''
     if kind == 'db_exposure':
         label = (v.template_id or '').replace('db-exposure-', '', 1)
         number = _safe_url_port(v.http_url)
-        reply = extracted[0] if extracted else ''
+        reply = signed[0] if signed else ''
         facts = {'reply': reply}
-        payload = {'service': _s(label, 40), 'port': number, 'server_reply': reply,
+        payload = {'service': _s(label, 40), 'port': number, 'server_reply': extracted[0] if extracted else '',
                    'product': _s((port or ('', ''))[0], 120, names), 'version': _s((port or ('', ''))[1], 120, names),
                    'name': _prose(v.name, 200, names)}
         fields = {'label': label, 'port': number, 'reply': reply}
@@ -389,7 +394,7 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
     elif kind == 'bbot':
         facts = {}
         payload = {'module': _s(v.template_id, 60, names), 'name': _prose(v.name, 200, names), 'severity': SEVERITY_NAMES.get(severity),
-                   'description': _prose(v.description, 1000, names), 'path': _path_only(v.http_url, names),
+                   'description': _prose(redact_text(v.description), 1000, names), 'path': _path_only(v.http_url, names),
                    'snippet': (extracted or [''])[0][:200]}
         fields = {'module': v.template_id or '', 'name': v.name, 'severity': severity}
         priority = (4, -severity)
@@ -399,10 +404,10 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
         payload = {'template_id': _s(v.template_id, 120, names), 'name': _prose(v.name, 200, names), 'severity': SEVERITY_NAMES.get(severity),
                    'matcher_name': matcher, 'extracted_results': extracted, 'cve_ids': sorted(_s(c, 40) for c in cves)[:10],
                    'cwe_ids': sorted(_s(c, 40) for c in cwes)[:10], 'tags': sorted(_s(t, 40) for t in tags)[:15],
-                   'description': _prose(v.description, 1500, names), 'path': _path_only(v.http_url, names),
+                   'description': _prose(redact_text(v.description), 1500, names), 'path': _path_only(v.http_url, names),
                    'http_status': _status_of(v.response), 'source': _s(source, 40)}
         fields = {'source': source, 'template_id': v.template_id or '', 'matcher': v.matcher_name or '', 'name': v.name,
-                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(extracted)}
+                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(signed)}
         priority = (0, 0) if source == 'nuclei-cve' else (3, -severity)
     return {'kind': kind, 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': severity, 'priority': priority}
 
@@ -507,7 +512,7 @@ def attach_host_context(d, match):
     except Exception:  # noqa: BLE001
         logger.exception('could not read the host context of match %s', match.pk)
         return
-    d['host_context'] = _strip_deep(host_context.clipped(context))
+    d['host_context'] = _strip_deep(host_context.clipped(context, stable=True))  # the model is shown the stable view (see bind_host_text)
     d['facts']['closure_basis'] = basis
     digest = host_context.signal_digest(context)
     if digest:
@@ -520,13 +525,29 @@ def bind_host_text(d):
     """Key a CVE match's verdict to the host-controlled text the model was shown (banner extras, CPE, host metadata) when no hard
     evidence bounds the answer. The verdict is shared by every host and organization with the same signature, so without this one
     host's crafted banner could set the stored verdict of every other host with the same product and version. A match with a floor
-    needs no such key: the model can only raise it, never clear it."""
+    needs no such key: the model can only raise it, never clear it.
+
+    What the model is shown of the host (``d['host_context']``) is ``host_context.stable_view`` of the context, and this key is made from that
+    same view: a value the model was shown is in the key, and a value that changes while the host does not (a certificate's days left, a
+    probe's observed date, a request id, a cache state, a banner's clock) is in neither, so it no longer moves the signature every day and every
+    rescan no longer asks the same question again (one AI call per match without a floor, per rescan). The key hashes ``d['host_context']`` itself, so the
+    agreement holds by construction (a path that forgot ``stable=True`` would show and key the raw context). The hash formula is the one it always was, so a row
+    keyed before this change keeps its key only where the old and the new view agree; for the others the signature moves once, which queues one
+    review per such match (the verdict, classification and validation record stay until it answers), bounded by the daily triage caps
+    (``_rereview_fields``, ``DEFAULT_CAPS``). Deliberate: the AI's verdicts on the host's other matches are blanked in the view, so another CVE's
+    verdict flipping does not re-ask this match; the host inventory's package count is not in it, so a package change alone does not either."""
     if d['kind'] != 'cve_match' or hard_evidence('cve_match', d['facts'])[0]:
         return
+    key = host_text_key(d)
+    if key:
+        d['signature_fields']['host_text'] = key
+
+
+def host_text_key(d):
+    """The host text key of a description (see ``bind_host_text``), whether or not the match has a floor; '' when there is no text."""
     payload = d['payload']
-    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]
-    if any(text):
-        d['signature_fields']['host_text'] = hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]  # exactly what the model is shown: nothing is made of it here
+    return hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16] if any(text) else ''
 
 
 def describe(finding):
