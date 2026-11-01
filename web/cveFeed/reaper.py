@@ -124,13 +124,24 @@ REDISPATCH_SCAN_AFTER_MINUTES = 30  # a queued scan the broker holds no message 
 REDISPATCH_SCAN_EVERY_HOURS = 2  # and no more often than this per scan
 
 
+def redispatch_mode(scan):
+    """The bbot mode a lost queued scan is sent again in: the one it was queued with. A scan queued before the mode was recorded takes its
+    target's own, and a manual only target (which no automatic start ever queues, so this is a scan someone asked for before changing it) is
+    sent as passive: a recovery never widens what was asked for, and never sends traffic the target's mode does not allow."""
+    from targetApp.models import Domain
+    if scan.discovery_mode:
+        return scan.discovery_mode
+    mode = scan.domain.discovery_mode
+    return Domain.DISCOVERY_PASSIVE if mode == Domain.DISCOVERY_MANUAL else mode
+
+
 def redispatch_queued_scans(now=None, live=None):
     """Queue again the discovery scans (``ScanHistory`` rows queued, -1) whose worker message was lost, e.g. in a worker or update restart:
     the row says queued forever and the dashboard shows "queued, none running" until someone intervenes. A queued scan records no Celery id
     until it starts, so the broker is asked whether any message still exists for its scan id (``broker_recovery.live_tasks``: a queue, an
     unacknowledged hold or a worker). Only a scan the broker holds nothing for, and only when that can be told, is sent again: a long queue
     after a bulk add is waiting its turn and is left alone. A second message is harmless (the domain lock answers 'duplicate', and a finished
-    scan is not run again). The bbot mode is not stored on the row, so a recovered scan runs in the default mode. ``live`` is the scan ids
+    scan is not run again). The bbot mode is stored on the row (``ScanHistory.discovery_mode``), so a recovered scan runs in the mode it was queued in. ``live`` is the scan ids
     the broker holds (None: cannot be told), injectable for tests. Returns how many were queued again."""
     from cveFeed import broker_recovery, ledger
     from cveFeed.discovery import QUEUED
@@ -148,7 +159,7 @@ def redispatch_queued_scans(now=None, live=None):
     client = getattr(resources.get_store(), 'r', None)
     queued = 0
     for scan in ScanHistory.objects.filter(scan_status=QUEUED, start_scan_date__lt=now - timedelta(minutes=REDISPATCH_SCAN_AFTER_MINUTES)
-                                           ).order_by('id')[:50]:
+                                           ).select_related('domain').order_by('id')[:50]:
         if scan.id in live or scan.celery_ids:
             continue
         key = f'cvengine:scan:redispatch:{scan.pk}'
@@ -160,7 +171,8 @@ def redispatch_queued_scans(now=None, live=None):
         from reNgine.celery import app
         # a scan of an internal target (cveFeed.internal_scan) is its own task; sent by name so this module needs no import of it
         name = 'run_internal_scan' if 'internal_pipeline' in (scan.tasks or []) else 'run_bbot_discovery'
-        app.send_task(name, args=[scan.pk], queue='discovery_queue')
+        args = [scan.pk] if name == 'run_internal_scan' else [scan.pk, redispatch_mode(scan)]
+        app.send_task(name, args=args, queue='discovery_queue')
         queued += 1
     return queued
 

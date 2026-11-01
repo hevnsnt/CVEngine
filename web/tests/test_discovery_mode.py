@@ -298,7 +298,7 @@ class OtherAutomaticPathsTests(DiscoveryModeBase):
 
 	def test_certificate_transparency_does_not_start_the_host_pipeline_for_a_manual_only_target(self):
 		manual = self.domain('manual.ct.test', mode='manual')
-		auto = self.domain('auto.ct.test', mode='passive')
+		auto = self.domain('auto.ct.test', mode='deep')
 		with mock.patch('cveFeed.tasks.host_pipeline.delay') as pipeline, mock.patch.object(ctmonitor, 'MIN_GAP', (0, 0)):
 			ctmonitor.run_ct_watch(manual.id, fetch=lambda name: {'new.manual.ct.test'})
 			pipeline.assert_not_called()

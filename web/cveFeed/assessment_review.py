@@ -56,6 +56,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     from cveFeed.internal_scan import TASK_TAG as INTERNAL_PIPELINE_TASK
     from cveFeed.unresolved_archive import COUNTS_FOR
     from startScan.models import ScanActivity, Subdomain
+    from targetApp.models import Domain
 
     completed = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
                                          scan_history__scan_status=2)
@@ -81,6 +82,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     # here would try the external pipeline and cannot repair missing internal stages.
     rows = (Subdomain.objects.filter(latest_scan_q()).filter(target_domain__project=project)
             .exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
+            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: no automatic assessment, so it is no backlog either
             .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
                       excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
             .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))

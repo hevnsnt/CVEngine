@@ -23,6 +23,7 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } f
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { RUNNABLE, STORED, defaultChoice, discoverBody, discoverHint, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 
 const root = document.getElementById("section");
@@ -2068,7 +2069,7 @@ function allTargets(mount) {
       withProject([
         { label: "Target", render: (t) => named(hostLink(t.name, projectOf(t)), t) },
         { label: "Scope", render: (t) => (t.host_scoped ? "this host only" : t.scope_mode === "parent" ? "includes parent domain" : "auto") },
-        { label: "Discovery", render: (t) => (t.discovery_mode === "manual" ? "manual only" : t.discovery_mode || "standard") },
+        { label: "Discovery", render: (t) => modeText(t.discovery_mode) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2239,23 +2240,26 @@ const pages = {
       });
     // The mode discovery runs in whenever it starts on its own (the work conductor's rescans, the weekly sweeps). "Manual only" is
     // "just add it, do not scan yet": nothing automatic scans it until a person picks a mode here and presses Discover or Scan.
+    const modeSelects = new Map(); // target id -> the Discovery column's choice
+    const howSelects = new Map(); // target id -> the choice next to Discover
     const discoveryCell = (t) => {
       const pick = el("select", "", null, { "aria-label": `Discovery mode of ${t.name}` });
-      for (const [value, label] of [
-        ["standard", "Standard"],
-        ["deep", "Deep"],
-        ["passive", "Passive (public sources only)"],
-        ["manual", "Manual only (never scanned automatically)"],
-      ]) {
+      for (const [value, label] of STORED) {
         const o = el("option", "", label, { value });
         o.selected = t.discovery_mode === value;
         pick.append(o);
       }
+      modeSelects.set(t.id, pick); // Discover keeps the mode it ran in: this shows it
       pick.onchange = async () => {
         pick.disabled = true;
         try {
           const r = await post(`targets/${t.id}/discovery-mode`, { discovery_mode: pick.value });
           t.discovery_mode = r.discovery_mode;
+          const how = howSelects.get(t.id);
+          if (how) {
+            how.value = defaultChoice(t.discovery_mode);
+            how.title = discoverHint(t.discovery_mode);
+          }
           toast(`${t.name}: discovery ${r.discovery_mode}`);
         } catch (err) {
           pick.value = t.discovery_mode;
@@ -2322,6 +2326,12 @@ const pages = {
           label: "",
           render: (t) => {
             const box = el("div", "row-actions");
+            // the mode Discover runs in: the target's own, or another one, which the server keeps on the target
+            const how = el("select", "", null, { "aria-label": `Mode to discover ${t.name} in` });
+            how.title = discoverHint(t.discovery_mode);
+            for (const [value, label] of RUNNABLE) how.append(Object.assign(el("option", "", label), { value }));
+            how.value = defaultChoice(t.discovery_mode);
+            howSelects.set(t.id, how);
             const discover = el("button", "btn sm", "Discover", {
               type: "button",
             });
@@ -2329,8 +2339,13 @@ const pages = {
               discover.disabled = true;
               discover.textContent = "Queueing…";
               try {
-                const r = await post(`targets/${t.id}/discover`, {});
-                toast(`Discovery #${r.scan_id} started`);
+                const stored = t.discovery_mode;
+                const r = await post(`targets/${t.id}/discover`, discoverBody(stored, how.value));
+                t.discovery_mode = modeAfter(stored, how.value);
+                const shown = modeSelects.get(t.id);
+                if (shown) shown.value = t.discovery_mode;
+                how.title = discoverHint(t.discovery_mode);
+                toast(startedText(r.scan_id, stored, how.value));
                 discover.textContent = "Discovery queued";
                 setTimeout(() => {
                   discover.textContent = "Discover";
@@ -2364,7 +2379,7 @@ const pages = {
                 scan.disabled = false;
               }
             };
-            box.append(discover, scan);
+            box.append(how, discover, scan);
             if (signIns) box.append(signInButton(signIns, t));
             return box;
           },

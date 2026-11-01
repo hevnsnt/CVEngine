@@ -304,13 +304,13 @@ class QueuedScanRedispatchTests(ReaperTests):
 		lost = self.queued(2)
 		count, send = self.redispatch(set())
 		self.assertEqual(count, 1)
-		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk], queue='discovery_queue')
+		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk, 'standard'], queue='discovery_queue')
 
 	def test_a_scan_with_a_message_in_a_queue_or_a_worker_is_only_waiting_its_turn(self):
 		waiting, lost = self.queued(2), self.queued(2)
 		count, send = self.redispatch({waiting.pk})
 		self.assertEqual(count, 1)
-		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk], queue='discovery_queue')
+		send.assert_called_once_with('run_bbot_discovery', args=[lost.pk, 'standard'], queue='discovery_queue')
 
 	def test_nothing_is_sent_when_the_broker_cannot_be_asked(self):
 		self.queued(2)
