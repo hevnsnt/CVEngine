@@ -196,59 +196,97 @@ def register(ctx, body):
 
 
 def hold_days():
-    """``CVENGINE_AGENT_HOLD_DAYS``: for how many days a suspension or revocation holds back a user's new agents (default 30). ``0`` means for
-    as long as the agent stays suspended or revoked; a value that is not a whole number is the default."""
+    """``CVENGINE_AGENT_HOLD_DAYS``: for how many days a suspension or revocation suspends a user's new agents (default 30). Only an explicit
+    ``0`` means for as long as the agent stays suspended or revoked; a negative value, or one that is not a whole number, is the default."""
     try:
-        return max(0, int(os.environ.get('CVENGINE_AGENT_HOLD_DAYS', HOLD_DAYS_DEFAULT)))
+        days = int(os.environ.get('CVENGINE_AGENT_HOLD_DAYS', HOLD_DAYS_DEFAULT))
     except ValueError:
         return HOLD_DAYS_DEFAULT
+    return days if days >= 0 else HOLD_DAYS_DEFAULT
 
 
-def suspension_culprit(user, now=None):
+def suspension_culprit(user, now=None, recent=True):
     """The agent of ``user`` whose suspension or revocation a new agent of theirs inherits, or None. It is an agent an administrator suspended or
-    revoked (one this rule suspended on its own is not counted: it would hold back every later agent for a decision nobody made) within the last
-    ``hold_days()`` days, the most recent first. An App Admin's agents are never held back: an App Admin approves and reinstates agents, their
-    own included, so the hold would protect nothing and only stop their own instance-wide Sentinels. Deleting the agent (``delete_agent``) ends
-    the hold for good."""
+    revoked (one this rule held back on its own is not counted: it would hold back every later agent for a decision nobody made), the most
+    recent first; with ``recent`` (what suspends the new agent) only one within the last ``hold_days()`` days, without it any that still stands
+    (what makes an administrator's new agent wait for approval instead of starting active, see ``_initial_status``). An App Admin's agents are
+    never held back: an App Admin approves and reinstates agents, their own included, so the hold would protect nothing and only stop their own
+    instance-wide Sentinels. Deleting the agent (``delete_agent``) ends the hold for good."""
     if user.is_superuser:
         return None
     qs = Agent.objects.filter(token__user=user, status__in=('suspended', 'revoked'), status_inherited=False)
-    days = hold_days()
+    days = hold_days() if recent else 0
     if days:
         # a row with no time (stored before the time was kept, and not filled in by migration 0009) still counts: the safe side
         qs = qs.filter(Q(status_changed_at__isnull=True) | Q(status_changed_at__gte=(now or timezone.now()) - timedelta(days=days)))
     return qs.order_by(F('status_changed_at').desc(nulls_first=True), '-id').first()
 
 
-def hold_note(culprit):
-    """The note of an agent held back because of ``culprit``: which agent, its status and since when, and what an administrator can do."""
+def hold_note(culprit, status='suspended'):
+    """The note of an agent held back because of ``culprit``: which agent, its status and since when, and what an administrator can do. ``status``
+    is the new agent's: ``suspended`` (Reinstate it) or ``pending`` (Approve it)."""
     name = culprit.name if len(culprit.name) <= 40 else culprit.name[:37] + '...'
     when = culprit.status_changed_at.date().isoformat() if culprit.status_changed_at else 'a date not recorded'
     what = 'Sentinel' if culprit.kind == 'scanner' else 'agent'
-    return _text(f'{what} "{name}" (#{culprit.pk}) of the same user was {culprit.status} on {when}. Reinstate this one to use it, '
+    act = 'Approve' if status == 'pending' else 'Reinstate'
+    return _text(f'{what} "{name}" (#{culprit.pk}) of the same user was {culprit.status} on {when}. {act} this one to use it, '
                  f'and reinstate or delete #{culprit.pk} so new agents start normally', MAX_NOTE)
 
 
 def _initial_status(user, now=None):
-    """The status fields of a new registration. A user who has an agent suspended or revoked does not get round it with a new token: the new
-    agent starts suspended and its note names the agent that caused it (``suspension_culprit`` says which count). Otherwise an
-    administrator's agent is active at once and anyone else's waits for approval, because an agent can take work, and report it fixed, in
-    every project its user writes to."""
+    """The status fields of a new registration. A user who has an agent an administrator suspended or revoked recently does not get round it with
+    a new token: the new agent starts suspended and its note names the agent that caused it (``suspension_culprit``). An administrator's agent is
+    otherwise active at once and anyone else's waits for approval, because an agent can take work, and report it fixed, in every project its user
+    writes to; but an administrator (not an App Admin) with such a decision older than the window, still standing, waits for approval too, with
+    the same kind of note, so the window never turns a standing revocation into an agent that works at once."""
     now = now or timezone.now()
     culprit = suspension_culprit(user, now)
     if culprit is not None:
         return {'status': 'suspended', 'status_note': hold_note(culprit), 'status_changed_at': now, 'status_inherited': True, 'held_by': culprit}
-    return {'status': 'active' if roles.is_admin_anywhere(user) else 'pending', 'status_note': '', 'status_changed_at': now}
+    if not roles.is_admin_anywhere(user):
+        return {'status': 'pending', 'status_note': '', 'status_changed_at': now}
+    culprit = suspension_culprit(user, now, recent=False)
+    if culprit is not None:
+        return {'status': 'pending', 'status_note': hold_note(culprit, 'pending'), 'status_changed_at': now, 'status_inherited': True,
+                'held_by': culprit}
+    return {'status': 'active', 'status_note': '', 'status_changed_at': now}
 
 
 def record_hold(agent, user, **detail):
-    """One audit line for every agent the rule suspended at registration, naming the agent it inherited the suspension from."""
+    """One audit line for every agent the rule held back at registration (suspended, or an administrator's agent made to wait for approval),
+    naming the agent it inherited that from."""
     culprit = agent.held_by
     if not agent.status_inherited or culprit is None:
         return
-    audit.record_for_user(None, 'agent.hold', user, target=agent.name, agent_id=agent.pk, kind=agent.kind, held_by=culprit.pk,
+    audit.record_for_user(None, 'agent.hold', user, target=agent.name, agent_id=agent.pk, kind=agent.kind, status=agent.status, held_by=culprit.pk,
                           held_by_name=culprit.name, held_by_status=culprit.status, held_by_since=svc._iso(culprit.status_changed_at),
                           hold_days=hold_days(), **detail)
+
+
+def can_decide(viewer, agent):
+    """Whether ``viewer`` may change this agent's status or delete it: what ``update_agent`` and ``delete_agent`` allow (never their own agent
+    unless App Admin; an organization admin only for a user all of whose organizations they administer). A page offers only buttons that work."""
+    if viewer is None:
+        return False
+    if viewer.is_superuser:
+        return True
+    owner = agent.token.user
+    return owner.pk != viewer.pk and roles.can_manage_credentials(viewer, owner)
+
+
+HIDDEN_HOLD_NOTE = 'held back because another agent of this user is suspended or revoked; an App Admin can see which and decide'
+
+
+def visible_hold(agent, viewer, decide=None):
+    """``(status_note, held_by)`` as ``viewer`` may see them. An automatic hold's note names another agent of the same user, and that user may
+    work for another tenant too: a viewer who cannot decide on the agent (``can_decide``, passed in when the caller has it) gets a general note
+    and no name. The owner and an App Admin see it all."""
+    held = held_by(agent)
+    if viewer is None or viewer.is_superuser or agent.token.user_id == viewer.pk or not agent.status_inherited:
+        return agent.status_note, held
+    if decide if decide is not None else can_decide(viewer, agent):
+        return agent.status_note, held
+    return HIDDEN_HOLD_NOTE, ({'id': None, 'deleted': False, 'hidden': True} if held else None)
 
 
 def _warnings(agent):
@@ -962,10 +1000,10 @@ def agent_dict(agent, detail=False, counts=None, viewer=None):
 
 
 def held_by(agent):
-    """For an agent the hold-back rule suspended (``_initial_status``) and nobody has decided on since: the agent that caused it, ``{id, name,
+    """For an agent the hold-back rule suspended or made wait for approval (``_initial_status``) and nobody has decided on since: the agent that caused it, ``{id, name,
     kind, status, since, deleted: false}``, ``{id: null, deleted: true}`` once that agent was deleted (this one then only needs reinstating), or
     ``{id: null, deleted: false}`` when it was not recorded (held back before it was, and no candidate was left to name). None otherwise."""
-    if agent.status != 'suspended' or not agent.status_inherited:
+    if agent.status not in ('suspended', 'pending') or not agent.status_inherited:
         return None
     culprit = agent.held_by
     if culprit is None:  # deleted since, or (with the note of before) held back before the agent that caused it was recorded
@@ -979,6 +1017,7 @@ def _redacted(out, viewer, agent):
     more than one) are left out of what it is responsible for, with the host list, which could name their assets."""
     if viewer is None or viewer.is_superuser or agent.token.user_id == viewer.pk:
         return out
+    out['status_note'], out['held_by'] = visible_hold(agent, viewer)
     from dashboard.models import Org, Project
     org_ids = roles.managed_org_ids(viewer)
     orgs = set(Org.objects.filter(pk__in=org_ids).values_list('slug', flat=True))
@@ -1064,7 +1103,7 @@ def get_agent(ctx, agent_id):
     recent = (_sentinel().recent_tasks(agent, ctx.user) if agent.kind == 'scanner'
              else [task_brief(t) for t in _task_rows(AgentTask.objects.filter(agent=agent)).order_by('-id')[:20]])
     return {**agent_dict(agent, detail=True, counts=_counts([agent.pk]).get(agent.pk), viewer=ctx.user), 'warnings': _warnings(agent),
-            'recent_tasks': recent}
+            'recent_tasks': recent, 'can_manage': can_decide(ctx.user, agent)}
 
 
 def _clean_limits(value):
@@ -1111,17 +1150,20 @@ def update_agent(ctx, agent_id, body):
     if 'limits' in body:
         agent.limits = _clean_limits(body['limits'])
     note = _text(body['note'], MAX_NOTE) if 'note' in body else None
-    if agent.status != before['status'] and note in (None, agent.status_note) and (
-            agent.status == 'active' or agent.status_note == INHERITED_SUSPENSION_NOTE):
-        # Approving or reinstating clears the reason the agent was held back, so an active agent is not shown with it; the automatic "another
-        # agent of this user is suspended ..." note goes with any change of status. An administrator's own reason stays when the agent is
-        # suspended or revoked. (The admin dialog sends the note field back unchanged with every action, which counts as no new note.)
+    automatic = agent.status_inherited or agent.status_note == INHERITED_SUSPENSION_NOTE
+    decided = 'status' in body and (agent.status != before['status'] or agent.status_inherited)
+    if note in (None, agent.status_note) and ((agent.status != before['status'] and agent.status == 'active') or (decided and automatic)):
+        # Approving or reinstating clears the reason the agent was held back, so an active agent is not shown with it; the automatic note of the
+        # hold-back rule goes with any status an administrator sets, the same one included. An administrator's own reason stays when the agent
+        # is suspended or revoked. (The admin dialog sends the note field back unchanged with every action, which counts as no new note.)
         agent.status_note = ''
     elif note is not None:
         agent.status_note = note
-    if agent.status != before['status']:
+    if decided:
+        # an administrator's decision now, not the hold-back rule's, even when the status is the one the rule set: it then counts as a
+        # suspension of its own (suspension_culprit) and stands when the agent that caused the hold is deleted
         agent.status_changed_at = timezone.now()
-        agent.status_inherited, agent.held_by = False, None  # an administrator's decision now, not the hold-back rule's
+        agent.status_inherited, agent.held_by = False, None
     agent.status_by = ctx.user
     agent.save()
     if 'settings' in body:
@@ -1143,7 +1185,7 @@ def delete_agent(ctx, agent_id):
     its API token is revoked with it, so that token cannot register a fresh agent in its place. Only a revoked agent: revoke it first (which
     releases its work and is audited as the decision); a suspended one is a decision still open, and an agent's own ``unregister`` is refused
     once it is suspended or revoked. The same administrators as ``update_agent`` (not for their own agent unless App Admin). Agents this one
-    held back stay suspended until an administrator reinstates them; the reply lists them."""
+    held back stay suspended (or pending) until an administrator reinstates (or approves) them; the reply lists them."""
     from dashboard.models import ApiToken
     svc.require_write_token(ctx)
     agent = _manageable(ctx.user).filter(pk=svc._int_param(agent_id, 'agent_id')).first()
@@ -1158,7 +1200,7 @@ def delete_agent(ctx, agent_id):
     token, owner = agent.token, agent.token.user
     released = release_agent_tasks(agent, 'the agent was deleted', actor=ctx.user)
     ApiToken.objects.filter(pk=token.pk).update(revoked=True)
-    held = list(Agent.objects.filter(held_by=agent, status='suspended', status_inherited=True).order_by('id').values('id', 'name'))
+    held = list(Agent.objects.filter(held_by=agent, status__in=('suspended', 'pending'), status_inherited=True).order_by('id').values('id', 'name'))
     audit.record_for_user(ctx.user, 'agent.delete', owner, target=agent.name, agent_id=agent.pk, kind=agent.kind, token_id=token.pk,
                           revoked_since=svc._iso(agent.status_changed_at), released_tasks=released, still_held=[h['id'] for h in held])
     deleted_id = agent.pk

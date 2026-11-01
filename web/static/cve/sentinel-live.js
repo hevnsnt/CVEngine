@@ -79,6 +79,20 @@ export function stateLine(s) {
   return s.state === "suspended" && s.status_note ? `${word}: ${s.status_note}` : word;
 }
 
+// The buttons a card offers, in order. None when the viewer may not decide on this Sentinel (`can_manage` false: their own, unless App Admin, or
+// a user who also works for a tenant they do not administer), because each would only be refused. Delete names the revoked agent that holds this
+// one back.
+export function actionsFor(s) {
+  if (!s.can_manage) return [];
+  const out = [];
+  if (s.status === "pending") out.push("approve");
+  if (s.status === "suspended") out.push("reinstate");
+  if (s.held_by && s.held_by.id && s.held_by.status === "revoked") out.push("delete");
+  if (s.status !== "suspended") out.push("suspend");
+  out.push("revoke");
+  return out;
+}
+
 function card(s, reload, detail, group) {
   const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
   const head = el("header", "sl-head");
@@ -93,35 +107,35 @@ function card(s, reload, detail, group) {
     await api("PATCH", `/api/v1/agents/${s.id}`, { status });
     await reload();
   };
-  if (s.status === "pending") actions.append(button("Approve", patch("active"), "btn sm"));
-  if (s.status === "suspended") actions.append(button("Reinstate", patch("active"), "btn sm"));
   const culprit = s.held_by;
-  if (culprit && culprit.id && culprit.status === "revoked") {
+  const keep = s.status === "pending" ? "approve" : "reinstate";
+  const ACT = {
+    approve: () => button("Approve", patch("active"), "btn sm"),
+    reinstate: () => button("Reinstate", patch("active"), "btn sm"),
     // held back only because another agent of the same user is revoked: deleting that one ends the hold for the next registrations
-    actions.append(
+    delete: () =>
       button(
         `Delete ${culprit.name}`,
         async () => {
-          if (!confirm(`Delete the revoked agent ${culprit.name} (#${culprit.id}) and revoke its token? New agents of this user then start normally. ${s.name} stays suspended until you reinstate it.`)) return;
+          if (!confirm(`Delete the revoked agent ${culprit.name} (#${culprit.id}) and revoke its token? New agents of this user then start normally. ${s.name} stays ${s.status} until you ${keep} it.`)) return;
           await api("DELETE", `/api/v1/agents/${culprit.id}`);
-          toast(`${culprit.name} deleted. Reinstate ${s.name} to use it.`);
+          toast(`${culprit.name} deleted. ${keep === "approve" ? "Approve" : "Reinstate"} ${s.name} to use it.`);
           await reload();
         },
         "btn ghost sm",
       ),
-    );
-  }
-  if (s.status !== "suspended") actions.append(button("Suspend", patch("suspended"), "btn ghost sm"));
-  actions.append(
-    button(
-      "Revoke",
-      async () => {
-        if (!confirm(`Revoke ${s.name}? This cannot be undone.`)) return;
-        await patch("revoked")();
-      },
-      "btn ghost sm",
-    ),
-  );
+    suspend: () => button("Suspend", patch("suspended"), "btn ghost sm"),
+    revoke: () =>
+      button(
+        "Revoke",
+        async () => {
+          if (!confirm(`Revoke ${s.name}? This cannot be undone.`)) return;
+          await patch("revoked")();
+        },
+        "btn ghost sm",
+      ),
+  };
+  actionsFor(s).forEach((a) => actions.append(ACT[a]()));
   head.append(actions);
   c.append(head);
 

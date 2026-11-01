@@ -17,7 +17,7 @@ globalThis.document = {getElementById: () => null, querySelector: () => null, qu
 globalThis.window = globalThis;
 globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 
-const {stateLine} = await import('../static/cve/sentinel-live.js');
+const {actionsFor, stateLine} = await import('../static/cve/sentinel-live.js');
 const NOTE = 'Sentinel "old-box" (#1) of the same user was revoked on 2026-03-02. Reinstate this one to use it, and reinstate or delete #1 so new agents start normally';
 
 test('a suspended Sentinel reads "Suspended: <reason>", never idle', () => {
@@ -35,4 +35,28 @@ test('the other states keep their words, whatever note an administrator left', (
   assert.equal(stateLine({state: 'pending', status: 'pending', status_note: ''}), 'Waiting for approval');
   assert.equal(stateLine({state: 'working', status: 'active', status_note: ''}), 'Working');
   assert.equal(stateLine({state: 'offline', status: 'active', status_note: ''}), 'Offline');
+});
+
+const HELD = {state: 'suspended', status: 'suspended', status_note: NOTE, held_by: {id: 1, name: 'old-box', status: 'revoked', deleted: false}};
+
+test('a held Sentinel the viewer may decide on offers Reinstate and Delete of the revoked agent', () => {
+  assert.deepEqual(actionsFor({...HELD, can_manage: true}), ['reinstate', 'delete', 'revoke']);
+});
+
+test('no button that would be refused: an org admin\'s own held Sentinel, or a user of another tenant too', () => {
+  assert.deepEqual(actionsFor({...HELD, can_manage: false}), []);
+  assert.deepEqual(actionsFor({...HELD}), []);  // an older server that does not say: nothing offered
+});
+
+test('Delete only for a revoked agent that is known', () => {
+  const ids = (held_by) => actionsFor({...HELD, can_manage: true, held_by});
+  assert.ok(!ids({id: 1, name: 'old-box', status: 'suspended'}).includes('delete'));  // suspended: reinstate or revoke it first
+  assert.ok(!ids({id: null, deleted: true}).includes('delete'));
+  assert.ok(!ids({id: null, deleted: false, hidden: true}).includes('delete'));
+  assert.ok(!ids(null).includes('delete'));
+});
+
+test('pending and active cards keep their buttons', () => {
+  assert.deepEqual(actionsFor({state: 'pending', status: 'pending', can_manage: true, held_by: HELD.held_by}), ['approve', 'delete', 'suspend', 'revoke']);
+  assert.deepEqual(actionsFor({state: 'idle', status: 'active', can_manage: true, held_by: null}), ['suspend', 'revoke']);
 });

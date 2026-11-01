@@ -469,6 +469,18 @@ class SentinelHoldBackTests(SentinelBase):
         boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'johnny-2'})[1]
         self.assertEqual(boot['status'], 'active')
 
+    def test_an_org_admins_own_held_sentinel_offers_no_buttons_they_cannot_use(self):
+        _, old = register_sentinel(self.t['dana'], name='danas-old')
+        call(self.t['root'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})
+        _, held = register_sentinel(create_token(self.dana, 'second')[1], name='danas-new', approve=False)
+        self.assertEqual(held['status'], 'suspended')
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['danas-new']
+        self.assertFalse(row['can_manage'])  # her own: Reinstate and Delete would be refused, so the card shows neither
+        self.assertEqual(row['held_by']['id'], old['id'])  # her own agents: she may know which one
+        self.assertEqual(call(self.t['dana'], 'DELETE', f'/api/v1/agents/{old["id"]}')[0], 403)
+        self.assertFalse({r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/projects/sen-a/sentinels')[1]['results']}['danas-new']['manageable'])
+        self.assertTrue({r['name']: r for r in call(self.t['root'], 'GET', '/api/v1/sentinels/live')[1]['results']}['danas-new']['can_manage'])
+
     def test_a_held_sentinel_reads_suspended_with_the_agent_to_reinstate_or_delete(self):
         _, old = register_sentinel(self.t['alice'], name='old-alice')
         call(self.t['dana'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})
@@ -479,7 +491,7 @@ class SentinelHoldBackTests(SentinelBase):
         row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
         self.assertEqual(row['state'], 'suspended')
         self.assertIn(f'"old-alice" (#{old["id"]}) of the same user was revoked', row['status_note'])
-        self.assertEqual((row['held_by']['id'], row['held_by']['status']), (old['id'], 'revoked'))
+        self.assertEqual((row['held_by']['id'], row['held_by']['status'], row['can_manage']), (old['id'], 'revoked', True))
         tab = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/projects/sen-a/sentinels')[1]['results']}['new-alice']
         self.assertEqual((tab['status'], tab['status_note'], tab['manageable']), ('suspended', row['status_note'], True))
         # the card's Delete button: the revoked one goes, the held one stays suspended until it is reinstated

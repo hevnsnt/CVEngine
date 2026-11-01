@@ -32,7 +32,7 @@ def backfill(apps, schema_editor):
     # says which one and what to do, as a new hold does). None left (deleted or reinstated since): the old note stays.
     for held in Agent.objects.filter(status='suspended', status_inherited=True, held_by__isnull=True).select_related('token'):
         culprit = (Agent.objects.filter(token__user_id=held.token.user_id, status__in=('suspended', 'revoked'), status_inherited=False)
-                   .exclude(pk=held.pk).order_by(models.F('status_changed_at').desc(nulls_last=True), '-id').first())
+                   .exclude(pk=held.pk).order_by(models.F('status_changed_at').desc(nulls_first=True), '-id').first())
         if culprit is not None:
             Agent.objects.filter(pk=held.pk).update(held_by=culprit, status_note=note_for(culprit))
 
