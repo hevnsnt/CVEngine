@@ -156,6 +156,23 @@ export const modesOffered = (info) =>
 export const canReset = (info) => Boolean(info && info.source === "agent");
 const validCap = (cap) =>
   cap == null || (Number.isInteger(cap) && cap >= 1 && cap <= MAX_CONCURRENT);
+// The sentence under a cap field that cannot be saved ("" when it can: empty means no cap).
+export const capProblem = (raw) => {
+  const t = String(raw ?? "").trim();
+  if (t === "") return "";
+  return validCap(/^\d+$/.test(t) ? Number(t) : NaN)
+    ? ""
+    : `At once must be a whole number from 1 to ${MAX_CONCURRENT}, or empty for no limit.`;
+};
+// One line for the panel when an instance default denies kinds here: an own Allow overrides it for this Sentinel only.
+export function defaultHint(kinds) {
+  const names = Object.entries(kinds || {})
+    .filter(([, i]) => i && i.source === "instance default" && i.mode === "deny" && i.declared)
+    .map(([k]) => kindWord(k));
+  return names.length
+    ? `${names.join(", ")} ${names.length === 1 ? "is" : "are"} denied here by the instance default. Choosing Allow overrides that default for this Sentinel only.`
+    : "";
+}
 
 // What to PATCH: ``picks`` is {kind: {mode, cap, reset}} read from the panel; only a kind whose mode or cap differs from what the server shows is sent
 // (null removes the Sentinel's own policy for it, which hands the kind back to the instance default).
@@ -185,9 +202,11 @@ export function kindChips(kinds) {
   Object.entries(kinds || {}).forEach(([k, info]) => {
     const state = kindState(info);
     if (state === "unavailable") return;
-    const tone =
-      state === "on" ? "kind-on" : state === "cool_off" || state === "outdated" ? "kind-held" : "kind-denied";
-    const word = `${kindWord(k)}${state === "on" && info.mode === "prefer" ? " (preferred)" : ""}${info.cap && state === "on" ? ` x${info.cap}` : ""}`;
+    // each style also says its state in words, so it never depends on colour: a denied kind is struck through and marked, one turned off on the machine
+    // is hatched, dashed and marked "off on machine" (the server cannot lift it), a withheld one is marked too
+    const tone = { on: "kind-on", denied: "kind-denied", machine_off: "kind-locked", cool_off: "kind-held", outdated: "kind-held" }[state] || "kind-denied";
+    const cue = { denied: " (denied)", machine_off: " (off on machine)", cool_off: " (withheld)", outdated: " (outdated)" }[state] || "";
+    const word = `${kindWord(k)}${cue}${state === "on" && info.mode === "prefer" ? " (preferred)" : ""}${info.cap && state === "on" ? ` x${info.cap}` : ""}`;
     const note = kindNote(info);
     box.append(
       el("span", `chip ${tone}`, word, { role: "listitem", title: note, "aria-label": `${kindWord(k)}: ${note}` }),
@@ -199,9 +218,27 @@ export function kindChips(kinds) {
 
 // The per-kind rows of the settings panel: Allow / Deny / Prefer and a cap each, the note of who decided, and "Use default" where the Sentinel has a policy of
 // its own. A kind the Sentinel does not declare, or its machine turned off, shows why and offers nothing.
-export function kindsPanel(kinds, onReset) {
+// What a cap field holds; a number field with letters typed into it reports an empty value and ``validity.badInput``, which is not "no limit".
+const capText = (input) => (input.validity && input.validity.badInput ? "x" : input.value);
+
+export function kindsPanel(kinds, onReset, onValidity = () => {}) {
   const box = el("div", "ss-pol", null, { role: "group", "aria-label": "What this Sentinel may take" });
+  const hint = el("p", "note ss-pol-hint");
+  hint.hidden = true;
+  box.append(hint);
   const rows = new Map();
+  const check = () => {
+    rows.forEach((r) => {
+      const problem = r.cap.hidden ? "" : capProblem(capText(r.cap));
+      r.err.textContent = problem;
+      r.err.hidden = !problem;
+      if (problem) r.cap.setAttribute("aria-invalid", "true");
+      else r.cap.removeAttribute("aria-invalid");
+      r.cap.classList.toggle("invalid", Boolean(problem));
+    });
+    onValidity(!invalid());
+  };
+  const invalid = () => [...rows.values()].some((r) => !r.cap.hidden && capProblem(capText(r.cap)));
   SENTINEL_KINDS.forEach((k) => {
     const row = el("div", "ss-pol-row");
     const note = el("span", "note ss-pol-note");
@@ -211,10 +248,14 @@ export function kindsPanel(kinds, onReset) {
       type: "number", min: "1", max: String(MAX_CONCURRENT), step: "1", inputmode: "numeric",
       placeholder: "no limit", "aria-label": `${kindWord(k)} at once`,
     });
+    const err = el("p", "msg err ss-pol-err", "", { role: "alert", "aria-live": "assertive" });
+    err.hidden = true;
+    cap.addEventListener("input", check);
     const reset = button("Use default", async () => onReset(k), "btn sm ghost");
-    row.append(el("b", "ss-pol-name", kindWord(k)), note, mode, cap, reset);
+    // a stable grid: kind | mode | cap | use default, then the note and any error on their own full-width lines
+    row.append(el("b", "ss-pol-name", kindWord(k)), mode, cap, reset, note, err);
     box.append(row);
-    rows.set(k, { row, note, mode, cap, reset });
+    rows.set(k, { row, note, mode, cap, reset, err });
   });
   // refill: the inputs take the server's values (after a save or a reset), never while someone is typing
   function paint(next, refill) {
@@ -223,13 +264,17 @@ export function kindsPanel(kinds, onReset) {
       const offered = modesOffered(info).length > 0;
       r.row.setAttribute("data-state", kindState(info));
       r.note.textContent = kindNote(info);
-      r.mode.hidden = r.cap.hidden = !offered;
+      r.mode.hidden = r.cap.hidden = !offered; // hidden controls keep their column (visibility), so the rows line up
       r.reset.hidden = !canReset(info);
       if (refill && info) {
         r.mode.value = info.mode || "allow";
         r.cap.value = info.cap == null ? "" : String(info.cap);
       }
     });
+    const line = defaultHint(next);
+    hint.textContent = line;
+    hint.hidden = !line;
+    check();
   }
   function read() {
     const picks = {};
@@ -239,7 +284,7 @@ export function kindsPanel(kinds, onReset) {
     return picks;
   }
   paint(kinds, true);
-  return { node: box, paint, read };
+  return { node: box, paint, read, invalid };
 }
 
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
@@ -417,6 +462,7 @@ export function openSettings(first, onChange) {
     });
     body.append(form);
     let panel = null;
+    let save = null; // the Save button, made below; the panel tells it when a cap cannot be saved
     if (d.kinds) {
       body.append(
         el("h4", "ss-pol-title", "What it may take"),
@@ -426,21 +472,23 @@ export function openSettings(first, onChange) {
           "Allow offers the kind, Deny never does, Prefer also holds the work back from the others for a moment while this Sentinel has room. The number caps how many of that kind it runs at once. Only what the Sentinel declares can be enabled.",
         ),
       );
-      panel = kindsPanel(d.kinds, async (kind) => {
-        d = await api("PATCH", detailUrl(d.id), { settings: { kinds: { [kind]: null } } });
-        toast(`${kindWord(kind)} handed back to the default`);
-        paint(true);
-        onChange();
-      });
+      panel = kindsPanel(
+        d.kinds,
+        async (kind) => {
+          d = await api("PATCH", detailUrl(d.id), { settings: { kinds: { [kind]: null } } });
+          toast(`${kindWord(kind)} handed back to the default`);
+          paint(true);
+          onChange();
+        },
+        (ok) => {
+          if (save) save.disabled = !ok; // an invalid cap cannot be saved: the field says why
+        },
+      );
       body.append(panel.node);
     }
     const msg = el("p", "note ss-msg");
     const actions = el("div", "actions");
-    actions.append(
-      msg,
-      el("span", "grow"),
-      button("Close", async () => close(), "btn ghost"),
-      button("Save changes", async () => {
+    save = button("Save changes", async () => {
         const change = {};
         rows.forEach((r, key) => {
           const next = readControl(key, r.input);
@@ -468,9 +516,10 @@ export function openSettings(first, onChange) {
         toast("Saved. The Sentinel picks it up at its next heartbeat.");
         paint(true);
         onChange();
-      }),
-    );
+      });
+    actions.append(msg, el("span", "grow"), button("Close", async () => close(), "btn ghost"), save);
     body.append(actions);
+    if (panel && panel.invalid()) save.disabled = true;
 
     // the effective value and why it has it; the inputs are only refilled after a save or a reset, never while someone is typing
     function paint(refill) {

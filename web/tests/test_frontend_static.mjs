@@ -111,8 +111,18 @@ class SentinelElement {
     this.text = text == null ? '' : String(text);
     this.attrs = attrs;
     this.children = [];
+    this.hidden = false;
+    this.value = '';
+    this.listeners = {};
+    this.classes = new Set();
+    this.classList = {toggle: (name, on) => (on ? this.classes.add(name) : this.classes.delete(name))};
   }
   append(...children) { this.children.push(...children); }
+  get textContent() { return this.text; }
+  set textContent(value) { this.text = String(value); }
+  addEventListener(type, fn) { this.listeners[type] = fn; }
+  setAttribute(name, value) { this.attrs = {...this.attrs, [name]: value}; }
+  removeAttribute(name) { const {[name]: _gone, ...rest} = this.attrs; this.attrs = rest; }
 }
 
 const sentinelEl = (tag, cls, text, attrs) => new SentinelElement(tag, cls, text, attrs);
@@ -170,8 +180,9 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
-const {versionBlock, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset} = await import(`data:text/javascript,${encodeURIComponent(
-  `const {el, badge, button} = globalThis.__sentinelUi;\n${settingsSource}`,
+globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
+const {versionBlock, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
 
@@ -239,12 +250,14 @@ test('a card shows a chip per kind in three styles, with who or what decided in 
   const chips = kindChips(policyKinds);
   const byText = Object.fromEntries(chips.children.map((c) => [c.text, c]));
   assert.equal(byText['nmap'].cls, 'chip kind-on');
-  assert.equal(byText['OpenVAS'].cls, 'chip kind-denied');
-  assert.match(byText['OpenVAS'].attrs.title, /Denied by alice/);
-  assert.equal(byText['nuclei (light)'].cls, 'chip kind-held');
-  assert.match(byText['nuclei (light)'].attrs.title, /Withheld after repeated failures until/);
-  assert.equal(byText['testssl'].cls, 'chip kind-denied');
-  assert.match(byText['testssl'].attrs.title, /Turned off on the machine/);
+  assert.equal(byText['OpenVAS (denied)'].cls, 'chip kind-denied');
+  assert.match(byText['OpenVAS (denied)'].attrs.title, /Denied by alice/);
+  assert.equal(byText['nuclei (light) (withheld)'].cls, 'chip kind-held');
+  assert.match(byText['nuclei (light) (withheld)'].attrs.title, /Withheld after repeated failures until/);
+  // turned off on the machine is its own style (hatched, dashed, "off on machine"), not the denied one, and says so in words as well
+  assert.equal(byText['testssl (off on machine)'].cls, 'chip kind-locked');
+  assert.match(byText['testssl (off on machine)'].attrs.title, /Turned off on the machine/);
+  assert.notEqual(byText['testssl (off on machine)'].cls, byText['OpenVAS (denied)'].cls);
   assert.ok(byText['naabu (preferred) x2'], 'preferred and capped kinds say so');
   assert.equal(byText['WPScan'], undefined);
   assert.equal(kindChips({wpscan: policyKinds.wpscan}), null);
@@ -258,4 +271,73 @@ test('the capability policy is drawn with textContent only', () => {
   assert.match(settingsSource, /settings: \{ kinds: \{ \[kind\]: null \} \}/, 'Use default removes the Sentinel\'s own policy of a kind');
   assert.match(sentinelSource, /kindChips\(detail\.kinds\)/);
   assert.match(read('scannerbar.js'), /disabled_message/);
+});
+
+// --- the settings panel: a cap that cannot be saved says why under its field, and the instance default is explained -----------------------------
+const walk = (node, found = []) => { found.push(node); (node.children || []).forEach((c) => typeof c !== 'string' && walk(c, found)); return found; };
+
+test('a cap that is not a whole number from 1 to 10 has a sentence of its own, and empty means no limit', () => {
+  assert.equal(capProblem(''), '');
+  assert.equal(capProblem('  '), '');
+  for (const ok of ['1', '3', '10']) assert.equal(capProblem(ok), '');
+  for (const bad of ['0', '11', '2.5', '-1', 'abc', '1e1']) assert.match(capProblem(bad), /whole number from 1 to 10, or empty for no limit/);
+});
+
+test('the panel marks an invalid cap inline with an alert, tells Save, and clears when it is fixed', () => {
+  {
+    const validity = [];
+    const panel = kindsPanel({nmap: kindInfo()}, async () => {}, (ok) => validity.push(ok));
+    assert.equal(validity.at(-1), true, 'a panel that opens clean can be saved');
+    const row = walk(panel.node).find((n) => n.cls === 'ss-pol-row');
+    const cap = row.children.find((c) => c.tag === 'input');
+    const err = row.children.find((c) => c.cls && c.cls.includes('ss-pol-err'));
+    assert.equal(err.attrs.role, 'alert');
+    assert.equal(err.attrs['aria-live'], 'assertive');
+    assert.equal(err.hidden, true);
+    cap.value = '99';
+    cap.listeners.input();
+    assert.match(err.text, /whole number from 1 to 10/);
+    assert.equal(err.hidden, false);
+    assert.equal(cap.attrs['aria-invalid'], 'true');
+    assert.ok(cap.classes.has('invalid'));
+    assert.equal(validity.at(-1), false, 'Save is told to stay disabled');
+    assert.equal(panel.invalid(), true);
+    cap.value = '3';
+    cap.listeners.input();
+    assert.equal(err.hidden, true);
+    assert.equal(cap.attrs['aria-invalid'], undefined);
+    assert.equal(validity.at(-1), true);
+    assert.equal(panel.invalid(), false);
+    cap.validity = {badInput: true};  // letters typed into a number field read as empty, which is not "no limit"
+    cap.value = '';
+    cap.listeners.input();
+    assert.equal(panel.invalid(), true);
+  }
+});
+
+test('a kind denied by the instance default gets a one-line hint that Allow overrides it for this Sentinel only', () => {
+  const builtin = {openvas: kindInfo({mode: 'deny', source: 'instance default', by: 'root', state: 'denied', effective: false}), nmap: kindInfo()};
+  assert.match(defaultHint(builtin), /^OpenVAS is denied here by the instance default\. Choosing Allow overrides that default for this Sentinel only\.$/);
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'agent', state: 'denied'})}), '');
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'machine', state: 'machine_off'})}), '');
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'instance default', declared: false, state: 'denied'})}), '', 'nothing to override for a kind the Sentinel does not have');
+  assert.match(defaultHint({openvas: builtin.openvas, wpscan: kindInfo({mode: 'deny', source: 'instance default', state: 'denied'})}), /^OpenVAS, WPScan are denied here/);
+});
+
+test('the rows keep a stable grid: every row reserves its columns and the note and error take their own lines', () => {
+  const css = readFileSync(new URL('../static/cve/cve.css', import.meta.url), 'utf8');
+  // the tracks fit any container: fluid (fr) tracks, and the fixed ones add up to well under the narrowest dialog, so the row never overflows it
+  const grid = css.match(/\.ss-pol-row\{display:grid;grid-template-columns:([^;]+);/)[1];
+  assert.match(grid, /minmax\(0,1\.3fr\)/);
+  assert.match(grid, /fr\)/);
+  const fixed = [...grid.replace(/minmax\(0,[^)]*\)/g, '').matchAll(/(\d+)px/g)].map((m) => Number(m[1]));
+  assert.ok(fixed.reduce((a, b) => a + b, 0) + 3 * 10 <= 360, `fixed tracks ${fixed} plus gaps must stay far under a 530px container`);
+  assert.match(css, /\.ss-pol-row\{[^}]*min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol-row>\*\{min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol\{[^}]*min-width:0;max-width:100%\}/);
+  assert.match(css, /\.ss-pol-note\{grid-column:1\/-1/);
+  assert.match(css, /\.ss-pol-row \[hidden\]\{display:block;visibility:hidden\}/, 'a control a row does not offer keeps its column');
+  assert.match(css, /\.chip\.kind-locked\{[^}]*dashed/);
+  assert.match(css, /\.chip\.kind-denied\{[^}]*var\(--fire-ink\)/);
+  assert.match(settingsSource, /role: "alert"/);
 });
