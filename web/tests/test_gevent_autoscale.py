@@ -40,7 +40,7 @@ class Harness:
         return consumer
 
     def scaler(self, cls, max_concurrency=8, min_concurrency=1):
-        return cls(self.pool, max_concurrency, min_concurrency, worker=mock.Mock())
+        return cls(self.pool, max_concurrency, min_concurrency, worker=mock.Mock(consumer=mock.Mock(prefetch_multiplier=1)))
 
     def tick(self, scaler, times=1):
         """One autoscaler round per second in a worker; here back to back, letting greenlets run in between."""
@@ -147,3 +147,15 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(app.conf.worker_autoscaler, 'reNgine.gevent_autoscale:GeventAutoscaler')
         from celery.utils.imports import symbol_by_name
         self.assertIs(symbol_by_name(app.conf.worker_autoscaler), GeventAutoscaler)
+        self.assertFalse(app.conf.worker_enable_prefetch_count_reduction)  # its restore reads the greenlets running (test_gevent_worker_e2e)
+
+    def test_a_live_change_of_the_ceiling_moves_the_prefetch_even_with_nothing_running(self):
+        h = Harness()
+        consumer = mock.Mock(prefetch_multiplier=1, initial_prefetch_count=8)
+        scaler = GeventAutoscaler(h.pool, 8, 1, worker=mock.Mock(consumer=consumer))
+        scaler.update(max=12)
+        self.assertEqual(consumer.initial_prefetch_count, 12)
+        consumer.qos.increment_eventually.assert_called_once_with(4)
+        scaler.update(max=3)
+        self.assertEqual(consumer.initial_prefetch_count, 3)
+        consumer.qos.decrement_eventually.assert_called_once_with(9)
