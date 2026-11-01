@@ -162,10 +162,10 @@ def http_fetch(method, url, paced=True):
     try:
         connection.request(method, path, headers={'Host': host, 'User-Agent': 'cvENGINE bucket check', 'Accept': '*/*', 'Accept-Encoding': 'identity'})
         response = connection.getresponse()
-        body = b'' if method == 'HEAD' else (response.read(MAX_BODY) or b'')
+        body = b'' if method == 'HEAD' else pinned_transport.read_body(response, MAX_BODY)
         keep = ('x-amz-bucket-region', 'content-type', 'x-ms-error-code', 'x-goog-error')
         return Response(response.status, {k: response.getheader(k) or '' for k in keep}, body)
-    except http.client.HTTPException as exc:
+    except (http.client.HTTPException, ValueError) as exc:  # ValueError: a body that claims an encoding it is not in
         raise OSError(f'storage endpoint answered badly: {type(exc).__name__}') from None
     finally:
         connection.close()

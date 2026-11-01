@@ -340,6 +340,29 @@ class FetchTests(SimpleTestCase):
         self.assertEqual((got.status, got.headers['x-amz-bucket-region'], got.body), (200, 'us-east-1', b'<ListBucketResult/>'))
         connection.return_value.close.assert_called_once()
 
+    def fetch_encoded(self, body, encoding):
+        from tests.test_pinned_transport import FakeResponse
+        response = FakeResponse(body, encoding)
+        response.status = 200
+        with mock.patch('cveFeed.pinned_transport.resolve', return_value=((2, ('203.0.113.9', 443)),)), \
+                mock.patch('cveFeed.pinned_transport.HTTPConnection') as connection:
+            connection.return_value.getresponse.return_value = response
+            return bp.http_fetch('GET', 'https://ex-static.s3.amazonaws.com/?max-keys=20', paced=False)
+
+    def test_a_listing_a_server_sends_gzipped_despite_identity_is_read(self):
+        import gzip
+        listing = b'<ListBucketResult><Name>ex-static</Name><Contents><Key>a.txt</Key></Contents></ListBucketResult>'
+        got = self.fetch_encoded(gzip.compress(listing), 'gzip')
+        self.assertEqual((got.status, got.body), (200, listing))
+
+    def test_a_compressed_body_is_cut_at_the_cap_after_decoding_and_a_bad_one_is_a_network_error(self):
+        import gzip
+        got = self.fetch_encoded(gzip.compress(b'A' * 20_000_000, compresslevel=9), 'gzip')
+        self.assertEqual(len(got.body), bp.MAX_BODY)
+        for body, encoding in ((b'garbage', 'gzip'), (b'<x/>', 'br')):
+            with self.assertRaises(OSError):
+                self.fetch_encoded(body, encoding)
+
     def test_a_head_reads_no_body(self):
         response = mock.Mock(status=200)
         response.getheader.return_value = ''
