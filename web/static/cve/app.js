@@ -437,6 +437,55 @@ const duration = (from, to) => {
   if (m < 1) return `${Math.max(1, Math.round(ms / 1000))}s`;
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+// A scan's stages as a pipeline, in the order they were created. A stage's time is its start while it runs and its end once it is done,
+// and stages run one after another, so a finished stage took from the end of the one before it (or the scan's start) to its own time.
+// Each step shows that length as text and as a bar against the longest, so where the time went reads at a glance; the running stage
+// has a live timer and a beam on its connector, a failed one its error. Returns {node, tick}: tick() repaints the live timer.
+const STAGE_STATE = { success: "done", running: "running", queued: "waiting", failed: "failed", aborted: "stopped" };
+function stagePipeline(stages, scan) {
+  const steps = stages.slice().sort((a, b) => a.id - b.id);
+  let prevEnd = scan.started;
+  const spans = steps.map((st) => {
+    if (st.status === "queued") return { from: null, to: null };
+    if (st.status === "running") return { from: st.time, to: null };
+    const span = { from: prevEnd, to: st.time };
+    prevEnd = st.time;
+    return span;
+  });
+  const lengthOf = ({ from, to }) => (from ? Math.max(0, (to ? new Date(to) : new Date()) - new Date(from)) : 0);
+  const longest = Math.max(1, ...spans.map(lengthOf));
+  const node = el("div", "pipe-wrap");
+  const done = steps.filter((st) => st.status === "success").length;
+  const running = steps.filter((st) => st.status === "running").map((st) => st.title || st.name);
+  const failed = steps.filter((st) => st.status === "failed").length;
+  const total = `${steps.length} stage${steps.length === 1 ? "" : "s"}`;
+  node.append(el("p", "pipe-sum", running.length || steps.some((st) => st.status === "queued")
+    ? `${done} of ${total} done${running.length ? ` · now: ${running.join(", ")}` : ""}`
+    : `${total}${failed ? ` · ${failed} failed` : " · all done"}`));
+  const list = el("ol", "pipe");
+  const live = [];
+  steps.forEach((st, i) => {
+    const li = el("li", `pipe-step ${st.status}`);
+    const main = el("div", "pipe-main");
+    main.append(el("b", "", st.title || st.name), el("span", "pipe-state", STAGE_STATE[st.status] || st.status));
+    if (st.error) main.append(el("p", "pipe-err", st.error));
+    const bar = el("span", "pipe-bar", null, { "aria-hidden": "true" });
+    const fill = el("i");
+    bar.append(fill);
+    const dur = el("span", "pipe-dur");
+    const paint = () => {
+      const span = spans[i];
+      dur.textContent = span.from ? duration(span.from, span.to) : "";
+      fill.style.width = span.from ? `${Math.max(3, (100 * lengthOf(span)) / Math.max(longest, lengthOf(span)))}%` : "0";
+    };
+    paint();
+    if (st.status === "running") live.push(paint);
+    li.append(el("span", "pipe-dot", null, { "aria-hidden": "true" }), main, bar, dur);
+    list.append(li);
+  });
+  node.append(list);
+  return { node, tick: () => live.forEach((paint) => paint()) };
+}
 const meterCell = (n, of) => {
   const box = el("div", "meter-cell");
   const bar = el("div", "meter");
@@ -4157,8 +4206,10 @@ pages.scan = async function scanDetail(mount) {
         return [box, v];
       };
       const [durBox, durValue] = fact("Duration", duration(s.started, s.finished));
+      let pipe = null;
       const paintDur = () => {
         durValue.textContent = duration(s.started, s.finished);
+        if (pipe) pipe.tick();
       };
       if (live) ticker = setInterval(paintDur, 1000);
       meta.append(fact("Started", shortDate(s.started))[0], durBox);
@@ -4179,16 +4230,8 @@ pages.scan = async function scanDetail(mount) {
       top.insertBefore(pop, top.lastChild);
       head.append(top, meta);
       if (stages.length) {
-        const row = el("div", "phases");
-        stages
-          .slice()
-          .sort((a, b) => (a.time || "").localeCompare(b.time || ""))
-          .forEach((st) => {
-            const box = el("div", `phase ${st.status}`);
-            box.append(el("b", "", st.title), el("span", "", st.error ? st.error : st.status));
-            row.append(box);
-          });
-        head.append(row);
+        pipe = stagePipeline(stages, s);
+        head.append(pipe.node);
       }
       if (s.error) head.append(el("p", "msg err", s.error));
 
