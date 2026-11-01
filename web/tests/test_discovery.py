@@ -950,7 +950,8 @@ class IpTargetTests(TestCase):
 		from cveFeed.tasks import watch_certificates_all
 		named = Domain.objects.create(name='named.example', project=self.project, insert_date=timezone.now())
 		with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as queued, \
-				mock.patch('cveFeed.ledger.sweep_claim', return_value=True):  # the real claim outlives the test, in Redis
+				mock.patch('cveFeed.ledger.sweep_claim', return_value=True), \
+				mock.patch('cveFeed.ct_queue._client', return_value=None):  # the real claim and markers outlive the test, in Redis
 			out = watch_certificates_all()
 		self.assertEqual(out['queued'], 1)
 		self.assertEqual(queued.call_args[1]['args'], [named.id])

@@ -475,8 +475,8 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
     if kind == DOMAIN and created:  # every domain target is "subscribed": watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
-        watch_certificate_transparency.delay(created[0].id)
+        from cveFeed import ct_queue
+        ct_queue.queue_lookups([created[0].id], ct_queue.ADD_LIFETIME)  # one marker per domain: adding it twice queues one lookup
     scan_ids = []
     created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
     deferred = 0
@@ -1249,11 +1249,10 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
+        from cveFeed import ct_queue
         names_wanted = set(domain_names)
         wanted = [d for d in created if d.name in names_wanted]
-        for i, d in enumerate(wanted):  # crt.sh blocks a burst, so each check starts a couple of seconds after the last
-            watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
+        ct_queue.queue_lookups([d.id for d in wanted], ct_queue.ADD_LIFETIME)  # spaced out (crt.sh blocks a burst), marked, and expiring
     scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
     if discover and to_discover and stored != Domain.DISCOVERY_MANUAL:  # manual: "just add them, do not scan yet"
