@@ -734,6 +734,7 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
 @app.task(name="validate_match_on_demand", bind=False, queue="validation_priority_queue")
 def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
+    from django.db import transaction
     from django.utils import timezone
     from cveFeed import activity, correlation, triage, validation, validation_plan
     from cveFeed.validation_authority import require_authority
@@ -896,12 +897,19 @@ def validate_match_on_demand(request_id):
         # finished job for one of other evidence and queued the same match again (issue 338, jobs 4750 and 4752).
         row.refresh_from_db()
         match.refresh_from_db()  # the review writes the match's ai_verdict, which closure_basis reads: key the state enqueue will read
-        result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
-        OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-            status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
-            next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
-            error=('deferred until the daily validation cap resets' if capped_only else
-                   'a check or AI review failed or was blocked') if status == 'failed' else '')
+        with transaction.atomic():
+            done = OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
+                status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
+                next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
+                error=('deferred until the daily validation cap resets' if capped_only else
+                       'a check or AI review failed or was blocked') if status == 'failed' else '')
+            if done:
+                # The key is made AFTER the job left 'running', in the same transaction (nobody sees the finished job without it). A manual
+                # job counts as standing (match_policy.has_standing) once it is no longer running, and closure_basis reads that: a key made
+                # while it still ran described an edge-fronted match as clearable, the key enqueue makes from the database does not, so the
+                # two never matched and CVENGINE_VALIDATE_MIN_GAP_HOURS never held after a manual validation.
+                result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
+                OnDemandValidation.objects.filter(pk=job.pk).update(result=result)
         activity.settle(progress, 'failed' if status == 'failed' else 'done',
                         f'Validation request #{job.pk} {status} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')

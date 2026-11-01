@@ -278,6 +278,83 @@ def signal_digest(context):
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
+# What a re-scan or a clock changes without the host having changed. ``stable_view`` (the host text key of a match's signature) leaves these
+# out, so the same host evidence is the same key tomorrow (issue 338 follow-up: one AI review per rescan for every match without a floor).
+PER_REQUEST_HEADERS = frozenset({'cf-ray', 'x-amz-cf-id', 'x-amz-cf-pop', 'x-request-id', 'x-fastly-request-id', 'x-azure-ref', 'x-nf-request-id',
+                                 'x-vercel-id', 'x-sucuri-id', 'x-served-by', 'x-envoy-upstream-service-time'})  # a new value on every response
+CACHE_STATE_HEADERS = frozenset({'x-cache', 'cf-cache-status', 'x-nextjs-cache', 'x-drupal-cache', 'x-litespeed-cache',
+                                 'x-magento-cache-debug'})  # HIT or MISS, depending on who asked last
+_HEADER = re.compile(r'^\s*([a-z0-9-]+)\s*:')
+_NONCE = re.compile(r"nonce-[A-Za-z0-9+/_=-]+", re.I)  # a Content-Security-Policy nonce is new on every response
+_CLOCK = re.compile(r'\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b')  # a time of day in a banner or a check summary
+CERT_SOON_DAYS = 30
+
+
+def _stable_text(text):
+    return _CLOCK.sub('hh:mm:ss', _NONCE.sub('nonce-*', text))
+
+
+def _stable_header(line):
+    """``name: value`` with the value of a header that changes on every response (or with the cache's state) left out; the header being present
+    is what stays (it names the edge, the cache or the proxy)."""
+    match = _HEADER.match(line)
+    if match and match.group(1) in PER_REQUEST_HEADERS | CACHE_STATE_HEADERS:
+        return f'{match.group(1)}: *'
+    return line
+
+
+def _certificate_state(days_left):
+    return days_left if days_left is None else ('expired' if days_left < 0 else 'expiring' if days_left <= CERT_SOON_DAYS else 'valid')
+
+
+def _canonical(items):
+    """``items`` in an order that does not depend on the order the database returned them in (or on which row was written last)."""
+    return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+
+
+def _stable(value, key=''):
+    if isinstance(value, str):
+        return _stable_header(_stable_text(value)) if key == 'kept_response_headers' else _stable_text(value)
+    if isinstance(value, dict):
+        return {k: _stable(v, k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stable(v, key) for v in value]
+    return value
+
+
+def stable_view(context):
+    """``context`` (the clipped host context the model is shown) without what changes while the host does not, for hashing into a match's
+    signature (``triage.bind_host_text``): a certificate's days left (reduced to expired, expiring within CERT_SOON_DAYS days, or valid), the
+    date a probe observed what it observed, when the host's inventory was reported and how many packages it lists, whether a Tailscale device
+    is online right now, the AI's verdicts on the host's other matches, per-request and cache-state response headers (the header stays, its value goes), Content-Security-Policy nonces
+    and times of day, and the order of rows that carry no order of their own (probe results, certificates, ports on one number). A value that
+    is evidence (a product, a version, an outcome, a banner, a header's content, a certificate's issuer, expired or not) stays. A context with
+    none of these is returned as it is, so its key does not change."""
+    if not isinstance(context, dict):
+        return context
+    out = _stable(context)
+    if isinstance(out.get('certificates'), list):
+        certs = [{k: v for k, v in c.items() if k != 'days_left'} | {'expiry': _certificate_state(c.get('days_left'))}
+                 if isinstance(c, dict) and 'days_left' in c else c for c in out['certificates']]
+        out['certificates'] = _canonical(certs)
+    if isinstance(out.get('probe_results'), list):
+        out['probe_results'] = _canonical([{k: v for k, v in p.items() if k != 'observed'} if isinstance(p, dict) else p
+                                           for p in out['probe_results']])
+    if isinstance(out.get('host_inventory'), dict):
+        out['host_inventory'] = {k: v for k, v in out['host_inventory'].items() if k not in ('reported_at', 'packages')}
+    if isinstance(out.get('other_cve_matches'), list):
+        # the AI's verdicts on this host's matches (this match's own among them) are answers, not host evidence: the review writes this match's
+        # verdict, and a rescan's new row of it starts with none, so the key moved from one scan to the next. Blanked, not removed, so a host
+        # whose matches had no verdict yet keeps the key it had.
+        out['other_cve_matches'] = [{**m, 'verdict': ''} if isinstance(m, dict) and 'verdict' in m else m for m in out['other_cve_matches']]
+    if isinstance(out.get('tailscale'), dict):
+        out['tailscale'] = {k: v for k, v in out['tailscale'].items() if k != 'online'}
+    if isinstance(out.get('ports'), list):
+        out['ports'] = sorted(out['ports'], key=lambda p: (p.get('number', 0) if isinstance(p, dict) else 0,
+                                                           json.dumps(p, sort_keys=True, default=str)))
+    return out
+
+
 def _deep(value, depth=0):
     """Every string cleaned to the identifier-like alphabet and every container bounded: what the AI prompts get is safe at any depth."""
     if isinstance(value, str):

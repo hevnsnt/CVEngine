@@ -522,13 +522,21 @@ def bind_host_text(d):
     """Key a CVE match's verdict to the host-controlled text the model was shown (banner extras, CPE, host metadata) when no hard
     evidence bounds the answer. The verdict is shared by every host and organization with the same signature, so without this one
     host's crafted banner could set the stored verdict of every other host with the same product and version. A match with a floor
-    needs no such key: the model can only raise it, never clear it."""
+    needs no such key: the model can only raise it, never clear it.
+
+    The key is made from ``host_context.stable_view`` of the context, not the context as shown: what changes while the host does not (a
+    certificate's days left, the date a probe observed something, a request id, a cache state) would otherwise move the signature every day
+    and every rescan would ask the model the same question again (one AI call per match without a floor, per rescan). A host whose context
+    holds none of those has the key it always had, so changing the definition re-asks nothing for it; for the rest, the reviews it queues
+    once keep the verdict and are bounded by the daily triage caps (``_rereview_fields``, ``DEFAULT_CAPS``)."""
     if d['kind'] != 'cve_match' or hard_evidence('cve_match', d['facts'])[0]:
         return
+    from cveFeed import host_context
     payload = d['payload']
     text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]
     if any(text):
-        d['signature_fields']['host_text'] = hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        stable = [text[0], text[1], host_context.stable_view(text[2])]
+        d['signature_fields']['host_text'] = hashlib.sha1(json.dumps(stable, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def describe(finding):
