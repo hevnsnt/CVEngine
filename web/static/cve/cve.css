@@ -1737,13 +1737,14 @@ section.internal[hidden]{display:none}
 @media (max-width:640px){.ss-row{grid-template-columns:1fr}.ss-reset{grid-column:1;grid-row:auto;justify-self:start}}
 /* the capability policy: one row per kind (name, who decided, mode, cap, reset) in the settings panel, and the chips of a card */
 .ss-pol-title{margin:16px 0 4px}
-.ss-pol{display:flex;flex-direction:column;margin:8px 0}
-.ss-pol-row{display:grid;grid-template-columns:150px 120px 140px 120px;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.ss-pol{display:flex;flex-direction:column;margin:8px 0;min-width:0;max-width:100%}
+.ss-pol-row{display:grid;grid-template-columns:minmax(0,1.3fr) 110px minmax(88px,1fr) 112px;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line);min-width:0;box-sizing:border-box}
+.ss-pol-row>*{min-width:0;box-sizing:border-box}
 .ss-pol-name{font-size:13px;overflow-wrap:anywhere}
 .ss-pol-note{grid-column:1/-1;margin:0;font-size:12px;overflow-wrap:anywhere}
 .ss-pol-err{grid-column:1/-1;margin:0;padding:4px 8px;font-size:12px}
 .ss-pol-hint{margin:6px 0 4px}
-.ss-pol-row select,.ss-pol-row input{min-height:0;width:100%;min-width:0}
+.ss-pol-row select,.ss-pol-row input{min-height:0;width:100%;min-width:0;box-sizing:border-box}
 .ss-pol-row input.invalid{border-color:var(--fire);box-shadow:0 0 0 1px var(--fire)}
 .ss-pol-row[data-state=unavailable] .ss-pol-name,.ss-pol-row[data-state=machine_off] .ss-pol-name{color:var(--muted)}
 .ss-pol-row [hidden]{display:block;visibility:hidden}

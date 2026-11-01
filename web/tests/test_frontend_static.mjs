@@ -315,7 +315,15 @@ test('a kind denied by the instance default gets a one-line hint that Allow over
 
 test('the rows keep a stable grid: every row reserves its columns and the note and error take their own lines', () => {
   const css = readFileSync(new URL('../static/cve/cve.css', import.meta.url), 'utf8');
-  assert.match(css, /\.ss-pol-row\{display:grid;grid-template-columns:150px 120px 140px 120px/);
+  // the tracks fit any container: fluid (fr) tracks, and the fixed ones add up to well under the narrowest dialog, so the row never overflows it
+  const grid = css.match(/\.ss-pol-row\{display:grid;grid-template-columns:([^;]+);/)[1];
+  assert.match(grid, /minmax\(0,1\.3fr\)/);
+  assert.match(grid, /fr\)/);
+  const fixed = [...grid.replace(/minmax\(0,[^)]*\)/g, '').matchAll(/(\d+)px/g)].map((m) => Number(m[1]));
+  assert.ok(fixed.reduce((a, b) => a + b, 0) + 3 * 10 <= 360, `fixed tracks ${fixed} plus gaps must stay far under a 530px container`);
+  assert.match(css, /\.ss-pol-row\{[^}]*min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol-row>\*\{min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol\{[^}]*min-width:0;max-width:100%\}/);
   assert.match(css, /\.ss-pol-note\{grid-column:1\/-1/);
   assert.match(css, /\.ss-pol-row \[hidden\]\{display:block;visibility:hidden\}/, 'a control a row does not offer keeps its column');
   assert.match(css, /\.chip\.kind-locked\{[^}]*dashed/);
