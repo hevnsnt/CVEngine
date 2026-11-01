@@ -48,10 +48,11 @@ BASE_COSTS_MB = {
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
     'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
     'testssl': 150,         # testssl.sh and its openssl children against one TLS port
+    'screenshot': 450,      # one headless Chromium and its driver, one page at a time (cveFeed.web_shot); a batch of pages is one job
 }
 # How many of each kind may run at once in a container, whatever memory is free: these are CPU and network bound, so more
 # in parallel only makes every one of them slower. Override with HEAVY_MAX_<KIND>, e.g. HEAVY_MAX_NMAP=2.
-MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2}
+MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2, 'screenshot': 1}
 DEFAULT_WAIT_SECONDS = 24 * 3600  # a queued deep discovery may wait behind several others, one at a time
 RESERVATION_TTL = 90        # a holder that stops heartbeating loses its reservation after this many seconds
 HEARTBEAT_SECONDS = 3

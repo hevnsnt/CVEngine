@@ -588,7 +588,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None):
+                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -618,6 +618,14 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if (rdp_capturer or rdp_shot.available()) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
         rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
                             fallback={'attempted': 0})
+        if stopped(scan_id):
+            return gone
+    from cveFeed import web_shot
+    shot_result = None
+    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by the screenshot worker (its own queue and memory gate)
+        shot_result = _stage(scan, 'Web screenshots', 'web_screenshot',
+                             lambda: (screenshot_queuer or web_shot.queue_for_scan)(scan_id, by_person=by_person or scan.initiated_by_id is not None, force=retest or force),
+                             fallback={'queued': 0})
         if stopped(scan_id):
             return gone
     db_result = _stage(scan, 'Database exposure check', 'db_exposure_scan',
@@ -749,6 +757,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['node2shell'] = node2shell_result
     if rdp_result is not None:
         result['rdp_screenshot'] = rdp_result
+    if shot_result is not None:
+        result['web_screenshot'] = shot_result
     _announce(scan, result, summary=hygiene)
     return result
 
@@ -914,7 +924,7 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                 return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             scanned = [n for n in wanted if n in resolved_names] if force else wanted  # the hosts the stages have something to do for
             result = _run_stages(scan.id, found, hygiene=hygiene, hygiene_host=scanned if assessment_ids else None,
-                                 retest=retest, force=force, **stage_kwargs)
+                                 retest=retest, force=force, by_person=by_person, **stage_kwargs)
             if per_host:
                 result['per_host'] = per_host
             return result

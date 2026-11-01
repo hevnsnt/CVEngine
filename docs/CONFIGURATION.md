@@ -89,6 +89,13 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_RUNZERO_SYNC_HOURS`, `CVENGINE_RUNZERO_IMPORT_MAX` | `6`, `500` | Hours between runZero syncs of each project that has a token (1 to 336; an hourly beat task starts the ones that are due), and the most new targets one sync may import when import is on (1 to 5000). See [runZero](#runzero). |
 | `CVENGINE_ARCHIVE_LOOKUP` | `1` | Set to `0` to stop asking the Internet Archive which URLs it saved for a target (passive, nothing is sent to the target). |
 | `CVENGINE_TTL_ARCHIVE_URLS` | `168` | Hours before a target's archived URLs are read again. |
+| `CVENGINE_SCREENSHOTS` | `1` | `0`, `false`, `no` or `off` turns off web screenshots: the scan stage, the Take screenshot button and the hourly backfill (see [Pipeline](PIPELINE.md#web-screenshots)). Pictures already taken stay. |
+| `CVENGINE_SCREENSHOT_TTL_HOURS`, `CVENGINE_SCREENSHOT_RETRY_HOURS` | `72`, `24` | Hours before a captured page is photographed again, and before a page that failed (or was blocked) is tried again. |
+| `CVENGINE_SCREENSHOT_MAX_PER_SCAN` | `50` | Pages one scan queues; the hourly backfill takes the rest. |
+| `CVENGINE_SCREENSHOT_BACKFILL_PER_PROJECT`, `CVENGINE_SCREENSHOT_BACKFILL_MAX` | `20`, `100` | Pages the hourly backfill queues per project and in all per run. |
+| `CVENGINE_SCREENSHOT_TIMEOUT` | `20` | Seconds allowed for one page (8 to 60): the navigation gets up to 15 of them, then the page is given a moment to settle. |
+| `CVENGINE_SCREENSHOT_MAX_BYTES`, `CVENGINE_SCREENSHOT_PROJECT_MB` | `2097152`, `500` | The size above which a picture is stored as a smaller JPEG, and the storage one project may use for pictures (megabytes). |
+| `CVENGINE_SCREENSHOT_USER` | `nobody` | The account the screenshot browser runs as when the worker is root (`-` or `root` runs it as the worker). The browser has no sandbox of its own in a container, so this keeps a hostile page away from the worker's files and secrets. `HEAVY_COST_SCREENSHOT_MB` (default 450) and `HEAVY_MAX_SCREENSHOT` (default 1) size its place in the memory queue. |
 | `CVENGINE_RDP_SHOT` | `1` | Set to `0` to turn off RDP login-screen screenshots entirely. |
 | `CVENGINE_TTL_RDP_SHOT` | `24` | Hours before a host's RDP screenshot is captured again. |
 | `CVENGINE_RDP_SHOT_MAX_HOSTS` | `10` | RDP servers screenshotted per scan; a live RDP session plus an AI call costs more than most checks. |

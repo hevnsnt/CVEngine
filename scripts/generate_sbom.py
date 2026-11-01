@@ -64,6 +64,10 @@ def tools(dockerfile):
         component('testssl.sh', arg(dockerfile, 'TESTSSL_VERSION'), f'pkg:github/testssl/testssl.sh@v{arg(dockerfile, "TESTSSL_VERSION")}',
                   hashes=[arg(dockerfile, 'TESTSSL_SHA256')], note='GPLv2, run as a separate program; the release tarball (hash: tarball)',
                   url='https://testssl.sh'),
+        component('chromium (Playwright headless shell)', arg(dockerfile, 'PLAYWRIGHT_CHROMIUM_VERSION'),
+                  f'pkg:generic/chromium@{arg(dockerfile, "PLAYWRIGHT_CHROMIUM_VERSION")}',
+                  note='the build the pinned Playwright drives, installed with `playwright install` (web/Dockerfile); the build checks it launches this exact version',
+                  url='https://playwright.dev'),
         component('nuclei-templates', None, None, kind='data', pinned=False, note='refreshed at runtime, by design',
                   url='https://github.com/projectdiscovery/nuclei-templates'),
     ]

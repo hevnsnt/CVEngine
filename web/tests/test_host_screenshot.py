@@ -143,17 +143,15 @@ class HostScreenshotThumbnailTests(HostScreenshotTests):
 
 
 class ScreenshotNoteTests(TestCase):
-	"""The host page says why a host has no screenshot instead of showing nothing."""
+	"""The host page says why a host has no screenshot instead of showing nothing (the full set of reasons is in tests/test_web_shot.py)."""
 
-	def test_each_reason_and_none_when_there_is_a_shot(self):
-		from types import SimpleNamespace
+	def test_each_reason_when_there_is_no_capture_yet(self):
+		from unittest import mock
 
-		from agentapi import services
-		has = SimpleNamespace(screenshot_path='x/screenshots/a.jpeg')
-		none = SimpleNamespace(screenshot_path='')
-		self.assertEqual(services._screenshot_note(has, {}), '')
-		self.assertIn('no web page has answered', services._screenshot_note(none, {}))
-		later = services._screenshot_note(none, {'url': 'https://www.a.example/', 'status': 301})
+		from cveFeed import web_shot
+		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
+			self.assertIn('no web page has answered', web_shot.note_for([], has_web_evidence=False))
+			later = web_shot.note_for([], has_web_evidence=True)
 		self.assertTrue(later.startswith('None yet'))
-		self.assertIn('rescan', later)
-		self.assertTrue(services._screenshot_note(none, {'status': 200}).startswith('None yet'))
+		self.assertIn('Take screenshot', later)
+		self.assertNotIn('rescan the host', later)  # a rescan is not what takes a picture; the screenshot stage and the button are

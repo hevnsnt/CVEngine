@@ -829,10 +829,12 @@ EXCLUDED = {
         'rescore': 'recomputes host scores from stored data',
         'udp-unavailable-note': 'a once-a-day rate limit for a note in the activity feed',
         'suppliers': 'third-party supplier host cards; suppliers are not owned hosts and are deliberately kept out of this registry',
+        'screenshot-backfill': 'queues web screenshots for hosts that have none (cveFeed.web_shot); a picture is evidence for a person, not a check, and its own state (outcome and reason per page) is on the host page and in get_system_status',
     },
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
         'asset_changes': 'the change log of the scan, bookkeeping only',
+        'web_screenshot': 'queues the web screenshots of the scan\'s hosts for the screenshot worker (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
         'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the testssl ledger kind, which the tls-audit check judges for an internal host',
         'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
         'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the udp-scan ledger kind, which the udp check judges for an internal host',

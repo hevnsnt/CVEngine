@@ -97,6 +97,21 @@ def subdir_apps_sweep():
     return subdir_apps.sweep_all()
 
 
+@app.task(name='drain_screenshots', bind=False, queue='screenshot_queue')
+def drain_screenshots():
+    """Capture the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``), one browser, one page at a time, one drain
+    at a time: see ``cveFeed.web_shot``. Kicked by a scan stage, the Take screenshot button and the hourly sweep; a second call while one runs returns at once."""
+    from cveFeed import web_shot
+    return web_shot.drain()
+
+
+@app.task(name='screenshot_backfill', bind=False, queue='screenshot_queue')
+def screenshot_backfill():
+    """Hourly: queue the hosts that have no web screenshot (or an old one), a few per project per run, then drain: see ``cveFeed.web_shot.backfill``."""
+    from cveFeed import web_shot
+    return web_shot.sweep()
+
+
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which

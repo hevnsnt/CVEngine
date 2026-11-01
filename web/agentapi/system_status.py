@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'screenshot_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -84,7 +84,38 @@ def _project_row(project):
         'wordpress': wpscan_scan.status_counts([project.id]),
         # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
         'web_discovery': subdir_apps.status_counts([project.id]),
+        # web screenshots (cveFeed.web_shot): hosts with a picture of how many have a web page, what waits, what failed, and the last capture error
+        'screenshots': _screenshots_of(project),
     }
+
+
+def _screenshots_of(project):
+    from cveFeed import web_shot
+    try:
+        return web_shot.status_counts([project.id])
+    except Exception as exc:  # noqa: BLE001 - counts only: the row is shown without them rather than not at all
+        return {'error': type(exc).__name__}
+
+
+def _screenshots(problems, notes):
+    """The screenshot browser of this server: switched on, installed (the Chromium the pinned Playwright drives), the last time the browser itself failed
+    to run, and what waits (cveFeed.web_shot). A missing browser or a failing one is a problem worth seeing: no host will get a picture."""
+    from django.core.cache import cache
+    from cveFeed import web_shot
+    from cveFeed.models import HostScreenshot
+    pinned = web_shot.pinned_browser()
+    try:
+        last = cache.get('screenshots:last_browser_error')
+    except Exception:  # noqa: BLE001
+        last = None
+    out = {'enabled': web_shot.enabled(), 'chromium_installed': web_shot.browser_installed(), 'chromium_version': pinned.get('version') or None,
+           'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'last_browser_error': last}
+    reason = web_shot.unavailable_reason()
+    if reason and web_shot.enabled():
+        notes.append(f'screenshots: {reason}')  # a note, not a problem: an image that predates the feature runs everything else fine
+    elif last:
+        problems.append(f"screenshots: the browser last failed to run at {last.get('at')}: {last.get('error')}")
+    return out
 
 
 def _projects(ctx):
@@ -266,6 +297,11 @@ def _tool_version(argv):
     return value
 
 
+def _chromium_version():
+    from cveFeed import web_shot
+    return web_shot.pinned_browser().get('version') if web_shot.browser_installed() else None
+
+
 def _template_refresh():
     """What the last ``nuclei -update-templates`` run said, as the worker recorded it: ``{'at', 'ok', 'result'}`` or None."""
     from django.core.cache import cache
@@ -317,7 +353,9 @@ def _tools():
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
                          'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
-                         'testssl': _tool_version(('testssl.sh', '--version'))}}
+                         'testssl': _tool_version(('testssl.sh', '--version')),
+                         # the screenshot browser: the Chromium the pinned Playwright drives, when it is on disk (looked up, never launched)
+                         'chromium': _chromium_version()}}
 
 
 def _runzero(problems):
@@ -437,6 +475,7 @@ def _system(user, problems, notes):
     out['ai'] = _probe(problems, 'ai', _ai)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
+    out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))
     out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
     out['tools'] = _probe(problems, 'tools', _tools)
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})

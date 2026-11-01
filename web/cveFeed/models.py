@@ -791,6 +791,51 @@ class RdpScreenshot(models.Model):
         return f"{self.host}:{self.port}"
 
 
+class HostScreenshot(models.Model):
+    """The newest capture of one web page (or RDP login screen) of a host: one row per (project, host, scheme, port).
+
+    Written by ``cveFeed.web_shot`` (a real browser, its own stage and queue), never by discovery, so a host's screenshot no longer lives on
+    a per-scan ``Subdomain`` row that a rescan replaces. ``outcome`` and ``reason`` say what the last attempt did, so a host with no image
+    can say why. A failed attempt keeps the previous image (``image_path``) and ``captured_at`` (the time of the last success); a row that
+    is waiting for the capture worker is ``queued``. ``previous_image_path`` is the capture before the current one (the pair a visual diff
+    needs); older files are deleted."""
+
+    OUTCOMES = ("queued", "ok", "blank", "timeout", "unreachable", "tls_error", "blocked", "nla_required", "unavailable", "error")
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    scheme = models.CharField(max_length=8, default="https")  # http, https or rdp
+    port = models.PositiveIntegerField(default=443)
+    image_path = models.CharField(max_length=1000, blank=True, default="")  # relative to MEDIA_ROOT
+    thumb_path = models.CharField(max_length=1000, blank=True, default="")
+    image_hash = models.CharField(max_length=16, blank=True, default="")  # cveFeed.shots.dhash_file
+    image_bytes = models.PositiveIntegerField(default=0)
+    previous_image_path = models.CharField(max_length=1000, blank=True, default="")
+    previous_image_hash = models.CharField(max_length=16, blank=True, default="")
+    final_url = models.CharField(max_length=2000, blank=True, default="")  # where the page ended up after redirects
+    http_status = models.PositiveIntegerField(null=True, blank=True)
+    title = models.CharField(max_length=300, blank=True, default="")
+    outcome = models.CharField(max_length=16, default="queued")
+    reason = models.CharField(max_length=300, blank=True, default="")
+    captured_at = models.DateTimeField(null=True, blank=True)  # the last successful capture
+    attempted_at = models.DateTimeField(null=True, blank=True)  # the last attempt, success or not
+    queued_at = models.DateTimeField(null=True, blank=True)
+    by_person = models.BooleanField(default=False)  # a person asked for it: the bug bounty confirmation does not hold it back
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "scheme", "port"], name="uniq_hostshot_project_host_scheme_port")]
+        indexes = [models.Index(fields=["project", "outcome"], name="hostshot_project_outcome_idx"),
+                   models.Index(fields=["outcome", "queued_at"], name="hostshot_queue_idx")]
+
+    def __str__(self):
+        return f"{self.scheme}://{self.host}:{self.port} ({self.outcome})"
+
+    @property
+    def has_image(self):
+        return bool(self.image_path)
+
+
 class HostAssessment(models.Model):
     """One requested assessment of an inventoried host. Active requests are unique per project and name."""
 

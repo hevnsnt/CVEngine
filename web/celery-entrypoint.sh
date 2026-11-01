@@ -98,6 +98,8 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
 # ctwatch_queue: certificate transparency lookups of new targets (crt.sh rate limits them; a bulk add queues hundreds) must not hold the feed worker
 classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,ctwatch_queue"
+# screenshot_queue: the web screenshot drain (one Chromium, one page at a time, under the memory gate, one drain at a time: a second task returns at once)
+classic_queues+=",screenshot_queue"
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own

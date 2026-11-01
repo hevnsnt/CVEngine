@@ -758,6 +758,7 @@ a.why-more{color:var(--ink)}
 .shot{display:block;width:100%;max-width:680px;border-radius:var(--r);border:1px solid var(--line-2);margin-top:14px}
 .shot-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .shot-pair .shot{margin-top:6px}
+.shots-box{margin:0 0 16px}.shots-body{display:flex;flex-direction:column;gap:14px}.shot-figure{margin:0;display:flex;flex-direction:column;gap:6px;align-items:flex-start}.shot-figure .shot{margin-top:0}
 .ip-line{font:700 13px var(--mono);margin:14px 0 6px}
 .svc{padding:12px 14px;border-radius:var(--r);border:1px solid var(--line);background:var(--surface-2);margin-bottom:8px;min-width:0}
 .svc-top{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
