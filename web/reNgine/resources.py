@@ -252,25 +252,47 @@ def invalidate_saved():
 
 
 def saved_values(now_fn=time.monotonic):
-    """The values saved on the configMaxxing page, {key: whole number}, cached SAVED_CACHE_SECONDS. When Redis cannot be read the last copy this
-    process saw is kept; with none, nothing is saved as far as this process knows and the environment and the built-in defaults apply."""
+    """The values saved on the configMaxxing page, {key: whole number}, cached SAVED_CACHE_SECONDS. When Redis cannot be reached the last copy this
+    process saw is kept; with none, nothing is saved as far as this process knows and the environment and the built-in defaults apply. When Redis
+    answers but holds no copy (restarted without persistence, flushed, recreated), the database is the truth: it is read (at most once per cache
+    window), used and published again, so a lost copy never silently puts a saved limit back to the default."""
     now = now_fn()
     with _saved_lock:
         if _saved['at'] is not None and now - _saved['at'] < SAVED_CACHE_SECONDS:
             return _saved['values']
+    values = None
     try:
         client = redis_client()
         raw = client.get(SAVED_VALUES_KEY) if client is not None else None
-        values = json.loads(raw).get('values', {}) if raw else {}
-        values = values if isinstance(values, dict) else {}
+        values = json.loads(raw).get('values') if raw else None
+        values = values if isinstance(values, dict) else None
+    except (ValueError, AttributeError):
+        values = None  # a copy nobody can read is no copy
     except Exception:  # noqa: BLE001 - a cache that cannot be read must never stop admission or the conductor
         logger.debug('saved scan concurrency could not be read', exc_info=False)
         with _saved_lock:
             _saved['at'] = now  # no retry on every call during an outage
             return _saved['values']
+    if values is None:
+        values = _recover_saved(client is not None)
+        if values is None:  # the database could not be read either (or this is not a Django process): keep what this process had
+            with _saved_lock:
+                _saved['at'] = now
+                return _saved['values']
     with _saved_lock:
         _saved.update(at=now, values=values)
     return values
+
+
+def _recover_saved(publish_again):
+    """The saved values from the database, published again; None where that cannot be done (a process without Django, a database that is down).
+    Imported here so that this module stays importable by itself."""
+    try:
+        from cveFeed import scan_concurrency
+        return scan_concurrency.recover(publish_again)
+    except Exception:  # noqa: BLE001
+        logger.debug('saved scan concurrency could not be recovered from the database', exc_info=False)
+        return None
 
 
 def _admin_cap(kind):

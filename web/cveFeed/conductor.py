@@ -42,7 +42,10 @@ def wanted_depth():
 
 
 def min_gap():
-    return timedelta(hours=_env_int('CVENGINE_WORK_MIN_GAP_HOURS', DEFAULT_MIN_GAP_HOURS))
+    """The least time between two conductor scans of one target: what an App Admin saved on Settings, configMaxxing, else
+    CVENGINE_WORK_MIN_GAP_HOURS, else 2 hours (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    return timedelta(hours=tunables.value('work_min_gap_hours', DEFAULT_MIN_GAP_HOURS))
 
 
 def active_scans():

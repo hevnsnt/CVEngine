@@ -672,7 +672,11 @@ GENERATION_DEFAULTS = {'TEMPLATE_GEN_MAX_PER_DAY': 10, 'TEMPLATE_GEN_CVE_DAYS': 
 
 
 def generation_limit(name):
-    """A template-generation limit, overridable by CVENGINE_<NAME> in the environment."""
+    """A template-generation limit: for the daily budget what an App Admin saved on Settings, configMaxxing (``cveFeed.tunables``), else
+    CVENGINE_<NAME> in the environment, else the default."""
+    from cveFeed import tunables
+    if name.lower() in tunables.BY_KEY:
+        return tunables.value(name.lower(), GENERATION_DEFAULTS[name])
     try:
         return max(1, int(os.environ.get(f'CVENGINE_{name}', '')))
     except ValueError:

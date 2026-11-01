@@ -2,10 +2,13 @@
 
 Each card is a small registry entry (an id, a title and the module that owns its numbers), so another tunable is added by registering a card
 here and in ``static/cve/config-maxxing.js``, not by redesigning the section. This module is only what the server must do for the section as a
-whole: list the cards and put every one of them back to its defaults, as one audited action. Each card keeps its own storage, validation,
-audit entries and API (``/cve/api/settings/<card id>``).
+whole: list the cards and put every one of them back to its defaults, as one audited action. Scan concurrency keeps its own storage, validation,
+audit entries and API (``/cve/api/settings/scan_concurrency``). Every other card is a group of the generic tunable registry
+(``cveFeed.tunables``: AI spend, Scan pacing ...): its numbers share one row and one API (``/cve/api/settings/tunables``), so a new tunable is
+one line in that registry and a new group is one line there plus one in ``static/cve/tunables-card.js``.
 """
 from collections import namedtuple
+from functools import partial
 
 Card = namedtuple('Card', 'id title reset')
 
@@ -15,9 +18,19 @@ def _reset_scan_concurrency(user):
     return scan_concurrency.reset_all(user)
 
 
-CARDS = [
-    Card('scan_concurrency', 'Scan concurrency', _reset_scan_concurrency),
-]
+def _reset_tunable_group(group_id, user):
+    from cveFeed import tunables
+    return tunables.reset_group(user, group_id)
+
+
+def _cards():
+    from cveFeed import tunables
+    # one card per group of the tunable registry (cveFeed.tunables): a new group needs no entry here
+    return [Card('scan_concurrency', 'Scan concurrency', _reset_scan_concurrency)] + [
+        Card(group.id, group.title, partial(_reset_tunable_group, group.id)) for group in tunables.GROUPS]
+
+
+CARDS = _cards()
 
 
 def listing():

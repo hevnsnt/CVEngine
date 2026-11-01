@@ -6,6 +6,7 @@ import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
 import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
 import { FIELDS, GROUPS, anySet, applies, checkDraft, collect, effective, initialDrafts, labelOf, warnings } from "/staticfiles/cve/ai-settings-logic.js";
+import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)
 import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const root = document.getElementById("settings");
