@@ -182,8 +182,9 @@ class _Dispatch:
                     and sentinel_broker.capacity_state(self.project, self.kind, self.internal, exclude=[task.pk, *others])['state'] == 'busy'):
                 self.busy, self.claim_deadline = True, self.started + self.queue_budget  # another stage took the free slot first: wait for the next one
                 return False
-            if self._held_by_siblings():
-                self.claim_deadline = now + self.queue_budget  # waiting behind its own stage's chunks, which are being worked: not a reason to run it here
+            hold = self._sibling_hold()
+            if hold:
+                self.claim_deadline = now + hold  # waiting behind its own stage's chunks, which are being worked: not a reason to run it here
                 return False
             self.never_claimed = True
             sentinel_broker.expire(task, ('no Sentinel slot freed up in time; the stage fell back to local execution' if self.busy
@@ -194,16 +195,17 @@ class _Dispatch:
             return True
         return False
 
-    def _held_by_siblings(self):
-        """Whether this queued chunk task is queued because the slots are held by other chunk tasks of its own stage that a Sentinel has claimed.
-        Those finish and free a slot, so it keeps waiting, within the age the reaper allows a queued task, rather than falling back locally behind
-        work that is going well."""
+    def _sibling_hold(self):
+        """Seconds this queued chunk task may keep waiting because the slots are held by other chunk tasks of its own stage that a Sentinel has
+        claimed (they finish and free a slot), or 0 to give it up. A safety net, since the window is sized to the free slots and a stage normally
+        has no chunk queued behind its own: never beyond the age at which the reaper would expire a queued task (``queued_ttl``, less two reap
+        intervals), so this loop expires it, and says why, before the reaper does."""
         if not self.siblings or not any(t.status in ('claimed', 'running') for t in self.siblings()):
-            return False
+            return 0
         from agentapi import sentinel_broker
         from django.utils import timezone
         age = (timezone.now() - self.task.created_at).total_seconds()
-        return age < sentinel_broker.queued_ttl(self.kind).total_seconds() - 2 * REAP_EVERY
+        return max(0, min(self.queue_budget, sentinel_broker.queued_ttl(self.kind).total_seconds() - 2 * REAP_EVERY - age))
 
     def pause(self, now):
         """Seconds to sleep before the next look."""
@@ -308,9 +310,10 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     the order they finish, not the order they were given, and a chunk's own result is never split: a caller applies each as a whole.
 
     A window of chunk tasks is created up front and waited for in ONE poll loop (one read of all of them per tick); each finished chunk refills the
-    window. Its width is the smallest of: the chunks left, the free Sentinel slots of the project plus one (the one waiting for the next slot),
-    twice the instance's slots divided among the scans dispatching now (one scan does not take every slot), and ``CVENGINE_STAGE_PARALLEL``
-    (default 4). It is re-read on every refill, so a slot another stage took is not counted on. When no live Sentinel is left, or one never claims a
+    window. Its width is the smallest of: the chunks left, the slots this stage holds plus the project's free Sentinel slots (never more chunk
+    tasks than slots, so none queues behind its own stage's chunks), twice the instance's slots divided among the scans dispatching now (one scan
+    does not take every slot), and ``CVENGINE_STAGE_PARALLEL`` (default 4). The free slots and the other scans are read again on every refill, so
+    a slot another stage took is not counted on; the instance's slot total is read once, when the stage starts. When no live Sentinel is left, or one never claims a
     task, no more chunks are sent: that chunk and every chunk not yet sent are yielded as ``None`` after the in-flight ones finish. A chunk
     that failed or expired after a Sentinel took it falls back alone, and the rest carry on.
 
@@ -349,7 +352,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
             halted = True
             return
         holding = sum(d.task.status in ('claimed', 'running') for d in flying.values())
-        width = min(ceiling, _stage_share(scan, kind, total), max(1, holding + capacity['free'] + 1))
+        width = min(ceiling, _stage_share(scan, kind, total), max(1, holding + capacity['free']))
         free_left = max(0, capacity['free'])
         while pending and len(flying) < width:
             index = pending.pop(0)

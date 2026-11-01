@@ -393,13 +393,15 @@ def reuse_findings(scan, project, targets):
 
 
 def _chunk_size(stream, total):
-    """Targets handed to ``stream`` per call. A local stream gets ``NUCLEI_CHUNK`` at a time (a memory kill then only repeats one chunk); the Sentinel
-    wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) splits and runs the chunks side by side itself, so it is handed the whole list
-    (unless ``CVENGINE_STAGE_PARALLEL=1``, which keeps the serial, 100 at a time, behaviour exactly)."""
+    """Targets handed to ``stream`` per call. A local stream gets ``NUCLEI_CHUNK`` at a time (a memory kill then only repeats one chunk). The Sentinel
+    wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) splits each call into 64-target chunk tasks and runs them side by side, so it is
+    handed enough to fill its window (``MAX_ADDRESSES`` times ``CVENGINE_STAGE_PARALLEL``, 256 by default) and no more: the ledger is written
+    after each call, so a failure part way marks only the targets of the calls that did not finish. ``CVENGINE_STAGE_PARALLEL=1`` keeps the serial,
+    100 at a time, behaviour exactly."""
     if getattr(stream, 'chunks_itself', False):
-        from agentapi.sentinel_dispatch import stage_parallel
+        from agentapi.sentinel_dispatch import MAX_ADDRESSES, stage_parallel
         if stage_parallel() > 1:
-            return max(1, total)
+            return max(NUCLEI_CHUNK, MAX_ADDRESSES * stage_parallel())
     return NUCLEI_CHUNK
 
 

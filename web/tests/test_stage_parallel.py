@@ -39,9 +39,11 @@ class FakeSentinels:
         self.duration, self.outcome, self.claim = duration, outcome, claim
         self.answer = answer or self.default_answer
         self.clock = 1000.0
+        self.wall0 = timezone.now()  # the wall clock the code under test sees is this plus the simulated seconds, so ages and leases agree with the fake monotonic clock
         self.claimed_at = {}  # task pk -> clock when the harness claimed it
         self.peak_inflight = self.peak_claimed = self.sleeps = 0
         self.hooks = []  # (tick number, callable)
+        self.heartbeating = True
 
     def index_of(self, task):
         target = task.target.get('addresses') or task.target.get('targets')
@@ -58,6 +60,9 @@ class FakeSentinels:
     def monotonic(self):
         return self.clock
 
+    def wall(self):
+        return self.wall0 + timedelta(seconds=self.clock - 1000.0)
+
     def sleep(self, seconds):
         self.clock += max(seconds, 0.01)
         self.sleeps += 1
@@ -68,13 +73,17 @@ class FakeSentinels:
                 hook()
 
     def tick(self):
+        if self.heartbeating:  # the Sentinels heartbeat: they stay live, and keep their leases
+            Agent.objects.filter(pk__in=[a.pk for a in self.agents]).update(last_seen=self.wall())
+        if self.heartbeating:
+            SentinelTask.objects.filter(status__in=('claimed', 'running'), pk__in=list(self.claimed_at)).update(lease_expires_at=self.wall() + timedelta(minutes=5))
         for task in SentinelTask.objects.filter(status='claimed', pk__in=list(self.claimed_at)).order_by('id'):
             index = self.index_of(task)
             if self.clock - self.claimed_at[task.pk] < self.duration(index):
                 continue
             outcome = self.outcome(index)
             if outcome == 'done':
-                SentinelTask.objects.filter(pk=task.pk).update(status='done', result=self.answer(task), finished_at=timezone.now())
+                SentinelTask.objects.filter(pk=task.pk).update(status='done', result=self.answer(task), finished_at=self.wall())
             elif outcome == 'failed':
                 SentinelTask.objects.filter(pk=task.pk).update(status='failed', error='boom', finished_at=timezone.now())
         if self.claim:
@@ -83,7 +92,7 @@ class FakeSentinels:
                     held = SentinelTask.objects.filter(agent=agent, status__in=('claimed', 'running')).count()
                     if held < agent.max_concurrent and task.kind in agent.capabilities:
                         SentinelTask.objects.filter(pk=task.pk, status='queued').update(
-                            status='claimed', agent=agent, claimed_at=timezone.now(), lease_expires_at=timezone.now() + timedelta(minutes=5))
+                            status='claimed', agent=agent, claimed_at=self.wall(), lease_expires_at=self.wall() + timedelta(minutes=5))
                         self.claimed_at[task.pk] = self.clock
                         break
         stage = SentinelTask.objects.filter(status__in=ACTIVE).exclude(kind__in=OTHER_KINDS)
@@ -92,7 +101,8 @@ class FakeSentinels:
 
     def run(self, call):
         with mock.patch('agentapi.sentinel_dispatch.time.monotonic', side_effect=self.monotonic), \
-                mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=self.sleep):
+                mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=self.sleep), \
+                mock.patch('django.utils.timezone.now', side_effect=self.wall):
             return call()
 
 
@@ -137,7 +147,7 @@ class WindowTests(StageBase):
         got = self.fan_out(fake)
         self.assertEqual(sorted(i for i, _ in got), list(range(8)))
         self.assertTrue(all(result is not None for _, result in got))
-        self.assertEqual(fake.peak_inflight, 4)  # four free slots, one more would be waiting, but the ceiling is four
+        self.assertEqual(fake.peak_inflight, 4)  # four free slots (and the ceiling is four)
         self.assertEqual(fake.peak_claimed, 4)
         self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 8)  # every chunk a task of its own, created as the window made room
         self.assertEqual(self.active_tasks(), 0)
@@ -151,7 +161,7 @@ class WindowTests(StageBase):
         self.assertEqual(got[-1][0], 0)  # the slow one lands last, though it was sent first
         self.assertEqual(sorted(i for i, _ in got), [0, 1, 2, 3])
 
-    def test_the_window_is_the_free_slots_plus_one_never_more(self):
+    def test_the_window_is_the_free_slots_never_more(self):
         agents = self.two_agents()  # four slots
         for _ in range(2):  # two of them held by other work, so two are free
             SentinelTask.objects.create(project=self.project, kind='testssl', target={}, agent=agents[0], status='running',
@@ -159,8 +169,8 @@ class WindowTests(StageBase):
         fake = FakeSentinels(agents, chunks_of(8), duration=lambda i: 5)
         got = self.fan_out(fake)
         self.assertEqual(len(got), 8)
-        self.assertEqual(fake.peak_inflight, 3)  # 2 free slots + the one waiting for the next
-        self.assertLessEqual(fake.peak_claimed, 2)  # never past the slots that were free
+        self.assertEqual(fake.peak_inflight, 2)  # the 2 free slots: no chunk task is created to queue behind its own stage's
+        self.assertEqual(fake.peak_claimed, 2)
 
     def test_a_ceiling_below_the_free_slots_wins(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 5)
@@ -181,11 +191,43 @@ class WindowTests(StageBase):
         self.assertEqual(len(got), 8)
         self.assertEqual(fake.peak_inflight, 2)
 
-    def test_a_single_slot_sentinel_serves_a_second_chunk_that_waits_behind_the_first_instead_of_running_it_here(self):
-        fake = FakeSentinels([self.agent('solo', slots=1)], chunks_of(2), duration=lambda i: 400 if i == 0 else 5)  # the first runs past the 300 s queue wait
-        got = dict(self.fan_out(fake))
-        self.assertTrue(all(result is not None for result in got.values()), got)  # the second was not given up on and sent to run here
+    @mock.patch.object(dispatch, 'DISPATCH_POLL_INTERVAL', 5)  # a coarser poll keeps the simulated half hour short
+    def test_a_one_slot_sentinel_with_a_long_first_chunk_keeps_the_stage_serial_as_before(self):
+        from agentapi import sentinel_broker
+        ttl = sentinel_broker.queued_ttl('nmap').total_seconds()
+        fake = FakeSentinels([self.agent('solo', slots=1)], chunks_of(3), duration=lambda i: ttl * 2.5 if i == 0 else 5)  # the first runs far past what the reaper allows a queued task
+        got = dict(self.fan_out(fake, timeout=ttl * 4))
+        self.assertTrue(all(result is not None for result in got.values()), got)  # nothing was sent to run here
+        self.assertEqual(fake.peak_inflight, 1)  # one chunk task at a time: none is queued behind its own stage's
+        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 3)
         self.assertEqual(SentinelTask.objects.filter(status='expired').count(), 0)
+
+    @mock.patch.object(dispatch, 'DISPATCH_POLL_INTERVAL', 5)
+    def test_a_chunk_queued_behind_its_own_stage_is_given_up_by_the_loop_before_the_reaper_and_says_so(self):
+        """The safety net: should a chunk end up queued behind its own stage's claimed chunks, it waits no longer than the reaper would let a queued
+        task, and it is the loop that ends it (the stage stops sending, the activity line says no slot freed up), not the reaper."""
+        from agentapi import sentinel_broker
+        from cveFeed.models import AgentActivity
+        ttl = sentinel_broker.queued_ttl('nmap').total_seconds()
+        fake = FakeSentinels([self.agent('solo', slots=1)], chunks_of(4), duration=lambda i: ttl * 3 if i == 0 else 5)
+        real = sentinel_broker.capacity_state
+        calls = []
+
+        def two_free_slots_once(*args, **kwargs):  # the first look says two slots are free, though the Sentinel has one
+            state = real(*args, **kwargs)
+            calls.append(1)
+            return {**state, 'free': 2} if len(calls) == 1 else state
+        with mock.patch.object(sentinel_broker, 'capacity_state', two_free_slots_once):
+            got = dict(self.fan_out(fake, timeout=ttl * 4))
+        self.assertIsNone(got[1])  # the queued chunk was given up, to run here
+        self.assertIsNotNone(got[0])
+        queued = SentinelTask.objects.get(kind='nmap', target__addresses=fake.chunks[1])
+        self.assertEqual(queued.status, 'expired')
+        self.assertIn('no Sentinel slot freed up in time', queued.error)  # step ended it, not reap_expired ('while it waited in the queue')
+        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 2)  # and the stage stopped sending: chunks 2 and 3 were never created
+        self.assertEqual([got[2], got[3]], [None, None])
+        self.assertTrue(AgentActivity.objects.filter(message__contains='No Sentinel slot freed up for nmap work').exists())
+        self.assertFalse(AgentActivity.objects.filter(message__contains='No Sentinel checked in nmap work').exists())
 
     def test_one_poll_read_per_tick_whatever_the_number_of_chunks_in_flight(self):
         agents = self.two_agents()
@@ -216,7 +258,10 @@ class FallbackTests(StageBase):
 
     def test_the_sentinels_going_away_stops_the_fan_out_and_the_chunks_not_sent_are_left_to_run_here(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 3)
-        fake.hooks.append((1, lambda: Agent.objects.update(last_seen=timezone.now() - timedelta(hours=1))))  # both go quiet after the first tick
+        def go_quiet():
+            fake.heartbeating = False
+            Agent.objects.update(last_seen=fake.wall() - timedelta(hours=1))
+        fake.hooks.append((1, go_quiet))  # both go quiet after the first tick
         got = dict(self.fan_out(fake))
         sent = SentinelTask.objects.filter(kind='nmap').count()
         self.assertLess(sent, 8)
@@ -411,9 +456,31 @@ class CallerTests(StageBase):
         with mock.patch.dict(os.environ, {'CVENGINE_STAGE_PARALLEL': '1'}), mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
             fake = sentinels()
             fake.run(lambda: nuclei_scan.run_light_nuclei(self.scan.id, stream=spy(real), force=True))
-        self.assertEqual(seen, [nuclei_scan.NUCLEI_CHUNK, out['targets'] - nuclei_scan.NUCLEI_CHUNK])  # the serial behaviour exactly
+        self.assertEqual((len(seen), seen[0]), (2, nuclei_scan.NUCLEI_CHUNK))  # the serial behaviour exactly: 100, then the rest
         self.assertEqual(fake.peak_inflight, 1)
 
         seen.clear()  # a stream that is not the wrapper (a test's, or the local one) keeps its chunking whatever the setting
         nuclei_scan.run_light_nuclei(self.scan.id, stream=lambda path, **kw: seen.append(len(open(path).read().split())) or iter(()), force=True)
-        self.assertEqual(seen, [nuclei_scan.NUCLEI_CHUNK, out['targets'] - nuclei_scan.NUCLEI_CHUNK])
+        self.assertEqual((len(seen), seen[0]), (2, nuclei_scan.NUCLEI_CHUNK))
+
+
+class LedgerTests(StageBase):
+    def test_a_failure_after_some_calls_finished_marks_only_the_unfinished_targets_failed(self):
+        from cveFeed import ledger
+        for i in range(600):
+            Subdomain.objects.create(scan_history=self.scan, target_domain=self.domain, name=f'h{i}.example.test')
+        calls = []
+
+        def stream(path, **kwargs):
+            with open(path) as handle:
+                calls.append(handle.read().split())
+            if len(calls) == 3:
+                raise RuntimeError('no Sentinel inside the network answered')
+            return iter(())
+        stream.chunks_itself = True  # what the Sentinel wrapper declares
+        out = nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
+        self.assertEqual([len(c) for c in calls[:2]], [256, 256])  # enough per call to fill the window, no more
+        self.assertIn('error', out)
+        done = set(ledger.fresh(nuclei_scan.LIGHT_SERVICE, sum(calls, []), self.project.pk))
+        self.assertEqual(done, set(calls[0] + calls[1]))  # what the finished calls covered stays recorded as scanned
+        self.assertFalse(done & set(calls[2]))  # only the call that failed is not
