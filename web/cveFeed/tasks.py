@@ -734,6 +734,7 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
 @app.task(name="validate_match_on_demand", bind=False, queue="validation_priority_queue")
 def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
+    from django.db import transaction
     from django.utils import timezone
     from cveFeed import activity, correlation, triage, validation, validation_plan
     from cveFeed.validation_authority import require_authority
@@ -896,12 +897,45 @@ def validate_match_on_demand(request_id):
         # finished job for one of other evidence and queued the same match again (issue 338, jobs 4750 and 4752).
         row.refresh_from_db()
         match.refresh_from_db()  # the review writes the match's ai_verdict, which closure_basis reads: key the state enqueue will read
-        result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
-        OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-            status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
-            next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
-            error=('deferred until the daily validation cap resets' if capped_only else
-                   'a check or AI review failed or was blocked') if status == 'failed' else '')
+        with transaction.atomic():
+            done = OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
+                status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
+                next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
+                error=('deferred until the daily validation cap resets' if capped_only else
+                       'a check or AI review failed or was blocked') if status == 'failed' else '')
+            if done:
+                # What the job answered for is described AFTER it left 'running', in the same transaction (nobody sees the finished job
+                # without it). A manual job counts as standing (match_policy.has_standing) once it is no longer running, and closure_basis
+                # reads that: the key, and the signature, made while it still ran described an edge-fronted match as clearable, the ones
+                # enqueue and track make from the database do not, so the gap never held after a manual validation (the key), and the job
+                # was never taken for the evidence the row has (the signature), so the same match was validated again later.
+                after = triage.describe(match)
+                result['revalidation_key'] = triage.revalidation_key(after)
+                signature = triage.effective_signature(after, row.review_nonce)
+                OnDemandValidation.objects.filter(pk=job.pk).update(result=result, evidence_signature=signature)
+                # Equal but for the job's own standing: closure_basis, and the host text key that only a match with no floor has (the
+                # standing is what gives this one its floor back), which is compared as the match would have it
+                ignored = ('closure_basis', 'host_text')
+                standing_only = (
+                    {k: v for k, v in described['signature_fields'].items() if k not in ignored}
+                    == {k: v for k, v in after['signature_fields'].items() if k not in ignored}
+                    and described['signature_fields'].get('host_text') in (None, triage.host_text_key(after)))
+                if (standing_only and row.status == 'triaged' and row.verdict_id and row.signature != signature
+                        and triage.rank(row.classification) >= triage.rank(triage.hard_evidence('cve_match', after['facts'])[0])):
+                    # The review above was made with the signature the running job gave the match, and the only thing that differs now is the
+                    # job's own standing (closure_basis): the evidence is the one the model answered for. The answer it stored already
+                    # satisfies the floor the finished job leaves, so the row takes the new signature without a second review (and not over
+                    # a fresh review requested meanwhile). A classification below the floor is asked again.
+                    Triage.objects.filter(pk=row.pk, signature=row.signature, review_nonce=row.review_nonce).update(
+                        signature=signature, evidence_key=triage.evidence_key_for(after['kind'], after['signature_fields'], row.review_nonce))
+        if done:
+            # Anything else that moved while the checks and the review ran (a lowered floor, a new banner, a new template result) is NOT
+            # absorbed above: track the match as it is now, so a real change resets or queues the row as always, and the row and the finished
+            # job describe the same evidence (a failed job's backoff then holds: enqueue sees one signature, not two).
+            try:
+                triage.track(triage.with_cves([match]))
+            except Exception:  # noqa: BLE001 - the job is finished; the next sweep tracks the match
+                logger.exception('could not track match %s after validation request %s', match.pk, job.pk)
         activity.settle(progress, 'failed' if status == 'failed' else 'done',
                         f'Validation request #{job.pk} {status} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
@@ -1148,29 +1182,54 @@ def watch_certificate_transparency(self, domain_id):
     """Check one target against crt.sh for hosts not already known (see cveFeed.ctmonitor). When crt.sh could not be reached
     (rate limit, timeout) the check is tried again later instead of the target being skipped. It has a queue of its own, off the
     feed queue that runs the work conductor, the reaper and the Sentinel feed: hundreds of lookups wait behind one shared rate limit,
-    and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``)."""
+    and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``).
+    Every publish carries a lifetime (``expires``, kept by the retries) and a per-domain marker (``cveFeed.ct_queue``): the marker is
+    cleared here once the lookup ends for good, and a lookup that ends in failure is remembered so the sweep stops re-queuing it."""
     import random
 
+    from cveFeed import ct_queue
     from cveFeed.ctmonitor import CtBusy, run_ct_watch
+    retrying = False
     try:
-        result = run_ct_watch(domain_id)
-    except CtBusy as busy:  # waiting for crt.sh's pacing is not a failure: it is asked again when the slot is due, with no slot held meanwhile
-        raise self.retry(exc=busy, countdown=int(busy.wait) + random.randint(1, 60), max_retries=None)
-    if result.get("failed") and self.request.retries < 3:
-        raise self.retry(countdown=600 * (self.request.retries + 1), max_retries=3)
-    return result
+        try:
+            result = run_ct_watch(domain_id)
+        except CtBusy as busy:  # waiting for crt.sh's pacing is not a failure: it is asked again when the slot is due, with no slot held meanwhile
+            retrying = True
+            raise self.retry(exc=busy, countdown=int(busy.wait) + random.randint(1, 60), max_retries=None)
+        except Exception:  # a target the lookup cannot handle (a timeout, a reply it cannot read): not at the head of every sweep
+            ct_queue.record_failure(domain_id)
+            raise
+        if result.get("failed"):
+            delay = 600 * (self.request.retries + 1)
+            # a retry that would start after the message's lifetime is dropped unseen by the worker, so this failure is the last this
+            # lookup will see: record it now (the sweep's messages live about 20 minutes, the retries wait 10, 20 and 30)
+            if self.request.retries < 3 and not ct_queue.expires_within(self.request.expires, delay):
+                retrying = True
+                raise self.retry(countdown=delay, max_retries=3)
+            ct_queue.record_failure(domain_id)
+        return result
+    finally:
+        if not retrying:  # a retry is the same lookup still on its way: its marker stays
+            ct_queue.clear(domain_id)
 
 
 @app.task(name="watch_certificates_all", bind=False, queue="cve_feed_queue")
 def watch_certificates_all():
     """Periodic sweep: every target is "subscribed" to certificate-transparency monitoring this way. Targets checked in the
-    last 24 hours are skipped; the rest go oldest first, as many as fit in one interval (a check starts every ~3 seconds)."""
-    from cveFeed import ledger
+    last 24 hours are skipped; the rest go oldest first, as many as fit in one interval (a check starts every ~3 seconds).
+    It is bounded: nothing is queued while ``ctwatch_queue`` holds ``CVENGINE_CT_BACKLOG_MAX`` messages, a sweep adds at most the room
+    left under that cap, a target already queued or that recently failed for good is left out, and every message expires."""
+    from cveFeed import ct_queue, ledger
     from dashboard.models import SystemTimings
     from targetApp.models import Domain
     from targetApp.shared_domains import is_provider_domain
     from targetApp.target_types import IP, classify_target
     window = SystemTimings.current().ct_watch_minutes * 60
+    size = max(1, window // 3)
+    cap = ct_queue.backlog_max(size)
+    waiting = ct_queue.backlog()
+    if waiting is not None and waiting >= cap:  # the consumer is behind: more lookups would only lengthen the line
+        return {"queued": 0, "skipped": f"ctwatch_queue already holds {waiting} (cap {cap})", "backlog": waiting, "cap": cap}
     if not ledger.sweep_claim('ct-watch', int(window * 0.8)):
         return {"queued": 0, "skipped": "another sweep is running"}
     # crt.sh has nothing on a bare IP, so only names are asked about
@@ -1180,10 +1239,14 @@ def watch_certificates_all():
     rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
-    batch = due[:max(1, window // 3)]
-    for i, (domain_id, _name, _project) in enumerate(batch):  # spread out: crt.sh blocks a burst, so each check starts a couple of seconds after the last
-        watch_certificate_transparency.apply_async(args=[domain_id], countdown=int(i * 2.5))
-    return {"queued": len(batch), "due": len(due)}
+    failed = ct_queue.recently_failed(due)
+    candidates = [r[0] for r in due if r[0] not in failed]
+    room = cap if waiting is None else cap - waiting
+    # oldest first, as many as fit in one interval and under the cap; a domain already on its way is skipped without using a place,
+    # and each lookup starts a couple of seconds after the last (crt.sh blocks a burst)
+    queued = ct_queue.queue_lookups(candidates, lifetime=window, limit=min(size, room))
+    return {"queued": len(queued), "due": len(due), "backlog": waiting, "cap": cap,
+            "not_queued": len(candidates) - len(queued), "recently_failed": len(failed)}  # not_queued: already on its way, or past the batch and the cap's room
 
 
 DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's lock held is asked again (run_bbot_discovery)
@@ -1693,6 +1756,8 @@ def report_resources():
     resources.report_state()
     from cveFeed import scan_concurrency
     scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
+    from cveFeed import tunables
+    tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     return {}
 
 

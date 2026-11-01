@@ -1808,6 +1808,26 @@ class ScanConcurrency(models.Model):
         return f"scan concurrency ({len(self.values)} set)"
 
 
+class TunableSettings(models.Model):
+    """Single-row store of the advanced tunables chosen on Settings, configMaxxing (see cveFeed.tunables): ``values`` maps a tunable's key
+    (``triage_max_per_day``, ``stage_parallel`` ...) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that
+    is absent was never set (or was reset), so the environment variable, then the built-in default, applies. One row for every tunable, so
+    another tunable is one registry entry and no migration. The row is the durable truth; the processes that read a tunable use a copy that is
+    published to Redis (a few seconds old at most). It belongs to the instance, not to a project or an organization."""
+
+    values = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)  # {key: {"by": username, "at": iso time}}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return f"tunables ({len(self.values)} set)"
+
+
 class SmtpSettings(models.Model):
     """Single-row outgoing mail server (Settings, Email; see cveFeed.mailer). Off by default: with it off, or with no address on the
     account, adding a person shows a temporary password as it always did. The password is encrypted like every other stored secret and

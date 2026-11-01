@@ -423,7 +423,7 @@ def plan_ct_watch(h, ev):
         return 'a shared provider domain is never enumerated'
     if h.project_id in ev.blocked:
         return BOUNTY_REASON
-    return _one(h, ev, ('ct-watch',))
+    return _one(h, ev, ('ct-watch', 'ct-watch-failed'))
 
 
 def plan_archive(h, ev):
@@ -778,7 +778,7 @@ INTERNAL_PLANS = {
 CHECKS = (
     Check('discovery', 'Subdomain discovery (bbot)', plan_discovery, kinds=('bbot',), stages=('bbot_discovery',)),
     Check('deep-discovery', 'Weekly deep discovery', plan_deep_discovery, kinds=('bbot-deep',), sweeps=('deep-apex',)),
-    Check('ct-watch', 'Certificate transparency watch', plan_ct_watch, kinds=('ct-watch',), sweeps=('ct-watch',)),
+    Check('ct-watch', 'Certificate transparency watch', plan_ct_watch, kinds=('ct-watch', 'ct-watch-failed'), sweeps=('ct-watch',)),
     Check('archive-urls', 'Web archive history', plan_archive, kinds=('archive-urls',)),
     Check('email-auth', 'Email authentication (SPF, DKIM, DMARC, CAA)', plan_mail, kinds=('hygiene',), sweeps=('hygiene',)),
     Check('nmap', 'Service fingerprint (nmap)', plan_nmap, kinds=('nmap-fast',), stages=('nmap_scan',)),

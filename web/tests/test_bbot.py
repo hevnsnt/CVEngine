@@ -122,6 +122,58 @@ class BbotParseTests(unittest.TestCase):
 		self.assertNotIn('--silent', cmd)  # --silent hides the event stream
 
 
+class TrufflehogGateTests(unittest.TestCase):
+	"""bbot's trufflehog module verifies every secret it finds against the issuer's live API (bbot 3.0.2 never passes --no-verification), so it
+	is off in every mode unless CVENGINE_BBOT_TRUFFLEHOG=1 and the caller says the project may use it."""
+
+	def excluded(self, cmd):
+		return '-em' in cmd and 'trufflehog' in cmd[cmd.index('-em') + 1:cmd.index('-em') + 2]
+
+	def test_every_mode_excludes_trufflehog_by_default(self):
+		from reNgine.bbot import MODES
+		with mock.patch.dict('os.environ', {}, clear=False):
+			import os
+			os.environ.pop('CVENGINE_BBOT_TRUFFLEHOG', None)
+			for mode in MODES:
+				cmd = build_command(['example.com'], mode=mode)
+				self.assertTrue(self.excluded(cmd), mode)
+				self.assertTrue(cmd[cmd.index('-em') + 2].startswith('-'), 'the exclusion list must end at the next option')
+			deep = build_command(['example.com'], mode='deep')
+			self.assertEqual(deep[deep.index('-p') + 1], 'kitchen-sink')  # the preset itself is unchanged: its modules still run
+
+	def test_the_environment_alone_does_not_enable_it(self):
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': '1'}):
+			self.assertTrue(self.excluded(build_command(['example.com'], mode='deep')))
+
+	def test_the_flag_alone_does_not_enable_it(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': ''}):
+			cmd = build_command(['example.com'], mode='deep', extra_args=[TRUFFLEHOG_FLAG])
+			self.assertTrue(self.excluded(cmd))
+			self.assertNotIn(TRUFFLEHOG_FLAG, cmd)
+
+	def test_opt_in_needs_both_and_is_not_passed_to_bbot(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': 'yes'}):
+			cmd = build_command(['example.com'], mode='deep', extra_args=[TRUFFLEHOG_FLAG, '-c', 'modules.shodan_dns.api_key=k'])
+		self.assertFalse(self.excluded(cmd))
+		self.assertNotIn('-em', cmd)
+		self.assertNotIn(TRUFFLEHOG_FLAG, cmd)
+		self.assertIn('modules.shodan_dns.api_key=k', cmd)
+
+	def test_enabled_reads_the_usual_truthy_words(self):
+		from reNgine.bbot import trufflehog_enabled
+		for value, expected in (('1', True), ('true', True), ('ON', True), ('0', False), ('', False), ('no', False)):
+			with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': value}):
+				self.assertEqual(trufflehog_enabled(), expected, value)
+
+	def test_the_flag_survives_the_private_config_file_move(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG, private_config
+		with private_config([TRUFFLEHOG_FLAG, '-c', 'modules.shodan_dns.api_key=k']) as args:
+			self.assertIn(TRUFFLEHOG_FLAG, args)
+			self.assertNotIn('modules.shodan_dns.api_key=k', args)
+
+
 class StreamEventsProcessTests(unittest.TestCase):
 	"""A real subprocess (not bbot itself) stands in, so these exercise the actual Popen/thread plumbing."""
 
@@ -156,6 +208,40 @@ class StreamEventsProcessTests(unittest.TestCase):
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
 			list(stream_events(['example.com'], problems=problems))
 		self.assertEqual(problems, [('shodan_dns', 'Error with API (401 Unauthorized')])
+
+	def test_a_hard_failed_module_is_collected_with_the_first_line_of_its_reason(self):
+		# the lines bbot 3.0.2 logs when gowitness cannot start Chrome (module line, then the summary naming it again)
+		script = ('import sys\n'
+		          'print("[ERRR] Setup hard-failed for gowitness: Failed to set up Google chrome. Please install manually and set '
+		          '`chrome_path`, or try again with --force-deps.", file=sys.stderr)\n'
+		          'print("[ERRR] Setup hard-failed for 1 modules (gowitness)", file=sys.stderr)\n'
+		          'print("[WARN] Setup soft-failed for shodan_dns: Error with API (401 Unauthorized", file=sys.stderr)\n'
+		          'print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\')\n')
+		problems, hard = [], []
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
+			list(stream_events(['example.com'], problems=problems, hard_failures=hard))
+		self.assertEqual(hard, [('gowitness', 'Failed to set up Google chrome. Please install manually and set `chrome_path`, '
+		                                       'or try again with --force-deps.')])
+		self.assertEqual(problems, [('shodan_dns', 'Error with API (401 Unauthorized')])  # soft failures are unchanged
+
+	def test_hard_failure_parsing_of_single_lines(self):
+		from reNgine.bbot import _note_hard_failure
+		hard = []
+		_note_hard_failure('18:42:01 [ERRR] Setup hard-failed for 2 modules (gowitness,baddns)', hard)  # the summary alone: names, no reason
+		self.assertEqual(hard, [('gowitness', ''), ('baddns', '')])
+		_note_hard_failure('18:42:00 [ERRR] bbot.modules.gowitness: Setup hard-failed for gowitness: chrome --version failed', hard)
+		self.assertEqual(hard, [('gowitness', 'chrome --version failed'), ('baddns', '')])  # the reason fills in, no duplicate
+		_note_hard_failure('[ERRR] Setup hard-failed for gowitness: a different reason', hard)
+		self.assertEqual(hard[0], ('gowitness', 'chrome --version failed'))  # the first reason stays
+		_note_hard_failure('[INFO] Setup succeeded for 20/22 modules.', hard)
+		_note_hard_failure('[WARN] Setup soft-failed for shodan_dns: Error with API', hard)
+		self.assertEqual(len(hard), 2)
+
+	def test_a_clean_run_collects_no_hard_failures(self):
+		hard = []
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', 'pass']):
+			list(stream_events(['example.com'], hard_failures=hard))
+		self.assertEqual(hard, [])
 
 	def test_a_clean_empty_scan_is_still_not_an_error(self):
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', 'pass']):

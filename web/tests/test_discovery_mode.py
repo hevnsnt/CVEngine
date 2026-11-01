@@ -45,6 +45,9 @@ class DiscoveryModeBase(TestCase):
 			patcher = mock.patch(name)
 			patcher.start()
 			self.addCleanup(patcher.stop)
+		patcher = mock.patch('cveFeed.ct_queue._client', return_value=None)  # no per-domain markers left in Redis
+		patcher.start()
+		self.addCleanup(patcher.stop)
 		self.delay = tasks.run_bbot_discovery.delay
 
 	def domain(self, name, project=None, mode=None):
