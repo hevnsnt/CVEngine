@@ -628,7 +628,6 @@ class CaptureTests(ShotFixture, TestCase):
 
 	def test_a_sub_resource_a_guard_dropped_does_not_stop_the_page(self):
 		self.queue()
-		summary = {}
 
 		def drops_an_asset(proxy, key):
 			proxy.admit(key, 'cdn.internal.test', 443)
