@@ -1,7 +1,10 @@
 """Secret masking for AI prompts and replies (cveFeed.secret_redaction): a test vector for every pattern, the known-secret mask, the
 nuclei template rules, idempotence and the cost of long adversarial strings."""
+import json
+import re
 import time
 import unittest
+from unittest import mock
 
 from cveFeed import secret_redaction as sr
 
@@ -48,6 +51,10 @@ VECTORS = [
     ('url_password', 'postgres://admin:hunter2pass@db.example.test:5432/app', 'hunter2pass'),
     ('url_password', 'mongodb+srv://user:p4ss%21word@cluster0.example.test/db', 'p4ss%21word'),
     ('url_password', 'https://user:s3cret@example.test/path', 's3cret'),
+    ('url_password', 'redis://:s3cretpass@cache.example.test:6379/0', 's3cretpass'),
+    ('url_password', 'postgres://u:p@ss@db.example.test/app', 'p@ss'),
+    ('secret_value', 'password=hunter2x', 'hunter2x'),
+    ('secret_value', '{"api_key": "plainsecretvalue"}', 'plainsecretvalue'),
     ('bearer_token', 'Authorization: Bearer abcDEF1234567890abcdef.xyz-123', 'abcDEF1234567890abcdef.xyz-123'),
     ('auth_header', 'Authorization: Basic dXNlcjpwYXNzd29yZA==', 'dXNlcjpwYXNzd29yZA=='),
     ('secret', 'Known Secret Found. Secret Type: [Django] Secret: [s3cr3t-signing-value] Product Type: [cookie]', 's3cr3t-signing-value'),
@@ -71,13 +78,23 @@ HARMLESS = [
 ]
 
 
-class RedactTextTests(unittest.TestCase):
+class FixedKey(unittest.TestCase):
+    """Runs with a known HMAC key, so a mask carries its fingerprint whether or not Django is configured."""
+
+    def setUp(self):
+        saved, saved_wait = list(sr._KEY_CACHE), list(sr._NO_KEY_UNTIL)
+        sr._KEY_CACHE[:] = [b'k' * 32]
+        self.addCleanup(lambda: (sr._KEY_CACHE.__setitem__(slice(None), saved), sr._NO_KEY_UNTIL.__setitem__(slice(None), saved_wait)))
+
+
+class RedactTextTests(FixedKey):
     def test_every_pattern_masks_its_secret_and_names_its_kind(self):
         for kind, text, secret in VECTORS:
             with self.subTest(kind=kind, text=text[:50]):
                 out = sr.redact_text(text)
                 self.assertNotIn(secret, out)
-                self.assertIn(f', {kind}, fp:', out)
+                self.assertIn(f', {kind}', out)
+                self.assertRegex(out, r'redacted \d+ chars, ' + kind + r'(?:, fp:[0-9a-f]{8})?\]')
                 self.assertIn('[redacted ', out)
 
     def test_harmless_text_is_untouched(self):
@@ -115,14 +132,87 @@ class RedactTextTests(unittest.TestCase):
         for value in (None, 5, ['AKIAIOSFODNN7EXAMPLE'], {'a': KEY}):
             self.assertIs(sr.redact_text(value), value)
 
-    def test_the_fingerprint_depends_on_the_server_key(self):
+    def test_the_fingerprint_depends_on_the_server_key_and_is_derived_from_it(self):
         before = sr.fingerprint('same-secret')
         saved = list(sr._KEY_CACHE)
         try:
-            sr._KEY_CACHE[:] = [b'another-key']
+            sr._KEY_CACHE[:] = [b'another-derived-key']
             self.assertNotEqual(sr.fingerprint('same-secret'), before)
         finally:
             sr._KEY_CACHE[:] = saved
+        self.assertEqual(sr.fingerprint('same-secret'), before)
+
+    def test_the_hmac_key_is_not_the_field_key_itself(self):
+        import hashlib
+        import hmac
+        saved, saved_wait = list(sr._KEY_CACHE), list(sr._NO_KEY_UNTIL)
+        try:
+            sr._KEY_CACHE[:] = []
+            sr._NO_KEY_UNTIL[:] = [0.0]
+            with mock.patch.dict('os.environ', {'CVENGINE_FIELD_KEY': 'field-key-for-the-test'}):
+                derived = sr._fingerprint_key()
+        finally:
+            sr._KEY_CACHE[:] = saved
+            sr._NO_KEY_UNTIL[:] = saved_wait
+        self.assertNotEqual(derived, b'field-key-for-the-test')
+        self.assertEqual(derived, hmac.new(b'field-key-for-the-test', sr.KEY_DOMAIN, hashlib.sha256).digest())
+
+    def test_without_a_key_the_mask_has_no_fingerprint(self):
+        with mock.patch.object(sr, '_fingerprint_key', return_value=None):
+            self.assertEqual(sr.fingerprint(KEY), '')
+            out = sr.redact_text('found ' + KEY)
+            self.assertEqual(out, 'found AIza\u2026[redacted 39 chars, google_api_key]')
+            self.assertEqual(sr.redact_text(out), out)
+            self.assertEqual(sr.mask_secret('hunter2-hunter2', 'x'), '\u2026[redacted 15 chars, x]')
+
+    def test_a_bare_pem_header_is_not_masked_but_a_key_body_is(self):
+        for text in ('words: ["-----BEGIN RSA PRIVATE KEY-----"]', 'a -----BEGIN PRIVATE KEY----- header, then -----END PRIVATE KEY-----',
+                     '-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----'):
+            self.assertEqual(sr.redact_text(text), text)
+
+    def test_url_credentials_in_json_and_query_strings_are_left_alone(self):
+        for text in ('{"url":"http://host:8080","contact":"admin@example.com"}',
+                     '{"a":"https://x.com:443","b":"https://y.com","c":"me@z.com"}',
+                     'http://host:8080?email=a@b.c', "see 'http://host:8080', mail me@z.com", 'http://host:8080#me@z.com'):
+            with self.subTest(text=text):
+                self.assertEqual(sr.redact_text(text), text)
+                if text.startswith('{'):
+                    json.loads(sr.redact_text(text))
+
+    def test_more_url_credential_forms(self):
+        out = sr.redact_text('redis://:s3cretpass@cache.example.test:6379/0')
+        self.assertTrue(out.startswith('redis://:') and out.endswith('@cache.example.test:6379/0'))
+        self.assertNotIn('s3cretpass', out)
+        out = sr.redact_text('postgres://u:p@ss@db.example.test/app')
+        self.assertNotIn('p@ss', out)
+        self.assertTrue(out.startswith('postgres://u:') and out.endswith('@db.example.test/app'))
+        out = sr.redact_text('{"dsn":"postgres://u:hunter2pw@db.example.test/app","x":1}')
+        self.assertNotIn('hunter2pw', out)
+        self.assertEqual(json.loads(out)['x'], 1)
+
+    def test_key_value_pairs_mask_the_value_and_keep_the_key(self):
+        cases = ['password=hunter2x', 'passwd: Hunter2!x', 'api_key=abcd1234efgh', 'apikey: abcd1234efgh', 'secret_key=abcd1234efgh',
+                 'SECRET_KEY=abcd1234efgh', 'X-API-Key: abcd1234efgh', 'DB_PASSWORD=s3cr3t-value', 'client_secret = "plainlowercase"',
+                 'access_token=abc123def456']
+        for text in cases:
+            with self.subTest(text=text):
+                out = sr.redact_text(text)
+                key = re.split(r'[:=]', text)[0]
+                self.assertTrue(out.startswith(key), out)
+                self.assertIn('[redacted ', out)
+                self.assertIn('secret_value', out)
+                self.assertEqual(sr.redact_text(out), out)
+        out = sr.redact_text('{"password":"hunter2","user":"bob","api_key": "plainsecretvalue"}')
+        self.assertEqual(json.loads(out)['user'], 'bob')
+        self.assertNotIn('hunter2', out)
+        self.assertNotIn('plainsecretvalue', out)
+        self.assertTrue(out.startswith('{"password":"'))
+
+    def test_the_word_password_in_prose_is_left_alone(self):
+        for text in ('the password: required for login', 'Set a password=true flag', 'password: Required.', 'use a strong password, e.g. a passphrase',
+                     'api_key=${API_KEY}', 'password=********', 'api_key: <your key>', 'apikey=null', 'password: changeme', 'the api key is shown once'):
+            with self.subTest(text=text):
+                self.assertEqual(sr.redact_text(text), text)
 
 
 class AdversarialInputTests(unittest.TestCase):
@@ -149,6 +239,15 @@ class AdversarialInputTests(unittest.TestCase):
         'webhooks': 'https://hooks.slack.com/services/' * 10000,
         'account-keys': 'AccountKey=' * 30000,
         'aws-secret-assign': 'aws_secret_access_key=' * 20000,
+        'kv-keys': 'password=' * 50000,
+        'kv-quotes': 'api_key: "' * 30000,
+        'kv-prefixes': 'a_b_c_' * 60000 + 'password=x',
+        'kv-long-value': 'password=' + 'a1' * 150000,
+        'url-colons': 'a://' + ':' * 300000,
+        'url-ats': 'a://b:' + '@' * 300000,
+        'url-ats-many': 'a://b:@' * 50000,
+        'pem-lines': '-----BEGIN PRIVATE KEY-----\n' + ('a' * 64 + '\n') * 8000 + '-----END PRIVATE KEY-----',
+        'pem-short-lines': '-----BEGIN PRIVATE KEY-----\n' + 'a\n' * 100000,
         'many-matches': ('AIza' + 'a' * 35 + ' ') * 20000,
     }
 
@@ -160,7 +259,7 @@ class AdversarialInputTests(unittest.TestCase):
                 self.assertLess(time.monotonic() - started, 5.0, f'{name} took too long')
 
 
-class MaskSecretTests(unittest.TestCase):
+class MaskSecretTests(FixedKey):
     def test_a_known_shape_keeps_its_public_prefix(self):
         out = sr.mask_secret(KEY, 'google-api-key')
         self.assertTrue(out.startswith('AIza\u2026[redacted 39 chars, google_api_key, fp:'))
@@ -200,6 +299,8 @@ class ExtractedResultsTests(unittest.TestCase):
         out = sr.mask_extracted(['nginx/1.18', 'two words here', 'Zm9vYmFyYmF6cXV4'], 'some-leak', ['exposure'])
         self.assertEqual(out[:2], ['nginx/1.18', 'two words here'])
         self.assertIn('[redacted 16 chars', out[2])
+        versions = ['Apache/2.4.49-ubuntu', 'v1.2.3-rc1.build5', 'OpenSSL/1.1.1k-fips', '10.2.3.4567-beta']
+        self.assertEqual(sr.mask_extracted(versions, 'some-leak', ['exposure']), versions)
 
     def test_a_template_nobody_tagged_still_gets_the_generic_pass(self):
         out = sr.mask_extracted(['v1.2', 'AKIAIOSFODNN7EXAMPLE'], 'plain-template', ['panel'])

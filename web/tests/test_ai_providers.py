@@ -113,6 +113,17 @@ class SecretRedactionTests(unittest.TestCase):
 		self.assertEqual(parsed['classification'], 'confirmed')
 		self.assertNotIn(self.KEY, parsed['reason'])
 
+	def test_a_stage_can_keep_its_reply_literal_but_never_its_prompt(self):
+		reply = {'content': [{'type': 'text', 'text': 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'}]}
+		provider = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+		with mock.patch('requests.post', return_value=FakeResp(reply)) as post:
+			with ai.request_options(redact_reply=False):
+				literal = provider.complete('sys', 'evidence ' + self.KEY)
+			masked = provider.complete('sys', 'plain')
+		self.assertIn('eyJzdWIiOiIxMjM0NTY3ODkwIn0', literal)
+		self.assertNotIn('eyJzdWIiOiIxMjM0NTY3ODkwIn0', masked)  # any other caller: a hallucinated or echoed key is still masked
+		self.assertNotIn(self.KEY, json.dumps(post.call_args_list[0][1]['json']))  # the prompt was masked all the same
+
 
 class VisionTests(unittest.TestCase):
 	"""complete_vision() attaches one image to the user turn, in each provider's own shape, and shares the text

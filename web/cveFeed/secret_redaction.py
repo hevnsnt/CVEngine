@@ -21,27 +21,27 @@ import re
 import time
 
 FINGERPRINT_CHARS = 8
-_FALLBACK_KEY = b'cvengine/secret-redaction/v1'
+KEY_DOMAIN = b'cvengine/secret-redaction/v1'  # the HMAC key is derived from the field key with this label, never the field key itself
 MAX_TEXT = 2_000_000  # a longer text is masked in pieces: the work stays bounded whatever a caller passes
-
 
 _KEY_CACHE = []
 _NO_KEY_UNTIL = [0.0]
 
 
 def _fingerprint_key():
-    """The server field key (``CVENGINE_FIELD_KEY``, else Django's SECRET_KEY), read once; the fixed fallback is never cached, so a key
-    that appears later (Django set up after the first call) is still used."""
+    """The HMAC key for fingerprints, derived (domain separated) from the server field key (``CVENGINE_FIELD_KEY``, else Django's SECRET_KEY),
+    read once; None when no key can be loaded (then masks carry no fingerprint: a public constant key would make them guessable). A missing
+    key is not cached for long, so one that appears later (Django set up after the first call) is still used."""
     if _KEY_CACHE:
         return _KEY_CACHE[0]
     if time.monotonic() < _NO_KEY_UNTIL[0]:
-        return _FALLBACK_KEY
+        return None
     key = (os.environ.get('CVENGINE_FIELD_KEY') or '').strip()
     if not key:
         try:
             from reNgine.crypto_fields import dedicated_keys
             key = (dedicated_keys() or ('',))[0]
-        except Exception:  # noqa: BLE001 - no Django here (a unit test, a script): the fallback below
+        except Exception:  # noqa: BLE001 - no Django here (a unit test, a script)
             key = ''
     if not key:
         try:
@@ -51,19 +51,24 @@ def _fingerprint_key():
             key = ''
     if not key:
         _NO_KEY_UNTIL[0] = time.monotonic() + 30  # looking is slow (an import that fails): not once per match
-        return _FALLBACK_KEY
-    _KEY_CACHE.append(key.encode())
-    return _KEY_CACHE[0]
+        return None
+    derived = hmac.new(key.encode(), KEY_DOMAIN, hashlib.sha256).digest()
+    _KEY_CACHE.append(derived)
+    return derived
 
 
 def fingerprint(value):
-    """A short stable keyed digest of a secret: identical secrets share it, and it reveals nothing of the value."""
-    return hmac.new(_fingerprint_key(), str(value).encode('utf-8', 'replace'), hashlib.sha256).hexdigest()[:FINGERPRINT_CHARS]
+    """A short stable keyed digest of a secret (identical secrets share it, it reveals nothing of the value), or '' when no key is available."""
+    key = _fingerprint_key()
+    if key is None:
+        return ''
+    return hmac.new(key, str(value).encode('utf-8', 'replace'), hashlib.sha256).hexdigest()[:FINGERPRINT_CHARS]
 
 
 def _mask(value, kind, prefix=''):
     value = str(value)
-    return f'{prefix}\u2026[redacted {len(value)} chars, {kind}, fp:{fingerprint(value)}]'
+    fp = fingerprint(value)
+    return f'{prefix}\u2026[redacted {len(value)} chars, {kind}{", fp:" + fp if fp else ""}]'
 
 
 # A token must not start in the middle of a longer token.
@@ -74,10 +79,11 @@ _PEM_KIND = r'(?:[A-Z]{2,10} ){0,3}PRIVATE KEY(?: BLOCK)?'
 # specific shapes come before the generic ones (sk-ant- before sk-).
 _BASE64_RUN = r'[A-Za-z0-9+/=]{20,8192}'
 SHAPES = (
-    # a PEM block, END marker present; or, when it is cut short (a prompt is capped), the header and the base64 lines that follow it
+    # a PEM block: the header and the base64 body (every line at least 20 characters), then the END marker when it is there (a prompt is capped,
+    # so the end may be cut off). A bare header (a template's matcher, a sentence about keys) has no body and stays.
     ('private_key', '', re.compile(
-        r'-----BEGIN ' + _PEM_KIND + r'-----(?:(?:[A-Za-z0-9+/=\s\\:,.]{0,8192}?-----END ' + _PEM_KIND + r'-----)'
-        r'|(?:(?:\s|\\n){0,4}' + _BASE64_RUN + r'(?:(?:\s|\\n){1,4}' + _BASE64_RUN + r'){0,200}))?')),
+        r'-----BEGIN ' + _PEM_KIND + r'-----(?:\s|\\n){0,4}' + _BASE64_RUN + r'(?:(?:\s|\\n){1,4}' + _BASE64_RUN + r'){0,200}'
+        r'(?:(?:\s|\\n){0,4}[A-Za-z0-9+/=]{0,76}(?:\s|\\n){0,4}-----END ' + _PEM_KIND + r'-----)?')),
     ('jwt', 'eyJ', re.compile(_B + r'eyJ[A-Za-z0-9_-]{5,4096}\.eyJ[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{0,4096}')),
     ('google_api_key', 'AIza', re.compile(_B + r'AIza[0-9A-Za-z_-]{35,64}')),
     ('google_oauth_secret', 'GOCSPX-', re.compile(_B + r'GOCSPX-[0-9A-Za-z_-]{20,64}')),
@@ -98,8 +104,16 @@ SHAPES = (
     ('azure_storage_key', '', re.compile(r'(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/]{30,100}={0,2}')),
     ('aws_secret_access_key', '', re.compile(r'(?i:aws_secret_access_key|secret_access_key)["\']?\s{0,3}[:=]\s{0,3}["\']?[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])')),
 )
-# The credential of a URL (scheme://user:password@host): the password alone is masked, the rest stays readable.
-_URL_CREDENTIAL = re.compile(r'(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s:/@]{1,128}:)([^\s/@]{1,256})(@)')
+# The credential of a URL (scheme://user:password@host): the password alone is masked, the rest stays readable. The user may be empty
+# (redis://:pass@host), the password may hold an @ (it runs to the last @ of the token), and neither may hold a quote, comma, backslash,
+# angle bracket, ? or #, so a URL inside JSON, a query string or a sentence is not mistaken for one.
+_URL_CREDENTIAL = re.compile(r'(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s:/@"\'\\,<>?#]{0,128}:)([^\s/"\'\\,<>?#]{1,256})(@)')
+# A key=value or key: value pair that names a secret (password=..., "api_key": "...", X-API-Key: ..., SECRET_KEY=...): the value alone is
+# masked, the key stays, and the value must be plausible (see _plausible_value), so the word "password" in prose is not touched.
+_KEY_VALUE = re.compile(
+    r'(?<![A-Za-z0-9])((?:[A-Za-z0-9]{1,20}[_-]){0,3}(?:password|passwd|api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token)'
+    r'["\']?\s{0,3}[:=]\s{0,3}(["\']?))([^\s"\'<>,;&\\]{6,512})', re.I)
+_PLACEHOLDER = re.compile(r'^(?:[*x#.\-_]+|null|none|true|false|undefined|required|optional|string|your[_-].*|example|changeme)$', re.I)
 # A bearer token anywhere in text (not a lowercase word: "Bearer token-based authentication" is prose), and an Authorization header.
 _BEARER = re.compile(r'(\bBearer\s+)(?!(?-i:[a-z-]+)(?![A-Za-z0-9._~+/=-]))([A-Za-z0-9._~+/=-]{16,2048})', re.I)
 _AUTH_HEADER = re.compile(r'(\bAuthorization["\']?\s{0,3}[:=]\s{0,3}["\']?(?:Basic|Token|Digest)\s+)([A-Za-z0-9._~+/=-]{8,2048})', re.I)
@@ -121,10 +135,25 @@ def _sub_shape(kind, prefix):
     return lambda match: _mask(match.group(0), kind, _prefix_of(match.group(0), prefix))
 
 
+def _plausible_value(value, quoted):
+    """Whether a value after ``password=`` looks like a secret and not like prose or a placeholder: not already masked, not a placeholder or a
+    template variable, and either quoted (a config or JSON value) or holding a digit or a symbol."""
+    if value.startswith(('\u2026', '$', '{', '%', '@')) or '[redacted' in value or _PLACEHOLDER.match(value):
+        return False
+    return quoted or bool(re.search(r'[0-9!#$%^*_+=/~]', value))
+
+
+def _mask_key_value(match):
+    if not _plausible_value(match.group(3), bool(match.group(2))):
+        return match.group(0)
+    return match.group(1) + _mask(match.group(3), 'secret_value')
+
+
 def _redact_piece(text):
     for kind, prefix, pattern in SHAPES:
         text = pattern.sub(_sub_shape(kind, prefix), text)
     text = _URL_CREDENTIAL.sub(lambda m: m.group(1) + _mask(m.group(2), 'url_password') + m.group(3), text)
+    text = _KEY_VALUE.sub(_mask_key_value, text)
     text = _BEARER.sub(lambda m: m.group(1) + _mask(m.group(2), 'bearer_token'), text)
     text = _AUTH_HEADER.sub(lambda m: m.group(1) + _mask(m.group(2), 'auth_header'), text)
     text = _BBOT_BRACKET.sub(lambda m: m.group(0) if _MASKED in m.group(2) else m.group(1) + _mask(m.group(2), 'secret') + m.group(3), text)
@@ -169,6 +198,8 @@ STRONG_TAGS = frozenset({'token', 'tokens', 'secret', 'secrets', 'key', 'keys', 
 WEAK_TAGS = frozenset({'exposure', 'exposures', 'leak', 'disclosure'})
 _STRONG_ID = re.compile(r'token|secret|api[-_]?key|access[-_]?key|credential|private[-_]?key|passw(?:or)?d|-key(?:-|$)|^key-', re.I)
 WEAK_MIN_LENGTH = 12
+# "Apache/2.4.49", "v1.2.3-rc1": a version string is not a secret, whichever template extracted it.
+_VERSIONISH = re.compile(r'^(?:[A-Za-z][A-Za-z0-9_+-]{0,30}[/_-]v?|v?)\d+(?:\.\d+){1,3}[\w.+~-]{0,30}$')
 
 
 def secret_template(template_id='', tags=()):
@@ -186,7 +217,8 @@ def mask_extracted(values, template_id='', tags=()):
     out = []
     for value in values or ():
         text = '' if value is None else str(value)
-        if level == 'strong' or (level == 'weak' and len(text.strip()) >= WEAK_MIN_LENGTH and not re.search(r'\s', text.strip())):
+        if level == 'strong' or (level == 'weak' and len(text.strip()) >= WEAK_MIN_LENGTH and not re.search(r'\s', text.strip())
+                                           and not _VERSIONISH.match(text.strip())):
             out.append(mask_secret(text, template_id or 'secret'))
         else:
             out.append(redact_text(text))

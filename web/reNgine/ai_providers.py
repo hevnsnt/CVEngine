@@ -44,7 +44,8 @@ def request_options(**options):
 	answers differently on every call unless both are pinned, so a verdict is not reproducible; the hosted providers are left alone),
 	``schema`` (a JSON Schema the reply must follow, see ``structured_levels``), ``max_tokens`` (the stage's own reply limit, used when
 	the operator set none and the server is self-hosted, see ``reply_limit``) and ``token_factor`` (a retry after a reply was cut off asks
-	for a longer one)."""
+	for a longer one), ``redact_reply`` (False for a stage whose reply is code or a template that must stay literal: the prompt is masked
+	whatever this says, only the reply is left as the model wrote it)."""
 	token = _request_options.set({**_request_options.get(), **options})
 	try:
 		yield
@@ -204,7 +205,9 @@ def tracked_completion(fn):
 		self._last_usage, self._last_actual_model = None, ''
 		status, category = 'failed', ''
 		try:
-			answer = redact_text(fn(self, *args, **kwargs))
+			answer = fn(self, *args, **kwargs)
+			if _request_options.get().get('redact_reply', True):  # a stage whose reply is code that must stay literal (templategen) opts out
+				answer = redact_text(answer)
 			status = 'succeeded'
 			return answer
 		except Exception as exc:
