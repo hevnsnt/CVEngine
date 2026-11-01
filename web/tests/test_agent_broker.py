@@ -1031,7 +1031,7 @@ class ApprovalTests(AgentBrokerTestCase):
 		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'revoked'})
 		status, fresh = register(self.t['alice2'], approve=False)
 		self.assertEqual((status, fresh['status']), (201, 'suspended'))
-		self.assertIn('another agent', fresh['status_note'])
+		self.assertIn('of the same user was revoked', fresh['status_note'])
 		queue(self.t['alice'], 'validate', [self.m_linux.pk])
 		self.assertEqual(next_task(self.t['alice2'])[0], 403)
 
@@ -1040,7 +1040,7 @@ class ApprovalTests(AgentBrokerTestCase):
 		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'revoked'})
 		_, fresh = register(self.t['alice2'], approve=False)
 		url = f'/api/v1/agents/{fresh["id"]}'
-		self.assertEqual(fresh['status_note'], broker.INHERITED_SUSPENSION_NOTE)
+		self.assertEqual(fresh['status_note'], broker.hold_note(Agent.objects.get(pk=body['id'])))
 		status, out = call(self.t['dana'], 'PATCH', url, {'status': 'active'})  # the Sentinels page's Reinstate button
 		self.assertEqual((status, out['status'], out['status_note']), (200, 'active', ''))
 		call(self.t['dana'], 'PATCH', url, {'status': 'suspended', 'note': 'looping on one host'})
@@ -1090,6 +1090,189 @@ class ApprovalTests(AgentBrokerTestCase):
 		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'status': 'active'})[0], 403)
 		self.assertEqual(Agent.objects.get().status, 'revoked')
 		self.assertEqual(call(self.t['root'], 'PATCH', url, {'status': 'active'})[0], 200)
+
+
+class HoldBackTests(AgentBrokerTestCase):
+	"""A user with an agent suspended or revoked does not get round it with a new token, but only for a recent decision an administrator made,
+	never for an App Admin, and a deleted agent holds nothing back."""
+
+	def revoke(self, agent_id, by='dana', **extra):
+		status, out = call(self.t[by], 'PATCH', f'/api/v1/agents/{agent_id}', {'status': 'revoked', **extra})
+		self.assertEqual(status, 200, out)
+		return out
+
+	def test_the_note_names_the_agent_that_holds_a_new_one_back_and_an_audit_line_is_kept(self):
+		_, old = register(self.t['alice'], name='old-box')
+		self.revoke(old['id'])
+		status, fresh = register(self.t['alice2'], approve=False, name='new-box')
+		self.assertEqual((status, fresh['status']), (201, 'suspended'))
+		today = timezone.now().date().isoformat()
+		note = fresh['status_note']
+		for part in ('"old-box"', f'(#{old["id"]})', 'revoked', today, 'Reinstate this one', f'delete #{old["id"]}'):
+			self.assertIn(part, note)
+		self.assertLessEqual(len(note), broker.MAX_NOTE)
+		self.assertEqual({k: fresh['held_by'][k] for k in ('id', 'name', 'status', 'deleted')},
+						 {'id': old['id'], 'name': 'old-box', 'status': 'revoked', 'deleted': False})
+		row = AuditLog.objects.get(action='agent.hold')
+		self.assertIsNone(row.actor)  # the rule did it, not a person
+		self.assertEqual((row.target, row.detail['agent_id'], row.detail['held_by'], row.detail['held_by_status']),
+						 ('new-box', fresh['id'], old['id'], 'revoked'))
+		self.assertFalse(AuditLog.objects.filter(action='agent.hold').exclude(pk=row.pk).exists())
+
+	def test_a_long_name_is_clipped_so_the_whole_instruction_fits(self):
+		_, old = register(self.t['alice'], name='x' * 100)
+		self.revoke(old['id'])
+		note = register(self.t['alice2'], approve=False)[1]['status_note']
+		self.assertTrue(note.endswith(f'reinstate or delete #{old["id"]} so new agents start normally'), note)
+
+	def test_a_suspension_holds_back_too_and_names_its_status(self):
+		_, old = register(self.t['alice'])
+		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'suspended'})
+		fresh = register(self.t['alice2'], approve=False)[1]
+		self.assertEqual(fresh['status'], 'suspended')
+		self.assertIn('was suspended on', fresh['status_note'])
+
+	def test_an_old_decision_stops_holding_back_after_the_window(self):
+		_, old = register(self.t['alice'])
+		self.revoke(old['id'])
+		Agent.objects.filter(pk=old['id']).update(status_changed_at=timezone.now() - timedelta(days=31))
+		with mock.patch.dict('os.environ', {'CVENGINE_AGENT_HOLD_DAYS': '60'}):
+			self.assertEqual(broker.suspension_culprit(self.alice).pk, old['id'])
+		with mock.patch.dict('os.environ', {'CVENGINE_AGENT_HOLD_DAYS': '0'}):  # 0: for as long as it stands
+			self.assertEqual(broker.suspension_culprit(self.alice).pk, old['id'])
+		with mock.patch.dict('os.environ', {'CVENGINE_AGENT_HOLD_DAYS': 'soon'}):  # not a number: the default, 30
+			self.assertIsNone(broker.suspension_culprit(self.alice))
+		status, fresh = register(self.t['alice2'], approve=False)  # default 30 days: a non-administrator's agent still waits for approval
+		self.assertEqual((status, fresh['status'], fresh['status_note'], fresh['held_by']), (201, 'pending', '', None))
+		self.assertFalse(AuditLog.objects.filter(action='agent.hold').exists())
+
+	def test_a_row_with_no_recorded_time_still_holds_back(self):
+		_, old = register(self.t['alice'])
+		self.revoke(old['id'])
+		Agent.objects.filter(pk=old['id']).update(status_changed_at=None)
+		fresh = register(self.t['alice2'], approve=False)[1]
+		self.assertEqual(fresh['status'], 'suspended')
+		self.assertIn('a date not recorded', fresh['status_note'])
+
+	def test_an_app_admins_second_agent_is_active_whatever_their_first_one_is(self):
+		_, first = register(self.t['root'], scope={'orgs': ['one']}, name='johnny-1')
+		self.revoke(first['id'], by='root')  # an App Admin may manage their own agent
+		self.assertIsNone(broker.suspension_culprit(self.root))
+		status, second = register(create_token(self.root, 'second')[1], approve=False, scope={'orgs': ['one']}, name='johnny')
+		self.assertEqual((status, second['status'], second['status_note'], second['held_by']), (201, 'active', '', None))
+		self.assertFalse(AuditLog.objects.filter(action='agent.hold').exists())
+
+	def test_an_agent_the_rule_held_back_does_not_hold_back_the_next_one(self):
+		_, old = register(self.t['alice'])
+		self.revoke(old['id'])
+		held = register(self.t['alice2'], approve=False)[1]
+		self.assertEqual(held['status'], 'suspended')
+		third = create_token(self.alice, 'alice3')[1]
+		self.assertEqual(register(third, approve=False, name='third')[1]['held_by']['id'], old['id'])  # still the revoked one, not `held`
+		status, out = call(self.t['dana'], 'DELETE', f'/api/v1/agents/{old["id"]}')
+		self.assertEqual(status, 200, out)
+		self.assertEqual(sorted(h['id'] for h in out['still_held']), sorted([held['id'], Agent.objects.get(name='third').pk]))
+		self.assertIsNone(broker.suspension_culprit(self.alice))  # only agents the rule held back are left: nothing counts
+		fourth = create_token(self.alice, 'alice4')[1]
+		self.assertEqual(register(fourth, approve=False, name='fourth')[1]['status'], 'pending')
+		self.assertEqual(call(self.t['dana'], 'GET', f'/api/v1/agents/{held["id"]}')[1]['held_by'], {'id': None, 'deleted': True})
+
+	def test_reinstating_a_held_agent_makes_it_an_administrators_decision(self):
+		_, old = register(self.t['alice'])
+		self.revoke(old['id'])
+		held = register(self.t['alice2'], approve=False)[1]
+		status, out = call(self.t['dana'], 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
+		self.assertEqual((status, out['status'], out['status_note'], out['held_by']), (200, 'active', '', None))
+		agent = Agent.objects.get(pk=held['id'])
+		self.assertEqual((agent.status_inherited, agent.held_by_id), (False, None))
+		self.assertIsNotNone(agent.status_changed_at)
+		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'suspended', 'note': 'looping'})
+		Agent.objects.filter(pk=old['id']).delete()
+		self.assertEqual(broker.suspension_culprit(self.alice).pk, held['id'])  # suspended by a person now: it counts
+
+	def test_an_org_admin_still_inherits_a_revocation_another_administrator_made_even_through_an_enrollment(self):
+		_, mine = register(self.t['dana'], scope={'orgs': ['one']})
+		self.revoke(mine['id'], by='root')
+		status, enroll = call(self.t['dana'], 'POST', '/api/v1/projects/proj-a/sentinels/enroll')
+		self.assertEqual(status, 201, enroll)
+		status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': enroll['enrollment_token'], 'name': 'dana-sentinel'})
+		self.assertEqual((status, boot['status'], boot['held_by']['id']), (201, 'suspended', mine['id']))
+		self.assertIn(f'#{mine["id"]}', boot['status_note'])
+		row = AuditLog.objects.get(action='agent.hold')
+		self.assertEqual((row.detail['via'], row.detail['agent_id']), ('enrollment', boot['id']))
+
+
+class DeleteAgentTests(AgentBrokerTestCase):
+	def setUp(self):
+		super().setUp()
+		_, self.reg = register(self.t['alice'], name='to-go')
+		self.url = f'/api/v1/agents/{self.reg["id"]}'
+
+	def test_only_a_revoked_agent_can_be_deleted_and_its_token_goes_with_it(self):
+		from dashboard.models import ApiToken
+		for status in ('active', 'suspended'):
+			call(self.t['dana'], 'PATCH', self.url, {'status': status})
+			code, body = call(self.t['dana'], 'DELETE', self.url)
+			self.assertEqual(code, 409)
+			self.assertIn('revoke it first', body['error'])
+		call(self.t['dana'], 'PATCH', self.url, {'status': 'revoked'})
+		token_id = Agent.objects.get().token_id
+		status, out = call(self.t['dana'], 'DELETE', self.url)
+		self.assertEqual((status, out['deleted'], out['token_revoked'], out['still_held']), (200, True, True, []))
+		self.assertFalse(Agent.objects.exists())
+		self.assertTrue(ApiToken.objects.get(pk=token_id).revoked)
+		self.assertEqual(call(self.t['alice'], 'PUT', '/api/v1/agent', {'name': 'again'})[0], 401)  # the token cannot come back as a new agent
+		row = AuditLog.objects.get(action='agent.delete')
+		self.assertEqual((row.actor, row.target, row.detail['agent_id'], row.detail['token_id']), (self.dana, 'to-go', self.reg['id'], token_id))
+		self.assertEqual(call(self.t['dana'], 'DELETE', self.url)[0], 404)
+
+	def test_who_may_delete(self):
+		call(self.t['dana'], 'PATCH', self.url, {'status': 'revoked'})
+		for name in ('alice2', 'bob', 'carol'):  # the owner (another token), another tenant, an auditor
+			self.assertEqual(call(self.t[name], 'DELETE', self.url)[0], 404, name)
+		self.assertEqual(call(self.t['ro'], 'DELETE', self.url)[0], 403)  # a read only token
+		_, own = register(self.t['dana'], scope={'orgs': ['one']}, name='danas')
+		call(self.t['root'], 'PATCH', f'/api/v1/agents/{own["id"]}', {'status': 'revoked'})
+		self.assertEqual(call(self.t['dana'], 'DELETE', f'/api/v1/agents/{own["id"]}')[0], 403)  # not their own: that would lift the hold
+		self.assertEqual(Agent.objects.filter(status='revoked').count(), 2)
+
+	def test_over_mcp(self):
+		call(self.t['dana'], 'PATCH', self.url, {'status': 'revoked'})
+		is_error, out = tool_call(self.t['dana'], 'delete_agent', {'agent_id': self.reg['id']})
+		self.assertFalse(is_error, out)
+		self.assertEqual((out['deleted'], out['id']), (True, self.reg['id']))
+		_, data = rpc(self.t['dana'], 'tools/list')
+		self.assertFalse({t['name']: t for t in data['result']['tools']}['delete_agent']['annotations']['readOnlyHint'])
+
+
+class HoldMigrationTests(AgentBrokerTestCase):
+	def test_the_migration_dates_existing_decisions_and_marks_agents_the_old_rule_held_back(self):
+		import importlib
+		from django.apps import apps
+		ids = [register(self.t[name])[1]['id'] for name in ('alice', 'alice2', 'dana')]
+		long_ago = timezone.now() - timedelta(days=400)
+		Agent.objects.filter(pk=ids[0]).update(status='revoked', status_changed_at=None, updated_at=long_ago)
+		Agent.objects.filter(pk=ids[1]).update(status='suspended', status_note=broker.INHERITED_SUSPENSION_NOTE, status_changed_at=None)
+		Agent.objects.filter(pk=ids[2]).update(status='active', status_changed_at=None)
+		importlib.import_module('agentapi.migrations.0009_agent_hold').backfill(apps, None)
+		rows = {a.pk: a for a in Agent.objects.all()}
+		self.assertEqual((rows[ids[0]].status_changed_at, rows[ids[0]].status_inherited), (long_ago, False))
+		self.assertTrue(rows[ids[1]].status_inherited)
+		self.assertEqual(rows[ids[1]].held_by_id, ids[0])  # the old note named nobody: the user's revoked agent is named now
+		self.assertEqual(rows[ids[1]].status_note, broker.hold_note(rows[ids[0]]))  # the frozen copy writes what the live code writes
+		self.assertIn('was revoked on', rows[ids[1]].status_note)
+		self.assertIsNone(rows[ids[2]].status_changed_at)
+		self.assertIsNone(broker.suspension_culprit(self.alice))  # revoked 400 days ago, and the other one was held back by the old rule
+
+	def test_a_held_agent_whose_cause_cannot_be_named_keeps_the_old_note(self):
+		import importlib
+		from django.apps import apps
+		held = register(self.t['alice'])[1]['id']
+		Agent.objects.filter(pk=held).update(status='suspended', status_note=broker.INHERITED_SUSPENSION_NOTE)
+		importlib.import_module('agentapi.migrations.0009_agent_hold').backfill(apps, None)
+		agent = Agent.objects.get(pk=held)
+		self.assertEqual((agent.status_inherited, agent.held_by_id, agent.status_note), (True, None, broker.INHERITED_SUSPENSION_NOTE))
+		self.assertEqual(call(self.t['dana'], 'GET', f'/api/v1/agents/{held}')[1]['held_by'], {'id': None, 'deleted': False})
 
 
 class CrossTenantAdminTests(AgentBrokerTestCase):

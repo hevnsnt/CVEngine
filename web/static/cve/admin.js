@@ -825,6 +825,7 @@ function manageAgent(agent, done) {
       el("p", "note", `Scope: ${scopeText(agent.scope)}`),
       el("p", "note", `Declared capabilities: ${agent.capabilities.join(", ") || "none"}`),
     );
+    if (agent.held_by) body.append(el("p", "msg", `Suspended automatically: ${agent.status_note || "another agent of this user is suspended or revoked"}`));
     const eff = agent.effective;
     if (eff) body.append(el("p", "note", `Right now it can reach ${eff.projects.length} project(s) with ${eff.capabilities.length} capability(ies)${eff.problem ? `, but ${eff.problem}` : ""}.`));
     const note = text(agent.status_note, { maxlength: "200" });
@@ -864,6 +865,16 @@ function manageAgent(agent, done) {
         }, "btn danger"),
       );
     } else {
+      if (agent.status === "revoked") {
+        actions.append(button("Delete", async () => {
+          if (!(await ask(`Delete ${agent.name} and revoke its token? It no longer holds back new agents of ${agent.owner}. This cannot be undone.`, { ok: "Delete" }))) return;
+          const out = await api("DELETE", `${AG}/agents/${agent.id}`);
+          const held = out.still_held || [];
+          toast(held.length ? `Agent deleted. Still suspended until you reinstate them: ${held.map((h) => h.name).join(", ")}` : "Agent deleted");
+          close();
+          done();
+        }, "btn danger"));
+      }
       actions.append(button(agent.status === "pending" ? "Approve" : "Reinstate", () => send({ status: "active" }, "Agent is active"), "btn"));
     }
     body.append(actions);

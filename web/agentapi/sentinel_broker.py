@@ -292,12 +292,12 @@ def bootstrap(body):
                   'instance': not enrollment.org_id and not enrollment.project_id}
         user = enrollment.created_by
         token, raw_token = create_token(user, f'sentinel:{name}'[:100], scope=SCOPE_SENTINEL, expires_at=timezone.now() + SENTINEL_TOKEN_TTL)
-        status, note = broker._initial_status(user)
-        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, status=status, status_note=note,
-                                     network=enrollment.network, **fields)
+        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, network=enrollment.network,
+                                     **broker._initial_status(user), **fields)
         SentinelEnrollment.objects.filter(pk=enrollment.pk).update(used_by_agent=agent, token=token)
     audit.record_for_user(user, 'agent.register', user, target=agent.name, agent_id=agent.pk, kind='scanner', scope=scope,
                           via='enrollment', enrollment_id=enrollment.pk)
+    broker.record_hold(agent, user, via='enrollment', enrollment_id=enrollment.pk)
     out = broker.agent_dict(agent, detail=True)
     out.update(created=True, token=raw_token, note='Store this token now. It is not shown again.', warnings=broker._warnings(agent))
     return _with_settings(out, settings)
@@ -1648,7 +1648,7 @@ def live_overview(ctx):
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note, 'held_by': broker.held_by(agent),
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,

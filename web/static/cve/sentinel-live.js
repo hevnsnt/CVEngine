@@ -72,12 +72,19 @@ function recent(t) {
 
 const INTERNAL = "network:internal";
 
+// The state in words. A suspended Sentinel says why on the same line ("Suspended: <reason>"), so its reason never reads as a remark on a
+// working one.
+export function stateLine(s) {
+  const word = WORDS[s.state] || s.state;
+  return s.state === "suspended" && s.status_note ? `${word}: ${s.status_note}` : word;
+}
+
 function card(s, reload, detail, group) {
   const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
   const head = el("header", "sl-head");
   head.append(orbFor(s, group));
   const title = el("div", "sl-title");
-  const state = el("p", "sl-state", WORDS[s.state] || s.state);
+  const state = el("p", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
   title.append(el("h3", "", s.name), state);
   head.append(title);
@@ -88,6 +95,22 @@ function card(s, reload, detail, group) {
   };
   if (s.status === "pending") actions.append(button("Approve", patch("active"), "btn sm"));
   if (s.status === "suspended") actions.append(button("Reinstate", patch("active"), "btn sm"));
+  const culprit = s.held_by;
+  if (culprit && culprit.id && culprit.status === "revoked") {
+    // held back only because another agent of the same user is revoked: deleting that one ends the hold for the next registrations
+    actions.append(
+      button(
+        `Delete ${culprit.name}`,
+        async () => {
+          if (!confirm(`Delete the revoked agent ${culprit.name} (#${culprit.id}) and revoke its token? New agents of this user then start normally. ${s.name} stays suspended until you reinstate it.`)) return;
+          await api("DELETE", `/api/v1/agents/${culprit.id}`);
+          toast(`${culprit.name} deleted. Reinstate ${s.name} to use it.`);
+          await reload();
+        },
+        "btn ghost sm",
+      ),
+    );
+  }
   if (s.status !== "suspended") actions.append(button("Suspend", patch("suspended"), "btn ghost sm"));
   actions.append(
     button(
@@ -108,7 +131,7 @@ function card(s, reload, detail, group) {
   const version = versionBlock(detail, { onChange: reload });
   if (version) c.append(version);
   if (s.problem) c.append(el("p", "sl-note", s.problem));
-  else if (s.status_note) c.append(el("p", "sl-note", s.status_note));
+  else if (s.status_note && s.state !== "suspended") c.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
 
   const now = el("div", "sl-now");
   if (s.current.length) s.current.forEach((t) => now.append(task(t)));
