@@ -1738,16 +1738,21 @@ section.internal[hidden]{display:none}
 /* the capability policy: one row per kind (name, who decided, mode, cap, reset) in the settings panel, and the chips of a card */
 .ss-pol-title{margin:16px 0 4px}
 .ss-pol{display:flex;flex-direction:column;margin:8px 0}
-.ss-pol-row{display:grid;grid-template-columns:130px minmax(0,1fr) 110px 90px auto;gap:6px 10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.ss-pol-row{display:grid;grid-template-columns:150px 120px 140px 120px;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .ss-pol-name{font-size:13px;overflow-wrap:anywhere}
-.ss-pol-note{margin:0;font-size:12px;overflow-wrap:anywhere}
-.ss-pol-row select,.ss-pol-row input{min-height:0;width:100%}
+.ss-pol-note{grid-column:1/-1;margin:0;font-size:12px;overflow-wrap:anywhere}
+.ss-pol-err{grid-column:1/-1;margin:0;padding:4px 8px;font-size:12px}
+.ss-pol-hint{margin:6px 0 4px}
+.ss-pol-row select,.ss-pol-row input{min-height:0;width:100%;min-width:0}
+.ss-pol-row input.invalid{border-color:var(--fire);box-shadow:0 0 0 1px var(--fire)}
 .ss-pol-row[data-state=unavailable] .ss-pol-name,.ss-pol-row[data-state=machine_off] .ss-pol-name{color:var(--muted)}
-.ss-pol-row [hidden]{display:none}
-@media (max-width:640px){.ss-pol-row{grid-template-columns:1fr 1fr}.ss-pol-name,.ss-pol-note{grid-column:1/-1}}
+.ss-pol-row [hidden]{display:block;visibility:hidden}
+.ss-pol-row .ss-pol-err[hidden]{display:none}
+@media (max-width:640px){.ss-pol-row{grid-template-columns:1fr 1fr}.ss-pol-name{grid-column:1/-1}.ss-pol-row .btn{grid-column:1/-1;justify-self:start}.ss-pol-row [hidden]{display:none}}
 .sl-kinds{margin:0}
 .chip.kind-on{background:var(--ok-bg);color:var(--ink)}
-.chip.kind-denied{background:var(--sunk);color:var(--muted);text-decoration:line-through;cursor:help}
+.chip.kind-denied{background:var(--fire-bg);color:var(--fire-ink);border:1px solid var(--fire);text-decoration:line-through;cursor:help}
+.chip.kind-locked{background:repeating-linear-gradient(135deg,var(--sunk) 0 5px,transparent 5px 9px);color:var(--ink);border:1px dashed var(--muted);cursor:help}
 .chip.kind-held{background:var(--smoke-bg);color:var(--smoke-ink);cursor:help}
 
 /* settings: the tabs grouped in a column beside the panel; on a narrow screen the groups wrap into rows above it */
