@@ -9,7 +9,8 @@ Three groups of numbers, each with a built-in default and an environment variabl
 * ``assess_batch``          how many hosts one assessment run carries (``CVENGINE_ASSESS_BATCH``)
 * ``work_depth``            how many discovery scans the work conductor keeps running or queued (``CVENGINE_WORK_DEPTH``)
 
-Precedence, one rule for every key: the value an App Admin saved here, else the environment variable, else the built-in default.
+Precedence, one rule for every key: the value an App Admin saved here (it pins the key), else the number the auto-tuner chose (mode Auto, for a
+field with ``auto_tunable=True``; ``cveFeed.autotune``), else the environment variable, else the built-in default.
 The saved value is a row in the database (``ScanConcurrency``, the truth, and what ``celery-entrypoint.sh`` reads at start). Workers read a
 copy that is published to Redis on every save and again every 30 seconds, and cache it in memory for ``CACHE_SECONDS``, so admission never
 waits on the database and a save takes effect within seconds, with no restart. If Redis cannot be read, the last copy a process saw is kept
@@ -38,7 +39,12 @@ DISCOVERY_WORKER_PREFIX = 'discovery_worker@'
 DISCOVERY_DEFAULT = 8
 WORK_DEPTH_DEFAULT = 3
 
-Field = namedtuple('Field', 'key label help group env default low high env_floor')
+# auto_tunable must be stated for every field (True or False): the auto-tuner (cveFeed.autotune) only ever moves a field that opts in, inside
+# auto_min..auto_max (tighter than low..high where that is safer), by auto_step at a time.
+# auto_optimistic: the auto-tuner's target when the facts it sizes from (memory, cores, Sentinels) are not reported yet
+# (cveFeed.autotune_policy.size_for).
+Field = namedtuple('Field', 'key label help group env default low high env_floor auto_tunable auto_min auto_max auto_step auto_optimistic',
+                   defaults=(None, None, None, 1, None))
 
 # One line per local scanner kind: what it is, in words that mean something to a person who has never read the code.
 HEAVY_HELP = {
@@ -60,29 +66,40 @@ HEAVY_HELP = {
 # load the most memory; sixteen for the one kind that is only a few polite requests.
 HEAVY_HIGH = {'bbot-deep': 4, 'nmap-full-bg': 4, 'nmap-udp-bg': 4, 'naabu': 4, 'route-probe': 16}
 HEAVY_HIGH_DEFAULT = 8
+# (auto_min, auto_max, auto_optimistic): the range the auto-tuner may move a scanner kind's limit within (HEAVY_TUNE_MIN/MAX_<KIND> narrow or widen
+# it), and its target before memory and CPU are reported. Inside the range the target is sized for the machine (cveFeed.autotune_policy.size_for:
+# the memory budget at the kind's real peak, and the CPU cores). A kind that is not here is never auto-tuned: the background sweeps wait behind everything on purpose, naabu sends raw
+# SYN packets at a fixed rate (two at once is twice the packets on the network), and a generated template test runs AI-written checks against a host.
+HEAVY_AUTO = {'bbot-deep': (1, 2, 1), 'bbot-standard': (1, 4, 2), 'bbot-passive': (1, 6, 3), 'nuclei': (1, 4, 2), 'nuclei-light': (1, 4, 2),
+              'nmap': (1, 8, 3), 'route-probe': (1, 16, 4), 'wpscan': (1, 6, 3), 'testssl': (1, 6, 3), 'screenshot': (1, 4, 2)}
 
 
 def _heavy_fields():
     out = []
     for kind, default in resources.MAX_CONCURRENT.items():
         label, help_text = HEAVY_HELP.get(kind, (kind, ''))
+        auto = HEAVY_AUTO.get(kind)
         out.append(Field(f'heavy.{kind}', label, help_text, 'heavy', 'HEAVY_MAX_' + kind.upper().replace('-', '_'), default, 1,
-                         max(HEAVY_HIGH.get(kind, HEAVY_HIGH_DEFAULT), default), 1))
+                         max(HEAVY_HIGH.get(kind, HEAVY_HIGH_DEFAULT), default), 1, auto is not None, *(auto or (None, None, None))[:2], 1,
+                         (auto or (None, None, None))[2]))
     return out
 
 
 FIELDS = _heavy_fields() + [
     Field('discovery_concurrency', 'Hosts assessed at once',
           'How many discovery tasks and host assessments run at the same time. A task that waits on a Sentinel holds one of these while it waits. It is the ceiling of the discovery worker\'s autoscaler, which adds a slot a second while work is waiting, up to this number.',
-          'discovery', 'DISCOVERY_CONCURRENCY', DISCOVERY_DEFAULT, 1, 32, 1),
+          'discovery', 'DISCOVERY_CONCURRENCY', DISCOVERY_DEFAULT, 1, 32, 1, True, 4, 32, 2, 16),
     Field('assess_batch', 'Hosts per assessment batch',
           'How many hosts of one target are carried through one assessment run together, so a Sentinel is handed a batch instead of one host at a time. 1 runs every host on its own. Projects this server scans without a Sentinel always use 1.',
-          'discovery', 'CVENGINE_ASSESS_BATCH', 8, 1, 64, 1),
+          'discovery', 'CVENGINE_ASSESS_BATCH', 8, 1, 64, 1, True, 4, 32, 4, 16),
     Field('work_depth', 'Discovery scans kept running',
           'How many discovery scans the work conductor keeps running or queued, starting the targets that have waited longest. 0 turns the conductor off: only people start scans.',
-          'depth', 'CVENGINE_WORK_DEPTH', WORK_DEPTH_DEFAULT, 0, 32, 0),
+          'depth', 'CVENGINE_WORK_DEPTH', WORK_DEPTH_DEFAULT, 0, 32, 0, True, 1, 16, 1, 6),
 ]
 BY_KEY = {f.key: f for f in FIELDS}
+assert all(f.auto_tunable in (True, False) for f in FIELDS), 'every scan concurrency field states auto_tunable'
+assert all(not f.auto_tunable or f.low <= f.auto_min <= f.auto_optimistic <= f.auto_max <= f.high for f in FIELDS), \
+    'an auto-tuning range (or its optimistic value) is outside the allowed range'
 GROUP_TITLES = {'heavy': 'Scanners at once', 'discovery': 'Discovery and assessment', 'depth': 'The work conductor'}
 
 
@@ -103,22 +120,26 @@ def env_value(field, environ=None):
     return number
 
 
-def resolve(key, stored=None):
-    """{'value', 'source'} for one key: ``admin`` (saved on the page), ``environment`` or ``default``. ``stored`` is the saved mapping; by
-    default the cached copy the workers use."""
+def resolve(key, stored=None, auto=None):
+    """{'value', 'source'} for one key: ``admin`` (saved on the page: it pins the key), ``auto`` (what the auto-tuner chose, mode Auto only),
+    ``environment`` or ``default``. ``stored`` is the saved mapping and ``auto`` the tuned one; by default the cached copies the workers use."""
     field = BY_KEY[key]
     values = stored_values() if stored is None else stored
     saved = values.get(key)
     if isinstance(saved, int) and not isinstance(saved, bool) and field.low <= saved <= field.high:
         return {'value': saved, 'source': 'admin'}
+    if field.auto_tunable:
+        tuned = (resources.auto_values() if auto is None else auto).get(key)
+        if isinstance(tuned, int) and not isinstance(tuned, bool) and field.low <= tuned <= field.high:
+            return {'value': tuned, 'source': 'auto'}
     env = env_value(field)
     if env is not None:
         return {'value': env, 'source': 'environment'}
     return {'value': field.default, 'source': 'default'}
 
 
-def effective(key, stored=None):
-    return resolve(key, stored)['value']
+def effective(key, stored=None, auto=None):
+    return resolve(key, stored, auto)['value']
 
 
 def admin_value(key):
@@ -278,9 +299,10 @@ def bootstrap_value(key):
     """The value a starting container should use, read from the database (the entrypoint's way in). Falls back to the environment, then
     the default, if the saved value cannot be read."""
     try:
-        return effective(key, saved_values())
+        from cveFeed import autotune
+        return effective(key, saved_values(), autotune.applied_values())
     except Exception:
-        return effective(key, {})
+        return effective(key, {}, {})
 
 
 # --- the discovery worker ---------------------------------------------------------------------------------------------
@@ -304,7 +326,10 @@ def apply_discovery(app=None, now_fn=time.time, saved=None):
     it): a worker that does not answer keeps the number it has. Returns {'want', 'workers': {name: ceiling or None}, 'changed': [names]}."""
     if app is None:
         from reNgine.celery import app
-    want = effective('discovery_concurrency', saved_values() if saved is None else saved)
+    if saved is None:
+        want = effective('discovery_concurrency', saved_values(), _tuned_from_database())
+    else:
+        want = effective('discovery_concurrency', saved, _tuned_from_database())
     workers = discovery_workers(app)
     changed = []
     for name, ceiling in list(workers.items()):
@@ -330,6 +355,15 @@ def apply_discovery(app=None, now_fn=time.time, saved=None):
     except Exception:
         logger.debug('scan concurrency: could not record the discovery workers', exc_info=False)
     return record
+
+
+def _tuned_from_database():
+    """The auto-tuned numbers that apply now, from the database (the truth), or the cached copy when it cannot be read."""
+    try:
+        from cveFeed import autotune
+        return autotune.applied_values()
+    except Exception:
+        return resources.auto_values()
 
 
 def reconcile():
@@ -416,10 +450,11 @@ def snapshot():
     """Everything the Scan concurrency card shows, from the database (the truth), the environment and the workers' own reports."""
     row = saved_row()
     stored = {k: v for k, v in (row.values or {}).items() if k in BY_KEY}
+    tuned = _tuned_from_database()
     running = running_discovery()
     fields = []
     for f in FIELDS:
-        got = resolve(f.key, stored)
+        got = resolve(f.key, stored, tuned)
         meta = (row.meta or {}).get(f.key) or {}
         item = {'key': f.key, 'label': f.label, 'help': f.help, 'group': f.group, 'default': f.default, 'min': f.low, 'max': f.high,
                 'value': got['value'], 'source': got['source'], 'env_name': f.env, 'env_value': env_value(f),
@@ -430,14 +465,24 @@ def snapshot():
         else:
             item['applies'] = 'live'
         fields.append(item)
-    caps = {f.key.split('.', 1)[1]: effective(f.key, stored) for f in FIELDS if f.group == 'heavy'}
+    caps = {f.key.split('.', 1)[1]: effective(f.key, stored, tuned) for f in FIELDS if f.group == 'heavy'}
     context = memory_context()
     plan = memory_plan(caps, context['costs_mb'], context['budget_mb'])
     return {'fields': fields, 'groups': [{'id': g, 'title': t} for g, t in GROUP_TITLES.items()],
             'memory': {'budget_mb': context['budget_mb'], 'limit_mb': context['limit_mb'], 'costs_mb': context['costs_mb'],
                        'total_mb': plan['total_mb'], 'default_total_mb': plan['default_total_mb'], 'warnings': plan['warnings']},
-            'discovery': discovery_status(effective('discovery_concurrency', stored), running),
-            'cache_seconds': CACHE_SECONDS}
+            'discovery': discovery_status(effective('discovery_concurrency', stored, tuned), running),
+            'cache_seconds': CACHE_SECONDS, 'autotune': _annotate(fields)}
+
+
+def _annotate(fields):
+    """Add each field's auto-tuning state (pinned, tuned, a recommendation) for the page; the mode summary is returned. Never fails the card."""
+    try:
+        from cveFeed import autotune
+        return autotune.annotate(fields)
+    except Exception:
+        logger.warning('scan concurrency: the auto-tuning state could not be read', exc_info=True)
+        return None
 
 
 def discovery_status(saved, running):

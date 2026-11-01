@@ -5,7 +5,8 @@ environment variable. Nothing else changes: the storage (one row, ``TunableSetti
 the cards on the page are all driven by the registry. A new *group* (a card) is one ``Group`` line here and one ``registerTunableGroup`` line in
 ``static/cve/tunables-card.js`` (a test keeps the two lists equal).
 
-Precedence, one rule for every tunable: the value an App Admin saved here, else the environment variable (as it always was), else the built-in
+Precedence, one rule for every tunable: the value an App Admin saved here (it pins the tunable), else the number the auto-tuner chose (mode
+Auto, only for a tunable with ``auto_tunable=True``; ``cveFeed.autotune``), else the environment variable (as it always was), else the built-in
 default. The saved value is a row in the database (the truth). The processes that read a tunable (web, celery workers) use a copy that is
 published to Redis on every save and again every 30 seconds (``reconcile``, from the ``report_resources`` tick, so a flushed Redis heals), and
 cache it in memory for ``CACHE_SECONDS``: a save takes effect everywhere within seconds, with no restart, and a read never waits on the
@@ -40,8 +41,14 @@ Group = namedtuple('Group', 'id title intro')
 # ``caution``: ``cap`` (a number that limits paid calls or work per run or day: the page warns, softly, about a value far below or far above the default),
 # ``rescan`` (0 means continuous rescans) or ``None``. ``window``: when a cap counts from again (``run``, ``utc_day``, ``rolling_day``). ``note``: a
 # sentence that replaces the standard "applies" text where a tunable is read less often than on every use.
-Tunable = namedtuple('Tunable', 'key label help group env default low high unit applies env_float caution window note',
-                     defaults=(LIVE, False, None, None, None))
+# ``auto_tunable`` must be stated (True or False) for every tunable: only a throughput, concurrency or pacing number opts in, never an AI spend cap
+# or anything that guards safety. The auto-tuner (cveFeed.autotune) moves one that opts in inside ``auto_min``..``auto_max`` (tighter than
+# ``low``..``high`` where that is safer) by ``auto_step``. ``auto_sense``: ``more`` (a higher number does more work at once) or ``gap`` (a
+# higher number waits longer between runs, so does less). ``auto_optimistic``: the tuner's target when the facts it sizes from are not reported yet
+# (cveFeed.autotune_policy.size_for).
+Tunable = namedtuple('Tunable', 'key label help group env default low high unit applies env_float caution window note '
+                     'auto_tunable auto_min auto_max auto_step auto_sense auto_optimistic',
+                     defaults=(LIVE, False, None, None, None, None, None, None, 1, 'more', None))
 HOURS_CEILING = 24 * 365 * 10  # an environment value in hours is held to ten years before it reaches a timedelta
 USED_SINCE = {'utc_day': 'since UTC midnight', 'rolling_day': 'in the last 24 hours'}
 WINDOW_TEXT = {'run': 'at the next run', 'utc_day': 'at the next UTC midnight', 'rolling_day': 'as the oldest of the last 24 hours ages out'}
@@ -54,59 +61,88 @@ GROUPS = [
     Group('throughput', 'Scan pacing',
           'How eagerly scans are started and how widely one scan spreads across your Sentinels. More at once finishes sooner but puts more load on '
           'your Sentinels and more traffic on your targets. How many things this server scans at once is under Scan concurrency.'),
+    Group('autotune_pace', 'Auto-tuning pace',
+          'The auto-tuner aims high for this machine first, backs off at once on trouble, then probes upward slowly. These say how slowly, and how much '
+          'history it reads. Longer waits make it calmer, shorter ones let it follow a changing load sooner. The AI advisor\'s own budget is under AI spend.'),
 ]
 
 TUNABLES = [
     Tunable('triage_max_per_run', 'Triage questions per run',
             'Most AI triage questions one run asks. One question serves every finding with the same evidence; a repair call and a local-check suggestion count too. '
             'What is over the cap waits for the next run.',
-            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_RUN', 100, 1, 1000, 'questions', caution='cap', window='run'),
+            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_RUN', 100, 1, 1000, 'questions', caution='cap', window='run', auto_tunable=False),
     Tunable('triage_max_per_project_day', 'Triage questions per project per day',
             'Most AI triage questions asked for one project in a day (counted from UTC midnight), so one busy project cannot use the whole day\'s budget. '
             'The same number applies to every project.',
-            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_PROJECT_DAY', 500, 1, 10000, 'questions', caution='cap', window='utc_day'),
+            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_PROJECT_DAY', 500, 1, 10000, 'questions', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('triage_max_per_day', 'Triage questions per day',
             'Most AI triage questions asked in a day (counted from UTC midnight) across all projects: the ceiling on triage spend. '
             'Failed and abandoned attempts count, because the provider bills them.',
-            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_DAY', 2000, 1, 50000, 'questions', caution='cap', window='utc_day'),
+            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_DAY', 2000, 1, 50000, 'questions', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('validate_max_per_run', 'Validation checks per task',
             'Most validation checks one validation task runs. Each check can use up to three AI calls.',
-            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_RUN', 50, 1, 500, 'checks', caution='cap', window='run'),
+            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_RUN', 50, 1, 500, 'checks', caution='cap', window='run', auto_tunable=False),
     Tunable('validate_max_per_project_day', 'Validation checks per project per day',
             'Most validation checks run for one project in a day (counted from UTC midnight). The same number applies to every project.',
-            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY', 300, 1, 5000, 'checks', caution='cap', window='utc_day'),
+            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY', 300, 1, 5000, 'checks', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('validate_max_per_day', 'Validation checks per day',
             'Most validation checks run in a day (counted from UTC midnight) across all projects: the ceiling on validation spend. Failed checks count.',
-            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_DAY', 1500, 1, 20000, 'checks', caution='cap', window='utc_day'),
+            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_DAY', 1500, 1, 20000, 'checks', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('validate_min_gap_hours', 'Hours between validations of the same finding',
             'The least time between two automatic validations of the same host, CVE, product and version whose evidence did not change (a rescan makes a new '
             'match of the same finding each time). New evidence is validated at once. 0 turns the gap off.',
-            'ai_spend', 'CVENGINE_VALIDATE_MIN_GAP_HOURS', 12, 0, 720, 'hours', LIVE, True),
+            'ai_spend', 'CVENGINE_VALIDATE_MIN_GAP_HOURS', 12, 0, 720, 'hours', LIVE, True, auto_tunable=False),
     Tunable('template_gen_max_per_day', 'AI template drafts per day',
             'Most Nuclei templates the AI may draft in the last 24 hours (a rolling window, not a calendar day) across all projects. Every attempt counts, '
             'whatever its outcome.',
-            'ai_spend', 'CVENGINE_TEMPLATE_GEN_MAX_PER_DAY', 10, 1, 200, 'drafts', caution='cap', window='rolling_day'),
+            'ai_spend', 'CVENGINE_TEMPLATE_GEN_MAX_PER_DAY', 10, 1, 200, 'drafts', caution='cap', window='rolling_day', auto_tunable=False),
+    Tunable('autotune_ai_max_per_day', 'Auto-tuning AI advice per day',
+            'Most questions the auto-tuner asks the AI advisor in a day (counted from UTC midnight). Each question is one small call with numbers only. '
+            'Over the cap the deterministic controller keeps tuning on its own; with no AI provider it always does.',
+            'ai_spend', 'CVENGINE_AUTOTUNE_AI_MAX_PER_DAY', 8, 1, 96, 'questions', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('stage_parallel', 'Chunks of one scan stage at once',
             'The most chunk tasks ONE scan stage keeps in flight across Sentinel slots at once (the nmap and naabu chunks of up to 64 addresses, the nuclei chunks). '
             '1 sends them one after another. The window is also limited by the Sentinel slots that are free, so raising this does nothing without free slots.',
             'throughput', 'CVENGINE_STAGE_PARALLEL', 4, 1, 16, 'chunks',
-            note='Applies from the next stage that starts; a stage already running keeps the number it started with'),
+            note='Applies from the next stage that starts; a stage already running keeps the number it started with',
+            auto_tunable=True, auto_min=2, auto_max=16, auto_step=1, auto_optimistic=6),
     Tunable('work_min_gap_hours', 'Hours before a target is scanned again by the conductor',
             'The work conductor never starts a discovery scan of a target scanned inside this many hours. Lower rescans sooner and costs more scanning. '
             'How many scans it keeps running is under Scan concurrency.',
-            'throughput', 'CVENGINE_WORK_MIN_GAP_HOURS', 2, 0, 168, 'hours', caution='rescan'),
+            'throughput', 'CVENGINE_WORK_MIN_GAP_HOURS', 2, 0, 168, 'hours', caution='rescan',
+            auto_tunable=True, auto_min=1, auto_max=12, auto_step=1, auto_sense='gap', auto_optimistic=1),
     Tunable('sentinel_refresh_gap_hours', 'Hours before a host is assessed again by the refresh',
             'When no host is missing its first pass, a live Sentinel is kept busy by assessing the hosts assessed longest ago again, none sooner than this many hours '
             'after its last assessment. 0 turns the refresh off.',
-            'throughput', 'CVENGINE_SENTINEL_REFRESH_GAP_HOURS', 6, 0, 720, 'hours', LIVE, True),
+            'throughput', 'CVENGINE_SENTINEL_REFRESH_GAP_HOURS', 6, 0, 720, 'hours', LIVE, True,
+            auto_tunable=True, auto_min=2, auto_max=24, auto_step=1, auto_sense='gap', auto_optimistic=3),
     Tunable('bulk_discover_now', 'Targets scanned at once when many are added',
             'How many of the targets one add (a paste of many names, the API or a tool) queues for discovery at once. The rest are created and left to the work '
             'conductor, one per project per minute, so one paste cannot push every other project\'s scans back.',
-            'throughput', 'CVENGINE_BULK_DISCOVER_NOW', 50, 1, 500, 'targets'),
+            'throughput', 'CVENGINE_BULK_DISCOVER_NOW', 50, 1, 500, 'targets', auto_tunable=False),
+    Tunable('autotune_cooldown_minutes', 'Minutes between two calm auto-tune changes of one setting',
+            'The least time between two changes of the same setting that no trouble forced (a one-step lowering the AI advisor recommends). A back-off '
+            'for memory, database, worker or Sentinel trouble never waits for it, and an upward probe waits for the longer probe cooldown below.',
+            'autotune_pace', 'CVENGINE_AUTOTUNE_COOLDOWN_MINUTES', 30, 10, 1440, 'minutes', auto_tunable=False),
+    Tunable('autotune_raise_cooldown_minutes', 'Minutes before an auto-tune probe upward',
+            'After aiming high and backing off, the tuner probes upward one step at a time, and only this long after the setting last changed. A probe '
+            'also needs two hours without trouble for that setting, work waiting and room to spare, and never reaches a level that caused trouble in the last day.',
+            'autotune_pace', 'CVENGINE_AUTOTUNE_RAISE_COOLDOWN_MINUTES', 120, 10, 1440, 'minutes', auto_tunable=False),
+    Tunable('autotune_window_hours', 'Hours of measurements the auto-tuner reads',
+            'How far back the auto-tuner looks at its own measurements (taken every ten minutes) when it summarises them for a decision and for the AI advisor. '
+            'An upward probe also needs the last three measurements in a row to show queued work and room to spare.',
+            'autotune_pace', 'CVENGINE_AUTOTUNE_WINDOW_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
+    Tunable('autotune_ai_interval_hours', 'Hours between two questions to the AI advisor',
+            'How often the auto-tuner asks the AI advisor for a second opinion, when an AI provider is set up and the advisor is on. Between questions, '
+            'and whenever the advisor is unavailable or over its daily budget, the deterministic controller tunes alone.',
+            'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
 ]
 BY_KEY = {t.key: t for t in TUNABLES}
 GROUP_BY_ID = {g.id: g for g in GROUPS}
 assert len(BY_KEY) == len(TUNABLES) and all(t.group in GROUP_BY_ID for t in TUNABLES), 'a tunable is duplicated or names no group'
+assert all(t.auto_tunable in (True, False) for t in TUNABLES), 'every tunable states auto_tunable=True or auto_tunable=False'
+assert not any(t.auto_tunable and t.group == 'ai_spend' for t in TUNABLES), 'an AI spend cap is never auto-tuned'
+assert all(not t.auto_tunable or (t.low <= t.auto_min <= t.auto_optimistic <= t.auto_max <= t.high and t.auto_sense in ('more', 'gap')) for t in TUNABLES)
 APPLIES_TEXT = {LIVE: 'Applies within a few seconds, with no restart', RESTART: 'Applies after the next restart'}
 
 
@@ -139,14 +175,19 @@ def _valid_saved(tunable, saved):
     return isinstance(saved, int) and not isinstance(saved, bool) and tunable.low <= saved <= tunable.high
 
 
-def resolve(key, stored=None):
-    """{'value', 'source'} for one key: ``admin`` (saved on the page), ``environment`` or ``default``. ``stored`` is the saved mapping; by default
-    the cached copy the processes use."""
+def resolve(key, stored=None, auto=None):
+    """{'value', 'source'} for one key: ``admin`` (saved on the page: it pins the key), ``auto`` (what the auto-tuner chose, mode Auto only, for
+    a tunable that opts in), ``environment`` or ``default``. ``stored`` is the saved mapping and ``auto`` the tuned one; by default the cached
+    copies the processes use."""
     tunable = BY_KEY[key]
     values = stored_values() if stored is None else stored
     saved = values.get(key)
     if _valid_saved(tunable, saved):
         return {'value': saved, 'source': 'admin'}
+    if tunable.auto_tunable:
+        tuned = (resources.auto_values() if auto is None else auto).get(key)
+        if _valid_saved(tunable, tuned):
+            return {'value': tuned, 'source': 'auto'}
     env = env_value(tunable)
     if env is not None:
         return {'value': env, 'source': 'environment'}
@@ -161,7 +202,7 @@ def value(key, default=None):
         got = resolve(key)
     except Exception:  # noqa: BLE001 - a cache that cannot be read must never stop a scan or an AI budget check
         logger.debug('tunable %s: the saved copy could not be read', key, exc_info=False)
-        got = resolve(key, {})
+        got = resolve(key, {}, {})
     return default if default is not None and got['source'] == 'default' else got['value']
 
 
@@ -384,7 +425,9 @@ def usage_today():
     today, template drafts in the last 24 hours. A counter that cannot be read is left out, never guessed."""
     from cveFeed import triage, validation
     out = {}
-    for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day)):
+    from cveFeed import autotune
+    for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day),
+                      ('autotune_ai_max_per_day', autotune.advisor_calls_today)):
         try:
             out[key] = int(read())
         except Exception:  # noqa: BLE001
@@ -407,9 +450,14 @@ def snapshot():
     row = saved_row()
     stored = {k: v for k, v in (row.values or {}).items() if k in BY_KEY}
     usage = usage_today()
+    try:
+        from cveFeed import autotune
+        tuned = autotune.applied_values()
+    except Exception:  # noqa: BLE001
+        tuned = {}
     fields = []
     for t in TUNABLES:
-        got = resolve(t.key, stored)
+        got = resolve(t.key, stored, tuned)
         meta = (row.meta or {}).get(t.key) or {}
         admin = got['source'] == 'admin'
         fields.append({'key': t.key, 'label': t.label, 'help': t.help, 'group': t.group, 'default': t.default, 'min': t.low, 'max': t.high,
@@ -418,4 +466,11 @@ def snapshot():
                        'set_at': meta.get('at') if admin else None, 'applies': t.applies, 'applies_text': t.note or APPLIES_TEXT[t.applies],
                        'caution': t.caution, 'window_text': WINDOW_TEXT.get(t.window), 'used_today': usage.get(t.key),
                        'used_since': USED_SINCE.get(t.window)})
-    return {'fields': fields, 'groups': [{'id': g.id, 'title': g.title, 'intro': g.intro} for g in GROUPS], 'cache_seconds': CACHE_SECONDS}
+    try:
+        from cveFeed import autotune
+        state = autotune.annotate(fields)
+    except Exception:  # noqa: BLE001 - the cards must draw even when the auto-tuning state cannot be read
+        logger.warning('tunables: the auto-tuning state could not be read', exc_info=True)
+        state = None
+    return {'fields': fields, 'groups': [{'id': g.id, 'title': g.title, 'intro': g.intro} for g in GROUPS], 'cache_seconds': CACHE_SECONDS,
+            'autotune': state}

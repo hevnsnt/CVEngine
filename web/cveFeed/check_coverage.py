@@ -854,6 +854,7 @@ EXCLUDED = {
     'sweeps': {
         'buckets': 'cloud storage candidates belong to the project, not to one host',
         'conductor': 'the scheduler that keeps discovery queued; it does no check',
+        'autotune': 'the auto-tuner of the configMaxxing throughput settings (cveFeed.autotune); it measures the instance and checks no host',
         'distro-sync': 'a feed sync, not a check of a host',
         'triage': 'AI review of findings, not a check of a host',
         'validate': 'validation of CVE matches, recorded on the match',

@@ -3,13 +3,13 @@
 // group is one registerTunableGroup() line below (a test keeps these ids equal to the server's groups). Everything from the server is set with
 // textContent or value.
 import { api, button, el, shortDate, toast } from "/staticfiles/cve/ui.js";
-import { API, registerCard } from "/staticfiles/cve/config-maxxing.js";
+import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.js";
 import { canPin, canReset, changesFrom, originLines, rangeText, runningText, softWarning, sourceLabel, usageText } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/tunables`;
 const inputId = (key) => `tn-${key.replace(/[^a-z0-9]/gi, "-")}`;
 
-function row(field, onInput, save) {
+function row(field, onInput, save, mode, reload) {
   const wrap = el("div", "field", null, { style: "padding:10px 0;border-top:1px solid var(--line, rgba(128,128,128,.25))" });
   const id = inputId(field.key);
   const input = el("input", "", null, {
@@ -44,11 +44,14 @@ function row(field, onInput, save) {
     id: `${id}-note`, style: "margin:4px 0 0",
   });
   const warning = el("p", "msg err", "", { style: "margin:4px 0 0", hidden: "", role: "status" });
-  wrap.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts, warning);
+  wrap.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts);
+  const tuning = autoTuneRow(field, mode, reload);
+  if (tuning) wrap.append(tuning);
+  wrap.append(warning);
   return { wrap, input, warning };
 }
 
-async function build(host, groupId, focusId = "") {
+async function build(host, groupId, focusId = "", ctx = {}) {
   const data = await api("GET", PATH);
   const group = (data.groups || []).find((g) => g.id === groupId);
   if (!group) throw new Error(`No settings are registered for ${groupId}`);
@@ -60,7 +63,7 @@ async function build(host, groupId, focusId = "") {
   const problem = el("p", "msg err", "", { style: "margin:8px 0 0", hidden: "", role: "alert" });
   const save = async (values, focus = "") => {
     await api("PUT", PATH, { values });
-    await build(host, groupId, focus || (document.activeElement && document.activeElement.id) || "");
+    await build(host, groupId, focus || (document.activeElement && document.activeElement.id) || "", ctx);
   };
   const saveButton = button("Save", async () => {
     const { changes, error } = changesFrom(fields, drafts());
@@ -82,7 +85,7 @@ async function build(host, groupId, focusId = "") {
     });
   };
   fields.forEach((field) => {
-    const { wrap, input, warning } = row(field, refresh, save);
+    const { wrap, input, warning } = row(field, refresh, save, (data.autotune || {}).effective_mode, () => (ctx.reload ? ctx.reload() : build(host, groupId, "", ctx)));
     inputs.push(input);
     warnings.push(warning);
     card.append(wrap);
@@ -98,8 +101,9 @@ async function build(host, groupId, focusId = "") {
 }
 
 export function registerTunableGroup(id, title) {
-  registerCard({ id, title, build: (host) => build(host, id) });
+  registerCard({ id, title, build: (host, ctx = {}) => build(host, id, "", ctx) });
 }
 
 registerTunableGroup("ai_spend", "AI spend");
 registerTunableGroup("throughput", "Scan pacing");
+registerTunableGroup("autotune_pace", "Auto-tuning pace");

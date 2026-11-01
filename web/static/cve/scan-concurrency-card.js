@@ -1,7 +1,7 @@
 // The Scan concurrency card of Settings, configMaxxing: how many scanner runs of each kind, how many hosts are assessed at once and how many
 // discovery scans are kept running. Everything from the server is set with textContent or value.
 import { api, badge, button, el, shortDate, toast } from "/staticfiles/cve/ui.js";
-import { API, registerCard } from "/staticfiles/cve/config-maxxing.js";
+import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.js";
 import {
   EXPLANATION_TEXT, canReset, changesFrom, checkDraft, discoveryNotice, formatMb, groupFields, memoryPlan, originLines, rangeText, runningText, sourceLabel,
 } from "/staticfiles/cve/config-maxxing-logic.js";
@@ -10,7 +10,7 @@ const PATH = `${API}/scan_concurrency`;
 const TONE = { applied: "success", pending: "queued", unknown: "" };
 const STATE_LABEL = { applied: "Applied", pending: "Being applied", unknown: "Not confirmed" };
 
-function fieldRow(field, data, onInput, save) {
+function fieldRow(field, data, onInput, save, reload) {
   const row = el("div", "field", null, { style: "padding:10px 0;border-top:1px solid var(--line, rgba(128,128,128,.25))" });
   const id = `sc-${field.key.replace(/[^a-z0-9]/gi, "-")}`;
   const input = el("input", "", null, {
@@ -34,6 +34,8 @@ function fieldRow(field, data, onInput, save) {
     id: `${id}-note`, style: "margin:4px 0 0",
   });
   row.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts);
+  const tuning = autoTuneRow(field, (data.autotune || {}).effective_mode, reload);
+  if (tuning) row.append(tuning);
   if (field.key === "discovery_concurrency") {
     const status = data.discovery || {};
     const line = el("p", "note", null, { style: "margin:6px 0 0" });
@@ -43,7 +45,7 @@ function fieldRow(field, data, onInput, save) {
   return { row, input };
 }
 
-async function build(host) {
+async function build(host, ctx = {}) {
   const data = await api("GET", PATH);
   const card = el("div", "card", null, { style: "max-width:720px" });
   card.append(el("h2", "", "Scan concurrency", { style: "margin-bottom:12px" }), el("p", "note", EXPLANATION_TEXT, { style: "margin:0 0 12px" }));
@@ -101,7 +103,7 @@ async function build(host) {
   groupFields(data.fields, data.groups).forEach((group) => {
     card.append(el("p", "sec", group.title, { style: "margin:16px 0 4px" }));
     group.fields.forEach((field) => {
-      const { row, input } = fieldRow(field, data, refresh, save);
+      const { row, input } = fieldRow(field, data, refresh, save, () => (ctx.reload ? ctx.reload() : rebuild()));
       inputs.push(input);
       card.append(row);
     });
@@ -112,7 +114,7 @@ async function build(host) {
   host.textContent = "";
   host.append(card);
   refresh();
-  const rebuild = async () => build(host);
+  const rebuild = async () => build(host, ctx);
 }
 
 registerCard({ id: "scan_concurrency", title: "Scan concurrency", build });

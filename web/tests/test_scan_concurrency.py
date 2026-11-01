@@ -188,12 +188,13 @@ class SavingTests(Isolated, TestCase):
 	def test_reset_all_clears_every_tinkerer_setting_and_is_audited(self):
 		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'work_depth': 5, 'discovery_concurrency': 12}})
 		status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
-		self.assertEqual((status, data['cleared']), (200, {'scan_concurrency': 3, 'ai_spend': 0, 'throughput': 0}))
+		self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 3, 'ai_spend': 0, 'throughput': 0, 'autotune_pace': 0}))
 		self.assertEqual(ScanConcurrency.current().values, {})
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.scan_concurrency_reset_all').exists())
-		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'scan_concurrency', 'title': 'Scan concurrency'}, {'id': 'ai_spend', 'title': 'AI spend'},
-			{'id': 'throughput', 'title': 'Scan pacing'}]})
+		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'autotune', 'title': 'Auto-tuning'},
+			{'id': 'scan_concurrency', 'title': 'Scan concurrency'}, {'id': 'ai_spend', 'title': 'AI spend'},
+			{'id': 'throughput', 'title': 'Scan pacing'}, {'id': 'autotune_pace', 'title': 'Auto-tuning pace'}]})
 
 	def test_every_change_is_audited_with_before_and_after_and_a_no_change_is_not(self):
 		os.environ['HEAVY_MAX_NMAP'] = '3'
@@ -363,13 +364,12 @@ class TunerBoundsTests(Isolated, TestCase):
 		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 5}))
 		self.assertEqual(res.max_concurrent('nmap'), 3)
 
-	def test_a_tuner_step_down_stays_until_the_admin_saves_again(self):
+	def test_a_leftover_step_of_the_retired_three_hour_tuner_changes_nothing(self):
+		"""The three-hour review no longer moves admission caps (the auto-tuner does, cveFeed.autotune): a step it left in Redis is not read."""
 		sc.update({'heavy.nmap': 4}, self.root)
 		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 3, 'direction': 'down'}))
-		self.assertEqual(res.max_concurrent('nmap'), 3)
-		sc.update({'heavy.nmap': 4}, self.root)  # unchanged: nothing to apply
-		self.assertEqual(res.max_concurrent('nmap'), 3)
-		sc.update({'heavy.nmap': 5}, self.root)  # a new choice starts from what the admin chose
+		self.assertEqual(res.max_concurrent('nmap'), 4)
+		sc.update({'heavy.nmap': 5}, self.root)
 		self.assertEqual(res.max_concurrent('nmap'), 5)
 
 	def test_the_review_candidate_never_leaves_the_bounds_the_admin_set(self):

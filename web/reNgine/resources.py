@@ -302,28 +302,93 @@ def _admin_cap(kind):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
 
 
+# What the auto-tuner chose (cveFeed.autotune), published by the process that changes it and again by the 30 second tick, read and cached the same
+# way as the saved values above. The copy holds numbers only while the instance's mode is Auto; Off and Suggest publish an empty copy, so a number
+# the tuner chose stops applying within seconds of turning it off. ``CVENGINE_AUTOTUNE=0`` (the kill switch) is honoured here too, by every reader.
+AUTO_VALUES_KEY = 'cvengine:autotune:values'
+_auto = {'at': None, 'values': {}}
+AUTOTUNE_OFF_WORDS = ('0', 'false', 'no', 'off')
+
+
+def autotune_killed(environ=None):
+    """Whether CVENGINE_AUTOTUNE turns auto-tuning off for this process (the environment's kill switch, read on every call)."""
+    return str((environ if environ is not None else os.environ).get('CVENGINE_AUTOTUNE', '')).strip().lower() in AUTOTUNE_OFF_WORDS
+
+
+def auto_values(now_fn=time.monotonic):
+    """The numbers the auto-tuner chose and that apply now, ``{key: whole number}`` (empty unless the mode is Auto), cached SAVED_CACHE_SECONDS.
+    The same three cases as ``saved_values``: a copy is used; Redis without a copy means the database is read and the copy published again; Redis
+    that cannot be reached keeps the last copy this process saw (none: no tuned numbers, so the saved value, the environment or the default)."""
+    if autotune_killed():
+        return {}
+    now = now_fn()
+    with _saved_lock:
+        if _auto['at'] is not None and now - _auto['at'] < SAVED_CACHE_SECONDS:
+            return _auto['values']
+    values = None
+    try:
+        client = redis_client()
+        raw = client.get(AUTO_VALUES_KEY) if client is not None else None
+        values = json.loads(raw).get('values') if raw else None
+        values = values if isinstance(values, dict) else None
+    except (ValueError, AttributeError):
+        values = None
+    except Exception:  # noqa: BLE001 - a cache that cannot be read must never stop admission or the conductor
+        logger.debug('auto-tuned values could not be read', exc_info=False)
+        with _saved_lock:
+            _auto['at'] = now
+            return _auto['values']
+    if values is None:
+        values = _recover_auto(client is not None)
+        if values is None:
+            with _saved_lock:
+                _auto['at'] = now
+                return _auto['values']
+    values = {k: v for k, v in values.items() if isinstance(v, int) and not isinstance(v, bool)}
+    with _saved_lock:
+        _auto.update(at=now, values=values)
+    return values
+
+
+def invalidate_auto():
+    with _saved_lock:
+        _auto.update(at=None)
+
+
+def _recover_auto(publish_again):
+    try:
+        from cveFeed import autotune
+        return autotune.recover(publish_again)
+    except Exception:  # noqa: BLE001
+        logger.debug('auto-tuned values could not be recovered from the database', exc_info=False)
+        return None
+
+
+def _auto_cap(kind):
+    value = auto_values().get('heavy.' + kind)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
+
+
 def base_cap(kind):
-    """Where the cap starts: what the admin saved, else HEAVY_MAX_<KIND>, else the built-in default. The AI review moves from here."""
+    """The cap in effect: what a person saved (it pins the kind), else what the auto-tuner chose (mode Auto only), else HEAVY_MAX_<KIND>, else
+    the built-in default."""
     saved = _admin_cap(kind)
-    return saved if saved is not None else _static_cap(kind)
+    if saved is not None:
+        return saved
+    tuned = _auto_cap(kind)
+    return tuned if tuned is not None else _static_cap(kind)
 
 
 def max_concurrent(kind):
-    baseline = base_cap(kind)
-    low, high = adaptive_bounds(kind, baseline)
-    try:
-        client = getattr(get_store(), 'r', None)
-        raw = client.get(f'cvengine:adaptive:max:{kind}') if client is not None else None
-        value = json.loads(raw).get('value') if raw else None
-        return max(low, min(high, int(value))) if value is not None else max(low, min(high, baseline))
-    except Exception:  # Redis is advisory; admission must retain the static operator cap on an outage.
-        return max(low, min(high, baseline))
+    """How many runs of a kind may run at once. Only the auto-tuner (cveFeed.autotune) moves it now, through ``base_cap``: the step the old
+    three-hour review kept in Redis (``cvengine:adaptive:max:<kind>``) is no longer read, so a leftover one changes nothing."""
+    return max(1, base_cap(kind))
 
 
 def adaptive_bounds(kind, baseline=None):
-    """The range the AI review may move a kind's cap within. The cap an App Admin saved is the default maximum (and is never pushed outside
-    the range by HEAVY_TUNE_MIN/MAX in the environment: the review may not go above it unless HEAVY_TUNE_MAX_<KIND> says so explicitly);
-    without one, the maximum is the HEAVY_MAX_<KIND> or built-in cap, as before."""
+    """The range the three-hour review's candidate is judged against (cveFeed.performance_review, which now only reports). The cap an App Admin
+    saved is the default maximum; HEAVY_TUNE_MIN/MAX_<KIND> narrow or widen it as before. The auto-tuner has its own range per kind
+    (cveFeed.autotune.envelope), which HEAVY_TUNE_MIN/MAX_<KIND> also narrow or widen."""
     baseline = baseline or base_cap(kind)
     saved = _admin_cap(kind)
     suffix = kind.upper().replace('-', '_')

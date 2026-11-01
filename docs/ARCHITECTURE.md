@@ -105,7 +105,7 @@ A Sentinel's scope widens past one project: an organization-wide enrollment (`or
 - Choosing nuclei template tags and severities from those the installed templates use.
 - Drafting a nuclei template when none exists for a CVE.
 - Writing detection checks for the CVEs attackers use, from feed text only, within a daily budget.
-- The three-hour coverage review and scanner capacity tuning.
+- The three-hour coverage review, and the advisor of the auto-tuner (a second opinion on the throughput settings, numbers only, every few hours; the deterministic controller tunes without it).
 - Reading RDP login-screen screenshots, and suggesting local checks for matches no external check can settle.
 - Report text on the bug bounty page.
 

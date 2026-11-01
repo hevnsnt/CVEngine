@@ -6,10 +6,10 @@ export const SECTION_ID = "configmaxxing";
 export const SECTION_LABEL = "configMaxxing";
 export const STORAGE_KEY = "cve.settings.configmaxxing.open";
 export const WARNING_TEXT =
-  "Advanced settings for people who like to tune things. The defaults are safe. Changing these can make scans slower, use more memory or send more traffic to your targets.";
+  "Advanced settings for people who like to tune things. The defaults are safe, and auto-tuning (on by default) adjusts the throughput numbers for you. Changing these can make scans slower, use more memory or send more traffic to your targets.";
 export const EXPLANATION_TEXT =
   "More at once scans faster but needs more CPU and memory. The memory gate still holds work back when the container is short on memory. " +
-  "Scanning on a second machine (a Sentinel) is the best way to scale.";
+  "Scanning on a second machine (a Sentinel) is the best way to scale. Auto-tuning (the first card) moves the numbers nobody saved here; a number you save is pinned.";
 
 // --- whether the section is open: remembered per viewer, never required ---------------------------------------
 export function readOpen(storage) {
@@ -153,4 +153,85 @@ export function runningText(field) {
   if (field.applies !== "pool") return "Applies within a few seconds, with no restart";
   if (field.running == null) return "Worker ceiling now: not reported yet";
   return `Worker ceiling now: ${field.running}`;
+}
+
+// --- auto-tuning (cveFeed/autotune.py) --------------------------------------------------------------------------
+export const AUTOTUNE_MODES = [
+  ["auto", "Auto: the tuner applies small, bounded changes itself"],
+  ["suggest", "Suggest: it recommends changes, with the reason and an Apply button, and changes nothing"],
+  ["off", "Off: hand tuning, nothing is measured or changed"],
+];
+export const AUTOTUNE_INTRO =
+  "Auto-tuning is on by default. It aims high: after each restart or update it sets the throughput settings below to the most this machine sensibly " +
+  "carries (sized from its CPU cores, memory budget, database connections and Sentinel slots), backs off at once when it sees trouble (memory kills, " +
+  "time-outs, a busy database, a silent worker, Sentinel waits that ran locally), then probes upward again one step at a time after two healthy hours. " +
+  "It never changes AI spend caps, never changes anything while scanning is paused or an update is applied, and every change is listed here with its reason and a Revert button.";
+export const AUTOTUNE_OFF_HELP =
+  "To tune by hand, choose Off. To keep one number as it is, type it in its box and save it: a saved number is pinned and the tuner leaves it alone. " +
+  "CVENGINE_AUTOTUNE=0 in .env turns auto-tuning off for the whole instance, whatever is chosen here.";
+export const SOURCE_LABEL = { controller: "controller", ai: "AI advisor", person: "a person" };
+
+// One line under a row of a configMaxxing card: pinned, auto-tuned (and from what), suggested, or what the tuner may do with it.
+// Returns {text, kind, release, suggestion}: kind is "pinned" | "tuned" | "suggested" | "managed" | "" (nothing to say).
+export function autoTuneLine(field, mode, formatDate = (x) => x) {
+  const at = field && field.autotune;
+  const none = { text: "", kind: "", release: false, suggestion: null };
+  if (!at || !at.managed || !mode || mode === "off") return none;
+  if (at.pinned) {
+    return { text: `Pinned by ${at.pinned_by || "an administrator"}: auto-tuning leaves this number alone`, kind: "pinned", release: mode === "auto", suggestion: null };
+  }
+  if (at.suggestion) {
+    const s = at.suggestion;
+    const by = s.source === "ai" ? " (AI advisor)" : "";
+    return { text: `Suggested${by}: ${s.value} (now ${s.from}) · ${s.reason}${s.at ? ` · ${formatDate(s.at)}` : ""}`, kind: "suggested", release: false, suggestion: s };
+  }
+  const sized = sizedText(at);
+  if (at.tuned) {
+    const was = at.was != null ? ` (was ${at.was})` : "";
+    const why = at.reason ? ` · ${at.reason}` : "";
+    const when = at.at ? ` · ${formatDate(at.at)}` : "";
+    return { text: `Auto-tuned: ${field.value}${was}${why}${when}${sized}`, kind: "tuned", release: false, suggestion: null };
+  }
+  const notRaised = at.why_not_raised ? ` · not raised now: ${at.why_not_raised}` : "";
+  return { text: `Auto-tuning may move this between ${at.min} and ${at.max}${notRaised}${sized}`, kind: "managed", release: false, suggestion: null };
+}
+
+// "sized for this machine: 8 cores, 3.4 GB memory budget, 9 Sentinel slots (target 22)", or nothing before the first run.
+export function sizedText(at) {
+  if (!at || !at.sized_for) return "";
+  return ` · sized for this machine: ${at.sized_for}${at.target != null ? ` (target ${at.target})` : ""}`;
+}
+
+// One line of the tuning history.
+export function decisionText(d) {
+  const label = d.label || d.setting;
+  const who = d.source === "person" ? d.actor || "a person" : SOURCE_LABEL[d.source] || d.source;
+  const phase = { aim_high: "aimed high", back_off: "backed off", probe: "probed up", cap: "held to the memory budget" }[d.phase];
+  const what = (d.applied && phase) || {
+    raise: d.applied ? "raised" : "suggested raising",
+    lower: d.applied ? "lowered" : "suggested lowering",
+    apply: "applied",
+    revert: "reverted",
+    release: "handed to auto-tuning",
+  }[d.action] || d.action;
+  const numbers = d.action === "release" ? `at ${d.new_value}` : `${d.old_value} -> ${d.new_value}`;
+  const state = d.resolution === "reverted" ? " (reverted)" : d.resolution === "superseded" ? " (replaced)" : d.resolution === "applied" ? " (applied)" : "";
+  const pressure = d.pressure && d.phase !== "back_off" ? " under pressure" : "";
+  return `${label}: ${what}${pressure} ${numbers} by ${who}${state}${d.reason ? ` · ${d.reason}` : ""}`;
+}
+
+export function modeNotice(status) {
+  if (!status) return "";
+  if (status.killed) return "Auto-tuning is off for this instance: CVENGINE_AUTOTUNE=0 is set in the environment. Remove it (or set it to 1) and restart to turn it back on.";
+  if (status.effective_mode === "off") return "Auto-tuning is off: every number below is what a person saved, the environment, or the default.";
+  if (status.effective_mode === "suggest") return "Suggest mode: the tuner recommends changes on the rows below; nothing changes until you press Apply.";
+  return "Auto mode: the tuner changes the rows below that are not pinned, one step at a time.";
+}
+
+export function lastRunText(last, formatDate = (x) => x) {
+  if (!last || !last.at) return "The tuner has not run yet (it runs every ten minutes).";
+  const when = formatDate(last.at);
+  if (last.held) return `Last run ${when}: ${last.held}.`;
+  const n = (last.changes || []).length;
+  return `Last run ${when}: ${n ? `${n} change(s)` : "no change"}.`;
 }

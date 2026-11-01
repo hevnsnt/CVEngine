@@ -30,11 +30,12 @@ def _env_int(name, default):
 
 
 def wanted_depth():
-    """The depth an App Admin saved on Settings, configMaxxing, else CVENGINE_WORK_DEPTH, else 3 (see cveFeed.scan_concurrency)."""
+    """The depth an App Admin saved on Settings, configMaxxing, else the auto-tuner's number, else CVENGINE_WORK_DEPTH, else 3 (see
+    cveFeed.scan_concurrency)."""
     try:
         from cveFeed import scan_concurrency
         got = scan_concurrency.resolve('work_depth')
-        if got['source'] == 'admin':
+        if got['source'] in ('admin', 'auto'):  # saved by a person, or chosen by the auto-tuner (cveFeed.autotune)
             return got['value']
     except Exception:  # noqa: BLE001 - the saved copy is a cache: without it the environment decides, as before
         logger.debug('work conductor: the saved depth could not be read', exc_info=False)

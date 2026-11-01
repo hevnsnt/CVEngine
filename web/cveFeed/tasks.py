@@ -1782,7 +1782,17 @@ def report_resources():
     scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
     from cveFeed import tunables
     tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
+    from cveFeed import autotune
+    autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
     return {}
+
+
+@app.task(name="autotune", bind=False, queue="cve_feed_queue")
+def autotune_task():
+    """Every ten minutes: one auto-tuning round (cveFeed.autotune): measure, then move (mode Auto) or recommend (mode Suggest) the throughput
+    settings of configMaxxing that no person pinned, one bounded step at a time. Changes nothing while scanning is paused or updating."""
+    from cveFeed import autotune
+    return autotune.run()
 
 
 @app.task(name="apply_scan_concurrency", bind=False, queue="cve_feed_queue")
