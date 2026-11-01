@@ -126,6 +126,8 @@ class RunCtWatchTests(TestCase):
 		self.assertNotIn('graphed.example.test', {n['label'] for n in g['nodes']})  # a name that has not resolved is not a live system
 		from startScan.models import IpAddress
 		Subdomain.objects.get(name='graphed.example.test').ip_addresses.add(IpAddress.objects.create(address='192.0.2.77', os_guess=''))
+		from cveFeed import views
+		views.clear_stats_cache()  # the graph's version is kept a few seconds per scope; a bump (or the passing of the seconds) shows the change
 		g = client_for(self.user).get('/cve/api/graph').json()
 		self.assertIn('graphed.example.test', {n['label'] for n in g['nodes']})  # once it resolves it appears, with no scan attached
 

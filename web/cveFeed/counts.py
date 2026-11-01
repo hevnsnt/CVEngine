@@ -63,23 +63,24 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-def running_scans(qs=None):
+def running_scans(qs=None, window=None):
+    """``window``: the running window when the caller already read it (it is a settings lookup)."""
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - running_window())
+    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - (running_window() if window is None else window))
 
 
 BACKGROUND_WINDOW = timedelta(hours=3)  # a "running" activity line older than this is a casualty of a restart, not work in progress
 BACKGROUND_KINDS = ("run_check", "discovery", "scan", "hygiene", "validate")
 
 
-def background_running(now=None):
+def background_running(now=None, window=None):
     """The activity lines of background work in progress: a check, sweep, rescan or assessment that runs under a scan record that is
     no longer running (the weekly deep nuclei pass, a host rescan, an assessment), so it is invisible to ``running_scans``. A line that
     belongs to a scan ``running_scans`` already counts is left out, so the two never count the same work twice."""
     from cveFeed.models import AgentActivity
     now = now or timezone.now()
-    under_a_running_scan = list(running_scans().values_list("id", flat=True))
+    under_a_running_scan = list(running_scans(window=window).values_list("id", flat=True))
     qs = AgentActivity.objects.filter(status="running", kind__in=BACKGROUND_KINDS, created_at__gte=now - BACKGROUND_WINDOW)
     if under_a_running_scan:
         # a missing key is not "in": filter first, then exclude by id. The inner query repeats the status, kind and age bounds (the lines it

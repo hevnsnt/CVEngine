@@ -7,6 +7,7 @@
 import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
 import { detailCache, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
+import { createGet, createPace, every, staleRows } from "/staticfiles/cve/poll.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -297,13 +298,27 @@ function section(g, reload, details) {
   return box;
 }
 
-const DETAIL_MS = 15000; // settings, version and update come from each Sentinel's detail, asked for less often than the live list
+const DETAIL_SAFETY_MS = 120000; // a detail is also asked for again after this long: the list's `revision` should move first, this is only the net under it
+
+// What the live list says about the detail card of one Sentinel: when it changes, the detail has to be asked for again.
+const detailKey = (s) => `${s.revision || ""}|${s.version_state || ""}`;
 
 export function sentinelLive(mount) {
   let data = null;
-  let timer = null;
+  const pace = createPace();
+  const conditional = createGet();
   const details = detailCache(() => paint());
+  const seen = new Map(); // id -> {key, at}: the detail key of the live list when its detail was last asked for, and when
   const ids = () => (data ? data.results.map((s) => s.id) : []);
+  // the Sentinels whose detail is not in hand, whose live-list revision moved since, or that has not been asked for in a while
+  const stale = () => (data ? staleRows(data.results, seen, { key: detailKey, has: details.has, safetyMs: DETAIL_SAFETY_MS }) : []);
+  const refreshDetails = async () => {
+    const want = stale();
+    [...seen.keys()].forEach((id) => { if (!ids().includes(id)) seen.delete(id); });
+    if (!want.length) return;
+    const stamp = Date.now();
+    if (await details.refresh(ids(), want.map((s) => s.id))) want.forEach((s) => seen.set(s.id, { key: detailKey(s), at: stamp }));
+  };
   const paint = () => {
     mount.textContent = "";
     if (!data) return;
@@ -334,26 +349,26 @@ export function sentinelLive(mount) {
   };
   async function load() {
     try {
-      data = await api("GET", LIVE);
-      paint();
+      const fresh = await conditional(LIVE); // null: a 304, nothing on the page has changed (the cards age by themselves below)
+      pace.ok();
+      if (fresh) {
+        data = fresh;
+        paint();
+      }
     } catch (err) {
-      if (!data) toast(err.message, true);
+      pace.fail(err);
+      if (!data) toast(err.status ? `Request failed (${err.status})` : err.message, true);
     }
   }
   async function reload() {
     await load();
-    await details.refresh(ids());
+    await refreshDetails();
   }
-  reload();
-  setInterval(() => {
-    if (!document.hidden) details.refresh(ids());
-  }, DETAIL_MS);
-  timer = setInterval(() => {
-    if (document.hidden) return;
-    load();
-  }, POLL_MS);
+  // One request at a time, jittered, paused while the tab is hidden; the detail of a Sentinel (settings, version, update) is asked for only when its live
+  // row says it moved (``revision``), not on every round.
+  const live = every(reload, POLL_MS, { pace });
   setInterval(tick, 1000);
-  return () => clearInterval(timer);
+  return () => live.stop();
 }
 
 const mount = document.getElementById("live");

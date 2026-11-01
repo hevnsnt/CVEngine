@@ -84,7 +84,7 @@ class CountFixture(TestCase):
 
 	def setUp(self):
 		cache.clear()
-		views._STATS_CACHE.clear()
+		views.clear_stats_cache()
 		self.client_ = client_for(self.user)
 
 	def api(self, path, **params):

@@ -57,6 +57,7 @@
 <script src="{% asset 'cve/vivagraph.min.js' %}"></script>
 <script type="module">
   import { detailDrawer, mountGraph } from '/staticfiles/cve/graph.js';
+  import { createGet, createPace, every } from '/staticfiles/cve/poll.js';
   const drawer = detailDrawer({ onClose: () => graph.deselect() });
   const graph = mountGraph(document.getElementById('graph'), { onSelect: d => drawer.show(d) });
   document.getElementById('pods-toggle').addEventListener('click', (e) => { const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', String(on)); graph.setPods(on); });
@@ -101,8 +102,8 @@
     polling = true;
     try { await poll(); } finally { polling = false; pollTimer = setTimeout(pollLoop, 4000 * 2 ** Math.min(failures, 4)); }
   }
-  select.addEventListener('change', () => { clearTimeout(pollTimer); pollLoop(); pollLive(); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { clearTimeout(pollTimer); pollLoop(); pollLive(); } });
+  select.addEventListener('change', () => { clearTimeout(pollTimer); pollLoop(); liveLoop.tick(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { clearTimeout(pollTimer); pollLoop(); } });  // the live loop resumes itself
   document.getElementById('graph-fit').addEventListener('click', () => graph.fit());
   pollLoop();
 
@@ -112,6 +113,11 @@
   const duration = (seconds) => {
     const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
     return h ? `${h}h ${m}m` : m ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`;
+  };
+  let skew = 0;  // the server's clock less ours, from the last full answer: the elapsed time is counted here from each scan's start, so an unchanged (304) answer still ticks
+  const elapsed = (scan) => {
+    const began = Date.parse(scan.started);
+    return Number.isFinite(began) ? Math.max(0, Math.round((Date.now() + skew - began) / 1000)) : scan.elapsed;
   };
   function renderScans(scans) {
     const list = el('soc-scans');
@@ -125,26 +131,35 @@
       const link = Object.assign(document.createElement('a'), { href: `/cve/${encodeURIComponent(scan.project || slug)}/scans/`, textContent: scan.domain });
       item.append(link,
         Object.assign(document.createElement('span'), { className: 'soc-stage', textContent: scan.stage || 'between steps' }),
-        Object.assign(document.createElement('span'), { className: 'soc-elapsed', textContent: duration(scan.elapsed) }));
+        Object.assign(document.createElement('span'), { className: 'soc-elapsed', textContent: duration(elapsed(scan)) }));
       list.append(item);
     });
   }
+  // A bare setInterval asked again whether or not the last answer had come; this asks one at a time, jittered, not at all while the tab is hidden, and
+  // sends If-None-Match: an unchanged answer is a 304 with no body (static/cve/poll.js). The elapsed clock keeps ticking from the last answer.
+  const livePace = createPace(), liveGet = createGet();
+  let lastLive = null;
   async function pollLive() {
-    if (document.hidden) return;
     try {
       const params = new URLSearchParams({ project: slug });
       if (select.value) params.set('domain', select.value);
-      const response = await fetch('/cve/api/graph-live?' + params, { credentials: 'same-origin', cache: 'no-store' });
-      if (!response.ok) throw new Error(response.status);
-      const data = await response.json();
-      graph.setActive(data.domains, data.hosts);
-      renderScans(data.scans);
-      el('soc-running').textContent = data.counts.running;
-      el('soc-queued').textContent = data.counts.queued;
+      let data;
+      try {
+        data = await liveGet('/cve/api/graph-live?' + params);
+        livePace.ok();
+      } catch (err) { livePace.fail(err); throw err; }
+      if (data) {
+        lastLive = data;
+        const at = Date.parse(data.at);
+        if (Number.isFinite(at)) skew = at - Date.now();
+        graph.setActive(data.domains, data.hosts);
+        el('soc-running').textContent = data.counts.running;
+        el('soc-queued').textContent = data.counts.queued;
+      }
+      if (lastLive) renderScans(lastLive.scans);
     } catch (_) { /* the next poll tries again; the highlight just stays as it was */ }
   }
-  pollLive();
-  setInterval(pollLive, 3000);
+  const liveLoop = every(pollLive, 3000, { pace: livePace });
 
   // SOC mode: the graph over the whole window, with a status bar and the running scans. ?soc=1 opens it that way (a wall display
   // can load the URL); the browser only allows real full screen from a click, so that is its own button.
