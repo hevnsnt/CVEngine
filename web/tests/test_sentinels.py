@@ -499,6 +499,15 @@ class McpToolTests(SentinelBase):
         self.assertIn('CVENGINE_SENTINEL_NETWORK=internal', setup['configure'])
         self.assertIn('COMPOSE_PROFILES=\\n', setup['configure'])  # light: no OpenVAS profile
         self.assertIn('./setup.sh --light --internal --blob', setup['configure_alternative'])
+        # one command a person pastes on the machine: clone, write .env, start
+        self.assertIn('git clone https://github.com/hevnsnt/cvengine-sentinel.git', setup['one_liner'])
+        self.assertIn(f"./setup.sh --light --internal --yes --name \"$(hostname -s)\" --blob '{out['blob']}'", setup['one_liner'])
+        self.assertTrue(setup['one_liner'].endswith('docker compose up -d'))
+        # a finished prompt for an AI agent: the blob and the choices already in it
+        self.assertIn(out['blob'], setup['agent_prompt'])
+        self.assertIn('./setup.sh --light --internal --yes', setup['agent_prompt'])
+        self.assertIn(out['server_url'], setup['agent_prompt'])
+        self.assertNotIn('| sh', setup['agent_prompt'])
         self.assertIn('private network', setup['note'])
         err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
         self.assertEqual((out['setup']['network'], out['setup']['profile']), ('external', 'full'))

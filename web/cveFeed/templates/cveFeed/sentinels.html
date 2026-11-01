@@ -16,7 +16,7 @@
   </div>
   <div class="card">
     <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
-    <p class="note" style="margin-bottom:6px">A Sentinel can be scoped to one project, one organization (every project of it, present and future) or, for an App Admin, the whole instance (every organization and project). Whichever scope, Provision generates a one-time enrollment secret, single-use and expiring in 30 minutes, packaged into one opaque blob. On the machine that will scan, clone <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>, paste the blob into <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code>, and run <code>docker compose up -d</code>; see that repository's <code>README.md</code> (or its <code>AGENTS.md</code> if an AI agent is doing the provisioning).</p>
+    <p class="note" style="margin-bottom:6px">A Sentinel can be scoped to one project, one organization (every project of it, present and future) or, for an App Admin, the whole instance (every organization and project). Whichever scope, Provision gives you one command to paste on the machine that will scan, and a ready-made prompt to hand an AI agent instead. Both carry a single-use secret that expires in 30 minutes. The machine needs Docker with Compose, git and outbound HTTPS to this server. The client is <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>.</p>
     <div class="field"><label for="enroll-scope">Scope</label>
       <select id="enroll-scope">
         <option value="project">Project</option>
@@ -92,14 +92,23 @@
     api('POST', url).then(function (x) {
       enrollOut.style.display = 'block';
       if (x.ok) {
-        enrollOut.className = 'msg ok secret-box'; enrollOut.textContent = '';
+        enrollOut.className = 'msg ok secret-box enroll-ready'; enrollOut.textContent = '';
         var label = x.d.scope === 'project' ? x.d.project : x.d.scope === 'org' ? ('organization ' + x.d.org) : 'the whole instance';
-        enrollOut.appendChild(el('span', '', 'One-time blob for ' + label + ', expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC. Paste this into your Sentinel\'s CVENGINE_SENTINEL_BLOB and run it once; the Sentinel then keeps its own token.'));
-        var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); enrollOut.appendChild(code);
         var steps = x.d.setup || {};
-        enrollOut.appendChild(el('div', 'meta', 'Or run, on the machine, in the cloned repository (' + steps.network + ', ' + steps.profile + '):'));
-        var cmd = el('pre', 'code', steps.configure_alternative || ''); cmd.appendChild(copyBtn(function () { return steps.configure_alternative || ''; })); enrollOut.appendChild(cmd);
-        enrollOut.appendChild(el('div', 'meta', 'server_url: ' + x.d.server_url));
+        enrollOut.appendChild(el('span', '', 'Ready for ' + label + ' (' + steps.network + ', ' + steps.profile + '). Single-use, expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC.'));
+        function block(title, sub, text, cls) {
+          enrollOut.appendChild(el('h3', 'enroll-step', title));
+          if (sub) enrollOut.appendChild(el('div', 'enroll-sub', sub));
+          var pre = el('pre', 'code' + (cls ? ' ' + cls : ''), text); pre.appendChild(copyBtn(function () { return text; })); enrollOut.appendChild(pre);
+        }
+        block('Run this on the machine', 'Clones the client, writes its settings, names it after the machine and starts it.', steps.one_liner || '');
+        block('Or give this to an AI agent', 'A complete prompt for an agent with a shell on that machine: the blob and your choices are already in it.', steps.agent_prompt || '', 'enroll-prompt');
+        var raw = el('details', 'fold');
+        raw.appendChild(el('summary', '', 'Just the blob'));
+        var rawBody = el('div', 'fold-body');
+        var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); rawBody.appendChild(code);
+        rawBody.appendChild(el('div', 'enroll-sub', 'For CVENGINE_SENTINEL_BLOB in an existing Sentinel\'s .env. Server: ' + x.d.server_url));
+        raw.appendChild(rawBody); enrollOut.appendChild(raw);
       } else {
         enrollOut.className = 'msg err'; enrollOut.textContent = x.d.error || 'Could not generate an enrollment blob.';
       }
