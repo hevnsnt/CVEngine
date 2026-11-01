@@ -255,6 +255,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     mark_running(scan_id)
     ctx = {'scan_history_id': scan.id, 'domain_id': scan.domain_id, 'subscan_id': None}
     extra_args = bbot_config_args(scan.domain.project) if scan.domain.project_id else []
+    if bbot_lib.trufflehog_allowed(scan.domain.project_id):  # opt-in (CVENGINE_BBOT_TRUFFLEHOG=1), never for a bug bounty project
+        extra_args = [*extra_args, bbot_lib.TRUFFLEHOG_FLAG]
     strict_scope = scan.domain.is_host_scoped()  # a tenant on a shared provider domain: this host only, never its parent or siblings
     batch, hosts, observed = bbot_lib.BbotResult(), {}, []
     shown = set()  # bbot reports the same name from several modules; show each thing once

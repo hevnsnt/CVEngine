@@ -17,6 +17,7 @@ from functools import wraps
 
 import requests
 
+from cveFeed.secret_redaction import redact_text
 from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_REPLY_CAPS, STRUCTURED_MODES,
 	AIRuntime, clean_number, reasoning_plan, setting_applies)
 
@@ -188,16 +189,22 @@ def _record_completion(provider, status, category, started, duration_ms):
 
 
 def tracked_completion(fn):
-	"""Wraps complete() and complete_vision(): same usage accounting either way."""
+	"""Wraps complete() and complete_vision(): same usage accounting either way, and the one place every prompt and every reply passes, so
+	the last line of defence against a secret reaching the provider or being stored from its answer sits here: the user message is masked
+	by ``cveFeed.secret_redaction`` before it is sent (the system prompt is ours and static), and so is the reply before it is returned."""
 	@wraps(fn)
 	def wrapped(self, *args, **kwargs):
 		from datetime import datetime, timezone
+		if len(args) > 1:  # (system, user, ...)
+			args = (args[0], redact_text(args[1]), *args[2:])
+		elif 'user' in kwargs:
+			kwargs['user'] = redact_text(kwargs['user'])
 		started = datetime.now(timezone.utc)
 		tick = time.monotonic()
 		self._last_usage, self._last_actual_model = None, ''
 		status, category = 'failed', ''
 		try:
-			answer = fn(self, *args, **kwargs)
+			answer = redact_text(fn(self, *args, **kwargs))
 			status = 'succeeded'
 			return answer
 		except Exception as exc:
@@ -998,7 +1005,7 @@ def _triage_clean(value, depth=0):
 	"""A payload with every string cleaned and capped, forbidden keys dropped, and the size bounded (defence in depth: the
 	builders in cveFeed.triage already clean what they select)."""
 	if isinstance(value, str):
-		return clean_text(value, 3000)
+		return clean_text(redact_text(value), 3000)  # masked before the cleaning can mangle a secret into something no pattern knows
 	if isinstance(value, dict) and depth < 4:
 		return {clean_text(k, 60, strict=True): _triage_clean(v, depth + 1) for k, v in list(value.items())[:40]
 				if str(k).lower() not in TRIAGE_FORBIDDEN_KEYS}

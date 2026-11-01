@@ -122,6 +122,58 @@ class BbotParseTests(unittest.TestCase):
 		self.assertNotIn('--silent', cmd)  # --silent hides the event stream
 
 
+class TrufflehogGateTests(unittest.TestCase):
+	"""bbot's trufflehog module verifies every secret it finds against the issuer's live API (bbot 3.0.2 never passes --no-verification), so it
+	is off in every mode unless CVENGINE_BBOT_TRUFFLEHOG=1 and the caller says the project may use it."""
+
+	def excluded(self, cmd):
+		return '-em' in cmd and 'trufflehog' in cmd[cmd.index('-em') + 1:cmd.index('-em') + 2]
+
+	def test_every_mode_excludes_trufflehog_by_default(self):
+		from reNgine.bbot import MODES
+		with mock.patch.dict('os.environ', {}, clear=False):
+			import os
+			os.environ.pop('CVENGINE_BBOT_TRUFFLEHOG', None)
+			for mode in MODES:
+				cmd = build_command(['example.com'], mode=mode)
+				self.assertTrue(self.excluded(cmd), mode)
+				self.assertTrue(cmd[cmd.index('-em') + 2].startswith('-'), 'the exclusion list must end at the next option')
+			deep = build_command(['example.com'], mode='deep')
+			self.assertEqual(deep[deep.index('-p') + 1], 'kitchen-sink')  # the preset itself is unchanged: its modules still run
+
+	def test_the_environment_alone_does_not_enable_it(self):
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': '1'}):
+			self.assertTrue(self.excluded(build_command(['example.com'], mode='deep')))
+
+	def test_the_flag_alone_does_not_enable_it(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': ''}):
+			cmd = build_command(['example.com'], mode='deep', extra_args=[TRUFFLEHOG_FLAG])
+			self.assertTrue(self.excluded(cmd))
+			self.assertNotIn(TRUFFLEHOG_FLAG, cmd)
+
+	def test_opt_in_needs_both_and_is_not_passed_to_bbot(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': 'yes'}):
+			cmd = build_command(['example.com'], mode='deep', extra_args=[TRUFFLEHOG_FLAG, '-c', 'modules.shodan_dns.api_key=k'])
+		self.assertFalse(self.excluded(cmd))
+		self.assertNotIn('-em', cmd)
+		self.assertNotIn(TRUFFLEHOG_FLAG, cmd)
+		self.assertIn('modules.shodan_dns.api_key=k', cmd)
+
+	def test_enabled_reads_the_usual_truthy_words(self):
+		from reNgine.bbot import trufflehog_enabled
+		for value, expected in (('1', True), ('true', True), ('ON', True), ('0', False), ('', False), ('no', False)):
+			with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': value}):
+				self.assertEqual(trufflehog_enabled(), expected, value)
+
+	def test_the_flag_survives_the_private_config_file_move(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG, private_config
+		with private_config([TRUFFLEHOG_FLAG, '-c', 'modules.shodan_dns.api_key=k']) as args:
+			self.assertIn(TRUFFLEHOG_FLAG, args)
+			self.assertNotIn('modules.shodan_dns.api_key=k', args)
+
+
 class StreamEventsProcessTests(unittest.TestCase):
 	"""A real subprocess (not bbot itself) stands in, so these exercise the actual Popen/thread plumbing."""
 
