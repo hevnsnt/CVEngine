@@ -149,6 +149,8 @@ which send nothing to the target and need no vantage point.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
 8. Drop the scan tools, Go and bbot from the server image.
 
+Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).
+
 ### Fallback telemetry: the gate for deleting a local path
 
 Step 5 deletes a local path only after the telemetry shows no fallbacks. `sentinel_dispatch._no_local` is the one place the decision "no Sentinel took it,
