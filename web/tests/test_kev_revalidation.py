@@ -297,3 +297,37 @@ class MinGapTests(Base):
         dispatch.assert_called_once()
         job = OnDemandValidation.objects.get(pk=body['id'])
         self.assertEqual(job.source, 'manual')
+
+
+class PostReviewKeyTests(Base):
+    def test_the_key_a_job_records_describes_the_match_as_the_review_left_it(self):
+        """The review writes the match's ai_verdict, and an edge-verified host's closure basis reads it (``has_standing``): a key made from the
+        match as it was before the review never equals the one the next enqueue makes from the database, and the gap never held."""
+        from cveFeed.tasks import validate_match_on_demand
+        match = self.match(self.scan(), source='tech')
+        (row,) = self.track(match)
+        job = OnDemandValidation.objects.create(match=match, project=self.project, evidence_signature=row.signature, priority=0)
+        plan = {'check_kinds': [], 'reason': 'edge', 'generate_template': False, 'source': 'test'}
+        edge = {'fronted': True, 'verified': True, 'providers': ['cloudflare'], 'basis': ['cname']}
+
+        def review(rows):
+            CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='affected')  # the AI answered: confirmed
+            return {}
+        digest = {'value': ''}
+        with mock.patch('cveFeed.host_context.edge_of', return_value=edge), \
+                mock.patch('cveFeed.host_context.signal_digest', side_effect=lambda context: digest['value']), \
+                mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.k.example']), \
+                mock.patch('cveFeed.correlation.invalid_identity_reason', return_value=''), \
+                mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
+                mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)), \
+                mock.patch('cveFeed.validation.run_validation', return_value={}), \
+                mock.patch('cveFeed.triage.run_triage', side_effect=review):
+            validate_match_on_demand(job.pk)
+            self.assertEqual(OnDemandValidation.objects.get(pk=job.pk).status, 'completed')
+            self.assertEqual(CVEMatch.objects.get(pk=match.pk).ai_verdict, 'affected')
+            digest['value'] = 'a-later-probe'  # the host context moved: the row is re-tracked under a new signature, the evidence is the same
+            (row,) = self.track(CVEMatch.objects.get(pk=match.pk))
+            self.assertNotEqual(row.signature, OnDemandValidation.objects.get(pk=job.pk).evidence_signature)
+            outcome, dispatch = self.enqueue(row)
+        self.assertEqual(outcome, 'min_gap')
+        dispatch.assert_not_called()

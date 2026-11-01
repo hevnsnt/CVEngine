@@ -895,6 +895,7 @@ def validate_match_on_demand(request_id):
         # the earlier checks a validation stores are part of the host context the signature is made from, so the next sweep took the
         # finished job for one of other evidence and queued the same match again (issue 338, jobs 4750 and 4752).
         row.refresh_from_db()
+        match.refresh_from_db()  # the review writes the match's ai_verdict, which closure_basis reads: key the state enqueue will read
         result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
             status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,

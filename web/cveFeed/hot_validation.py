@@ -36,7 +36,7 @@ def validate_all_matches():
 
 def min_gap_hours():
     """The least time between two automatic validations of the same host, CVE, product and version whose evidence did not change, from
-    CVENGINE_VALIDATE_MIN_GAP_HOURS (default 12; 0 turns it off; a value that is not a number is the default)."""
+    CVENGINE_VALIDATE_MIN_GAP_HOURS (default 12; 0 or any negative number turns it off; a value that is not a number is the default)."""
     try:
         return max(0.0, float(os.environ.get('CVENGINE_VALIDATE_MIN_GAP_HOURS', '')))
     except ValueError:
@@ -203,7 +203,7 @@ def match_is_current(match_id):
 def _inside_min_gap(row, now):
     """Whether a validation of the very same finding already finished inside the minimum gap: another match row of the same host, CVE,
     product and version (a rescan makes a new one each time) whose job recorded the same ``revalidation_key``, the evidence it answered
-    for. A changed key (a KEV listing, a new score, a new template result) is not inside it, and neither is a job that recorded no key
+    for (which also carries the match's source, so a port match and a tech match are two findings). A changed key (a KEV listing, a new score, a new template result) is not inside it, and neither is a job that recorded no key
     (written before the gap existed) or one that failed (its own backoff governs the retry)."""
     hours = min_gap_hours()
     if not hours or not row.match_id:
