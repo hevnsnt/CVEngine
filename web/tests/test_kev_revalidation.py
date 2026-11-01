@@ -226,6 +226,105 @@ class SignatureStabilityTests(Base):
         self.assertEqual(OnDemandValidation.objects.filter(match=match).count(), 1)
 
 
+class ReportTimelineTests(Base):
+    """The report's 31/10 sequence end to end, with the port match and the tech match of the CVE on the one host: scan 82 (22:46), the
+    re-test scan 83 whose matches exist before their Triage rows (23:03), the negative template run in between (23:04:39), the rows of
+    scan 83 made a second later, then the Fire sweeps (23:05, 23:10, 23:30) and the next rescan."""
+
+    def pair(self, scan):
+        sub = Subdomain.objects.create(name='www.k.example', target_domain=self.domain, scan_history=scan)
+        return [CVEMatch.objects.create(cve_entry=self.kev, subdomain=sub, matched_product='nginx', matched_version='1.18.0', source=source,
+                                        version_in_range=True) for source in ('port', 'tech')]
+
+    def track(self, *matches):
+        return sorted(super().track(*matches), key=lambda row: row.match_id)  # in the order the matches were made: port, then tech
+
+    def retest(self, finished=True):
+        """A change-triggered re-test of the host (a host-pipeline scan): its rows replace the host's rows once it has finished."""
+        return ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(),
+                                          scan_status=2 if finished else 1, tasks=['host_pipeline'])
+
+    def setUp(self):
+        super().setUp()
+        self.old = self.pair(self.scan())  # 28/10 (matches 8398 and 7723): validated while the AI was off, so their jobs count one day
+        rows = self.track(*self.old)
+        Triage.objects.filter(pk__in=[r.pk for r in rows]).update(status='not_triaged', classification='likely', validation_status='clean',
+                                                                  validated_at=timezone.now() - timedelta(days=3))
+        for match in self.old:
+            OnDemandValidation.objects.create(match=match, project=self.project, status='completed', evidence_signature='x',
+                                              result={'ai_state': 'unavailable'}, finished_at=timezone.now() - timedelta(days=3))
+        self.scan82 = self.pair(self.scan())  # 9281 and 9270
+        self.rows82 = self.track(*self.scan82)
+        self.assertEqual([r.carried_from for r in self.rows82], [m.pk for m in self.old])
+
+    def run_job(self, job):
+        """The validation task, with the fact probe storing a result that moves the row's signature (what queued #4752 after #4750)."""
+        from cveFeed.tasks import validate_match_on_demand
+        stored = {'probes': False}
+
+        def run(*args, **kwargs):
+            stored['probes'] = True
+            return {'ran': 1}
+        plan = {'check_kinds': [], 'reason': 'probe', 'generate_template': False, 'source': 'test'}
+        with mock.patch('cveFeed.host_context.signal_digest', side_effect=lambda context: 'probe-stored' if stored['probes'] else ''), \
+                mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.k.example']), \
+                mock.patch('cveFeed.correlation.invalid_identity_reason', return_value=''), \
+                mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
+                mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)), \
+                mock.patch('cveFeed.validation.run_validation', side_effect=run), \
+                mock.patch('cveFeed.triage.run_triage', return_value={}):
+            validate_match_on_demand(job.pk)
+            # the next sweeps read the row as the probe left it
+            return [self.enqueue(Triage.objects.get(match_id=job.match_id))[0] for _ in range(2)]
+
+    def test_the_template_run_before_the_rows_of_the_retest_exist(self):
+        """Scan 83 finished before the template ran: the template run writes no superseded row, scan 82's matches are not validated, each
+        of scan 83's is validated once (the signature its own probe moved does not queue it again), and the next rescan validates nothing."""
+        scan83 = self.pair(self.retest())  # 9305 and 9294, no Triage rows yet
+        stamps = dict(Triage.objects.values_list('pk', 'updated_at'))
+        self.assertEqual(self.template_run(), 0)  # the only current matches have no row yet; the rows of older matches stay as they were
+        self.assertEqual(dict(Triage.objects.values_list('pk', 'updated_at')), stamps)
+        rows83 = self.track(*scan83)
+        self.assertEqual([r.carried_from for r in rows83], [m.pk for m in self.scan82])  # not 8398 and 7723
+
+        for row in self.rows82:  # 23:05, #4750 and #4751: the matches scan 83 had just replaced
+            outcome, dispatch = self.enqueue(row)
+            self.assertEqual(outcome, 'stale')
+            dispatch.assert_not_called()
+        self.assertFalse(OnDemandValidation.objects.filter(match__in=self.scan82).exists())
+
+        for row in rows83:  # one validation of each finding of the current scan, then nothing more
+            self.assertEqual(self.enqueue(row)[0], 'queued')
+            self.assertEqual(self.enqueue(row)[0], 'inflight')
+            job = OnDemandValidation.objects.get(match_id=row.match_id)
+            self.assertEqual(self.run_job(job), ['fresh', 'fresh'])
+            self.assertEqual(OnDemandValidation.objects.get(pk=job.pk).status, 'completed')
+        self.assertEqual(OnDemandValidation.objects.filter(match__in=scan83).count(), 2)
+
+        scan84 = self.pair(self.retest())  # the next rescan of an unchanged host
+        rows84 = self.track(*scan84)
+        self.assertEqual([r.carried_from for r in rows84], [m.pk for m in scan83])
+        self.assertEqual([self.enqueue(r)[0] for r in rows84], ['fresh', 'fresh'])
+        self.assertFalse(OnDemandValidation.objects.filter(match__in=scan84).exists())
+
+    def test_the_template_run_while_the_retest_is_still_running(self):
+        """The template ran while scan 83 was still running: scan 82's rows were the current ones and took its result, and scan 83's rows,
+        made once it finished, inherit that validation of a minute ago although the job of the match before (28/10) is stale."""
+        retest = self.retest(finished=False)
+        scan83 = self.pair(retest)
+        self.assertEqual(self.template_run(), 2)
+        self.assertEqual(Triage.objects.filter(match__in=self.old, validated_at__gt=timezone.now() - timedelta(hours=1)).count(), 0)
+        ScanHistory.objects.filter(pk=retest.pk).update(scan_status=2)
+        rows83 = self.track(*scan83)
+        self.assertEqual([r.carried_from for r in rows83], [m.pk for m in self.scan82])
+        for row in rows83:
+            self.assertGreater(row.validated_at, timezone.now() - timedelta(minutes=5))
+            outcome, dispatch = self.enqueue(row)
+            self.assertEqual(outcome, 'fresh')
+            dispatch.assert_not_called()
+        self.assertFalse(OnDemandValidation.objects.exclude(match__in=self.old).exists())
+
+
 class MinGapTests(Base):
     """At most one automatic validation per host, CVE, product and version in CVENGINE_VALIDATE_MIN_GAP_HOURS unless the evidence changed."""
 

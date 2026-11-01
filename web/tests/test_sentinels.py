@@ -453,6 +453,57 @@ class AdminSuspendRevokeTests(SentinelBase):
         self.assertEqual(out['recent_tasks'][0]['kind'], 'nmap')
 
 
+class SentinelHoldBackTests(SentinelBase):
+    """The rule that holds a user's new agents back while another of theirs is suspended or revoked, as an administrator meets it on Sentinels."""
+
+    def test_an_app_admins_second_sentinel_is_active_although_an_old_one_is_revoked(self):
+        # the reported case: an App Admin revoked a Sentinel long ago, then provisioned another instance-wide one from Settings > Sentinels
+        _, old = register_sentinel(self.t['root'], name='old-sentinel')
+        self.assertEqual(call(self.t['root'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})[0], 200)
+        status, enroll = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll')
+        self.assertEqual(status, 201, enroll)
+        status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': enroll['enrollment_token'], 'name': 'johnny'})
+        self.assertEqual((status, boot['status'], boot['status_note'], boot['held_by']), (201, 'active', '', None))
+        is_error, out = tool_call(self.t['root'], 'generate_sentinel_enrollment', {})
+        self.assertFalse(is_error, out)
+        boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'johnny-2'})[1]
+        self.assertEqual(boot['status'], 'active')
+
+    def test_an_org_admins_own_held_sentinel_offers_no_buttons_they_cannot_use(self):
+        _, old = register_sentinel(self.t['dana'], name='danas-old')
+        call(self.t['root'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})
+        _, held = register_sentinel(create_token(self.dana, 'second')[1], name='danas-new', approve=False)
+        self.assertEqual(held['status'], 'suspended')
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['danas-new']
+        self.assertFalse(row['can_manage'])  # her own: Reinstate and Delete would be refused, so the card shows neither
+        self.assertEqual(row['held_by']['id'], old['id'])  # her own agents: she may know which one
+        self.assertEqual(call(self.t['dana'], 'DELETE', f'/api/v1/agents/{old["id"]}')[0], 403)
+        self.assertFalse({r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/projects/sen-a/sentinels')[1]['results']}['danas-new']['manageable'])
+        self.assertTrue({r['name']: r for r in call(self.t['root'], 'GET', '/api/v1/sentinels/live')[1]['results']}['danas-new']['can_manage'])
+
+    def test_a_held_sentinel_reads_suspended_with_the_agent_to_reinstate_or_delete(self):
+        _, old = register_sentinel(self.t['alice'], name='old-alice')
+        call(self.t['dana'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})
+        token = create_token(self.alice, 'second')[1]
+        _, held = register_sentinel(token, name='new-alice', approve=False)
+        self.assertEqual(held['status'], 'suspended')
+        Agent.objects.filter(pk=held['id']).update(last_seen=timezone.now())  # checking in: it would read idle if it were active
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
+        self.assertEqual(row['state'], 'suspended')
+        self.assertIn(f'"old-alice" (#{old["id"]}) of the same user was revoked', row['status_note'])
+        self.assertEqual((row['held_by']['id'], row['held_by']['status'], row['can_manage']), (old['id'], 'revoked', True))
+        tab = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/projects/sen-a/sentinels')[1]['results']}['new-alice']
+        self.assertEqual((tab['status'], tab['status_note'], tab['manageable']), ('suspended', row['status_note'], True))
+        # the card's Delete button: the revoked one goes, the held one stays suspended until it is reinstated
+        status, out = call(self.t['dana'], 'DELETE', f'/api/v1/agents/{old["id"]}')
+        self.assertEqual((status, [h['id'] for h in out['still_held']]), (200, [held['id']]))
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
+        self.assertEqual((row['state'], row['held_by']), ('suspended', {'id': None, 'deleted': True}))
+        call(self.t['dana'], 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
+        self.assertEqual((row['state'], row['status_note'], row['held_by']), ('idle', '', None))
+
+
 class McpToolTests(SentinelBase):
     """The MCP tools are thin wrappers over the same broker functions the REST routes use; one pass through the real
     JSON-RPC transport per verb proves the wiring (names, argument shapes) is correct, not just importable."""

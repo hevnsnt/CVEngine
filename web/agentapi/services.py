@@ -785,7 +785,10 @@ def _run_mode(domain, mode=None):
 
 
 def discover_target(ctx, slug, target_id, mode=None):
-    """Start a bbot discovery plus nuclei pipeline on one existing target, in ``mode`` (kept on the target) or the target's own."""
+    """Start a bbot discovery plus nuclei pipeline on one existing target, in ``mode`` (kept on the target) or the target's own. The answer
+    says what actually happened: ``discovery_mode`` is the mode stored on the target after the call, ``scan_mode`` the mode the returned scan
+    runs in (a scan already going keeps the mode it was started in, so the two can differ; an internal target's scan has none, and its stored
+    mode is not changed)."""
     from cveFeed.discovery import start_discovery
     from targetApp.models import Domain
     project, _ = get_project(ctx, slug, write=True)
@@ -795,13 +798,13 @@ def discover_target(ctx, slug, target_id, mode=None):
     _refuse_excluded(project, domain)
     internal = _internal_scan(ctx, project, domain)
     if internal:
-        return internal
+        return {**internal, 'discovery_mode': domain.discovery_mode, 'scan_mode': ''}
     run = _run_mode(domain, mode)
     scan = start_discovery(domain, run, initiated_by=ctx.user)
     if run != domain.discovery_mode:  # a mode chosen here is the mode the target is rescanned in from now on
         domain.discovery_mode = run
         domain.save(update_fields=['discovery_mode'])
-    return {'scan_id': scan.id, 'status': 'started'}
+    return {'scan_id': scan.id, 'status': 'started', 'discovery_mode': domain.discovery_mode, 'scan_mode': scan.discovery_mode or run}
 
 
 RESCAN_MAX_HOSTS = 200

@@ -317,6 +317,59 @@ class HttpLoginTests(Base):
         self.assertEqual(open_checks(self.domain), {})
 
 
+class InternalAndGateTests(Base):
+    """What a Sentinel stored for a declared internal network counts like any other stored port; nothing here sends a packet; the bounty gate holds."""
+
+    def internal_target(self, address='10.20.0.7'):
+        from cveFeed import internal_view
+        from cveFeed.models import InternalRange
+        InternalRange.objects.create(project=self.project, cidr='10.20.0.0/24')
+        internal_view.invalidate()
+        self.addCleanup(internal_view.invalidate)
+        target = Domain.objects.create(name=address, project=self.project, insert_date=timezone.now())
+        sub = Subdomain.objects.create(name=address, target_domain=target)
+        ip = IpAddress.objects.create(address=address)
+        sub.ip_addresses.add(ip)
+        for number, service in ((23, 'telnet'), (21, 'ftp')):  # as the Sentinel's nmap stored them
+            ip.ports.add(Port.objects.create(number=number, service_name=service, state='open', protocol='tcp', extra={'method': 'probed'}))
+        return target
+
+    def test_a_host_in_a_declared_internal_network_is_flagged_from_the_ports_its_sentinel_stored_and_is_medium(self):
+        target = self.internal_target()
+        probe, mail = mock.Mock(return_value=None), mock.Mock(return_value=([], False))
+        hygiene.run_hygiene(target.id, probe=probe, emailer=mail, mx=lambda n, t: False)
+        probe.assert_not_called()  # an internal address is no target for this server's TLS probe, and the cleartext check sends nothing at all
+        rows = open_checks(target)
+        self.assertEqual({k[1]: r.severity for k, r in rows.items()}, {'cleartext_telnet': MEDIUM, 'cleartext_ftp': MEDIUM})
+        self.assertEqual(rows[('10.20.0.7', 'cleartext_telnet')].evidence['exposure'], 'internal')
+
+    def test_the_check_opens_no_socket_and_makes_no_http_request(self):
+        self.host('router.example.test', '192.168.88.1', (23, 'telnet'), (21, 'ftp'), (80, 'http'))
+        self.host('www.example.test', '8.8.8.99', (23, 'telnet'), (80, 'http'))
+        RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.example.test', url='http://www.example.test/login',
+                                 path='/login', auth_state='login', http_status=200)
+        with mock.patch('socket.socket', side_effect=AssertionError('socket opened')), \
+                mock.patch('socket.getaddrinfo', side_effect=AssertionError('DNS lookup')), \
+                mock.patch('http.client.HTTPConnection.connect', side_effect=AssertionError('HTTP connection')), \
+                mock.patch('cveFeed.route_auth.probe_url', side_effect=AssertionError('probe')):
+            found = cleartext.findings_for(self.domain)
+        self.assertEqual(sorted(f.check for f in found),
+                         ['cleartext_ftp', 'cleartext_http_login', 'cleartext_telnet', 'cleartext_telnet'])
+
+    def test_the_daily_sweep_reaches_the_internal_target_but_not_a_bounty_project_that_has_not_confirmed_automated_testing(self):
+        from cveFeed import tasks
+        from cveFeed.models import BountyEngagement, BountyProgram
+        target = self.internal_target()
+        with mock.patch.object(tasks.run_hygiene_task, 'delay') as queued, mock.patch('cveFeed.ledger.sweep_claim', return_value=True):
+            tasks.run_hygiene_all()
+        self.assertIn(target.id, [c.args[0] for c in queued.call_args_list])
+        program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
+        BountyEngagement.objects.create(project=self.project, program=program, status='active', automated_ok=False)
+        with mock.patch.object(tasks.run_hygiene_task, 'delay') as queued, mock.patch('cveFeed.ledger.sweep_claim', return_value=True):
+            tasks.run_hygiene_all()
+        queued.assert_not_called()
+
+
 class SurfaceTests(Base):
     """The findings are ordinary hygiene findings: the listings, the unified status and the report take them as they are."""
 

@@ -275,6 +275,14 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
         count(name, 'miss')
         return _build(compute, etag_of, rev)
     try:
+        try:  # another request may have stored the entry and let go of the lock between the read above and winning the lock here: serve it
+            stored = cache.get(key)
+            if (isinstance(stored, dict) and 'payload' in stored and stored.get('rev') == rev
+                    and (entry is None or stored.get('at') != entry.get('at'))):  # one that was not there when the key was read
+                count(name, 'waited')
+                return stored
+        except Exception:  # noqa: BLE001 - an unreadable cache is built from, as everywhere else here
+            pass
         count(name, 'miss')
         entry = _build(compute, etag_of, rev)
         try:

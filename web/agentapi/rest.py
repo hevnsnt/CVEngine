@@ -413,6 +413,8 @@ ROUTES = [
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
     ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
+    ('DELETE', r'agents/(?P<agent_id>\d+)', 'Administrator: delete a revoked agent and revoke its API token, so it no longer holds back its user\'s new agents; {deleted, id, token_revoked, released_tasks, still_held: [{id, name}]} (agents it held stay suspended until reinstated); 409 unless revoked',
+     lambda r, c, agent_id, **k: broker.delete_agent(c, agent_id)),
     ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, changed_by, changed_at}; self_update applies to every Sentinel with no value of its own (null follows the instance\'s Automatic or Manual update choice)',
      lambda r, c, **k: sentinel_settings.get_defaults()),
     ('PUT', r'sentinels/defaults', 'App Admin: set the instance-wide Sentinel default {self_update: off|manual|automatic|null}',

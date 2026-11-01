@@ -173,6 +173,7 @@ def _admit(project, sub, unattended=True):
     """``(target domain, host name)`` for a stored host owned by this project that may be assessed, else ``ValueError``."""
     from cveFeed.exclusions import is_excluded
     from cveFeed.models import HostState
+    from targetApp.models import Domain
     from targetApp.target_types import sentinel_only_target
 
     domain = sub.target_domain
@@ -182,6 +183,11 @@ def _admit(project, sub, unattended=True):
         raise ValueError('host is outside its stored target scope')
     if sentinel_only_target(host, project.pk):
         raise ValueError('internal hosts are assessed by an internal Sentinel scan')
+    if unattended and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's request assesses its hosts
+        from cveFeed.manual_only import other_holder
+        domain = other_holder(project.pk, host)  # unless a target that is not manual only holds the host too: then it is that target's
+        if domain is None:
+            raise ValueError('the target is set to manual only; assess its hosts yourself, or pick a discovery mode for it')
     if is_excluded(project.pk, host):
         raise ValueError('host is excluded')
     from cveFeed.bounty_gate import Gate
@@ -301,10 +307,12 @@ def _unassessable(job):
     from cveFeed.models import HostState
     from cveFeed.scan_control import pause_requested
     from startScan.models import Subdomain
+    from targetApp.models import Domain
     from targetApp.target_types import sentinel_only_target
 
     current = Subdomain.objects.filter(target_domain=job.domain, name=job.host).exists()
     return bool(not current or sentinel_only_target(job.host, job.project_id) or is_excluded(job.project_id, job.host) or
+                (job.requested_by_id is None and job.domain.discovery_mode == Domain.DISCOVERY_MANUAL) or
                 HostState.objects.filter(project_id=job.project_id, host=job.host, archived_at__isnull=False).exists() or
                 (job.domain.is_host_scoped() and job.host != job.domain.name.lower()) or pause_requested() or
                 Gate().refusal(job.project_id, job.host, unattended=job.requested_by_id is None))
