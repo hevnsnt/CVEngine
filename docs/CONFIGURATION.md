@@ -122,6 +122,7 @@ See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) for the enrollment 
 | `CVENGINE_TRIAGE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `100`, `500`, `2000` | AI triage questions per run, per project per day, and per day. One question serves every finding with the same evidence. A repair call (the model's first reply was invalid) and a local-check suggestion count too; validation planning has its own budget. |
 | `CVENGINE_VALIDATE_MAX_PER_RUN`, `_PER_PROJECT_DAY`, `_PER_DAY` | `50`, `300`, `1500` | Validation checks per task, per project per day, and per day. |
 | `CVENGINE_AUTO_VALIDATE_ALL_MATCHES` | `1` | Queue every CVE match for automatic validation, hottest first. Set to `0` to validate only fire and smoke matches automatically. |
+| `CVENGINE_VALIDATE_MIN_GAP_HOURS` | `12` | The least time between two automatic validations of the same host, CVE, product and version whose evidence did not change (a rescan makes a new match of the same finding each time; each validation costs up to three AI calls). A new KEV listing or score, a new version, a new template result or a changed source is changed evidence and is validated at once; so is **Validate now**, which ignores the gap. A failed validation is retried by its own backoff, not by this. `0` turns the gap off. |
 | `CVENGINE_TEMPLATE_GEN_MAX_PER_DAY`, `CVENGINE_TEMPLATE_GEN_CVE_DAYS` | `10`, `7` | AI template drafts per day across all projects, and one attempt per CVE per this many days. |
 
 ## CVE feeds and bug bounty data

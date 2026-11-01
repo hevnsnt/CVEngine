@@ -752,6 +752,8 @@ def validate_match_on_demand(request_id):
     try:
         require_authority(job)
         owned = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id)
+        def still_current():
+            return owned.filter(latest_scan_q('subdomain__')).exists()
         match = owned.filter(latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
         if not match:
             # a rescan replaced the match while the job waited (or the host left the inventory): superseded work, not a worker failure.
@@ -788,6 +790,10 @@ def validate_match_on_demand(request_id):
         plans = [plan]
         activity.settle(planning, 'done', f'Validation request #{job.pk}: {plan["reason"]}',
                         check_kinds=plan['check_kinds'], plan_source=plan['source'])
+        if not still_current():
+            # a scan finished while the plan was asked for: stop before the checks, the template draft and the review, which are the
+            # rest of the work (and of the AI calls) and would all be spent on a match nobody sees any more
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         candidate = None
         if plan['generate_template']:
             draft_step = activity.log('write_check', f'Validation request #{job.pk}: testing an AI-written template draft for {cve_id}',
@@ -850,6 +856,8 @@ def validate_match_on_demand(request_id):
                      f'{check_result.get("reused", 0)} reused, {check_result.get("capped", 0)} deferred'
                      + ('; no executable check available' if no_check else ''), project=job.project_id,
                      cve_id=cve_id, **detail)
+        if not still_current():
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         # Rebuild the signature after checks, so a fresh template hit is part of the AI review.
         match.refresh_from_db()
         row, described = triage.track(triage.with_cves([match]))[0]
@@ -883,8 +891,13 @@ def validate_match_on_demand(request_id):
         status = 'failed' if broken or capped_only else 'completed'  # capped: no coverage was established yet
         if capped_only:
             result['deferred_by_cap'] = True  # retried once the per-day caps reset, without spending an attempt
+        # what the job answered for. The signature it recorded when it started is not the row's once the checks ran: the probe results and
+        # the earlier checks a validation stores are part of the host context the signature is made from, so the next sweep took the
+        # finished job for one of other evidence and queued the same match again (issue 338, jobs 4750 and 4752).
+        row.refresh_from_db()
+        result['revalidation_key'] = triage.revalidation_key(triage.describe(match))
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-            status=status, result=result, finished_at=timezone.now(),
+            status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
             next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
             error=('deferred until the daily validation cap resets' if capped_only else
                    'a check or AI review failed or was blocked') if status == 'failed' else '')

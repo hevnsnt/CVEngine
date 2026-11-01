@@ -203,6 +203,20 @@ def evidence_key_for(kind, fields, review_nonce=''):
     return hashlib.sha1(json.dumps(blob, sort_keys=True, default=str, separators=(',', ':')).encode()).hexdigest()
 
 
+REVALIDATION_IGNORES = ('context', 'host_text')  # what a validation itself writes about the host (probe results, earlier checks)
+
+
+def revalidation_key(description):
+    """The sha1 of what a finished validation answered for, to tell whether the finding changed since: the signature fields without what a
+    validation itself writes into the host context (probe results, earlier checks), and without the nonce a fresh review adds. It keeps the
+    CVE feed's intelligence (a KEV listing, a new score), the matched product and version, the source and the template result, so a real
+    change in evidence still counts as one (hot_validation's minimum gap between two automatic validations)."""
+    fields = description['signature_fields']
+    kept = {k: v for k, v in fields.items() if k not in REVALIDATION_IGNORES} if isinstance(fields, dict) else fields
+    blob = json.dumps([description['kind'], kept], sort_keys=True, default=str, separators=(',', ':'))
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
 def effective_signature(description, review_nonce=''):
     """Evidence signature, with a persisted nonce only for an explicit fresh review."""
     return (signature_for(description['kind'], [description['signature_fields'], review_nonce])
@@ -616,16 +630,18 @@ def _twins(pending):
     """``{match pk: Triage row}`` for the CVE matches in ``pending`` (``[(match, description)]``, none with a Triage row yet). A rescan
     makes new host rows and so new match rows, and a new row used to start with no record: every match was judged and validated again
     although nothing about it had changed (issue 206). The twin of a match is the newest row of another match with the same project,
-    host, CVE, source and matched product whose asset evidence is the same: one CVE can be matched twice on one host (Apache 2.4.58 from the
-    port scan and again from the web fingerprint, with different evidence), and each of the two inherits from its own predecessor, not from
-    whichever row of the pair is newest. That test is made with the twin's own review nonce, because a validation sets one on its row and
+    host, CVE, source, matched product and matched version whose asset evidence is the same: one CVE can be matched twice on one host (Apache
+    2.4.58 from the port scan and again from the web fingerprint, with different evidence), and each of the two inherits from its own
+    predecessor, not from whichever row of the pair is newest. "Newest" is the newest MATCH (the latest scan's), never the row written last:
+    a template run or a validation writes ``updated_at`` on rows of older matches too, and ranking on it made a rescan's row inherit from,
+    and point its job history at, a match several scans back (issue 338). That test is made with the twin's own review nonce, because a validation sets one on its row and
     the nonce is part of the stored evidence key."""
     from cveFeed.models import Triage
     pending = [(f, d) for f, d in pending if d['kind'] == 'cve_match']
     if not pending:
         return {}
     from django.db.models import Q
-    # one row per finding (host, CVE, source, matched product): the newest that holds a record, within the window. DISTINCT ON bounds what comes
+    # one row per finding (host, CVE, source, matched product and version): the row of the newest match that holds a record, within the window. DISTINCT ON bounds what comes
     # back (one row per finding), not what is read: PostgreSQL sorts every row of these hosts and CVEs inside TWIN_WINDOW to pick the newest, and
     # every rescan adds a row per finding that nothing prunes. Measured with 500 findings and 60 scans kept: 30,000 rows sorted, an external
     # merge of 8 MB, about 250 ms per chunk, linear in the scans kept (sorting only the key columns and fetching the rows after it is about 85 ms,
@@ -636,12 +652,14 @@ def _twins(pending):
                                   host__in={d['host'][:500] for _, d in pending},
                                   match__cve_entry_id__in={f.cve_entry_id for f, _ in pending})
             .exclude(match_id__in=[f.pk for f, _ in pending]).select_related('match')
-            .order_by('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', '-updated_at', '-id')
-            .distinct('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product'))
-    newest = {(row.project_id, row.host, row.match.cve_entry_id, row.match.source, row.match.matched_product): row for row in rows}
+            .order_by('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', 'match__matched_version',
+                      '-match_id', '-id')
+            .distinct('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', 'match__matched_version'))
+    newest = {(row.project_id, row.host, row.match.cve_entry_id, row.match.source, row.match.matched_product, row.match.matched_version): row
+              for row in rows}
     out = {}
     for f, d in pending:
-        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id, f.source, f.matched_product))
+        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id, f.source, f.matched_product, f.matched_version))
         if row is not None and row.evidence_key == evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce):
             out[f.pk] = row
     return out
