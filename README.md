@@ -100,7 +100,7 @@ flowchart LR
         A["AI triage<br/>and validation"] --> O["Changes, host score,<br/>dashboard, API, alerts"]
     end
 
-    H["Hygiene<br/>TLS, SPF, DKIM, DMARC, CAA"]
+    H["Hygiene<br/>TLS, SPF, DKIM, DMARC, CAA, cleartext services"]
 
     T --> FIND --> PROBE --> MATCH --> DECIDE
     DECIDE -.-> H

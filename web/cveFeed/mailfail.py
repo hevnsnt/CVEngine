@@ -470,7 +470,7 @@ def fetch_mta_sts_policy(domain):
         resp = conn.getresponse()
         if resp.status != 200:
             return None
-        body = resp.read(MAX_POLICY_BYTES + 1)
+        body = pinned_transport.read_body(resp, MAX_POLICY_BYTES + 1)  # a server that sends gzip despite identity is decoded, capped after decoding
         return None if len(body) > MAX_POLICY_BYTES else body.decode('utf-8', 'replace')
     except Exception:  # noqa: BLE001
         return None
