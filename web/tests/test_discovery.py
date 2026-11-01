@@ -65,6 +65,38 @@ class DiscoveryTests(TestCase):
 		self.assertIn('401', lines[0][0])
 		self.assertEqual(lines[0][1], 'failed')
 
+	def test_a_hard_failed_gowitness_is_one_activity_line_and_discovery_is_otherwise_unchanged(self):
+		from cveFeed.models import AgentActivity
+		scan = self._scan()
+
+		def stream(targets, problems=None, hard_failures=None, **k):
+			hard_failures += [('gowitness', 'Failed to set up Google chrome. Please install manually.'), ('gowitness', ''), ('baddns', 'x')]
+			return iter(EVENTS)
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=stream)
+		self.assertEqual(out['status'], discovery.SUCCESS)  # screenshots missing never fails the discovery
+		lines = list(AgentActivity.objects.filter(message__startswith='Screenshots unavailable').values_list('message', 'status'))
+		self.assertEqual(lines, [('Screenshots unavailable: the gowitness module failed to set up (Failed to set up Google chrome. Please '
+		                          'install manually.); no screenshots will be taken until it is fixed', 'failed')])
+
+	def test_a_hard_failure_with_no_reason_and_another_module_failing_alone(self):
+		from cveFeed.models import AgentActivity
+		scan = self._scan()
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=lambda *a, hard_failures=None, **k: (hard_failures.append(('gowitness', '')), iter(EVENTS))[1])
+		self.assertEqual(AgentActivity.objects.filter(message__contains='gowitness module failed to set up (no reason given)').count(), 1)
+		other = self._scan()
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(other.id, stream=lambda *a, hard_failures=None, **k: (hard_failures.append(('baddns', 'x')), iter(EVENTS))[1])
+		self.assertEqual(AgentActivity.objects.filter(message__startswith='Screenshots unavailable').count(), 1)  # still just the first
+
+	def test_no_activity_line_when_nothing_hard_failed(self):
+		from cveFeed.models import AgentActivity
+		scan = self._scan()
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=lambda *a, **k: iter(EVENTS))
+		self.assertFalse(AgentActivity.objects.filter(message__startswith='Screenshots unavailable').exists())
+
 	def test_streaming_discovery_persists_assets_events_and_activity(self):
 		scan = self._scan()
 		self.assertEqual(scan.scan_status, -1)  # queued until a worker starts it
