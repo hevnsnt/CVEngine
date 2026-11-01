@@ -109,7 +109,7 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiate
             part = fresh[start:start + 500]
             scans = ScanHistory.objects.bulk_create([
                 ScanHistory(domain=d, scan_type=engine, start_scan_date=now, scan_status=QUEUED, results_dir='/usr/src/scan_results',
-                           initiated_by=initiated_by)
+                           initiated_by=initiated_by, discovery_mode=mode)
                 for d in part])
             ScanActivity.objects.bulk_create([
                 ScanActivity(scan_of=scan, title='BBOT discovery', name='bbot_discovery', time=now, status=QUEUED) for scan in scans])
@@ -600,6 +600,11 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         message = f'{scan.domain.name} is excluded for this organization and is not scanned'
         ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
+    from targetApp.models import Domain
+    if scan.initiated_by_id is None and scan.domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # set to manual only after the system queued it: no person asked for this one
+        message = f'{scan.domain.name} is set to manual only and is not scanned on its own; choose a discovery mode to scan it'
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from cveFeed.bounty_gate import Gate
     why = Gate().refusal(scan.domain.project_id, scan.domain.name, unattended=scan.initiated_by_id is None)  # a bug bounty program: confirmed automated testing (unless a person started this) and a target its scope names
     if why:
@@ -876,6 +881,8 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     suffix = domain.name.lower()
+    if not by_person and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's own request takes its hosts through the stages
+        return {'status': 'inconclusive', 'hosts': 0, 'error': 'the target is set to manual only; nothing was scanned'}
     wanted = sorted({n.strip().lower().rstrip('.') for n in names if n and n.strip()})
     requested = list(wanted)
     from cveFeed.exclusions import drop_excluded

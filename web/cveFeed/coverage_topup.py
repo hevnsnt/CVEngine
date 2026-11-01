@@ -174,9 +174,11 @@ def stalest_hosts(project, now, limit, gap):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment
     from startScan.models import Subdomain
+    from targetApp.models import Domain
 
     last = HostAssessment._base_manager.filter(project=project, host=OuterRef('lowered')).order_by('-created_at').values('created_at')[:1]
     rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).select_related('target_domain')
+            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
             .annotate(lowered=Lower('name')).annotate(last_assessed=Subquery(last))
             .filter(Q(last_assessed__isnull=True) | Q(last_assessed__lt=now - gap))
             .order_by(F('last_assessed').asc(nulls_first=True), 'id')[:limit * 4])

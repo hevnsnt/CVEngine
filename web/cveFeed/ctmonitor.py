@@ -234,7 +234,7 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
         from cveFeed.bounty_gate import Gate
         gate = Gate()  # a bug bounty project is recorded but not scanned on its own: not before its owner confirmed automated testing, not outside the program's scope
         to_scan = [s.name for s in created if gate.allows(domain.project_id, s.name)]
-        if domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add it, do not scan yet": the names are recorded, nothing connects to them
+        if domain.discovery_mode in (Domain.DISCOVERY_MANUAL, Domain.DISCOVERY_PASSIVE):  # "just add it, do not scan yet" or public sources only: the names are recorded, nothing connects to them
             to_scan = []
         try:  # the new hosts get fingerprinted and checked now, not at the next full discovery
             from cveFeed.tasks import host_pipeline

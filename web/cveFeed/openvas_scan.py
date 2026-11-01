@@ -472,9 +472,11 @@ def _address(host, project_id):
 
 
 def _latest_row(project_id, host):
+    """The newest row of ``host``, a row of a target that is not manual only before one that is (a host two targets hold is the first one's to scan)."""
+    from cveFeed.manual_only import held_expr
     from startScan.models import Subdomain
     return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).select_related('scan_history', 'target_domain')
-            .order_by('-scan_history_id').first())
+            .annotate(held=held_expr()).order_by('held', '-scan_history_id').first())
 
 
 def _names(items):
@@ -580,6 +582,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
             refuse(host, heat, 'excluded from scanning')
         elif (barred := bounty.refusal(project_id, host)):
             refuse(host, heat, 'bug bounty: ' + barred)
+        elif sub.target_domain.discovery_mode == 'manual' and host not in forced:  # "just add them, do not scan yet": only a person who names the host reaches it
+            refuse(host, heat, 'the target is set to manual only: OpenVAS scans its hosts only when a person names them')
         elif gate and host not in forced and heat not in HOT:
             refuse(host, heat, f'not Fire or Smoke ({heat or "unknown"}): OpenVAS is only spent on hosts on fire or smoke')
         elif _platform_reason(sub):

@@ -159,7 +159,9 @@ def web_addresses(project_id):
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     found = {}
-    rows = Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id).prefetch_related('ip_addresses__ports').order_by('id')
+    from targetApp.models import Domain
+    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+            .prefetch_related('ip_addresses__ports').order_by('id'))  # a manual only target's hosts name no address to ask
     for sub in rows:
         for ip in sub.ip_addresses.all():
             if not ip.address or ip.is_cdn:
@@ -182,8 +184,10 @@ def known_names(project_id):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import DiscoveryEvent, HostArchive
     from startScan.models import Subdomain
+    from targetApp.models import Domain
     names = {}
-    for name in Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id).values_list('name', flat=True).distinct():
+    for name in (Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+                 .values_list('name', flat=True).distinct()):
         if name and _is_name(name):
             names[name.strip().lower().rstrip('.')] = 3
     for label in DiscoveryEvent.objects.filter(domain__project_id=project_id, module='ct-monitor').values_list('label', flat=True).distinct():
@@ -415,7 +419,9 @@ def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
     from cveFeed.conductor import bounty_blocked_projects
     if project_id in bounty_blocked_projects():
         return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
-    targets = scope_targets(project_id)
+    from targetApp.models import Domain
+    held = set(Domain._base_manager.filter(project_id=project_id, discovery_mode=Domain.DISCOVERY_MANUAL).values_list('id', flat=True))
+    targets = [t for t in scope_targets(project_id) if t[2] not in held]  # a manual only target gives no name scope: nothing is asked for its names
     if not targets:
         return {**summary, 'skipped': 'the project has no domain target to give a name scope'}
     owner = f'vhost-{os.getpid()}'
