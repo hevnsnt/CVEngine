@@ -97,6 +97,15 @@ def subdir_apps_sweep():
     return subdir_apps.sweep_all()
 
 
+@app.task(name='refresh_live_snapshots', bind=False, queue='live_cache_queue', ignore_result=True)
+def refresh_live_snapshots():
+    """Every few seconds (``CVENGINE_LIVE_REFRESH_SECONDS``, 5): recompute the live screen's snapshots of the scopes people are looking at, so a
+    poll is served from the cache (see ``cveFeed.live_refresh``). It has a queue and a worker of its own so scan work never starves it, and
+    it reads and writes only the cache and the database: it never touches a target."""
+    from cveFeed import live_refresh
+    return live_refresh.refresh_hot_scopes()
+
+
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which

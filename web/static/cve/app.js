@@ -15,6 +15,7 @@ import {
   copyButton,
   copyText,
   dialog,
+  emptyState,
   field,
   text as uiText,
 } from "/staticfiles/cve/ui.js";
@@ -283,7 +284,7 @@ function createList({
       failures = 0;
       if (reset) body.textContent = "";
       body.removeAttribute("aria-busy");
-      if (reset && !items.length) body.append(el("p", "empty", empty));
+      if (reset && !items.length) body.append(emptyNode(empty));
       else render(body, items, reset);
       if (onLoaded) onLoaded(data, reset, quiet);
       more.textContent = "";
@@ -436,6 +437,55 @@ const duration = (from, to) => {
   if (m < 1) return `${Math.max(1, Math.round(ms / 1000))}s`;
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+// A scan's stages as a pipeline, in the order they were created. A stage's time is its start while it runs and its end once it is done,
+// and stages run one after another, so a finished stage took from the end of the one before it (or the scan's start) to its own time.
+// Each step shows that length as text and as a bar against the longest, so where the time went reads at a glance; the running stage
+// has a live timer and a beam on its connector, a failed one its error. Returns {node, tick}: tick() repaints the live timer.
+const STAGE_STATE = { success: "done", running: "running", queued: "waiting", failed: "failed", aborted: "stopped" };
+function stagePipeline(stages, scan) {
+  const steps = stages.slice().sort((a, b) => a.id - b.id);
+  let prevEnd = scan.started;
+  const spans = steps.map((st) => {
+    if (st.status === "queued") return { from: null, to: null };
+    if (st.status === "running") return { from: st.time, to: null };
+    const span = { from: prevEnd, to: st.time };
+    prevEnd = st.time;
+    return span;
+  });
+  const lengthOf = ({ from, to }) => (from ? Math.max(0, (to ? new Date(to) : new Date()) - new Date(from)) : 0);
+  const longest = Math.max(1, ...spans.map(lengthOf));
+  const node = el("div", "pipe-wrap");
+  const done = steps.filter((st) => st.status === "success").length;
+  const running = steps.filter((st) => st.status === "running").map((st) => st.title || st.name);
+  const failed = steps.filter((st) => st.status === "failed").length;
+  const total = `${steps.length} stage${steps.length === 1 ? "" : "s"}`;
+  node.append(el("p", "pipe-sum", running.length || steps.some((st) => st.status === "queued")
+    ? `${done} of ${total} done${running.length ? ` · now: ${running.join(", ")}` : ""}`
+    : `${total}${failed ? ` · ${failed} failed` : " · all done"}`));
+  const list = el("ol", "pipe");
+  const live = [];
+  steps.forEach((st, i) => {
+    const li = el("li", `pipe-step ${st.status}`);
+    const main = el("div", "pipe-main");
+    main.append(el("b", "", st.title || st.name), el("span", "pipe-state", STAGE_STATE[st.status] || st.status));
+    if (st.error) main.append(el("p", "pipe-err", st.error));
+    const bar = el("span", "pipe-bar", null, { "aria-hidden": "true" });
+    const fill = el("i");
+    bar.append(fill);
+    const dur = el("span", "pipe-dur");
+    const paint = () => {
+      const span = spans[i];
+      dur.textContent = span.from ? duration(span.from, span.to) : "";
+      fill.style.width = span.from ? `${Math.max(3, (100 * lengthOf(span)) / Math.max(longest, lengthOf(span)))}%` : "0";
+    };
+    paint();
+    if (st.status === "running") live.push(paint);
+    li.append(el("span", "pipe-dot", null, { "aria-hidden": "true" }), main, bar, dur);
+    list.append(li);
+  });
+  node.append(list);
+  return { node, tick: () => live.forEach((paint) => paint()) };
+}
 const meterCell = (n, of) => {
   const box = el("div", "meter-cell");
   const bar = el("div", "meter");
@@ -487,6 +537,23 @@ const whenCell = (iso) => {
   const t = el("time", "when", null, { datetime: iso, title: `${fmtDateTime(iso)} ${zoneLabel()} (${iso.replace("T", " ").slice(0, 19)} UTC)` });
   t.append(el("b", "", fmtTime(iso)), el("span", "", fmtDay(iso)));
   return t;
+};
+
+// What an empty list shows: a plain sentence, emptyState() options, or a function returning either, so a list can tell "nothing yet"
+// (say what to do next) from "nothing matches these filters" (offer to clear them).
+function emptyNode(empty) {
+  const v = typeof empty === "function" ? empty() : empty;
+  return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
+}
+// The empty Targets page's next step: the shell's own Add targets button, when this page has one
+function addTargetsAction() {
+  const add = document.querySelector("[data-add-targets]");
+  return add ? [{ label: "Add targets", run: () => add.click() }] : [];
+}
+const NO_TARGETS = {
+  icon: "target",
+  title: "No targets yet",
+  body: "A target is a domain, IP or range to watch. Paste a list, one per line; #Project headers sort them into projects. Discovery and scanning start on their own.",
 };
 
 function searchBox(placeholder, onChange) {
@@ -1902,7 +1969,10 @@ function allTargets(mount) {
     mount,
     path: `${base}/targets`,
     params: () => ({ q: q.value }),
-    empty: 'No targets yet. Use "Add targets" with #Project headers to paste a list of domains, IPs or ranges.',
+    empty: () =>
+      q.value.trim()
+        ? { icon: "search", title: "No target matches", body: `Nothing matches \u201c${q.value.trim()}\u201d.`, actions: [{ label: "Clear search", run: () => { q.value = ""; list.reload(); } }] }
+        : { ...NO_TARGETS, actions: addTargetsAction() },
     render: table(
       withProject([
         { label: "Target", render: (t) => named(hostLink(t.name, projectOf(t)), t) },
@@ -2133,8 +2203,10 @@ const pages = {
         syncBar();
       },
       params: () => ({ q: q.value }),
-      empty:
-        'No targets yet. Use "Add targets" to paste a list of domains, IPs or ranges.',
+      empty: () =>
+        q.value.trim()
+          ? { icon: "search", title: "No target matches", body: `Nothing matches \u201c${q.value.trim()}\u201d.`, actions: [{ label: "Clear search", run: () => { q.value = ""; reload(); } }] }
+          : { ...NO_TARGETS, actions: addTargetsAction() },
       render: table([
         { label: "", cls: "sel", head: () => headBox, render: rowBox },
         {
@@ -2261,7 +2333,15 @@ const pages = {
       mount,
       path: `${base}/scans`,
       params: () => ({ status: status.value }),
-      empty: "No scans here. Start one from Targets.",
+      empty: () =>
+        status.value
+          ? { icon: "radar", title: "No scans with this status", actions: [{ label: "Show all scans", run: () => status.node.querySelector("button").click() }] }
+          : {
+              icon: "radar",
+              title: "No scans yet",
+              body: "A scan starts when you add a target, on the target's schedule, or when you press Scan on the Targets page.",
+              actions: [{ label: "Go to Targets", href: `/cve/${encodeURIComponent(slug)}/targets/` }],
+            },
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
       onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
@@ -3312,7 +3392,33 @@ const pages = {
       path: `${base}/search`,
       params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
       pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
-      empty: "No hosts match. Hosts appear as discovery and port scans finish.",
+      empty: () =>
+        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all"
+          ? {
+              icon: "search",
+              title: "No host matches",
+              body: q.value.trim() ? "Try a bare word, or one filter such as port:443 or tech:nginx." : "No host is at this temperature right now.",
+              actions: [
+                {
+                  label: "Clear filters",
+                  run: () => {
+                    q.value = "";
+                    heatFilter = "all";
+                    scopeFilter = "all";
+                    scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));
+                    syncUrl();
+                    paintHeat();
+                    list.reload();
+                  },
+                },
+              ],
+            }
+          : {
+              icon: "server",
+              title: "No hosts yet",
+              body: "Hosts appear as discovery and port scans finish on your targets.",
+              actions: [{ label: "Go to Targets", href: `/cve/${encodeURIComponent(slug)}/targets/` }],
+            },
       onLoaded: (data) => {
         totalHosts = data.count || 0;
         scopeChips.hidden = !data.has_internal && scopeFilter === "all";
@@ -3506,7 +3612,35 @@ const pages = {
       path: `${base}/findings`,
       filters: [views.node, q, scope, type.node, sev.node, status.node],
       params,
-      empty: "No findings match these filters.",
+      empty: () => {
+        const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value;
+        if (narrowed)
+          return {
+            icon: "search",
+            title: "Nothing matches these filters",
+            actions: [
+              {
+                label: "Clear filters",
+                run: () => {
+                  setPicker(type, "type", "all");
+                  setPicker(sev, "severity", "all");
+                  q.value = "";
+                  scope.value = "";
+                  reload();
+                },
+              },
+            ],
+          };
+        if (status.value === "actionable")
+          return {
+            icon: "shield",
+            tone: "calm",
+            title: "Nothing needs action",
+            body: "Every finding is fixed, accepted, info only or ruled out by the AI. Scans keep looking.",
+            actions: [{ label: "Show everything", run: () => { setPicker(status, "status", "all"); reload(); } }],
+          };
+        return { icon: "bug", title: "No findings yet", body: "Findings appear as scans finish and new CVEs match your hosts." };
+      },
       onLoaded: (data, reset) => {
         if (reset) describe(data);
       },
@@ -3582,7 +3716,15 @@ const pages = {
       path: `${base}/matches`,
       filters: [cveNote, q, status.node, cls, verdict],
       params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly }),
-      empty: "No CVE matches yet. They appear when a new CVE matches a host in your inventory.",
+      empty: () =>
+        q.value.trim() || status.value || cls.value || cveOnly || verdict.value !== "active"
+          ? { icon: "search", title: "No match for these filters" }
+          : {
+              icon: "match",
+              tone: "calm",
+              title: "No open CVE matches",
+              body: "When a new CVE matches software on one of your hosts, it appears here with the AI's verdict.",
+            },
       onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
       statusControl,
       row: (m) => ({
@@ -3731,8 +3873,15 @@ pages.hygiene = function hygiene(mount) {
     mount: issues,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
-    empty:
-      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
+    empty: () =>
+      sev.value || kind.value || q.value.trim()
+        ? { icon: "search", title: "No issue matches these filters" }
+        : {
+            icon: "shield",
+            tone: "calm",
+            title: "No open hygiene issues",
+            body: "Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
+          },
     onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
@@ -3813,7 +3962,7 @@ pages.changes = function changes(mount) {
     mount,
     path: `${base}/changes`,
     params: () => ({ since: since.value, host: host.value, kind: kinds.value }),
-    empty: "No changes in this period. Changes appear when a scan finds something different from the last one.",
+    empty: { icon: "pulse", title: "No changes in this period", body: "Changes appear when a scan finds something different from the last one." },
     onLoaded: (_, reset, quiet) => reset && !quiet && kinds.refresh(),
     render: table(withProject([
       { label: "When", render: (c) => whenCell(c.detected) },
@@ -3899,7 +4048,7 @@ pages.activity = function activity(mount) {
     mount,
     path: `${base}/activity`,
     params: () => ({ kind: kinds.value }),
-    empty: "No activity yet. The engine reports here as it reads the feed, checks the inventory and runs scans.",
+    empty: { icon: "pulse", title: "No activity yet", body: "The engine reports here as it reads the feed, checks the inventory and runs scans." },
     render: table(withProject([
       { label: "When", render: (a) => whenCell(a.created) },
       { label: "Kind", render: (a) => badge(ACTIVITY_KIND[a.kind] || a.kind, ACTIVITY_BADGE[a.kind] || "") },
@@ -4057,8 +4206,10 @@ pages.scan = async function scanDetail(mount) {
         return [box, v];
       };
       const [durBox, durValue] = fact("Duration", duration(s.started, s.finished));
+      let pipe = null;
       const paintDur = () => {
         durValue.textContent = duration(s.started, s.finished);
+        if (pipe) pipe.tick();
       };
       if (live) ticker = setInterval(paintDur, 1000);
       meta.append(fact("Started", shortDate(s.started))[0], durBox);
@@ -4079,16 +4230,8 @@ pages.scan = async function scanDetail(mount) {
       top.insertBefore(pop, top.lastChild);
       head.append(top, meta);
       if (stages.length) {
-        const row = el("div", "phases");
-        stages
-          .slice()
-          .sort((a, b) => (a.time || "").localeCompare(b.time || ""))
-          .forEach((st) => {
-            const box = el("div", `phase ${st.status}`);
-            box.append(el("b", "", st.title), el("span", "", st.error ? st.error : st.status));
-            row.append(box);
-          });
-        head.append(row);
+        pipe = stagePipeline(stages, s);
+        head.append(pipe.node);
       }
       if (s.error) head.append(el("p", "msg err", s.error));
 
