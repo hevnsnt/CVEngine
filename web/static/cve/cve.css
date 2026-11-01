@@ -2002,3 +2002,4 @@ section.internal[hidden]{display:none}
 .ai-adv input[aria-invalid="true"]{border-color:var(--fire);box-shadow:0 0 0 1px var(--fire)}
 .ai-warns:not(:empty){margin-top:12px}
 .ai-warn{margin:6px 0 0;padding:8px 10px;border-radius:var(--r);background:var(--smoke-bg);color:var(--smoke-ink)}
+.ai-warn-err{background:var(--fire-bg);color:var(--fire-ink);font-weight:600}

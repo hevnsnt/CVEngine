@@ -207,10 +207,12 @@ const sections = {
           ? selectOf(f.choices, initial)
           : text(initial, { autocomplete: "off", spellcheck: "false", ...(f.kind === "number" ? { inputmode: "numeric" } : { placeholder: f.placeholder || "" }) });
       const wrap = field(f.label, input, f.help);
-      const hint = el("p", "note ai-hint", "", { "aria-live": "polite" });
+      const hint = el("p", "note ai-hint", "", { id: `${input.id}-hint` });
+      input.setAttribute("aria-describedby", hint.id);
       wrap.append(hint);
-      input.addEventListener("input", () => refreshHints());
-      input.addEventListener("change", () => refreshHints());
+      // The hint under a box follows every keystroke; the one announced region (warnBox) is rewritten when the value is committed.
+      input.addEventListener("input", () => refreshHints(false));
+      input.addEventListener("change", () => refreshHints(true));
       inputs[f.key] = input;
       hints[f.key] = hint;
       wraps[f.key] = wrap;
@@ -218,9 +220,10 @@ const sections = {
     });
     adv.append(grid, warnBox);
     const drafts = () => Object.fromEntries(FIELDS.map((f) => [f.key, inputs[f.key].value]));
-    refreshHints = () => {
+    refreshHints = (announce = true) => {
       const p = provider.value;
       const now = drafts();
+      const problems = [];
       FIELDS.forEach((f) => {
         wraps[f.key].style.display = applies(s, f.key, p) ? "" : "none";
         const checked = checkDraft(s, f.key, now[f.key]);
@@ -228,9 +231,15 @@ const sections = {
         const eff = effective(s, f.key, p, now[f.key]);
         hints[f.key].textContent = checked.ok ? eff.text : checked.error;
         hints[f.key].className = `note ai-hint${checked.ok ? "" : " ai-hint-err"}`;
+        if (!checked.ok && applies(s, f.key, p)) problems.push(`${f.label}: ${checked.error}`);
         if (f.kind === "number") inputs[f.key].placeholder = checked.ok && eff.value != null ? String(eff.value) : "default";
       });
-      warnBox.replaceChildren(...warnings(s, p, now).map((w) => el("p", "note ai-warn", w)));
+      if (announce) {
+        warnBox.replaceChildren(
+          ...problems.map((w) => el("p", "note ai-warn ai-warn-err", w)),
+          ...warnings(s, p, now).map((w) => el("p", "note ai-warn", w)),
+        );
+      }
     };
     sync();
     const enabled = check("Use this model to confirm CVE matches", s.enabled);
@@ -277,13 +286,15 @@ const sections = {
       status.textContent = message || "";
     };
     const save = async () => {
-      const { values, errors } = collect(s, drafts());
+      const { values, errors } = collect(s, drafts(), provider.value); // only what the chosen provider uses: a hidden box cannot be fixed
       const bad = FIELDS.find((f) => errors[f.key]);
       if (bad) {
         adv.open = true;
         refreshHints();
         inputs[bad.key].focus();
-        throw new Error(`${bad.label}: ${errors[bad.key]}`);
+        const message = `${bad.label}: ${errors[bad.key]}`;
+        say(message, false); // beside the toast, which goes after 3.5 seconds
+        throw new Error(message);
       }
       const saved = await api("PUT", "ai", {
         ...values,

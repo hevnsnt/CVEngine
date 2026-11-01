@@ -71,13 +71,26 @@ test('the save body holds every setting, empty ones as empty strings, and a bad 
   const s = state({request_timeout: 600});
   const drafts = L.initialDrafts(s);
   assert.deepEqual(drafts, {request_timeout: '600', connect_timeout: '', max_tokens: '', context_tokens: '', structured_mode: '', reasoning: '', keep_alive: ''});
-  const ok = L.collect(s, {...drafts, max_tokens: '4096', reasoning: 'low'});
+  const ok = L.collect(s, {...drafts, max_tokens: '4096', reasoning: 'low'}, 'ollama');
   assert.deepEqual(ok.errors, {});
   assert.deepEqual(ok.values, {request_timeout: '600', connect_timeout: '', max_tokens: '4096', context_tokens: '', structured_mode: '', reasoning: 'low', keep_alive: ''});
-  const bad = L.collect(s, {...drafts, connect_timeout: '999', keep_alive: 'x'});
+  const bad = L.collect(s, {...drafts, connect_timeout: '999', keep_alive: 'x'}, 'ollama');
   assert.deepEqual(Object.keys(bad.errors).sort(), ['connect_timeout', 'keep_alive']);
   assert.equal(L.FIELDS.length, 7);
   assert.deepEqual(L.FIELDS.map((f) => f.key), ['request_timeout', 'connect_timeout', 'max_tokens', 'context_tokens', 'structured_mode', 'reasoning', 'keep_alive']);
+});
+
+test('a box the chosen provider does not use is neither checked nor sent, so a hidden mistake cannot block a save', () => {
+  const s = state({context_tokens: 8192, keep_alive: '30m'});
+  const drafts = {...L.initialDrafts(s), context_tokens: '4k', keep_alive: 'forever', max_tokens: '4096'};
+  const vllm = L.collect(s, drafts, 'vllm');
+  assert.deepEqual(vllm.errors, {});
+  assert.equal('context_tokens' in vllm.values, false);
+  assert.equal('keep_alive' in vllm.values, false);
+  assert.equal(vllm.values.max_tokens, '4096');
+  const ollama = L.collect(s, drafts, 'ollama');
+  assert.deepEqual(Object.keys(ollama.errors).sort(), ['context_tokens', 'keep_alive']);  // visible there, so reported
+  assert.deepEqual(Object.keys(L.collect(s, drafts).errors).sort(), ['context_tokens', 'keep_alive']);  // no provider named: everything is checked
 });
 
 test('the section opens when something is customised', () => {
@@ -156,6 +169,36 @@ test('keep-alive explains its special values', () => {
   assert.match(L.effective(s, 'keep_alive', 'ollama', '30m').text, /for 30m/);
 });
 
+test('a long generation on a short request timeout is warned about, because a request that times out here is still billed', () => {
+  const s = state();
+  const none = {request_timeout: '', connect_timeout: '', max_tokens: '', reasoning: ''};
+  const long = (over, p = 'anthropic') => L.warnings(s, p, {...none, ...over}).filter((w) => /still bills it/.test(w));
+  assert.equal(long({}).length, 0);
+  assert.equal(long({max_tokens: '16384'}).length, 1);
+  assert.match(long({max_tokens: '16384'})[0], /120-second request timeout/);
+  assert.equal(long({max_tokens: '16383'}).length, 0);
+  assert.equal(long({reasoning: 'high'}).length, 1);
+  assert.equal(long({reasoning: 'max'}).length, 1);
+  assert.equal(long({reasoning: 'low'}).length, 0);
+  assert.equal(long({reasoning: 'high', request_timeout: '600'}).length, 0);  // the room is there
+  assert.equal(long({max_tokens: '32768', request_timeout: '300'}).length, 1);
+  assert.equal(long({max_tokens: '32768', request_timeout: '301'}).length, 0);
+  assert.equal(long({reasoning: 'high'}, 'lmstudio').length, 1);  // LM Studio waits 300 by default: still short
+  assert.equal(L.warnings(state({env: {max_tokens: '20000'}}), 'anthropic', none).filter((w) => /still bills it/.test(w)).length, 1);  // from the environment too
+  assert.equal(L.warnings(state({env: {reasoning: 'high'}}), 'anthropic', {...none, reasoning: 'default'}).filter((w) => /still bills it/.test(w)).length, 0);
+});
+
+test('Anthropic is told that older Claude models refuse a very large reply limit, and the help describes the triage retry', () => {
+  const s = state();
+  assert.match(L.effective(s, 'max_tokens', 'anthropic', '').text, /Older Claude models refuse a very large limit with a 400/);
+  assert.match(L.effective(s, 'max_tokens', 'anthropic', '30000').text, /Older Claude models/);
+  assert.doesNotMatch(L.effective(s, 'max_tokens', 'ollama', '').text, /Older Claude/);
+  assert.doesNotMatch(L.effective(s, 'request_timeout', 'anthropic', '').text, /Older Claude/);
+  const help = L.FIELDS.find((f) => f.key === 'max_tokens').help;
+  assert.match(help, /twice the limit, up to 32,768/);
+  assert.doesNotMatch(help, /longest answer/);
+});
+
 test('warnings: a short limit, thinking on a short limit, and a connect timeout longer than the answer timeout', () => {
   const s = state();
   const none = {request_timeout: '', connect_timeout: '', max_tokens: '', reasoning: ''};
@@ -163,10 +206,10 @@ test('warnings: a short limit, thinking on a short limit, and a connect timeout 
   assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: '500'}).length, 1);
   assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: '999'}).length, 1);
   assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: '1000'}).length, 0);
-  assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: '2048', reasoning: 'high'}).length, 1);
+  assert.equal(L.warnings(s, 'ollama', {...none, request_timeout: '600', max_tokens: '2048', reasoning: 'high'}).length, 1);
   assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: '2048', reasoning: 'off'}).length, 0);
-  assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: '8192', reasoning: 'high'}).length, 0);
-  assert.equal(L.warnings(s, 'ollama', {...none, reasoning: 'high'}).length, 0);  // no limit set here: nothing to warn about
+  assert.equal(L.warnings(s, 'ollama', {...none, request_timeout: '600', max_tokens: '8192', reasoning: 'high'}).length, 0);
+  assert.equal(L.warnings(s, 'ollama', {...none, request_timeout: '600', reasoning: 'high'}).length, 0);  // no limit set here: nothing to warn about
   assert.equal(L.warnings(s, 'ollama', {...none, request_timeout: '20', connect_timeout: '60'}).length, 1);
   assert.equal(L.warnings(s, 'ollama', {...none, max_tokens: 'x'}).length, 0);  // an invalid draft is reported as an error, not a warning
 });
@@ -175,9 +218,14 @@ test('the page draws only with textContent, shows the provider groups, keeps its
   const src = read('settings.js');
   const ai = src.slice(src.indexOf('async ai(m)'), src.indexOf('const seedState'));
   assert.doesNotMatch(ai, /innerHTML|insertAdjacentHTML|outerHTML/);
-  assert.match(ai, /from "\/staticfiles\/cve\/ai-settings-logic\.js"|collect\(s, drafts\(\)\)/);
+  assert.match(read('settings.js'), /from "\/staticfiles\/cve\/ai-settings-logic\.js"/);
   assert.match(ai, /\.\.\.values,/, 'the validated request settings are part of the save');
   assert.match(ai, /optgroup/);
   assert.match(ai, /say\(err\.message, false\)/, 'a failed test stays on the page');
   assert.match(ai, /Object\.assign\(s, saved\)/, 'the page follows what the server stored');
+  assert.match(ai, /collect\(s, drafts\(\), provider\.value\)/, 'only the boxes the provider uses are checked');
+  assert.doesNotMatch(ai, /"aria-live": "polite" \}\);\n\s+wrap\.append\(hint\)/, 'a hint is not its own live region');
+  assert.match(ai, /aria-describedby/, 'each box is tied to its hint');
+  assert.match(ai, /say\(message, false\)/, 'a refused save shows on the page as well as in the toast');
+  assert.match(ai, /refreshHints\(false\)/, 'a keystroke does not rewrite the announced region');
 });

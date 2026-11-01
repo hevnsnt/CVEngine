@@ -35,7 +35,7 @@ export const FIELDS = [
   { key: "connect_timeout", label: "Connect timeout (seconds)", kind: "number",
     help: "How long to wait to reach the server. A server that is down then fails quickly instead of after the full request timeout." },
   { key: "max_tokens", label: "Reply limit (tokens)", kind: "number",
-    help: "The longest answer a request may ask for, for every task. A reasoning model spends part of it thinking, so a short limit can cut its answer off." },
+    help: "The most a request may ask for as an answer, for every task (a finding triage whose answer was cut off is asked once more with twice the limit, up to 32,768). A reasoning model spends part of it thinking, so a short limit can cut its answer off." },
   { key: "context_tokens", label: "Context window (tokens)", kind: "number",
     help: "Ollama only. How much text the model reads at once. Ollama picks it from the machine's memory (4096 tokens under 24 GiB) and cuts a longer prompt at its start without an error." },
   { key: "structured_mode", label: "JSON mode", kind: "choice",
@@ -78,11 +78,13 @@ export function checkDraft(s, key, draft) {
   return { ok: false, error: `Choose one of: ${allowed.join(", ")}.` };
 }
 
-// The body of the save request for the request settings, or the errors by field. `drafts` is {key: string}.
-export function collect(s, drafts) {
+// The body of the save request for the request settings, or the errors by field. `drafts` is {key: string}. A setting the chosen provider
+// does not use is not checked and not sent (its box is hidden: an error there could not be seen or fixed), so what is stored stays.
+export function collect(s, drafts, provider) {
   const values = {};
   const errors = {};
   for (const f of FIELDS) {
+    if (provider != null && !applies(s, f.key, provider)) continue;
     const r = checkDraft(s, f.key, drafts[f.key]);
     if (r.ok) values[f.key] = r.value;
     else errors[f.key] = r.error;
@@ -109,6 +111,12 @@ function envNumber(s, key) {
 
 // {source: 'setting' | 'env' | 'default' | 'none', text, value (a number setting that has one)} for one setting of `provider` given what is typed (`draft`).
 export function effective(s, key, provider, draft) {
+  const out = effectiveValue(s, key, provider, draft);
+  if (key === "max_tokens" && provider === "anthropic") out.text += " Older Claude models refuse a very large limit with a 400.";
+  return out;
+}
+
+function effectiveValue(s, key, provider, draft) {
   const checked = checkDraft(s, key, draft);
   const typed = checked.ok ? checked.value : "";
   const defaults = (s.provider_defaults || {})[provider] || {};
@@ -156,22 +164,38 @@ export function effective(s, key, provider, draft) {
   return { source: "default", text: "" };
 }
 
+// The reasoning level in force (typed, else the environment's), or '' when none is asked for.
+function reasoningLevel(s, draft) {
+  const levels = ["off", "low", "medium", "high", "max"];
+  const typed = checkDraft(s, "reasoning", draft);
+  const t = typed.ok ? typed.value : "";
+  if (t === "default") return "";
+  const env = ((s.env || {}).reasoning || "").toLowerCase();
+  return t || (levels.includes(env) ? env : "");
+}
+
 // Sentences worth showing next to the section, not errors.
 export function warnings(s, provider, drafts) {
   const out = [];
   const cap = checkDraft(s, "max_tokens", drafts.max_tokens);
-  const level = checkDraft(s, "reasoning", drafts.reasoning);
-  const thinking = level.ok && level.value && level.value !== "default" && level.value !== "off";
+  const level = reasoningLevel(s, drafts.reasoning);
   if (cap.ok && cap.value !== "" && Number(cap.value) < 1000) {
     out.push("A reply limit under 1,000 tokens cuts off the answer of most tasks, and of a reasoning model before it finishes thinking.");
   }
-  if (thinking && cap.ok && cap.value !== "" && Number(cap.value) < 4096) {
+  if (cap.ok && cap.value !== "" && level && level !== "off" && Number(cap.value) < 4096) {
     out.push("Reasoning is paid from the reply limit: with thinking on, give the reply limit 4,096 tokens or more.");
   }
   const timeout = checkDraft(s, "request_timeout", drafts.request_timeout);
   const connect = checkDraft(s, "connect_timeout", drafts.connect_timeout);
   if (timeout.ok && connect.ok && timeout.value !== "" && connect.value !== "" && Number(connect.value) > Number(timeout.value)) {
     out.push("The connect timeout is longer than the request timeout.");
+  }
+  // Requests are not streamed: a generation that outlasts the request timeout fails here, and the provider still bills it.
+  const wait = effective(s, "request_timeout", provider, drafts.request_timeout).value;
+  const room = effective(s, "max_tokens", provider, drafts.max_tokens).value;
+  const long = (room != null && room >= 16384) || level === "high" || level === "max";
+  if (long && wait != null && wait <= 300) {
+    out.push(`A long reply (a reply limit of 16,384 tokens or more, or high reasoning) can take longer than the ${num(wait)}-second request timeout. The request then fails here, but the provider still bills it: raise Request timeout.`);
   }
   return out;
 }
