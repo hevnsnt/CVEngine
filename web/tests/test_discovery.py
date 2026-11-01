@@ -48,6 +48,38 @@ class DiscoveryTests(TestCase):
 		queued.assert_called_once_with(scan.id, 'standard')  # standard is the default
 		return scan
 
+	def _hosts(self, count, extra=()):
+		events = [{'type': 'DNS_NAME', 'id': f'D{i}', 'data': f'h{i}.example.test', 'host': f'h{i}.example.test', 'module': 'crt',
+				   'resolved_hosts': [f'192.0.2.{i + 1}'], 'parent': 'S'} for i in range(count)]
+		return events + list(extra)
+
+	def _run_for_web_check(self, events, mode='standard', scan_name='demo_scan'):
+		scan = self._scan()
+		scan_event = {'type': 'SCAN', 'id': 'S', 'data': None, 'data_json': {'name': scan_name}}
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, mode=mode, stream=lambda *a, **k: iter([scan_event] + events))
+		return [a for a in AgentActivity.objects.filter(message__contains='no web page').order_by('id')]
+
+	def test_many_hosts_and_no_web_page_at_all_is_said_in_the_activity_feed_with_where_to_look(self):
+		said = self._run_for_web_check(self._hosts(6))
+		self.assertEqual(len(said), 1)
+		self.assertEqual((said[0].status, said[0].kind, said[0].project_id), ('failed', 'discovery', self.project.id))
+		self.assertIn('found 6 hosts but bbot reported no web page', said[0].message)
+		self.assertIn('~/.bbot/scans/demo_scan/scan.log', said[0].message)
+		self.assertIn('are not affected', said[0].message)  # the screenshot stage and the route checks make their own requests
+
+	def test_a_discovery_that_reported_a_url_or_an_http_response_says_nothing(self):
+		url = {'type': 'URL', 'id': 'U1', 'data': 'https://h0.example.test/', 'host': 'h0.example.test', 'module': 'http', 'parent': 'D0', 'tags': ['status-200']}
+		response = {'type': 'HTTP_RESPONSE', 'id': 'R1', 'data': None, 'host': 'h0.example.test', 'module': 'http', 'parent': 'D0',
+					'data_json': {'url': 'https://h0.example.test/', 'status_code': 200}}
+		self.assertEqual(self._run_for_web_check(self._hosts(6, [url])), [])
+		AgentActivity.objects.all().delete()
+		self.assertEqual(self._run_for_web_check(self._hosts(6, [response])), [])
+
+	def test_a_few_hosts_or_a_passive_discovery_is_not_a_reason_to_warn(self):
+		self.assertEqual(self._run_for_web_check(self._hosts(discovery.MIN_HOSTS_FOR_WEB_CHECK - 1)), [])
+		self.assertEqual(self._run_for_web_check(self._hosts(8), mode='passive'), [])  # passive never visits a host
+
 	def test_a_rejected_key_becomes_an_activity_line_naming_the_service(self):
 		from cveFeed.models import AgentActivity
 		from dashboard.models import ApiCredential

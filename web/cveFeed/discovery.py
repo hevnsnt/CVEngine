@@ -247,6 +247,29 @@ def _report_key_problems(problems, extra_args, scan):
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
+MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
+
+
+def _report_no_web_pages(scan, mode, web_events, bbot_scan_name=''):
+    """One activity line when a standard or deep discovery found many hosts and bbot reported no web page at all (no URL and no HTTP_RESPONSE event).
+    Its web module (``http``) is what turns a host into a URL, so without it a discovery records no endpoint, no HTTP status and no page title, and
+    gowitness has nothing to photograph; that was seen on a live instance (a 43 host discovery with 0 endpoints) and the cause was not in the logs
+    cvENGINE keeps. The line says what to look at, with the name of bbot's own scan directory."""
+    if mode not in ('standard', 'deep') or any(web_events.values()):
+        return
+    from cveFeed import activity
+    from startScan.models import Subdomain
+    hosts = Subdomain.objects.filter(scan_history=scan).count()
+    if hosts < MIN_HOSTS_FOR_WEB_CHECK:
+        return
+    where = f'~/.bbot/scans/{bbot_scan_name}/scan.log' if bbot_scan_name else "bbot's scan.log"
+    activity.log('discovery', f'{mode.capitalize()} discovery of {scan.domain.name} found {hosts} hosts but bbot reported no web page for any of them '
+                 f'(no URL and no HTTP_RESPONSE event), so no endpoint, HTTP status or title was recorded from it. bbot\'s web module may have failed '
+                 f'to start or reach the hosts: look in {where} in the celery container (docs/PIPELINE.md, "When discovery finds no web pages"). '
+                 'Web screenshots and the route checks make their own requests and are not affected.',
+                 project=scan.domain.project_id, status='failed', scan_id=scan.id, hosts=hosts)
+
+
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
     """Body of the celery task; ``stream`` is injectable so tests need no bbot binary."""
     from cveFeed.api_credentials import bbot_config_args
@@ -272,6 +295,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
     problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
+    web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what bbot's web module reported, counted over the whole run (``batch`` is emptied at every flush)
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
@@ -288,6 +312,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                                strict_scope=strict_scope, problems=problems):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
+                    if event.get('type') in web_events:
+                        web_events[event['type']] += 1
                     seen = bbot_lib.parse_event(event, batch, hosts)
                     if seen and (seen.type, seen.label) not in shown:
                         shown.add((seen.type, seen.label))
@@ -308,6 +334,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                 raise
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
         _report_key_problems(problems, extra_args, scan)
+        _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
