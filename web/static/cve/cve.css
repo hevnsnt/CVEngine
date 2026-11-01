@@ -81,7 +81,7 @@ a{color:var(--ink);text-decoration-thickness:1px;text-underline-offset:3px}
 .skip{position:absolute;left:-999px;top:8px;background:var(--ink);color:var(--on-ink);padding:8px 12px;border-radius:var(--r-s);z-index:100}
 .skip:focus{left:8px}
 svg{flex:none}
-.rail svg:not(.mk),.tabbar svg,.sheet svg,.topbar svg,.palette svg,.menu svg,.btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+.rail svg:not(.mk),.tabbar svg,.sheet svg,.topbar svg,.scope svg,.palette svg,.menu svg,.btn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
 
 /* micro label used everywhere: tiny mono caps */
 .eyebrow,.proj-label,.rail-h,.sec,.table th{font:600 10.5px/1.2 var(--font);text-transform:uppercase;letter-spacing:.16em;color:var(--muted)}
@@ -140,6 +140,35 @@ svg{flex:none}
 .sheet-list form{display:contents}
 .sheet-list a,.sheet-list button{display:flex;align-items:center;gap:12px;min-height:48px;padding:10px 4px;border:0;border-bottom:1px solid var(--line);background:none;font:600 15px var(--font);color:var(--ink);text-decoration:none;text-align:left;width:100%;cursor:pointer}
 .sheet-list button.out{color:var(--fire-ink);border-bottom:0}
+/* the project bar (phones and tablets): what you are looking at, one tap from switching it */
+.scope-row{max-width:1360px;margin:0 auto;padding:12px max(var(--gutter),env(safe-area-inset-right,0px)) 0 max(var(--gutter),env(safe-area-inset-left,0px))}
+.scope{display:flex;align-items:center;gap:12px;width:100%;min-height:52px;padding:7px 8px 7px 14px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.scope:active{background:var(--sunk)}
+.scope-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.scope-k{font:600 10.5px/1.2 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.scope-v{font-size:16px;font-weight:700;line-height:1.2}
+.scope-k,.scope-v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scope-go{flex:none;display:flex;align-items:center;gap:4px;min-height:36px;padding:0 8px 0 12px;border-radius:var(--r-s);background:var(--sunk);font:600 12px var(--mono);letter-spacing:.03em;color:var(--ink-2)}
+.scope-go svg{width:16px;height:16px;stroke-width:2.2}
+.scope-sheet{padding-top:0}
+.scope-sheet:has(.scope-q){height:86dvh} /* it keeps its height while the find box narrows the list */
+.scope-head{position:sticky;top:0;z-index:1;display:flex;flex-direction:column;gap:10px;padding:8px 0 10px;margin:0 0 2px;background:var(--surface)}
+.scope-head::before{content:"";width:40px;height:4px;border-radius:2px;background:var(--line-2);margin:0 auto 4px}
+.scope-sheet .sheet-grip{display:none}
+.scope-head h2{margin:0;font-size:18px}
+.scope-q{width:100%}
+.scope-list{display:flex;flex-direction:column}
+.scope-org h3{margin:16px 0 2px;font:600 10.5px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.scope-list button{display:flex;align-items:center;gap:12px;width:100%;min-height:50px;padding:10px 4px;border:0;border-bottom:1px solid var(--line);background:none;font:600 15px var(--font);color:var(--ink);text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.scope-list button:active{background:var(--sunk)}
+.scope-list button>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scope-list button.all{color:var(--ink-2);font-weight:550}
+.scope-list button small{font:600 12px var(--mono);color:var(--muted)}
+.scope-list button[aria-current]{color:var(--ink);font-weight:700}
+.scope-list button[aria-current]::after{content:"";flex:none;width:6px;height:12px;margin:0 8px 3px 0;border:solid var(--brand);border-width:0 2.5px 2.5px 0;transform:rotate(45deg)}
+.scope-none{margin:14px 0 0}
+.scope-list [hidden]{display:none}
+@media (min-width:1000px){.scope-row,.scope-sheet{display:none!important}}
 @keyframes rise{from{transform:translateY(24px);opacity:0}to{transform:none;opacity:1}}
 
 /* project switcher */
@@ -845,7 +874,7 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
 }@media (min-width:1024px) and (max-width:1100px){:root{--rail:232px}}
 
 .a-repeat{color:var(--muted);font:600 11.5px var(--mono)}
-.scans-bar{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.scans-bar{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
 .scans-bar .picker{flex:1;min-width:0}
 
 .host-link{color:inherit;text-decoration:none;border-bottom:1px solid var(--line-2)}@media (hover:hover) and (pointer:fine){.host-link:hover{border-bottom-color:currentColor}}
@@ -1017,6 +1046,36 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
   #section[data-kind="changes"] .table tr,#section[data-kind="activity"] .table tr{padding:2px 14px;margin-bottom:6px}
   #section[data-kind="changes"] .table td,#section[data-kind="activity"] .table td{padding:5px 0;gap:10px}
   #section[data-kind="activity"] .table td[data-label="Scan"]:has(:only-child),#section[data-kind="activity"] .table td[data-label="Scan"]:not(:has(a)){display:none}
+  /* certificates: four short lines a card (host; expiry and days left; issuer; key and TLS), not six labelled rows */
+  .hy-certs .table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:4px 12px;padding:11px 14px 11px 18px;margin-bottom:8px}
+  .hy-certs .table td{display:block;padding:0;border:0;text-align:left;font-size:13px;color:var(--ink-2)}
+  .hy-certs .table td::before{display:none}
+  .hy-certs .table td[data-label="Host"],.hy-certs .table td[data-label="Issuer"],.hy-certs .table td[data-label="Project"]{grid-column:1/-1}
+  .hy-certs .table td[data-label="Host"]{font-size:14.5px;color:var(--ink);overflow-wrap:anywhere}
+  .hy-certs .table td[data-label="Host"] a{padding:2px 0}
+  .hy-certs .table td[data-label="Expires"],.hy-certs .table td[data-label="Key"]{font-family:var(--mono);font-size:12px}
+  .hy-certs .table td[data-label="Expires"]::before{display:inline;content:"Expires ";font:inherit;letter-spacing:0;text-transform:none;color:var(--muted)}
+  .hy-certs .table td[data-label="Left"],.hy-certs .table td[data-label="TLS"]{justify-self:end;font-family:var(--mono);font-size:12px}
+  .hy-certs .table td[data-label="Issuer"]{color:var(--muted);font-size:12.5px}
+  /* scans: number, target and status on one line, the numbers under it, not seven labelled rows */
+  #section[data-kind="scans"] .table tr{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:6px 12px;padding:10px 14px 10px 18px;margin-bottom:8px}
+  #section[data-kind="scans"] .table td{display:block;padding:0;border:0;text-align:left;font-size:13px;color:var(--ink-2)}
+  #section[data-kind="scans"] .table td::before{display:none}
+  #section[data-kind="scans"] .table td[data-label="#"] a{padding:2px 0}
+  #section[data-kind="scans"] .table td[data-label="Target"]{font-size:14.5px;color:var(--ink);overflow-wrap:anywhere}
+  #section[data-kind="scans"] .table td[data-label="Status"],#section[data-kind="scans"] .table td[data-label="Duration"]{justify-self:end}
+  #section[data-kind="scans"] .table td[data-label="Hosts"],#section[data-kind="scans"] .table td[data-label="Findings"]{display:flex;align-items:center;justify-content:flex-start;gap:6px}
+  #section[data-kind="scans"] .table td[data-label="#"]{grid-row:1;grid-column:1/3}
+  #section[data-kind="scans"] .table td[data-label="Status"]{grid-row:1;grid-column:3}
+  #section[data-kind="scans"] .table td[data-label="Target"]{grid-row:2;grid-column:1/-1}
+  #section[data-kind="scans"] .table td[data-label="Hosts"]{grid-row:3;grid-column:1}
+  #section[data-kind="scans"] .table td[data-label="Started"]{grid-row:3;grid-column:2;white-space:nowrap}
+  #section[data-kind="scans"] .table td[data-label="Duration"]{grid-row:3;grid-column:3}
+  #section[data-kind="scans"] .table td[data-label="Findings"]:not(:has(*)){display:none}
+  #section[data-kind="scans"] .table td[data-label="Hosts"]::before,#section[data-kind="scans"] .table td[data-label="Findings"]::before{display:inline;font:600 10px var(--mono);letter-spacing:.06em}
+  #section[data-kind="scans"] .table td[data-label="Started"]{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  #section[data-kind="scans"] .table td[data-label="Findings"],#section[data-kind="scans"] .table td[data-label="Project"]{grid-column:1/-1}
+  #section[data-kind="scans"] .table td[data-label=""]{grid-column:1/-1;justify-self:end}
 }
 
 /* ---- host page: header, stat strip, tabs. One concern per tab instead of one long scroll ---- */
@@ -1143,7 +1202,26 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 
 /* ---- bulk selection: a Select toggle, row checkboxes, and the black action bar ---- */
 .list-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:26px}
-.list-meta .list-count{margin:0}
+.list-meta .list-count{margin:0;white-space:nowrap}
+.list-meta .meta-tools{flex-wrap:wrap;justify-content:flex-end}
+.new-toggle{white-space:nowrap}
+@media (pointer:coarse){.new-toggle{min-height:36px}}
+/* the CVE guidance "write the next N now" line: the number box sits in the sentence instead of splitting it */
+.guide-now{align-items:center;flex-wrap:wrap;gap:6px 8px}
+.guide-now>input{width:96px;flex:none}
+/* a tab strip that runs off a narrow screen fades at the cut edge, so it reads as "scroll for more" (shell.js sets the classes) */
+[role=tablist].cut-end{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 36px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 36px),transparent)}
+[role=tablist].cut-start{-webkit-mask-image:linear-gradient(90deg,transparent,#000 36px);mask-image:linear-gradient(90deg,transparent,#000 36px)}
+[role=tablist].cut-start.cut-end{-webkit-mask-image:linear-gradient(90deg,transparent,#000 36px,#000 calc(100% - 36px),transparent);mask-image:linear-gradient(90deg,transparent,#000 36px,#000 calc(100% - 36px),transparent)}
+@media (max-width:639px){
+  .list-tools{grid-template-columns:minmax(0,1fr)}
+  .list-tools>select{width:100%}
+  .scans-bar .picker{flex-basis:100%}
+  .scans-bar>.btn{margin-left:auto}
+  .list-meta{flex-wrap:wrap}
+  .list-meta .meta-tools{width:100%;justify-content:flex-start;gap:6px}
+  .list-meta .new-toggle{padding:0 9px}
+}
 .bulk-toggle{all:unset;box-sizing:border-box;min-height:26px;padding:0 10px;display:inline-flex;align-items:center;border:1px solid var(--line-2);border-radius:var(--r-s);font:650 12px var(--font);cursor:pointer;color:var(--ink)}@media (hover:hover) and (pointer:fine){.bulk-toggle:hover{border-color:var(--ink)}}
 .bulk-toggle[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
 .bulk-toggle:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
