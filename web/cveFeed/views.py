@@ -892,18 +892,25 @@ def node_detail(node_id):
         ports = [f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_services(ip)]
         matches = list(CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage'))
         vulns = Vulnerability.objects.filter(subdomain=s).order_by('-severity')[:8]
-        from agentapi.services import _host_heat, alias_and_note
+        from agentapi.services import _host_heat_merged, _merge_group, _name_siblings, alias_and_note
         from cveFeed.models import HostProfile
         project = s.target_domain.project if s.target_domain else None
         mine = HostProfile.objects.filter(project=project, host=s.name.lower()).first() if project else None
         given = alias_and_note(s, [], {(project.id, s.name.lower()): {'alias': mine.alias, 'note': mine.note}} if mine else {})  # what a person calls it
-        return {'kind': 'host', 'title': s.name, 'heat': _host_heat(s),
+        # why the host has its colour: the same reasons, over the same copies of the host, as its row on the Hosts page, hottest first
+        others = _name_siblings(project, [s]).get(s.id, [])
+        _, reasons, _, _ = _merge_group(s, others)
+        return {'kind': 'host', 'title': s.name, 'heat': _host_heat_merged(s, others, reasons), 'project': project.slug if project else '',
+                'reasons': [{**{k: r.get(k) for k in ('kind', 'label', 'description', 'detail', 'temp', 'finding', 'id')},
+                             'classification': (r.get('classification') or '').replace('_', ' '),
+                             'href': f'/cve/{quote(project.slug)}/vulns/#{r["finding"]}-{r["id"]}' if project else ''} for r in reasons[:12]],
+                'reasons_total': len(reasons),
                 'link': f'/cve/{project.slug}/hosts/?host={quote(s.name)}' if project else '', 'rows': _kv(
             ('Alias', given['alias']), ('Note', given['note']),
             ('Target', [(s.target_domain.name, _host_href(project.slug, s.target_domain.name))] if project else (s.target_domain.name if s.target_domain else '')),
             ('IP addresses', [(ip.address, _ip_href(project.slug, ip.address)) for ip in s.ip_addresses.all()] if project
              else ', '.join(ip.address for ip in s.ip_addresses.all())),
-            ('Heat', _host_heat(s)), ('Score', s.score),
+            ('Score', s.score),
             ('Open ports', ', '.join(ports)),
             ('HTTP', f'{s.http_status} {s.page_title or ""}'.strip() if s.http_status else ''),
             ('Web server', s.webserver), ('CDN', s.cdn_name if s.is_cdn else ''),

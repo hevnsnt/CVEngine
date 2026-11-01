@@ -680,6 +680,51 @@ body.soc .soc-hud{display:block;position:absolute;inset:0;z-index:3;pointer-even
 .drawer .drawer-body{flex:1;min-height:0;margin:0;padding:16px;border:0;border-radius:0;overflow:auto;overscroll-behavior:contain}
 .drawer .node-rows dd{overflow-wrap:anywhere;word-break:break-word}
 body.soc .drawer{display:none}
+/* what a click on the graph answers (graph.js showNodeDetails): why a host is hot, a bubble's hosts and their reasons */
+.why-fire{--h:var(--fire);--h-ink:var(--fire-ink);--h-bg:var(--fire-bg)}
+.why-smoke{--h:var(--smoke);--h-ink:var(--smoke-ink);--h-bg:var(--smoke-bg)}
+.why-ice{--h:var(--ice);--h-ink:var(--ice-ink);--h-bg:var(--ice-bg)}
+.why-hygiene,.why-clean{--h:var(--ok);--h-ink:var(--ok-ink);--h-bg:var(--ok-bg)}
+.why-hero{position:relative;padding:14px 14px 14px 16px;margin:0 0 4px;border-radius:var(--r-l);background:var(--h-bg,var(--surface-2));border:1px solid color-mix(in srgb,var(--h,var(--line)) 30%,transparent)}
+.why-hero::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 3px 3px 0;background:var(--h,var(--line-2))}
+.why-kicker{display:block;font:600 10.5px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--h-ink,var(--muted))}
+.why-title{display:block;margin-top:4px;font:700 20px/1.2 var(--font);color:var(--ink);letter-spacing:-.01em}
+.why-lede{margin:6px 0 0;font-size:13px;line-height:1.45;color:var(--ink-2)}
+.why-tally{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:12px}
+.why-tally-cell{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:var(--r);background:var(--surface);border:1px solid var(--line)}
+.why-tally-cell b{font:700 17px/1 var(--mono);color:var(--h-ink)}
+.why-tally-cell span{font:600 10px/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.why-sec{margin-top:18px}
+.why-sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px}
+.why-sec-head h3{margin:0;font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--ink)}
+.why-sec-sub{font:500 11px/1 var(--mono);color:var(--muted)}
+.why-list{display:flex;flex-direction:column;gap:6px}
+.why-card{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border-radius:var(--r);border:1px solid var(--line);border-left:3px solid var(--h);background:var(--surface);color:var(--ink);text-decoration:none;transition:border-color .15s,background .15s,transform .15s}
+a.why-card:hover{background:var(--h-bg);border-color:color-mix(in srgb,var(--h) 40%,var(--line));transform:translateX(2px)}
+a.why-card:focus-visible{outline:2px solid var(--h);outline-offset:2px}
+.why-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.why-label{font:700 13px/1.3 var(--mono);overflow-wrap:anywhere}
+.why-temp{flex:none;padding:2px 6px;border-radius:3px;font:700 9.5px/1.2 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--h-ink);background:var(--h-bg)}
+.why-facts{font:500 11.5px/1.4 var(--mono);color:var(--h-ink)}
+.why-desc{font-size:12.5px;line-height:1.45;color:var(--ink-2);display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.why-compact{padding:7px 10px}
+.why-compact .why-label{font-size:12px}
+.why-compact .why-desc{-webkit-line-clamp:2;font-size:12px}
+.why-host{padding:12px;border-radius:var(--r-l);border:1px solid var(--line);background:var(--surface-2);margin-bottom:8px}
+.why-host-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:4px}
+.why-host-name{font:700 13.5px/1.3 var(--mono);color:var(--ink);overflow-wrap:anywhere}
+a.why-host-name{text-decoration:none;border-bottom:1px solid var(--line-2)}
+a.why-host-name:hover{border-color:var(--ink)}
+.why-score{flex:none;font:500 11px/1 var(--mono);color:var(--muted)}
+.why-what{margin:0 0 8px;font-size:12px;line-height:1.4;color:var(--muted);overflow-wrap:anywhere}
+.why-chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.why-chip{padding:3px 7px;border-radius:3px;border:1px solid var(--line);background:var(--surface);font:500 11.5px/1.3 var(--mono);color:var(--ink);text-decoration:none;overflow-wrap:anywhere}
+.why-chip:hover{border-color:var(--h)}
+.why-more{display:inline-block;margin-top:6px;font:500 11.5px/1.3 var(--mono);color:var(--muted)}
+a.why-more{color:var(--ink)}
+.why-calm{margin:14px 0 0;padding:10px 12px;border-radius:var(--r);background:var(--surface-2);font-size:13px;color:var(--muted)}
+.why-actions{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+@media (prefers-reduced-motion:reduce){.why-card{transition:none}a.why-card:hover{transform:none}}
 @media (prefers-reduced-motion:reduce){.drawer,.drawer.open{transition:none}}
 .discovery .node-rows{max-width:100%}
 .discovery .node-rows dd{overflow-wrap:anywhere;word-break:break-word}
