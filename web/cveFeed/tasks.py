@@ -1930,6 +1930,11 @@ def weekly_maintenance():
         return {'error': type(exc).__name__}
     finally:
         cache.delete('cvengine:weekly-maintenance')
+    try:
+        from cveFeed import web_shot
+        result['screenshot_files_removed'] = web_shot.sweep_orphans()  # picture files no row names (a project or target deleted with its rows)
+    except Exception:  # noqa: BLE001 - housekeeping only
+        logger.exception('screenshot file sweep failed')
     archived = sum(result['archived'].values())
     activity.log('feed', (f'Weekly log maintenance archived and removed {archived:,} log rows older than their retention '
                           f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '

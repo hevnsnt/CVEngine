@@ -5,6 +5,8 @@ One row per cve.now entry, carrying the merged severity, exploitation
 correlation engine matches against the discovered asset inventory.
 """
 from django.db import models
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
 from django.db.models.functions import Lower
 
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
@@ -800,7 +802,7 @@ class HostScreenshot(models.Model):
     is waiting for the capture worker is ``queued``. ``previous_image_path`` is the capture before the current one (the pair a visual diff
     needs); older files are deleted."""
 
-    OUTCOMES = ("queued", "ok", "blank", "timeout", "unreachable", "tls_error", "blocked", "nla_required", "unavailable", "error")
+    OUTCOMES = ("queued", "ok", "blank", "timeout", "unreachable", "tls_error", "blocked", "nla_required", "unavailable", "too_big", "error")
 
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
@@ -813,6 +815,7 @@ class HostScreenshot(models.Model):
     image_bytes = models.PositiveIntegerField(default=0)
     previous_image_path = models.CharField(max_length=1000, blank=True, default="")
     previous_image_hash = models.CharField(max_length=16, blank=True, default="")
+    previous_image_bytes = models.PositiveIntegerField(default=0)
     final_url = models.CharField(max_length=2000, blank=True, default="")  # where the page ended up after redirects
     http_status = models.PositiveIntegerField(null=True, blank=True)
     title = models.CharField(max_length=300, blank=True, default="")
@@ -834,6 +837,16 @@ class HostScreenshot(models.Model):
     @property
     def has_image(self):
         return bool(self.image_path)
+
+
+@receiver(post_delete, sender=HostScreenshot)
+def _remove_screenshot_files(sender, instance, **kwargs):
+    """A row deleted, by a cascade from its project or target or by a purge, takes its picture files with it (never raises)."""
+    try:
+        from cveFeed import web_shot
+        web_shot.remove_row_files(instance)
+    except Exception:  # noqa: BLE001 - the weekly sweep removes whatever is left
+        pass
 
 
 class HostAssessment(models.Model):

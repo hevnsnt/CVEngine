@@ -28,7 +28,14 @@ TOTAL_SECONDS = 20           # the whole of one page: navigation, settling and t
 SETTLE_MS = 600              # a last moment for fonts and late layout after the load event
 LAUNCH_ARGS = ('--disable-dev-shm-usage', '--disable-gpu', '--mute-audio', '--no-first-run', '--disable-extensions',
                '--disable-background-networking', '--disable-component-update', '--disable-sync', '--disable-notifications',
-               '--hide-scrollbars')
+               '--hide-scrollbars',
+               # WebRTC sends UDP straight from the browser, around the vetting proxy (a STUN URL in a page names a host and a port of its choosing, loopback
+               # and the metadata address included, and its name is resolved by Chromium itself): with this policy only proxied traffic is allowed, and
+               # none of it is UDP. QUIC is UDP too.
+               '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
+               # one renderer, with a heap ceiling: a hostile page cannot start a process per frame or grow without bound (the parent also kills the
+               # whole tree above CVENGINE_SCREENSHOT_MAX_RSS_MB)
+               '--renderer-process-limit=1', '--js-flags=--max-old-space-size=512')
 LOCAL_SCHEMES = ('data', 'blob', 'about')
 NETWORK_SCHEMES = ('http', 'https')
 

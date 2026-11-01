@@ -999,7 +999,7 @@ const subdirectoryCard = (h) => {
 const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
 const OUTCOME_TEXT = {
   ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
-  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", error: "Failed",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
 };
 function screenshotsSection(h, project, isCurrent) {
   const box = el("div", "shots-box");

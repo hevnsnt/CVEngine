@@ -46,6 +46,7 @@ class Migration(migrations.Migration):
                     "previous_image_hash",
                     models.CharField(blank=True, default="", max_length=16),
                 ),
+                ("previous_image_bytes", models.PositiveIntegerField(default=0)),
                 (
                     "final_url",
                     models.CharField(blank=True, default="", max_length=2000),

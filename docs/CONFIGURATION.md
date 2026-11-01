@@ -104,6 +104,7 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_SCREENSHOT_BACKFILL_PER_PROJECT`, `CVENGINE_SCREENSHOT_BACKFILL_MAX` | `20`, `100` | Pages the hourly backfill queues per project and in all per run. |
 | `CVENGINE_SCREENSHOT_TIMEOUT` | `20` | Seconds allowed for one page (8 to 60): the navigation gets up to 15 of them, then the page is given a moment to settle. |
 | `CVENGINE_SCREENSHOT_MAX_BYTES`, `CVENGINE_SCREENSHOT_PROJECT_MB` | `2097152`, `500` | The size above which a picture is stored as a smaller JPEG, and the storage one project may use for pictures (megabytes). |
+| `CVENGINE_SCREENSHOT_MAX_RSS_MB` | `1500` | The memory the screenshot browser and everything it started may hold together (300 to 16384) before the whole tree is killed and the page in flight is recorded `too_big`. |
 | `CVENGINE_SCREENSHOT_USER` | `nobody` | The account the screenshot browser runs as when the worker is root (`-` or `root` runs it as the worker). The browser has no sandbox of its own in a container, so this keeps a hostile page away from the worker's files and secrets. `HEAVY_COST_SCREENSHOT_MB` (default 450) and `HEAVY_MAX_SCREENSHOT` (default 1) size its place in the memory queue. |
 | `CVENGINE_RDP_SHOT` | `1` | Set to `0` to turn off RDP login-screen screenshots entirely. |
 | `CVENGINE_TTL_RDP_SHOT` | `24` | Hours before a host's RDP screenshot is captured again. |

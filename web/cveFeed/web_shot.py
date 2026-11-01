@@ -20,6 +20,8 @@ How it works (docs/PIPELINE.md, "Web screenshots"):
 * **Nothing is silently missing.** Each attempt records an ``outcome`` and a plain ``reason`` on the row; the host page shows them instead of "none".
 """
 import concurrent.futures
+import hashlib
+import io
 import json
 import logging
 import os
@@ -27,6 +29,7 @@ import pwd
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -49,7 +52,7 @@ CURSOR_KEY = 'cvengine:screenshots:cursor'
 QUEUE = 'screenshot_queue'
 
 OK, QUEUED, BLANK, BLOCKED, NLA = 'ok', 'queued', 'blank', 'blocked', 'nla_required'
-FAILURES = ('timeout', 'unreachable', 'tls_error', 'error', 'blank', 'unavailable')  # an attempt that produced nothing: tried again after the retry window
+FAILURES = ('timeout', 'unreachable', 'tls_error', 'error', 'blank', 'unavailable', 'too_big')  # an attempt that produced nothing: tried again after the retry window
 STATIC = (BLOCKED, NLA)                    # decided without a browser, re-evaluated when the host is planned again
 
 MAX_PORTS_PER_HOST = 6
@@ -60,6 +63,7 @@ DEFAULT_BACKFILL_PER_PROJECT = 20
 DEFAULT_BACKFILL_TOTAL = 100
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_PROJECT_MB = 500
+DEFAULT_MAX_RSS_MB = 1500       # the browser and everything it started may hold this much before it is killed (CVENGINE_SCREENSHOT_MAX_RSS_MB)
 BATCH_PAGES = 20                # pages one browser serves before it is replaced
 DRAIN_SECONDS = 40 * 60         # one drain stops taking new batches after this long (the next backfill continues)
 HEAVY_WAIT_SECONDS = 30 * 60    # how long a batch waits for memory before the drain gives up for now
@@ -103,6 +107,10 @@ def max_bytes():
 
 def project_cap_bytes():
     return _env_int('CVENGINE_SCREENSHOT_PROJECT_MB', DEFAULT_PROJECT_MB, 10, 100000) * 1024 * 1024
+
+
+def max_rss_mb():
+    return _env_int('CVENGINE_SCREENSHOT_MAX_RSS_MB', DEFAULT_MAX_RSS_MB, 300, 16384)
 
 
 def nav_timeout_seconds():
@@ -171,7 +179,7 @@ def _is_cdn(sub):
     return bool(sub.is_cdn) or any(ip.is_cdn for ip in sub.ip_addresses.all())
 
 
-def web_targets(sub, manual=False):
+def web_targets(sub, manual=False, raw=False):
     """``[(scheme, port)]`` to photograph for a Subdomain row with ``ip_addresses__ports`` prefetched: the page its own URL names, and every open
     TCP port that nmap or naabu identified as HTTP(S) or that is a well-known web port. HTTPS is tried first on 443, then 80, then the rest by
     number, at most ``MAX_PORTS_PER_HOST``. A host behind a CDN is photographed on 80 and 443 only. ``manual`` (a person pressed the button)
@@ -189,7 +197,7 @@ def web_targets(sub, manual=False):
             if port.number in KNOWN_WEB_PORTS or service in HTTP_SERVICE_NAMES or service.startswith(('http', 'ssl/http')) or 'http' in product:
                 tls = ('https' in service or 'ssl' in service or KNOWN_WEB_PORTS.get(port.number) == 'https' or (port.extra or {}).get('tunnel') == 'ssl')
                 found.add(('https' if tls else 'http', port.number))
-    if _is_cdn(sub):
+    if _is_cdn(sub) and not raw:
         found = {(scheme, number) for scheme, number in found if number in CDN_PORTS}
     if not found and manual:
         found = {('https', 443), ('http', 80)}
@@ -237,7 +245,7 @@ def queue(project_id, domain_id, host, scheme, port, *, by_person=False, force=F
         return 'kept'
     if not force and not _row_window_open(row, now):
         return 'kept'
-    HostScreenshot.objects.filter(pk=row.pk).update(outcome=QUEUED, queued_at=now, domain_id=domain_id, by_person=by_person or row.by_person)
+    HostScreenshot.objects.filter(pk=row.pk).update(outcome=QUEUED, queued_at=now, domain_id=domain_id, by_person=by_person)  # asked again: a person's earlier request is not carried over
     return 'queued'
 
 
@@ -291,6 +299,10 @@ def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None
                 summary['rdp'] += 1
         _settle_unplanned(project_id, host, planned, now)
         if not targets:
+            edge = web_targets(sub, raw=True)[:1] if not why else []  # a CDN host whose only web port is not 80 or 443: say so, so it is not planned again every hour
+            for scheme, number in edge:
+                _record_static(project_id, domain_id, host, scheme, number, BLOCKED,
+                               'Not captured: this host is behind a CDN and only a port of the edge other than 80 and 443 looks like a web port.', now)
             continue
         summary['hosts'] += 1
         if why or sentinel_only_target(host, project_id):
@@ -316,7 +328,7 @@ def _settle_unplanned(project_id, host, planned, now):
     if not stale:
         return
     gone = [r.pk for r in stale if not r.image_path]
-    HostScreenshot.objects.filter(pk__in=gone).delete()
+    HostScreenshot.objects.filter(pk__in=gone).delete()  # no picture, so no file (a post_delete hook removes any that exist)
     HostScreenshot.objects.filter(pk__in=[r.pk for r in stale if r.image_path]).update(attempted_at=now)
 
 
@@ -376,27 +388,39 @@ def _web_evidence_q():
     return ports | Q(http_url__gt='')
 
 
+SCAN_CAP = 1000  # candidate names one project's backfill looks at before it gives up for this run
+
+
 def _due_names(project_id, limit, now):
     """The names of the project's hosts to plan next: first those with a web port and no capture row at all (a host nobody has ever photographed),
-    then those whose rows are older than their window, longest-waiting first. At most ``limit``."""
+    then those whose rows are older than their window, longest-waiting first. At most ``limit``. Names the organization excluded are skipped while
+    looking (they have no row to mark them), reading further down the list so a large excluded subtree cannot starve the rest."""
     from django.db.models import Exists, F, Max, OuterRef, Q
     from django.db.models.functions import Lower
+    from cveFeed.exclusions import excluded_names, normalize
     from cveFeed.models import HostScreenshot
     from startScan.models import Subdomain
     from cveFeed.archive_rediscovery import archived_names
     limit = min(limit, 200)
+    banned = excluded_names(project_id)
     names = []
     never = (Subdomain.objects.filter(target_domain__project_id=project_id).filter(_web_evidence_q()).annotate(lname=Lower('name'))
              .exclude(lname__in=list(archived_names(project_id)))
              .annotate(has=Exists(HostScreenshot.objects.filter(project_id=project_id, host=OuterRef('lname'))))
-             .filter(has=False).values('lname').annotate(newest=Max('id')).order_by('-newest')[:limit])
-    names += [row['lname'].rstrip('.') for row in never]
+             .filter(has=False).values('lname').annotate(newest=Max('id')).order_by('-newest'))
+    for row in never[:SCAN_CAP]:
+        name = row['lname'].rstrip('.')
+        if normalize(name) in banned:
+            continue
+        names.append(name)
+        if len(names) >= limit:
+            break
     if len(names) < limit:
         stale = Q(outcome=OK, captured_at__lt=now - ttl()) | Q(outcome__in=FAILURES + STATIC, attempted_at__lt=now - retry_after())
         due = (HostScreenshot.objects.filter(project_id=project_id).filter(stale).exclude(scheme='rdp')
                .order_by(F('attempted_at').asc(nulls_first=True)).values_list('host', flat=True)[:limit * 4])
         for host in due:
-            if host not in names:
+            if host not in names and normalize(host) not in banned:
                 names.append(host)
             if len(names) >= limit:
                 break
@@ -472,6 +496,41 @@ def sweep(runner=None):
 
 # ----------------------------------------------------------------------------- the guards, per request
 
+_stack = {'at': 0.0, 'value': (frozenset(), frozenset())}
+
+
+def stack_blocklist(refresh=False):
+    """``(names, addresses)`` of this installation's own services: the compose service names, the database, broker and cache hosts of the settings,
+    and every address they resolve to. A page is never allowed to reach them, whatever ``CVENGINE_ALLOW_PRIVATE_TARGETS`` says: with that opt-in
+    an internal address is a legitimate scan target, but the stack behind this server is not, and a screenshot of one would be a read of it.
+    Looked up in the calling thread and kept for a minute."""
+    from cveFeed import egress_proxy
+    if not refresh and time.monotonic() - _stack['at'] < 60 and _stack['at']:
+        return _stack['value']
+    names = set(egress_proxy.STACK_HOSTS)
+    configured = []
+    try:
+        configured = [getattr(settings, 'CELERY_BROKER_URL', None), (getattr(settings, 'DATABASES', {}).get('default') or {}).get('HOST')]
+    except Exception:  # noqa: BLE001 - settings not configured (the smoke script): the environment below is enough
+        pass
+    for raw in (os.environ.get('POSTGRES_HOST'), os.environ.get('CELERY_BROKER'), os.environ.get('CACHE_URL'), os.environ.get('CELERY_BACKEND'), *configured):
+        text = str(raw or '').strip()
+        if not text or text.startswith('/'):
+            continue  # a unix socket path is not a host
+        host = (urlsplit(text if '://' in text else f'//{text}').hostname or '').lower().rstrip('.')
+        if host:
+            names.add(host)
+    addresses = set()
+    for name in names:
+        try:
+            for info in socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP):
+                addresses.add(info[4][0])
+        except (OSError, UnicodeError):
+            continue
+    _stack.update(at=time.monotonic(), value=(frozenset(names), frozenset(addresses)))
+    return _stack['value']
+
+
 class Guard:
     """The platform's answer to "may this page's browser connect to host:port?", for ONE page being captured. It is asked by the vetting proxy
     (``cveFeed.shot_proxy``) for every connection the page makes: its own address, each redirect hop and every sub-resource. Every host is held
@@ -480,11 +539,12 @@ class Guard:
     every answer is vetted, and the connection is made to that vetted address). ``denied`` records what was refused, in order, so the result can
     say why a page that never loaded is ``blocked``, and how many sub-resources were dropped."""
 
-    def __init__(self, project_id, primary, unattended, gate=None, excluded=None, resolver=None):
+    def __init__(self, project_id, primary, unattended, gate=None, excluded=None, resolver=None, stack=None):
         from cveFeed.bounty_gate import Gate
         self.project_id, self.primary, self.unattended = project_id, primary, unattended
         self.gate = gate if gate is not None else Gate()
         self.excluded = excluded
+        self.stack = stack if stack is not None else stack_blocklist()
         self.resolver = resolver or self._resolve
         self.denied = []          # [(host, reason)]
         self._verdicts = {}
@@ -515,6 +575,8 @@ class Guard:
             return None, 'The exclusion list could not be read.'
         if normalize(host) in names:
             return None, f'{host} is excluded for this organization.'
+        if host in self.stack[0]:
+            return None, f'{host} is one of this installation\'s own services; it is never visited.'
         if host != self.primary:
             why = self.gate.refusal(self.project_id, host, unattended=self.unattended)
             if why:
@@ -525,7 +587,30 @@ class Guard:
             return None, f'{host} resolves to an internal or reserved address; it is not visited.'
         except OSError as exc:
             return None, f'{host} could not be resolved ({str(exc)[:80] or "no answer"}).'
+        own = self.stack[1]
+        if own and any(item[1][0] in own for item in addresses):
+            return None, f'{host} resolves to an address of this installation\'s own services; it is never visited.'
         return (addresses, self.project_id if host == self.primary else None), ''
+
+    def warm(self):
+        """Read what the judgements need from the database now, in the calling thread: the exclusions and the bug bounty scope of the project."""
+        if self.excluded is None:
+            from cveFeed.exclusions import excluded_names
+            try:
+                self.excluded = excluded_names(self.project_id, strict=True)
+            except Exception:  # noqa: BLE001 - _judge refuses everything when it cannot read them
+                self.excluded = None
+        self.gate.refusal(self.project_id, self.primary, unattended=self.unattended)  # builds and keeps the project's scope
+
+    def relabel(self, outcome):
+        """Whether a page that failed with ``outcome`` failed because a guard refused it: the page's own host was refused, or the connection failed
+        outright and a redirect hop (any other host) was refused. A timeout, a TLS or other error is the page's own, whatever a sub-resource was refused."""
+        if not self.denied:
+            return False
+        return self.refused_primary() or outcome == 'unreachable'
+
+    def refused_primary(self):
+        return any(h == self.primary for h, _ in self.denied)
 
     def blocked_reason(self):
         """Why a page that failed to load was refused, from the first refusal that is not just a sub-resource, else the first of any."""
@@ -595,6 +680,22 @@ def run_child(job, on_result, wall_seconds, argv=None, heavy=True, label='', wor
         timer.daemon = True
         timer.start()
         fatal, done = '', False
+        over = {'mb': 0}
+        stop_watch = threading.Event()
+        ceiling = max_rss_mb()
+
+        def watch():  # the browser and everything it started, however many sessions it used: a hostile page cannot eat the container
+            while not stop_watch.wait(2):
+                try:
+                    used = resources.tree_rss_mb(proc.pid)
+                except Exception:  # noqa: BLE001 - a failed measurement is not a reason to kill
+                    continue
+                if used > ceiling:
+                    over['mb'] = used
+                    resources.terminate_group(proc, grace=2)
+                    return
+        watcher = threading.Thread(target=watch, name='shot-rss', daemon=True)
+        watcher.start()
         try:
             proc.stdin.write(json.dumps(job, separators=(',', ':')) + '\n')
             proc.stdin.flush()
@@ -615,12 +716,15 @@ def run_child(job, on_result, wall_seconds, argv=None, heavy=True, label='', wor
             pass
         finally:
             timer.cancel()
+            stop_watch.set()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 resources.terminate_group(proc, grace=3)
         if job_handle is not None:
             job_handle.raise_if_killed()
+        if over['mb']:
+            return f'too_big:{over["mb"]}'
         if fatal:
             return fatal
         if not done:
@@ -647,7 +751,10 @@ def media_root():
 
 
 def safe_name(host):
-    return re.sub(r'[^a-z0-9.-]+', '_', host.lower())[:100] or 'host'
+    """The directory name of a host's pictures: readable, and unique to the exact name (two names that differ only in characters the readable part
+    replaces, or only after its length cap, never share a directory, so deleting one host never deletes another's pictures)."""
+    readable = re.sub(r'[^a-z0-9.-]+', '_', host.lower())[:60] or 'host'
+    return f'{readable}-{hashlib.sha1(host.lower().encode("utf-8", "replace")).hexdigest()[:8]}'
 
 
 def new_paths(row):
@@ -668,71 +775,137 @@ def remove_files(*rel_paths):
                 try:
                     os.remove(real)
                 except OSError:
-                    pass
+                    continue
+                parent = os.path.dirname(real)  # a host's or a project's directory left empty goes too
+                for _ in range(2):
+                    if parent.startswith(base + os.sep):
+                        try:
+                            os.rmdir(parent)
+                        except OSError:
+                            break
+                        parent = os.path.dirname(parent)
+
+
+def remove_row_files(row):
+    remove_files(row.image_path, row.previous_image_path)
+
+
+def sweep_orphans(older_than=24 * 3600):
+    """Delete picture files under ``screenshots/`` that no row names (a project or target deleted with its rows, a crash between writing and saving),
+    when they are older than a day. Returns how many. Part of the weekly maintenance."""
+    from cveFeed.models import HostScreenshot
+    base = os.path.join(media_root(), 'screenshots')
+    if not os.path.isdir(base):
+        return 0
+    known = set()
+    for rel in HostScreenshot.objects.values_list('image_path', 'thumb_path', 'previous_image_path'):
+        for item in rel:
+            if item:
+                known.add(os.path.join(media_root(), item))
+                known.add(os.path.join(media_root(), item) + THUMB_SUFFIX)
+    removed, cutoff = 0, time.time() - older_than
+    for folder, _dirs, names in os.walk(base):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if path not in known and os.lstat(path).st_mtime < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue
+    for folder, _dirs, _names in os.walk(base, topdown=False):  # empty directories
+        if folder != base:
+            try:
+                os.rmdir(folder)
+            except OSError:
+                pass
+    return removed
 
 
 def project_bytes(project_id):
     from django.db.models import Sum
     from cveFeed.models import HostScreenshot
-    return HostScreenshot.objects.filter(project_id=project_id).aggregate(total=Sum('image_bytes'))['total'] or 0
+    totals = HostScreenshot.objects.filter(project_id=project_id).aggregate(now=Sum('image_bytes'), before=Sum('previous_image_bytes'))
+    return (totals['now'] or 0) + (totals['before'] or 0)
 
 
-def _shrink(path):
-    """Re-encode a picture over the size cap as JPEG (quality 80, then 60). Returns ``(path, error)``; the PNG is removed on success."""
+def _shrink(data):
+    """Re-encode a picture over the size cap as JPEG (quality 80, then 60), from its bytes. Returns ``(bytes, error)``."""
     try:
         from PIL import Image
-        jpg = os.path.splitext(path)[0] + '.jpg'
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(data)) as image:
             rgb = image.convert('RGB')
         for quality in (80, 60):
-            rgb.save(jpg, 'JPEG', quality=quality, optimize=True)
-            if os.path.getsize(jpg) <= max_bytes():
-                os.remove(path)
-                return jpg, ''
-        os.remove(jpg)
-        return path, 'The picture is larger than the size allowed.'
+            out = io.BytesIO()
+            rgb.save(out, 'JPEG', quality=quality, optimize=True)
+            if out.tell() <= max_bytes():
+                return out.getvalue(), ''
+        return data, 'The picture is larger than the size allowed.'
     except Exception as exc:  # noqa: BLE001 - a picture that cannot be shrunk is not stored
-        return path, f'The picture could not be reduced ({type(exc).__name__}).'
+        return data, f'The picture could not be reduced ({type(exc).__name__}).'
 
 
-def _inside(path, base):
-    real, root = os.path.realpath(path), os.path.realpath(base)
-    return real.startswith(root + os.sep)
+def read_picture(workdir, name, limit):
+    """The bytes of the file ``name`` the browser wrote in ``workdir``, or None. Opened without following a link (``O_NOFOLLOW``), checked to be a
+    regular file on the descriptor itself, and read from it: the browser runs as another account and could swap the file for a link to anything
+    after a path check, so nothing here goes by the path twice."""
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+    try:
+        dirfd = os.open(workdir, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    except OSError:
+        return None
+    try:
+        fd = os.open(name, flags, dir_fd=dirfd)
+    except OSError:
+        return None
+    finally:
+        os.close(dirfd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return b'' if stat.S_ISREG(info.st_mode) else None
+        with os.fdopen(fd, 'rb', closefd=False) as handle:
+            return handle.read(limit + 1)
+    finally:
+        os.close(fd)
+
+
+def write_new(path, data):
+    """Create ``path`` with the picture, mode 0644, failing if anything is there already (no link is followed, no mode is changed afterwards)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o644)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(data)
 
 
 def finish_image(row, result, workdir):
     """Validate and store what the browser wrote for ``row`` (a file in ``workdir``). Returns ``(fields, outcome, reason)``: the model fields of a
-    good capture, or an outcome (blank, error) and why. The file is moved into the media root only when it is kept, and is deleted otherwise."""
+    good capture, or an outcome (blank, error) and why. The bytes are read once from the descriptor (see ``read_picture``) and the picture is
+    written to the media root as a new file of this process's own."""
     from cveFeed import shots
     from cveFeed.rdp_shot import is_meaningful
-    path = result.get('path') or ''
-    if not path or not _inside(path, workdir) or not os.path.isfile(path) or os.path.islink(path):
+    name = os.path.basename(result.get('path') or '')
+    data = read_picture(workdir, name, shots.MAX_SHOT_BYTES) if name else None
+    if data is None or not data:
         return {}, 'error', 'The browser reported a picture that was not written.'
-    size = os.path.getsize(path)
-    if size > shots.MAX_SHOT_BYTES:
-        os.remove(path)
+    if len(data) > shots.MAX_SHOT_BYTES:
         return {}, 'error', 'The picture is larger than the size allowed.'
-    with open(path, 'rb') as handle:
-        if not is_meaningful(handle.read()):
-            os.remove(path)
-            return {}, BLANK, 'The page rendered blank (a single flat color).'
-    if size > max_bytes():
-        path, error = _shrink(path)
+    if not is_meaningful(data):
+        return {}, BLANK, 'The page rendered blank (a single flat color).'
+    extension = '.png'
+    if len(data) > max_bytes():
+        data, error = _shrink(data)
         if error:
-            os.remove(path)
             return {}, 'error', error
-        size = os.path.getsize(path)
+        extension = '.jpg'
+    size = len(data)
     if project_bytes(row.project_id) + size > project_cap_bytes():
         _free_previous(row.project_id)
         if project_bytes(row.project_id) + size > project_cap_bytes():
-            os.remove(path)
             return {}, 'error', f'This project\'s screenshot storage ({project_cap_bytes() // (1024 * 1024)} MB) is full.'
     final, rel = new_paths(row)
-    final = os.path.splitext(final)[0] + os.path.splitext(path)[1]  # a shrunk picture is a JPEG
-    rel = os.path.splitext(rel)[0] + os.path.splitext(path)[1]
-    os.makedirs(os.path.dirname(final), exist_ok=True)
-    shutil.move(path, final)
-    os.chmod(final, 0o644)
+    final, rel = os.path.splitext(final)[0] + extension, os.path.splitext(rel)[0] + extension
+    write_new(final, data)
     thumb = shots.thumbnail_path(final)
     return {'image_path': rel, 'thumb_path': os.path.relpath(thumb, media_root()) if thumb else '', 'image_hash': shots.dhash_file(final),
             'image_bytes': size}, OK, ''
@@ -743,7 +916,7 @@ def _free_previous(project_id):
     from cveFeed.models import HostScreenshot
     rows = HostScreenshot.objects.filter(project_id=project_id).exclude(previous_image_path='')
     remove_files(*rows.values_list('previous_image_path', flat=True))
-    rows.update(previous_image_path='', previous_image_hash='')
+    rows.update(previous_image_path='', previous_image_hash='', previous_image_bytes=0)
 
 
 def _same_host(final_url, host):
@@ -759,7 +932,7 @@ def apply_result(row, result, now=None, workdir=''):
     fields = {}
     if outcome == OK:
         fields, outcome, reason = finish_image(row, result, workdir)
-    update = {'outcome': outcome, 'reason': reason, 'attempted_at': now, 'queued_at': None}
+    update = {'outcome': outcome, 'reason': reason, 'attempted_at': now, 'queued_at': None, 'by_person': False}  # a person's request is used up by this attempt
     if outcome == OK:
         final = str(result.get('final_url') or '')[:2000]
         status = result.get('status')
@@ -770,7 +943,7 @@ def apply_result(row, result, now=None, workdir=''):
         stale_previous = row.previous_image_path
         update.update(fields)
         update.update(reason=reason, final_url=final, http_status=status, title=str(result.get('title') or '')[:300], captured_at=now,
-                      previous_image_path=row.image_path, previous_image_hash=row.image_hash)
+                      previous_image_path=row.image_path, previous_image_hash=row.image_hash, previous_image_bytes=row.image_bytes)
         HostScreenshot.objects.filter(pk=row.pk).update(**update)
         if stale_previous and stale_previous != row.image_path:
             remove_files(stale_previous)
@@ -863,11 +1036,11 @@ def process(rows, runner=None, resolve=None, summary=None, proxy_factory=None):
     for batch in _batches(items):
         if _kill_switch():
             return summary
-        _run_batch(batch, runner, summary, proxy_factory=proxy_factory)
+        _run_batch(batch, runner, summary, proxy_factory=proxy_factory, ctx=ctx)
     return summary
 
 
-def _run_batch(items, runner, summary, proxy_factory=None):
+def _run_batch(items, runner, summary, proxy_factory=None, ctx=None):
     """One browser child over ``items`` (``Item`` tuples), every page through its own vetting proxy connection (``shot_proxy``), each result written as it
     arrives. ``proxy_factory(admit, connect, secret)`` replaces the proxy in tests."""
     import secrets
@@ -882,12 +1055,21 @@ def _run_batch(items, runner, summary, proxy_factory=None):
         paths[key] = os.path.join(workdir, f'{key}.png')
         by_key[key] = item
         order.append(key)
-        guards[key] = Guard(item.row.project_id, item.host, unattended=not item.row.by_person)
+        loaded = (ctx or {}).get(item.row.project_id) or {}
+        # everything the guard needs from the database is read here, in this thread: the proxy's threads run no query of their own
+        guards[key] = Guard(item.row.project_id, item.host, unattended=not item.row.by_person, gate=loaded.get('gate'), excluded=loaded.get('excluded'),
+                            stack=stack_blocklist())
+        guards[key].warm()
         targets.append({'key': key, 'url': item.url, 'out': paths[key]})
 
     def admit(key, host, port):
         guard = guards.get(key)
-        return guard.admit(host, port) if guard else (None, 'unknown page')
+        if not guard:
+            return None, 'unknown page'
+        try:
+            return guard.admit(host, port)
+        finally:
+            _close_thread_connections()
 
     def on_result(message):
         key = message.get('key')
@@ -897,7 +1079,7 @@ def _run_batch(items, runner, summary, proxy_factory=None):
         done.add(key)
         message['path'] = paths[key]  # the file is the one this side named, whatever the child says
         guard = guards[key]
-        if message.get('outcome') in ('unreachable', 'error', 'timeout') and guard.denied:
+        if message.get('outcome') != OK and guard.relabel(message.get('outcome')):
             message['outcome'], message['reason'] = BLOCKED, guard.blocked_reason()[:300]  # the page never loaded because a guard refused it
         elif message.get('outcome') == OK:
             summary['dropped_requests'] = summary.get('dropped_requests', 0) + len(guard.denied)
@@ -923,6 +1105,13 @@ def _run_batch(items, runner, summary, proxy_factory=None):
         failure = f'{type(exc).__name__}'
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+    if failure.startswith('too_big:'):  # the page in flight held the browser over its memory ceiling: that page failed, the others are not blamed
+        in_flight = order[len(done)] if len(done) < len(order) else None
+        if in_flight is not None:
+            apply_result(by_key[in_flight].row, {'outcome': 'too_big', 'reason': f'The page needed more than {max_rss_mb()} MB of memory ({failure.split(":", 1)[1]} MB) and was stopped.'})
+            summary['failed'] += 1
+        failure = ''
+        summary['too_big'] = summary.get('too_big', 0) + 1
     if not failure and done:
         _note_error(None)  # the browser ran: whatever it last said is over
     if failure:
@@ -933,6 +1122,18 @@ def _run_batch(items, runner, summary, proxy_factory=None):
             if key not in done:
                 apply_result(by_key[key].row, {'outcome': 'unavailable', 'reason': f'The browser could not run: {failure}'[:300]})
                 summary['failed'] += 1
+
+
+def _close_thread_connections():
+    """Close the database connections the calling thread opened (the proxy's threads must not leave one each behind). A connection inside a transaction
+    (a test) is left alone."""
+    try:
+        from django.db import connections
+        for connection in connections.all():
+            if not connection.in_atomic_block:
+                connection.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _note_error(text):
@@ -1038,7 +1239,7 @@ def describe(row, host):
 
 
 FAILURE_TEXT = {'timeout': 'timed out', 'unreachable': 'could not be reached', 'tls_error': 'failed the TLS handshake', 'error': 'failed', 'blank': 'rendered blank',
-                'unavailable': 'could not run the browser'}
+                'unavailable': 'could not run the browser', 'too_big': 'needed too much memory'}
 
 
 def note_for(rows, *, has_web_evidence, legacy=False, network=None, ports_known=False):

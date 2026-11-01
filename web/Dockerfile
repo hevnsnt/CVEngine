@@ -135,7 +135,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 # here, and why screenshots never worked through it). The browser is fixed by the Playwright pin in requirements.txt: PLAYWRIGHT_CHROMIUM_VERSION is the
 # build that release drives, and the build fails if it launches anything else, so a Playwright bump that moves the browser is read before it ships. Only the
 # headless shell is installed (it is what a screenshot needs, and about 100 MB smaller than the full browser). It is launched as root and as the unprivileged
-# account the screenshot worker runs it as (nobody), against about:blank, so a missing library or an unreadable install stops the build instead of the first scan.
+# account the screenshot worker runs it as (nobody), against about:blank (there is no checksum of the download to pin: Playwright fetches its own pinned revision, and this launch check is what verifies it), so a missing library or an unreadable install stops the build instead of the first scan.
 ARG PLAYWRIGHT_CHROMIUM_VERSION=156.0.8078.4
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN set -e; playwright install --with-deps --only-shell chromium \

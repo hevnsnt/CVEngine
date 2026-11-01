@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import textwrap
+import time
 from datetime import timedelta
 from unittest import mock
 
@@ -382,7 +383,7 @@ class GuardTests(ShotFixture, TestCase):
 		for address in ('127.0.0.1', '169.254.169.254', '10.0.0.5', '192.168.1.1', '[::1]'):
 			target, reason = guard.admit(address.strip('[]'), 80)
 			self.assertIsNone(target, address)
-			self.assertIn('internal or reserved', reason, address)
+			self.assertTrue('internal or reserved' in reason or 'own services' in reason, (address, reason))  # 127.0.0.1 is also the test broker
 
 	def test_a_name_that_does_not_resolve_is_refused_with_a_reason(self):
 		def gone(host, port):
@@ -516,7 +517,7 @@ class CaptureTests(ShotFixture, TestCase):
 		row.refresh_from_db()
 		self.assertEqual((row.outcome, row.reason, row.http_status, row.title, row.final_url), ('ok', '', 200, 'Welcome', 'https://www.rt.test/home'))
 		self.assertTrue(row.captured_at and row.attempted_at and not row.queued_at)
-		self.assertRegex(row.image_path, rf'^screenshots/{self.project.pk}/www\.rt\.test/https-443-\d+\.png$')
+		self.assertRegex(row.image_path, rf'^screenshots/{self.project.pk}/www\.rt\.test-[0-9a-f]{{8}}/https-443-\d+\.png$')
 		self.assertTrue(os.path.isfile(os.path.join(self.media, row.image_path)))
 		self.assertTrue(os.path.isfile(os.path.join(self.media, row.thumb_path)))
 		self.assertRegex(row.image_hash, r'^[0-9a-f]{16}$')
@@ -573,7 +574,6 @@ class CaptureTests(ShotFixture, TestCase):
 			row.refresh_from_db()
 			paths.append(row.image_path)
 			HostScreenshot.objects.update(outcome='queued')
-			import time
 			time.sleep(0.003)  # file names carry the millisecond
 		self.assertEqual(len(set(paths)), 3)
 		row.refresh_from_db()
@@ -1442,3 +1442,257 @@ class WiringTests(TestCase):
 			open(os.path.join(root, f'chromium_headless_shell-{pinned["revision"]}', 'INSTALLATION_COMPLETE'), 'w').close()
 			self.assertTrue(web_shot.browser_installed())
 		self.assertIn('Chromium is not installed', web_shot.unavailable_reason() if not web_shot.browser_installed() else 'Chromium is not installed')
+
+
+# ------------------------------------------------------------------------------------------------ review round: hardening
+
+class StackGuardTests(ShotFixture, TestCase):
+	def guard(self, resolver):
+		return web_shot.Guard(self.project.pk, 'www.rt.test', True, excluded=frozenset(), resolver=resolver, stack=(frozenset({'web', 'redis', 'db'}), frozenset({'172.18.0.5'})))
+
+	def test_the_installations_own_service_names_are_never_visited(self):
+		guard = self.guard(lambda host, port: ((2, ('203.0.113.5', port)),))
+		for name in ('web', 'redis', 'db'):
+			target, reason = guard.admit(name, 8000)
+			self.assertIsNone(target, name)
+			self.assertIn('own services', reason)
+
+	def test_a_name_that_resolves_to_an_address_of_the_stack_is_refused_even_with_private_targets_allowed(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
+			guard = self.guard(lambda host, port: ((2, ('172.18.0.5', port)),))
+			target, reason = guard.admit('innocent.example.test', 80)
+		self.assertIsNone(target)
+		self.assertIn('own services', reason)
+		self.assertIsNotNone(self.guard(lambda host, port: ((2, ('172.18.0.9', port)),)).admit('other.example.test', 80)[0])  # another private address is the opt-in's business
+
+	def test_the_blocklist_is_built_from_the_service_names_and_the_settings(self):
+		with mock.patch.dict(os.environ, {'CELERY_BROKER': 'redis://broker.internal:6379/0', 'CACHE_URL': 'redis://cache.internal:6379/1', 'POSTGRES_HOST': '/var/run/postgresql'}), \
+				mock.patch('socket.getaddrinfo', side_effect=lambda name, *a, **k: [(2, 1, 6, '', ('10.9.8.7', 0))] if name == 'broker.internal' else (_ for _ in ()).throw(OSError('x'))):
+			names, addresses = web_shot.stack_blocklist(refresh=True)
+		self.assertTrue({'web', 'redis', 'db', 'celery', 'broker.internal', 'cache.internal'} <= names)
+		self.assertNotIn('/var/run/postgresql', names)
+		self.assertEqual(addresses, frozenset({'10.9.8.7'}))
+		web_shot.stack_blocklist(refresh=True)  # leave a clean cache for the other tests
+
+
+class NoDatabaseInTheProxyTests(ShotFixture, TestCase):
+	def test_the_guard_is_loaded_in_the_calling_thread_and_judges_with_no_query(self):
+		guard = web_shot.Guard(self.project.pk, 'www.rt.test', True, resolver=lambda host, port: ((2, ('203.0.113.5', port)),), stack=(frozenset(), frozenset()))
+		guard.warm()
+		with self.assertNumQueries(0):
+			self.assertIsNotNone(guard.admit('www.rt.test', 443)[0])
+			self.assertIsNotNone(guard.admit('cdn.thirdparty.test', 443)[0])
+
+	def test_connections_are_closed_after_each_judgement_unless_inside_a_transaction(self):
+		with mock.patch('django.db.backends.base.base.BaseDatabaseWrapper.close') as closed:
+			web_shot._close_thread_connections()  # a test runs in a transaction: left alone
+		closed.assert_not_called()
+
+
+class RelabelTests(ShotFixture, TestCase):
+	def guard(self):
+		return web_shot.Guard(self.project.pk, 'www.rt.test', True, excluded=frozenset(), resolver=lambda h, p: ((2, ('203.0.113.5', p)),), stack=(frozenset({'web'}), frozenset()))
+
+	def test_a_refused_sub_resource_does_not_turn_a_timeout_into_blocked(self):
+		guard = self.guard()
+		guard.admit('web', 80)  # a font host refused
+		self.assertFalse(guard.relabel('timeout'))
+		self.assertFalse(guard.relabel('tls_error'))
+		self.assertFalse(guard.relabel('error'))
+
+	def test_a_connection_that_failed_outright_after_a_refusal_is_blocked_and_a_refused_primary_always_is(self):
+		guard = self.guard()
+		self.assertFalse(guard.relabel('unreachable'))  # nothing was refused
+		guard.admit('web', 80)
+		self.assertTrue(guard.relabel('unreachable'))
+		primary = web_shot.Guard(self.project.pk, 'web', True, excluded=frozenset(), stack=(frozenset({'web'}), frozenset()))
+		primary.admit('web', 80)
+		self.assertTrue(primary.relabel('timeout'))
+
+
+class PictureFileTests(ShotFixture, TestCase):
+	def test_a_link_in_place_of_the_picture_is_never_followed(self):
+		workdir = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+		secret = os.path.join(tempfile.mkdtemp(), 'secret.png')
+		with open(secret, 'wb') as handle:
+			handle.write(png())
+		os.symlink(secret, os.path.join(workdir, '0.png'))
+		self.assertIsNone(web_shot.read_picture(workdir, '0.png', 1 << 20))
+		with open(os.path.join(workdir, '1.png'), 'wb') as handle:
+			handle.write(png())
+		self.assertEqual(web_shot.read_picture(workdir, '1.png', 1 << 20), png())
+		self.assertEqual(web_shot.read_picture(workdir, '1.png', 10), b'')  # over the limit: refused, not read
+		self.assertIsNone(web_shot.read_picture(workdir, 'missing.png', 1 << 20))
+
+	def test_the_stored_picture_is_a_new_file_of_our_own_and_never_overwrites(self):
+		target = os.path.join(self.media, 'screenshots', '1', 'h', 'a.png')
+		web_shot.write_new(target, b'x')
+		self.assertEqual(oct(os.stat(target).st_mode & 0o777), '0o644')
+		with self.assertRaises(FileExistsError):
+			web_shot.write_new(target, b'y')
+		os.remove(target)
+		os.symlink('/etc/hostname', target)
+		with self.assertRaises(OSError):
+			web_shot.write_new(target, b'z')
+
+	def test_a_capture_the_browser_replaced_with_a_link_is_an_error_not_a_picture(self):
+		row = self.make_row()
+		workdir = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+		os.symlink('/etc/hostname', os.path.join(workdir, '0.png'))
+		fields, outcome, reason = web_shot.finish_image(row, {'path': os.path.join(workdir, '0.png')}, workdir)
+		self.assertEqual((fields, outcome), ({}, 'error'))
+
+	def test_two_hosts_that_differ_only_in_replaced_characters_have_their_own_directories(self):
+		self.assertNotEqual(web_shot.safe_name('a*b.example.test'), web_shot.safe_name('a_b.example.test'))
+		self.assertNotEqual(web_shot.safe_name('x' * 80 + '1.example'), web_shot.safe_name('x' * 80 + '2.example'))
+		self.assertEqual(web_shot.safe_name('WWW.Example.test'), web_shot.safe_name('www.example.test'))
+		self.assertRegex(web_shot.safe_name('www.example.test'), r'^www\.example\.test-[0-9a-f]{8}$')
+
+
+class OrphanFileTests(ShotFixture, TestCase):
+	def test_a_row_deleted_by_a_cascade_takes_its_files_and_empty_directories_with_it(self):
+		rel = f'screenshots/{self.project.pk}/www.rt.test-abcd1234/https-443-1.png'
+		previous = f'screenshots/{self.project.pk}/www.rt.test-abcd1234/https-443-0.png'
+		self.plant(rel)
+		self.plant(previous)
+		self.plant(rel + web_shot.THUMB_SUFFIX)
+		self.make_row(outcome='ok', image_path=rel, previous_image_path=previous)
+		self.domain.delete()  # the project's target goes, and its rows with it
+		self.assertEqual(HostScreenshot.objects.count(), 0)
+		self.assertFalse(os.path.exists(os.path.join(self.media, 'screenshots', str(self.project.pk))))
+
+	def test_a_queued_row_whose_host_is_gone_loses_its_picture_files_too(self):
+		sub = self.host(ports=((443, 'https'),))
+		rel = f'screenshots/{self.project.pk}/www.rt.test-abcd1234/https-443-1.png'
+		self.plant(rel)
+		self.make_row(outcome='queued', image_path=rel)
+		Subdomain.objects.filter(pk=sub.pk).delete()
+		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
+			web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
+		self.assertFalse(os.path.exists(os.path.join(self.media, rel)))
+
+	def test_the_sweep_removes_old_files_no_row_names_and_keeps_the_rest(self):
+		kept = f'screenshots/{self.project.pk}/h-1/a.png'
+		old_orphan = f'screenshots/{self.project.pk}/h-2/b.png'
+		new_orphan = f'screenshots/{self.project.pk}/h-2/c.png'
+		for rel in (kept, old_orphan, new_orphan):
+			self.plant(rel)
+		self.make_row(outcome='ok', image_path=kept)
+		long_ago = time.time() - 3 * 86400
+		os.utime(os.path.join(self.media, kept), (long_ago, long_ago))
+		os.utime(os.path.join(self.media, old_orphan), (long_ago, long_ago))
+		self.assertEqual(web_shot.sweep_orphans(), 1)
+		self.assertTrue(os.path.exists(os.path.join(self.media, kept)))
+		self.assertFalse(os.path.exists(os.path.join(self.media, old_orphan)))
+		self.assertTrue(os.path.exists(os.path.join(self.media, new_orphan)))  # a young file may be one being written
+
+	def test_the_storage_a_project_uses_counts_the_comparison_copies(self):
+		self.make_row(outcome='ok', image_path='a', image_bytes=100, previous_image_path='b', previous_image_bytes=40)
+		self.assertEqual(web_shot.project_bytes(self.project.pk), 140)
+
+	def test_the_weekly_maintenance_runs_the_sweep(self):
+		import inspect
+
+		from cveFeed import tasks
+		self.assertIn('sweep_orphans', inspect.getsource(tasks.weekly_maintenance))
+
+
+class BrowserProcessTests(SimpleTestCase):
+	def test_the_launch_flags_keep_udp_and_quic_off_the_network_and_limit_the_renderer(self):
+		from cveFeed import shot_worker
+		flags = set(shot_worker.LAUNCH_ARGS)
+		self.assertIn('--force-webrtc-ip-handling-policy=disable_non_proxied_udp', flags)  # WebRTC would send UDP around the vetting proxy
+		self.assertIn('--disable-quic', flags)
+		self.assertIn('--renderer-process-limit=1', flags)
+		self.assertTrue(any(f.startswith('--js-flags=--max-old-space-size=') for f in flags))
+		self.assertIn('--disable-dev-shm-usage', flags)
+
+	def test_the_memory_of_a_browser_that_left_its_process_group_is_counted_and_stopped(self):
+		"""A browser starts its own session: the launcher's group holds ~30 MB, the browser behind it hundreds."""
+		import subprocess
+
+		from reNgine import resources
+		proc = subprocess.Popen([sys.executable, '-c', textwrap.dedent("""
+			import os, subprocess, sys, time
+			child = subprocess.Popen([sys.executable, '-c', 'import time; x = bytearray(60 * 1024 * 1024); time.sleep(60)'], start_new_session=True)
+			print(child.pid, flush=True)
+			time.sleep(60)""")], stdout=subprocess.PIPE, text=True, start_new_session=True)
+		self.addCleanup(lambda: resources.terminate_group(proc, grace=1))
+		child_pid = int(proc.stdout.readline())
+		time.sleep(0.5)
+		self.assertNotEqual(os.getpgid(child_pid), os.getpgid(proc.pid))  # it really is another group
+		self.assertIn(child_pid, resources.tree_pids(proc.pid))
+		self.assertGreaterEqual(resources.tree_rss_mb(proc.pid), 50)
+		self.assertLess(resources.group_rss_mb(proc.pid), 50)  # the old measure saw only the launcher
+		resources.terminate_group(proc, grace=2)
+		time.sleep(0.3)
+		self.assertFalse(os.path.exists(f'/proc/{child_pid}') and 'Z' not in open(f'/proc/{child_pid}/stat').read().rsplit(')', 1)[1][:3])
+
+	def test_a_browser_over_its_memory_ceiling_is_killed_and_reported_as_too_big(self):
+		workdir = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+		script = "import time; x = bytearray(80 * 1024 * 1024); time.sleep(60)"
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOT_MAX_RSS_MB': '300'}), mock.patch.object(web_shot, '_unprivileged', return_value=None), \
+				mock.patch('reNgine.resources.tree_rss_mb', return_value=2000):
+			failure = web_shot.run_child({'targets': []}, lambda m: None, 60, argv=[sys.executable, '-c', script], heavy=False, workdir=workdir)
+		self.assertEqual(failure, 'too_big:2000')
+
+
+class TooBigPageTests(ShotFixture, TestCase):
+	def test_the_page_in_flight_is_recorded_too_big_and_the_others_stay_queued(self):
+		self.host(name='a.rt.test', ports=((443, 'https'),), address='203.0.113.31')
+		self.host(name='b.rt.test', ports=((443, 'https'),), address='203.0.113.32')
+		first, second = self.make_row(host='a.rt.test'), self.make_row(host='b.rt.test')
+
+		def run(job, on_result, wall, label='', workdir=None):
+			on_result({'key': '0', 'outcome': 'timeout', 'reason': 'slow'})
+			return 'too_big:2100'
+		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
+			web_shot.drain(runner=run, proxy_factory=FakeProxy, batch=5)
+		first.refresh_from_db()
+		second.refresh_from_db()
+		self.assertEqual(first.outcome, 'timeout')
+		self.assertEqual(second.outcome, 'too_big')
+		self.assertIn('MB of memory', second.reason)
+
+
+class ByPersonTests(ShotFixture, TestCase):
+	def test_a_persons_request_is_used_up_by_the_capture_and_not_carried_into_a_later_unattended_one(self):
+		sub = self.host(ports=((443, 'https'),))
+		web_shot.queue_for_subs([sub], self.project.pk, by_person=True)
+		self.assertTrue(HostScreenshot.objects.get().by_person)
+		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
+			web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
+		self.assertFalse(HostScreenshot.objects.get().by_person)
+		HostScreenshot.objects.update(outcome='timeout', by_person=True, attempted_at=timezone.now() - timedelta(days=3))  # e.g. left over from an interrupted run
+		web_shot.queue_for_subs([sub], self.project.pk)  # the backfill or a scan asks again
+		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
+		self.assertFalse(HostScreenshot.objects.get().by_person)
+
+
+class BackfillStarvationTests(ShotFixture, TestCase):
+	def test_an_excluded_subtree_does_not_starve_the_hosts_behind_it(self):
+		from startScan.models import ScanHistory
+		scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='x')
+		ip, _ = IpAddress.objects.get_or_create(address='198.51.100.77')
+		ip.ports.add(Port.objects.create(number=443, service_name='https', state='open'))
+		for i in range(30):  # newest ids first: the excluded names crowd the top of the list
+			sub = Subdomain.objects.create(name=f'ok{i}.rt.test', target_domain=self.domain, scan_history=scan)
+			sub.ip_addresses.add(ip)
+		for i in range(30):
+			sub = Subdomain.objects.create(name=f'bad{i}.skip.rt.test', target_domain=self.domain, scan_history=scan)
+			sub.ip_addresses.add(ip)
+		HostExclusion.objects.create(org=self.project.org, host='skip.rt.test', include_subdomains=True)
+		out = web_shot.backfill(per_project=5, total=50)
+		self.assertEqual(out['queued'], 5)
+		self.assertFalse(HostScreenshot.objects.filter(host__contains='skip').exists())
+
+	def test_a_cdn_host_whose_only_web_port_is_an_edge_port_gets_a_marker_row_so_it_is_not_planned_every_hour(self):
+		sub = self.host(ports=((8443, 'https-alt'),))
+		IpAddress.objects.filter(address='203.0.113.5').update(is_cdn=True)
+		web_shot.queue_for_subs([self.fresh(sub)], self.project.pk)
+		row = HostScreenshot.objects.get()
+		self.assertEqual((row.outcome, row.port), ('blocked', 8443))
+		self.assertIn('behind a CDN', row.reason)

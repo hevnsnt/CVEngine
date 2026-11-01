@@ -33,6 +33,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._redirect(f'http://localhost:{port}/page')
         if self.path.startswith('/to-metadata'):
             return self._redirect('http://169.254.169.254/latest/meta-data/')
+        if self.path.startswith('/webrtc'):  # a page that tries to send UDP straight from the browser (STUN to our own UDP socket)
+            body = ('<html><body>webrtc<script>const pc = new RTCPeerConnection({iceServers:[{urls:"stun:127.0.0.1:%d"}]});'
+                    'pc.createDataChannel("x"); pc.createOffer().then(o => pc.setLocalDescription(o));</script></body></html>' % self.server.udp_port).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if self.path.startswith('/to-loopback-port'):
             return self._redirect('http://[::1]:6379/')
         if self.path.startswith('/page') or self.path == '/':
@@ -79,6 +87,11 @@ def main():
         return 2
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     port = server.server_address[1]
+    import socket as _socket
+    udp = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    udp.bind(('127.0.0.1', 0))
+    udp.settimeout(0.2)
+    server.udp_port, udp_packets = udp.getsockname()[1], []
     threading.Thread(target=server.serve_forever, daemon=True).start()
     workdir = web_shot.make_workdir()
     import socket
@@ -104,7 +117,7 @@ def main():
         closed_port = probe.getsockname()[1]
     pages = {'page': f'http://127.0.0.1:{port}/page', 'redirect-blocked': f'http://127.0.0.1:{port}/to-blocked',
              'redirect-allowed': f'http://127.0.0.1:{port}/to-localhost', 'redirect-metadata': f'http://127.0.0.1:{port}/to-metadata',
-             'redirect-loopback': f'http://127.0.0.1:{port}/to-loopback-port', 'closed': f'http://127.0.0.1:{closed_port}/'}
+             'webrtc': f'http://127.0.0.1:{port}/webrtc', 'redirect-loopback': f'http://127.0.0.1:{port}/to-loopback-port', 'closed': f'http://127.0.0.1:{closed_port}/'}
     if secure is not None:
         pages['https'] = f'https://127.0.0.1:{secure.server_address[1]}/page'  # a self-signed certificate, through CONNECT
     targets = [{'key': key, 'url': url, 'out': os.path.join(workdir, f'{key}.png')} for key, url in pages.items()]
@@ -152,6 +165,16 @@ def main():
             problems.append(f'{key}: the hop to {host} was not refused by the platform\'s address rules: {results.get(key)} {real.denied}')
         else:
             print(f'{key}: refused at the proxy by the real address rules ({refused[0]})')
+    deadline = __import__('time').time() + 3
+    while __import__('time').time() < deadline:  # anything WebRTC sent would have arrived by now
+        try:
+            udp_packets.append(udp.recvfrom(2048))
+        except OSError:
+            pass
+    if (results.get('webrtc') or {}).get('outcome') != 'ok' or udp_packets:
+        problems.append(f'WebRTC: {results.get("webrtc")} sent {len(udp_packets)} UDP packet(s) around the proxy')
+    else:
+        print('webrtc: page captured, 0 UDP packets reached the local socket')
     closed = results.get('closed') or {}
     if closed.get('outcome') != 'unreachable':
         problems.append(f'closed port: {closed}')
