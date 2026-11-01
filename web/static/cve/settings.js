@@ -243,8 +243,8 @@ const sections = {
         (() => {
           const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
           f.append(guideNote);
-          const row = el("div", "tools");
-          row.append(el("span", "note", "Or write the next"), guideNow, el("span", "note", "CVEs now, whatever is left of today's budget:"), guideRun);
+          const row = el("div", "tools guide-now");
+          row.append(el("span", "note", "Or, from what is left of today's budget, write the next"), guideNow, el("span", "note", "CVEs now"), guideRun);
           f.append(row);
           return f;
         })(),

@@ -421,7 +421,8 @@ def ui_context(request, active, slug=None, remember=True):
             'ai_usage_model': ai_cfg.model if ai_connected else '',
             'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2,
             'scope_org': scope_org, 'scope_org_name': next((o['name'] for o in orgs if o['slug'] == scope_org), '') if scope_org else '',
-            'scope_projects': len(in_scope)}
+            'scope_projects': len(in_scope),
+            'here_name': here['name'] if here else '', 'here_org_name': (here['org_name'] or '') if here else ''}
 
 
 def _bounty_allowed(user):
