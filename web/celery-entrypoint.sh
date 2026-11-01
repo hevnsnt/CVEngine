@@ -107,7 +107,7 @@ discovery_concurrency=$(python3 manage.py scan_concurrency_value discovery_concu
 if ! [[ "$discovery_concurrency" =~ ^[0-9]+$ ]] || [ "$discovery_concurrency" -lt 1 ]; then
     discovery_concurrency="${DISCOVERY_CONCURRENCY:-8}"
 fi
-echo "Discovery worker concurrency: $discovery_concurrency"
+echo "Discovery pool size (autoscale ceiling): $discovery_concurrency"
 commands+="$(generate_worker_command "discovery_queue" "$discovery_concurrency" "discovery_worker")"$'\n'
 commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\n'
 # A reserved one-at-a-time lane keeps requested validation ahead of routine feed work.
