@@ -505,7 +505,8 @@ class ImportTests(SyncFixture):
             row.search = search
         row.save()
         with mock.patch('agentapi.services._start_discoveries', return_value=[]) as discoveries, \
-                mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as watch, mock.patch.dict(os.environ, env):
+                mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as watch, \
+                mock.patch('cveFeed.ct_queue._client', return_value=None), mock.patch.dict(os.environ, env):
             result = self.sync(assets=assets)
         return result, discoveries, watch
 

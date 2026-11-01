@@ -1990,3 +1990,16 @@ section.internal[hidden]{display:none}
 .host-row.sel .alias-tag{background:transparent;color:var(--on-ink);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--on-ink) 55%,transparent)}
 .named{display:inline-block;max-width:100%;vertical-align:top}.named .alias-tag{max-width:24ch}.table td .named .alias-tag,.table td .named .alias-note{max-width:12ch}.alias-note{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;white-space:pre-line;overflow-wrap:anywhere;max-width:36ch}
 .alias-edit{margin-top:4px;padding-inline:8px}
+/* Settings, AI model: the request settings (timeouts, reply limit, context window, JSON mode, reasoning, keep-alive) */
+.ai-adv{margin:0 0 16px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r);background:var(--sunk)}
+.ai-adv>summary{cursor:pointer;font-weight:650;min-height:24px}
+.ai-adv[open]>summary{margin-bottom:8px}
+.ai-adv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:14px 16px;margin-top:14px}
+.ai-adv-grid .field{margin:0;min-width:0}
+.ai-adv-grid .ai-hint{margin:6px 0 0;overflow-wrap:anywhere}
+.ai-hint{color:var(--ink-2)}
+.ai-hint-err{color:var(--fire-ink);font-weight:600}
+.ai-adv input[aria-invalid="true"]{border-color:var(--fire);box-shadow:0 0 0 1px var(--fire)}
+.ai-warns:not(:empty){margin-top:12px}
+.ai-warn{margin:6px 0 0;padding:8px 10px;border-radius:var(--r);background:var(--smoke-bg);color:var(--smoke-ink)}
+.ai-warn-err{background:var(--fire-bg);color:var(--fire-ink);font-weight:600}

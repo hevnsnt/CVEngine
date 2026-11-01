@@ -51,7 +51,7 @@ class Base(TestCase):
 		patches = [mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
 			mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
 			mock.patch('cveFeed.tasks.run_bbot_discovery.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.delay'),
-			mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async')]
+			mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None)]
 		for p in patches:
 			p.start()
 		self.addCleanup(mock.patch.stopall)

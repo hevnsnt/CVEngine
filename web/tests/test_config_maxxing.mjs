@@ -13,7 +13,7 @@ const field = (over = {}) => ({key: 'heavy.nmap', label: 'Port and service scan 
 test('the section is called configMaxxing, with that capitalisation, and has no subtitle', () => {
   assert.equal(L.SECTION_LABEL, 'configMaxxing');
   assert.equal(L.SECTION_ID, 'configmaxxing');
-  for (const name of ['config-maxxing.js', 'config-maxxing-logic.js', 'scan-concurrency-card.js', 'settings.js']) {
+  for (const name of ['config-maxxing.js', 'config-maxxing-logic.js', 'scan-concurrency-card.js', 'tunables-card.js', 'settings.js']) {
     const src = read(name);
     assert.doesNotMatch(src, /Tinkerer settings/i, `${name} carries a subtitle`);
     assert.doesNotMatch(src, /config-maxing|"tinkerer"|#tinkerer/i, `${name} uses another name or an alias`);
@@ -118,12 +118,13 @@ test('the discovery pool never claims a number the worker did not report', () =>
   assert.equal(L.runningText(pool), 'Worker ceiling now: not reported yet');
   assert.equal(L.runningText({...pool, running: 8}), 'Worker ceiling now: 8');
   assert.equal(L.runningText(field()), 'Applies within a few seconds, with no restart');
+  assert.equal(L.runningText(field({applies: 'restart'})), 'Applies after the next restart');  // a tunable read once at process start says so
   assert.equal(L.discoveryNotice(pool, {message: 'Saved 12, runs 8'}), 'Saved 12, runs 8');
   assert.match(L.discoveryNotice(pool, null), /not known/);
 });
 
 test('the new pages build the DOM with textContent only, never innerHTML, and register their card', () => {
-  for (const name of ['config-maxxing.js', 'config-maxxing-logic.js', 'scan-concurrency-card.js']) {
+  for (const name of ['config-maxxing.js', 'config-maxxing-logic.js', 'scan-concurrency-card.js', 'tunables-card.js']) {
     const src = read(name);
     assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/, `${name} writes markup`);
   }

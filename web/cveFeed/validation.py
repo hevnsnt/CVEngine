@@ -73,11 +73,10 @@ DB_EQUIVALENT = {
 
 
 def cap(name):
-    """A validation cap, overridable by CVENGINE_<NAME> in the environment."""
-    try:
-        return max(1, int(os.environ.get(f'CVENGINE_{name}', '')))
-    except ValueError:
-        return DEFAULT_CAPS[name]
+    """A validation cap: what an App Admin saved on Settings, configMaxxing, else CVENGINE_<NAME> in the environment, else the default
+    (``cveFeed.tunables``; read on every use, so a change applies within seconds)."""
+    from cveFeed import tunables
+    return tunables.value(name.lower(), DEFAULT_CAPS[name])
 
 
 # ----------------------------------------------------------------------------- templates (read-only by their own text)

@@ -83,7 +83,8 @@ def ct_watch_finds_a_host(self, w):
 
 def ct_sweep(self, w):
     from cveFeed.tasks import watch_certificates_all
-    with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as queued:
+    with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as queued, \
+            mock.patch('cveFeed.ct_queue._client', return_value=None):
         watch_certificates_all()
     return queued.called
 
