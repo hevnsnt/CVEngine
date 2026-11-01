@@ -141,15 +141,17 @@ class AddTargetSubscribesToCtWatchTests(TestCase):
 
 	def test_adding_a_domain_queues_a_ct_watch_immediately(self):
 		from agentapi.services import Ctx, add_target
-		with mock.patch('cveFeed.tasks.watch_certificate_transparency.delay') as queued:
+		with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as queued, \
+				mock.patch('cveFeed.ct_queue._client', return_value=None):
 			add_target(Ctx(user=self.user), 'ctsub', 'newly-added.test')
 		queued.assert_called_once()
 		domain = Domain.objects.get(name='newly-added.test')
-		self.assertEqual(queued.call_args[0][0], domain.id)
+		self.assertEqual(queued.call_args.kwargs['args'], [domain.id])
+		self.assertEqual(queued.call_args.kwargs['expires'], 6 * 3600)  # a lookup nobody got to is dropped, not kept for ever
 
 	def test_adding_an_ip_or_range_does_not_trigger_certificate_watching(self):
 		from agentapi.services import Ctx, add_target
-		with mock.patch('cveFeed.tasks.watch_certificate_transparency.delay') as queued:
+		with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as queued:
 			add_target(Ctx(user=self.user), 'ctsub', '203.0.113.5')
 		queued.assert_not_called()
 

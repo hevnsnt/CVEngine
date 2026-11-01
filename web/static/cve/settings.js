@@ -5,6 +5,7 @@ import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
 import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
+import { FIELDS, GROUPS, anySet, applies, checkDraft, collect, effective, initialDrafts, labelOf, warnings } from "/staticfiles/cve/ai-settings-logic.js";
 import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)
 import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
@@ -112,18 +113,20 @@ const card = (title, ...kids) => {
 const sections = {
   async ai(m) {
     const s = await api("GET", "ai");
-    const LABELS = {
-      anthropic: "Anthropic",
-      openai: "OpenAI",
-      openrouter: "OpenRouter",
-      ollama: "Ollama",
-      vllm: "vLLM",
-      lmstudio: "LM Studio",
-    };
-    const provider = selectOf(
-      s.providers.map((p) => [p, LABELS[p] || p]),
-      s.provider,
-    );
+    const provider = el("select");
+    const listed = new Set(s.providers);
+    const grouped = GROUPS.map(([title, ids]) => [title, ids.filter((id) => listed.has(id))]);
+    const named = new Set(grouped.flatMap(([, ids]) => ids));
+    const others = s.providers.filter((id) => !named.has(id));
+    if (others.length) grouped.push(["Other", others]);
+    grouped.forEach(([title, ids]) => {
+      if (!ids.length) return;
+      const g = el("optgroup");
+      g.label = title;
+      ids.forEach((id) => g.append(Object.assign(el("option", "", labelOf(id)), { value: id })));
+      provider.append(g);
+    });
+    provider.value = s.provider;
     const model = text(s.model, { list: "ai-models", autocomplete: "off" });
     const models = el("datalist", "", null, { id: "ai-models" });
     const modelNote = el("p", "note", "", { style: "margin:6px 0 0" });
@@ -133,12 +136,13 @@ const sections = {
     const baseField = field("Base URL", base);
     const BASE_HINT = {
       ollama: "required, e.g. http://100.64.0.5:11434 (Tailscale or remote), or http://localhost:11434 if it runs on this server",
-      vllm: "required, e.g. http://100.64.0.5:8000/v1, or http://localhost:8000/v1 if it runs on this server",
+      vllm: "required, e.g. http://100.64.0.5:8000/v1 (vLLM) or http://localhost:8080/v1 (llama.cpp's llama-server, LiteLLM or any OpenAI-compatible server); the API key is only needed if the server asks for one",
       lmstudio: "required, e.g. http://100.64.0.5:1234/v1, or http://localhost:1234/v1 if it runs on this server (the API key is only needed when you turned on authentication in LM Studio)",
       openrouter: "optional, defaults to https://openrouter.ai/api/v1",
       openai: "optional, empty uses OpenAI (https://api.openai.com/v1); set it for a LiteLLM proxy or another OpenAI-compatible service, which then gets the key you type here",
       anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
+    let refreshHints = () => {}; // set below, once the request settings exist
     const sync = () => {
       const p = provider.value;
       const pick = s.selectable.includes(p);
@@ -146,8 +150,8 @@ const sections = {
         ? "choose a model (Load models)"
         : "automatic: newest, cheapest";
       modelNote.textContent = pick
-        ? `${LABELS[p]} serves whichever models you pick or host, so choose one.`
-        : `Leave blank for the newest cheapest ${LABELS[p]} model, or choose another.`;
+        ? `${labelOf(p)} serves whichever models you pick or host, so choose one.`
+        : `Leave blank for the newest cheapest ${labelOf(p)} model, or choose another.`;
       key.placeholder = s.keyless.includes(p)
         ? "optional"
         : s.has_key && p === s.provider
@@ -155,6 +159,7 @@ const sections = {
           : "API key";
       base.placeholder = BASE_HINT[p] || "optional";
       keyField.style.display = p === "ollama" ? "none" : "";
+      refreshHints();
     };
     const load = async () => {
       const r = await api("POST", "ai/models", {
@@ -183,6 +188,60 @@ const sections = {
       base.value = provider.value === s.provider ? (s.base_url || "") : ""; // an address belongs to the service it was saved for
       sync();
     });
+    // --- how a request is made: timeouts, reply limit, context window, JSON mode, reasoning, keep-alive -----------------------------------
+    // An empty box follows the server's environment variable and then the provider's default; the line under each box says which one applies.
+    const inputs = {};
+    const hints = {};
+    const wraps = {};
+    const adv = el("details", "ai-adv");
+    adv.open = anySet(s);
+    adv.append(
+      el("summary", "", "Request settings"),
+      el("p", "note", "How each request to the model is made. Leave a box empty to use the provider's default (or the server's environment setting, if it has one); the line under each box says what is in force. These apply to every task the model does and to the connection test."),
+    );
+    const grid = el("div", "ai-adv-grid");
+    const warnBox = el("div", "ai-warns", null, { role: "status" });
+    FIELDS.forEach((f) => {
+      const initial = initialDrafts(s)[f.key];
+      const input =
+        f.kind === "choice"
+          ? selectOf(f.choices, initial)
+          : text(initial, { autocomplete: "off", spellcheck: "false", ...(f.kind === "number" ? { inputmode: "numeric" } : { placeholder: f.placeholder || "" }) });
+      const wrap = field(f.label, input, f.help);
+      const hint = el("p", "note ai-hint", "", { id: `${input.id}-hint` });
+      input.setAttribute("aria-describedby", hint.id);
+      wrap.append(hint);
+      // The hint under a box follows every keystroke; the one announced region (warnBox) is rewritten when the value is committed.
+      input.addEventListener("input", () => refreshHints(false));
+      input.addEventListener("change", () => refreshHints(true));
+      inputs[f.key] = input;
+      hints[f.key] = hint;
+      wraps[f.key] = wrap;
+      grid.append(wrap);
+    });
+    adv.append(grid, warnBox);
+    const drafts = () => Object.fromEntries(FIELDS.map((f) => [f.key, inputs[f.key].value]));
+    refreshHints = (announce = true) => {
+      const p = provider.value;
+      const now = drafts();
+      const problems = [];
+      FIELDS.forEach((f) => {
+        wraps[f.key].style.display = applies(s, f.key, p) ? "" : "none";
+        const checked = checkDraft(s, f.key, now[f.key]);
+        inputs[f.key].setAttribute("aria-invalid", checked.ok ? "false" : "true");
+        const eff = effective(s, f.key, p, now[f.key]);
+        hints[f.key].textContent = checked.ok ? eff.text : checked.error;
+        hints[f.key].className = `note ai-hint${checked.ok ? "" : " ai-hint-err"}`;
+        if (!checked.ok && applies(s, f.key, p)) problems.push(`${f.label}: ${checked.error}`);
+        if (f.kind === "number") inputs[f.key].placeholder = checked.ok && eff.value != null ? String(eff.value) : "default";
+      });
+      if (announce) {
+        warnBox.replaceChildren(
+          ...problems.map((w) => el("p", "note ai-warn ai-warn-err", w)),
+          ...warnings(s, p, now).map((w) => el("p", "note ai-warn", w)),
+        );
+      }
+    };
     sync();
     const enabled = check("Use this model to confirm CVE matches", s.enabled);
     const fire = check(
@@ -214,8 +273,32 @@ const sections = {
       const r = await api("POST", "cve_guidance/run", { count: guideNow.value });
       guideNote.textContent = `Queued: the model writes guidance for the next ${r.queued} CVEs. Progress shows here after a refresh.`;
     }, "btn ghost sm");
+    const verified = el("p", "note", "");
+    const showVerified = () => {
+      verified.textContent = s.verified_at
+        ? `Connection verified ${new Date(s.verified_at).toLocaleString()}.`
+        : "Not tested since the last change.";
+    };
+    showVerified();
+    const status = el("p", "msg", "", { role: "status", "aria-live": "polite", hidden: "" });
+    const say = (message, ok) => {
+      status.hidden = !message;
+      status.className = `msg ${ok ? "ok" : "err"}`;
+      status.textContent = message || "";
+    };
     const save = async () => {
-      await api("PUT", "ai", {
+      const { values, errors } = collect(s, drafts(), provider.value); // only what the chosen provider uses: a hidden box cannot be fixed
+      const bad = FIELDS.find((f) => errors[f.key]);
+      if (bad) {
+        adv.open = true;
+        refreshHints();
+        inputs[bad.key].focus();
+        const message = `${bad.label}: ${errors[bad.key]}`;
+        say(message, false); // beside the toast, which goes after 3.5 seconds
+        throw new Error(message);
+      }
+      const saved = await api("PUT", "ai", {
+        ...values,
         cve_guidance_daily: guideDaily.value,
         plan_daily_total: planTotal.value,
         plan_daily_per_project: planProject.value,
@@ -227,8 +310,11 @@ const sections = {
         auto_fire: fire.box.checked,
         auto_fire_max_scans: max.value,
       });
+      Object.assign(s, saved); // the stored provider, address and settings, so a later change of provider restores the right address
       key.value = "";
-      key.placeholder = "saved (leave blank to keep)";
+      key.placeholder = s.has_key ? "saved (leave blank to keep)" : "API key";
+      showVerified();
+      refreshHints();
     };
     m.append(
       card(
@@ -241,6 +327,7 @@ const sections = {
         })(),
         keyField,
         baseField,
+        adv,
         enabled.wrap,
         field("Validation planning requests per day, all projects", planTotal),
         field("Validation planning requests per day, one project", planProject),
@@ -252,7 +339,9 @@ const sections = {
           f.append(row);
           return f;
         })(),
+        verified,
         button("Save", async () => {
+          say("");
           await save();
           toast("Saved");
         }),
@@ -260,12 +349,21 @@ const sections = {
         button(
           "Save and test",
           async () => {
+            say("");
             await save();
-            const r = await api("POST", "ai/test");
-            toast(`Connection OK: ${r.reply}`);
+            say("Testing the connection…", true);
+            try {
+              const r = await api("POST", "ai/test");
+              say(`Connection OK. The model answered: ${r.reply}`, true);
+            } catch (err) {
+              say(err.message, false); // stays on the page: the sentence says what to change
+            }
+            Object.assign(s, await api("GET", "ai")); // verified_at moved
+            showVerified();
           },
           "btn ghost",
         ),
+        status,
       ),
     );
     const seedState = await api("GET", "cve_seed");

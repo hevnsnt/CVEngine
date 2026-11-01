@@ -209,6 +209,40 @@ class StreamEventsProcessTests(unittest.TestCase):
 			list(stream_events(['example.com'], problems=problems))
 		self.assertEqual(problems, [('shodan_dns', 'Error with API (401 Unauthorized')])
 
+	def test_a_hard_failed_module_is_collected_with_the_first_line_of_its_reason(self):
+		# the lines bbot 3.0.2 logs when gowitness cannot start Chrome (module line, then the summary naming it again)
+		script = ('import sys\n'
+		          'print("[ERRR] Setup hard-failed for gowitness: Failed to set up Google chrome. Please install manually and set '
+		          '`chrome_path`, or try again with --force-deps.", file=sys.stderr)\n'
+		          'print("[ERRR] Setup hard-failed for 1 modules (gowitness)", file=sys.stderr)\n'
+		          'print("[WARN] Setup soft-failed for shodan_dns: Error with API (401 Unauthorized", file=sys.stderr)\n'
+		          'print(\'{"type": "DNS_NAME", "data": "a.com", "host": "a.com"}\')\n')
+		problems, hard = [], []
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', script]):
+			list(stream_events(['example.com'], problems=problems, hard_failures=hard))
+		self.assertEqual(hard, [('gowitness', 'Failed to set up Google chrome. Please install manually and set `chrome_path`, '
+		                                       'or try again with --force-deps.')])
+		self.assertEqual(problems, [('shodan_dns', 'Error with API (401 Unauthorized')])  # soft failures are unchanged
+
+	def test_hard_failure_parsing_of_single_lines(self):
+		from reNgine.bbot import _note_hard_failure
+		hard = []
+		_note_hard_failure('18:42:01 [ERRR] Setup hard-failed for 2 modules (gowitness,baddns)', hard)  # the summary alone: names, no reason
+		self.assertEqual(hard, [('gowitness', ''), ('baddns', '')])
+		_note_hard_failure('18:42:00 [ERRR] bbot.modules.gowitness: Setup hard-failed for gowitness: chrome --version failed', hard)
+		self.assertEqual(hard, [('gowitness', 'chrome --version failed'), ('baddns', '')])  # the reason fills in, no duplicate
+		_note_hard_failure('[ERRR] Setup hard-failed for gowitness: a different reason', hard)
+		self.assertEqual(hard[0], ('gowitness', 'chrome --version failed'))  # the first reason stays
+		_note_hard_failure('[INFO] Setup succeeded for 20/22 modules.', hard)
+		_note_hard_failure('[WARN] Setup soft-failed for shodan_dns: Error with API', hard)
+		self.assertEqual(len(hard), 2)
+
+	def test_a_clean_run_collects_no_hard_failures(self):
+		hard = []
+		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', 'pass']):
+			list(stream_events(['example.com'], hard_failures=hard))
+		self.assertEqual(hard, [])
+
 	def test_a_clean_empty_scan_is_still_not_an_error(self):
 		with mock.patch('reNgine.bbot.build_command', return_value=[sys.executable, '-c', 'pass']):
 			self.assertEqual(list(stream_events(['example.com'])), [])

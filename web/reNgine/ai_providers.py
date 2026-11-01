@@ -796,11 +796,12 @@ def get_provider(name, model=None, api_key=None, base_url=None, runtime=None):
 
 def provider_defaults(name):
 	"""What a request gets for each setting when neither the Settings page nor the environment sets it, for the page's hints: the answer
-	time, the connect time, the reply limit (None: none is sent), the triage limit where a stage has its own, whether a schema is sent."""
+	time, the connect time, the reply limit (None: none is sent), the triage limit where a stage has its own, whether a schema is sent, whether a reasoning field can be sent at all."""
 	profile = PROFILES[name]
 	return {'request_timeout': PROVIDERS[name].timeout, 'connect_timeout': CONNECT_TIMEOUT, 'max_tokens': profile.reply_cap or None,
 		'triage_max_tokens': STAGE_REPLY_CAPS['triage'] if profile.reply_cap and profile.reply_cap_by_stage else None,
-		'structured': bool(profile.structured and profile.structured_default), 'structured_possible': bool(profile.structured)}
+		'structured': bool(profile.structured and profile.structured_default), 'structured_possible': bool(profile.structured),
+		'reasoning_sent': bool(profile.reasoning_field)}  # False: reasoning is switched on the server (vLLM, LM Studio) or not at all (OpenRouter)
 
 
 def effective_settings(name, model, runtime):

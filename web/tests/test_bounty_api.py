@@ -287,7 +287,7 @@ class EngagementTests(BountyBase):
         self.assertNotIn('status.acme.test', values)
         self.assertFalse(plan['discovery'])
         call(self.c, 'PATCH', url, {'project': 'a1', 'acknowledge': True})
-        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('agentapi.services._start_discoveries') as disc:
+        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None), mock.patch('agentapi.services._start_discoveries') as disc:
             status, out = call(self.c, 'POST', url + '/import', {'project': 'a1', 'dry_run': False, 'values': ['www.acme.test', 'not-in-plan.example']})
         self.assertEqual(status, 200)
         self.assertEqual((out['requested'], out['created'], out['discovery_started']), (1, 1, False))
@@ -302,7 +302,7 @@ class EngagementTests(BountyBase):
         url = f'{B}engagements/{e["id"]}'
         call(self.c, 'PATCH', url, {'project': 'a1', 'acknowledge': True})
         self.assertEqual(call(self.c, 'PATCH', url, {'project': 'a1', 'automated_ok': True})[0], 200)
-        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('agentapi.services._start_discoveries', return_value=[mock.Mock(id=1)]) as disc:
+        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None), mock.patch('agentapi.services._start_discoveries', return_value=[mock.Mock(id=1)]) as disc:
             _, out = call(self.c, 'POST', url + '/import', {'project': 'a1', 'dry_run': False, 'values': ['www.acme.test']})
         disc.assert_called_once()
         self.assertTrue(out['discovery_started'])
@@ -421,7 +421,7 @@ class BugBountyOrgTests(BountyBase):
     def test_importing_scope_adds_the_targets_to_the_engagements_own_project(self):
         _, e = self.create()
         call(self.c, 'PATCH', f'{B}engagements/{e["id"]}', {'project': e['project'], 'acknowledge': True})
-        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('agentapi.services._start_discoveries'):
+        with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None), mock.patch('agentapi.services._start_discoveries'):
             status, out = call(self.c, 'POST', f'{B}engagements/{e["id"]}/import', {'project': e['project'], 'dry_run': False, 'values': ['www.acme.test']})
         self.assertEqual((status, out['created']), (200, 1))
         self.assertTrue(Domain.objects.filter(project__slug=e['project'], name='www.acme.test').exists())

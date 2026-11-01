@@ -330,7 +330,29 @@ _CONFIG_REJECTED = re.compile(r'Error parsing command-line (?:config option|pres
 # "Setup soft-failed for shodan_dns: Error with API (401 Unauthorized": a module that could not start (a rejected or missing key)
 # is skipped and the scan goes on, so this line is the only place a rejected key shows
 _SOFT_FAIL = re.compile(r'Setup soft-failed for (\w+): (.{1,200})')
+# "Setup hard-failed for gowitness: Failed to set up Google chrome. Please install manually ...": a module whose set-up returned False or
+# raised. With --force (the standard and deep modes) bbot logs it and carries on without the module, so this line is the only place it shows.
+# bbot then adds a summary line, "Setup hard-failed for 1 modules (gowitness)", which names the modules without a reason.
+_HARD_FAIL = re.compile(r'Setup hard-failed for (\w+): (.{1,200})')
+_HARD_FAIL_SUMMARY = re.compile(r'Setup hard-failed for \d[\d,]* modules \(([^)]*)\)')
 _ERROR_LINE = re.compile(r'(?:\b\w*(?:Error|Exception)\b|\bfailed\b|\bFailed\b|\bCRITICAL\b)')
+
+
+def _note_hard_failure(line, hard_failures):
+    """Add ``(module, reason)`` to ``hard_failures`` for a bbot log ``line`` that reports a module whose set-up hard-failed. A module is
+    listed once; the line that carries a reason replaces an earlier summary entry that named it without one."""
+    found = _HARD_FAIL.search(line)
+    if found:
+        entries = [(found.group(1), found.group(2).strip())]
+    else:
+        summary = _HARD_FAIL_SUMMARY.search(line)
+        entries = [(name.strip(), '') for name in (summary.group(1).split(',') if summary else []) if name.strip()]
+    for module, reason in entries:
+        known = [i for i, (name, _reason) in enumerate(hard_failures) if name == module]
+        if not known:
+            hard_failures.append((module, reason))
+        elif reason and not hard_failures[known[0]][1]:
+            hard_failures[known[0]] = (module, reason)
 
 
 def config_secrets(extra_args):
@@ -401,10 +423,12 @@ def private_config(extra_args):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False, problems=None):
+def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False, problems=None,
+                  hard_failures=None):
     """Run bbot and yield decoded JSON events as they arrive; API keys in ``extra_args`` reach bbot through a private temporary
     config file (see private_config), never through its command line. ``problems``, when given, collects ``(module, reason)`` for every
-    module bbot skipped at start-up. See _stream_events for the rest.
+    module bbot skipped at start-up; ``hard_failures`` the same for modules whose set-up hard-failed (the reason is empty when only
+    bbot's summary line named the module). See _stream_events for the rest.
 
     Settings > Proxy (``cveFeed.egress_proxy``) is applied through bbot's own ``web.http_proxy`` setting, so the HTTP requests of its modules
     go through it (the passive modules' calls to third-party services included: bbot cannot tell them apart). The proxy URL (it may carry a
@@ -414,11 +438,11 @@ def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIME
     extra_args = [*(extra_args or ()), *egress_proxy.for_tool('bbot')]
     with private_config(extra_args) as args:
         yield from _stream_events(targets, presets, mode, timeout, args, secrets=config_secrets(extra_args), strict_scope=strict_scope,
-                                  problems=problems)
+                                  problems=problems, hard_failures=hard_failures)
 
 
 def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), secrets=None, strict_scope=False,
-                   problems=None):
+                   problems=None, hard_failures=None):
     """Run bbot and yield decoded JSON events as they arrive (kills bbot after ``timeout`` seconds).
 
     A nonzero exit or timeout is a failed discovery even if it emitted partial events.
@@ -448,6 +472,8 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
                 found = _SOFT_FAIL.search(line)
                 if found and problems is not None:
                     problems.append((found.group(1), found.group(2).strip()))
+                if hard_failures is not None:
+                    _note_hard_failure(line, hard_failures)
 
         drain = threading.Thread(target=_drain_stderr, daemon=True)
         drain.start()
