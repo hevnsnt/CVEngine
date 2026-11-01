@@ -628,6 +628,7 @@ class ReaperAndLimitsTests(Base):
         self.assertTrue(many.time_limit and many.time_limit > 6 * 3600)
 
 
+@mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop: chunks one after another through dispatch_or_none (the fan-out has its own tests)
 class SentinelChunkTests(SimpleTestCase):
     def test_every_chunk_of_a_long_address_list_goes_to_a_sentinel(self):
         targets = [f'198.51.100.{i}' for i in range(1, 101)] + [f'203.0.113.{i}' for i in range(1, 51)]  # 150 addresses: three chunks

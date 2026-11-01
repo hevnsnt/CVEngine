@@ -748,7 +748,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None):
     exists (the work cannot go to one), ``free`` when at least one has a slot to take it now, ``busy`` when live eligible Sentinels exist and every
     one is at its concurrency limit (the work should wait for a slot, not run somewhere else). A Sentinel's slots are its ``max_concurrent``, and
     a slot is in use while it holds a task (claimed or running), whatever the kind. A task already queued for ``kind`` in this project is promised
-    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, a dispatcher's own)."""
+    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, or an iterable of them: a dispatcher's own)."""
     now = now or timezone.now()
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
     if not live:
@@ -760,7 +760,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None):
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
         if exclude is not None:
-            waiting = waiting.exclude(pk=exclude)
+            waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
         free = max(0, free - waiting.count())
     return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
 
