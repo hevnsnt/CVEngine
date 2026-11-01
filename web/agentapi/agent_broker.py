@@ -49,6 +49,7 @@ MAX_CHECKS = 20
 MAX_NOTE = 200
 RATES = {'register': (30, 3600), 'heartbeat': (120, 60), 'claim': (60, 60), 'report': (120, 60), 'release': (120, 60), 'queue': (30, 60)}
 ADMIN_STATUSES = ('active', 'suspended', 'revoked')
+INHERITED_SUSPENSION_NOTE = 'another agent of this user is suspended or revoked; an administrator must reinstate this one'  # migration 0008 matches it
 STATUS_ORDER = ('queued', 'assigned', 'running', 'completed', 'failed', 'cancelled')
 
 
@@ -196,7 +197,7 @@ def _initial_status(user):
     agent starts suspended. Otherwise an administrator's agent is active at once and anyone else's waits for approval, because an agent
     can take work, and report it fixed, in every project its user writes to."""
     if Agent.objects.filter(token__user=user, status__in=('suspended', 'revoked')).exists():
-        return 'suspended', 'another agent of this user is suspended or revoked; an administrator must reinstate this one'
+        return 'suspended', INHERITED_SUSPENSION_NOTE
     return ('active', '') if roles.is_admin_anywhere(user) else ('pending', '')
 
 
@@ -1045,8 +1046,14 @@ def update_agent(ctx, agent_id, body):
         agent.status = body['status']
     if 'limits' in body:
         agent.limits = _clean_limits(body['limits'])
-    if 'note' in body:
-        agent.status_note = _text(body['note'], MAX_NOTE)
+    note = _text(body['note'], MAX_NOTE) if 'note' in body else None
+    if agent.status != before['status'] and note in (None, agent.status_note):
+        # The note explains the status it was written with ("another agent of this user is suspended ..."): a change of status that brings no
+        # new note clears it, so an approved or reinstated agent is not shown with the reason it was held back. (The admin dialog sends the note
+        # field back unchanged with every action, which counts as no new note.)
+        agent.status_note = ''
+    elif note is not None:
+        agent.status_note = note
     agent.status_by = ctx.user
     agent.save()
     if 'settings' in body:
