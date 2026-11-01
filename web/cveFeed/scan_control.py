@@ -17,6 +17,7 @@ PAUSE_EXEMPT_TASKS = frozenset({
     'check_for_updates', 'refresh_sentinel_version', 'feed_sentinels', 'update_nuclei_templates', 'prune_asset_changes', 'prune_scan_history', 'report_resources', 'apply_scan_concurrency', 'rescore_all_hosts',
     'reconcile_invalid_correlations', 'weekly_maintenance', 'reap_stuck_jobs', 'send_notif',
     'send_task_notif', 'snapshot_daily_stats', 'bootstrap_first_run', 'evaluate_saved_searches',
+    'refresh_live_snapshots',  # the Live screen's cache keeps answering while scanning is paused: people watch a pause too
     # The OpenVAS step is exempt so that a pause can reach a GVM task that is already running: while scanning is paused it only stops
     # that task (``openvas_scan.tick``), and never starts or dispatches one.
     'openvas_sweep',

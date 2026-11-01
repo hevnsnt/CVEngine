@@ -74,6 +74,7 @@ def serve_tls(workdir):
         return None
     secure = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2  # no TLS 1.0 or 1.1, even in a throw-away test server
     context.load_cert_chain(cert, key)
     secure.socket = context.wrap_socket(secure.socket, server_side=True)
     threading.Thread(target=secure.serve_forever, daemon=True).start()

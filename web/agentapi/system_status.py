@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'screenshot_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'live_cache_queue', 'screenshot_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
@@ -404,6 +404,28 @@ def _udp_scan(problems):
     return udp_scan.status(problems)
 
 
+def _live_cache(notes):
+    """The Live screen's snapshot cache (``cveFeed.snapshot_cache``, ``cveFeed.live_refresh``): whether the refresher is on and running, how many
+    scopes are hot, and how this hour's and the last hour's polls were answered (served from the cache fresh or stale, computed by the request,
+    waited for another request's answer; ``refreshed`` is the refresher's own work). A poll should almost never be a ``miss`` while the
+    refresher runs."""
+    from cveFeed import snapshot_cache
+    from reNgine import livecache_config
+    enabled, interval = livecache_config.refresh_enabled(), livecache_config.refresh_seconds()
+    last = snapshot_cache.last_beat()
+    out = {'refresher': 'off' if not enabled else ('running' if snapshot_cache.refresher_alive() else 'silent'),
+           'interval_seconds': interval, 'hot_seconds': livecache_config.hot_seconds(),
+           'auth_cache_seconds': livecache_config.auth_cache_seconds(),
+           'hot_scopes': len(snapshot_cache.hot_recipes()),
+           'last_run': None if not last else {'seconds_ago': round(snapshot_cache._clock() - last['at'], 1),
+                                              **{k: last[k] for k in ('state', 'hot', 'refreshed', 'errors', 'seconds', 'overran', 'skipped') if k in last}},
+           'polls': snapshot_cache.metrics()}
+    if enabled and out['refresher'] == 'silent' and out['hot_scopes']:  # people are on the Live screen and nothing keeps it warm
+        notes.append('the live cache refresher has not run lately (is celery beat running, and does the classic worker consume live_cache_queue?): the Live screen computes '
+                     'its numbers on request until it does')
+    return out
+
+
 SENTINEL_RECENT_ERRORS = 10
 SENTINEL_ERROR_RATE_PROBLEM = 0.5  # failed/expired share of the last day's finished tasks that counts as a problem, once there are enough to judge
 
@@ -503,6 +525,7 @@ def _system(user, problems, notes):
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
     out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))
     out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
+    out['live_cache'] = _probe(problems, 'live_cache', lambda: _live_cache(notes))
     out['tools'] = _probe(problems, 'tools', _tools)
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:

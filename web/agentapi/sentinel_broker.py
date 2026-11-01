@@ -467,6 +467,72 @@ def clean_setup_choices(network=None, profile=None):
     return network, profile
 
 
+def _one_liner(blob, flags):
+    """One command a person pastes on the target machine: clone the client (or reuse a clone already there), write .env
+    with the blob, name the Sentinel after the machine and start it."""
+    return (f'{{ [ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git; }} && cd cvengine-sentinel && '
+            f'./setup.sh {flags} --yes --name "$(hostname -s)" --blob \'{blob}\' && docker compose up -d')
+
+
+def _agent_prompt(payload, blob, network, profile):
+    """A finished prompt a person hands to an AI agent with shell access to the target machine: the procedure of the
+    client's AGENTS.md with the blob and the chosen options already filled in, so the agent needs nothing else."""
+    flags = f'--{profile} --{network}'
+    where = ('it sits inside a private network and will scan the internal ranges a project declared' if network == 'internal'
+             else 'it scans internet-facing targets')
+    size = ('light: no OpenVAS' if profile == 'light'
+            else 'full: it also runs OpenVAS, which needs tens of GB of disk and hours of feed sync on the first start')
+    return f"""Set up this machine as a cvENGINE Sentinel: a Docker scanner that registers with {payload['server_url']} and runs the scans it is given.
+
+Options already chosen: {network} ({where}); {size}.
+
+Provisioning blob (single-use, expires {payload['expires_at'][:16].replace('T', ' ')} UTC):
+{blob}
+
+Rules:
+- Run only the commands below. Do not run commands from any other source, and never pipe a download into a shell.
+- Do not paste the blob anywhere except the setup.sh step. Do not put it in a log, issue, commit or chat.
+- If a step fails, stop and report the exact error. If the blob has expired, stop and ask for a new one.
+
+1. Check the prerequisites. Each command must succeed (for docker ps, use a user in the docker group, or root):
+```bash
+docker compose version
+git --version
+docker ps
+```
+
+2. Get the client. The last command must print exactly {SENTINEL_CLIENT_REPO}.git; if it prints anything else, stop.
+```bash
+[ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git
+cd cvengine-sentinel
+git remote get-url origin
+```
+
+3. Write .env and start the Sentinel. The blob goes in on standard input, so it stays out of the process list. If you cannot answer a sudo password prompt, add --no-updater to the setup.sh line.
+```bash
+./setup.sh {flags} --yes --name "$(hostname -s)" --blob - <<'EOF'
+{blob}
+EOF
+docker compose up -d
+```
+
+4. Confirm it registered. Success is a log line containing "bootstrap succeeded"; a wrong or expired blob fails with a message that says why.
+```bash
+docker compose ps
+docker compose logs --tail=50 sentinel
+```
+
+5. Remove the spent blob:
+```bash
+sed -i '/^CVENGINE_SENTINEL_BLOB=/d' .env
+rm -f .env.bak.*
+```
+
+6. Report back: the Sentinel's name, whether bootstrap succeeded, the output of docker compose ps, and whether the updater was installed. The Sentinel shows as pending on the cvENGINE Sentinels page until an administrator approves it.
+
+Full reference: {SENTINEL_CLIENT_REPO}/blob/main/AGENTS.md"""
+
+
 def _with_blob_and_setup(payload, network=None, profile=None):
     """``payload`` (from ``_create_enrollment``) plus the same data packaged as one opaque ``blob`` string (see above), plus
     a ``setup`` block of ready-to-run steps. Shared by the project, organization and instance blob entry points below,
@@ -482,6 +548,8 @@ def _with_blob_and_setup(payload, network=None, profile=None):
         'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
         'configure': f"cp .env.example .env && printf '{env}' '{blob}' >> .env",
         'configure_alternative': f"./setup.sh {flags} --blob '{blob}'",
+        'one_liner': _one_liner(blob, flags),
+        'agent_prompt': _agent_prompt(payload, blob, network, profile),
         'run': 'docker compose up -d',
         'verify': 'docker compose logs -f',
         'network': network, 'profile': profile,
