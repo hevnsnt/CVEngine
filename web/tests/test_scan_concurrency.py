@@ -293,6 +293,34 @@ class AdmissionTests(Isolated, TestCase):
 		with mock.patch.object(res, 'redis_client', side_effect=ConnectionError('redis is down')):
 			self.assertEqual(res.max_concurrent('nmap'), 5)
 
+	def test_a_flushed_redis_does_not_put_a_saved_limit_back_to_the_default(self):
+		"""Redis answers but the published copy is gone (restart without persistence, a flush): the database is the truth, read and published again."""
+		sc.update({'heavy.nmap': 5, 'work_depth': 7}, self.root)
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		self.assertEqual(res.max_concurrent('nmap'), 5)  # not 2
+		self.assertEqual(conductor.wanted_depth(), 7)
+		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'heavy.nmap': 5, 'work_depth': 7})  # published again
+
+	def test_a_copy_nobody_can_read_is_no_copy_for_admission_either(self):
+		sc.update({'heavy.nmap': 5}, self.root)
+		sc._redis().set(sc.VALUES_KEY, 'not json')
+		sc.invalidate()
+		self.assertEqual(res.max_concurrent('nmap'), 5)
+
+	def test_a_flushed_redis_with_the_database_down_keeps_the_last_copy_and_a_read_does_not_create_the_row(self):
+		sc.update({'heavy.nmap': 5}, self.root)
+		self.assertEqual(res.max_concurrent('nmap'), 5)
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		with mock.patch.object(sc, 'recover', side_effect=RuntimeError('db down')):
+			self.assertEqual(res.max_concurrent('nmap'), 5)
+		ScanConcurrency.objects.all().delete()
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		self.assertEqual(res.max_concurrent('nmap'), 2)  # nothing saved any more
+		self.assertEqual(ScanConcurrency.objects.count(), 0)
+
 	def test_a_reading_failure_is_not_retried_on_every_call(self):
 		sc.invalidate()
 		with mock.patch.object(res, 'redis_client', side_effect=ConnectionError('redis is down')) as attempts:

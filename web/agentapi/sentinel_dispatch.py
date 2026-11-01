@@ -311,7 +311,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     A window of chunk tasks is created up front and waited for in ONE poll loop (one read of all of them per tick); each finished chunk refills the
     window. Its width is the smallest of: the chunks left, the slots this stage holds plus the project's free Sentinel slots (never more chunk
     tasks than slots, so none queues behind its own stage's chunks), twice the instance's slots divided among the scans dispatching now (one scan
-    does not take every slot), and ``CVENGINE_STAGE_PARALLEL`` (default 4). The free slots and the other scans are read again on every refill, so
+    does not take every slot), and ``CVENGINE_STAGE_PARALLEL`` (default 4, saved on Settings, configMaxxing: read ONCE when the stage starts, so a change applies from the next stage and a stage in flight keeps the ceiling it began with). The free slots and the other scans are read again on every refill, so
     a slot another stage took is not counted on; the instance's slot total is read once, when the stage starts. When no live Sentinel is left, or one never claims a
     task, no more chunks are sent: that chunk and every chunk not yet sent are yielded as ``None`` after the in-flight ones finish. A chunk
     that failed or expired after a Sentinel took it falls back alone, and the rest carry on.
@@ -326,13 +326,13 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     if not chunks:
         return
     prepare = prepare or (lambda chunk: ({'addresses': chunk}, chunk))
-    if stage_parallel() <= 1 or len(chunks) == 1:
+    ceiling = stage_parallel()  # read once per stage: a stage already in flight keeps the ceiling it started with
+    if ceiling <= 1 or len(chunks) == 1:
         yield from _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none)
         return
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from reNgine import resources
-    ceiling = stage_parallel()
     total = sentinel_broker.total_slots()
     pending = list(range(len(chunks)))  # chunk indexes not sent yet, in order
     flying = {}  # index -> _Dispatch

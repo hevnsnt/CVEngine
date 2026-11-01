@@ -87,18 +87,50 @@ class RegistryTests(Isolated, SimpleTestCase):
         self.assertEqual(re.findall(r'registerTunableGroup\("([a-z_]+)", "([^"]+)"\);', source), [(g.id, g.title) for g in tunables.GROUPS])
         self.assertIn('tunables-card.js', (WEB / 'static' / 'cve' / 'settings.js').read_text())
 
+    def python_files(self):
+        for path in WEB.rglob('*.py'):
+            if 'tests' in path.parts or path.name == 'tunables.py' or 'migrations' in path.parts:
+                continue
+            yield path
+
     def test_no_code_reads_a_registered_variable_around_the_registry(self):
         """Reading the environment directly would ignore what an App Admin saved: every reader goes through tunables.value."""
         names = '|'.join(re.escape(t.env) for t in tunables.TUNABLES)
         pattern = re.compile(rf'(environ|getenv)[^\n]*({names})\b')
         offenders = []
-        for path in WEB.rglob('*.py'):
-            if 'tests' in path.parts or path.name == 'tunables.py' or 'migrations' in path.parts:
-                continue
+        for path in self.python_files():
             for number, line in enumerate(path.read_text().splitlines(), 1):
                 if pattern.search(line) and not line.lstrip().startswith('#'):
                     offenders.append(f'{path.relative_to(WEB)}:{number}')
         self.assertEqual(offenders, [])
+
+    def test_no_code_reads_a_name_built_in_an_f_string_except_the_two_that_cannot_reach_a_registered_one(self):
+        """``environ.get(f'CVENGINE_{name}')`` could be a registered variable under another spelling, so each such reader is accounted for: the
+        template budget reader asks the registry first (a registered name never reaches the environment read), and the detection author's names are
+        not tunables."""
+        pattern = re.compile(r'(environ|getenv)[^\n]*\bf[\'"]CVENGINE_')
+        found = sorted(str(path.relative_to(WEB)) for path in self.python_files() if any(pattern.search(line) for line in path.read_text().splitlines()))
+        self.assertEqual(found, ['cveFeed/detection_author.py', 'cveFeed/templategen.py'])
+        from cveFeed import detection_author, templategen
+        self.assertFalse([k for k in detection_author.DEFAULTS if f'CVENGINE_{k}' in ENV_NAMES])
+        for name in templategen.GENERATION_DEFAULTS:  # a registered name is answered by the registry, whatever the environment says
+            if f'CVENGINE_{name}' in ENV_NAMES:
+                with mock.patch.dict(os.environ, {f'CVENGINE_{name}': '5'}), mock.patch.object(tunables, 'value', return_value=77) as asked:
+                    self.assertEqual(templategen.generation_limit(name), 77)
+                asked.assert_called_once()
+
+    def test_the_help_says_when_a_day_starts_and_what_a_change_applies_to(self):
+        for t in tunables.TUNABLES:
+            self.assertNotIn('server time', t.help, t.key)
+            if t.key.startswith(('triage_max_per_project_day', 'triage_max_per_day', 'validate_max_per_project_day', 'validate_max_per_day')):
+                self.assertIn('UTC midnight', t.help, t.key)
+        self.assertNotIn('server time', ''.join(g.intro for g in tunables.GROUPS))
+        self.assertIn('24 hours', tunables.BY_KEY['template_gen_max_per_day'].help)  # a rolling window, not a calendar day
+        self.assertEqual(tunables.BY_KEY['template_gen_max_per_day'].window, 'rolling_day')
+        self.assertEqual({t.window for t in tunables.TUNABLES if t.key.startswith(('triage_max_per_day', 'validate_max_per_day'))}, {'utc_day'})
+        note = tunables.BY_KEY['stage_parallel'].note
+        self.assertIn('next stage that starts', note)
+        self.assertIn('keeps the number it started with', note)
 
     def test_a_restart_tunable_says_so_and_a_live_one_does_not(self):
         self.assertEqual(tunables.APPLIES_TEXT[tunables.RESTART], 'Applies after the next restart')
@@ -120,15 +152,32 @@ class ResolveTests(Isolated, SimpleTestCase):
         self.assertEqual(tunables.resolve('triage_max_per_day', {'triage_max_per_day': 5}), {'value': 5, 'source': 'admin'})
 
     def test_the_environment_keeps_the_meaning_it_always_had(self):
-        # not a number, empty and not finite: the default; below the minimum: clamped up to it (the readers always did max(1, ...)); above the
-        # page's maximum: used as is (the environment was never range checked)
-        for raw, expected in (('lots', 'default'), ('', 'default'), ('  ', 'default'), ('nan', 'default'), ('inf', 'default'), ('0', 1), ('-4', 1), ('99999999', 99999999), ('7.9', 7)):
+        # an integer tunable reads a whole number, as int() always did: not a number, empty, a fraction ("7.9") or an exponent ("1e6") is the default (it is
+        # never silently truncated); below the minimum: clamped up to it (the readers always did max(1, ...)); above the page's maximum: used as is
+        for raw, expected in (('lots', 'default'), ('', 'default'), ('  ', 'default'), ('nan', 'default'), ('inf', 'default'), ('7.9', 'default'), ('1e6', 'default'),
+                              ('0', 1), ('-4', 1), ('99999999', 99999999), (' 6 ', 6)):
             os.environ['CVENGINE_STAGE_PARALLEL'] = raw
             got = tunables.resolve('stage_parallel', {})
             if expected == 'default':
                 self.assertEqual((got['value'], got['source']), (4, 'default'), raw)
             else:
                 self.assertEqual((got['value'], got['source']), (expected, 'environment'), raw)
+
+    def test_an_environment_number_of_hours_cannot_overflow_a_timedelta(self):
+        from datetime import timedelta
+
+        from cveFeed import conductor, coverage_topup
+        os.environ['CVENGINE_WORK_MIN_GAP_HOURS'] = '99999999999999'
+        os.environ['CVENGINE_SENTINEL_REFRESH_GAP_HOURS'] = '1e30'
+        self.assertEqual(tunables.value('work_min_gap_hours'), tunables.HOURS_CEILING)
+        self.assertEqual(tunables.value('sentinel_refresh_gap_hours'), tunables.HOURS_CEILING)
+        self.assertEqual(conductor.min_gap(), timedelta(hours=tunables.HOURS_CEILING))
+        self.assertEqual(coverage_topup.refresh_gap(), timedelta(hours=tunables.HOURS_CEILING))
+        os.environ['CVENGINE_SENTINEL_REFRESH_GAP_HOURS'] = 'inf'
+        self.assertEqual(tunables.resolve('sentinel_refresh_gap_hours', {})['source'], 'default')
+        os.environ['CVENGINE_VALIDATE_MIN_GAP_HOURS'] = '1e40'
+        from cveFeed import hot_validation
+        self.assertEqual(hot_validation.min_gap_hours(), float(tunables.HOURS_CEILING))
 
     def test_hours_may_be_a_fraction_in_the_environment_and_zero_turns_the_gap_off(self):
         os.environ['CVENGINE_VALIDATE_MIN_GAP_HOURS'] = '0.5'
@@ -281,12 +330,34 @@ class SavingTests(Isolated, TestCase):
         self.assertEqual(sorted(groups.values_list('target', flat=True)), ['ai_spend', 'throughput'])
         self.assertEqual(AuditLog.objects.filter(action='tunable.reset').count(), 3)
 
+    def test_the_snapshot_carries_what_the_cards_need_for_warnings_usage_and_when_a_change_applies(self):
+        from cveFeed import triage, validation
+        with mock.patch.object(triage, 'asked_today', return_value=7), mock.patch.object(validation, 'ran_today', return_value=11):
+            status, data = send(self.c, 'GET', 'tunables')
+        triage_day, validate_day, drafts = (self.field(data, k) for k in ('triage_max_per_day', 'validate_max_per_day', 'template_gen_max_per_day'))
+        self.assertEqual((triage_day['used_today'], triage_day['used_since'], triage_day['caution'], triage_day['window_text']),
+                         (7, 'since UTC midnight', 'cap', 'at the next UTC midnight'))
+        self.assertEqual((validate_day['used_today'], validate_day['used_since']), (11, 'since UTC midnight'))
+        self.assertEqual((drafts['used_today'], drafts['used_since']), (0, 'in the last 24 hours'))
+        self.assertIsNone(self.field(data, 'stage_parallel')['used_today'])
+        self.assertEqual(self.field(data, 'stage_parallel')['applies_text'], tunables.BY_KEY['stage_parallel'].note)
+        self.assertEqual(self.field(data, 'triage_max_per_run')['window_text'], 'at the next run')
+        self.assertEqual(self.field(data, 'work_min_gap_hours')['caution'], 'rescan')
+        self.assertEqual(triage_day['applies_text'], 'Applies within a few seconds, with no restart')
+
+    def test_a_counter_that_cannot_be_read_is_left_out_not_guessed(self):
+        from cveFeed import triage
+        with mock.patch.object(triage, 'asked_today', side_effect=RuntimeError('boom')):
+            data = send(self.c, 'GET', 'tunables')[1]
+        self.assertIsNone(self.field(data, 'triage_max_per_day')['used_today'])
+        self.assertIsNotNone(self.field(data, 'validate_max_per_day')['used_today'])
+
     def test_the_values_are_one_for_the_instance_and_the_page_shows_no_project_data(self):
         status, data = send(self.c, 'GET', 'tunables')
         self.assertEqual(status, 200)
         self.assertEqual(set(data), {'fields', 'groups', 'cache_seconds'})
         allowed = {'key', 'label', 'help', 'group', 'default', 'min', 'max', 'unit', 'value', 'source', 'env_name', 'env_value', 'saved', 'set_by', 'set_at',
-                   'applies', 'applies_text'}
+                   'applies', 'applies_text', 'caution', 'window_text', 'used_today', 'used_since'}
         for f in data['fields']:
             self.assertEqual(set(f) - allowed, set(), f['key'])  # nothing about a project, an organization or a target can come along
 
@@ -300,24 +371,82 @@ class PublishTests(Isolated, TestCase):
         tunables.update({'triage_max_per_day': 800}, self.root)
         self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {'triage_max_per_day': 800})
 
+    def test_a_flushed_redis_does_not_put_a_saved_cap_back_to_the_default(self):
+        """Redis answers but the copy is gone (restart without persistence, FLUSHALL, a recreated container): the database is the truth."""
+        tunables.update({'triage_max_per_day': 100, 'stage_parallel': 2}, self.root)
+        resources.redis_client().delete(tunables.VALUES_KEY)
+        tunables.invalidate()
+        self.assertEqual(tunables.value('triage_max_per_day'), 100)  # not 2000: no extra paid calls while the copy is missing
+        self.assertEqual(tunables.value('stage_parallel'), 2)
+        os.environ['CVENGINE_TRIAGE_MAX_PER_DAY'] = '900'
+        self.assertEqual(tunables.resolve('triage_max_per_day'), {'value': 100, 'source': 'admin'})
+
+    def test_the_copy_is_published_again_after_the_database_fallback_with_its_version(self):
+        tunables.update({'stage_parallel': 2}, self.root)
+        row = TunableSettings.current()
+        resources.redis_client().delete(tunables.VALUES_KEY)
+        tunables.invalidate()
+        self.assertEqual(tunables.value('stage_parallel'), 2)
+        copy = json.loads(resources.redis_client().get(tunables.VALUES_KEY))
+        self.assertEqual((copy['values'], copy['v']), ({'stage_parallel': 2}, row.updated_at.timestamp()))
+
+    def test_a_missing_copy_with_nothing_saved_is_published_as_empty_so_the_database_is_not_asked_again(self):
+        self.assertEqual(tunables.value('stage_parallel'), 4)
+        self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {})
+        self.assertEqual(TunableSettings.objects.count(), 0)  # a read never creates the row
+        with self.assertNumQueries(0):
+            tunables.invalidate()
+            tunables.value('stage_parallel')
+
+    def test_a_copy_nobody_can_read_is_no_copy(self):
+        tunables.update({'stage_parallel': 2}, self.root)
+        for junk in ('not json', '[1, 2]', json.dumps({'values': 'x'})):
+            resources.redis_client().set(tunables.VALUES_KEY, junk)
+            tunables.invalidate()
+            self.assertEqual(tunables.value('stage_parallel'), 2, junk)
+            self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {'stage_parallel': 2})
+
+    def test_an_unreachable_redis_keeps_the_last_copy_and_never_asks_the_database(self):
+        tunables.update({'triage_max_per_day': 100}, self.root)
+        self.assertEqual(tunables.value('triage_max_per_day'), 100)  # this process has the copy
+        TunableSettings.objects.update(values={'triage_max_per_day': 7})  # the database moved on, which a process that cannot reach Redis cannot know
+        tunables.invalidate()  # the cache window is over; the last copy is still held
+        with mock.patch.object(resources, 'redis_client', side_effect=OSError('redis down')), self.assertNumQueries(0):
+            self.assertEqual(tunables.stored_values(), {'triage_max_per_day': 100})
+
+    def test_a_flushed_redis_and_a_database_that_is_down_keeps_the_last_copy(self):
+        tunables.update({'triage_max_per_day': 100}, self.root)
+        tunables.stored_values()
+        tunables.invalidate()
+        resources.redis_client().delete(tunables.VALUES_KEY)
+        with mock.patch.object(tunables, '_database', side_effect=RuntimeError('db down')):
+            self.assertEqual(tunables.stored_values(), {'triage_max_per_day': 100})
+
     def test_a_flushed_redis_heals_on_the_next_tick_and_the_tick_is_wired_in(self):
         tunables.update({'stage_parallel': 2}, self.root)
         resources.redis_client().delete(tunables.VALUES_KEY)
-        tunables.invalidate()
-        self.assertEqual(tunables.value('stage_parallel'), 4)  # as far as this process can tell, nothing is saved
         self.assertTrue(tunables.reconcile())
-        tunables.invalidate()
-        self.assertEqual(tunables.value('stage_parallel'), 2)
+        self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {'stage_parallel': 2})
         from cveFeed import tasks
         with mock.patch('reNgine.resources.report_state'), mock.patch('cveFeed.scan_concurrency.reconcile'), mock.patch.object(tunables, 'reconcile') as tick:
             tasks.report_resources()
         tick.assert_called_once_with()
 
+    def test_a_tick_that_read_the_row_before_a_save_cannot_overwrite_the_save(self):
+        tunables.update({'stage_parallel': 2}, self.root)
+        stale_values, stale_version = tunables._database()
+        tunables.update({'stage_parallel': 9}, self.root)  # the save publishes itself ...
+        self.assertTrue(tunables.publish(stale_values, stale_version - 5))  # ... and the tick that read the row earlier arrives afterwards
+        self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {'stage_parallel': 9})
+        self.assertTrue(tunables.publish({'stage_parallel': 3}))  # an unversioned publish is written as it is
+        self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {'stage_parallel': 3})
+
     def test_reconcile_never_raises(self):
-        with mock.patch.object(tunables, 'saved_values', side_effect=RuntimeError('db down')):
+        with mock.patch.object(tunables, '_database', side_effect=RuntimeError('db down')):
             self.assertFalse(tunables.reconcile())
         with mock.patch.object(resources, 'redis_client', side_effect=OSError('redis down')):
             self.assertFalse(tunables.publish({'stage_parallel': 2}))
+            self.assertFalse(tunables.publish({'stage_parallel': 2}, 1.0))
 
 
 class CacheTests(Isolated, SimpleTestCase):
@@ -461,6 +590,15 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn('configMaxxing', row, t.env)
             self.assertIn(tunables.GROUP_BY_ID[t.group].title, row, t.env)
             self.assertRegex(row, rf'\b{t.low} to {t.high}\b', f'{t.env}: the row does not give the range the page allows')
+
+    def test_the_rows_say_when_a_day_starts_and_when_the_stage_ceiling_applies(self):
+        for key in ('triage_max_per_project_day', 'triage_max_per_day', 'validate_max_per_project_day', 'validate_max_per_day'):
+            self.assertIn('UTC midnight', self.row_for(tunables.BY_KEY[key].env), key)
+        self.assertIn('rolling window', self.row_for('CVENGINE_TEMPLATE_GEN_MAX_PER_DAY'))
+        stage = self.row_for('CVENGINE_STAGE_PARALLEL')
+        self.assertIn('next stage that starts', stage)
+        self.assertNotIn('next chunk of a running scan', stage)
+        self.assertNotIn('server time', '\n'.join(self.rows))
 
     def test_the_section_explains_the_precedence_and_the_groups(self):
         text = (ROOT / 'docs' / 'CONFIGURATION.md').read_text()

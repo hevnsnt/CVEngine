@@ -172,6 +172,18 @@ class WindowTests(StageBase):
         self.assertEqual(fake.peak_inflight, 2)  # the 2 free slots: no chunk task is created to queue behind its own stage's
         self.assertEqual(fake.peak_claimed, 2)
 
+    def test_a_stage_in_flight_keeps_the_ceiling_it_started_with_and_the_next_stage_takes_the_new_one(self):
+        """The ceiling is read once when a stage starts (Settings, configMaxxing says "from the next stage that starts")."""
+        agents = self.two_agents()
+        fake = FakeSentinels(agents, chunks_of(8), duration=lambda i: 5)
+        fake.hooks.append((2, lambda: os.environ.update(CVENGINE_STAGE_PARALLEL='1')))  # changed while the first chunks are running
+        got = self.fan_out(fake)
+        self.assertEqual((len(got), fake.peak_inflight), (8, 4))  # still the four it began with
+        self.assertEqual(dispatch.stage_parallel(), 1)  # a stage that starts now takes the new number
+        later = FakeSentinels(agents, chunks_of(4), duration=lambda i: 5)
+        self.fan_out(later)
+        self.assertEqual(later.peak_inflight, 1)
+
     def test_a_ceiling_below_the_free_slots_wins(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 5)
         with mock.patch.dict(os.environ, {'CVENGINE_STAGE_PARALLEL': '2'}):

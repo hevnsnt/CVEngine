@@ -37,13 +37,20 @@ Group = namedtuple('Group', 'id title intro')
 # key: stable id (also the API and database key). env: the environment variable that existed before the page. default/low/high: whole numbers;
 # the environment is clamped up to ``low`` as every reader always did, but never capped at ``high``. ``unit`` is a few words shown beside the
 # box. ``env_float``: the environment may hold a fraction (hours), which is passed through as it always was.
-Tunable = namedtuple('Tunable', 'key label help group env default low high unit applies env_float', defaults=(LIVE, False))
+# ``caution``: ``cap`` (a number that limits paid calls or work per run or day: the page warns, softly, about a value far below or far above the default),
+# ``rescan`` (0 means continuous rescans) or ``None``. ``window``: when a cap counts from again (``run``, ``utc_day``, ``rolling_day``). ``note``: a
+# sentence that replaces the standard "applies" text where a tunable is read less often than on every use.
+Tunable = namedtuple('Tunable', 'key label help group env default low high unit applies env_float caution window note',
+                     defaults=(LIVE, False, None, None, None))
+HOURS_CEILING = 24 * 365 * 10  # an environment value in hours is held to ten years before it reaches a timedelta
+USED_SINCE = {'utc_day': 'since UTC midnight', 'rolling_day': 'in the last 24 hours'}
+WINDOW_TEXT = {'run': 'at the next run', 'utc_day': 'at the next UTC midnight', 'rolling_day': 'as the oldest of the last 24 hours ages out'}
 
 GROUPS = [
     Group('ai_spend', 'AI spend',
           'Every triage question, validation check and template draft is a call to your AI provider, which costs money with a paid key. '
-          'Lower numbers spend less and leave more work waiting for the next day; higher numbers clear a backlog faster. A day starts at midnight (server time). '
-          'The AI model tab holds the provider, the model and the planning and CVE guidance budgets.'),
+          'Lower numbers spend less and leave more work waiting; higher numbers clear a backlog faster. Triage and validation count a day from UTC midnight; '
+          'template drafts count the last 24 hours. The AI model tab holds the provider, the model and the planning and CVE guidance budgets.'),
     Group('throughput', 'Scan pacing',
           'How eagerly scans are started and how widely one scan spreads across your Sentinels. More at once finishes sooner but puts more load on '
           'your Sentinels and more traffic on your targets. How many things this server scans at once is under Scan concurrency.'),
@@ -53,37 +60,41 @@ TUNABLES = [
     Tunable('triage_max_per_run', 'Triage questions per run',
             'Most AI triage questions one run asks. One question serves every finding with the same evidence; a repair call and a local-check suggestion count too. '
             'What is over the cap waits for the next run.',
-            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_RUN', 100, 1, 1000, 'questions'),
+            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_RUN', 100, 1, 1000, 'questions', caution='cap', window='run'),
     Tunable('triage_max_per_project_day', 'Triage questions per project per day',
-            'Most AI triage questions asked for one project in a day, so one busy project cannot use the whole day\'s budget. The same number applies to every project.',
-            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_PROJECT_DAY', 500, 1, 10000, 'questions'),
+            'Most AI triage questions asked for one project in a day (counted from UTC midnight), so one busy project cannot use the whole day\'s budget. '
+            'The same number applies to every project.',
+            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_PROJECT_DAY', 500, 1, 10000, 'questions', caution='cap', window='utc_day'),
     Tunable('triage_max_per_day', 'Triage questions per day',
-            'Most AI triage questions asked in a day across all projects: the ceiling on triage spend. Failed and abandoned attempts count, because the provider bills them.',
-            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_DAY', 2000, 1, 50000, 'questions'),
+            'Most AI triage questions asked in a day (counted from UTC midnight) across all projects: the ceiling on triage spend. '
+            'Failed and abandoned attempts count, because the provider bills them.',
+            'ai_spend', 'CVENGINE_TRIAGE_MAX_PER_DAY', 2000, 1, 50000, 'questions', caution='cap', window='utc_day'),
     Tunable('validate_max_per_run', 'Validation checks per task',
             'Most validation checks one validation task runs. Each check can use up to three AI calls.',
-            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_RUN', 50, 1, 500, 'checks'),
+            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_RUN', 50, 1, 500, 'checks', caution='cap', window='run'),
     Tunable('validate_max_per_project_day', 'Validation checks per project per day',
-            'Most validation checks run for one project in a day. The same number applies to every project.',
-            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY', 300, 1, 5000, 'checks'),
+            'Most validation checks run for one project in a day (counted from UTC midnight). The same number applies to every project.',
+            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY', 300, 1, 5000, 'checks', caution='cap', window='utc_day'),
     Tunable('validate_max_per_day', 'Validation checks per day',
-            'Most validation checks run in a day across all projects: the ceiling on validation spend. Failed checks count.',
-            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_DAY', 1500, 1, 20000, 'checks'),
+            'Most validation checks run in a day (counted from UTC midnight) across all projects: the ceiling on validation spend. Failed checks count.',
+            'ai_spend', 'CVENGINE_VALIDATE_MAX_PER_DAY', 1500, 1, 20000, 'checks', caution='cap', window='utc_day'),
     Tunable('validate_min_gap_hours', 'Hours between validations of the same finding',
             'The least time between two automatic validations of the same host, CVE, product and version whose evidence did not change (a rescan makes a new '
             'match of the same finding each time). New evidence is validated at once. 0 turns the gap off.',
             'ai_spend', 'CVENGINE_VALIDATE_MIN_GAP_HOURS', 12, 0, 720, 'hours', LIVE, True),
     Tunable('template_gen_max_per_day', 'AI template drafts per day',
-            'Most Nuclei templates the AI may draft in a day across all projects. Every attempt counts, whatever its outcome.',
-            'ai_spend', 'CVENGINE_TEMPLATE_GEN_MAX_PER_DAY', 10, 1, 200, 'drafts'),
+            'Most Nuclei templates the AI may draft in the last 24 hours (a rolling window, not a calendar day) across all projects. Every attempt counts, '
+            'whatever its outcome.',
+            'ai_spend', 'CVENGINE_TEMPLATE_GEN_MAX_PER_DAY', 10, 1, 200, 'drafts', caution='cap', window='rolling_day'),
     Tunable('stage_parallel', 'Chunks of one scan stage at once',
             'The most chunk tasks ONE scan stage keeps in flight across Sentinel slots at once (the nmap and naabu chunks of up to 64 addresses, the nuclei chunks). '
             '1 sends them one after another. The window is also limited by the Sentinel slots that are free, so raising this does nothing without free slots.',
-            'throughput', 'CVENGINE_STAGE_PARALLEL', 4, 1, 16, 'chunks'),
+            'throughput', 'CVENGINE_STAGE_PARALLEL', 4, 1, 16, 'chunks',
+            note='Applies from the next stage that starts; a stage already running keeps the number it started with'),
     Tunable('work_min_gap_hours', 'Hours before a target is scanned again by the conductor',
             'The work conductor never starts a discovery scan of a target scanned inside this many hours. Lower rescans sooner and costs more scanning. '
             'How many scans it keeps running is under Scan concurrency.',
-            'throughput', 'CVENGINE_WORK_MIN_GAP_HOURS', 2, 0, 168, 'hours'),
+            'throughput', 'CVENGINE_WORK_MIN_GAP_HOURS', 2, 0, 168, 'hours', caution='rescan'),
     Tunable('sentinel_refresh_gap_hours', 'Hours before a host is assessed again by the refresh',
             'When no host is missing its first pass, a live Sentinel is kept busy by assessing the hosts assessed longest ago again, none sooner than this many hours '
             'after its last assessment. 0 turns the refresh off.',
@@ -102,18 +113,25 @@ APPLIES_TEXT = {LIVE: 'Applies within a few seconds, with no restart', RESTART: 
 # --- resolving a value ------------------------------------------------------------------------------------------------
 
 def env_value(tunable, environ=None):
-    """The number the environment gives, or None when it is unset or not a number. Clamped up to the tunable's minimum (as every reader always
-    did), never capped: the environment was never range-checked, and an operator who sets it knows."""
+    """The number the environment gives, or None when it is unset or not a number. Read as the readers always did: a whole number for an integer
+    tunable (``7.9`` and ``1e6`` are not one, so the default applies), a number of hours that may be a fraction for the gap settings (a value that is
+    not finite is not a number). Clamped up to the tunable's minimum (as every reader always did) and never capped, except that a number of hours
+    is held to ``HOURS_CEILING`` so that it cannot overflow a ``timedelta``: the environment was never range-checked, and an operator who sets it
+    knows."""
     raw = (environ if environ is not None else os.environ).get(tunable.env)
     if raw is None or not str(raw).strip():
         return None
     try:
-        number = float(str(raw).strip())
-        if number != number or number in (float('inf'), float('-inf')):
-            return None
-        number = number if tunable.env_float else int(number)
-    except (ValueError, OverflowError):
+        if tunable.env_float:
+            number = float(str(raw).strip())
+            if number != number or number in (float('inf'), float('-inf')):
+                return None
+        else:
+            number = int(str(raw).strip())
+    except ValueError:
         return None
+    if tunable.unit == 'hours':
+        number = min(number, HOURS_CEILING)
     return max(tunable.low, number)
 
 
@@ -159,41 +177,111 @@ def invalidate():
         _cache.update(at=None)
 
 
+def _copy_values(raw):
+    """The ``values`` of a published copy, or None when there is no usable copy (missing, not JSON, not an object)."""
+    try:
+        values = json.loads(raw).get('values') if raw else None
+    except (ValueError, AttributeError):
+        return None
+    return values if isinstance(values, dict) else None
+
+
 def stored_values(now_fn=time.monotonic):
-    """What an App Admin saved, as the processes see it: the Redis copy, cached CACHE_SECONDS. On a Redis outage the last copy this process saw
-    is kept; with none, nothing is saved as far as this process knows and the environment or the default applies, as before this page."""
+    """What an App Admin saved, as the processes see it: the Redis copy, cached CACHE_SECONDS.
+
+    Three different situations, because they must not be confused (a number that limits paid AI calls must not silently go back to the default):
+    * the copy is there: use it;
+    * Redis answers but there is no usable copy (it was restarted without persistence, flushed, recreated): the database is the truth, so read it
+      (one small row, at most once per cache window per process), use it and publish it again;
+    * Redis cannot be reached: keep the last copy this process saw. With none yet, nothing is saved as far as this process knows and the
+      environment or the default applies, as before this page."""
     now = now_fn()
     with _lock:
         if _cache['at'] is not None and now - _cache['at'] < CACHE_SECONDS:
             return _cache['values']
+    values = None
     try:
         client = resources.redis_client()
-        raw = client.get(VALUES_KEY) if client is not None else None
-        values = json.loads(raw).get('values', {}) if raw else {}
-        values = values if isinstance(values, dict) else {}
-    except Exception:  # noqa: BLE001
+        values = _copy_values(client.get(VALUES_KEY)) if client is not None else None
+    except Exception:  # noqa: BLE001 - Redis is unreachable: not the same as "nothing saved"
         logger.debug('saved tunables could not be read', exc_info=False)
         with _lock:
             _cache['at'] = now  # no retry on every call during an outage
             return _cache['values']
+    if values is None:
+        values = _recover(publish_again=client is not None)
+        if values is None:  # the database could not be read either: keep what this process had
+            with _lock:
+                _cache['at'] = now
+                return _cache['values']
     with _lock:
         _cache.update(at=now, values=values)
     return values
 
 
-def publish(values):
-    """Put the saved values where the processes read them. Returns whether Redis took them (the 30 second tick tries again if not)."""
+def _recover(publish_again=True):
+    """The saved values from the database, published again. None when the database cannot be read."""
+    try:
+        values, version = _database()
+    except Exception:  # noqa: BLE001
+        logger.debug('saved tunables could not be read from the database', exc_info=False)
+        return None
+    if publish_again:
+        publish(values, version)
+    return values
+
+
+def _database():
+    """({known key: number}, version) straight from the database, without creating the row. The version is the row's last save as a number."""
+    from cveFeed.models import TunableSettings
+    row = TunableSettings.objects.order_by('pk').first()
+    if row is None:
+        return {}, 0.0
+    return ({k: v for k, v in (row.values or {}).items() if k in BY_KEY and isinstance(v, int) and not isinstance(v, bool)},
+            row.updated_at.timestamp() if row.updated_at else 0.0)
+
+
+def publish(values, version=None):
+    """Put the saved values where the processes read them. Returns whether Redis took them (the 30 second tick tries again if not).
+
+    ``version`` is the database row's last save. The copy carries it, and a publish never replaces a copy with a newer version: the tick that read
+    the row just before a save cannot overwrite the save's own publish. (Without a version the copy is written as is.)"""
     try:
         client = resources.redis_client()
         if client is None:
             return False
-        client.set(VALUES_KEY, json.dumps({'values': values, 't': time.time()}))
-        return True
+        payload = json.dumps({'values': values, 't': time.time(), 'v': version})
+        if version is None:
+            client.set(VALUES_KEY, payload)
+            return True
+        import redis
+        for _ in range(3):
+            with client.pipeline() as pipe:
+                try:
+                    pipe.watch(VALUES_KEY)
+                    current = _copy_version(pipe.get(VALUES_KEY))
+                    if current is not None and current > version:
+                        return True  # a newer save already published itself
+                    pipe.multi()
+                    pipe.set(VALUES_KEY, payload)
+                    pipe.execute()
+                    return True
+                except redis.WatchError:
+                    continue
+        return False
     except Exception:  # noqa: BLE001
         logger.warning('tunables: could not publish the saved values to Redis; processes pick them up on the next 30 second check')
         return False
     finally:
         invalidate()
+
+
+def _copy_version(raw):
+    try:
+        version = json.loads(raw).get('v') if raw else None
+    except (ValueError, AttributeError):
+        return None
+    return version if isinstance(version, (int, float)) and not isinstance(version, bool) else None
 
 
 def saved_row():
@@ -203,13 +291,14 @@ def saved_row():
 
 def saved_values():
     """The saved values straight from the database (the truth), keeping only what names a known tunable."""
-    return {k: v for k, v in (saved_row().values or {}).items() if k in BY_KEY and isinstance(v, int) and not isinstance(v, bool)}
+    return _database()[0]
 
 
 def reconcile():
     """The 30 second tick (``report_resources``): republish the saved values, so a flushed Redis heals. Never raises."""
     try:
-        return publish(saved_values())
+        values, version = _database()
+        return publish(values, version)
     except Exception:  # noqa: BLE001
         logger.debug('tunables: reconcile could not read the saved values', exc_info=False)
         return False
@@ -273,7 +362,7 @@ def update(values, user):
             row.values, row.meta, row.updated_by = stored, meta, user
             row.save()
     if changed:
-        publish(stored)
+        publish(stored, row.updated_at.timestamp())
     return changed
 
 
@@ -290,11 +379,34 @@ def reset_group(user, group_id):
 
 # --- what the page shows -------------------------------------------------------------------------------------------------
 
+def usage_today():
+    """{key: number used so far} for the caps that have a counter already: triage questions asked since UTC midnight, validation checks reserved
+    today, template drafts in the last 24 hours. A counter that cannot be read is left out, never guessed."""
+    from cveFeed import triage, validation
+    out = {}
+    for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day)):
+        try:
+            out[key] = int(read())
+        except Exception:  # noqa: BLE001
+            logger.debug('tunables: could not count today\'s use for %s', key, exc_info=False)
+    return out
+
+
+def _drafts_last_day():
+    import datetime
+
+    from django.utils import timezone
+
+    from cveFeed.models import GeneratedTemplate
+    return GeneratedTemplate.objects.filter(created_at__gte=timezone.now() - datetime.timedelta(days=1)).count()
+
+
 def snapshot():
     """Everything the cards show, from the database (the truth) and the environment. The same shape as the Scan concurrency card's fields, so
     the page draws them with the same code."""
     row = saved_row()
     stored = {k: v for k, v in (row.values or {}).items() if k in BY_KEY}
+    usage = usage_today()
     fields = []
     for t in TUNABLES:
         got = resolve(t.key, stored)
@@ -303,5 +415,7 @@ def snapshot():
         fields.append({'key': t.key, 'label': t.label, 'help': t.help, 'group': t.group, 'default': t.default, 'min': t.low, 'max': t.high,
                        'unit': t.unit, 'value': got['value'], 'source': got['source'], 'env_name': t.env, 'env_value': env_value(t),
                        'saved': stored.get(t.key) if admin else None, 'set_by': meta.get('by') if admin else None,
-                       'set_at': meta.get('at') if admin else None, 'applies': t.applies, 'applies_text': APPLIES_TEXT[t.applies]})
+                       'set_at': meta.get('at') if admin else None, 'applies': t.applies, 'applies_text': t.note or APPLIES_TEXT[t.applies],
+                       'caution': t.caution, 'window_text': WINDOW_TEXT.get(t.window), 'used_today': usage.get(t.key),
+                       'used_since': USED_SINCE.get(t.window)})
     return {'fields': fields, 'groups': [{'id': g.id, 'title': g.title, 'intro': g.intro} for g in GROUPS], 'cache_seconds': CACHE_SECONDS}
