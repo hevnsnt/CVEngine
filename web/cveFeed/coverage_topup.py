@@ -158,12 +158,10 @@ REFRESH_PER_RUN = 20           # most assessments one refresh pass queues across
 
 
 def refresh_gap():
-    """How long a host rests between refresh assessments (``CVENGINE_SENTINEL_REFRESH_GAP_HOURS``, default 6; ``0`` turns the refresh off)."""
-    import os
-    try:
-        hours = float(os.environ.get('CVENGINE_SENTINEL_REFRESH_GAP_HOURS', REFRESH_GAP_DEFAULT_HOURS))
-    except ValueError:
-        hours = REFRESH_GAP_DEFAULT_HOURS
+    """How long a host rests between refresh assessments (what an App Admin saved on Settings, configMaxxing, else
+    ``CVENGINE_SENTINEL_REFRESH_GAP_HOURS``, default 6; ``0`` turns the refresh off). Read on every pass (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    hours = float(tunables.value('sentinel_refresh_gap_hours', REFRESH_GAP_DEFAULT_HOURS))
     return None if hours <= 0 else timedelta(hours=hours)
 
 

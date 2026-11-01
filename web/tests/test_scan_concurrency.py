@@ -188,11 +188,12 @@ class SavingTests(Isolated, TestCase):
 	def test_reset_all_clears_every_tinkerer_setting_and_is_audited(self):
 		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'work_depth': 5, 'discovery_concurrency': 12}})
 		status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
-		self.assertEqual((status, data['cleared']), (200, {'scan_concurrency': 3}))
+		self.assertEqual((status, data['cleared']), (200, {'scan_concurrency': 3, 'ai_spend': 0, 'throughput': 0}))
 		self.assertEqual(ScanConcurrency.current().values, {})
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.scan_concurrency_reset_all').exists())
-		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'scan_concurrency', 'title': 'Scan concurrency'}]})
+		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'scan_concurrency', 'title': 'Scan concurrency'}, {'id': 'ai_spend', 'title': 'AI spend'},
+			{'id': 'throughput', 'title': 'Scan pacing'}]})
 
 	def test_every_change_is_audited_with_before_and_after_and_a_no_change_is_not(self):
 		os.environ['HEAVY_MAX_NMAP'] = '3'
@@ -291,6 +292,34 @@ class AdmissionTests(Isolated, TestCase):
 		res._saved.update(at=-1000.0)  # expired: it will try Redis again
 		with mock.patch.object(res, 'redis_client', side_effect=ConnectionError('redis is down')):
 			self.assertEqual(res.max_concurrent('nmap'), 5)
+
+	def test_a_flushed_redis_does_not_put_a_saved_limit_back_to_the_default(self):
+		"""Redis answers but the published copy is gone (restart without persistence, a flush): the database is the truth, read and published again."""
+		sc.update({'heavy.nmap': 5, 'work_depth': 7}, self.root)
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		self.assertEqual(res.max_concurrent('nmap'), 5)  # not 2
+		self.assertEqual(conductor.wanted_depth(), 7)
+		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'heavy.nmap': 5, 'work_depth': 7})  # published again
+
+	def test_a_copy_nobody_can_read_is_no_copy_for_admission_either(self):
+		sc.update({'heavy.nmap': 5}, self.root)
+		sc._redis().set(sc.VALUES_KEY, 'not json')
+		sc.invalidate()
+		self.assertEqual(res.max_concurrent('nmap'), 5)
+
+	def test_a_flushed_redis_with_the_database_down_keeps_the_last_copy_and_a_read_does_not_create_the_row(self):
+		sc.update({'heavy.nmap': 5}, self.root)
+		self.assertEqual(res.max_concurrent('nmap'), 5)
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		with mock.patch.object(sc, 'recover', side_effect=RuntimeError('db down')):
+			self.assertEqual(res.max_concurrent('nmap'), 5)
+		ScanConcurrency.objects.all().delete()
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		self.assertEqual(res.max_concurrent('nmap'), 2)  # nothing saved any more
+		self.assertEqual(ScanConcurrency.objects.count(), 0)
 
 	def test_a_reading_failure_is_not_retried_on_every_call(self):
 		sc.invalidate()
