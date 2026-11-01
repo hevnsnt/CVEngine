@@ -1,12 +1,12 @@
 # Sentinels
 
-A Sentinel is a scanner you run on a machine of your own. It checks in with cvENGINE, takes scan work off a project's queue, runs the tool there, and sends the typed result back. cvENGINE stores that result exactly as if it had run the tool itself.
+A Sentinel is a scanner you run on any machine of your own. It checks in with cvENGINE, takes scan work off a project's queue, runs the tool there, and sends the typed result back. cvENGINE stores that result exactly as if it had run the tool itself.
 
 Why run one:
 
-- **Another vantage point.** Scan your internet-facing targets from a different network or region than the cvENGINE server.
+- **Scale out.** Deploy one or a hundred. Each Sentinel checks in and takes work, so scanning spreads across as many machines as you have. Every Sentinel adds its own CPU, memory and network path.
 - **Private networks.** The cvENGINE server never scans a private address. A Sentinel inside an office LAN, a VPC or a VPN is the only way to cover one ([Internal networks](#internal-networks)).
-- **Heavy scanners elsewhere.** nmap, nuclei and especially OpenVAS are hungry. A Sentinel takes that load off the server.
+- **Another vantage point.** Scan your internet-facing targets from a different network or region than the cvENGINE server.
 
 A project with no live Sentinel scans on the server, as it always did.
 
