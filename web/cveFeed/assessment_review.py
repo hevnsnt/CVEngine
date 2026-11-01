@@ -63,8 +63,9 @@ def host_coverage_due(project, at, limit=1, need_count=True):
         check = ScanActivity.objects.filter(scan_of_id=OuterRef('scan_history_id'), name=stage, status=2)
         key = f'stage_{index}'
         completed = completed.annotate(**{key: Exists(check)}).filter(**{key: True})
+    from cveFeed.host_assessment import BATCH_STOPPED
     attempts = HostAssessment.objects.filter(project=project, host=OuterRef('name'),
-                                             created_at__gte=at - timedelta(hours=24))
+                                             created_at__gte=at - timedelta(hours=24)).exclude(error=BATCH_STOPPED)  # a host caught in a batch someone stopped never had its turn
     active = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
                                       scan_history__scan_status__in=(-1, 1))
     excluded = HostExclusion.objects.filter(org_id=project.org_id, host=OuterRef('name'))

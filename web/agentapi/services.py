@@ -883,6 +883,12 @@ def stop_host_assessment(ctx, slug, assessment_id):
     HostAssessment.objects.filter(pk=job.pk, status__in=('queued', 'running')).update(
         status='stopped', finished_at=timezone.now(), error='Stopped by a person')
     if job.scan_id:
+        from cveFeed.host_assessment import BATCH_STOPPED
+        # a batch is one scan over several hosts: stopping one host's assessment stops the run, the only way to stop scanning that host (stages cannot
+        # drop one host mid-run). The other hosts it carried are settled now with a reason of their own, which a first-pass sweep does not count as
+        # an attempt (``assessment_review.host_coverage_due``), so they are queued again by the next sweep instead of waiting out the 24 hours
+        HostAssessment.objects.filter(scan_id=job.scan_id, status__in=('queued', 'running')).update(
+            status='stopped', finished_at=timezone.now(), error=BATCH_STOPPED)
         _abort_scan(job.scan, ctx.user)
     return {'id': job.pk, 'status': 'stopped'}
 
