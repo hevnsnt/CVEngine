@@ -56,6 +56,9 @@ class Fresh(World):
             patch = mock.patch.object(snapshot_cache, name, self.clock)
             patch.start()
             self.addCleanup(patch.stop)
+        patch = mock.patch.object(membership_cache, 'CACHE_IN_TRANSACTION', True)  # a test case is one open transaction: these tests are about the cache
+        patch.start()
+        self.addCleanup(patch.stop)
         cache.clear()  # this run's Redis database: no snapshot, counter or registration of an earlier test is anywhere
         membership_cache.bump_epoch()
         self.addCleanup(snapshot_cache.reset_hot)

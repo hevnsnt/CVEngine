@@ -17,17 +17,20 @@ What keeps it from weakening tenancy:
   whose set changed hashes to another key; this cache only decides which ids that is, and a stale set can only show the user what they could see a
   few seconds ago, never what another scope holds.
 * An App Admin (``is_superuser``, read from the user row of this very request) is never cached, and a user who stops being one gets a fresh lookup.
-* A cache that does not answer means a fresh lookup.
+* A cache that does not answer means a fresh lookup, and so does a lookup made inside an open transaction (what it reads may be rolled back, which
+  fires no signal): nothing uncommitted is ever kept.
 """
 import re
 import uuid
 
 from django.core.cache import cache
+from django.db import connection
 
 from reNgine import livecache_config
 from tenancy import roles
 
 EPOCH_KEY = 'cve:tenancy:epoch'
+CACHE_IN_TRANSACTION = False  # a test of the cache itself sets it: see allowed_for_request
 LIVE_PATHS = re.compile(r'^/cve/api/(stats|graph|graph-live|discovery)$')
 
 
@@ -51,6 +54,10 @@ def allowed_for_request(request, user):
         return roles.allowed_project_ids(user)
     if user.is_superuser:
         return None
+    if connection.in_atomic_block and not CACHE_IN_TRANSACTION:
+        # Inside an open transaction (a request never is: ATOMIC_REQUESTS is off; a test case always is) what a query sees may never be committed, and
+        # a rollback fires no signal, so it must not be kept for the next reader.
+        return roles.allowed_project_ids(user)
     key = _key(user)
     try:
         got = cache.get_many([EPOCH_KEY, key])
