@@ -138,7 +138,7 @@ def ai_get(request):
     out['applies_to'] = {name: list(providers) for name, providers in SETTING_APPLIES.items()}
     out['env'] = _env_in_force()
     out['provider_defaults'] = {name: provider_defaults(name) for name in DEFAULT_MODELS}
-    out['effective'] = effective_settings(cfg.provider, cfg.model, AIRuntime.from_row(cfg))
+    out['effective'] = effective_settings(cfg.provider, cfg.model, AIRuntime.from_row(cfg)) if cfg.provider in DEFAULT_MODELS else {}  # a stored provider this version does not know: no defaults to show
     return out
 
 
@@ -316,7 +316,8 @@ def ai_models(request):
 AI_ERROR_HINTS = {
     'provider_auth': 'the server refused the key (or this account may not use the model): check the API key, and for a gateway the address it expects',
     'provider_rate_limit': 'the provider is rate limiting this key: wait a moment, or check the plan behind the key',
-    'provider_timeout': 'no answer in {timeout} seconds: a slow or still loading model needs a longer "Request timeout" (Settings, AI model, Advanced)',
+    'provider_timeout': 'no answer in {timeout} seconds: a slow or still loading model needs a longer "Request timeout" (Settings, AI model, Request settings)',
+    'provider_connect_timeout': 'the server did not accept a connection in {connect} seconds: check the address and the port, that the server is running and reachable from this machine, or raise "Connect timeout" (Settings, AI model, Request settings) if the route is slow',
     'provider_network': 'the server could not be reached: check the address and the port, that the server is running, and that this machine can reach it (inside Docker, localhost is the Docker host)',
     'provider_http': 'the server answered with an error: check the model name and the address (a model it does not serve, or the wrong path, shows up here)',
     'provider_json': 'the address answered, but not with an AI API: check that it is the server\'s API address (often ending in /v1)',
@@ -326,17 +327,32 @@ AI_ERROR_HINTS = {
 }
 
 
-def ai_error_hint(exc, timeout):
-    """A sentence on what to change for a failed request, by the kind of failure; never anything the provider said."""
-    return AI_ERROR_HINTS.get(getattr(exc, 'category', ''), '').format(timeout=timeout)
+TEST_TIMEOUT_CAP = 240  # seconds; the test runs inside the web request, which the web server ends at 300 (GUNICORN_TIMEOUT): longer shows as a 502, not as advice
+
+
+def ai_error_hint(exc, timeout, connect=10, capped=False):
+    """A sentence on what to change for a failed request, by the kind of failure; never anything the provider said. ``capped``: the test cut
+    the request timeout down to TEST_TIMEOUT_CAP, which the sentence then says."""
+    hint = AI_ERROR_HINTS.get(getattr(exc, 'category', ''), '').format(timeout=timeout, connect=connect)
+    if hint and capped and exc.category == 'provider_timeout':
+        hint += f'. The test waits at most {TEST_TIMEOUT_CAP} seconds (it runs inside a web request); your Request timeout is longer and applies to real requests'
+    return hint
 
 
 def ai_test(request):
-    from reNgine.ai_providers import PROVIDERS, AIProviderError, request_timeout
+    import dataclasses
+    from reNgine.ai_providers import PROVIDERS, AIProviderError, connect_timeout, request_timeout
     cfg = AIProviderSettings.objects.first()
     if not cfg:
         raise SettingsError(400, 'save the AI settings first')
+    if cfg.provider not in PROVIDERS:
+        raise SettingsError(400, f'the saved provider "{cfg.provider}" is not one this version knows: choose a provider and save')
     runtime = AIRuntime.from_row(cfg)
+    waits = request_timeout(PROVIDERS[cfg.provider].timeout, runtime)
+    capped = waits > TEST_TIMEOUT_CAP
+    if capped:
+        runtime = dataclasses.replace(runtime, request_timeout=TEST_TIMEOUT_CAP)
+        waits = TEST_TIMEOUT_CAP
     try:
         from reNgine.ai_providers import get_provider
         provider = get_provider(cfg.provider, model=cfg.model or None, api_key=cfg.api_key or None,
@@ -347,12 +363,15 @@ def ai_test(request):
     except AIProviderError as exc:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
         cfg.save(update_fields=['verified_at', 'verified_provider', 'verified_model'])
-        hint = ai_error_hint(exc, request_timeout(PROVIDERS[cfg.provider].timeout, runtime))
+        hint = ai_error_hint(exc, waits, connect_timeout(runtime), capped)
         raise SettingsError(400, f'connection failed: {exc}' + (f'. {hint[0].upper()}{hint[1:]}' if hint else ''))
     from django.utils import timezone
     cfg.verified_at, cfg.verified_provider, cfg.verified_model = timezone.now(), cfg.provider, provider.model
     cfg.save(update_fields=['verified_at', 'verified_provider', 'verified_model'])
-    return {'ok': True, 'reply': reply[:80]}
+    out = {'ok': True, 'reply': reply[:80]}
+    if capped:
+        out['note'] = f'The test waits at most {TEST_TIMEOUT_CAP} seconds; your Request timeout is longer and applies to real requests.'
+    return out
 
 
 def ai_usage_get(request):

@@ -100,6 +100,21 @@ class NothingSetTests(unittest.TestCase):
 		self.assertEqual(send('ollama')[1]['options'], {'num_predict': 2048})
 		self.assertNotIn('keep_alive', send('ollama')[1])
 
+	def test_the_request_of_every_provider_is_a_fixed_body(self):
+		"""The bodies and timeouts earlier versions sent, written out (not compared with the new code run another way)."""
+		msgs = [{'role': 'system', 'content': 's'}, {'role': 'user', 'content': 'u'}]
+		expected = {
+			'anthropic': ((10, 120), {'model': 'm', 'max_tokens': 2048, 'system': 's', 'messages': [{'role': 'user', 'content': 'u'}]}),
+			'openai': ((10, 120), {'model': 'm', 'messages': msgs}),
+			'openrouter': ((10, 120), {'model': 'm', 'messages': msgs}),
+			'vllm': ((10, 120), {'model': 'm', 'messages': msgs, 'max_tokens': 2048}),
+			'lmstudio': ((10, 300), {'model': 'm', 'messages': msgs, 'max_tokens': 2048}),
+			'ollama': ((10, 120), {'model': 'm', 'stream': False, 'messages': msgs, 'options': {'num_predict': 2048}}),
+		}
+		for name, (timeout, body) in expected.items():
+			for runtime in (None, AIRuntime(), AIRuntime.from_row(row())):
+				self.assertEqual(send(name, runtime), (timeout, body), name)
+
 
 class TimeoutSettingTests(unittest.TestCase):
 	def test_the_request_timeout_is_the_page_then_the_environment_then_the_provider(self):
@@ -156,6 +171,46 @@ class ReplyLimitSettingTests(unittest.TestCase):
 		self.assertIsNone(limit(send('openai', AIRuntime(max_tokens=99999))[1]))
 
 
+class RetryCeilingTests(unittest.TestCase):
+	CUT = {'choices': [{'message': {'content': '{'}, 'finish_reason': 'length'}]}
+
+	def ask(self, max_tokens):
+		with mock.patch.dict('os.environ', {k: '' for k in ENV_NAMES}), mock.patch('requests.post', return_value=Reply(self.CUT)) as post:
+			p = ai.get_provider('vllm', model='m', base_url='http://h:8000/v1', runtime=AIRuntime(max_tokens=max_tokens))
+			with self.assertRaises(ai.AIProviderError) as raised:
+				ai._ask_triage(p, 'finding_triage', 's', 'u')
+		return post, raised.exception
+
+	def test_a_cut_off_triage_is_asked_again_with_twice_the_limit(self):
+		post, error = self.ask(16000)
+		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [16000, 32000])
+		self.assertEqual(error.category, 'output_truncated')
+
+	def test_a_limit_already_at_the_ceiling_is_not_asked_twice(self):
+		post, error = self.ask(32768)  # the second request would be identical, and paid
+		self.assertEqual(post.call_count, 1)
+		self.assertEqual(error.category, 'output_truncated')
+
+	def test_a_limit_that_doubling_would_only_cap_is_still_retried_once(self):
+		post, _ = self.ask(20000)  # 20000 -> 32768 is a longer reply
+		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [20000, 32768])
+
+
+class ConnectTimeoutTests(unittest.TestCase):
+	def category(self, exc):
+		import requests
+		with mock.patch('requests.post', side_effect=exc), self.assertRaises(ai.AIProviderError) as raised:
+			ai.get_provider('vllm', model='m', base_url='http://h:8000/v1').complete('s', 'u')
+		return raised.exception.category
+
+	def test_a_connect_timeout_is_not_reported_as_a_slow_answer(self):
+		import requests
+		self.assertEqual(self.category(requests.ConnectTimeout()), 'provider_connect_timeout')
+		self.assertEqual(self.category(requests.ReadTimeout()), 'provider_timeout')
+		self.assertEqual(self.category(requests.Timeout()), 'provider_timeout')
+		self.assertEqual(self.category(requests.ConnectionError()), 'provider_network')
+
+
 class ContextSettingTests(unittest.TestCase):
 	def test_ollama_is_asked_for_the_window_the_page_names(self):
 		self.assertEqual(send('ollama', AIRuntime(context_tokens=16384))[1]['options'], {'num_predict': 2048, 'num_ctx': 16384})
@@ -175,8 +230,17 @@ class ContextSettingTests(unittest.TestCase):
 
 class KeepAliveSettingTests(unittest.TestCase):
 	def test_ollama_is_told_how_long_to_keep_the_model(self):
-		for value in ('30m', '0', '-1', '1h'):
-			self.assertEqual(send('ollama', AIRuntime(keep_alive=value))[1]['keep_alive'], value)
+		for value in ('30m', '1h', '90s'):
+			self.assertEqual(send('ollama', AIRuntime(keep_alive=value))[1]['keep_alive'], value)  # a Go duration is a JSON string
+
+	def test_unload_and_keep_forever_are_sent_as_integers_because_a_string_of_them_is_refused(self):
+		# Ollama reads a string with Go's time.ParseDuration, which refuses "-1" ("missing unit in duration"): every request would be a 400
+		for value, sent in (('0', 0), ('-1', -1)):
+			got = send('ollama', AIRuntime(keep_alive=value))[1]['keep_alive']
+			self.assertEqual((got, type(got)), (sent, int), value)
+		self.assertEqual(ai._keep_alive_value('30m'), '30m')
+		self.assertEqual(ai._keep_alive_value('-1'), -1)
+		self.assertIsInstance(send('ollama', AIRuntime(keep_alive='30m'))[1]['keep_alive'], str)
 
 	def test_it_is_a_top_level_field_and_leaves_the_options_alone(self):
 		body = send('ollama', AIRuntime(keep_alive='30m', max_tokens=900))[1]
