@@ -1356,6 +1356,14 @@ def assess_host(self, assessment_id):
     return execute(assessment_id, celery_id=self.request.id)
 
 
+@app.task(name='assess_hosts', bind=True, queue='discovery_queue')
+def assess_hosts(self, assessment_ids):
+    """Execute a batch of stored, scope-checked host assessments of one target as one pipeline run (each host keeps its own row and outcome);
+    the broker carries no target text, only row ids. The time limit is the discovery queue's, as for ``assess_host``."""
+    from cveFeed.host_assessment import execute_batch
+    return execute_batch(assessment_ids, celery_id=self.request.id)
+
+
 @app.task(name="retest_hosts", bind=True, queue="discovery_queue")
 def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None):
     """Hosts that just changed, through the host pipeline again with the CVE checks forced (see cveFeed.retest)."""

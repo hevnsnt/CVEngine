@@ -765,6 +765,15 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None):
     return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
 
 
+def host_narrowed(project):
+    """Whether a Sentinel that may be given work of ``project`` declares ``scope.hosts``, a narrowing to named hosts, addresses or networks. A task
+    that names many hosts is claimable by such a Sentinel when ANY of them is in its scope (``SentinelEff._in_hosts``), so hosts of a project it
+    covers must not share a task: ``host_assessment`` runs each host of such a project on its own. Live or not, since one may come back."""
+    rows = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
+                                token__revoked=False).values_list('scope', flat=True)[:CANDIDATES]
+    return any(isinstance(scope, dict) and scope.get('hosts') for scope in rows)
+
+
 def project_slots(project, now=None):
     """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over."""
     now = now or timezone.now()

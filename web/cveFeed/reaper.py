@@ -49,6 +49,37 @@ def _hours(name, default):
         return default
 
 
+NO_LIMIT_CEILING_HOURS = 12  # the longest a batch is given when the discovery queue has no time limit (``CVENGINE_TIME_LIMITS=0``)
+BATCH_HOSTS_PER_FACTOR = 4  # a batch of this many hosts (or fewer) is given the limit of one host; each further few hosts add another
+
+
+def batch_shield(hours, now):
+    """The running host assessments of a batch (``host_assessment.enqueue_batch``: its rows share one Celery task id) that are past ``hours`` but
+    still inside the longer limit a batch gets: ``hours`` for each ``BATCH_HOSTS_PER_FACTOR`` hosts, never longer than the discovery queue's hard
+    time limit (``reNgine.time_limits``, just under the broker's redelivery window), which ends the one task they share. A batch is one pipeline
+    over all its hosts, so it takes longer than one host does; the age limit is only the backstop for a task that is gone, which
+    ``expire_orphaned_running`` closes within a tick whenever the broker can be asked. Returns the pks to leave alone."""
+    from django.db.models import Count, Q
+
+    from cveFeed.models import HostAssessment
+    from reNgine import time_limits
+    cutoff = now - timedelta(hours=hours)
+    rows = list(HostAssessment._base_manager.filter(Q(started_at__lt=cutoff) | Q(started_at__isnull=True, created_at__lt=cutoff), status='running')
+                .exclude(celery_id='').values_list('pk', 'celery_id', 'started_at', 'created_at'))
+    if not rows:
+        return set()
+    sizes = dict(HostAssessment._base_manager.filter(celery_id__in={r[1] for r in rows}).values('celery_id').annotate(n=Count('pk'))
+                 .values_list('celery_id', 'n'))
+    found = time_limits.limits_for('discovery_queue')
+    ceiling = max(hours, math.ceil(found[1] / 3600)) if found else max(hours, NO_LIMIT_CEILING_HOURS)  # no task limit: a dead batch still goes within a day
+    shielded = set()
+    for pk, celery_id, started, created in rows:
+        allowed = min(hours * math.ceil(sizes.get(celery_id, 1) / BATCH_HOSTS_PER_FACTOR), ceiling)
+        if (started or created) >= now - timedelta(hours=allowed):
+            shielded.add(pk)
+    return shielded
+
+
 REDISPATCH_AFTER_MINUTES = 30  # a queued assessment nobody started in this long is asked for again
 REDISPATCH_EVERY_HOURS = 2  # and no more often than this, so a long but healthy queue does not fill with copies
 
@@ -199,6 +230,8 @@ def reap(now=None):
         else:
             fields['error'] = reason
         stuck = model.objects.filter(old, status=state)
+        if name == 'HostAssessment' and state == 'running':
+            stuck = stuck.exclude(pk__in=batch_shield(hours, now))
         if name in VALIDATION_MODELS:
             # due again at once while attempts remain; a job that keeps killing its worker stops at MAX_ATTEMPTS like any failure
             from cveFeed.hot_validation import MAX_ATTEMPTS
