@@ -475,8 +475,8 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
     if kind == DOMAIN and created:  # every domain target is "subscribed": watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
-        watch_certificate_transparency.delay(created[0].id)
+        from cveFeed import ct_queue
+        ct_queue.queue_lookups([created[0].id], ct_queue.ADD_LIFETIME)  # one marker per domain: adding it twice queues one lookup
     scan_ids = []
     created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
     deferred = 0
@@ -972,10 +972,8 @@ def _discover_new(domains, mode, project_id, initiated_by=None):
     longest, one per project per minute, so the targets left for it are scanned all the same and interleaved with everyone else's. With the
     conductor off (``CVENGINE_WORK_DEPTH=0``) nothing would pick them up, so then every target is queued now."""
     from cveFeed import activity, conductor
-    try:
-        cap = max(1, int(os.environ.get('CVENGINE_BULK_DISCOVER_NOW', BULK_DISCOVER_NOW)))
-    except ValueError:
-        cap = BULK_DISCOVER_NOW
+    from cveFeed import tunables
+    cap = max(1, int(tunables.value('bulk_discover_now', BULK_DISCOVER_NOW)))  # saved on Settings, configMaxxing, else CVENGINE_BULK_DISCOVER_NOW, else 50
     if not conductor.wanted_depth():
         cap = len(domains) or 1
     else:  # what the project already has waiting counts against the batch: two pastes in a row are not two batches
@@ -1297,11 +1295,10 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
+        from cveFeed import ct_queue
         names_wanted = set(domain_names)
         wanted = [d for d in created if d.name in names_wanted]
-        for i, d in enumerate(wanted):  # crt.sh blocks a burst, so each check starts a couple of seconds after the last
-            watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
+        ct_queue.queue_lookups([d.id for d in wanted], ct_queue.ADD_LIFETIME)  # spaced out (crt.sh blocks a burst), marked, and expiring
     scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
     if discover and to_discover and stored != Domain.DISCOVERY_MANUAL:  # manual: "just add them, do not scan yet"
@@ -1449,7 +1446,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
-            **_screenshot_fields(sub, http, ips, (shared or {}).get('shots', {}).get(host_key, []), (shared or {}).get('legacy_shots', {}).get(host_key)),
+            **_screenshot_fields(sub, http, ips, (shared or {}).get('shots', {}).get(host_key, []), (shared or {}).get('legacy_shots', {}).get(host_key), network),
             'technologies': sorted(techs),
             'technology_details': details,
             # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
@@ -1550,7 +1547,7 @@ def _unverified_products(sub, others, ips):
     return match_policy.unversioned_leads(technologies, ports)[:50]
 
 
-def _screenshot_fields(sub, http, ips, rows, legacy_id):
+def _screenshot_fields(sub, http, ips, rows, legacy_id, network=None):
     """The screenshot part of a host record. The browser's captures (``HostScreenshot``, cveFeed.web_shot) come first; a discovery screenshot
     (``Subdomain.screenshot_path``, bbot's gowitness) is the fallback, and it is the newest same-name row that has one, not just ``sub``: a rescan
     writes a new row with no screenshot, and it used to hide the older row's. ``screenshot_note`` says why there is none (or what the latest
@@ -1560,7 +1557,9 @@ def _screenshot_fields(sub, http, ips, rows, legacy_id):
     legacy = sub.id if sub.screenshot_path else legacy_id
     legacy_shown = not pictures and legacy is not None
     web_ports = any(web_shot.KNOWN_WEB_PORTS.get(p.number) or 'http' in (p.service_name or '').lower() for e in ips.values() for p in e['ports'])
-    note = web_shot.note_for(rows, has_web_evidence=bool(http.get('url') or http.get('status') or web_ports), legacy=legacy_shown)
+    ports_known = any(e['ports'] for e in ips.values())
+    note = web_shot.note_for(rows, has_web_evidence=bool(http.get('url') or http.get('status') or web_ports), legacy=legacy_shown,
+                             network=network, ports_known=ports_known)
     shown = pictures[0] if pictures else None
     return {'screenshot': bool(pictures) or legacy_shown, 'screenshot_note': note,
             'screenshot_source': 'browser' if pictures else 'discovery' if legacy_shown else None,

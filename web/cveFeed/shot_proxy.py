@@ -75,6 +75,10 @@ class VettingProxy:
         listener, self._listener = self._listener, None
         if listener is not None:
             try:
+                listener.shutdown(socket.SHUT_RDWR)  # a thread blocked in accept() would otherwise keep the port open after close()
+            except OSError:
+                pass
+            try:
                 listener.close()
             except OSError:
                 pass

@@ -143,15 +143,50 @@ class HostScreenshotThumbnailTests(HostScreenshotTests):
 
 
 class ScreenshotNoteTests(TestCase):
-	"""The host page says why a host has no screenshot instead of showing nothing (the full set of reasons is in tests/test_web_shot.py)."""
+	"""The host page says why a host has no screenshot instead of showing nothing, and never tells a person to Rescan host for one. (The full set of
+	reasons the browser attempts record is in tests/test_web_shot.py.)"""
 
-	def test_each_reason_when_there_is_no_capture_yet(self):
+	def _note(self, rows=(), has_web_evidence=True, **kwargs):
 		from unittest import mock
 
 		from cveFeed import web_shot
 		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
-			self.assertIn('no web page has answered', web_shot.note_for([], has_web_evidence=False))
-			later = web_shot.note_for([], has_web_evidence=True)
-		self.assertTrue(later.startswith('None yet'))
-		self.assertIn('Take screenshot', later)
-		self.assertNotIn('rescan the host', later)  # a rescan is not what takes a picture; the screenshot stage and the button are
+			return web_shot.note_for(list(rows), has_web_evidence=has_web_evidence, **kwargs)
+
+	def test_no_web_page_answered(self):
+		self.assertIn('no web page has answered', self._note(has_web_evidence=False))
+
+	def test_no_web_port_recorded(self):
+		self.assertIn('no web port', self._note(has_web_evidence=False, ports_known=True))
+		self.assertNotIn('no web port', self._note(has_web_evidence=True, ports_known=True))
+
+	def test_internal_hosts_say_that_only_a_sentinel_scans_them(self):
+		self.assertIn('internal network 10.20.0.0/24', self._note(network='10.20.0.0/24'))
+
+	def test_a_host_that_answers_on_the_web_says_when_a_picture_will_be_taken(self):
+		note = self._note()
+		self.assertTrue(note.startswith('No screenshot yet'))
+		self.assertIn('Take screenshot', note)
+		self.assertNotIn('Rescan host to take one', note)
+		self.assertNotIn('rediscovered', note)
+
+	def test_the_host_record_carries_the_note(self):
+		from unittest import mock
+
+		from agentapi.services import Ctx, list_hosts
+		from cveFeed import web_shot
+		now = timezone.now()
+		org = Org.objects.create(name='N', slug='n-shot')
+		project = Project.objects.create(name='N', slug='n-shot-p', insert_date=now, org=org)
+		domain = Domain.objects.create(name='n.example', project=project, insert_date=now)
+		engine = EngineType.objects.create(engine_name='e-n', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=now, scan_status=2)
+		Subdomain.objects.create(scan_history=scan, name='www.n.example', target_domain=domain, http_status=200, http_url='https://www.n.example/')
+		Subdomain.objects.create(scan_history=scan, name='shot.n.example', target_domain=domain, http_status=200, http_url='https://shot.n.example/',
+		                         screenshot_path='n.example_1/screenshots/s.jpeg')
+		user = User.objects.create_user('n-admin', password='x', is_superuser=True)
+		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
+			hosts = {h['host']: h for h in list_hosts(Ctx(user=user), 'n-shot-p', {})['results']}
+		self.assertIn('waiting for the next screenshot pass', hosts['www.n.example']['screenshot_note'])
+		self.assertFalse(hosts['www.n.example']['screenshot'])
+		self.assertEqual((hosts['shot.n.example']['screenshot'], hosts['shot.n.example']['screenshot_note']), (True, ''))

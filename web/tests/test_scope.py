@@ -172,7 +172,8 @@ class CertificateTransparencyScopeTests(TestCase):
 			client.delete('cvengine:sweep:ct-watch')
 		self.addCleanup(lambda: client.delete('cvengine:sweep:ct-watch') if client is not None else None)
 		queued = []
-		with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async', side_effect=lambda args, countdown: queued.append(args[0])):
+		with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async', side_effect=lambda args, countdown, expires: queued.append(args[0])), \
+				mock.patch('cveFeed.ct_queue._client', return_value=None):  # the lookups carry a lifetime; no Redis markers outlive the test
 			tasks.watch_certificates_all()
 		names = set(Domain.objects.filter(id__in=queued).values_list('name', flat=True))
 		self.assertEqual(names, {'acme.jfrog.com', 'acme-example.ai'})

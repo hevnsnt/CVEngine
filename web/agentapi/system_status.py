@@ -23,6 +23,7 @@ MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
 FEED_STALE_HOURS = 48
 MEMORY_REPORT_STALE_SECONDS = 180
+CT_BACKLOG_WARN = 5000  # lookups waiting in ctwatch_queue before status says so; the reaper stops recovering orphans past broker_recovery.MAX_QUEUE_SCAN
 
 
 def _probe(problems, name, fn):
@@ -187,7 +188,32 @@ def _queues():
     """Messages waiting in each Celery queue, plus those a worker has taken but not yet acknowledged."""
     client = _broker_client()
     waiting = {name: sum(client.llen(name + suffix) for suffix in PRIORITY_SUFFIXES) for name in QUEUES}
-    return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': client.hlen('unacked')}
+    from cveFeed import ct_queue
+    from cveFeed.broker_recovery import MAX_QUEUE_SCAN
+    ct = waiting.get('ctwatch_queue', 0)
+    try:  # the cap the sweep itself works to: it is never below one sweep's batch
+        from dashboard.models import SystemTimings
+        batch = max(1, SystemTimings.current().ct_watch_minutes * 60 // 3)
+    except Exception:  # noqa: BLE001
+        batch = 0
+    return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': client.hlen('unacked'),
+            'ct_backlog': {'waiting': ct, 'cap': ct_queue.backlog_max(batch), 'warn_at': CT_BACKLOG_WARN, 'scan_limit': MAX_QUEUE_SCAN}}
+
+
+def _ct_backlog_problem(queues):
+    """A line for ``problems`` when the certificate lookups wait in a line long enough to threaten the reaper, else None."""
+    info = queues.get('ct_backlog') if isinstance(queues, dict) else None
+    if not isinstance(info, dict) or info.get('waiting', 0) <= info.get('warn_at', CT_BACKLOG_WARN):
+        return None
+    waiting, limit = info['waiting'], info['scan_limit']
+    if waiting > limit:
+        tail = f"above {limit}: the reaper's orphan recovery (redispatch of queued scans, expiry of orphaned running scans) has stopped"
+    elif waiting >= limit * 0.75:
+        tail = f"close to {limit}, above which the reaper's orphan recovery stops"
+    else:
+        tail = f"it would stop the reaper's orphan recovery above {limit}"
+    return (f"queues: {waiting} certificate lookups are waiting in ctwatch_queue (cap {info['cap']}); {tail}. "
+            'The sweep adds no more while it is at the cap; the queue can be purged, the sweep re-derives the work from the ledger.')
 
 
 def _workers_and_jobs(user):
@@ -482,6 +508,9 @@ def _system(user, problems, notes):
     if problem:
         problems.append(problem)
     queues = out['queues']
+    ct_problem = _ct_backlog_problem(queues)
+    if ct_problem:
+        problems.append(ct_problem)
     if isinstance(queues, dict) and queues.get('waiting_total'):
         notes.append(f"{queues['waiting_total']} message(s) waiting in the work queues")
     return out

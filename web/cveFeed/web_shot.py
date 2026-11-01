@@ -1041,7 +1041,7 @@ FAILURE_TEXT = {'timeout': 'timed out', 'unreachable': 'could not be reached', '
                 'unavailable': 'could not run the browser'}
 
 
-def note_for(rows, *, has_web_evidence, legacy=False):
+def note_for(rows, *, has_web_evidence, legacy=False, network=None, ports_known=False):
     """The line the host page shows next to (or instead of) a screenshot, from what the attempts recorded. Empty when a current picture is shown
     and nothing needs saying. ``legacy`` is True when an older discovery screenshot is shown because the browser has no picture of the host."""
     web = [r for r in rows if r.scheme != 'rdp']
@@ -1054,15 +1054,20 @@ def note_for(rows, *, has_web_evidence, legacy=False):
             return ''
         return 'An older screenshot from discovery is shown. The latest capture attempt: ' + _reasons(failed)
     if not web:
+        if network:
+            return (f'No screenshot: this host is inside the internal network {network}. Only a Sentinel there scans it, and Sentinels do not '
+                    'take screenshots; this server never captures internal hosts.')
         why = unavailable_reason()
         if why:
-            return f'None: {why}'
+            return f'No screenshot: {why}'
         if not has_web_evidence:
-            return 'None: no web page has answered on this host, so there is nothing to capture.'
-        return 'None yet: this host answers on the web and is waiting for the next screenshot pass (every hour), or press Take screenshot.'
+            if ports_known:
+                return 'No screenshot: no web port (such as 80 or 443) is recorded open on this host, so there is no page to capture.'
+            return 'No screenshot: no web page has answered on this host, so there is nothing to capture.'
+        return 'No screenshot yet: this host answers on the web and is waiting for the next screenshot pass (every hour), or press Take screenshot.'
     if queued:
         return 'Waiting for the screenshot worker: ' + ', '.join(f'{r.scheme}://{r.host}:{r.port}' for r in queued[:3]) + '.'
-    return 'None: ' + _reasons(failed)
+    return 'No screenshot: ' + _reasons(failed)
 
 
 def _reasons(rows):

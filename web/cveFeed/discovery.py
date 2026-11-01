@@ -270,6 +270,18 @@ def _report_no_web_pages(scan, mode, web_events, bbot_scan_name=''):
                  project=scan.domain.project_id, status='failed', scan_id=scan.id, hosts=hosts)
 
 
+def _report_screenshot_failure(hard_failures, scan):
+    """One activity line when bbot's gowitness module (the only front-page screenshot taker) failed to set up. With --force bbot
+    carries on without it, so without this line a discovery that took no screenshots looks like one that found no web pages."""
+    from cveFeed import activity
+    reasons = [reason for module, reason in hard_failures if module == 'gowitness']
+    if not reasons:
+        return
+    reason = ((reasons[0] or '').strip().splitlines() or ['no reason given'])[0][:160] or 'no reason given'
+    activity.log('discovery', f'Screenshots unavailable: the gowitness module failed to set up ({reason}); '
+                 'no discovery-time screenshots will be taken until it is fixed (the browser screenshot stage is separate and not affected)', project=scan.domain.project_id, status='failed', scan_id=scan.id)
+
+
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
     """Body of the celery task; ``stream`` is injectable so tests need no bbot binary."""
     from cveFeed.api_credentials import bbot_config_args
@@ -296,6 +308,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     finished_mode = mode
     problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
     web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what bbot's web module reported, counted over the whole run (``batch`` is emptied at every flush)
+    hard_failures = []  # (bbot module, reason) for modules whose set-up hard-failed, e.g. gowitness without a working Chrome
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
@@ -309,7 +322,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         for attempt, run_mode in enumerate(modes):
             try:
                 for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,
-                               strict_scope=strict_scope, problems=problems):
+                               strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
                     if event.get('type') in web_events:
@@ -335,6 +348,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
         _report_key_problems(problems, extra_args, scan)
         _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name)
+        _report_screenshot_failure(hard_failures, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}

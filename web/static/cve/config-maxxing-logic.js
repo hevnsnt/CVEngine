@@ -51,6 +51,9 @@ export function changesFrom(fields, drafts) {
   let error = null;
   fields.forEach((field) => {
     if (!(field.key in drafts)) return;
+    // A box the person did not touch is not theirs to get right: an environment value above the page's range, or a fraction of an hour, is shown as
+    // it is and must neither block the save of another box nor be sent back.
+    if (String(drafts[field.key] ?? "").trim() === String(field.value)) return;
     const checked = checkDraft(field, drafts[field.key]);
     if (!checked.ok) {
       error = error || checked.error;
@@ -60,6 +63,30 @@ export function changesFrom(fields, drafts) {
   });
   return { changes, error };
 }
+
+// A soft warning for a typed number; never blocks a save. Only for the fields the server marks: `cap` (a limit on paid calls or work: far below the
+// default defers work, far above it spends more than the documented default) and `rescan` (0 is continuous).
+export function softWarning(field, draft) {
+  const raw = String(draft ?? "").trim();
+  if (!/^\d+$/.test(raw)) return "";
+  const value = Number(raw);
+  if (value < field.min || value > field.max) return "";
+  if (field.caution === "rescan" && value === 0) return "0 means a target is rescanned as soon as its last scan ends: rescans become continuous.";
+  if (field.caution !== "cap") return "";
+  if (value < field.default * 0.25) {
+    const when = field.window_text ? ` ${field.window_text}` : "";
+    return `This is far below the default (${field.default}): work over the cap is deferred and tried again${when}.`;
+  }
+  const fromEnv = field.env_value != null;
+  const reference = fromEnv ? field.env_value : field.default;
+  if (value > reference * 10) return `This is more than ten times ${fromEnv ? "the environment value" : "the default"} (${reference}): it raises spend above the documented default.`;
+  return "";
+}
+export const usageText = (field) => (field.used_today == null || !field.used_since ? "" : `Used ${field.used_since}: ${field.used_today}`);
+
+// Offered for a value that comes from the environment and fits the page's range: saving it pins it here, so it no longer follows the environment.
+export const canPin = (field) =>
+  field.source === "environment" && Number.isInteger(field.env_value) && field.env_value >= field.min && field.env_value <= field.max;
 
 // --- what a row says about where its number comes from ---------------------------------------------------------
 export function sourceLabel(field) {
@@ -122,6 +149,7 @@ export function discoveryNotice(field, status) {
   return field.running == null ? "What the discovery worker's ceiling is now is not known." : `The discovery worker's ceiling is ${field.running}.`;
 }
 export function runningText(field) {
+  if (field.applies === "restart") return "Applies after the next restart";
   if (field.applies !== "pool") return "Applies within a few seconds, with no restart";
   if (field.running == null) return "Worker ceiling now: not reported yet";
   return `Worker ceiling now: ${field.running}`;

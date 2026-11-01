@@ -1130,7 +1130,7 @@ class HostRecordTests(ReadFixture, TestCase):
 		self.assertFalse(record['screenshot'])
 		self.assertIn('https://www.rt.test:443: The page did not load within the time allowed.', record['screenshot_note'])
 		self.assertIn('http://www.rt.test:80: The connection was refused.', record['screenshot_note'])
-		self.assertNotIn('None yet', record['screenshot_note'])
+		self.assertNotIn('No screenshot yet', record['screenshot_note'])
 
 	def test_a_page_waiting_for_the_worker_says_so(self):
 		self.make_row()
@@ -1144,7 +1144,7 @@ class HostRecordTests(ReadFixture, TestCase):
 	def test_a_host_with_nothing_on_the_web_says_there_is_nothing_to_capture(self):
 		self.host(name='db.rt.test', ports=((5432, 'postgresql'),), address='203.0.113.9')
 		note = [r for r in call(self.token, 'GET', '/api/v1/projects/pr/hosts')[1]['results'] if r['host'] == 'db.rt.test'][0]['screenshot_note']
-		self.assertEqual(note, 'None: no web page has answered on this host, so there is nothing to capture.')
+		self.assertEqual(note, 'No screenshot: no web port (such as 80 or 443) is recorded open on this host, so there is no page to capture.')
 
 	def test_a_server_without_the_browser_says_that(self):
 		with mock.patch.object(web_shot, 'browser_installed', return_value=False):

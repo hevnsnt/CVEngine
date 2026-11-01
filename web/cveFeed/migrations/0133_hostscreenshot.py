@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cveFeed", "0131_scanconcurrency"),
+        ("cveFeed", "0132_tunablesettings"),
         ("dashboard", "0031_ai_provider_request_settings"),
         ("targetApp", "0007_domain_alias_note"),
     ]
