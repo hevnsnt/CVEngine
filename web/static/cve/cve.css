@@ -916,10 +916,12 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
 .code .copy{position:absolute;top:8px;right:8px;min-height:36px;padding:0 12px;border:1px solid color-mix(in srgb,var(--on-ink) 28%,transparent);border-radius:6px;background:transparent;color:var(--on-ink);font:600 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;cursor:pointer}@media (hover:hover) and (pointer:fine){.code .copy:hover{background:var(--on-ink);color:var(--ink)}}
 .secret-box{display:grid;gap:10px}
 .secret-box .code{margin:0}
-.enroll-ready .enroll-step{margin:8px 0 -6px;font-size:14px;color:var(--ink)}
 .enroll-ready .enroll-sub{font:13px/1.45 var(--font);color:var(--muted)}
 .enroll-ready .enroll-prompt{max-height:260px;overflow:auto;overscroll-behavior:contain}
-.enroll-ready .fold-body{padding-top:12px;display:grid;grid-template-columns:minmax(0,1fr);gap:8px}@media (prefers-reduced-motion:reduce){
+.msg.enroll-ready{display:grid;grid-template-columns:minmax(0,1fr)}
+.enroll-ready .enroll-tabs{display:flex;width:max-content;max-width:100%;margin:6px 0 0}
+.enroll-ready .enroll-panel{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.enroll-ready .enroll-panel[hidden]{display:none}@media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
 }
 

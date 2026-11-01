@@ -96,19 +96,39 @@
         var label = x.d.scope === 'project' ? x.d.project : x.d.scope === 'org' ? ('organization ' + x.d.org) : 'the whole instance';
         var steps = x.d.setup || {};
         enrollOut.appendChild(el('span', '', 'Ready for ' + label + ' (' + steps.network + ', ' + steps.profile + '). Single-use, expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC.'));
-        function block(title, sub, text, cls) {
-          enrollOut.appendChild(el('h3', 'enroll-step', title));
-          if (sub) enrollOut.appendChild(el('div', 'enroll-sub', sub));
-          var pre = el('pre', 'code' + (cls ? ' ' + cls : ''), text); pre.appendChild(copyBtn(function () { return text; })); enrollOut.appendChild(pre);
+        // three ways in, one at a time: a tab each, the last one chosen remembered in this browser
+        var ways = [
+          {key: 'command', label: 'Command', sub: 'Paste on the machine that will scan. It clones the client, writes its settings, names it after the machine and starts it.', text: steps.one_liner || ''},
+          {key: 'agent', label: 'AI agent', sub: 'Give this to an agent with a shell on that machine. The blob and your choices are already in it.', text: steps.agent_prompt || '', cls: 'enroll-prompt'},
+          {key: 'blob', label: 'Blob', sub: 'For CVENGINE_SENTINEL_BLOB in an existing Sentinel\'s .env. Server: ' + x.d.server_url, text: x.d.blob}
+        ];
+        var chosen = 'command';
+        try { chosen = localStorage.getItem('cve.sentinel.way') || 'command'; } catch (e) { /* storage blocked: default */ }
+        if (!ways.some(function (w) { return w.key === chosen; })) chosen = 'command';
+        var bar = el('div', 'enroll-tabs'); bar.setAttribute('role', 'tablist'); bar.setAttribute('aria-label', 'How to provision');
+        var tabs = [], panels = [];
+        ways.forEach(function (w, i) {
+          var tab = el('button', 'btn sm', w.label); tab.type = 'button'; tab.id = 'enroll-tab-' + w.key;
+          tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', 'enroll-panel-' + w.key);
+          var panel = el('div', 'enroll-panel'); panel.id = 'enroll-panel-' + w.key;
+          panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
+          panel.appendChild(el('div', 'enroll-sub', w.sub));
+          var pre = el('pre', 'code' + (w.cls ? ' ' + w.cls : ''), w.text); pre.appendChild(copyBtn(function () { return w.text; })); panel.appendChild(pre);
+          tab.addEventListener('click', function () { pick(i, true); });
+          tab.addEventListener('keydown', function (e) {
+            var to = e.key === 'ArrowRight' ? (i + 1) % ways.length : e.key === 'ArrowLeft' ? (i + ways.length - 1) % ways.length : -1;
+            if (to < 0) return;
+            e.preventDefault(); pick(to, true); tabs[to].focus();
+          });
+          tabs.push(tab); panels.push(panel); bar.appendChild(tab);
+        });
+        function pick(i, remember) {
+          tabs.forEach(function (t, j) { t.setAttribute('aria-selected', String(i === j)); t.tabIndex = i === j ? 0 : -1; panels[j].hidden = i !== j; });
+          if (remember) { try { localStorage.setItem('cve.sentinel.way', ways[i].key); } catch (e) { /* storage blocked */ } }
         }
-        block('Run this on the machine', 'Clones the client, writes its settings, names it after the machine and starts it.', steps.one_liner || '');
-        block('Or give this to an AI agent', 'A complete prompt for an agent with a shell on that machine: the blob and your choices are already in it.', steps.agent_prompt || '', 'enroll-prompt');
-        var raw = el('details', 'fold');
-        raw.appendChild(el('summary', '', 'Just the blob'));
-        var rawBody = el('div', 'fold-body');
-        var code = el('pre', 'code', x.d.blob); code.appendChild(copyBtn(function () { return x.d.blob; })); rawBody.appendChild(code);
-        rawBody.appendChild(el('div', 'enroll-sub', 'For CVENGINE_SENTINEL_BLOB in an existing Sentinel\'s .env. Server: ' + x.d.server_url));
-        raw.appendChild(rawBody); enrollOut.appendChild(raw);
+        enrollOut.appendChild(bar);
+        panels.forEach(function (p) { enrollOut.appendChild(p); });
+        pick(ways.map(function (w) { return w.key; }).indexOf(chosen), false);
       } else {
         enrollOut.className = 'msg err'; enrollOut.textContent = x.d.error || 'Could not generate an enrollment blob.';
       }
