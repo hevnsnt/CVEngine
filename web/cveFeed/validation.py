@@ -636,14 +636,19 @@ def resync(row):
 
 def record_template_outcomes(cve, outcomes, project, template_path):
     """Feed the template tests auto-fire runs (templategen.run_cve_tests) into the same record: each tested host's Triage rows for this
-    CVE get the outcome as a validation step. ``record_outcomes`` has already written the Vulnerability and template_result."""
+    CVE get the outcome as a validation step. ``record_outcomes`` has already written the Vulnerability and template_result.
+
+    Only the rows of the host's CURRENT matches are written (``latest_scan_q``): a superseded match's row is history, and writing its
+    ``validated_at`` and ``updated_at`` made it look like the freshest record of the finding to the next rescan's twin lookup (issue 338)."""
     from cveFeed import templategen
+    from cveFeed.correlation import latest_scan_q
     from cveFeed.models import Triage
     if project is None or not outcomes:
         return 0
     by_host = {templategen._host_key(o['host']): o for o in outcomes}
     done = 0
-    rows = Triage.objects.filter(project_id=project, kind='cve_match', match__cve_entry=cve, host__in=list(by_host)).select_related('match')
+    rows = (Triage.objects.filter(project_id=project, kind='cve_match', match__cve_entry=cve, host__in=list(by_host))
+            .filter(latest_scan_q('match__subdomain__')).select_related('match'))
     for row in rows:
         outcome = by_host.get(row.host)
         if outcome is None:
