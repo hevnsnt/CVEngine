@@ -318,7 +318,7 @@ class ReasoningRequestTests(unittest.TestCase):
 				sent('openai', model='gpt-4.1', env={'CVENGINE_AI_REASONING': 'high'})
 				sent('vllm', model='qwen3-32b', env={'CVENGINE_AI_REASONING': 'high'})
 		self.assertEqual(len(logs.records), 3)
-		self.assertIn('CVENGINE_AI_REASONING=high is ignored for openai gpt-4o', logs.output[0])
+		self.assertIn('the reasoning setting (high) is ignored for openai gpt-4o', logs.output[0])
 		self.assertIn('server', logs.output[2])
 
 	def test_the_plan_is_pure_and_names_why_it_sent_nothing(self):
