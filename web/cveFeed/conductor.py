@@ -2,7 +2,7 @@
 
 Scans used to start only when someone asked or when a daily/weekly sweep ran, so for most of the day nothing was running even with a
 thousand hosts to look after. Every minute this keeps the discovery pipeline fed: it counts the scans that are running or queued and,
-below the wanted depth (``CVENGINE_WORK_DEPTH``, default 3; 0 turns the conductor off), starts discovery of the targets that have gone
+below the wanted depth (Settings, configMaxxing, else ``CVENGINE_WORK_DEPTH``, default 3; 0 turns the conductor off), starts discovery of the targets that have gone
 longest without one. Never scanned first, then the stalest, at most one per project per round so no project starves the rest, and
 never a project whose bug bounty engagement has not confirmed automated testing, never a target scanned within ``CVENGINE_WORK_MIN_GAP_HOURS`` (default 2), one that already has a scan queued or running, one an
 organization excluded, or anything while scanning is paused (including the pause an update holds).
@@ -30,6 +30,14 @@ def _env_int(name, default):
 
 
 def wanted_depth():
+    """The depth an App Admin saved on Settings, configMaxxing, else CVENGINE_WORK_DEPTH, else 3 (see cveFeed.scan_concurrency)."""
+    try:
+        from cveFeed import scan_concurrency
+        got = scan_concurrency.resolve('work_depth')
+        if got['source'] == 'admin':
+            return got['value']
+    except Exception:  # noqa: BLE001 - the saved copy is a cache: without it the environment decides, as before
+        logger.debug('work conductor: the saved depth could not be read', exc_info=False)
     return _env_int('CVENGINE_WORK_DEPTH', DEFAULT_DEPTH)
 
 

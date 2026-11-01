@@ -1677,7 +1677,17 @@ def report_resources():
     container) can show it. See reNgine/resources.py."""
     from reNgine import resources
     resources.report_state()
+    from cveFeed import scan_concurrency
+    scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
     return {}
+
+
+@app.task(name="apply_scan_concurrency", bind=False, queue="cve_feed_queue")
+def apply_scan_concurrency():
+    """After a save on Settings, configMaxxing: resize the running discovery worker to the saved value with celery's ``autoscale`` remote
+    control (the other numbers are read live by the workers). report_resources does the same every 30 seconds."""
+    from cveFeed import scan_concurrency
+    return scan_concurrency.apply_discovery()
 
 
 PRUNE_ROUNDS, PRUNE_BATCH = 20, 5000

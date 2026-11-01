@@ -66,7 +66,15 @@ DEFAULT_BATCH, MAX_BATCH = 8, 64  # 64 is what one dispatched nmap/naabu task ta
 
 def batch_size():
     """Most hosts of one target carried through one assessment pipeline run (``CVENGINE_ASSESS_BATCH``, default 8, held to 1..64; 1 runs
-    every host on its own, exactly as before batching). An unreadable value is the default."""
+    every host on its own, exactly as before batching). An unreadable value is the default. A value saved on Settings, configMaxxing wins over
+    the environment (see ``cveFeed.scan_concurrency``); when it cannot be read, the environment decides."""
+    try:
+        from cveFeed import scan_concurrency
+        got = scan_concurrency.resolve('assess_batch')
+        if got['source'] == 'admin':
+            return got['value']
+    except Exception:  # noqa: BLE001 - the saved copy is a cache: without it the environment decides
+        logger.debug('assessment batch: the saved size could not be read', exc_info=False)
     try:
         wanted = int(str(os.environ.get(BATCH_ENV, '')).strip())
     except ValueError:

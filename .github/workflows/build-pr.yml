@@ -100,7 +100,7 @@ jobs:
         # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
         run: python manage.py test --noinput --parallel auto
       - name: Graph cluster regression gate
-        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs web/tests/test_inventory_snippets.mjs web/tests/test_frontend_static.mjs web/tests/test_poll.mjs
+        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs web/tests/test_inventory_snippets.mjs web/tests/test_frontend_static.mjs web/tests/test_poll.mjs web/tests/test_config_maxxing.mjs web/tests/test_config_maxxing_page.mjs
 
   build:
     name: 🐳 Build Docker image (${{ matrix.platform }})

@@ -14,7 +14,7 @@ from django_celery_beat.schedulers import DatabaseScheduler
 # other bookkeeping. Everything else (discovery, scanners, validation, AI triage and reviews, certificate watching) waits.
 PAUSE_EXEMPT_TASKS = frozenset({
     'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'sync_bounty_catalogue', 'sync_threat_intel',
-    'check_for_updates', 'refresh_sentinel_version', 'feed_sentinels', 'update_nuclei_templates', 'prune_asset_changes', 'prune_scan_history', 'report_resources', 'rescore_all_hosts',
+    'check_for_updates', 'refresh_sentinel_version', 'feed_sentinels', 'update_nuclei_templates', 'prune_asset_changes', 'prune_scan_history', 'report_resources', 'apply_scan_concurrency', 'rescore_all_hosts',
     'reconcile_invalid_correlations', 'weekly_maintenance', 'reap_stuck_jobs', 'send_notif',
     'send_task_notif', 'snapshot_daily_stats', 'bootstrap_first_run', 'evaluate_saved_searches',
     # The OpenVAS step is exempt so that a pause can reach a GVM task that is already running: while scanning is paused it only stops
