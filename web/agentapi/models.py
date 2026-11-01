@@ -44,6 +44,13 @@ class Agent(models.Model):
     reported_settings = models.JSONField(default=dict, blank=True)
     status_note = models.CharField(max_length=200, blank=True, default='')
     status_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # When ``status`` last changed (registration, or an administrator's ``update_agent``): how old a suspension or revocation is, for the rule
+    # that holds a user's new agents back while another of theirs is suspended or revoked (``agent_broker.suspension_culprit``).
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    # Set when that rule suspended this agent at registration (no administrator decided it), with the agent it named. Such an agent is never
+    # itself a reason to hold the next one back, and any status an administrator sets clears both.
+    status_inherited = models.BooleanField(default=False, db_default=False)
+    held_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     last_seen = models.DateTimeField(null=True, blank=True)
     registered_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

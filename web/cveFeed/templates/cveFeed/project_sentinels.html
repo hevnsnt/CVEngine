@@ -59,6 +59,8 @@
       left.appendChild(el('span', 'cve-id', a.name));
       left.appendChild(el('div', 'meta', a.status + (a.status === 'active' ? (a.live ? ' · live' : ' · offline') : '') + ' · seen ' + when(a.last_seen) +
         ' · covers ' + (LEVEL[a.scope_level] || a.scope_level)));
+      // why it is suspended, on its own line, for the people who can act on it (the Sentinels page shows the same "Suspended: <reason>")
+      if (a.status === 'suspended' && a.manageable && a.status_note) left.appendChild(el('div', 'meta', 'Suspended: ' + a.status_note));
       left.appendChild(el('div', 'meta', a.tasks.open + ' running, ' + a.tasks.queued + ' queued, ' + a.tasks.completed + ' done, ' + a.tasks.failed + ' failed here · ' +
         (a.capabilities.join(', ') || 'no capabilities')));
       top.appendChild(left);

@@ -292,12 +292,12 @@ def bootstrap(body):
                   'instance': not enrollment.org_id and not enrollment.project_id}
         user = enrollment.created_by
         token, raw_token = create_token(user, f'sentinel:{name}'[:100], scope=SCOPE_SENTINEL, expires_at=timezone.now() + SENTINEL_TOKEN_TTL)
-        status, note = broker._initial_status(user)
-        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, status=status, status_note=note,
-                                     network=enrollment.network, **fields)
+        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, network=enrollment.network,
+                                     **broker._initial_status(user), **fields)
         SentinelEnrollment.objects.filter(pk=enrollment.pk).update(used_by_agent=agent, token=token)
     audit.record_for_user(user, 'agent.register', user, target=agent.name, agent_id=agent.pk, kind='scanner', scope=scope,
                           via='enrollment', enrollment_id=enrollment.pk)
+    broker.record_hold(agent, user, via='enrollment', enrollment_id=enrollment.pk)
     out = broker.agent_dict(agent, detail=True)
     out.update(created=True, token=raw_token, note='Store this token now. It is not shown again.', warnings=broker._warnings(agent))
     return _with_settings(out, settings)
@@ -1543,7 +1543,7 @@ def list_project_sentinels(ctx, slug):
     reap_expired()
     now = timezone.now()
     agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner',
-                                       token__revoked=False).exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
+                                       token__revoked=False).exclude(status='revoked').select_related('token__user', 'held_by').order_by('name', 'id')[:CANDIDATES])
     rows = []
     for agent in agents:
         eff = SentinelEff(agent, now)
@@ -1554,19 +1554,35 @@ def list_project_sentinels(ctx, slug):
     counts = {}
     for agent_id, status, n in (SentinelTask.objects.filter(project=project, agent_id__in=ids).values_list('agent_id', 'status').annotate(n=Count('id'))):
         counts.setdefault(agent_id, {})[status] = n
-    manageable = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    # what the caller may change (update_agent would accept it): only then the row carries the status note, which can be an administrator's
+    # reason or name another agent of the same user (possibly working for another tenant), never for every role in the project
+    listed = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    decide = _deciders(ctx.user, [a for a, _ in rows if a.pk in listed])
     out = []
     for agent, eff in rows:
         scope = agent.scope or {}
         level = 'instance' if scope.get('instance') else ('project' if project.slug in (scope.get('projects') or []) else 'org')
         c = counts.get(agent.pk, {})
-        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note, 'live': eff.live,
+        manageable = decide.get(agent.pk, False)
+        note = broker.visible_hold(agent, ctx.user, manageable)[0] if manageable else ''
+        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': note, 'live': eff.live,
                     'last_seen': svc._iso(agent.last_seen), 'scope_level': level, 'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
                     'os': agent.os, 'max_concurrent': agent.max_concurrent,
                     'tasks': {'open': c.get('claimed', 0) + c.get('running', 0), 'queued': c.get('queued', 0), 'completed': c.get('done', 0),
                               'failed': c.get('failed', 0)},
-                    'manageable': agent.pk in manageable})
+                    'manageable': manageable})
     return {'project': project.slug, 'results': out}
+
+
+def _deciders(user, agents):
+    """``{agent id: can_decide}`` for ``agents``, worked out once per owner (a page lists many Sentinels of few users)."""
+    by_owner, out = {}, {}
+    for agent in agents:
+        owner = agent.token.user_id
+        if owner not in by_owner:
+            by_owner[owner] = broker.can_decide(user, agent)
+        out[agent.pk] = by_owner[owner]
+    return out
 
 
 def _state_of(agent, live, active):
@@ -1641,14 +1657,16 @@ def live_overview(ctx):
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
     orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
+    decide = _deciders(ctx.user, agents)
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)
         mine = held.get(agent.pk, [])
+        note, held_by = broker.visible_hold(agent, ctx.user, decide[agent.pk])
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': note, 'held_by': held_by, 'can_manage': decide[agent.pk],
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
