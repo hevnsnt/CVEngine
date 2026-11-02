@@ -3480,11 +3480,12 @@ def _apply_remediation(obj, status, note, user, rescore=True):
     statuses, cveFeed.closure.STATUSES, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's
     body left it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Closing with fixed,
     accepted_risk or false_positive makes it the closure note, with who (remediation_by) and when (remediation_updated_at). The note is
-    cleaned here too (callers clean it first, so a bad one fails before any write). Raises on an unrecognized status; never touches
-    whatever auto-managed liveness field (open_status, HygieneFinding.status, ai_verdict) the model also carries, which stays under the
-    scan/check pipeline."""
+    cleaned and cut to 2000 characters here (the request paths refuse a longer one with a 400 first, via _clean_note; an agent's own
+    report is cut, as before). Raises on an unrecognized status; never touches whatever auto-managed liveness field (open_status,
+    HygieneFinding.status, ai_verdict) the model also carries, which stays under the scan/check pipeline."""
+    from cveFeed import closure
     _check_status(status)
-    note = _clean_note(note)
+    note = closure.clip_note(note)
     fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
     obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
     if note is not None:
@@ -3508,8 +3509,8 @@ def _record_status_change(project, kind, finding_id, before, after, actor, note=
 
 
 def _log_status(project, message, before, status, note, **detail):
-    """The activity feed's line for a status change: the new status in words, and in its detail the statuses before and after and the
-    note (clipped), so the feed and the audit trail agree."""
+    """The activity feed's line for a status change, with the statuses before and after and the note (clipped) in its detail, so the feed
+    and the audit trail agree."""
     from cveFeed import activity
     extra = {'note': note[:500]} if note else {}
     activity.log('remediation', message, project=project, before=before, after=status, **detail, **extra)

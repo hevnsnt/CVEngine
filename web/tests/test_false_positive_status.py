@@ -158,6 +158,15 @@ class RestTests(Fixture, TestCase):
 		self.match.refresh_from_db()
 		self.assertEqual(self.match.remediation_status, 'open')
 
+	def test_a_note_the_server_writes_itself_is_cut_not_refused(self):
+		from agentapi import services
+		services._apply_remediation(self.match, 'fixed', 'Fixed by agent bot: ' + 'x' * 5000 + '\x00', self.alice)
+		self.match.refresh_from_db()
+		self.assertEqual((self.match.remediation_status, len(self.match.remediation_note)), ('fixed', 2000))
+		self.assertTrue(self.match.remediation_note.startswith('Fixed by agent bot: xxx'))
+		self.assertEqual(closure.clip_note('  a\x00b  '), 'ab')
+		self.assertIsNone(closure.clip_note(None))
+
 	def test_unknown_status_is_still_refused(self):
 		self.assertEqual(call(self.t_alice, 'PATCH', f'{self.base}/findings/match/{self.match.id}', {'status': 'false-positive'})[0], 400)
 

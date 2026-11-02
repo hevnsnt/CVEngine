@@ -54,6 +54,14 @@ def clean_note(value, limit=NOTE_MAX):
     return text
 
 
+def clip_note(value, limit=NOTE_MAX):
+    """``value`` cleaned like ``clean_note`` but cut to ``limit`` instead of refused: for a note the server writes itself (an agent's
+    report), where there is nobody to send a 400 to. ``None`` stays ``None``."""
+    if value is None:
+        return None
+    return _CONTROL.sub('', str(value).replace('\r\n', '\n').replace('\r', '\n')).strip()[:limit].rstrip()
+
+
 def is_closed(status):
     return status in CLOSED
 
