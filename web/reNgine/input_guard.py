@@ -62,6 +62,9 @@ STRICT_FIELDS = {'value', 'target', 'host', 'hostname', 'domain', 'project', 'sl
                  'target_id', 'scan_id', 'engine_id', 'match_id', 'org_id', 'project_id'}
 BULK_FIELDS = {'text', 'targets', 'assets'}
 STRICT_OK = re.compile(r'^[A-Za-z0-9._:/\[\] \-]*$')
+# A target typed for Add targets may start with one '=' ("=example.com": exactly that host, agentapi.services.HOST_ONLY_MARK). That mark is
+# allowed in front of the ``value`` field only; the rest of the value is held to STRICT_OK like any other strict field.
+HOST_MARK_FIELDS = frozenset({'value'})
 TOKEN_BAD = re.compile(r'[|&$`<>(){}\\]')
 _MD_LINK = re.compile(r'\[[^\]]*\]\(([^)\s]*)\)')
 EXEMPT_PATH = re.compile(r'^/(staticfiles|login|logout|mfa|admin)(/|$)')
@@ -110,6 +113,12 @@ def _free_text_fields(request, data):
     return API_FREE_TEXT_FIELDS | {'text'} if comment else API_FREE_TEXT_FIELDS
 
 
+def _without_host_mark(name, text):
+    """``text`` without the one leading '=' a host-only target carries, for the fields that take one (HOST_MARK_FIELDS)."""
+    stripped = text.lstrip()
+    return stripped[1:] if name in HOST_MARK_FIELDS and stripped.startswith('=') else text
+
+
 def _authority(token):
     """The part of a pasted token that must be a hostname or address: for a URL, the host (not its path or query,
     which legitimately hold & ? = and so on); otherwise the token up to any slash."""
@@ -156,7 +165,7 @@ def inspect(pairs):
                 hits.append((category, weight, name, text[max(0, m.start() - 20):m.end() + 20]))
                 break
         else:
-            if name in STRICT_FIELDS and not STRICT_OK.match(text):
+            if name in STRICT_FIELDS and not STRICT_OK.match(_without_host_mark(name, text)):
                 hits.append(('strict_field', 1, name, text))
             elif name in BULK_FIELDS:
                 for line in text.splitlines():
