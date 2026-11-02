@@ -769,6 +769,24 @@ def names_of(records):
 _TOKENS = {re.sub(r'[^a-z0-9]', '', n) for n in (*PRODUCTS, *LIBRARIES)}
 
 
+def page_status(status):
+    """Whether a front page that answered ``status`` is a page whose scripts are the host's: 2xx, or the page a hosted site serves for a
+    missing ``/`` (404, 410), which still loads its scripts."""
+    return isinstance(status, int) and (200 <= status < 300 or status in (404, 410))
+
+
+def script_page(entries):
+    """What correlation keeps of a parsed front page (``parse_page`` entries): how many scripts with a source it loads and the ``?ver=``
+    strings they carry, each with the library its script is ('' for a theme's or plugin's own script)."""
+    urls = [entry['url'] for entry in entries if entry.get('url')]
+    seen = {}
+    for url in urls:
+        found = identify(url)
+        if found['query_version']:
+            seen.setdefault((found['query_version'], found['library']), None)
+    return {'scripts': len(urls), 'query_versions': [{'version': v, 'library': k} for v, k in list(seen)[:60]]}
+
+
 def is_library(name):
     """Whether a stored technology name (``jQuery:3.4.1``) or an advisory's product name (``jquery_ui``) is one of the libraries read here."""
     return re.sub(r'[^a-z0-9]', '', (name or '').split(':', 1)[0].lower()) in _TOKENS
@@ -795,6 +813,21 @@ def closed_reason(reason):
     host only redirects, the page's files state another version, the page loads no such script, or the version is a cache-buster).
     Correlation reopens such a match as soon as the host matches it again."""
     return f'{LIBRARY_CLOSED}: {str(reason)[:400]}.'
+
+
+def closure_kind(reason):
+    """The kind of a stored library closure reason (``closed_reason``), for counts: redirect_alias, contradicted_by_file, cache_buster,
+    no_such_script, or '' for any other reason."""
+    text = str(reason or '')
+    if not text.startswith(LIBRARY_CLOSED):
+        return ''
+    if 'only redirects to' in text:
+        return 'redirect_alias'
+    if 'cache-buster' in text:
+        return 'cache_buster'
+    if 'loads no ' in text:
+        return 'no_such_script'
+    return 'contradicted_by_file'
 
 
 def _origin(url):
@@ -833,12 +866,12 @@ class HostLibraries:
     stored version may make a match and with what evidence. ``alias_of`` is the host the front page only redirects to (``redirect_alias_of``):
     such a host serves no scripts of its own, so no library version stored for it is matched."""
 
-    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, query_versions=()):
+    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, query_versions=None):
         self.records = records or {}  # library key -> record
         self.legacy = legacy or {}    # (library key, version) -> source, from fingerprints that predate records
         self.alias_of = alias_of
-        self.page_read = page_read    # a front page that answered 2xx was parsed for its scripts since 1.3.3 (or 1.3.2 found a library on it)
-        self.query_versions = set(query_versions)  # every ?ver= string the front page's scripts carry (cache-busters, never versions)
+        self.page_read = page_read    # the front page was parsed for its scripts (script_page) or the 1.3.2 reader found a library on it
+        self.query_versions = dict(query_versions or {})  # ?ver= string -> the libraries whose scripts carry it ('' for any other script)
 
     @classmethod
     def for_subdomain(cls, subdomain):
@@ -847,19 +880,20 @@ class HostLibraries:
         if not project:
             return cls()
         host = subdomain.name.lower()
-        dated, legacy, roots, page_read, query_versions = [], {}, [], False, set()
-        for row in RouteAuth.objects.filter(project_id=project, host=host, path='/', retired_at__isnull=True).only(
+        dated, legacy, roots, page_read, query_versions = [], {}, [], False, {}
+        # every root row, a retired one too: a root that now answers 404 is retired, and the page it serves still loads the host's scripts
+        for row in RouteAuth.objects.filter(project_id=project, host=host, path='/').only(
                 'evidence', 'checked_at', 'url', 'http_status', 'redirect_to'):
             roots.append((row.url, row.http_status, row.redirect_to))
             evidence = row.evidence or {}
             if isinstance(evidence.get('libraries'), dict):
                 dated += [(row.checked_at, key, rec) for key, rec in evidence['libraries'].items() if isinstance(rec, dict)]
             script_page = evidence.get('script_page')
-            if isinstance(row.http_status, int) and 200 <= row.http_status < 300 and (
-                    isinstance(script_page, dict) or isinstance(evidence.get('libraries'), dict)):
+            if page_status(row.http_status) and (isinstance(script_page, dict) or isinstance(evidence.get('libraries'), dict)):
                 page_read = True
-                if isinstance(script_page, dict):
-                    query_versions |= {str(v) for v in script_page.get('query_versions') or [] if v}
+                for item in (script_page or {}).get('query_versions') or [] if isinstance(script_page, dict) else []:
+                    if isinstance(item, dict) and item.get('version'):
+                        query_versions.setdefault(str(item['version']), set()).add(str(item.get('library') or ''))
             for found in evidence.get('fingerprints') or []:
                 if isinstance(found, dict) and found.get('source') in FILENAME_SOURCES:
                     _legacy_add(legacy, found.get('name'), found['source'])
@@ -880,8 +914,10 @@ class HostLibraries:
             # version one of them read from a file is never lost
             seen = {(c.get('url'), c.get('version')) for c in records[key]['copies'] if isinstance(c, dict)}
             records[key]['copies'] += [c for c in record.get('copies') or [] if isinstance(c, dict) and (c.get('url'), c.get('version')) not in seen]
-        for record in records.values():
-            query_versions |= {str(c['query_version']) for c in record['copies'] if isinstance(c, dict) and c.get('query_version')}
+        for key, record in records.items():
+            for copy in record['copies']:
+                if isinstance(copy, dict) and copy.get('query_version'):
+                    query_versions.setdefault(str(copy['query_version']), set()).add(key)
         from cveFeed.route_auth import web_bases
         return cls(records, legacy, redirect_alias_of(roots, host, web_bases(subdomain, limit=None)) if roots else '', page_read, query_versions)
 
@@ -907,7 +943,7 @@ class HostLibraries:
             if (key, version) in self.legacy:
                 return self._judge_legacy(key, version)
             if self.page_read:  # the front page was read and loads no script of this library: the version came from somewhere else
-                return True, {'reason': (_cache_buster(name, version) if version in self.query_versions else
+                return True, {'reason': (_cache_buster(name, version) if self._cache_busted(key, version) else
                                          f'the front page loads no {name} script; the {version} came from a technology scan')}, None
             return self._judge_legacy(key, version)
         copies = [c for c in record.get('copies') or [] if isinstance(c, dict)]
@@ -947,7 +983,7 @@ class HostLibraries:
                                      if said else f'the {name} script\'s own file does not state {version}')}, None
         if stated:  # the page's files state the library's version(s), and this one is none of them: another tool's misreading
             return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
-        if version in self.query_versions:  # a theme's or plugin's ?ver= cache-buster on the same page, read as the library's version
+        if self._cache_busted(key, version):  # a theme's or plugin's ?ver= cache-buster on the same page, read as the library's version
             return True, {'reason': _cache_buster(name, version)}, None
         if named:  # the script was never read: its query or name string is all there is, kept at the file-name confidence
             copy = named[0]
@@ -958,6 +994,12 @@ class HostLibraries:
         # another tool read it (from a script name or query string the page's files do not bear out): shown with what the page itself
         # says, and trusted no further than a file name
         return False, {'copies': summary, **_other()}, CONFIDENCE['filename']
+
+    def _cache_busted(self, key, version):
+        """Whether ``version`` is the ``?ver=`` string of a script on the page that is not this library's own copy (another library's, a
+        theme's or a plugin's): a cache-buster, never this library's version. Its own copy's ``?ver=`` may be the real version (WordPress
+        puts core jQuery's there), so that alone proves nothing."""
+        return bool(self.query_versions.get(version, set()) - {key})
 
     def _judge_legacy(self, key, version):
         """A version stored before records existed, from a script's name or its query string (one cannot be told from the other any more):

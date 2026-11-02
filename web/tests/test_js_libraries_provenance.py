@@ -8,6 +8,7 @@ Two leaks the client-side design review found after the 1.3.2 re-cut, on live da
 * a host that only redirects (five ``*.mybluegrace.com`` names answer a 301 to ``mybluegrace.com``) was given the libraries of the page it
   redirects to: the probes follow the redirect and recorded the target's scripts on the alias, and correlation matched them there.
 """
+import os
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -339,3 +340,164 @@ class StoredMatchClosureTests(Hosts):
         self.wordpress_root()
         reconcile_invalid_correlations(limit=100)
         self.assertEqual(CVEMatch.objects.get(pk=worked.pk).ai_verdict, '')
+
+
+class SystemicLibraryTests(Hosts):
+    """The same provenance step for every library the registry names, not only jQuery: Bootstrap and Lodash."""
+
+    BOOTSTRAP_XSS = FakeCVE(10735, [{'vendor': 'getbootstrap', 'product': 'bootstrap', 'ranges': [{'introduced': '0', 'fixed': '3.4.1'}]}])
+    LODASH_POLLUTION = FakeCVE(10744, [{'vendor': 'lodash', 'product': 'lodash', 'ranges': [{'introduced': '0', 'fixed': '4.17.12'}]}])
+
+    def found(self, page, bodies, *names):
+        with mock.patch.object(js_libraries, '_cache', return_value=None):
+            records = read(page, bodies)
+        self.root('www.rt.test', evidence=AnotherToolsVersionTests.page_evidence(self, records, page=page))
+        sub = self.sub('www.rt.test')
+        for name in names:
+            sub.technologies.add(Technology.objects.get_or_create(name=name)[0])
+        cves = (self.BOOTSTRAP_XSS, self.LODASH_POLLUTION)
+        rows = correlation.collect_subdomain_matches(Subdomain.objects.prefetch_related('technologies').get(pk=sub.pk),
+                                                     correlation.build_product_index(cves), {c.id: c for c in cves})
+        return {(r['matched_product'].lower(), r['matched_version']): r for r in rows}, js_libraries.HostLibraries.for_subdomain(sub)
+
+    def test_bootstrap_and_lodash_versions_the_files_contradict_are_not_matched(self):
+        page = '<script src="/js/bootstrap.min.js"></script><script src="/js/lodash.min.js"></script>'
+        bodies = {'/js/bootstrap.min.js': '/*!\n  * Bootstrap v5.3.2 (https://getbootstrap.com/)\n  */',
+                  '/js/lodash.min.js': '/**\n * @license\n * Lodash 4.17.21 <https://lodash.com/>\n */'}
+        found, libraries = self.found(page, bodies, 'Bootstrap:3.3.7', 'Lodash:4.17.4', 'Bootstrap:5.3.2', 'Lodash:4.17.21')
+        self.assertEqual(found, {})
+        self.assertEqual(libraries.judge('Bootstrap', '3.3.7')[1]['reason'],
+                         "the page's own scripts say Bootstrap 5.3.2; the 3.3.7 came from a technology scan")
+        self.assertEqual(libraries.judge('Lodash', '4.17.4')[1]['reason'], "the page's own scripts say Lodash 4.17.21; the 4.17.4 came from a technology scan")
+
+    def test_bootstrap_and_lodash_cache_busters_are_not_matched_and_their_own_files_still_are(self):
+        page = ('<script src="/js/lodash.min.js"></script><script src="/js/bootstrap.min.js?ver=3.3.7"></script>'
+                '<script src="/wp-content/themes/acme/js/theme.js?ver=4.17.4"></script>')
+        bodies = {'/js/lodash.min.js': '/** @license lodash 4.17.4 */'}  # bootstrap.min.js could not be read
+        found, libraries = self.found(page, bodies, 'Lodash:4.17.4', 'Bootstrap:3.3.7')
+        # Lodash's own file says 4.17.4: proven, whatever a theme's cache-buster says; Bootstrap's own ?ver= alone proves nothing either way
+        self.assertEqual(found[('lodash', '4.17.4')]['evidence']['version_source'], 'body')
+        self.assertEqual(found[('bootstrap', '3.3.7')]['confidence'], js_libraries.CONFIDENCE['filename'])
+        _skip, evidence, _cap = libraries.judge('Bootstrap', '4.17.4')
+        self.assertIn('cache-buster', evidence['reason'])
+
+
+ORACLE = os.path.join(os.path.dirname(__file__), 'fixtures', 'js_provenance')
+
+
+def oracle(name):
+    with open(os.path.join(ORACLE, name), encoding='utf-8') as handle:
+        return handle.read()
+
+
+class LiveSiteOracleTests(RouteFixture, TestCase):
+    """The live case (2026-11-02, names replaced), replayed through the route check's page read, correlation and closure: a WordPress site
+    whose core jQuery file says 3.7.1, five names that only redirect to it, and a hosted landing site whose "/" answers 404 but loads a
+    real jQuery 1.11.2. Of the 19 stored matches, 18 close with a reason and exactly one stands: CVE-2020-11023 on the landing site."""
+
+    HOSTS = {'bg.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
+             'www.bg.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
+             'bgu.bg.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
+             'givinggrace.bg.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
+             'blog.bg.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
+             'careers.bg.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.4.1', 'jQuery:3.7.1'],
+             'info.bg.test': ['jQuery:1.11.2']}
+    REDIRECTS = {'www.bg.test': 'https://bg.test/', 'bgu.bg.test': 'https://bg.test/', 'givinggrace.bg.test': 'https://bg.test/',
+                 'blog.bg.test': 'https://bg.test/', 'careers.bg.test': 'https://bg.test/careers/working-at-acme/'}
+    SCRIPTS = {'https://bg.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN,
+               'https://bg.test/wp-includes/js/jquery/jquery-migrate.min.js': '/*! jQuery Migrate v3.4.1 | (c) OpenJS Foundation and other contributors */',
+               'https://info.bg.test/hs/hsstatic/jquery-libs/static-1.4/jquery/jquery-1.11.2.js': oracle('jquery-1.11.2-head.js')}
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed.models import CVEEntry
+        from targetApp.models import Domain
+        from startScan.models import IpAddress, Port, ScanHistory
+        self.site = Domain.objects.create(name='bg.test', project=self.project, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=self.site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[],
+                                          results_dir='x')
+        ip = IpAddress.objects.create(address='203.0.113.80')
+        ip.ports.add(Port.objects.create(number=443, service_name='https', state='open'))
+        self.subs = {}
+        for name, techs in self.HOSTS.items():
+            sub = Subdomain.objects.create(name=name, target_domain=self.site, scan_history=scan)
+            sub.ip_addresses.add(ip)
+            sub.technologies.add(*[Technology.objects.get_or_create(name=t)[0] for t in techs])
+            self.subs[name] = sub
+        self.entries = [
+            CVEEntry.objects.create(cve_id='CVE-2020-11023', kev=True, cvss=6.9, published_at=timezone.now(),
+                                    affected=[{'vendor': 'jquery', 'product': 'jquery', 'ranges': [{'introduced': '1.0.3', 'fixed': '3.5.0'}]}]),
+            CVEEntry.objects.create(cve_id='CVE-2020-11022', cvss=6.9, published_at=timezone.now(),
+                                    affected=[{'vendor': 'jquery', 'product': 'jquery', 'ranges': [{'introduced': '1.12.0', 'fixed': '3.5.0'}]}]),
+            CVEEntry.objects.create(cve_id='CVE-2026-114538', cvss=6.1, published_at=timezone.now(),
+                                    affected=[{'vendor': 'drupal', 'product': 'bootstrap', 'ranges': [{'introduced': '0.0.0', 'fixed': '3.45.0'}]}])]
+
+    def correlate(self):
+        index = correlation.build_product_index(self.entries)
+        correlation.correlate_subdomains(Subdomain.objects.filter(pk__in=[s.pk for s in self.subs.values()])
+                                         .prefetch_related('technologies', 'ip_addresses__ports'), index, {e.id: e for e in self.entries})
+
+    def read_front_pages(self):
+        """The route check's front-page read, against the saved answers: classify, read the scripts, store the root route."""
+        from cveFeed import route_auth
+
+        def probe(url, **_kw):
+            body = self.SCRIPTS.get(url.split('?', 1)[0])
+            return ({'status': 200, 'body': body, 'url': url, 'content_type': 'application/javascript', 'headers': {}} if body is not None
+                    else {'status': 404, 'body': 'not found', 'url': url, 'content_type': 'text/html', 'headers': {}})
+        answers = {'bg.test': {'status': 200, 'body': oracle('wordpress-front-page.html'), 'title': 'Home'},
+                   'info.bg.test': {'status': 404, 'body': oracle('hosted-404-front-page.html'), 'title': 'Page not found'}}
+        answers.update({host: {'status': 301, 'location': target, 'body': '<html><head><title>301 Moved Permanently</title></head></html>'}
+                        for host, target in self.REDIRECTS.items()})
+        for host, answer in answers.items():
+            url = f'https://{host}/'
+            result = route_auth.analyse({'url': url, 'content_type': 'text/html', 'headers': {}, **answer})
+            with mock.patch.object(js_libraries, '_cache', return_value=None):
+                route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
+                                         target=self.site)
+            RouteAuth.objects.create(project=self.project, domain=self.site, host=host, path='/', url=url, auth_state=result['state'],
+                                     http_status=answer['status'], redirect_to=result['evidence'].get('redirect_to', ''),
+                                     evidence=result['evidence'], checked_at=timezone.now())
+
+    def open_and_closed(self):
+        from cveFeed.models import CVEMatch
+        rows = list(CVEMatch.objects.filter(subdomain__in=self.subs.values()).select_related('cve_entry', 'subdomain'))
+        is_open = [m for m in rows if m.ai_verdict != 'not_affected']
+        closed = [m for m in rows if m.ai_verdict == 'not_affected']
+        return rows, is_open, closed
+
+    def assert_oracle(self, closed_kinds, proven=True):
+        rows, is_open, closed = self.open_and_closed()
+        self.assertEqual(len(rows), 19)
+        self.assertEqual([(m.subdomain.name, m.cve_entry.cve_id, m.matched_version) for m in is_open], [('info.bg.test', 'CVE-2020-11023', '1.11.2')])
+        survivor = is_open[0]
+        if proven:  # correlated again after the page read: proven by the file's banner
+            self.assertEqual((survivor.evidence.get('version_source'), survivor.confidence), ('body', 0.95))
+        self.assertEqual(len(closed), 18)
+        kinds = {}
+        for m in closed:
+            self.assertTrue(m.ai_reason.startswith(js_libraries.LIBRARY_CLOSED), m.ai_reason)
+            kinds[js_libraries.closure_kind(m.ai_reason)] = kinds.get(js_libraries.closure_kind(m.ai_reason), 0) + 1
+        self.assertEqual(kinds, closed_kinds)
+        by_host = {(m.subdomain.name, m.cve_entry.cve_id): m.ai_reason for m in closed}
+        self.assertIn("the page's own scripts say jQuery 3.7.1", by_host[('bg.test', 'CVE-2020-11023')])
+        self.assertIn('cache-buster', by_host[('bg.test', 'CVE-2026-114538')])
+        self.assertIn('only redirects to bg.test', by_host[('careers.bg.test', 'CVE-2020-11023')])
+
+    def test_the_next_correlation_closes_eighteen_and_keeps_the_real_one(self):
+        self.correlate()  # as stored before the fix: no front page read
+        rows, is_open, _closed = self.open_and_closed()
+        self.assertEqual((len(rows), len(is_open)), (19, 19))
+        self.read_front_pages()
+        self.correlate()
+        self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2, 'cache_buster': 1})
+
+    def test_the_reconcile_sweep_closes_the_same_eighteen_without_a_rescan(self):
+        from cveFeed.tasks import reconcile_invalid_correlations
+        self.correlate()
+        self.read_front_pages()
+        with self.assertLogs('cveFeed.tasks', level='INFO') as logs:
+            result = reconcile_invalid_correlations(limit=100)
+        self.assertEqual(result['closed_by_reason'], {'redirect_alias': 15, 'contradicted_by_file': 2, 'cache_buster': 1})
+        self.assertIn('closed 18 of', '\n'.join(logs.output))
+        self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2, 'cache_buster': 1}, proven=False)
