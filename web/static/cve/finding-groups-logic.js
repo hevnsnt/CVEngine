@@ -8,9 +8,9 @@
 
 export const GROUPED = "cve"; // the server's group mode the page asks for by default
 export const EVERY_HOST = "none"; // "Show every host": one row per host, as before
-export const STATUS_VALUES = ["open", "in_progress", "fixed", "accepted_risk"];
+export const STATUS_VALUES = ["open", "in_progress", "fixed", "accepted_risk", "false_positive"]; // closure-logic.js STATUS_VALUES
 const HEAT_ORDER = { fire: 3, smoke: 2, ice: 1 };
-const STATUS_WORD = { open: "open", in_progress: "in progress", fixed: "fixed", accepted_risk: "accepted risk", "ruled out": "ruled out" };
+const STATUS_WORD = { open: "open", in_progress: "in progress", fixed: "fixed", accepted_risk: "accepted risk", false_positive: "false positive", "ruled out": "ruled out" };
 
 export const isGroup = (item) => Boolean(item && item.group && Array.isArray(item.group.member_ids) && item.group.member_ids.length > 1);
 
@@ -23,7 +23,7 @@ export const chipCounts = (r) => ({ all: r.total || 0, ...((r && (r.row_counts |
 // "on 6 hosts" and the split of their own statuses, worst first: "4 open · 1 in progress · 1 fixed".
 export function statusSplit(group) {
   const counts = (group && group.status_counts) || {};
-  const order = ["open", "in_progress", "ruled out", "fixed", "accepted_risk"];
+  const order = ["open", "in_progress", "ruled out", "fixed", "accepted_risk", "false_positive"];
   const keys = Object.keys(counts).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
   return keys.map((k) => `${counts[k]} ${STATUS_WORD[k] || String(k).replace(/_/g, " ")}`).join(" · ");
 }
@@ -44,12 +44,12 @@ export const sortedMembers = (group) =>
 // The hash that opens one member on the Findings page (#match-12, or #project:match-12 in the all-projects view).
 export const memberHash = (member, project, all) => `${all ? `${project}:` : ""}match-${member.id}`;
 
-// A member's own remediation status (open, in_progress, fixed, accepted_risk), from the full map the server sends with every group.
+// A member's own remediation status (open, in_progress, fixed, accepted_risk, false_positive), from the full map the server sends with every group.
 const statusOfMember = (group, id) => (group.member_status && group.member_status[String(id)]) || ((group.members || []).find((m) => m.id === id) || {}).remediation_status;
 const ruledOut = (group, id) => (group.ruled_out_ids || []).includes(id);
-// Fixed or accepted-risk (or ruled out by the AI): someone already settled it. An action on a group leaves these alone unless the person
-// explicitly includes them.
-export const CLOSED = ["fixed", "accepted_risk"];
+// Fixed, accepted-risk or a false positive (or ruled out by the AI): someone already settled it. An action on a group leaves these alone
+// unless the person explicitly includes them.
+export const CLOSED = ["fixed", "accepted_risk", "false_positive"]; // closure-logic.js CLOSED
 const isClosedMember = (group, id) => CLOSED.includes(statusOfMember(group, id)) || ruledOut(group, id);
 
 // Which members of a group an action to `value` changes: only those whose status it actually changes, and by default only the open and
