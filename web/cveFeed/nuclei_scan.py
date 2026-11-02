@@ -690,7 +690,7 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
     per_host = {}
     for m in CVEMatch.objects.filter(subdomain__in=subs).exclude(ai_verdict='not_affected').exclude(distro_status='patched') \
             .select_related('cve_entry', 'subdomain'):
-        tier = m.cve_entry.threat_tier
+        tier = m.cve_entry.attention_tier  # what is tested follows KEV, exploit, CVSS and EPSS under either heat policy
         if tier in HOT_TIERS:
             # at equal heat a match whose version is in the affected range outranks one with no version to check
             per_host.setdefault(m.subdomain.name, []).append(

@@ -6,7 +6,7 @@ the Hosts page, search and the graph already read.
 
 | Component | Points | Cap |
 | --- | --- | --- |
-| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: a version-only match is smoke at most): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
+| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: under the KEV heat policy a KEV or exploited CVE is fire when its version is proven and smoke otherwise, anything else ice): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
 | CVE matches whose affected version range is not known (kept for review): 1 each, KEV or not | all of them | 2 |
 | Open findings: critical/high 25, medium 10, low 3 | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
@@ -161,7 +161,7 @@ def _cve_inputs(sub):
     for m in sub.cve_matches.all():
         if not match_is_live(m):  # ruled out, fixed or an accepted risk
             continue
-        # the heat the host card shows: a version-only match is held to CVENGINE_VERSION_ONLY_MAX_HEAT (smoke), KEV or not
+        # the heat the host card shows (threat.match_heat: the heat policy)
         out.append({'id': m.cve_entry.cve_id, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})
     return out
 
@@ -250,11 +250,13 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
     return scored
 
 
-HEAT_CAP_KEY = 'cvengine:scoring:version_only_max_heat'  # the version-only cap the stored scores were last asked to follow
+HEAT_CAP_KEY = 'cvengine:scoring:version_only_max_heat'  # the heat signature (threat.heat_signature) the stored scores were last asked to follow
 
 
 def rescore_if_heat_cap_changed():
-    """Queue one full rescore when the owner changed CVENGINE_VERSION_ONLY_MAX_HEAT: the cap differs from the one last recorded. Heat itself
+    """Queue one full rescore when the owner changed the heat rule: ``threat.heat_signature()`` (the heat policy, ``CVENGINE_HEAT_POLICY`` or
+    the Heat policy card, and under ``legacy`` CVENGINE_VERSION_ONLY_MAX_HEAT) differs from the one last recorded. Called when a worker starts
+    and from the 30 second tick, so a policy saved on the page reaches the stored scores within minutes. Heat itself
     needs nothing (it is computed when read); a score is stored, so it follows here, or at the next daily pass. The first time a cap is
     seen (the upgrade that introduced it, or a Redis without a volume that came back empty after ``docker compose down``) it is only
     recorded: a forced rescore of every host on each restart would cost far more than scores that catch up at the daily pass. One GETSET,
@@ -262,13 +264,13 @@ def rescore_if_heat_cap_changed():
     worker start tries again). The rescore it queues runs even when another full rescore holds the hour-long
     sweep claim (``rescore_all_hosts(force=True)``): a claim taken by the daily pass minutes before the change must not leave the scores on
     the old cap until the next day. Returns whether it queued. Never raises."""
-    from cveFeed.threat import version_only_max_heat
+    from cveFeed.threat import heat_signature
     from reNgine import resources
     try:
         client = getattr(resources.get_store(), 'r', None)
         if client is None:
             return False
-        cap = version_only_max_heat()
+        cap = heat_signature()
         previous = client.getset(HEAT_CAP_KEY, cap)
         if previous is None or previous == cap:
             return False
@@ -283,7 +285,7 @@ def rescore_if_heat_cap_changed():
             raise
         return True
     except Exception:  # noqa: BLE001 - the next worker start or the daily pass tries again
-        logger.exception('could not queue the rescore for the version-only heat cap')
+        logger.exception('could not queue the rescore for the heat rule')
         return False
 
 

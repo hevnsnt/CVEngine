@@ -44,16 +44,17 @@ def select_hosts(matches, max_hosts):
 
 
 def hot_cves_without_run(limit=CANDIDATE_LIMIT):
-    """FIRE and SMOKE CVEs that have not fired yet, newest first, plus those whose only run ended in an error within the retry
+    """FIRE and SMOKE CVEs by ``threat.attention_tier`` (KEV, exploit, CVSS, EPSS: the heat policy does not narrow detection) that have not fired yet, newest first, plus those whose only run ended in an error within the retry
     window (one failed run, say an AI outage, must not leave a CVE unchecked for good). The tier is decided by the database, and
     only the columns correlation and the AI prompt read are loaded."""
     from django.db.models import Q
     from django.utils import timezone
 
     from cveFeed.models import CVEEntry
-    from cveFeed.threat import hot_tier_q
+    from cveFeed.threat import attention_hot_q
     retry = Q(autofire__status='error', autofire__created_at__gte=timezone.now() - ERROR_RETRY_WINDOW)
-    return list(CVEEntry.objects.filter(Q(autofire__isnull=True) | retry).filter(hot_tier_q()).only(
+    # what is looked for is the attention rating (KEV, exploit, CVSS, EPSS) under either heat policy: the policy decides heat, not detection
+    return list(CVEEntry.objects.filter(Q(autofire__isnull=True) | retry).filter(attention_hot_q()).only(
         "id", "cve_id", "title", "summary", "original_description", "cvss", "affected", "kev", "epss_reached", "exploit_db",
         "published_at").order_by("-published_at")[:limit])
 

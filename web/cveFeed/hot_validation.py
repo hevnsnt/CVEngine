@@ -5,8 +5,9 @@ evidence before any check runs. Broker priority 0 (Fire) precedes 3 (manual), 6 
 9 (Ice, every other CVE match) on the reserved validation worker; a duplicate delivery after
 promotion is harmless. A CVE match of any confidence is queued by itself, hottest first; the
 per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave. A CVE match's lane is its
-``threat.validation_heat``, the heat without the version-only cap: a known-exploited match that rests on its version alone shows Smoke
-but is still validated in the Fire lane, because a validation hit is the evidence that makes it Fire.
+``threat.validation_heat``, the heat it would have once proven: a known-exploited match whose version is not proven shows Smoke but is
+still validated in the Fire lane, because a validation hit is the evidence that makes it Fire. Under the KEV heat policy a CVE that is
+neither on the KEV nor exploited is Ice here too, whatever its CVSS: proving it would not change its heat.
 """
 import os
 from datetime import timedelta
@@ -67,13 +68,13 @@ def next_attempt_number(previous, signature, signature_of):
 
 def tier_for(row):
     """The validation lane of a finding (fire, smoke or ice), or None when this finding is no longer current/open. For a CVE match it is
-    ``threat.validation_heat``: the heat the match would have without the version-only cap, so KEV still decides how soon it is checked."""
+    ``threat.validation_heat``: the heat the match would have once proven, so KEV still decides how soon it is checked."""
     if row.kind == 'cve_match' and row.match_id:
         match = row.match
         if match.ai_verdict == 'not_affected' or match.distro_status == 'patched' or not match.subdomain_id:
             return None
-        # the validation lane, not the heat shown: a known-exploited match that rests on its version alone shows smoke
-        # (threat.version_only_max_heat) but is validated in the fire lane, first, because a validation hit is how it earns fire
+        # the validation lane, not the heat shown: a known-exploited match whose version is not proven shows smoke but is validated in the
+        # fire lane, first, because a validation hit is how it earns fire
         return validation_heat(match)
     if row.vulnerability_id:
         vuln = row.vulnerability

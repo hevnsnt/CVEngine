@@ -74,15 +74,15 @@ def recap_version_only_answers(*args, **kwargs):
 
 @worker_ready.connect()
 def rescore_for_heat_cap(*args, **kwargs):
-    """Host scores are stored: when the version-only heat cap changed (the 1.3.2 upgrade, or CVENGINE_VERSION_ONLY_MAX_HEAT), one full
-    rescore is queued so a score never counts a version-only match as fire after its heat stopped saying so (cveFeed.scoring.
-    rescore_if_heat_cap_changed). Never stops the worker from starting."""
+    """Host scores are stored: when the heat rule changed (the heat policy, CVENGINE_HEAT_POLICY or the Heat policy card, and under legacy
+    CVENGINE_VERSION_ONLY_MAX_HEAT; the upgrade that introduced the policy too), one full rescore is queued so a score never counts a match
+    at a heat it no longer shows (cveFeed.scoring.rescore_if_heat_cap_changed). Never stops the worker from starting."""
     import logging
     try:
         from cveFeed import scoring
         scoring.rescore_if_heat_cap_changed()
     except Exception:  # noqa: BLE001 - the next worker start or the daily rescore tries again
-        logging.getLogger(__name__).exception('could not check the version-only heat cap')
+        logging.getLogger(__name__).exception('could not check the heat rule')
 
 
 @worker_ready.connect()

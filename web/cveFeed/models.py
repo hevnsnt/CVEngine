@@ -85,8 +85,16 @@ class CVEEntry(models.Model):
         return bool(self.kev) or cvss >= 9.0 or (cvss >= 7.0 and bool(self.epss_reached))
 
     @property
+    def attention_tier(self):
+        """The legacy fire / smoke / ice rating (KEV, exploit, CVSS, EPSS): what decides which CVEs are looked for and tested, under either
+        heat policy (cveFeed.threat.attention_tier)."""
+        from cveFeed.threat import attention_tier
+
+        return attention_tier(kev=self.kev, epss_reached=self.epss_reached, exploit_db=self.exploit_db, cvss=self.cvss)
+
+    @property
     def threat_tier(self):
-        """CVEngine fire / smoke / ice tier (see cveFeed.threat)."""
+        """CVEngine fire / smoke / ice tier of the CVE in general, under the heat policy (see cveFeed.threat.classify_threat_tier)."""
         from cveFeed.threat import classify_threat_tier
 
         return classify_threat_tier(

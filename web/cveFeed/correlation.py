@@ -779,8 +779,10 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
 
 
 def _is_ice(cve):
-    from cveFeed.threat import ICE, classify_threat_tier
-    return classify_threat_tier(
+    """Whether the end-of-life branch rule passes this CVE by: its ``attention_tier`` (the legacy rating, under either heat policy) is ice.
+    Which matches exist is a detection question, so the heat policy does not narrow it."""
+    from cveFeed.threat import ICE, attention_tier
+    return attention_tier(
         kev=getattr(cve, "kev", None), epss_reached=getattr(cve, "epss_reached", None),
         exploit_db=getattr(cve, "exploit_db", None), cvss=getattr(cve, "cvss", None)) == ICE
 

@@ -601,10 +601,9 @@ def apply_validation(row, check, result, now=None, save=True):
             # a validation hit is hard evidence: the score and snapshots follow, and a match that was version-only before this hit (read
             # with the row's earlier status) and is fire now is paged once. A template hit rescored in _record_template_hit and is
             # announced by notify.template_hits.
-            from cveFeed import match_policy, scoring
+            from cveFeed import scoring, threat
             match = row.match
-            was_version_only = not hit_before and not match_policy.has_hard_evidence(
-                match.source, match.evidence, match.template_result or '', match.distro_status or '')
+            was_version_only = not hit_before and threat.unproven(match, validation_status='')
             scoring.evidence_arrived([row.match_id], confirmed=[row.match_id] if was_version_only else ())
     return row
 

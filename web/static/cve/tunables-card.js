@@ -111,3 +111,4 @@ export function registerTunableGroup(id, title) {
 registerTunableGroup("ai_spend", "AI spend");
 registerTunableGroup("throughput", "Scan pacing");
 registerTunableGroup("autotune_pace", "Auto-tuning pace");
+registerTunableGroup("heat", "Heat policy");

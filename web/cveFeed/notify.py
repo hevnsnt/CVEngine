@@ -2,8 +2,8 @@
 
 Four events, each one message per call and each call made once per scan, per feed sync or per saved-search evaluation, never per host:
 - ``fire_matches``: new fire-tier CVE matches (``send_vuln_notif``);
-- ``fire_confirmed``: matches made version-only (smoke) that hard evidence later turned fire (``send_vuln_notif``);
-- ``template_hits``: hosts a template test confirmed vulnerable (``send_vuln_notif``);
+- ``fire_confirmed``: matches that were not proven (smoke) that evidence later turned fire (``send_vuln_notif``);
+- ``template_hits``: hosts a template test confirmed vulnerable, for a CVE that can be fire under the heat policy (``send_vuln_notif``);
 - ``scan_finished``: a discovery scan ended, with a one-line summary (``send_scan_status_notif``);
 - ``saved_search``: a saved search found new matches, lost some or reached its threshold (``send_interesting_notif``).
 
@@ -97,27 +97,31 @@ def fire_matches(since, scan=None, cve_ids=None):
     new CVEs (``cve_ids``, when given) made on the inventory. A feed match belongs to the scan whose host row it sits on, so it is
     not filtered on the scan; the caller runs this after the AI has judged them.
 
-    A page needs evidence that the vulnerability exists and the match to be fire on the host (``threat.match_heat``): with the default
-    CVENGINE_VERSION_ONLY_MAX_HEAT a version in the affected range alone is smoke, so only a match with hard evidence (a template hit, the
-    distribution tracker calling it vulnerable, the host's own report, runZero, a validation hit) is paged. A match the AI left uncertain (the AI's false-positive call lands there when no
-    hard evidence can close it) is not announced unless a template hit or the distribution tracker proves it; it stays open, is
-    tested, and a hit is announced by ``template_hits``. Matches the version rules out, the AI judged not affected or the host's
-    distribution has patched are left out."""
+    A page needs the match to be fire on the host (``threat.match_heat``). Under the KEV heat policy that is a KEV or exploited CVE whose
+    version is proven (``match_policy.version_proven``: hard evidence, or the version read from the component itself); a version we only
+    infer is smoke and a CVE that is neither on the KEV nor exploited is ice, so neither is paged. Under ``legacy`` a version in the affected
+    range alone is smoke (CVENGINE_VERSION_ONLY_MAX_HEAT), so only a match with hard evidence is paged. A match the AI left uncertain (the
+    AI's false-positive call lands there when no hard evidence can close it, and triage never rates a version-only match higher) is not
+    announced unless a template hit, the distribution tracker or, under the KEV policy, a version read from the component proves it; it
+    stays open, is tested, and a hit is announced by ``template_hits``. Matches the version rules out, the AI judged not affected or the
+    host's distribution has patched are left out."""
     try:
         from django.db.models import Q
 
         from cveFeed import match_policy
         from cveFeed.models import CVEEntry, CVEMatch
-        from cveFeed.threat import FIRE, HEAT_RANK, fire_tier_q, match_heat_rank_expr
+        from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, fire_tier_q, heat_policy, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
         rows = rows.filter(scan_history=scan) if scan is not None else rows
         if cve_ids is not None:
             rows = rows.filter(cve_entry_id__in=list(cve_ids))
         proven = Q(template_result='vulnerable') | Q(distro_status='vulnerable')
+        if heat_policy() != LEGACY_POLICY:
+            proven |= match_policy.version_read_from_component_q()  # the version is read from the component: fire on a KEV CVE
         rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').filter(
             Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(
             cve_entry_id__in=CVEEntry.objects.filter(fire_tier_q()).values('id'))
-        # and fire on the host: a version-only match shows smoke by default (threat.version_only_max_heat), so it is not paged as fire;
+        # and fire on the host: a match whose version is not proven shows smoke (and one that is not hot ice), so it is not paged as fire;
         # when evidence later makes it fire it is paged by ``template_hits`` (a template hit) or ``fire_confirmed`` (anything else)
         rows = rows.annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).filter(fire_notified_at__isnull=True)
         # each match is paged as fire once (a guarded claim: what a concurrent call claimed first is not counted or sent here)
@@ -138,7 +142,7 @@ def fire_matches(since, scan=None, cve_ids=None):
 
 def fire_confirmed(match_ids):
     """One message for the CVE matches that hard evidence just turned fire on the host (``threat.match_heat``). ``match_ids`` are only the
-    matches that were version-only (smoke at most) just before the evidence was written: the caller checks that before its write
+    matches that were not proven (``threat.unproven``: smoke at most) just before the evidence was written: the caller checks that before its write
     (``scoring.evidence_arrived``), so a match that was already fire (a distribution listing, a template hit) is never paged again
     because more evidence reached it. A template hit is announced by ``template_hits`` and is left out here.
 
@@ -187,9 +191,27 @@ def _claim(ids):
     return CVEMatch.objects.filter(pk__in=ids, fire_notified_at=now)
 
 
+def _hot_only(hits):
+    """The (CVE id, host) pairs whose CVE can be fire on a host under the heat policy: all of them under ``legacy``, those of a KEV or
+    exploited CVE under ``kev``. A lookup that fails keeps every pair (a message too many beats a missed one)."""
+    try:
+        from cveFeed.models import CVEEntry
+        from cveFeed.threat import LEGACY_POLICY, heat_policy, hot_q
+        if not hits or heat_policy() == LEGACY_POLICY:
+            return hits
+        wanted = {str(cve).upper() for cve, _host in hits}
+        hot = {c.upper() for c in CVEEntry.objects.filter(hot_q(), cve_id__in=wanted).values_list('cve_id', flat=True)}
+        return [(cve, host) for cve, host in hits if str(cve).upper() in hot]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('could not read which template hits are hot (%s)', type(exc).__name__)
+        return hits
+
+
 def template_hits(hits, scan=None):
-    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test)."""
-    hits = list(dict.fromkeys(hits))
+    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). Under the KEV heat
+    policy only a CVE on the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never pages (the hit
+    is recorded and shown all the same)."""
+    hits = _hot_only(list(dict.fromkeys(hits)))
     if not hits:
         return False
     cves = len({cve for cve, _ in hits})

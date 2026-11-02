@@ -484,8 +484,9 @@ def _names(items):
 
 
 HOT = ('fire', 'smoke')  # the heats OpenVAS is spent on: a run is slow (hours per host), so it goes where it matters
-# OpenVAS is a confirmer: it selects and orders hosts by the validation heat (threat.validation_heat, no version-only cap), as hot_validation
-# does, so a known-exploited match that rests on its version alone keeps its Fire priority here, whatever CVENGINE_VERSION_ONLY_MAX_HEAT says
+# OpenVAS is a confirmer: it selects and orders hosts by the validation heat (threat.validation_heat, the heat once proven), as hot_validation
+# does, so a known-exploited match whose version is not proven keeps its Fire priority here. Under the KEV heat policy a host whose only CVE
+# matches are ice (not on the KEV, no known exploit, whatever their CVSS) does not qualify.
 HOT_WINDOW = 500  # hot-looking names looked at in one step, per project
 EPOCH_DAYS = 36500
 
@@ -513,7 +514,7 @@ def hot_names(project_id, limit=HOT_WINDOW):
 def host_heat(project_id, names):
     """``{name: (heat, (fire reasons, smoke reasons))}`` for each of ``names`` that is a host of the project: the host card's rules (its CVE matches
     as they apply to it and its open findings, hottest first), read from the latest stored row of the name, with each CVE match rated by its
-    validation heat (no version-only cap: OpenVAS is how such a match is confirmed, see ``HOT``)."""
+    validation heat (the heat once proven: OpenVAS is how such a match is confirmed, see ``HOT``)."""
     from agentapi import services
     from startScan.models import Subdomain
     wanted = sorted(_names(names))
