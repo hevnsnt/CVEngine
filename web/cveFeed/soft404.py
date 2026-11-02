@@ -30,7 +30,10 @@ _ISO_TIME = re.compile(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?
 _DATE = re.compile(r'\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,? \d{1,2} [A-Z][a-z]{2,8} \d{4})\b')
 _BIG_NUMBER = re.compile(r'\b\d{6,}\b')
 _TOKEN_ATTR = re.compile(r'(?i)\b(nonce|csrf[-_\w]*|xsrf[-_\w]*|token|authenticity_token|requestid|request-id|trace-?id)\b(["\']?\s*[:=]\s*["\']?)[^"\'\s<>]{4,}')
-_META_TOKEN = re.compile(r'(?i)(<meta[^>]+name=["\'](?:csrf|xsrf)[^>]*content=["\'])[^"\']*')
+# a meta tag (bounded, no "<" or ">" inside), then, inside that one tag only, a CSRF token's content: two linear passes. The single pattern
+# this replaces backtracked over every "<meta" start (seconds of CPU on a page of repeated "<meta " with no ">")
+_META_TAG = re.compile(r'<meta\b[^<>]{0,1000}>', re.I)
+_META_TOKEN = re.compile(r'(?i)(\bname=["\'](?:csrf|xsrf)[^"\'<>]{0,100}["\'][^<>]{0,1000}?\bcontent=["\'])[^"\'<>]{0,1000}')
 _PASSWORD_FIELD = re.compile(r'<input\b[^<>]{0,1000}?type=["\']?password', re.I)
 _WORD = re.compile(r'[A-Za-z0-9]{2,}')
 
@@ -70,7 +73,7 @@ def normalise(text, path=''):
     pattern = _path_pattern(path) if path else None
     if pattern:
         text = pattern.sub(MARKER, text)
-    text = _META_TOKEN.sub(r'\1', text)
+    text = _META_TAG.sub(lambda tag: _META_TOKEN.sub(r'\1', tag.group(0)), text)
     text = _TOKEN_ATTR.sub(r'\1\2', text)
     for pattern in (_UUID, _LONG_HEX, _ISO_TIME, _DATE, _BASE64ISH, _BIG_NUMBER):
         text = pattern.sub('', text)

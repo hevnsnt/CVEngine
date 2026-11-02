@@ -1058,7 +1058,7 @@ def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEE
         if js_libraries.is_library(name) or js_libraries.is_library(m.matched_product):
             candidates.append((m, name if js_libraries.is_library(name) else m.matched_product))
     hosts = {sub.pk: sub for sub in Subdomain.objects.filter(pk__in={m.subdomain_id for m, _ in candidates})
-             .select_related('target_domain').prefetch_related('ip_addresses__ports')}
+             .select_related('target_domain').prefetch_related('ip_addresses__ports', 'technologies')}
     pages, closed, by_reason, looked = {}, 0, {}, 0
     for m, name in candidates:
         if clock() - started > seconds:  # out of time: the next run starts at the first match this one did not look at
@@ -1069,8 +1069,8 @@ def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEE
         if sub is None:
             continue
         if sub.pk not in pages:
-            pages[sub.pk] = js_libraries.HostLibraries.for_subdomain(sub)
-        reason, _hold = correlation.library_closure(m, pages[sub.pk], name=name)
+            pages[sub.pk] = (js_libraries.HostLibraries.for_subdomain(sub), correlation.host_library_versions(sub))
+        reason, _hold = correlation.library_closure(m, pages[sub.pk][0], name=name, present=pages[sub.pk][1])
         if reason and correlation.close_invalid_correlation(m, reason):
             closed += 1
             kind = js_libraries.closure_kind(reason)
