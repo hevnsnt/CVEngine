@@ -381,6 +381,9 @@ class EnforcementTests(Base):
 		self.sub(self.a1, HOST, ip='192.0.2.21')
 		hostnames, ips, ports = scan_targets(self.scans['a1'])
 		self.assertEqual((hostnames, ips), ({'ok.owned-a1.test'}, {'192.0.2.20'}))
+		# The other org owns this exact target; its inventory remains independently scannable.
+		self.targets['b1'].name = HOST
+		self.targets['b1'].save(update_fields=['name'])
 		self.sub(self.b1, HOST, ip='192.0.2.22')
 		self.assertEqual(scan_targets(self.scans['b1'])[0], {HOST})  # another org's scan still sees it
 

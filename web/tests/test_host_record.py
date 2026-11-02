@@ -209,7 +209,7 @@ class PortScanGuardTests(Fixture):
 
 	def test_the_host_nmap_pass_still_scans_the_rest(self):
 		self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
-		self.host('www.own.test', '192.0.2.51')
+		self.host('www.acme.test', '192.0.2.51')
 		seen = []
 
 		def runner(targets, flags, host_timeout):
