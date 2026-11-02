@@ -161,8 +161,10 @@ def web_addresses(project_id):
     found = {}
     from targetApp.models import Domain
     rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
-            .prefetch_related('ip_addresses__ports').order_by('id'))  # a manual only target's hosts name no address to ask
+            .select_related('target_domain').prefetch_related('ip_addresses__ports').order_by('id'))  # a manual only target's hosts name no address to ask
     for sub in rows:
+        if not sub.target_domain.includes_host(sub.name):
+            continue
         for ip in sub.ip_addresses.all():
             if not ip.address or ip.is_cdn:
                 continue

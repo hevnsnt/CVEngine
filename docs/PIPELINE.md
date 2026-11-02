@@ -398,7 +398,7 @@ A name on Netlify, Vercel, GitHub Pages, Heroku, or a CDN edge answers on addres
 
 ### Shared provider domains
 
-A tenant of a multi-tenant provider owns only its own subdomain. For `acme.jfrog.com`, the registrable domain `jfrog.com` belongs to the provider and all its customers, so cvENGINE never promotes it to an apex or enumerates it. A curated list (`SHARED_DOMAINS` in `web/targetApp/shared_domains.py`) marks such domains, and a target under one is **host scoped**: bbot runs with strict scope, the apex sweep skips it, and the certificate watch asks only about that host. Each target has a **scope mode**: `auto` (the list decides), `host`, or `parent` (for a domain you control that sits on the list).
+A tenant of a multi-tenant provider owns only its own hostname. For `acme.jfrog.com`, the registrable domain `jfrog.com` belongs to the provider and all its customers, so cvENGINE never promotes it to an apex or enumerates it. A curated list (`SHARED_DOMAINS` in `web/targetApp/shared_domains.py`) marks such domains. Newly added domain targets default to **exact-host scope** (`host`), irrespective of provider: bbot runs with `--strict-scope`, the apex sweep skips them, and certificate-watch results are filtered to that name before hosts are stored or queued. The host pipeline, reuse of older discoveries and scanner target selection recheck scope at execution time. `parent` explicitly authorizes discovery under a domain you control; `auto` keeps the previous shared-provider heuristic. Existing targets retain their stored mode until changed on the Targets page or via REST/MCP. Discovery depth (standard/deep/passive) does not grant a wider target scope.
 
 ### Excluded hosts
 

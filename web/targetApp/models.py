@@ -186,6 +186,14 @@ class Domain(models.Model):
 		from targetApp.shared_domains import effective_apex
 		return effective_apex(self.name)[1]
 
+	def includes_host(self, name):
+		"""Whether a host may be inventoried or scanned under this target's scope."""
+		target = self.name.strip().lower().rstrip('.')
+		host = str(name or '').strip().lower().rstrip('.')
+		from targetApp.target_types import IP, classify_target
+		return bool(host) and (host == target or (classify_target(target) != IP and not self.is_host_scoped()
+		                                    and host.endswith('.' + target)))
+
 	def get_recent_scan_id(self):
 		ScanHistory = apps.get_model('startScan.ScanHistory')
 		obj = ScanHistory.objects.filter(domain__id=self.id).order_by('-id')

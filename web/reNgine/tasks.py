@@ -631,7 +631,7 @@ def save_subdomain(subdomain_name, ctx={}):
 
 	if ctx.get('domain_id'):
 		domain = ctx.get('_domain') or Domain.objects.get(id=ctx.get('domain_id'))
-		if subdomain_name != domain.name and not subdomain_name.endswith('.' + domain.name):  # dot boundary: example.com.evil.net is not in scope
+		if not domain.includes_host(subdomain_name):  # exact-host targets never admit newly discovered children
 			logger.error(f"{subdomain_name} is not a subdomain of domain {domain.name}. Skipping.")
 			return None, False
 

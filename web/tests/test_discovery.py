@@ -53,6 +53,33 @@ class DiscoveryTests(TestCase):
 				   'resolved_hosts': [f'192.0.2.{i + 1}'], 'parent': 'S'} for i in range(count)]
 		return events + list(extra)
 
+	def test_exact_target_rejects_unexpected_bbot_child_even_at_scope_distance_zero(self):
+		self.domain.scope_mode = Domain.SCOPE_HOST
+		self.domain.save(update_fields=['scope_mode'])
+		scan = self._scan()
+		child = {'type': 'DNS_NAME', 'id': 'D2', 'data': 'child.example.test', 'host': 'child.example.test',
+				 'scope_distance': 0, 'resolved_hosts': ['192.0.2.2'], 'module': 'crt', 'parent': 'D1'}
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=lambda *args, **kwargs: iter([EVENTS[0], child]))
+		self.assertEqual(out['status'], discovery.SUCCESS)
+		self.assertEqual(set(Subdomain.objects.filter(scan_history=scan).values_list('name', flat=True)), {'example.test'})
+		self.assertFalse(DiscoveryEvent.objects.filter(scan=scan, host='child.example.test').exists())
+
+	def test_exact_target_rejects_hidden_child_url_and_port_in_bbot_output(self):
+		self.domain.scope_mode = Domain.SCOPE_HOST
+		self.domain.save(update_fields=['scope_mode'])
+		scan = self._scan()
+		unexpected = [
+			{'type': 'URL', 'data': 'https://child.example.test/', 'host': 'example.test', 'module': 'http'},
+			{'type': 'OPEN_TCP_PORT', 'data': 'child.example.test:443', 'host': 'example.test', 'module': 'nmap'},
+			{'type': 'HTTP_RESPONSE', 'data_json': {'url': 'https://child.example.test/', 'status_code': 200}, 'host': 'example.test', 'module': 'http'},
+		]
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=lambda *args, **kwargs: iter([EVENTS[0], *unexpected]))
+		self.assertEqual(out['status'], discovery.SUCCESS)
+		self.assertEqual(list(Subdomain.objects.filter(scan_history=scan).values_list('name', flat=True)), ['example.test'])
+		self.assertFalse(DiscoveryEvent.objects.filter(scan=scan, label__icontains='child').exists())
+
 	def _run_for_web_check(self, events, mode='standard', scan_name='demo_scan'):
 		scan = self._scan()
 		scan_event = {'type': 'SCAN', 'id': 'S', 'data': None, 'data_json': {'name': scan_name}}
@@ -816,7 +843,8 @@ class NucleiLedgerTests(TestCase):
 		self.addCleanup(patcher.stop)
 
 	def _scan(self, project, name, host='shared.example.test'):
-		domain = Domain.objects.create(name=name, project=project, insert_date=timezone.now())
+		domain, _ = Domain.objects.get_or_create(name=name, project=project,
+			defaults={'insert_date': timezone.now(), 'scope_mode': Domain.SCOPE_PARENT if name == 'example.test' else Domain.SCOPE_HOST})
 		scan = ScanHistory.objects.create(domain=domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=1)
 		Subdomain.objects.create(scan_history=scan, target_domain=domain, name=host)
 		return scan
@@ -829,7 +857,7 @@ class NucleiLedgerTests(TestCase):
 	def test_second_scan_in_a_project_never_streams_the_shared_host_and_gets_its_findings(self):
 		from cveFeed import nuclei_scan
 		from startScan.models import Vulnerability
-		first, second = self._scan(self.p1, 'one.test'), self._scan(self.p1, 'two.test')
+		first, second = self._scan(self.p1, 'example.test'), self._scan(self.p1, 'example.test')
 		seen = []
 
 		def stream(path, **kwargs):
@@ -843,12 +871,12 @@ class NucleiLedgerTests(TestCase):
 		self.assertEqual(seen, [['shared.example.test']])  # the second run had nothing left to scan
 		self.assertEqual(out['reused'], 1)
 		copied = Vulnerability.objects.get(scan_history=second)
-		self.assertEqual((copied.name, copied.target_domain.name, copied.subdomain.scan_history_id), ('Example RCE', 'two.test', second.id))
+		self.assertEqual((copied.name, copied.target_domain.name, copied.subdomain.scan_history_id), ('Example RCE', 'example.test', second.id))
 		self.assertTrue(AgentActivity.objects.filter(message__contains='reused 1 finding(s) on 1 host(s) scanned in the last 24h').exists())
 
 	def test_a_different_project_scans_the_same_host_again(self):
 		from cveFeed import nuclei_scan
-		first, other = self._scan(self.p1, 'one.test'), self._scan(self.p2, 'other.test')
+		first, other = self._scan(self.p1, 'example.test'), self._scan(self.p2, 'shared.example.test')
 		seen = []
 
 		def stream(path, **kwargs):
@@ -860,7 +888,7 @@ class NucleiLedgerTests(TestCase):
 
 	def test_targets_run_in_chunks_and_each_chunk_is_recorded(self):
 		from cveFeed import ledger, nuclei_scan
-		scan = self._scan(self.p1, 'one.test')
+		scan = self._scan(self.p1, 'example.test')
 		for i in range(nuclei_scan.NUCLEI_CHUNK + 5):
 			Subdomain.objects.create(scan_history=scan, target_domain=scan.domain, name=f'h{i}.example.test')
 		sizes = []

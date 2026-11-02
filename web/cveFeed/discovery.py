@@ -247,6 +247,30 @@ def _report_key_problems(problems, extra_args, scan):
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
+def _exact_event(event, domain):
+    """Treat BBOT output as untrusted, even when --strict-scope was passed to the process."""
+    from urllib.parse import urlsplit
+    kind = event.get('type')
+    if kind == 'SCAN':
+        return True
+    host = event.get('host')
+    payload = event.get('data_json') or event.get('data')
+    if (host and not domain.includes_host(host)) or (kind == 'DNS_NAME' and not domain.includes_host(payload)):
+        return False
+    if not host:
+        return False  # cannot authorize the source of a hostless event
+    if kind == 'URL' and not domain.includes_host(urlsplit(str(payload)).hostname):
+        return False
+    if kind == 'OPEN_TCP_PORT' and not domain.includes_host(str(payload).rpartition(':')[0].strip('[]')):
+        return False
+    if isinstance(payload, dict):
+        if payload.get('host') and not domain.includes_host(payload['host']):
+            return False
+        if payload.get('url') and not domain.includes_host(urlsplit(str(payload['url'])).hostname):
+            return False
+    return True
+
+
 MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
 
 
@@ -327,6 +351,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                                strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
+                    if strict_scope and not _exact_event(event, scan.domain):
+                        continue
                     if event.get('type') in web_events:
                         web_events[event['type']] += 1
                     seen = bbot_lib.parse_event(event, batch, hosts)
@@ -531,6 +557,7 @@ def seed_from_scan(scan, source):
               'content_type', 'response_time', 'webserver', 'content_length', 'page_title')
     originals = list(Subdomain.objects.filter(scan_history=source).filter(Q(name=name) | Q(name__endswith='.' + name))
                      .prefetch_related('ip_addresses', 'technologies').order_by('id'))
+    originals = [o for o in originals if scan.domain.includes_host(o.name)]
     from cveFeed.exclusions import excluded_names
     banned = excluded_names(scan.domain.project_id)  # an excluded host is never copied back into the inventory
     originals = [o for o in originals if o.name.lower().rstrip('.') not in banned]
@@ -880,13 +907,12 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
-    suffix = domain.name.lower()
     if not by_person and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's own request takes its hosts through the stages
         return {'status': 'inconclusive', 'hosts': 0, 'error': 'the target is set to manual only; nothing was scanned'}
     wanted = sorted({n.strip().lower().rstrip('.') for n in names if n and n.strip()})
     requested = list(wanted)
     from cveFeed.exclusions import drop_excluded
-    in_target = [n for n in wanted if n == suffix or n.endswith('.' + suffix)]
+    in_target = [n for n in wanted if domain.includes_host(n)]
     wanted = drop_excluded(domain.project_id, in_target)[:MAX_PIPELINE_HOSTS]
     not_excluded = set(wanted)
     from cveFeed.archive_rediscovery import archived_names

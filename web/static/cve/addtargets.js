@@ -99,8 +99,12 @@ function build() {
   const pick = el('label', 'btn ghost sm', 'Upload a file', { for: 'dlg-file', style: 'display:inline-flex;align-items:center;margin:0;cursor:pointer' });
   tools.append(count, el('span', 'grow'), pick, file);
   const mode = el('select', '', null, { 'aria-label': 'Discovery' });
-  [['standard', 'Standard discovery (subdomains and web fingerprinting, safe modules only)'], ['deep', 'Deep discovery (everything: brute forcing, spidering, takes hours)'], ['passive', 'Passive discovery (public sources only, fast)'], ['none', 'Just add them, do not scan yet (never scanned automatically)']]
+  [['standard', 'Standard discovery (within chosen scope, web fingerprinting, safe modules only)'], ['deep', 'Deep discovery (within chosen scope; brute forcing, spidering, takes hours)'], ['passive', 'Passive discovery (public sources only, fast)'], ['none', 'Just add them, do not scan yet (never scanned automatically)']]
     .forEach(([v, t]) => mode.append(Object.assign(el('option', '', t), { value: v })));
+  const scope = el('select', '', null, { 'aria-label': 'Target scope' });
+  [['host', 'Exact hosts only (default; no subdomains)'], ['parent', 'Expand to parent domain and subdomains (only if authorized)'],
+    ['auto', 'Automatic / legacy provider-domain rule']]
+    .forEach(([v, t]) => scope.append(Object.assign(el('option', '', t), { value: v })));
   const auth = el('input', '', null, { type: 'checkbox', id: 'dlg-auth' });
   const authWrap = el('label', 'check', null, { for: 'dlg-auth' });
   authWrap.append(auth, document.createTextNode('I am authorized to test these targets. Standard and deep discovery send traffic to them. The mode you pick is kept: the work conductor rescans each target in it, and never scans one added with "just add them".'));
@@ -110,8 +114,10 @@ function build() {
   const cancel = el('button', 'btn ghost', 'Close', { type: 'button' });
   const go = el('button', 'btn', 'Add targets', { type: 'submit' });
   actions.append(el('span', 'grow'), cancel, go);
-  form.append(title, dest, lead, area, tools, el('div', 'field', null, { style: 'margin-top:12px' }), authWrap, msg, out, actions);
+  form.append(title, dest, lead, area, tools, el('div', 'field', null, { style: 'margin-top:12px' }),
+    el('div', 'field', null, { style: 'margin-top:12px' }), authWrap, msg, out, actions);
   form.children[4].append(mode);
+  form.children[5].append(scope);
   d.append(form);
   document.body.append(d);
 
@@ -149,7 +155,9 @@ function build() {
       const orgMode = isOrgFormat(area.value);
       const res = await fetch(orgMode ? '/api/v1/targets/bulk-org' : `/api/v1/projects/${encodeURIComponent(projSel.value)}/targets/bulk`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? 'manual' : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined, authorized: auth.checked || undefined }), // the attestation travels with the request; the server does not record it yet
+        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? 'manual' : mode.value,
+          scope_mode: scope.value, current_project: orgMode && projSel.value ? projSel.value : undefined,
+          authorized: auth.checked || undefined }), // the attestation travels with the request; the server does not record it yet
       });
       const data = await res.json();
       clearInterval(ticker);

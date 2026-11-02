@@ -487,7 +487,7 @@ def tls_targets(domain, hosts=None):
     if selected is None or domain.name in selected:
         add(domain.name, 443)
     for sub in Subdomain.objects.filter(target_domain=domain).prefetch_related('ip_addresses__ports'):
-        if selected is not None and sub.name not in selected:
+        if not domain.includes_host(sub.name) or (selected is not None and sub.name not in selected):
             continue
         add(sub.name, 443)
         for ip in sub.ip_addresses.all():
@@ -502,7 +502,7 @@ def email_domains(domain, mx=has_record):
     from startScan.models import Subdomain
     names = [] if is_ip(domain.name) else [domain.name]
     extra = [s.name for s in Subdomain.objects.filter(target_domain=domain).exclude(name=domain.name)[:100]
-             if not is_ip(s.name) and mx(s.name, 'MX')]
+             if domain.includes_host(s.name) and not is_ip(s.name) and mx(s.name, 'MX')]
     return names + extra
 
 

@@ -440,6 +440,9 @@ def _allowed(project_id, entry, banned, vet_ip):
     address (a DNS host), or a vetted address that is not a shared platform's (a virtual host)."""
     from targetApp.target_types import scannable_hosts
     name = entry['name']
+    sub = entry['sub']
+    if not sub.target_domain or not sub.target_domain.includes_host(name):
+        return False
     if name.rstrip('.') in banned:
         return False
     if entry['connect_ip']:

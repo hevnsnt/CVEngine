@@ -108,6 +108,16 @@ class RunCtWatchTests(TestCase):
 		self.assertIsNotNone(msg)
 		self.assertIn('2 new hosts', msg.message)
 
+	def test_exact_host_does_not_store_or_queue_certificate_descendants(self):
+		self.domain.scope_mode = Domain.SCOPE_HOST
+		self.domain.save(update_fields=['scope_mode'])
+		fetch = lambda name: {'example.test', 'child.example.test', 'example.test.evil.net', 'sibling.test'}
+		with mock.patch('cveFeed.tasks.host_pipeline.delay') as pipeline:
+			self.assertEqual(ctmonitor.run_ct_watch(self.domain.id, fetch=fetch)['new'], 0)
+			pipeline.assert_not_called()
+		self.assertEqual(set(Subdomain.objects.filter(target_domain=self.domain).values_list('name', flat=True)), {'example.test'})
+		self.assertFalse(DiscoveryEvent.objects.filter(domain=self.domain).exists())
+
 	def test_nothing_new_is_a_quiet_no_op(self):
 		result = ctmonitor.run_ct_watch(self.domain.id, fetch=lambda name: {'example.test'})
 		self.assertEqual(result, {'checked': 1, 'new': 0})

@@ -2232,7 +2232,8 @@ const pages = {
       const box = el("div", "scope-cell");
       const note = el("span", "note", "");
       const show = () => {
-        note.textContent = t.host_scoped ? "provider domain: scanning this host only" : "";
+        note.textContent = /^[0-9.]+$/.test(t.name) || t.name.includes(":")
+          ? "Address only" : t.host_scoped ? "Scanning this exact host only" : "Includes subdomains";
       };
       const pick = el("select", "", null, { "aria-label": `Scope of ${t.name}` });
       for (const [value, label] of [

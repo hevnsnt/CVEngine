@@ -7,11 +7,13 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import discovery, ctmonitor, tasks
+from cveFeed import fullscan, hygiene, nuclei_scan
 from dashboard.models import Org, Project
 from reNgine import bbot as bbot_lib
 from reNgine import resources
+from reNgine.tasks import save_subdomain
 from scanEngine.models import EngineType
-from startScan.models import ScanHistory
+from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
 from targetApp.shared_domains import SHARED_DOMAINS, effective_apex, is_provider_domain, is_shared_apex
 
@@ -59,6 +61,14 @@ class IsHostScopedTests(SimpleTestCase):
 		self.assertTrue(Domain(name='hr.acme-example.ai', scope_mode='host').is_host_scoped())
 		self.assertFalse(Domain(name='hr.acme-example.ai').is_host_scoped())
 		self.assertFalse(Domain(name='203.0.113.5').is_host_scoped())
+
+	def test_host_membership_is_an_exact_case_insensitive_name(self):
+		d = Domain(name='EXACT.example.test.', scope_mode='host')
+		self.assertTrue(d.includes_host('exact.EXAMPLE.test'))
+		for name in ('child.exact.example.test', 'exact.example.test.evil.net', 'other.example.test', ''):
+			self.assertFalse(d.includes_host(name), name)
+		self.assertTrue(Domain(name='exact.example.test', scope_mode='parent').includes_host('child.exact.example.test'))
+		self.assertFalse(Domain(name='203.0.113.5').includes_host('child.203.0.113.5'))
 
 
 def _clear_claim():
@@ -145,6 +155,55 @@ class StrictScopeTests(TestCase):
 			with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
 				discovery.run_discovery(scan.id, stream=stream)
 		self.assertEqual(seen, {'acme.jfrog.com': True, 'acme-example.ai': False})
+
+	def test_a_host_pipeline_refuses_an_unlisted_child_before_dns(self):
+		org = Org.objects.create(name='HS', slug='h-s')
+		project = Project.objects.create(name='HS', slug='h-s', insert_date=timezone.now(), org=org)
+		domain = Domain.objects.create(name='exact.example.test', project=project, scope_mode='host')
+		resolver = mock.Mock(side_effect=AssertionError('must not resolve a child'))
+		out = discovery.run_host_pipeline(domain.id, ['child.exact.example.test'], resolver=resolver)
+		self.assertEqual(out['status'], 'empty')
+		resolver.assert_not_called()
+		self.assertFalse(ScanHistory.objects.filter(domain=domain).exists())
+
+	def test_reuse_copies_only_exact_name_when_destination_is_host_scoped(self):
+		org = Org.objects.create(name='HR', slug='h-r')
+		project = Project.objects.create(name='HR', slug='h-r', insert_date=timezone.now(), org=org)
+		engine = EngineType.objects.create(engine_name='hr', yaml_configuration='x', default_engine=True)
+		domain = Domain.objects.create(name='exact.example.test', project=project, scope_mode='host')
+		source = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now())
+		dest = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now())
+		for name in ('exact.example.test', 'child.exact.example.test'):
+			Subdomain.objects.create(target_domain=domain, scan_history=source, name=name)
+		self.assertEqual(discovery.seed_from_scan(dest, source), 1)
+		self.assertEqual(list(Subdomain.objects.filter(scan_history=dest).values_list('name', flat=True)), ['exact.example.test'])
+
+	def test_stale_descendant_inventory_cannot_drive_scanner_or_sweeps(self):
+		org = Org.objects.create(name='HR2', slug='h-r2')
+		project = Project.objects.create(name='HR2', slug='h-r2', insert_date=timezone.now(), org=org)
+		engine = EngineType.objects.create(engine_name='hr2', yaml_configuration='x', default_engine=True)
+		domain = Domain.objects.create(name='exact.example.test', project=project, scope_mode='host')
+		scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now())
+		child = Subdomain.objects.create(target_domain=domain, scan_history=scan, name='child.exact.example.test')
+		ip = IpAddress.objects.create(address='192.0.2.91')
+		child.ip_addresses.add(ip)
+		with mock.patch('targetApp.target_types.blocked_names', return_value=set()), \
+				mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: hosts) as allowed:
+			self.assertEqual(nuclei_scan.scan_targets(scan), (set(), set(), set()))
+			self.assertEqual(hygiene.tls_targets(domain), [('exact.example.test', 443)])
+			self.assertEqual(hygiene.email_domains(domain, mx=lambda *a: True), ['exact.example.test'])
+		self.assertFalse(fullscan.active_attached(ip).exists())
+		self.assertEqual(allowed.call_count, 1)
+		self.assertEqual(allowed.call_args.args[0], ['exact.example.test'])
+
+	def test_direct_persistence_cannot_add_child_to_an_exact_target(self):
+		org = Org.objects.create(name='SP', slug='s-p')
+		project = Project.objects.create(name='SP', slug='s-p', insert_date=timezone.now(), org=org)
+		domain = Domain.objects.create(name='exact.example.test', project=project, scope_mode='host')
+		ctx = {'domain_id': domain.id}
+		self.assertEqual(save_subdomain('child.exact.example.test', ctx), (None, False))
+		self.assertEqual(save_subdomain('exact.example.test.evil.net', ctx), (None, False))
+		self.assertEqual(save_subdomain('EXACT.example.test', ctx)[0].name, 'EXACT.example.test')
 
 
 class CertificateTransparencyScopeTests(TestCase):

@@ -88,16 +88,21 @@ TOOLS = [
     ('add_target', 'Add a domain, IP, CIDR or range as a target. mode is kept on the target and is what every later automatic scan of it uses: standard (default), deep, passive (public sources only), or manual (never scanned automatically).', _schema(
         {'project': SLUG, 'value': {'type': 'string'}, 'description': {'type': 'string'},
          'discover': {'type': 'boolean', 'description': 'also start live bbot discovery'},
-         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}}, ['project', 'value']),
-     lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover')), a.get('mode')), True),
+         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']},
+         'scope_mode': {'type': 'string', 'enum': ['host', 'parent', 'auto']}}, ['project', 'value']),
+     lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover')), a.get('mode'),
+                                 a.get('scope_mode')), True),
     ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive, or manual to just add them and never scan them automatically; it is kept on each target and used for every later automatic scan. A line starting with - (for example -example.com) EXCLUDES that domain and every name under it for the whole organization and removes its hosts and targets (needs an organization-level role).', _schema(
         {'project': SLUG, 'targets': {'type': 'array', 'items': {'type': 'string'}}, 'discover': {'type': 'boolean'},
-         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}}, ['project', 'targets']),
-     lambda c, a: svc.add_targets(c, a.get('project'), a.get('targets'), bool(a.get('discover', True)), a.get('mode')), True),
+         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']},
+         'scope_mode': {'type': 'string', 'enum': ['host', 'parent', 'auto']}}, ['project', 'targets']),
+     lambda c, a: svc.add_targets(c, a.get('project'), a.get('targets'), bool(a.get('discover', True)), a.get('mode'), a.get('scope_mode')), True),
     ('add_targets_by_org', 'Bulk add across one organization. text: "##Org" once, then "#Project" above each list of domains/IPs/CIDRs. Creates missing projects (needs org admin).', _schema(
         {'text': {'type': 'string'}, 'discover': {'type': 'boolean'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']},
-         'current_project': {'type': 'string', 'description': 'slug of the project in use; its organization is used when the paste names none'}}, ['text']),
-     lambda c, a: svc.add_targets_by_org(c, a.get('text', ''), bool(a.get('discover', True)), a.get('mode'), a.get('current_project')), True),
+         'current_project': {'type': 'string', 'description': 'slug of the project in use; its organization is used when the paste names none'},
+         'scope_mode': {'type': 'string', 'enum': ['host', 'parent', 'auto']}}, ['text']),
+     lambda c, a: svc.add_targets_by_org(c, a.get('text', ''), bool(a.get('discover', True)), a.get('mode'), a.get('current_project'),
+                                         a.get('scope_mode')), True),
     ('delete_targets', 'Delete targets (and their hosts, scans and results) by ids, or all matching q. Targets with a running scan are skipped. Irreversible.', _schema(
         {'project': SLUG, 'ids': {'type': 'array', 'items': {'type': 'integer'}}, 'all_matching': {'type': 'boolean'}, 'q': {'type': 'string'}}, ['project']),
      lambda c, a: svc.delete_targets(c, a.get('project'), a.get('ids'), bool(a.get('all_matching')), a.get('q') or ''), True),

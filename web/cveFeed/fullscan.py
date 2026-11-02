@@ -73,13 +73,14 @@ def investigate_max():
 def active_attached(ip):
     """Stored host rows on this IP that are still in active project scope: not archived, and not under a target set to manual only ("just
     add them, do not scan yet"), whose addresses no automatic sweep (the full port sweep, the UDP sweep) is ever aimed at."""
-    from django.db.models import Exists, OuterRef
+    from django.db.models import Exists, F, OuterRef, Q
     from cveFeed.models import HostState
     from startScan.models import Subdomain
     from targetApp.models import Domain
     archived = HostState.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'),
                                         archived_at__isnull=False)
     return (Subdomain.objects.filter(ip_addresses=ip, target_domain__project__isnull=False).filter(~Exists(archived))
+            .filter(~Q(target_domain__scope_mode=Domain.SCOPE_HOST) | Q(name__iexact=F('target_domain__name')))
             .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL))
 
 def candidates():

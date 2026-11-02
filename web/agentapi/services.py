@@ -319,6 +319,16 @@ def set_target_scope(ctx, slug, target_id, scope_mode):
     return _target(d)
 
 
+def _creation_scope(scope_mode):
+    """New user-supplied names are exact by default; expansion requires an explicit choice."""
+    from targetApp.models import Domain
+    if scope_mode is None:
+        return Domain.SCOPE_HOST
+    if not isinstance(scope_mode, str) or scope_mode not in {m for m, _ in Domain.SCOPE_MODES}:
+        raise ApiError(400, 'scope_mode must be auto, host or parent')
+    return scope_mode
+
+
 def clean_alias_note(alias=None, note=None):
     """``{'alias': ..., 'note': ...}`` for the fields given (``None`` leaves a field alone, ``''`` clears it), cleaned and bounded
     (targetApp.alias_note), or a 400 naming the field."""
@@ -426,7 +436,7 @@ def _discovery_mode(mode):
     return mode
 
 
-def _create_domains(project, names, description='', excluded=None, discovery_mode='standard'):
+def _create_domains(project, names, description='', excluded=None, discovery_mode='standard', scope_mode='host', domain_names=()):
     """Create a Domain per name in bulk, in order. Returns (the rows created, the names that already existed). Domain
     names are unique within an organization, so a name another project of the same organization holds counts as existing (another
     organization's record of the same name is a different, separate record). A name the project's organization
@@ -452,14 +462,15 @@ def _create_domains(project, names, description='', excluded=None, discovery_mod
         part = wanted[start:start + 1000]
         # ignore_conflicts: a concurrent add of the same name must not fail the whole batch; the re-read says what we own
         Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now,
-                                                      discovery_mode=discovery_mode) for n in part],
+                                                      discovery_mode=discovery_mode,
+                                                      scope_mode=scope_mode if n in domain_names else Domain.SCOPE_AUTO) for n in part],
                                    ignore_conflicts=True)
         created += Domain.objects.filter(project=project, name__in=part).order_by('id')
     created.sort(key=lambda d: d.id)
     return created, [n for n in names if n in existing]
 
 
-def add_target(ctx, slug, value, description='', discover=False, mode=None):
+def add_target(ctx, slug, value, description='', discover=False, mode=None, scope_mode=None):
     """Add a domain, IP, CIDR or range as target(s); ranges expand to individual IPs (capped). Every address of a range is
     queued for discovery, in order."""
     from targetApp.models import Domain
@@ -468,9 +479,11 @@ def add_target(ctx, slug, value, description='', discover=False, mode=None):
     if not isinstance(value, str):
         raise ApiError(400, 'value must be text')
     stored = _discovery_mode(mode)
+    scope = _creation_scope(scope_mode)
     kind, names = _expand_target(value, project.id)
     excluded = []
-    created, existing = _create_domains(project, names, description, excluded, stored)
+    created, existing = _create_domains(project, names, description, excluded, stored, scope,
+                                        names if kind == DOMAIN else ())
     if excluded and not created and not existing:
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
@@ -1155,7 +1168,7 @@ def _audit(user, action, target, org):
     AuditLog.objects.create(actor=user, actor_name=user.username, action=action, target=target[:300], org_id=org.pk, detail={'via': 'bulk'})
 
 
-def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None):
+def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None, scope_mode=None):
     """Bulk add across one organization's projects from the ``##Org`` / ``#Project`` paste format. Missing
     projects are created (needs the org admin role); every project's targets are added with that project's own
     write check, so one forbidden or invalid section never blocks the others. With no ``##Org`` (or one that does not
@@ -1167,6 +1180,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     if not isinstance(text, str):
         raise ApiError(400, 'text must be pasted text')
     manual = _discovery_mode(mode) == 'manual'
+    scope = _creation_scope(scope_mode)
     org, current = _current_org(ctx.user, current_project)
     if org is None:  # authorize before the paste is read: a caller with no organization gets nothing parsed
         raise ApiError(403, 'you are not a member of any organization')
@@ -1202,7 +1216,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             res['slug'] = project.slug
             if not entries:
                 continue
-            added = _add_targets(ctx, project.slug, entries, False, used)  # the mode is stored with the targets; discovery is queued below
+            added = _add_targets(ctx, project.slug, entries, False, used, scope)  # mode and scope stored with new targets
             res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
             if discover and not manual and added['domains']:
                 scans, left = _discover_new(added['domains'], used, project.id, initiated_by=ctx.user)
@@ -1215,8 +1229,8 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
 
 
-def add_targets(ctx, slug, values, discover=True, mode=None):
-    out = _add_targets(ctx, slug, values, discover, mode)
+def add_targets(ctx, slug, values, discover=True, mode=None, scope_mode=None):
+    out = _add_targets(ctx, slug, values, discover, mode, scope_mode)
     out.pop('domains')
     return out
 
@@ -1238,12 +1252,13 @@ def _exclude_patterns(ctx, slug, patterns):
     return done, refused
 
 
-def _add_targets(ctx, slug, values, discover, mode):
+def _add_targets(ctx, slug, values, discover, mode, scope_mode=None):
     """Add many targets at once. ``values`` is a list or pasted text. Each entry is validated on its own, so one
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
     queued for discovery, first in, first out."""
     project, _ = get_project(ctx, slug, write=True)
     _discovery_mode(mode)  # before the exclusions below, which cannot be undone
+    scope = _creation_scope(scope_mode)  # also before any exclusions
     if values is not None and not isinstance(values, (str, list)):
         raise ApiError(400, 'targets must be a list or pasted text')
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
@@ -1259,10 +1274,10 @@ def _add_targets(ctx, slug, values, discover, mode):
     if not entries:
         return {'received': len(patterns), 'created': 0, 'created_names': [], 'domains': [], 'already_exists': [], 'invalid': refused,
                 'excluded': excluded, 'discovery_started': 0, 'scan_ids': [], 'mode': mode, 'mode_note': None}
-    return add_entries(project, entries, discover, mode, excluded, refused, initiated_by=ctx.user)
+    return add_entries(project, entries, discover, mode, excluded, refused, initiated_by=ctx.user, scope_mode=scope)
 
 
-def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=(), initiated_by=None):
+def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=(), initiated_by=None, scope_mode=None):
     """Add already-normalized targets to ``project``: the part of Add targets that does not depend on who is asking, so an automated
     source (the runZero import) goes through the same expansion, private-range policy, organization exclusions, organization-wide
     uniqueness and discovery queueing. The caller has already checked that it may write to ``project``.
@@ -1274,6 +1289,7 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
     stored = _discovery_mode(mode)  # kept on every target this creates: the mode its later automatic scans use
+    scope = _creation_scope(scope_mode)
     names, domain_names, invalid, seen = [], [], [], set()
     for entry in entries:
         if len(names) >= BULK_MAX_EXPANDED:
@@ -1294,7 +1310,8 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             if kind == DOMAIN:
                 domain_names.append(name)
     skipped = []
-    created, existing = _create_domains(project, names, excluded=skipped, discovery_mode=stored)
+    created, existing = _create_domains(project, names, excluded=skipped, discovery_mode=stored, scope_mode=scope,
+                                        domain_names=set(domain_names))
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
