@@ -457,7 +457,7 @@ class ScannerSelectionTests(EnforcementBase):
 		urls = {'exact.test': ['https://old.exact.test/wp-login.php', 'https://exact.test/wp-login.php'],
 			'wide.test': ['https://www.wide.test/wp-login.php']}
 		for domain in (self.exact, self.wide):
-			with mock.patch.object(archive_urls, 'fetch_urls', side_effect=lambda apex, get=None: urls[apex]):
+			with mock.patch.object(archive_urls, 'fetch_urls', side_effect=lambda apex, get=None, exact=False: urls[apex]):
 				archive_urls.run_for_domain(domain.id, force=True)
 		self.assertEqual(set(HostArchive.objects.values_list('host', flat=True)), {'exact.test', 'www.wide.test'})
 
@@ -502,3 +502,117 @@ class ScannerSelectionTests(EnforcementBase):
 		kept = set(Subdomain.objects.filter(in_target_scope_q()).values_list('name', flat=True))
 		self.assertEqual(kept, {'exact.test', 'www.wide.test', 'loose.example'})
 		self.assertTrue(Subdomain.objects.filter(pk=orphan.pk).filter(in_target_scope_q()).exists())
+
+
+# ----------------------------------------------------------------------------- validation and other work started from a finding
+
+from tests.test_validation import ValidationBase  # noqa: E402
+
+
+class ValidationScopeTests(ValidationBase):
+	"""A finding on a name kept under a target that is now exactly one host is never validated through it; a name an unmarked target also
+	holds still is."""
+
+	def setUp(self):
+		super().setUp()
+		self.domain.scope_mode = Domain.SCOPE_HOST  # v.test, exactly that host
+		self.domain.save(update_fields=['scope_mode'])
+
+	def narrowed_match(self):
+		return self.match(name='old.v.test')
+
+	def dual_held(self):
+		parent = Domain.objects.create(name='test', project=self.project, insert_date=NOW())  # an unmarked target holding the same name
+		sub = Subdomain.objects.create(name='old.v.test', target_domain=parent)
+		from cveFeed.models import CVEMatch
+		return CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub, matched_product='nginx', matched_version='1.18.0',
+			version_in_range=True, source='port', evidence={'ip': '203.0.113.7', 'port': 443})
+
+	def test_the_sweep_does_not_pick_a_finding_on_a_narrowed_name(self):
+		from cveFeed import hot_validation, triage
+		from cveFeed.models import Triage
+		from startScan.models import Vulnerability
+		narrowed = self.narrowed_match()
+		vuln = Vulnerability.objects.create(name='High', severity=3, source='bbot', subdomain=narrowed.subdomain, target_domain=self.domain)
+		own = self.match(name='v.test')
+		triage.track(triage.with_cves([narrowed, own]) + [vuln])
+		for lane in ('fire', 'smoke'):
+			picked = {r.host for r in hot_validation._candidate_rows(lane)}
+			self.assertEqual(picked, {'v.test'}, lane)
+		other = self.dual_held()
+		triage.track(triage.with_cves([other]))
+		picked = {(r.host, r.match_id) for r in hot_validation._candidate_rows('fire')}
+		self.assertIn(('old.v.test', other.id), picked)  # the unmarked target's own finding on that name still validates
+		self.assertNotIn(('old.v.test', narrowed.id), picked)
+		self.assertTrue(Triage.objects.filter(match=narrowed).exists())
+
+	def test_a_queued_or_requested_validation_of_a_narrowed_name_is_refused(self):
+		self.narrowed_match()
+		stats, calls = self.run_validation([self.rows()[0]])
+		self.assertEqual((stats['blocked'], calls), (1, []))
+		from cveFeed.models import Triage
+		row = Triage.objects.get()
+		self.assertEqual(row.validation_status, 'skipped_blocked')
+		self.assertIn('this host only', row.validation_steps[0]['summary'])
+
+	def test_a_name_an_unmarked_target_also_holds_still_validates(self):
+		self.narrowed_match()
+		self.dual_held()
+		rows = [r for r in self.rows() if r.host == 'old.v.test']
+		stats, calls = self.run_validation(rows)
+		self.assertTrue(calls)
+		from cveFeed.models import Triage
+		self.assertFalse(any('this host only' in (s.get('summary') or '') for r in Triage.objects.all() for s in (r.validation_steps or [])))
+
+	def test_the_workers_skip_a_narrowed_name(self):
+		from cveFeed import hot_validation, tasks, triage
+		from cveFeed.models import AutomaticValidation, OnDemandValidation, Triage
+		from startScan.models import Vulnerability
+		narrowed = self.narrowed_match()
+		vuln = Vulnerability.objects.create(name='High', severity=3, source='bbot', subdomain=narrowed.subdomain, target_domain=self.domain)
+		triage.track(triage.with_cves([narrowed]) + [vuln])
+		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'), mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async'):
+			for row in Triage.objects.all():
+				self.assertEqual(hot_validation.enqueue(row, 'fire'), 'queued')  # queued before the target was narrowed, or by a person
+		ondemand = OnDemandValidation.objects.get()
+		self.assertEqual(tasks.validate_match_on_demand(ondemand.pk)['reason'], 'host_only_scope')
+		auto = AutomaticValidation.objects.get()
+		self.assertEqual(tasks.automatic_validate_finding(auto.pk)['reason'], 'host_only_scope')
+		ondemand.refresh_from_db()
+		self.assertEqual(ondemand.status, 'skipped')
+		self.assertIn('this host only', ondemand.result['next_action'])
+
+	def test_an_agent_is_not_sent_to_scan_a_narrowed_name(self):
+		from agentapi import agent_broker
+		from agentapi.services import Ctx
+		match = self.narrowed_match()
+		with mock.patch('agentapi.agent_tasks.describe', return_value=('network', ['validate:network'])):
+			why = agent_broker._queue_one(Ctx(user=User.objects.create_user('ag', password='x')), self.project, match, 'validate', None, None, [])
+		self.assertIn('this host only', why)
+
+
+class NarrowedNamesCostTests(EnforcementBase):
+	def test_one_query_without_an_exact_host_target_and_two_with_one(self):
+		from targetApp.models import narrowed_names
+		Subdomain.objects.create(target_domain=self.exact, name='old.exact.test')
+		with self.assertNumQueries(2):
+			self.assertEqual(narrowed_names(self.project.id, ['old.exact.test', 'exact.test', 'x.test']), {'old.exact.test'})
+		self.exact.scope_mode = Domain.SCOPE_AUTO
+		self.exact.save(update_fields=['scope_mode'])
+		with self.assertNumQueries(1):
+			self.assertEqual(narrowed_names(self.project.id, ['old.exact.test']), set())
+
+
+class ArchiveQueryTests(EnforcementBase):
+	def test_an_exact_host_target_asks_the_archive_for_its_own_urls_only(self):
+		from cveFeed import archive_urls
+		asked = []
+
+		def get(url, params=None, **kw):
+			asked.append(params['url'])
+			resp = mock.Mock(status_code=200)
+			resp.iter_content.return_value = [b'[]']
+			return resp
+		archive_urls.run_for_domain(self.exact.id, get=get, force=True)
+		archive_urls.run_for_domain(self.wide.id, get=get, force=True)
+		self.assertEqual(asked, ['exact.test/*', '*.wide.test'])

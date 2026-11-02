@@ -48,6 +48,13 @@ test('marks the server refuses count as nothing: a bare =, ==x and =-x', () => {
   assert.equal(L.countExclusions('-=a.com'), 0);
 });
 
+test('an address, CIDR or range keeps no mark: it is a target, never "this host only"', () => {
+  assert.equal(L.countLabel('=10.0.0.1'), '1 target');
+  assert.equal(L.countLabel('=203.0.113.0/30\n=192.0.2.1-20\n=2001:db8::1\n=app.example.com'), '4 targets (1 this host only)');
+  assert.equal(L.isAddress('10.0.0.1'), true);
+  assert.equal(L.isAddress('1.2.3.example'), false);
+});
+
 test('the Scope choice: auto first and sent as nothing, the others sent as scope_mode', () => {
   assert.deepEqual(L.SCOPE_CHOICES.map(([v]) => v), ['auto', 'host', 'parent']);
   assert.equal(L.DEFAULT_SCOPE, 'auto');

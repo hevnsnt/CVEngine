@@ -67,6 +67,8 @@ export const tokensOf = (lines) => {
 };
 // "=example.com" with something to add after the mark; "=", "==x" and "=-x" are refused by the server, so they count as nothing here
 const validMark = (t) => t.startsWith(HOST_ONLY_MARK) && t.length > 1 && !/^[=-]/.test(t.slice(1));
+// An address, CIDR or range: it has no subdomains, so the server ignores the mark on it (it is not "this host only")
+export const isAddress = (t) => t.includes(":") || /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2}|-\d{1,3}(\.\d{1,3}){0,3})?$/.test(t);
 // "=example.com" and "example.com" in one paste are one target (created as exactly that host), as on the server
 const targetsOf = (lines) =>
   new Set([...tokensOf(lines)].filter((t) => !t.startsWith("-") && (!t.startsWith(HOST_ONLY_MARK) || validMark(t))).map((t) => (validMark(t) ? t.slice(1) : t)));
@@ -76,7 +78,7 @@ export const countEntries = (text) => targetsOf(bodyLines(text)).size;
 // "-example.com" lines exclude a domain (and everything under it) instead of adding a target
 export const countExclusions = (text) => [...tokensOf(bodyLines(text))].filter((t) => t.startsWith("-") && !t.startsWith("-=")).length;
 // "=example.com": how many targets are added as exactly one host
-export const countHostOnly = (text) => new Set([...tokensOf(bodyLines(text))].filter(validMark).map((t) => t.slice(1))).size;
+export const countHostOnly = (text) => new Set([...tokensOf(bodyLines(text))].filter((t) => validMark(t) && !isAddress(t.slice(1))).map((t) => t.slice(1))).size;
 export const projectCount = (text) =>
   new Set(text.split("\n").map((l) => l.trim()).filter((l) => /^#[^#\s]/.test(l)).map((l) => l.slice(1).trim().toLowerCase())).size;
 

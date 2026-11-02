@@ -225,15 +225,24 @@ def in_target_scope_q(prefix=''):
 
 def narrowed_names(project_id, names):
 	"""The names among ``names`` that ``project_id`` holds only as rows under a target set to exactly one host (``in_target_scope_q``
-	leaves every row of theirs out): a sweep that starts from something other than the inventory (an old screenshot, say) skips them. Empty,
-	at the cost of one query, for a project with no such target."""
+	leaves every row of theirs out): a sweep or a worker that starts from something other than the inventory (an old screenshot, a queued
+	validation) skips them. A name another target of the project also holds is not narrowed. One query for a project with no such target, two
+	otherwise: the rows are read by (target, name), the index Subdomain has, and only the distinct (name, target) pairs come back."""
 	names = {str(n).strip().lower().rstrip('.') for n in names if n}
-	if not names or not Domain._base_manager.filter(project_id=project_id, scope_mode=Domain.SCOPE_HOST).exists():
+	if not names:
 		return set()
-	from django.db.models.functions import Lower
+	exact = {pk: str(name).strip().lower().rstrip('.') for pk, name in
+		Domain._base_manager.filter(project_id=project_id, scope_mode=Domain.SCOPE_HOST).values_list('id', 'name')}
+	if not exact:
+		return set()
 	from startScan.models import Subdomain
-	rows = Subdomain.objects.filter(target_domain__project_id=project_id).annotate(lname=Lower('name')).filter(lname__in=names)
-	return set(rows.exclude(in_target_scope_q()).values_list('lname', flat=True)) - set(rows.filter(in_target_scope_q()).values_list('lname', flat=True))
+	inside, outside = set(), set()
+	pairs = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=sorted(names)).order_by()
+		.values_list('name', 'target_domain_id').distinct())
+	for name, domain_id in pairs:
+		host = name.strip().lower().rstrip('.')
+		(outside if domain_id in exact and host != exact[domain_id] else inside).add(host)
+	return outside - inside
 
 
 def org_domains(project):

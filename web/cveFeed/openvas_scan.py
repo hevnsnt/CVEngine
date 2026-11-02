@@ -550,7 +550,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     ``verdicts`` is ``{host: {'heat', 'ready', 'reason', 'retry'}}`` for every candidate (``reason`` says why a host is not ready, in the words
     people read; ``retry`` marks one whose address could not be had, asked again in three days).
 
-    A host is refused when: it is not a host of the project; it is excluded or archived; (with ``gate``) it is not Fire or Smoke, unless
+    A host is refused when: it is held only under a target set to exactly one host (a name under ``=example.com``); it is not a host of the
+    project; it is excluded or archived; (with ``gate``) it is not Fire or Smoke, unless
     ``forced`` names it; it is on a CDN or a platform other tenants share, or at an address that is not the project's to test (documentation
     ranges, this server, the tailnet), or the same address as a host already chosen; it was scanned within a week or failed within three days.
     ``forced`` lifts only the heat gate, never the ownership refusals. Order: Fire before Smoke, then the most fire reasons, then the most smoke
