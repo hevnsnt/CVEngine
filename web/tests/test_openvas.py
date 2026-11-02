@@ -980,6 +980,26 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertIsNone(ov.dispatch_to_sentinel(self.link, [('db.rt.test', '93.184.214.7', 1)]))
         self.assertEqual(OpenvasRun.objects.count(), 1)
 
+    def test_hosts_per_task_are_held_to_what_a_sentinel_takes(self):
+        # The Sentinel client refuses an OpenVAS task of more than 16 hosts, so the setting is held to 16 (warned once per value) and a task
+        # target never names more.
+        self.assertEqual(ov.MAX_HOSTS_PER_TASK, 16)
+        ov._warned_max_hosts.clear()
+        for raw, expected in (('16', 16), ('3', 3), ('0', 1), ('x', ov.DEFAULT_MAX_HOSTS)):
+            with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': raw}), self.assertNoLogs('cveFeed.openvas_scan', 'WARNING'):
+                self.assertEqual(ov.max_hosts(), expected, raw)
+        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '40'}):
+            with self.assertLogs('cveFeed.openvas_scan', 'WARNING') as logs:
+                self.assertEqual(ov.max_hosts(), 16)
+            self.assertIn('CVENGINE_OPENVAS_MAX_HOSTS=40 is above 16', logs.output[0])
+            with self.assertNoLogs('cveFeed.openvas_scan', 'WARNING'):
+                self.assertEqual(ov.max_hosts(), 16)  # said once, not at every tick
+        batch = [(f'h{i}.rt.test', f'93.184.215.{i}', 1) for i in range(20)]
+        run = ov.dispatch_to_sentinel(self.link, batch)
+        self.assertEqual(len(run.sentinel_task.target['hosts']), 16)
+        self.assertEqual(len(run.sentinel_task.ips), 16)
+        self.assertEqual(run.sentinel_task.target['hosts'], {ip: host for host, ip, _ in batch[:16]})
+
     def test_while_the_addon_is_off_a_sentinel_is_never_asked_either(self):
         self.make_sentinel()
         self.settings.enabled = False
@@ -1299,6 +1319,18 @@ class ComposeTests(SimpleTestCase):
             else:
                 self.assertEqual(rest, 'community', name)  # a data image: a pinned feed would be a stale one
         self.assertEqual(seen, programs)
+
+    def test_the_scanner_is_pinned_to_a_digest_the_registry_still_serves(self):
+        # Greenbone removed sha256:5067aa68... (the registry answers 404, so a fresh pull of the add-on failed). Both services that run the scanner
+        # image (openvas-configure and openvas-openvasd) pin the stable digest read on 2026-11-02, the one the Sentinel client pins too.
+        withdrawn = '5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee'
+        current = '7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632'
+        scanner = [s['image'] for s in self.openvas.values() if s['image'].rpartition('/')[2].startswith('openvas-scanner:')]
+        self.assertEqual(len(scanner), 2)
+        for image in scanner:
+            self.assertEqual(image, f'registry.community.greenbone.net/community/openvas-scanner:stable@sha256:{current}')
+        for path in ('docker-compose.yml', 'docs/OPENVAS.md'):
+            self.assertNotIn(f'sha256:{withdrawn}', (ROOT / path).read_text(), path)
 
     def test_only_celery_mounts_gvmds_socket_and_read_only(self):
         for name, service in self.services.items():

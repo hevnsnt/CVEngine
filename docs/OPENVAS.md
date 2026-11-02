@@ -60,7 +60,7 @@ Every host, chosen or not, is vetted at every sweep:
 - a task gvmd reports as Done whose report names **no scanned host** is **inconclusive**, not a scan: no host is stamped as scanned, the run says "OpenVAS ran but reported no scanned host", the host's reason says the same, and it is asked again after three days;
 - the global pause is honored, projects take turns (the one scanned longest ago goes first), and the project's hosts are visited once a week each (`CVENGINE_TTL_OPENVAS`, hours; a host that failed waits three days, `CVENGINE_TTL_OPENVAS_FAILED`).
 
-The sweep runs on its own queue (`openvas_queue`), every 15 minutes. Each step is small: poll the running task, or start the next due batch of at most `CVENGINE_OPENVAS_MAX_HOSTS` hosts (default 1) as **one task for one project**. **One GVM task runs at a time**, enforced by a database constraint (`OpenvasRun`), so two workers or a restart cannot start a second. The task is throttled (`max_checks` from `CVENGINE_OPENVAS_MAX_CHECKS`, default 4, and `max_hosts` 1: that many tests at a time against one host at a time) and its target reuses the project's last target while the set of addresses is unchanged. A finished task is removed from GVM after its results are imported. Where the batch runs is decided first: see Where a due batch runs.
+The sweep runs on its own queue (`openvas_queue`), every 15 minutes. Each step is small: poll the running task, or start the next due batch of at most `CVENGINE_OPENVAS_MAX_HOSTS` hosts (default 1, at most 16) as **one task for one project**. **One GVM task runs at a time**, enforced by a database constraint (`OpenvasRun`), so two workers or a restart cannot start a second. The task is throttled (`max_checks` from `CVENGINE_OPENVAS_MAX_CHECKS`, default 4, and `max_hosts` 1: that many tests at a time against one host at a time) and its target reuses the project's last target while the set of addresses is unchanged. A finished task is removed from GVM after its results are imported. Where the batch runs is decided first: see Where a due batch runs.
 
 **Egress.** The scanner (`openvas-ospd`) needs raw sockets, so it has `NET_ADMIN` and `NET_RAW` and the unconfined seccomp and AppArmor profiles Greenbone's own compose file uses; it is the only add-on container with extra privileges, and no container in the stack runs privileged. Its scans leave the Docker host directly, not through the celery container, and the add-on is on its own network (`openvas_network`), publishes no ports and reads no `.env`. Only the celery container mounts gvmd's socket (read-only; a socket still connects), and gvmd still needs the login.
 
@@ -105,7 +105,7 @@ Only one GVM task, local or on a Sentinel, runs at a time. See [AGENT-API.md](AG
 | --- | --- | --- |
 | `CVENGINE_OPENVAS_MIN_AVAILABLE_MB` | `3072` | Free memory required, beside the platform's headroom, to start a scan |
 | `CVENGINE_OPENVAS_COST_MB` | `1500` | What a GVM scan is counted as against the job budget |
-| `CVENGINE_OPENVAS_MAX_HOSTS` | `1` | Hosts in one GVM task |
+| `CVENGINE_OPENVAS_MAX_HOSTS` | `1` | Hosts in one GVM task (1 to 16). A larger value is held to 16 with a warning in the log: a Sentinel refuses an OpenVAS task of more hosts, and the same batch goes to gvmd here or to a Sentinel |
 | `CVENGINE_OPENVAS_MAX_HOURS` | `24` | The time budget per host (a task of n hosts gets n times this). A task running longer is stopped and keeps what it found |
 | `CVENGINE_OPENVAS_MAX_CHECKS` | `4` | NVTs run at a time against a host (1 to 10; Greenbone's default is 4). At 2 a host takes about a day, at 4 about half that; lower is gentler on the target |
 | `CVENGINE_OWN_ADDRESSES` | none | Addresses of this instance OpenVAS must never scan, besides what `DOMAIN_NAME` resolves to |
@@ -123,7 +123,7 @@ Only one GVM task, local or on a Sentinel, runs at a time. See [AGENT-API.md](AG
 
 Greenbone publishes **no version tags**: the registry lists only the moving tags `stable`, `community`, `latest` and `edge` (read 2026-10-27), so the program images are pinned by `tag@digest` in `docker-compose.yml`, which is what runs. The feed data images (`vulnerability-tests`, `notus-data`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `report-formats`) follow `:community` on purpose: they are data that Greenbone refreshes daily and that is checked against its GPG signing keys, and a pinned feed would be a stale one. The set is the minimal one that exposes GMP, from Greenbone's own compose file (greenbone.github.io/docs, Greenbone Community Containers, `FEED_RELEASE` 24.10): without the web interface (`gsa`, `gsad`, `nginx`), the certificate generator and the `gvm-tools` shell. There is **no MQTT broker** in Greenbone's current compose file (older layouts ran a mosquitto broker for a separate notus-scanner); notus is served by `openvasd` in `OPENVASD_MODE=service_notus`.
 
-Digests read from `registry.community.greenbone.net` on 2026-10-27 (multi-architecture index digests). The `stable` rows are what `docker-compose.yml` pins; the `community` rows are for reference only, since the compose file follows that tag:
+Digests read from `registry.community.greenbone.net` on 2026-10-27 (multi-architecture index digests), `openvas-scanner` again on 2026-11-02: Greenbone removed the digest pinned before (`sha256:5067aa68...`, which the registry now answers with 404), so a fresh pull failed. The `stable` rows are what `docker-compose.yml` pins; the `community` rows are for reference only, since the compose file follows that tag:
 
 | Image | Tag | Digest |
 | --- | --- | --- |
@@ -132,7 +132,7 @@ Digests read from `registry.community.greenbone.net` on 2026-10-27 (multi-archit
 | `pg-gvm-migrator` | `stable` | `sha256:8fc1cc11cac0481674527e01ec7610a8195110cf117d700bd47fe3af7012b34d` |
 | `redis-server` | `stable` | `sha256:83227e34b276bf7c7453a91bbfc070341af58f7ff40eb707ed6724965fe3846c` |
 | `ospd-openvas` | `stable` | `sha256:31a85272abc77521c98451ce6834ed7d2f887e98ff1b26ff3fd94f00d000b169` |
-| `openvas-scanner` | `stable` | `sha256:5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee` |
+| `openvas-scanner` | `stable` | `sha256:7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632` |
 | `gpg-data` | `stable` | `sha256:c18618252f7d874cd1fe09413b043cfc40b57e6464d8c5973d4a93b074d5d91a` |
 | `vulnerability-tests` | `community` | `sha256:d0a8df253c177321c03c24ca5be051ca22da547756f684a96a2153c2ff0c9bd7` |
 | `notus-data` | `community` | `sha256:f84397aede60d158e47ac199e0fe5108f707ed75657406e4e9aad37b92cb0c9a` |

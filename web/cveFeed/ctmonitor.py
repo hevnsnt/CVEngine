@@ -207,6 +207,8 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
     from startScan.models import Subdomain
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
+    if domain.exact_host_only():  # added as exactly this host (=example.com): no name under it would be taken, so crt.sh is not asked
+        return {'checked': 0, 'new': 0, 'skipped': 'exact host'}
     known = set(Subdomain.objects.filter(target_domain=domain).values_list('name', flat=True))
     if fetch is fetch_ct_names:  # the real lookup: tell "unreachable" apart from "nothing found" so the task can try again later
         entries = _fetch(domain.name)

@@ -54,6 +54,7 @@ CONFIRMED_QOD = 95  # the lowest QoD of a hard type when a result carries no typ
 HARD_QOD_TYPES = frozenset({'exploit', 'remote_vul', 'remote_app', 'remote_active', 'package', 'registry'})
 FRESH_DAYS = 21  # an observation older than this is not carried onto a new scan's host row
 DEFAULT_MAX_HOSTS = 1  # hosts in one task: a run is slow (hours per host), so one host per task keeps what a stop or a failure costs to one host
+MAX_HOSTS_PER_TASK = 16  # the most CVENGINE_OPENVAS_MAX_HOSTS may give: the Sentinel client refuses an OpenVAS task of more hosts (client/openvas.py MAX_HOSTS)
 DEFAULT_MAX_HOURS = 24  # the time budget PER HOST: a task of n hosts gets n times this; when it runs out, what was found so far is kept
 DEFAULT_MAX_CHECKS = 4  # NVTs run at a time against a host (Greenbone's own default); CVENGINE_OPENVAS_MAX_CHECKS
 DEFAULT_MAX_INTERRUPTS = 3  # tasks in a row that gvmd reports Interrupted for a host before it waits three days; CVENGINE_OPENVAS_MAX_INTERRUPTS
@@ -96,8 +97,20 @@ def _env_int(name, default, low=1):
         return default
 
 
+_warned_max_hosts = set()  # the values of CVENGINE_OPENVAS_MAX_HOSTS already warned about, so a tick every 15 minutes does not repeat it
+
+
 def max_hosts():
-    return _env_int('CVENGINE_OPENVAS_MAX_HOSTS', DEFAULT_MAX_HOSTS)
+    """Hosts in one task (``CVENGINE_OPENVAS_MAX_HOSTS``, 1 to ``MAX_HOSTS_PER_TASK``). The same batch goes to gvmd here or to a Sentinel, and a
+    Sentinel refuses a task of more than 16 hosts, so a larger value is held to 16 (with a warning) rather than dispatching tasks that fail."""
+    value = _env_int('CVENGINE_OPENVAS_MAX_HOSTS', DEFAULT_MAX_HOSTS)
+    if value > MAX_HOSTS_PER_TASK:
+        if value not in _warned_max_hosts and len(_warned_max_hosts) < 100:
+            _warned_max_hosts.add(value)
+            logger.warning('CVENGINE_OPENVAS_MAX_HOSTS=%r is above %s, the most a Sentinel takes in one OpenVAS task: using %s',
+                           value, MAX_HOSTS_PER_TASK, MAX_HOSTS_PER_TASK)
+        value = MAX_HOSTS_PER_TASK
+    return value
 
 
 def max_hours():
@@ -471,12 +484,16 @@ def _address(host, project_id):
     return ordered[0][1][0]
 
 
-def _latest_row(project_id, host):
-    """The newest row of ``host``, a row of a target that is not manual only before one that is (a host two targets hold is the first one's to scan)."""
+def _latest_row(project_id, host, scoped=False):
+    """The newest row of ``host``, a row of a target that is not manual only before one that is (a host two targets hold is the first one's to scan).
+    ``scoped`` leaves out a row kept under a target that is now exactly one host (``targetApp.models.in_target_scope_q``): what may be scanned."""
     from cveFeed.manual_only import held_expr
     from startScan.models import Subdomain
-    return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).select_related('scan_history', 'target_domain')
-            .annotate(held=held_expr()).order_by('held', '-scan_history_id').first())
+    from targetApp.models import in_target_scope_q
+    rows = Subdomain.objects.filter(target_domain__project_id=project_id, name=host)
+    if scoped:
+        rows = rows.filter(in_target_scope_q())
+    return rows.select_related('scan_history', 'target_domain').annotate(held=held_expr()).order_by('held', '-scan_history_id').first()
 
 
 def _names(items):
@@ -500,12 +517,14 @@ def hot_names(project_id, limit=HOT_WINDOW):
     from cveFeed.models import CVEMatch
     from cveFeed.threat import match_heat_rank_expr
     from startScan.models import Vulnerability
+    from targetApp.models import in_target_scope_q
     closed = ('fixed', 'accepted_risk')
+    scope = in_target_scope_q('subdomain__')  # a name kept under a target that is now exactly one host is never OpenVAS's to scan through it
     # The current inventory only (not every scan's copy of a name), hottest first, so a large project's fire hosts fall inside the window.
-    names = set(CVEMatch.objects.filter(latest_scan_q('subdomain__'), subdomain__target_domain__project_id=project_id).exclude(ai_verdict='not_affected')
+    names = set(CVEMatch.objects.filter(latest_scan_q('subdomain__'), scope, subdomain__target_domain__project_id=project_id).exclude(ai_verdict='not_affected')
                 .exclude(remediation_status__in=closed).annotate(heat_rank=match_heat_rank_expr(capped=False)).filter(heat_rank__gte=2)
                 .values('subdomain__name').annotate(top=Max('heat_rank')).order_by('-top', 'subdomain__name').values_list('subdomain__name', flat=True)[:limit])
-    names |= set(Vulnerability.objects.filter(latest_scan_q('subdomain__'), target_domain__project_id=project_id, open_status=True, severity__gte=2)
+    names |= set(Vulnerability.objects.filter(latest_scan_q('subdomain__'), scope, target_domain__project_id=project_id, open_status=True, severity__gte=2)
                  .exclude(remediation_status__in=closed).values('subdomain__name').annotate(top=Max('severity')).order_by('-top', 'subdomain__name')
                  .values_list('subdomain__name', flat=True)[:limit])
     return _names(names)
@@ -545,7 +564,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     ``verdicts`` is ``{host: {'heat', 'ready', 'reason', 'retry'}}`` for every candidate (``reason`` says why a host is not ready, in the words
     people read; ``retry`` marks one whose address could not be had, asked again in three days).
 
-    A host is refused when: it is not a host of the project; it is excluded or archived; (with ``gate``) it is not Fire or Smoke, unless
+    A host is refused when: it is held only under a target set to exactly one host (a name under ``=example.com``); it is not a host of the
+    project; it is excluded or archived; (with ``gate``) it is not Fire or Smoke, unless
     ``forced`` names it; it is on a CDN or a platform other tenants share, or at an address that is not the project's to test (documentation
     ranges, this server, the tailnet), or the same address as a host already chosen; it was scanned within a week or failed within three days.
     ``forced`` lifts only the heat gate, never the ownership refusals. Order: Fire before Smoke, then the most fire reasons, then the most smoke
@@ -576,11 +596,15 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     fresh_failed = ledger.fresh(FAILED_SERVICE, names, project_id)
     empty = inconclusive_hosts(project_id, [n for n in names if n in fresh_failed])
     worn = interrupted_out_hosts(project_id, [n for n in names if n in fresh_failed])
+    from targetApp.models import narrowed_names
+    narrowed = narrowed_names(project_id, names)  # held only under a target that is now exactly one host: no person's naming lifts that
     passed = []
     for host in names:
         heat = heats.get(host, ('', (0, 0)))[0]
-        sub = _latest_row(project_id, host) if host in heats else None
-        if sub is None:
+        sub = _latest_row(project_id, host, scoped=True) if host in heats else None
+        if host in narrowed:
+            refuse(host, heat, 'its target is set to this host only: a name under it is not scanned')
+        elif sub is None:
             refuse(host, heat, 'not a host of this project')
         elif host not in kept:
             refuse(host, heat, 'excluded from scanning')
@@ -1158,6 +1182,7 @@ def dispatch_to_sentinel(link, batch):
     from agentapi.models import SentinelTask
     from cveFeed import activity
     from cveFeed.models import OpenvasRun
+    batch = batch[:MAX_HOSTS_PER_TASK]  # a Sentinel refuses more; ``max_hosts`` already holds a batch to this, and the rest would stay due for the next tick
     hosts = {ip: host for host, ip, _domain in batch}
     task = SentinelTask.objects.create(project=link.project, kind='openvas', ips=sorted(hosts), host=', '.join(sorted(set(hosts.values())))[:500],
                                        target={'hosts': hosts, 'excluded_families': list(EXCLUDED_FAMILIES), 'max_hours': budget_hours(len(hosts)),
