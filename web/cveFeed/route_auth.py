@@ -108,10 +108,10 @@ def _base(scheme, host, port):
     return f'{scheme}://{name}' + ('' if port == default else f':{port}')
 
 
-def web_bases(sub):
+def web_bases(sub, limit=MAX_BASES_PER_HOST):
     """Base URLs (scheme, host name, port) a prefetched Subdomain (``ip_addresses__ports``) serves web pages on: from its
     ``http_url`` and from every open port that looks like HTTP. The URL carries the hostname (virtual hosts), not the IP. At
-    most MAX_BASES_PER_HOST, 443 first, then 80, then the other web ports by number."""
+    most ``limit`` (MAX_BASES_PER_HOST; None for all of them), 443 first, then 80, then the other web ports by number."""
     host = (sub.name or '').strip().lower()
     if not host:
         return []
@@ -131,7 +131,7 @@ def web_bases(sub):
                          or (getattr(port, 'extra', None) or {}).get('tunnel') == 'ssl')
                 found.add(('https' if https else 'http', port.number))
     order = sorted(found, key=lambda sp: (0 if sp[1] == 443 else 1 if sp[1] == 80 else 2, sp[1], sp[0]))
-    return [_base(scheme, host, port) for scheme, port in order[:MAX_BASES_PER_HOST]]
+    return [_base(scheme, host, port) for scheme, port in order[:limit]]
 
 
 def _clean_path(url):
@@ -218,6 +218,14 @@ def classify(probe):
     page_scripts = js_libraries.parse_page(body, page_url) if root and 200 <= (probe.get('status') or 0) < 300 else []
     if any(entry['url'] for entry in page_scripts):
         evidence['page_scripts'] = {'page': page_url, 'scripts': page_scripts}  # read by _read_scripts, which removes it before anything is stored
+    if root and 200 <= (probe.get('status') or 0) < 300:
+        from cveFeed.probes import challenge_of
+        if not challenge_of(probe):
+            # the site's own front page was parsed for its scripts: a library no script of it is cannot be this page's (cveFeed.js_libraries
+            # HostLibraries.judge), and a ?ver= string of any script on it is a cache-buster, never a library version
+            urls = [entry['url'] for entry in page_scripts if entry.get('url')]
+            evidence['script_page'] = {'scripts': len(urls), 'query_versions': sorted(
+                {js_libraries.identify(url)['query_version'] for url in urls} - {''})[:40]}
     if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
