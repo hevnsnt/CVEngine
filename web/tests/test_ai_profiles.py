@@ -4,6 +4,7 @@ import json
 import unittest
 from unittest import mock
 
+import requests
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 
@@ -397,7 +398,9 @@ class OnboardingKeyTests(TestCase):
 	def test_no_key_re_checks_the_connected_provider(self):
 		from dashboard.models import AIProviderSettings
 		AIProviderSettings.objects.create(provider='anthropic', model='claude-haiku-5-5', api_key='stored-key', enabled=True)
-		with mock.patch('requests.post', return_value=Reply(ANTHROPIC_OK)) as post:
+		# the model list is not reachable here (no test touches the network): the default model is used, as when the list fails
+		with mock.patch('requests.post', return_value=Reply(ANTHROPIC_OK)) as post, \
+				mock.patch('requests.get', side_effect=requests.ConnectionError('no network in tests')):
 			self.assertEqual(self.save({'key': ''}).status_code, 200)
 		self.assertEqual(post.call_args.kwargs['headers']['x-api-key'], 'stored-key')
 

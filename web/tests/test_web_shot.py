@@ -1,6 +1,7 @@
 import io
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import textwrap
@@ -14,7 +15,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import web_shot
+from cveFeed import egress_proxy, web_shot
 from cveFeed.models import HostExclusion, HostScreenshot, HostState, InternalRange
 from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import IpAddress, Port, Subdomain
@@ -57,6 +58,15 @@ class ShotFixture(RouteFixture):
 		self.addCleanup(override.disable)
 		mock.patch.object(web_shot, 'browser_installed', return_value=True).start()
 		self.kicked = mock.patch('cveFeed.tasks.drain_screenshots.apply_async').start()
+		# the stack's own service names (web_shot.stack_blocklist) do not resolve outside the compose network, and no test may look them up
+		real_lookup = socket.getaddrinfo
+
+		def lookup(host, *args, **kwargs):
+			if host in egress_proxy.STACK_HOSTS and host != 'localhost':
+				raise socket.gaierror(f'{host}: not resolved in tests')
+			return real_lookup(host, *args, **kwargs)
+		mock.patch('socket.getaddrinfo', side_effect=lookup).start()
+		web_shot.stack_blocklist(refresh=True)
 		cache.clear()
 
 	def host(self, name='www.rt.test', ports=((443, 'https'), (80, 'http')), address='203.0.113.5', **fields):
