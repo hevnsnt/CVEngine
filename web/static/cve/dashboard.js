@@ -229,6 +229,14 @@ async function pollStats() {
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
     statsNow = s;
     paintMapCount();
+    const groupNote = $("s-match_groups_note");
+    if (groupNote) {
+      // one script on several hosts of a site is one row of the Findings list: beside the per-host count, how many distinct findings that is
+      const g = s.match_groups;
+      const fewer = g != null && s.matches != null && g < s.matches;
+      groupNote.textContent = fewer ? `in ${g}` : "";
+      groupNote.title = fewer ? `${s.matches} matches, one per host, are ${g} distinct findings: the same script on sibling hosts of one site counts once (the Findings list shows them grouped)` : "";
+    }
     const certNote = $("s-certs_total_note");
     if (certNote) {
       // beside the count, like "of 299 hosts" on the Exposed hosts tile: short enough to fit the narrow tile

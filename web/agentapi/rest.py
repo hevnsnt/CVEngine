@@ -338,7 +338,8 @@ ROUTES = [
      lambda r, c, slug, **k: tailscale.tailscale_devices(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/tailscale/sync', 'Sync the project\'s tailnet now: devices, findings and (if enabled) scans (administrators only)',
      lambda r, c, slug, **k: (tailscale.tailscale_sync(c, slug), 202)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/findings', 'Every finding in one list, hottest first: CVE matches, scanner and hygiene findings (type=all|cve|scanner|hygiene, heat=fire|smoke|ice, severity=, status=actionable|all, host=)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/findings', 'Every finding in one list, hottest first: CVE matches, scanner and hygiene findings (type=all|cve|scanner|hygiene, heat=fire|smoke|ice, severity=, status=actionable|all, host=, '
+     'group=none|cve: cve folds the same script on sibling hosts into one row with its member ids; the default none is one row per host)',
      lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/vulnerabilities', 'Scanner findings (severity, open filters)',
      lambda r, c, slug, **k: svc.list_vulnerabilities(c, slug, r.GET)),
