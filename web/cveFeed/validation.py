@@ -384,8 +384,11 @@ def run_nuclei_template(check):
 
 
 def run_nmap_sv(check):
-    from cveFeed import nmap_scan
-    out = nmap_scan.run_nmap_args(check['argv'][1:], label=check['target'], timeout=check['timeout'])
+    from cveFeed import local_egress, nmap_scan
+    try:
+        out = nmap_scan.run_nmap_args(check['argv'][1:], label=check['target'], timeout=check['timeout'])
+    except local_egress.PortHeld as exc:  # the opt-in skip list or the egress governor: nothing was sent, nothing is concluded
+        return {'status': 'failed', 'error': str(exc), 'summary': f'not run from this server: {exc}'}
     port = check['params']['port']
     record = next((p for host in nmap_scan.parse_xml(out) for p in host['ports'] if p['number'] == port), None)
     if record is None or record['state'] != 'open':

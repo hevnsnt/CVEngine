@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, js_libraries, versions
+from cveFeed import cms, fingerprint, js_libraries, local_egress, versions
 
 logger = logging.getLogger(__name__)
 
@@ -844,6 +844,10 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
         for asset, entry in todo.items():
             try:
                 found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
+            except local_egress.PortHeld as exc:  # skipped or paced on this server (cveFeed.local_egress): not run, not failed, still due
+                logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
+                stats['held'] = stats.get('held', 0) + 1
+                continue
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; it is retried next time, not recorded as clean
                 logger.warning('probe %s failed on host %s: %s', entry['probe'], sub.pk, type(exc).__name__)
                 ledger.record(SERVICE, [asset], project, scan, 'failed')

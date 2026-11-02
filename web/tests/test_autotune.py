@@ -1032,7 +1032,7 @@ class PrecedenceTests(Isolated, TestCase):
     def test_registry_states_auto_tunable_for_everything_and_never_for_ai_spend(self):
         for t in tunables.TUNABLES:
             self.assertIn(t.auto_tunable, (True, False), t.key)
-            if t.group in ('ai_spend', 'autotune_pace'):
+            if t.group in ('ai_spend', 'autotune_pace', 'egress'):  # a spend cap, the tuner's own pace and the egress safety caps are never tuned
                 self.assertFalse(t.auto_tunable, t.key)
         for f in sc.FIELDS:
             self.assertIn(f.auto_tunable, (True, False), f.key)
