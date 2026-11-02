@@ -267,6 +267,19 @@ def _target_host(target):
     return raw.rsplit(':', 1)[0] if raw.count(':') == 1 else raw
 
 
+def _has_port(target):
+    """Whether a nuclei target names its port (``host:25``, a URL with a port) rather than being a bare host or address."""
+    raw = str(target).strip()
+    if '://' in raw:
+        try:
+            return urlparse(raw).port is not None
+        except ValueError:
+            return False
+    if raw.startswith('['):
+        return ']:' in raw
+    return raw.count(':') == 1 and raw.rsplit(':', 1)[1].isdigit()
+
+
 def _target_ports(target):
     """The ports a nuclei target names: its own port, or 80 and 443 for a bare host or address (the web templates' defaults)."""
     raw = str(target).strip()
@@ -287,8 +300,11 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
     """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
     reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter).
 
-    A target on a port of the opt-in skip list (``CVENGINE_LOCAL_SKIP_PORTS``, ``host:25``) is left out of this server's run; the run is counted
-    in the egress ledger from its target list (an estimate: a network template may connect to a port of its own)."""
+    A target on a port of the opt-in skip list (``CVENGINE_LOCAL_SKIP_PORTS``, ``host:25``) is left out of this server's run. A target on a
+    budgeted port (``host:25``: the egress governor, ``cveFeed.local_egress``) is asked of the governor as NUCLEI_TARGET_CONNECTIONS
+    connections, all or nothing; one not granted is left out of this run (logged as paced) and comes back with the host's next nuclei run,
+    and the rest of the run goes ahead. The run is counted in the egress ledger from its target list (an estimate: a network template may
+    connect to a port of its own, which is not governed)."""
     from cveFeed import local_egress
     try:
         with open(targets_file) as f:
@@ -301,8 +317,14 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
         kept = [t for t in listed if not set(_target_ports(t)) & skip] if skip else listed
         if len(kept) != len(listed):
             local_egress.note_skipped('nuclei', skip, [_target_host(t) for t in listed if t not in kept])
-            if not kept:
-                return
+        rules = set(local_egress.budgets())
+        if rules:
+            explicit = lambda t: _target_ports(t) if _has_port(t) else []  # noqa: E731 - a bare host is a web target (80, 443)
+            kept = [t for t in kept if not any(local_egress.admit_one(p, 'nuclei', _target_host(t), weight=local_egress.NUCLEI_TARGET_CONNECTIONS)
+                                               for p in set(explicit(t)) & rules)]
+        if not kept:
+            return
+        if len(kept) != len(listed):
             handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
             handle.write('\n'.join(kept) + '\n')
             handle.close()
@@ -310,7 +332,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
         per_port = {}
         for target in kept:
             for port in _target_ports(target):
-                per_port[port] = per_port.get(port, 0) + 1
+                per_port[port] = per_port.get(port, 0) + (local_egress.NUCLEI_TARGET_CONNECTIONS if _has_port(target) else 1)
         local_egress.record('nuclei', sum(per_port.values()), per_port)
         for port in local_egress.log_ports() & set(per_port):
             local_egress.log_connections([_target_host(t) for t in kept if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)

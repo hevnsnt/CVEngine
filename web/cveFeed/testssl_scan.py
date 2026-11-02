@@ -437,14 +437,14 @@ def sweep(project_id, runner=None, resolve=None):
                 from agentapi import sentinel_dispatch
                 items = sentinel_dispatch.try_testssl(sub.target_domain.project, host, ip, port, starttls, scan=sub.scan_history)
                 if items is None:
-                    held = local_egress.admit_one(port, 'testssl', ip, weight=local_egress.TESTSSL_CONNECTIONS)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
+                    held = local_egress.admit_one(port, 'testssl', ip, weight=local_egress.TESTSSL_CONNECTIONS, burst=False)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
                     if held:
                         if held == 'skipped':
                             local_egress.note_skipped('testssl.sh', {port})  # the log record was written by admit_one
                         activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
                                         f'{local_egress.held_text(port, held)}; the target stays due')
                         continue
-                    # testssl.sh opens some tens of sockets to this one host and port: counted as TESTSSL_CONNECTIONS, an estimate
+                    # testssl.sh opens 159 to 231 sockets to this one host and port (measured): counted as TESTSSL_CONNECTIONS (240)
                     local_egress.record('testssl', local_egress.TESTSSL_CONNECTIONS, {port: local_egress.TESTSSL_CONNECTIONS}, project=project_id)
                     local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.ESTIMATED, project=project_id, scan_id=sub.scan_history_id)
                     items = run_testssl(host, ip, port, starttls, runner=runner)

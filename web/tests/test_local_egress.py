@@ -5,6 +5,7 @@ Every test starts and ends with the module's Redis state cleared: the governor's
 change the command lines of the next."""
 import json
 import os
+import time
 from unittest import mock
 
 from cveFeed import local_egress, naabu_scan, nmap_scan, testssl_scan
@@ -276,6 +277,11 @@ class TestsslSkipTests(Clean, TestCase):
             self.sweep()
         self.assertEqual(sorted(c[-1] for c in self.calls), ['mx.rt.test:25', 'mx.rt.test:443'])
 
+    def test_a_local_run_on_25_is_charged_its_measured_weight(self):
+        with mock.patch.dict(os.environ, NO_SKIP):
+            self.sweep()
+        self.assertEqual(local_egress.used_this_hour(25), local_egress.TESTSSL_CONNECTIONS)
+
     @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
     def test_skipped_locally_and_the_pair_stays_due(self):
         self.sweep()
@@ -347,7 +353,15 @@ class GovernorTests(Clean, TestCase):
 
     def test_over_budget_defers_and_does_not_drop_and_resumes_next_hour(self):
         addresses = [f'198.51.100.{i}' for i in range(1, 6)]
-        with local_egress.context(kind='nmap', org_id=None, project=None):
+        org = Org.objects.create(name='G', slug='gov-org')
+        project = Project.objects.create(name='G', slug='gov-p', insert_date=timezone.now(), org=org)
+        domain = Domain.objects.create(name='gov.test', project=project, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=domain, scan_type=EngineType.objects.create(engine_name='e-gov', yaml_configuration='x'),
+                                          start_scan_date=timezone.now(), scan_status=1, results_dir='/tmp')
+        sub = Subdomain.objects.create(scan_history=scan, name='www.gov.test')
+        for address in addresses:
+            sub.ip_addresses.add(IpAddress.objects.create(address=address))
+        with local_egress.context(kind='nmap', org_id=org.id, project=project.id):
             held = local_egress.plan(addresses, {25, 80}, 'nmap', now=T0)
         self.assertEqual(sorted(held), addresses[2:])  # two granted, three held back
         self.assertTrue(all(ports == {25} for ports in held.values()))
@@ -780,6 +794,7 @@ class CatchUpScopeTests(Clean, _ScanFixture, TestCase):
         self.assertEqual([a for _o, a, _p in local_egress.owed(25)], ['198.51.100.7'])
 
     def test_scope_is_judged_per_project_so_a_tailnet_device_of_the_project_is_probed(self):
+        Subdomain.objects.get(scan_history=self.scan).ip_addresses.add(IpAddress.objects.create(address='100.64.0.9'))
         local_egress.owe(25, ['100.64.0.9'], org_id=self.project.org_id, project=self.project.id)
         seen = []
 
@@ -800,7 +815,8 @@ class CatchUpScopeTests(Clean, _ScanFixture, TestCase):
             check()
 
     def test_overlapping_passes_never_probe_the_same_address_twice(self):
-        local_egress.owe(25, ['198.51.100.8'], org_id=None, project=None)
+        Subdomain.objects.get(scan_history=self.scan).ip_addresses.add(IpAddress.objects.create(address='198.51.100.8'))
+        local_egress.owe(25, ['198.51.100.8'], org_id=self.project.org_id, project=self.project.id)
 
         def runner(targets, flags, host_timeout):
             self.probed.append(list(targets))
@@ -899,3 +915,302 @@ class HermeticTests(SimpleTestCase):
         self.assertEqual(local_egress.budgets(), {})
         self.assertEqual(os.environ.get('CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR'), '0')
         self.assertEqual(os.environ.get('CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR'), '0')
+
+
+# --- second review of PR #389: regressions ---------------------------------------------------------------------------------------
+
+def port25_targets(calls):
+    """(address, port 25) probes the recorded nmap command lines would send: an address counts when 25 is in its -p list (or the full / top
+    list) and not in --exclude-ports."""
+    n = 0
+    for targets, flags in calls:
+        excluded = set()
+        if '--exclude-ports' in flags:
+            excluded = local_egress._expand(flags[flags.index('--exclude-ports') + 1]) or set()
+        if 25 in excluded:
+            continue
+        if '-p-' in flags:
+            n += len(targets)
+        elif '-p' in flags:
+            if 25 in (local_egress._expand(flags[flags.index('-p') + 1]) or set()):
+                n += len(targets)
+        else:
+            n += len(targets)  # --top-ports 1000 holds 25
+    return n
+
+
+R2 = {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:400/hour'}
+
+
+@mock.patch.dict(os.environ, R2)
+class NucleiGovernedTests(Clean, TestCase):
+    """nuclei gets host:25 for every host with port 25 open: each such target is asked of the governor (NUCLEI_TARGET_CONNECTIONS, all or
+    nothing); one not granted is left out of this run, logged paced, and the rest of the run goes ahead."""
+
+    def run_nuclei(self, targets):
+        import tempfile
+
+        from cveFeed import nuclei_scan
+        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+        handle.write('\n'.join(targets) + '\n')
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        seen = []
+
+        def fake(path, *a, **k):
+            seen.extend(open(path).read().split())
+            return iter(())
+        with mock.patch.object(nuclei_scan, '_stream_nuclei', side_effect=fake):
+            list(nuclei_scan.stream_nuclei(handle.name))
+        return seen
+
+    def test_a_drained_budget_holds_host_25_targets_back_and_the_rest_runs(self):
+        self.assertEqual(local_egress.take(25, 400), 100)  # this 15 minutes' share is used up
+        targets = [f'198.51.100.{i}:25' for i in range(1, 51)] + ['www.example.test', '198.51.100.1:8443']
+        seen = self.run_nuclei(targets)
+        self.assertEqual(seen, ['www.example.test', '198.51.100.1:8443'])
+        self.assertEqual(local_egress.used_this_hour(25), 100)
+        records = local_egress.connection_log(port=25, limit=1000)['records']
+        self.assertEqual({r['outcome'] for r in records}, {'paced'})
+        self.assertEqual(len(records), 50)
+
+    def test_each_granted_target_is_charged_its_weight_whole(self):
+        self.assertGreater(local_egress.NUCLEI_TARGET_CONNECTIONS, 1)
+        n = 100 // local_egress.NUCLEI_TARGET_CONNECTIONS
+        seen = self.run_nuclei([f'198.51.100.{i}:25' for i in range(1, n + 3)])
+        self.assertEqual(len(seen), n)  # the 15-minute share holds this many whole targets
+        self.assertEqual(local_egress.used_this_hour(25), n * local_egress.NUCLEI_TARGET_CONNECTIONS)
+        self.assertEqual(sorted({r['outcome'] for r in local_egress.connection_log(port=25)['records']}), ['paced', 'sent'])
+
+
+@mock.patch.dict(os.environ, R2)
+class MemoryKillRetryTests(Clean, _ScanFixture, TestCase):
+    """scan_in_chunks halves and re-runs a chunk nmap was stopped on for memory: the re-run must not probe port 25 again uncharged."""
+    ADDRESSES = [f'192.0.2.{i}' for i in range(10, 20)]
+
+    def setUp(self):
+        super().setUp()
+        self.make_scan(self.ADDRESSES)
+        self.calls = []
+
+    def test_the_retried_halves_leave_port_25_to_the_paced_pass(self):
+        from reNgine.resources import MemoryKill
+
+        def runner(targets, flags, host_timeout):
+            self.calls.append((list(targets), list(flags)))
+            if len(self.calls) == 1:
+                raise MemoryKill('nmap', 'test')
+            return report(*[(t, [25, 80]) for t in targets])
+        ports = {a: [25, 80] for a in self.ADDRESSES}
+        nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner, naabu_runner=lambda ips: dict(ports), dispatch=False)
+        self.assertEqual(len(self.calls), 3)
+        self.assertLessEqual(port25_targets(self.calls), local_egress.used_this_hour(25))
+        for _targets, flags in self.calls[1:]:
+            self.assertIn('25', flags[flags.index('--exclude-ports') + 1].split(','))
+        self.assertEqual(sorted(a for _o, a, _p in local_egress.owed(25)), self.ADDRESSES)
+
+
+@mock.patch.dict(os.environ, R2)
+class OwedListTests(Clean, _ScanFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.make_scan(['198.51.100.7'])
+        self.probed = []
+
+    def runner(self, targets, flags, host_timeout):
+        self.probed.append(list(targets))
+        return report(*[(t, [25]) for t in targets])
+
+    def test_entries_not_scannable_now_never_starve_newer_ones(self):
+        stuck = [f'10.9.0.{i}' for i in range(1, local_egress.CATCH_UP_BATCH + 5)]
+        sub = Subdomain.objects.get(scan_history=self.scan)
+        for a in stuck:
+            sub.ip_addresses.add(IpAddress.objects.create(address=a))
+            local_egress.owe(25, [a], org_id=self.project.org_id, project=self.project.id)
+        local_egress.owe(25, ['198.51.100.7'], org_id=self.project.org_id, project=self.project.id)
+        local_egress.catch_up(runner=self.runner, now=T0)
+        self.assertEqual(self.probed, [['198.51.100.7']])
+        self.assertEqual(len(local_egress.owed(25)), len(stuck))  # still owed, behind nobody
+
+    def test_each_entry_ages_out_on_its_own_after_30_days_with_a_log_line(self):
+        with mock.patch.object(local_egress.time, 'time', return_value=time.time() - 31 * 86400):
+            local_egress.owe(25, ['198.51.100.7'], org_id=self.project.org_id, project=self.project.id)
+        local_egress.owe(25, ['198.51.100.7'], org_id=self.project.org_id, project=self.project.id)  # owing again keeps its age
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[]):
+            local_egress.catch_up(runner=self.runner, now=T0)
+        self.assertEqual(local_egress.owed(25), [])
+        self.assertTrue(any('198.51.100.7' in m and '30 days' in m for m in _messages()))
+
+    def test_an_entry_of_a_deleted_project_or_no_project_is_dropped_not_probed(self):
+        local_egress.owe(25, ['198.51.100.7'], org_id=self.project.org_id, project=self.project.id)
+        local_egress.owe(25, ['198.51.100.9'], org_id=None, project=None)
+        self.project.delete()
+        out = local_egress.catch_up(runner=self.runner, now=T0)
+        self.assertEqual(self.probed, [])
+        self.assertEqual(local_egress.owed(25), [])
+        self.assertEqual(out[25]['probed'], 0)
+
+    def test_an_address_that_left_the_project_is_dropped(self):
+        local_egress.owe(25, ['203.0.113.77'], org_id=self.project.org_id, project=self.project.id)  # on no host of the project
+        local_egress.catch_up(runner=self.runner, now=T0)
+        self.assertEqual(self.probed, [])
+        self.assertEqual(local_egress.owed(25), [])
+
+    def test_the_default_runner_checks_scope_before_launch_and_logs_nothing_sent_when_refused(self):
+        from cveFeed.models import HostExclusion
+        local_egress.owe(25, ['198.51.100.7'], org_id=self.project.org_id, project=self.project.id)
+
+        def heavy(kind, **kwargs):
+            HostExclusion.objects.create(org=self.project.org, host='198.51.100.7', created_at=timezone.now())  # excluded during the wait
+            return _Job()
+        with mock.patch('reNgine.resources.heavy_job', side_effect=heavy), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(nmap_scan.subprocess, 'Popen') as popen:
+            local_egress.catch_up(now=T0)
+        popen.assert_not_called()
+        self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
+
+
+@mock.patch.dict(os.environ, R2)
+class WindowTests(Clean, TestCase):
+    def test_61_minute_buckets_are_needed(self):
+        got = [(s, local_egress.take(25, 100, now=T0 + s, burst=False)) for s in (59, 960, 1860, 2760, 3600)]  # the hour alone
+        self.assertEqual([g for _s, g in got[:4]], [100] * 4)
+        self.assertLessEqual(sum(g for s, g in got if 59 <= s < 59 + 3600), 400)
+
+    def test_16_minute_buckets_are_needed(self):
+        got = [local_egress.take(25, 100, now=T0 + s) for s in (59, 900)]
+        self.assertLessEqual(sum(got), 100)
+
+    def test_the_window_uses_the_redis_clock_not_each_workers(self):
+        with mock.patch.object(local_egress.time, 'time', return_value=time.time() + 120):  # a worker whose clock runs two minutes fast
+            ahead = local_egress.take(25, 100)
+        behind = local_egress.take(25, 100)
+        self.assertEqual(ahead + behind, 100)
+
+    def test_all_or_nothing_against_the_hour(self):
+        for minute in (0, 16, 32):
+            self.assertEqual(local_egress.take(25, 100, now=T0 + minute * 60), 100)
+        self.assertEqual(local_egress.take(25, 150, now=T0 + 48 * 60, whole=True, burst=False), 0)  # 100 left in the hour: not 150
+        self.assertEqual(local_egress.used_this_hour(25, now=T0), 300)
+        self.assertEqual(local_egress.take(25, 100, now=T0 + 48 * 60, whole=True, burst=False), 100)
+
+
+@mock.patch.dict(os.environ, R2)
+class TestsslWeightTests(Clean, TestCase):
+    def test_a_testssl_run_counts_its_measured_connections_and_may_exceed_the_burst_alone(self):
+        self.assertEqual(local_egress.TESTSSL_CONNECTIONS, 240)
+        self.assertEqual(local_egress.take(25, 50, now=T0), 50)
+        self.assertIsNone(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, now=T0, burst=False))
+        self.assertEqual(local_egress.used_this_hour(25, now=T0), 290)
+        self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.2', weight=local_egress.TESTSSL_CONNECTIONS, now=T0 + 1800,
+                                                 burst=False), 'paced')  # 530 would break the hour
+        self.assertEqual(local_egress.take(25, 1, now=T0 + 60), 0)  # the run filled this 15 minutes: no nmap probe on 25 beside it
+        self.assertEqual(local_egress.take(25, 200, now=T0 + 1800), 100)  # later: the burst limit again, inside what is left of the hour
+
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:4/hour'})
+class FullSweepGovernorTests(Clean, _ScanFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.make_scan(['192.0.2.30'])
+        self.ip = IpAddress.objects.get(address='192.0.2.30')
+        self.calls = []
+
+    def runner(self, open_ports):
+        def run(targets, flags, host_timeout):
+            self.calls.append(list(flags))
+            return report(*[(t, open_ports) for t in targets])
+        return run
+
+    def test_a_drained_budget_sweeps_without_25_and_owes_it(self):
+        from cveFeed import fullscan
+        local_egress.take(25, 10)
+        fullscan.sweep_ip(self.ip, runner=self.runner([80]), fingerprint_runner=self.runner([80]), pipeline=lambda *a: None)
+        self.assertIn('25', self.calls[0][self.calls[0].index('--exclude-ports') + 1].split(','))
+        self.assertEqual([a for _o, a, _p in local_egress.owed(25)], ['192.0.2.30'])
+
+    def test_a_new_port_25_is_not_fingerprinted_over_budget(self):
+        from cveFeed import fullscan
+        local_egress.take(25, 10)
+        fullscan.investigate(self.ip, [25, 8080], self.project.id, runner=self.runner([25, 8080]), pipeline=lambda *a: None)
+        self.assertEqual(self.calls[0][self.calls[0].index('-p') + 1], '8080')
+        self.assertEqual([a for _o, a, _p in local_egress.owed(25)], ['192.0.2.30'])
+
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '6379'})
+class OtherInProcessGateTests(Clean, _ScanFixture, TestCase):
+    def test_a_database_check_on_a_held_port_is_not_run(self):
+        from cveFeed import db_exposure
+        self.make_scan(['192.0.2.40'])
+        ip = IpAddress.objects.get(address='192.0.2.40')
+        ip.ports.add(Port.objects.create(number=6379, service_name='redis', state='open'))
+        probe = mock.Mock(return_value=True)
+        with mock.patch('targetApp.target_types.is_scannable_ip', return_value=True):
+            db_exposure.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
+        probe.assert_not_called()
+
+    def test_a_zombie_liveness_probe_on_a_held_port_is_not_sent(self):
+        from cveFeed import zombie
+        with mock.patch('socket.create_connection') as connect:
+            self.assertFalse(zombie.tcp_alive('192.0.2.41', 6379))
+        connect.assert_not_called()
+
+
+class FallbackWindowTests(Clean, TestCase):
+    def test_the_fallback_count_is_a_true_60_minute_window(self):
+        local_egress.note_fallback('nmap', now=T0 - 1900)  # 61 minutes before the look below: out of the window
+        for _ in range(2):
+            local_egress.note_fallback('nmap', now=T0 - 1700)
+        self.assertEqual(local_egress.fallbacks_last_hour(now=T0 + 1800), 2)
+
+
+class FloodInvariantTests(Clean, _ScanFixture, TestCase):
+    """Randomised: in the local fingerprinting pass the (address, port 25) probes nmap is handed never exceed what the governor charged, across
+    naabu answers with and without 25, missing answers, tarpits, chunking, a drained or partial budget, the fallback --top-ports flags and a
+    sustained flood (the reviewer's fuzz probe, kept)."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ['CVENGINE_LOCAL_SKIP_PORTS'] = ''
+        import random
+        self.rng = random.Random(389)
+        self.all = [f'198.51.100.{i + 1}' for i in range(180)]
+        self.make_scan(self.all)
+
+    def one_pass(self, flags_fallback):
+        calls = []
+
+        def runner(targets, flags, host_timeout):
+            calls.append((list(targets), list(flags)))
+            return report(*[(t, [80]) for t in targets])
+        answer = {}
+        for ip in self.all:
+            r = self.rng.random()
+            if r < 0.15:
+                continue
+            if r < 0.20:
+                answer[ip] = list(range(1, naabu_scan.MAX_OPEN_PER_IP + 5))
+            elif r < 0.55:
+                answer[ip] = sorted({25, 80, self.rng.randint(1, 9000)})
+            else:
+                answer[ip] = sorted({80, 443, self.rng.randint(1, 9000)} - {25})
+        ServiceRun.objects.all().delete()
+        before = local_egress.used_this_hour(25) or 0
+        patches = [mock.patch.object(nmap_scan, 'fast_flags', return_value=list(nmap_scan.FAST_FLAGS))] if flags_fallback else []
+        for p in patches:
+            p.start()
+        try:
+            nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner, naabu_runner=lambda ips: {i: answer[i] for i in ips if i in answer},
+                                        dispatch=False, force=True)
+        finally:
+            for p in patches:
+                p.stop()
+        return port25_targets(calls), (local_egress.used_this_hour(25) or 0) - before, calls
+
+    def test_flood(self):
+        for budget in (4, 37, 120, 400, 2000):
+            with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': f'25:{budget}/hour'}):
+                _clear()
+                for i in range(4):
+                    probed, charged, calls = self.one_pass(flags_fallback=bool(i % 2))
+                    self.assertLessEqual(probed, charged, (budget, i))

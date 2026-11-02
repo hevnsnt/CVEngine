@@ -174,7 +174,6 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
     if flags is None:  # every port asked for is on the opt-in skip list: nothing is sent, and no host is reported
         return EMPTY_REPORT
     from cveFeed import local_egress
-    local_egress.record_nmap(flags, targets)
     from reNgine import resources
     timeout = HOST_GROUPS_ALLOWED * _minutes(host_timeout) * 60 + PROCESS_TIMEOUT_BUFFER
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
@@ -186,6 +185,7 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
         with resources.heavy_job(kind, label=label, wait_timeout=wait_timeout) as job:
             if before_launch is not None:
                 before_launch()
+            local_egress.record_nmap(flags, targets)  # only once the run really starts: a run refused after its wait sent nothing
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
             try:
@@ -242,8 +242,8 @@ def run_nmap_args(args, label, timeout):
                 if reason == 'skipped':
                     local_egress.note_skipped('nmap', {port})
                 raise local_egress.PortHeld(port, reason)
-    local_egress.record_nmap(args, [target])
     with resources.heavy_job('nmap', label=label) as job:
+        local_egress.record_nmap(args, [target])
         proc = subprocess.Popen([NMAP_BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         job.attach(proc)
         try:
@@ -471,15 +471,23 @@ def close_unreported_ports(ip_obj, host):
 def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_for=None, org_id=None):
     """Run nmap over ``targets`` in chunks and persist each chunk as it finishes. If a run is stopped for memory, that
     chunk is halved and retried (down to a handful of hosts) before giving up. ``flags_for(chunk)`` may choose each chunk's flags
-    (naabu's open ports); None from it means the chunk has nothing to fingerprint. Returns the summed persist counts."""
+    (naabu's open ports); None from it means the chunk has nothing to fingerprint. Returns the summed persist counts.
+
+    The run that was stopped may already have probed a budgeted port (25 by default, ``cveFeed.local_egress``) on its addresses, which the
+    egress governor charged once: the retried halves leave every budgeted port out (``--exclude-ports``) and owe it to the paced catch-up
+    pass, which asks the governor again, so a retry never probes port 25 uncharged."""
     from reNgine.resources import MemoryKill
     totals = {'ports': 0, 'hosts_with_os': 0}
-    pending = [targets[i:i + size] for i in range(0, len(targets), size)]
+    pending = [(targets[i:i + size], False) for i in range(0, len(targets), size)]
     while pending:
-        chunk = pending.pop(0)
+        chunk, retried = pending.pop(0)
         chunk_flags = flags_for(chunk) if flags_for else flags
         if chunk_flags is None:
             continue
+        if retried:
+            chunk_flags = _retry_flags(chunk, chunk_flags)
+            if chunk_flags is None:
+                continue
         try:
             xml = runner(chunk, chunk_flags, host_timeout)
         except MemoryKill:
@@ -487,12 +495,27 @@ def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_
                 raise
             half = len(chunk) // 2
             logger.warning('nmap was stopped for memory on %s hosts; retrying as %s + %s', len(chunk), half, len(chunk) - half)
-            pending[0:0] = [chunk[:half], chunk[half:]]
+            pending[0:0] = [(chunk[:half], True), (chunk[half:], True)]
             continue
         result = persist_inventory(parse_xml(xml, strict=True), org_id=org_id)
         for key in totals:
             totals[key] += result.get(key, 0)
     return totals
+
+
+def _retry_flags(chunk, flags):
+    """The flags of a retried half: every budgeted port its plan would probe left out and owed to the paced pass (see scan_in_chunks)."""
+    from cveFeed import local_egress
+    rules = set(local_egress.budgets())
+    if not rules:
+        return flags
+    listed = local_egress._expand(flags[flags.index('-p') + 1]) if '-p' in flags else None
+    excluded = local_egress._expand(flags[flags.index('--exclude-ports') + 1]) or set() if '--exclude-ports' in flags else set()
+    planned = (set(listed) if listed is not None else set(local_egress.TOP_PORTS_WATCHED) | rules) - excluded
+    held = rules & planned
+    for port in sorted(held):
+        local_egress.owe(port, chunk)
+    return local_egress.nmap_exclude(flags, held) if held else flags
 
 
 def _plural(n, word):

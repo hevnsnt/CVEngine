@@ -142,7 +142,8 @@ TUNABLES = [
             'and whenever the advisor is unavailable or over its daily budget, the deterministic controller tunes alone.',
             'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
     Tunable('egress_port25_per_hour', 'Local connections to port 25 per hour',
-            'New connections this server\'s own scanners may open to port 25: never more than this in any 60 minutes, nor a quarter of it in any 15, shared by every worker. '
+            'Charged connection attempts this server\'s own scanners may make to port 25: never more than this in any 60 minutes, nor a quarter of it in any 15 '
+            '(one testssl.sh run, charged 240 as measured, is held to the 60 minutes only), shared by every worker. '
             'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
             'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
             'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
