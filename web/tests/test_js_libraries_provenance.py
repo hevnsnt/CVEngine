@@ -141,6 +141,37 @@ class RedirectAliasCorrelationTests(Hosts):
         self.root('blog.rt.test', 403, scheme='http')
         self.assertIn(('jquery', '3.2.1'), self.matches('blog.rt.test', 'jQuery:3.2.1'))
 
+    def test_a_web_port_the_route_check_did_not_read_keeps_the_host_from_being_an_alias(self):
+        from startScan.models import Port
+        self.sub('blog.rt.test').ip_addresses.first().ports.add(Port.objects.create(number=8443, service_name='https', state='open'))
+        self.root('blog.rt.test', 301, redirect_to='https://rt.test/')  # 443 redirects away, 8443 may serve an application of its own
+        self.assertIn(('jquery', '3.2.1'), self.matches('blog.rt.test', 'jQuery:3.2.1'))
+        RouteAuth.objects.create(project=self.project, domain=self.domain, host='blog.rt.test', path='/', url='https://blog.rt.test:8443/',
+                                 auth_state='redirect', http_status=302, redirect_to='https://rt.test/', checked_at=timezone.now())
+        self.assertEqual(self.matches('blog.rt.test', 'jQuery:3.2.1'), {})  # every web port redirects away: an alias
+
+    def test_a_match_closed_because_the_host_only_redirected_reopens_when_it_serves_its_own_page(self):
+        from cveFeed.models import CVEEntry, CVEMatch
+        entry = CVEEntry.objects.create(id=JQUERY_XSS.id, cve_id=JQUERY_XSS.cve_id, affected=JQUERY_XSS.affected, kev=True, cvss=6.9,
+                                        published_at=timezone.now())
+        sub = self.sub('blog.rt.test')
+        sub.technologies.add(Technology.objects.get_or_create(name='jQuery:3.2.1')[0])
+        index = correlation.build_product_index([entry])
+
+        def correlate():
+            correlation.correlate_subdomain(Subdomain.objects.prefetch_related('technologies').get(pk=sub.pk), index, {entry.id: entry})
+            return CVEMatch.objects.get(subdomain=sub, cve_entry=entry)
+        self.assertEqual(correlate().ai_verdict, '')
+        self.root('blog.rt.test', 301, redirect_to='https://rt.test/')
+        closed = correlate()
+        self.assertEqual(closed.ai_verdict, 'not_affected')
+        self.assertTrue(closed.ai_reason.startswith(js_libraries.ALIAS_CLOSED), closed.ai_reason)
+        self.assertIn('(rt.test)', closed.ai_reason)
+        RouteAuth.objects.filter(host='blog.rt.test').update(http_status=200, redirect_to='', auth_state='open')  # it serves a page now
+        reopened = correlate()
+        self.assertEqual((reopened.pk, reopened.ai_verdict, reopened.ai_reason), (closed.pk, '', ''))
+        self.assertEqual(reopened.confidence, js_libraries.CONFIDENCE['filename'])
+
     def test_the_alias_rule_is_pure(self):
         alias = js_libraries.redirect_alias_of
         self.assertEqual(alias([('https://a.test/', 301, 'https://b.test/')], 'a.test'), 'b.test')
@@ -149,6 +180,11 @@ class RedirectAliasCorrelationTests(Hosts):
         self.assertEqual(alias([('https://a.test/', 301, 'https://b.test/'), ('http://a.test/', 200, '')], 'a.test'), '')
         self.assertEqual(alias([('https://a.test/', None, '')], 'a.test'), '')
         self.assertEqual(alias([], 'a.test'), '')
+        away = [('https://a.test/', 301, 'https://b.test/')]
+        self.assertEqual(alias(away, 'a.test', ['https://a.test']), 'b.test')
+        self.assertEqual(alias(away, 'a.test', ['https://a.test', 'https://a.test:8443']), '')  # a web port with no root read
+        self.assertEqual(alias(away + [('https://a.test:8443/', 302, 'https://b.test/')], 'a.test', ['https://a.test', 'https://a.test:8443']),
+                         'b.test')
 
 
 class RedirectProbeTests(NoCache, SimpleTestCase):
@@ -165,10 +201,10 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
     def test_the_libraries_probe_records_nothing_for_a_host_that_redirected_elsewhere(self):
         self.assertEqual([o for o in self.run_probe('html-libraries', 'https://blog.rt.test', self.TARGET) if o['kind'] == 'version'], [])
 
-    def test_the_headers_probe_records_no_script_versions_for_a_host_that_redirected_elsewhere(self):
+    def test_the_headers_probe_records_nothing_of_the_page_another_host_served(self):
         found = self.run_probe('headers-root', 'https://blog.rt.test', self.TARGET)
         self.assertEqual([o for o in found if js_libraries.is_library(o['product'])], [])
-        self.assertIn(('nginx', '1.24.0'), {(o['product'], o['version']) for o in found if o['kind'] == 'version'})  # the answer's own headers stay
+        self.assertNotIn('nginx', {o['product'] for o in found})  # the target's Server header is the target's, too
 
     def test_the_host_the_page_belongs_to_records_its_libraries(self):
         found = self.run_probe('html-libraries', 'https://rt.test', self.TARGET)
@@ -179,7 +215,8 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
     def test_through_the_real_redirect_following_fetch(self):
         def probe_url(url, **_kw):
             if url == 'https://blog.rt.test/':
-                return {'status': 301, 'location': 'https://rt.test/', 'body': '', 'url': url, 'headers': {}}
+                return {'status': 301, 'location': 'https://rt.test/', 'body': '', 'url': url, 'headers': {'server': 'cloudflare'},
+                        'server': 'cloudflare', 'powered_by': '', 'content_type': 'text/html', 'title': '301 Moved Permanently'}
             path = '/' + url.split('://', 1)[1].split('/', 1)[1]
             return {**self.TARGET.get(path, page(404, body='not found')), 'url': url}
 
@@ -190,6 +227,11 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
             target = probes.run_http_probe('html-libraries', 'https://rt.test', set(), get=get, sleep=lambda s: None)
         self.assertEqual([o for o in alias if o['kind'] == 'version'], [])
         self.assertEqual([(o['product'], o['version']) for o in target if o['version']], [('jQuery', '3.2.1')])
+        with mock.patch.object(probes, '_permitted', return_value=True):
+            headers = probes.run_http_probe('headers-root', 'https://blog.rt.test', set(), get=get, sleep=lambda s: None)
+        products = {o['product'] for o in headers if o['kind'] == 'version'}
+        self.assertIn('Cloudflare', products)  # what the alias's own redirect answer says about itself stays
+        self.assertFalse(products & {'nginx', 'jQuery', 'Bootstrap'}, products)  # the page it leads to is not its
 
     def test_a_redirect_inside_the_same_host_still_records_the_page(self):
         table = {'/': {**self.TARGET['/'], 'final_url': 'https://blog.rt.test/en/', 'url': 'https://blog.rt.test/en/'},

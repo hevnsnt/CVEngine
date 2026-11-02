@@ -787,11 +787,33 @@ OTHER_NOTE = ('named by another fingerprinting tool (technology detection), not 
               'file name until a file on the page states it')
 
 
-def redirect_alias_of(roots, host):
+ALIAS_CLOSED = 'Closed automatically: the host only redirects to another host'
+
+
+def alias_closed_reason(target):
+    """The stored reason of a library match closed because its host only redirects to ``target``. Correlation reopens such a match
+    as soon as the host matches it again (it serves a page of its own)."""
+    return (f'{ALIAS_CLOSED} ({str(target)[:200]}); the JavaScript libraries seen there are that host\'s, so they are not matched '
+            'on this one.')
+
+
+def _origin(url):
+    parts = urlsplit(url or '')
+    return parts.scheme.lower(), parts.port or (443 if parts.scheme.lower() == 'https' else 80)
+
+
+def redirect_alias_of(roots, host, bases=None):
     """The host a front page only redirects to, or '' when ``host`` serves a page of its own. ``roots`` are ``(url, status, location)`` of the
     host's current root routes (http and https). A host is an alias only when every root answered a redirect and at least one of them leads
     to another host: a redirect to itself (http to https, ``/`` to ``/en/``) is not one, and neither is a host whose root answered anything
-    else (a page, a 403, an error), whose own answer may carry scripts. Pure."""
+    else (a page, a 403, an error), whose own answer may carry scripts. ``bases`` (the host's web base URLs, every port) must each have a
+    root among ``roots``: a web port the route check did not read (an app on 8443 beside a 443 that redirects away) may serve its own
+    page, so such a host is not an alias. Pure."""
+    try:
+        if bases is not None and not {_origin(b) for b in bases} <= {_origin(url) for url, _s, _l in roots}:
+            return ''
+    except ValueError:
+        return ''
     target = ''
     for url, status, location in roots:
         if not isinstance(status, int) or not 300 <= status < 400:
@@ -849,7 +871,8 @@ class HostLibraries:
             # version one of them read from a file is never lost
             seen = {(c.get('url'), c.get('version')) for c in records[key]['copies'] if isinstance(c, dict)}
             records[key]['copies'] += [c for c in record.get('copies') or [] if isinstance(c, dict) and (c.get('url'), c.get('version')) not in seen]
-        return cls(records, legacy, redirect_alias_of(roots, host))
+        from cveFeed.route_auth import web_bases
+        return cls(records, legacy, redirect_alias_of(roots, host, web_bases(subdomain, limit=None)) if roots else '')
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the

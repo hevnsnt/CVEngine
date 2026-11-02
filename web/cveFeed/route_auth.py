@@ -108,10 +108,10 @@ def _base(scheme, host, port):
     return f'{scheme}://{name}' + ('' if port == default else f':{port}')
 
 
-def web_bases(sub):
+def web_bases(sub, limit=MAX_BASES_PER_HOST):
     """Base URLs (scheme, host name, port) a prefetched Subdomain (``ip_addresses__ports``) serves web pages on: from its
     ``http_url`` and from every open port that looks like HTTP. The URL carries the hostname (virtual hosts), not the IP. At
-    most MAX_BASES_PER_HOST, 443 first, then 80, then the other web ports by number."""
+    most ``limit`` (MAX_BASES_PER_HOST; None for all of them), 443 first, then 80, then the other web ports by number."""
     host = (sub.name or '').strip().lower()
     if not host:
         return []
@@ -131,7 +131,7 @@ def web_bases(sub):
                          or (getattr(port, 'extra', None) or {}).get('tunnel') == 'ssl')
                 found.add(('https' if https else 'http', port.number))
     order = sorted(found, key=lambda sp: (0 if sp[1] == 443 else 1 if sp[1] == 80 else 2, sp[1], sp[0]))
-    return [_base(scheme, host, port) for scheme, port in order[:MAX_BASES_PER_HOST]]
+    return [_base(scheme, host, port) for scheme, port in order[:limit]]
 
 
 def _clean_path(url):

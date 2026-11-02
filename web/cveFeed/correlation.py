@@ -1092,7 +1092,9 @@ def save_matches(rows, covered=None):
         existing[k].matched_version != r["matched_version"] or existing[k].version_in_range != r["version_in_range"]
         or existing[k].distro_status != r["distro_status"]
         or ((existing[k].ai_reason or '').startswith('Closed automatically:') and
-            any(getattr(existing[k], field) != r[field] for field in _MATCH_FIELDS)))}
+            any(getattr(existing[k], field) != r[field] for field in _MATCH_FIELDS))
+        # closed because the host only redirected: it matches again, so the host serves its own page now, whatever else changed
+        or (existing[k].ai_reason or '').startswith(js_libraries.ALIAS_CLOSED))}
     if any(key not in existing for key in unique) or moved:  # a new match of a kind the AI already judged starts out judged
         verdicts = {signature_of(v): v for v in MatchVerdict.objects.filter(
             cve_entry_id__in={k[0] for k in unique if k not in existing or k in moved})}
@@ -1104,7 +1106,7 @@ def save_matches(rows, covered=None):
             extra = ({"ai_verdict": verdict.ai_verdict, "ai_reason": verdict.ai_reason, "ai_model": verdict.ai_model}
                      if verdict else {})
             fresh.append(CVEMatch(**row, **extra))
-        elif any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
+        elif key in moved or any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
             for f in _MATCH_FIELDS:
                 setattr(match, f, row[f])
             if key in moved:
@@ -1177,10 +1179,16 @@ def close_stale(current, covered):
         stale_keep.append(m)
         hosts.add(m.subdomain_id)
     if stale_keep:
-        CVEMatch.objects.filter(pk__in=[m.pk for m in stale_keep]).update(
-            ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-            ai_reason="Closed automatically: the host no longer matches this CVE (the version moved out of the affected range "
-                      "or the product is gone).")
+        aliases = _alias_hosts({m.subdomain_id for m in stale_keep if m.source == 'tech' and js_libraries.is_library(m.matched_product)})
+        by_reason = {}
+        for m in stale_keep:
+            target = aliases.get(m.subdomain_id) if m.source == 'tech' and js_libraries.is_library(m.matched_product) else ''
+            reason = js_libraries.alias_closed_reason(target) if target else (
+                "Closed automatically: the host no longer matches this CVE (the version moved out of the affected range "
+                "or the product is gone).")
+            by_reason.setdefault(reason, []).append(m.pk)
+        for reason, ids in by_reason.items():
+            CVEMatch.objects.filter(pk__in=ids).update(ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(), ai_reason=reason)
         from cveFeed import activity
         from startScan.models import Subdomain
         projects = dict(Subdomain.objects.filter(pk__in=hosts).values_list('id', 'target_domain__project_id'))
@@ -1189,6 +1197,20 @@ def close_stale(current, covered):
                 activity.log('confirm', 'CVE candidate closed after its product or version disappeared from inventory',
                              project=projects[match.subdomain_id], match_id=match.pk, decision='closed_not_applicable')
     return hosts
+
+
+def _alias_hosts(subdomain_ids):
+    """``{subdomain id: the host it only redirects to}`` for those of ``subdomain_ids`` whose front page only redirects to another host
+    (``js_libraries.HostLibraries.alias_of``): their library matches close with a reason of their own, so they reopen if that changes."""
+    if not subdomain_ids:
+        return {}
+    from startScan.models import Subdomain
+    out = {}
+    for sub in Subdomain.objects.filter(pk__in=list(subdomain_ids)).select_related('target_domain').prefetch_related('ip_addresses__ports'):
+        target = js_libraries.HostLibraries.for_subdomain(sub).alias_of
+        if target:
+            out[sub.pk] = target
+    return out
 
 
 def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidence=0.0, scan_history=None, rows=None,
