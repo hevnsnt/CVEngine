@@ -1023,6 +1023,8 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
     stats['rows'] = len(rows)
     state = {'run': 0}
     hits = []
+    from targetApp.models import narrowed_names
+    narrowed = narrowed_names(project_id, [r.host for r in rows if r.host])  # once for the batch
     with resources.scan_context(scan_id):
         for row in rows:
             if scan_id is not None and resources.abort_requested(scan_id):
@@ -1037,6 +1039,14 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             if triage.effective_signature(triage.describe(finding), row.review_nonce) != row.signature:
                 continue  # the evidence moved since: triage resets the row and validation follows the new signature
             subject = subject_for(row, finding)
+            if row.host and row.host.strip().lower().rstrip('.') in narrowed:  # held only under a target that is now exactly one host (=example.com)
+                row.validation_status, row.validation_steps = 'skipped_blocked', [{
+                    'kind': 'scope', 'label': 'scope check', 'display': '', 'target': row.host, 'ran_at': now.isoformat(),
+                    'result': 'blocked', 'summary': 'its target is set to this host only, and this name is under it, so nothing was run',
+                    'output_excerpt': '', 'error': ''}]
+                row.save(update_fields=['validation_status', 'validation_steps', 'updated_at'])
+                stats['blocked'] += 1
+                continue
             if not Subdomain.objects.filter(name=row.host, target_domain__project_id=project_id).exists():
                 row.validation_status, row.validation_steps = 'skipped_blocked', [{
                     'kind': 'scope', 'label': 'scope check', 'display': '', 'target': row.host, 'ran_at': now.isoformat(),

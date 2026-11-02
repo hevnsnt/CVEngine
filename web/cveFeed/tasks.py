@@ -739,6 +739,9 @@ def validate_findings(project_id, triage_ids, scan_id=None):
         return {"error": str(exc)[:200]}
 
 
+HOST_ONLY_SCOPE_TEXT = 'its target is set to this host only: a name under it is not validated'  # targetApp.models.narrowed_names
+
+
 def _skip_on_demand_validation(job, progress, cve_id, reason):
     """A queued request whose match is no longer the host's current finding is superseded work: it spends no attempt, schedules no retry
     and is not logged as a failure (the automatic path does the same, ``_skip_automatic_validation``)."""
@@ -747,7 +750,8 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
     from cveFeed.models import OnDemandValidation
 
     text = {'historical': 'the match was replaced by a newer scan before the request ran',
-            'out_of_scope': 'the host is outside the scannable project scope'}[reason]
+            'out_of_scope': 'the host is outside the scannable project scope',
+            'host_only_scope': HOST_ONLY_SCOPE_TEXT}[reason]
     result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason, 'next_action': text}
     OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
         status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
@@ -787,6 +791,9 @@ def validate_match_on_demand(request_id):
             return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         if not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
             return _skip_on_demand_validation(job, progress, cve_id, 'out_of_scope')
+        from targetApp.models import narrowed_names
+        if narrowed_names(job.project_id, [match.subdomain.name]):  # held only under a target that is now exactly one host
+            return _skip_on_demand_validation(job, progress, cve_id, 'host_only_scope')
         invalid_reason = correlation.invalid_identity_reason(match)
         if invalid_reason:
             correlation.close_invalid_correlation(match, invalid_reason)
@@ -1030,6 +1037,7 @@ def _skip_automatic_validation(job, progress, reason):
 
     result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason,
               'next_action': 'current evidence is eligible for the next validation sweep' if reason == 'evidence_changed'
+                             else HOST_ONLY_SCOPE_TEXT if reason == 'host_only_scope'
                              else 'validation requires an open eligible finding'}
     AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
         status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
@@ -1079,6 +1087,9 @@ def automatic_validate_finding(job_id):
         stage = 'scope_check'
         if row.host and not scannable_hosts([row.host], project=job.project_id):
             return _skip_automatic_validation(job, progress, 'out_of_scope')
+        from targetApp.models import narrowed_names
+        if row.host and narrowed_names(job.project_id, [row.host]):  # held only under a target that is now exactly one host
+            return _skip_automatic_validation(job, progress, 'host_only_scope')
         # This is a new automatic assessment of the current evidence. A prior shared verdict
         # must not short circuit its AI review, while later sweeps still deduplicate this job.
         triage.request_fresh_review(row, described, str(job.pk))
@@ -1275,7 +1286,8 @@ def watch_certificates_all():
     # nor on a bare shared provider domain (jfrog.com): a tenant's host under it is watched, the provider's whole tree is not
     from cveFeed.conductor import bounty_blocked_projects
     blocked = bounty_blocked_projects()  # a bug bounty project that has not confirmed automated testing is not watched on its own
-    rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
+    # nor on a target added as exactly one host (=example.com, scope_mode 'host'): no name under it would be taken, so there is nothing to look for
+    rows = [r for r in Domain.objects.exclude(scope_mode=Domain.SCOPE_HOST).values_list("id", "name", "project_id")
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
     failed = ct_queue.recently_failed(due)

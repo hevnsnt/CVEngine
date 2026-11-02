@@ -105,6 +105,9 @@ def manual_eligible(row):
 
 
 def _candidate_rows(lane):
+    from targetApp.models import in_target_scope_q
+    # a finding on a name kept under a target that is now exactly one host (=example.com) is never validated automatically through it
+    match_scope, vuln_scope = in_target_scope_q('match__subdomain__'), in_target_scope_q('vulnerability__subdomain__')
     cve_fire = (Q(match__cve_entry__kev=True) | Q(match__cve_entry__exploit_db=True)
                 | Q(match__cve_entry__cvss__gte=9)
                 | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
@@ -115,12 +118,12 @@ def _candidate_rows(lane):
         # every other current CVE match, whatever its confidence or score (an unscored CVE too); one the AI ruled out or the distro
         # patched is not a finding to validate
         cold = (Q(match__isnull=False) & ~cve_hot & ~unknown & ~Q(match__ai_verdict='not_affected') & ~Q(match__distro_status='patched')
-                & ~Q(match__source=HOST_REPORTED) & latest_scan_q('match__subdomain__'))
+                & ~Q(match__source=HOST_REPORTED) & latest_scan_q('match__subdomain__') & match_scope)
         return Triage.objects.filter(cold).select_related('match__cve_entry', 'match__subdomain__target_domain').order_by('pk')
     severity = 3 if lane == FIRE else 2
     candidate = ((cve_fire if lane == FIRE else cve_hot) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
-                 & latest_scan_q('match__subdomain__'))
-    candidate |= Q(vulnerability__open_status=True, vulnerability__severity__gte=severity)
+                 & latest_scan_q('match__subdomain__') & match_scope)
+    candidate |= Q(vulnerability__open_status=True, vulnerability__severity__gte=severity) & vuln_scope
     candidate |= Q(hygiene__status='open', hygiene__severity__gte=severity)
     if lane == SMOKE:
         candidate |= Q(route__auth_state='open') & (Q(route__sensitive_score__gt=0)
@@ -158,7 +161,7 @@ def _job_current(job, now):
         reason = (job.result or {}).get('reason')
         if reason in ('no_longer_eligible', 'historical'):
             return False  # a replaced match's job says nothing about the match that replaced it
-        if reason == 'out_of_scope':
+        if reason in ('out_of_scope', 'host_only_scope'):
             return when > now - timedelta(minutes=30)
         return True
     result = job.result or {}

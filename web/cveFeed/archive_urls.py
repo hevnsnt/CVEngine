@@ -45,11 +45,12 @@ def lookup_enabled():
     return os.environ.get('CVENGINE_ARCHIVE_LOOKUP', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
-def fetch_urls(domain, get=None):
+def fetch_urls(domain, get=None, exact=False):
     """The distinct archived URLs for ``domain`` and its subdomains that answered 200, as a list of strings (at most
-    ``MAX_URLS``). ``get`` replaces ``requests.get`` in tests. Raises on a network or format problem."""
+    ``MAX_URLS``). ``exact`` (a target set to exactly one host) asks for that host's own URLs only, so its subdomains cannot crowd it out of
+    the cap. ``get`` replaces ``requests.get`` in tests. Raises on a network or format problem."""
     get = get or requests.get
-    params = {'url': f'*.{domain}', 'output': 'json', 'fl': 'original', 'collapse': 'urlkey', 'filter': 'statuscode:200',
+    params = {'url': f'{domain}/*' if exact else f'*.{domain}', 'output': 'json', 'fl': 'original', 'collapse': 'urlkey', 'filter': 'statuscode:200',
               'limit': str(MAX_URLS)}
     response = get(CDX_URL, params=params, timeout=TIMEOUT, stream=True, headers={'User-Agent': 'cvENGINE passive lookup'})
     try:
@@ -119,12 +120,12 @@ def run_for_domain(domain_id, get=None, force=False):
     if not force and ledger.fresh('archive-urls', [apex], project=domain.project_id):
         return {'skipped': 'checked recently'}
     try:
-        urls = fetch_urls(apex, get=get)
+        urls = fetch_urls(apex, get=get, exact=domain.exact_host_only())
     except Exception as exc:  # noqa: BLE001 - a passive third-party lookup must never affect anything else
         logger.warning('archive lookup for %s failed: %s', apex, exc)
         return {'error': str(exc)[:200]}
     known = set(Subdomain.objects.filter(target_domain=domain).values_list('name', flat=True).distinct()[:MAX_HOSTS_PER_TARGET])
-    known = {n.lower() for n in known} | {apex}
+    known = {n.lower() for n in known if domain.includes_host(n)} | {apex}  # =example.com: a name kept under it from before is not looked up
     found = classify(urls, apex, known)
     now = timezone.now()
     stored = 0

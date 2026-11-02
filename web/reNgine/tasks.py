@@ -634,11 +634,17 @@ def save_subdomain(subdomain_name, ctx={}):
 		if subdomain_name != domain.name and not subdomain_name.endswith('.' + domain.name):  # dot boundary: example.com.evil.net is not in scope
 			logger.error(f"{subdomain_name} is not a subdomain of domain {domain.name}. Skipping.")
 			return None, False
+		if not domain.includes_host(subdomain_name):  # a target added as exactly one host (=example.com): nothing under it is kept
+			logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
+			return None, False
 
 	scan = ctx.get('_scan')
 	if scan is None or str(scan.pk) != str(scan_id):
 		scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
 	domain = scan.domain if scan else None
+	if domain is not None and domain.exact_host_only() and not domain.includes_host(subdomain_name):  # the scan's own target, when the caller named none
+		logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
+		return None, False
 	if domain is not None:
 		from cveFeed.exclusions import excluded_names, normalize
 		banned = ctx.get('_excluded_hosts')  # persist_bbot_result reads the list once for a whole batch

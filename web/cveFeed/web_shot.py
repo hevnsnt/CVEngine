@@ -407,8 +407,9 @@ def _due_names(project_id, limit, now):
     limit = min(limit, 200)
     banned = excluded_names(project_id)
     names = []
-    from targetApp.models import Domain
+    from targetApp.models import Domain, in_target_scope_q
     never = (Subdomain.objects.filter(target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: not photographed on a schedule
+             .filter(in_target_scope_q())  # a name kept under a target that is now exactly one host is not photographed on a schedule
              .filter(_web_evidence_q()).annotate(lname=Lower('name'))
              .exclude(lname__in=list(archived_names(project_id)))
              .annotate(has=Exists(HostScreenshot.objects.filter(project_id=project_id, host=OuterRef('lname'))))
@@ -427,6 +428,8 @@ def _due_names(project_id, limit, now):
         due = list(due)
         from cveFeed.manual_only import only_manual_hosts
         held = only_manual_hosts(project_id, set(due))  # held only by manual only targets: not photographed on a schedule
+        from targetApp.models import narrowed_names
+        held |= narrowed_names(project_id, due)  # held only under a target that is now exactly one host: not photographed again
         for host in due:
             if host not in names and normalize(host) not in banned and host.strip().lower().rstrip('.') not in held:
                 names.append(host)
