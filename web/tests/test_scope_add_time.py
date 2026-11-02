@@ -1,5 +1,6 @@
 """Scope chosen at add time: "=example.com" (or scope_mode) adds exactly one host, and a target set to scope_mode 'host' never takes,
 keeps or scans a name under it. A target added without the mark behaves as before (the regression half of every test)."""
+from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -48,6 +49,12 @@ class MarkerParseTests(SimpleTestCase):
 		self.assertEqual(parse_target_list(text), ['=a.example', 'b.example', '-c.example', 'd.example', 'a.example'])
 		org, groups, errors = parse_org_text('##Acme\n#Web\n=a.example\nb.example')
 		self.assertEqual((org, groups, errors), ('Acme', [('Web', ['=a.example', 'b.example'])], []))
+
+	def test_a_mark_standing_alone_belongs_to_the_next_entry_on_its_line(self):
+		self.assertEqual(parse_target_list('= spaced.example'), ['=spaced.example'])
+		self.assertEqual(parse_target_list('=  "quoted.example", b.example'), ['=quoted.example', 'b.example'])
+		self.assertEqual(parse_target_list('a.example =\nb.example'), ['a.example', '=', 'b.example'])  # never carried to the next line
+		self.assertEqual(parse_target_list('= -x.example'), ['=-x.example'])  # reported, never an exclusion
 
 	def test_split_scope_mark(self):
 		self.assertEqual(split_scope_mark('=a.example'), ('a.example', True))
@@ -129,6 +136,18 @@ class AddTimeScopeTests(TestCase):
 		status, data = call(self.tok, 'POST', '/api/v1/projects/sat/targets/bulk', {'text': 'dup.example\n=dup.example', 'discover': False})
 		self.assertEqual((status, data['created'], self.scope('dup.example')), (201, 1, 'host'))
 
+	def test_a_spaced_mark_is_exactly_that_host_and_a_trailing_one_is_reported(self):
+		status, data = call(self.tok, 'POST', '/api/v1/projects/sat/targets/bulk', {'text': '= spaced.example\nloose.example =', 'discover': False})
+		self.assertEqual(status, 201)
+		self.assertEqual((self.scope('spaced.example'), self.scope('loose.example')), ('host', 'auto'))
+		self.assertEqual([i['value'] for i in data['invalid']], ['='])
+		status, data = call(self.tok_admin, 'POST', '/api/v1/targets/bulk-org', {'text': '#S\n= org-spaced.example', 'discover': False})
+		self.assertEqual((status, self.scope('org-spaced.example')), (201, 'host'))
+
+	def test_received_counts_what_was_sent(self):
+		status, data = call(self.tok, 'POST', '/api/v1/projects/sat/targets/bulk', {'targets': ['twice.example', '=twice.example'], 'discover': False})
+		self.assertEqual((status, data['received'], data['created']), (201, 2, 1))
+
 	def test_an_existing_target_keeps_its_scope(self):
 		Domain.objects.create(name='old.example', project=self.project, insert_date=NOW())
 		status, data = call(self.tok, 'POST', '/api/v1/projects/sat/targets/bulk', {'text': '=old.example', 'discover': False})
@@ -149,7 +168,7 @@ class AddTimeScopeTests(TestCase):
 		status, data = call(self.tok_admin, 'POST', '/api/v1/projects/sat/targets/bulk',
 			{'text': '==twice.example\n=-mixed.example\n-gone.example\n=fine.example', 'discover': False})
 		self.assertEqual(status, 201)
-		self.assertEqual(sorted(i['value'] for i in data['invalid']), ['-mixed.example', '=twice.example'])
+		self.assertEqual(sorted(i['value'] for i in data['invalid']), ['=-mixed.example', '==twice.example'])  # reported as written
 		self.assertFalse(Domain.objects.filter(name='gone.example').exists())
 		self.assertEqual(self.scope('fine.example'), 'host')
 
@@ -399,6 +418,75 @@ class ScannerSelectionTests(EnforcementBase):
 		self.assertIn('192.0.2.10', addresses)
 		self.assertNotIn('192.0.2.11', addresses)
 		self.assertIn('192.0.2.12', addresses)
+
+	def test_testssl_audit(self):
+		from cveFeed import testssl_scan
+		with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **k: list(names)):
+			hosts = {t[0] for t in testssl_scan.targets(self.project.id)}
+		self.assertEqual(hosts, {'exact.test', 'www.wide.test'})
+
+	def test_openvas_never_picks_a_name_under_an_exact_host_target(self):
+		from cveFeed import openvas_scan
+		from startScan.models import Vulnerability
+		for sub in Subdomain.objects.filter(name__in=('exact.test', 'old.exact.test', 'www.wide.test')):
+			Vulnerability.objects.create(name='XSS', severity=3, subdomain=sub, target_domain=sub.target_domain, open_status=True, source='nuclei')
+		self.assertEqual(openvas_scan.hot_names(self.project.id), {'exact.test', 'www.wide.test'})
+		_ready, verdicts = openvas_scan.assess(self.project.id, ['old.exact.test', 'www.wide.test'], forced={'old.exact.test'},
+			resolve=lambda h, p: '93.184.216.9', blocked=lambda h: False)
+		self.assertIn('this host only', verdicts['old.exact.test']['reason'])
+		self.assertNotIn('this host only', verdicts['www.wide.test']['reason'] or '')
+
+	def test_openvas_ignores_a_cve_match_on_a_name_under_an_exact_host_target(self):
+		from cveFeed import openvas_scan
+		from cveFeed.models import CVEEntry, CVEMatch
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-7', kev=True, cvss=9.8, title='nginx bug', published_at=NOW(),
+			affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
+		for sub in Subdomain.objects.filter(name__in=('old.exact.test', 'www.wide.test')):
+			CVEMatch.objects.create(cve_entry=cve, subdomain=sub, confidence=0.9, matched_product='nginx', matched_version='1.18.0', version_in_range=True)
+		self.assertEqual(openvas_scan.hot_names(self.project.id), {'www.wide.test'})
+
+	def test_the_thorough_wpscan_pass_skips_a_name_under_an_exact_host_target(self):
+		from cveFeed import wpscan_scan
+		self.assertIsNone(wpscan_scan._latest_row(self.project.id, 'old.exact.test'))
+		self.assertEqual(wpscan_scan._latest_row(self.project.id, 'exact.test').name, 'exact.test')
+		self.assertEqual(wpscan_scan._latest_row(self.project.id, 'www.wide.test').name, 'www.wide.test')
+
+	def test_the_web_archive_lookup_ignores_a_name_kept_under_an_exact_host_target(self):
+		from cveFeed import archive_urls
+		from cveFeed.models import HostArchive
+		urls = {'exact.test': ['https://old.exact.test/wp-login.php', 'https://exact.test/wp-login.php'],
+			'wide.test': ['https://www.wide.test/wp-login.php']}
+		for domain in (self.exact, self.wide):
+			with mock.patch.object(archive_urls, 'fetch_urls', side_effect=lambda apex, get=None: urls[apex]):
+				archive_urls.run_for_domain(domain.id, force=True)
+		self.assertEqual(set(HostArchive.objects.values_list('host', flat=True)), {'exact.test', 'www.wide.test'})
+
+	def test_subdirectory_sweep(self):
+		from cveFeed import subdir_apps
+		names = {e['name'] for e in subdir_apps.web_hosts(self.project.id)}
+		self.assertEqual(names, {'exact.test', 'www.wide.test'})
+
+	def test_a_name_another_target_still_holds_stays_in_the_subdirectory_sweep(self):
+		"""Regression: the rows kept under the narrowed target are dropped before the rows are collapsed to one per host, so an unmarked
+		target holding the same name keeps it in the sweep even when the narrowed target's copy is the richer one."""
+		from cveFeed import subdir_apps
+		corp = Domain.objects.create(name='corp.test', project=self.project, insert_date=NOW())
+		narrow = Domain.objects.create(name='a.corp.test', project=self.project, insert_date=NOW(), scope_mode=Domain.SCOPE_HOST)
+		self.host(corp, 'www.a.corp.test', '192.0.2.20', scan=self.scan(corp, status=2))
+		rich, ip = self.host(narrow, 'www.a.corp.test', '192.0.2.21', scan=self.scan(narrow, status=2))
+		for number in (80, 8443, 8080):
+			ip.ports.add(Port.objects.create(number=number, protocol='tcp', state='open', service_name='http'))
+		self.assertIn('www.a.corp.test', {e['name'] for e in subdir_apps.web_hosts(self.project.id)})
+
+	def test_scheduled_screenshots_never_plan_a_name_under_an_exact_host_target(self):
+		from cveFeed import web_shot
+		from cveFeed.models import HostScreenshot
+		self.assertEqual(set(web_shot._due_names(self.project.id, 50, NOW())), {'exact.test', 'www.wide.test'})
+		old = NOW() - timedelta(days=365)
+		for host in ('exact.test', 'old.exact.test', 'www.wide.test'):
+			domain = self.wide if host.endswith('wide.test') else self.exact
+			HostScreenshot.objects.create(project=self.project, domain=domain, host=host, outcome=web_shot.OK, captured_at=old, attempted_at=old)
+		self.assertEqual(set(web_shot._due_names(self.project.id, 50, NOW())), {'exact.test', 'www.wide.test'})  # a stale capture is not refreshed
 
 	def test_scheduled_screenshots_skip_a_name_held_only_under_a_narrowed_target(self):
 		from targetApp.models import narrowed_names

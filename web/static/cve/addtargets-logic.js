@@ -47,17 +47,36 @@ export const normalizeTarget = (token) => {
 // Grouped format: an optional "##Organization" line, then "#Project" above each list ("# a comment" with a space is a comment).
 export const isOrgFormat = (text) => text.split("\n").some((l) => /^\s*#\S/.test(l));
 const stripLinks = (line) => line.replace(/\[[^\]]*\]\(([^)\s]*)\)/g, "$1");
-export const tokensOf = (lines) =>
-  new Set(lines.map((l) => stripLinks(l.split("#")[0])).join(" ").split(/[,\s;]+/).map(normalizeTarget).filter(Boolean));
+const QUOTES = /^["'<>`,;]+|["'<>`,;]+$/g;
+// The entries of some lines, unique and in order, as agentapi.services.parse_target_list reads them: a "=" standing alone marks the next entry
+// on its line ("= example.com" is "=example.com"), and one left at the end of a line stays (the server reports it).
+export const tokensOf = (lines) => {
+  const out = new Set();
+  for (const raw of lines) {
+    let mark = false;
+    for (const token of stripLinks(raw.split("#")[0]).split(/[,\s;]+/)) {
+      if (!token) continue;
+      if (token.replace(QUOTES, "") === HOST_ONLY_MARK) { mark = true; continue; }
+      const t = normalizeTarget(mark ? `${HOST_ONLY_MARK}${token}` : token);
+      mark = false;
+      if (t) out.add(t);
+    }
+    if (mark) out.add(HOST_ONLY_MARK);
+  }
+  return out;
+};
+// "=example.com" with something to add after the mark; "=", "==x" and "=-x" are refused by the server, so they count as nothing here
+const validMark = (t) => t.startsWith(HOST_ONLY_MARK) && t.length > 1 && !/^[=-]/.test(t.slice(1));
 // "=example.com" and "example.com" in one paste are one target (created as exactly that host), as on the server
-const targetsOf = (lines) => new Set([...tokensOf(lines)].filter((t) => !t.startsWith("-")).map((t) => (t.startsWith(HOST_ONLY_MARK) ? t.slice(1) : t)));
+const targetsOf = (lines) =>
+  new Set([...tokensOf(lines)].filter((t) => !t.startsWith("-") && (!t.startsWith(HOST_ONLY_MARK) || validMark(t))).map((t) => (validMark(t) ? t.slice(1) : t)));
 const bodyLines = (text) => (isOrgFormat(text) ? text.split("\n").filter((l) => !l.trim().startsWith("#")) : text.split("\n"));
 
 export const countEntries = (text) => targetsOf(bodyLines(text)).size;
 // "-example.com" lines exclude a domain (and everything under it) instead of adding a target
-export const countExclusions = (text) => [...tokensOf(bodyLines(text))].filter((t) => t.startsWith("-")).length;
+export const countExclusions = (text) => [...tokensOf(bodyLines(text))].filter((t) => t.startsWith("-") && !t.startsWith("-=")).length;
 // "=example.com": how many targets are added as exactly one host
-export const countHostOnly = (text) => new Set([...tokensOf(bodyLines(text))].filter((t) => t.startsWith(HOST_ONLY_MARK)).map((t) => t.slice(1))).size;
+export const countHostOnly = (text) => new Set([...tokensOf(bodyLines(text))].filter(validMark).map((t) => t.slice(1))).size;
 export const projectCount = (text) =>
   new Set(text.split("\n").map((l) => l.trim()).filter((l) => /^#[^#\s]/.test(l)).map((l) => l.slice(1).trim().toLowerCase())).size;
 

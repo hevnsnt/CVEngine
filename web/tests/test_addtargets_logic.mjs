@@ -32,6 +32,22 @@ test('the count matches what the server adds: a marked and an unmarked copy of o
   assert.equal(L.countEntries('a.example # =commented.example'), 1);
 });
 
+test('a mark standing alone belongs to the next entry on its line, as on the server', () => {
+  assert.deepEqual([...L.tokensOf(['= spaced.example'])], ['=spaced.example']);
+  assert.deepEqual([...L.tokensOf(['a.example =', 'b.example'])], ['a.example', '=', 'b.example']);
+  assert.equal(L.countLabel('= spaced.example'), '1 target (1 this host only)');
+  assert.equal(L.countLabel('=  "quoted.example", b.example'), '2 targets (1 this host only)');
+});
+
+test('marks the server refuses count as nothing: a bare =, ==x and =-x', () => {
+  for (const text of ['=', '==a.com', '=-a.com', 'a.com =']) {
+    assert.equal(L.countHostOnly(text), 0, text);
+  }
+  assert.equal(L.countEntries('=\n==a.com\n=-b.com'), 0);
+  assert.equal(L.countEntries('a.com ='), 1);
+  assert.equal(L.countExclusions('-=a.com'), 0);
+});
+
 test('the Scope choice: auto first and sent as nothing, the others sent as scope_mode', () => {
   assert.deepEqual(L.SCOPE_CHOICES.map(([v]) => v), ['auto', 'host', 'parent']);
   assert.equal(L.DEFAULT_SCOPE, 'auto');

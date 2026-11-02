@@ -1068,17 +1068,28 @@ def normalize_target(token):
 
 
 def parse_target_list(text):
-    """Split pasted text (newlines, commas, spaces, # comments, markdown links, URLs) into unique targets, in order."""
+    """Split pasted text (newlines, commas, spaces, # comments, markdown links, URLs) into unique targets, in order. A ``=`` standing alone
+    marks the next entry on its line (``= example.com`` is ``=example.com``); one left at the end of a line stays, to be reported."""
     seen, out = set(), []
+
+    def keep(token):
+        if token and token not in seen:
+            seen.add(token)
+            out.append(token)
     for line in (text or '')[:MAX_TARGET_TEXT].splitlines():
         line = _MD_LINK_RE.sub(r'\1', line.split('#', 1)[0])  # a comment, then [text](url) -> url
+        mark = False
         for token in re.split(r'[,\s;]+', line):
-            if len(token) > MAX_TARGET_TOKEN:
+            if not token or len(token) > MAX_TARGET_TOKEN:
                 continue
-            token = normalize_target(token)
-            if token and token not in seen:
-                seen.add(token)
-                out.append(token)
+            if token.strip('"\'<>`,;') == HOST_ONLY_MARK:  # "= example.com": the mark belongs to the entry after it
+                mark = True
+                continue
+            if mark:
+                token, mark = HOST_ONLY_MARK + token, False
+            keep(normalize_target(token))
+        if mark:
+            keep(HOST_ONLY_MARK)  # a mark with nothing after it: "not a domain", reported like any invalid entry
     return out
 
 
@@ -1321,26 +1332,28 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
     stored = _discovery_mode(mode)  # kept on every target this creates: the mode its later automatic scans use
     batch_scope = _scope_mode(scope_mode)
-    marked, plain = set(), []
+    received = len(entries)
+    marked, plain, written = set(), [], {}
     for entry in entries:
         name, exact = split_scope_mark(entry)
         if exact:
             marked.add(name)
         plain.append(name)
+        written.setdefault(name, entry)  # what the person wrote, for a line that is reported back
     entries = list(dict.fromkeys(plain))  # "=example.com" and "example.com" in one paste are one target, created as exactly that host
     names, domain_names, invalid, seen = [], [], [], set()
     for entry in entries:
         if len(names) >= BULK_MAX_EXPANDED:
-            invalid.append({'value': entry, 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
+            invalid.append({'value': written[entry], 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
             continue
         try:
             kind, expanded = _expand_target(entry, project.id)
         except ApiError as exc:
-            invalid.append({'value': entry, 'error': exc.message})
+            invalid.append({'value': written[entry], 'error': exc.message})
             continue
         fresh = [n for n in dict.fromkeys(expanded) if n not in seen]
         if len(names) + len(fresh) > BULK_MAX_EXPANDED:  # the cap counts what is added, so the last range cannot overshoot it
-            invalid.append({'value': entry, 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
+            invalid.append({'value': written[entry], 'error': f'skipped: one request may add at most {BULK_MAX_EXPANDED} targets after expanding ranges'})
             continue
         for name in fresh:
             seen.add(name)
@@ -1362,7 +1375,7 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
     if discover and to_discover and stored != Domain.DISCOVERY_MANUAL:  # manual: "just add them, do not scan yet"
         scans, deferred = _discover_new(to_discover, used, project.id, initiated_by=initiated_by)
         scan_ids = [scan.id for scan in scans]
-    return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
+    return {'received': received, 'created': len(created), 'created_names': [d.name for d in created][:200],
             'domains': created, 'already_exists': existing, 'invalid': invalid, 'excluded': excluded,
             'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note,
             'scope_mode': batch_scope, 'scope_modes': {d.name: d.scope_mode for d in created[:200]}}

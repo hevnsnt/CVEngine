@@ -124,7 +124,7 @@ def run_for_domain(domain_id, get=None, force=False):
         logger.warning('archive lookup for %s failed: %s', apex, exc)
         return {'error': str(exc)[:200]}
     known = set(Subdomain.objects.filter(target_domain=domain).values_list('name', flat=True).distinct()[:MAX_HOSTS_PER_TARGET])
-    known = {n.lower() for n in known} | {apex}
+    known = {n.lower() for n in known if domain.includes_host(n)} | {apex}  # =example.com: a name kept under it from before is not looked up
     found = classify(urls, apex, known)
     now = timezone.now()
     stored = 0

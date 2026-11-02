@@ -407,10 +407,10 @@ A target whose scope mode is `host` is exactly that one host. Choose it when you
 - bbot runs with strict scope, and an event that names any other host is dropped before it reaches the inventory or the live feed;
 - no name under it is stored under the target, whether bbot, the certificate watch or a reused discovery of a parent target found it, and the certificate watch does not query crt.sh for it at all;
 - the new-hosts pipeline and **Rescan hosts** take only the target itself;
-- the nuclei passes, the TLS and email hygiene checks, the full port and UDP sweeps, the virtual host and subdirectory application sweeps and the scheduled screenshots never reach a name under it, including one stored before the target was narrowed (that row stays in the inventory until it is archived or removed, but nothing scans it through this target);
+- the nuclei passes, the TLS and email hygiene checks, the testssl audit, OpenVAS, the thorough WPScan pass, the full port and UDP sweeps, the virtual host and subdirectory application sweeps, the web archive lookup and the scheduled screenshots never reach a name under it, including one stored before the target was narrowed (that row stays in the inventory until it is archived or removed, but nothing scans it through this target; a name another target still holds is scanned as that target's). The bucket check is not narrowed: it asks the storage provider about a bucket a host's data names, never the host itself;
 - its parent domain is never promoted by the weekly deep sweep.
 
-A name under it can still be its own target (add `www.example.com` too), and another target that covers it (an unmarked `example.com` in the same project) still discovers it. An `auto` tenant of a shared provider domain stays as it was: host scoped (strict bbot, never its parent) but still watched for its own tree in certificate transparency.
+A name under it can still be its own target (add `www.example.com` too), and for `=app.example.com` another target that covers it (an unmarked `example.com`) still discovers and scans `www.app.example.com` as its own. An `auto` tenant of a shared provider domain stays as it was: host scoped (strict bbot, never its parent) but still watched for its own tree in certificate transparency.
 
 ### Excluded hosts
 
